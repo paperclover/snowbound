@@ -1,0 +1,9 @@
+{
+  "disjoint": true,
+  "conflict_retained": true,
+  "server_restart": true,
+  "transport_reconnect": true,
+  "lock_contention": true,
+  "process_restart": true,
+  "vm_restart": true
+}

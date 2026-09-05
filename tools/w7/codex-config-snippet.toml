@@ -1,0 +1,16 @@
+# Paste into ~/.codex/config.toml.
+[mcp_servers.win7]
+command = "python3"
+args = ["/Users/clo/dev/one/tools/w7/mcp_win7.py"]
+# Covers a contended multi-VM boot with wait enabled.
+tool_timeout_sec = 915
+
+[mcp_servers.win7.env]
+WIN7 = "http://100.104.74.68:8777"  # wayback over Tailscale
+# WIN7_TOKEN = "..."  # only if the listener was started with a token
+
+[mcp_servers.one-linux]
+command = "python3"
+args = ["/Users/clo/dev/one/tools/w7/mcp_linux.py"]
+# A first boot downloads packages through cloud-init.
+tool_timeout_sec = 915

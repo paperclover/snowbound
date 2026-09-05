@@ -1,0 +1,12 @@
+﻿{
+    "fixture":  "07-table",
+    "notebook_id":  "{FF086732-4968-4A51-8C01-5EDFE6DA8207}{1}{B0}",
+    "section_id":  "{11D22281-460E-0999-06F6-9BFE9C650DEB}{1}{B0}",
+    "hierarchy_file":  "hierarchy.xml",
+    "pages":  [
+                  {
+                      "id":  "{3D9BD107-CFC5-4A88-8191-336F605D11F4}{1}{B0}",
+                      "file":  "pages\\\\page-00.xml"
+                  }
+              ]
+}

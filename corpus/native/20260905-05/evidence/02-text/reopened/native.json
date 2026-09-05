@@ -1,0 +1,11 @@
+﻿{
+    "expected_page_count":  1,
+    "actual_page_count":  1,
+    "hierarchy_file":  "hierarchy.xml",
+    "pages":  [
+                  {
+                      "id":  "{318E4E64-D5D5-408B-B701-8D88D0536D18}{1}{B0}",
+                      "file":  "pages\\\\page-00.xml"
+                  }
+              ]
+}

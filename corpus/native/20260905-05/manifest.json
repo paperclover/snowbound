@@ -1,0 +1,132 @@
+﻿{
+    "format":  "onenote-native-stage1-v1",
+    "status":  "completed",
+    "root":  "C:\\one-tests\\runs\\20260905-05",
+    "created_at_utc":  "2026-09-05T05:06:51.6546507Z",
+    "office":  {
+                   "prog_id":  "OneNote.Application",
+                   "clsid":  "{D7FAC39E-7FF1-49AA-98CF-A1DDD316337E}",
+                   "local_server":  "C:\\PROGRA~1\\MICROS~1\\Office14\\ONENOTE.EXE",
+                   "executable":  "C:\\PROGRA~1\\MICROS~1\\Office14\\ONENOTE.EXE",
+                   "file_version":  "14.0.7015.1000",
+                   "xml_schema":  "xs2010",
+                   "xml_schema_value":  1,
+                   "xml_namespace":  "http://schemas.microsoft.com/office/onenote/2010/onenote"
+               },
+    "harness":  {
+                    "source_path":  "C:\\one-tests\\corpus-current.ps1",
+                    "source_sha256":  "2cd9906d578377b1a5e17fe92048feb7042936e38c00009a7b07850deee080d6"
+                },
+    "notebook":  {
+                     "path":  "notebook",
+                     "section":  "synthetic.one"
+                 },
+    "fixtures":  [
+                     {
+                         "name":  "00-empty",
+                         "status":  "captured",
+                         "description":  "New notebook and section.",
+                         "at_utc":  "2026-09-05T05:06:54.3238034Z",
+                         "details":  {
+                                         "evidence":  "evidence\\00-empty",
+                                         "reopened_evidence":  "evidence\\00-empty\\reopened",
+                                         "snapshot":  "snapshots\\00-empty"
+                                     }
+                     },
+                     {
+                         "name":  "01-blank-page",
+                         "status":  "captured",
+                         "description":  "Blank page with no title.",
+                         "at_utc":  "2026-09-05T05:06:55.3868642Z",
+                         "details":  {
+                                         "evidence":  "evidence\\01-blank-page",
+                                         "reopened_evidence":  "evidence\\01-blank-page\\reopened",
+                                         "snapshot":  "snapshots\\01-blank-page"
+                                     }
+                     },
+                     {
+                         "name":  "02-text",
+                         "status":  "captured",
+                         "description":  "Plain text outline.",
+                         "at_utc":  "2026-09-05T05:06:56.2119114Z",
+                         "details":  {
+                                         "evidence":  "evidence\\02-text",
+                                         "reopened_evidence":  "evidence\\02-text\\reopened",
+                                         "snapshot":  "snapshots\\02-text"
+                                     }
+                     },
+                     {
+                         "name":  "03-format-unicode",
+                         "status":  "captured",
+                         "description":  "Formatted Unicode text replacing the fetched outline.",
+                         "at_utc":  "2026-09-05T05:06:57.3769780Z",
+                         "details":  {
+                                         "evidence":  "evidence\\03-format-unicode",
+                                         "reopened_evidence":  "evidence\\03-format-unicode\\reopened",
+                                         "snapshot":  "snapshots\\03-format-unicode"
+                                     }
+                     },
+                     {
+                         "name":  "04-positioned-outline",
+                         "status":  "captured",
+                         "description":  "Positioned text outline.",
+                         "at_utc":  "2026-09-05T05:06:58.2790296Z",
+                         "details":  {
+                                         "evidence":  "evidence\\04-positioned-outline",
+                                         "reopened_evidence":  "evidence\\04-positioned-outline\\reopened",
+                                         "snapshot":  "snapshots\\04-positioned-outline"
+                                     }
+                     },
+                     {
+                         "name":  "05-image",
+                         "status":  "captured",
+                         "description":  "Generated PNG in a positioned outline.",
+                         "at_utc":  "2026-09-05T05:06:59.3880930Z",
+                         "details":  {
+                                         "evidence":  "evidence\\05-image",
+                                         "reopened_evidence":  "evidence\\05-image\\reopened",
+                                         "snapshot":  "snapshots\\05-image"
+                                     }
+                     },
+                     {
+                         "name":  "06-attachment",
+                         "status":  "captured",
+                         "description":  "Generated attachment in a positioned outline.",
+                         "at_utc":  "2026-09-05T05:07:00.4511539Z",
+                         "details":  {
+                                         "evidence":  "evidence\\06-attachment",
+                                         "reopened_evidence":  "evidence\\06-attachment\\reopened",
+                                         "snapshot":  "snapshots\\06-attachment"
+                                     }
+                     },
+                     {
+                         "name":  "07-table",
+                         "status":  "captured",
+                         "description":  "Two-cell native table.",
+                         "at_utc":  "2026-09-05T05:07:01.4212093Z",
+                         "details":  {
+                                         "evidence":  "evidence\\07-table",
+                                         "reopened_evidence":  "evidence\\07-table\\reopened",
+                                         "snapshot":  "snapshots\\07-table"
+                                     }
+                     },
+                     {
+                         "name":  "08-onepkg",
+                         "status":  "captured",
+                         "description":  "Published OneNote package.",
+                         "at_utc":  "2026-09-05T05:07:03.4253240Z",
+                         "details":  {
+                                         "capture":  {
+                                                         "evidence":  "evidence\\08-onepkg",
+                                                         "reopened_evidence":  "evidence\\08-onepkg\\reopened",
+                                                         "snapshot":  "snapshots\\08-onepkg"
+                                                     },
+                                         "bytes":  4564,
+                                         "sha256":  "3ab9a28370cce2548d74c5d2e57af80c4e046bd847bbd770b46ab39eab81cc2e",
+                                         "package":  "notebook.onepkg"
+                                     }
+                     }
+                 ],
+    "operation_log":  "operation-log.jsonl",
+    "completed_at_utc":  "2026-09-05T05:07:03.4673264Z"
+}

@@ -1,0 +1,29 @@
+﻿{
+    "source_before":  {
+                          "file_count":  2,
+                          "byte_count":  8832,
+                          "sha256":  "82f0f4c011de271c0ce91a385e38e09950b58f2ae08713e570ca71d4d09f5d0a"
+                      },
+    "copied":  {
+                   "file_count":  2,
+                   "byte_count":  8832,
+                   "sha256":  "82f0f4c011de271c0ce91a385e38e09950b58f2ae08713e570ca71d4d09f5d0a"
+               },
+    "source_after":  {
+                         "file_count":  2,
+                         "byte_count":  8832,
+                         "sha256":  "82f0f4c011de271c0ce91a385e38e09950b58f2ae08713e570ca71d4d09f5d0a"
+                     },
+    "files":  [
+                  {
+                      "path":  "Open Notebook.onetoc2",
+                      "bytes":  4816,
+                      "sha256":  "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+                  },
+                  {
+                      "path":  "synthetic.one",
+                      "bytes":  4016,
+                      "sha256":  "c68a53117d80b3acde6b789e67d17e6dcd360ab1bc6571e521082ab181fa1682"
+                  }
+              ]
+}

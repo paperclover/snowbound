@@ -1,0 +1,215 @@
+{
+  "provenance": "OneNote 2010 14.0.7015.1000 on Windows 7; Rust over macOS SMB to Samba zenith. Disposable synthetic notebooks. Separate native cold-cache reads after live competing edits, offline native edit/reconnect, whole-file lock contention, and lost successful SMB FLUSH replies. Native conflict UI confirms offline competing text; COM hierarchy omits conflict pages. fault-01 result transcribed from tool output; fault-02/03 capture subprocess results. Contention controller completed edit/sync while locked and closed at its deadline; queued commands 4-6 were submitted after it had closed and are excluded. All snapshots are final files, not live reads.",
+  "files": [
+    {
+      "path": "contention/controller/closed",
+      "bytes": 6,
+      "sha256": "c3eefb58d7c42440a9d4abec51d629544d635a6d936ff3c4d3fca96d611b3cf3"
+    },
+    {
+      "path": "contention/controller/inbox/0002.json",
+      "bytes": 105,
+      "sha256": "3eee25e32b408cf11a968933daf88e42b20b264bef3a8202f8a52b5f84059561"
+    },
+    {
+      "path": "contention/controller/outbox/2/done",
+      "bytes": 2,
+      "sha256": "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"
+    },
+    {
+      "path": "contention/controller/outbox/3/done",
+      "bytes": 2,
+      "sha256": "2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df"
+    },
+    {
+      "path": "contention/lock-result.json",
+      "bytes": 208,
+      "sha256": "08ac88cb982b2bdd57b44b75392f5f4dac2d5a4c20dede2c54a458df62636e1c"
+    },
+    {
+      "path": "contention/locks.txt",
+      "bytes": 139,
+      "sha256": "9ffd453cecbc7f6b7824c24a49eae96f60bdb0fff11fd9364cd88af89332fdf1"
+    },
+    {
+      "path": "contention/notebook/Open Notebook.onetoc2",
+      "bytes": 3780,
+      "sha256": "5d29939d775452394e16c4850ecf98a35ccbb4da1ffdea148f8999fb69a89eaf"
+    },
+    {
+      "path": "contention/notebook/synthetic.one",
+      "bytes": 10548,
+      "sha256": "b1b553e571ebcd39dbc35d73817d6c0b7dabadf28dd849fc2cf7fb59f4a97c83"
+    },
+    {
+      "path": "fault-01/notebook/Open Notebook.onetoc2",
+      "bytes": 1612,
+      "sha256": "fafa5dcb3cd827c7edd30c8ea2fbc957a59fb4d2a8b28b667a3c551c8261ab86"
+    },
+    {
+      "path": "fault-01/notebook/synthetic.one",
+      "bytes": 4784,
+      "sha256": "c099cc85d9e4e48a568ce1fdc89aafb15a727523cef20bf5c7bfd2bf07fe40f8"
+    },
+    {
+      "path": "fault-01/result.json",
+      "bytes": 189,
+      "sha256": "076b8f75581c9e52f9e53bb2ba33f3e4d492908fb12421a05d0b017e88a2d50d"
+    },
+    {
+      "path": "fault-02/notebook/Open Notebook.onetoc2",
+      "bytes": 1612,
+      "sha256": "fafa5dcb3cd827c7edd30c8ea2fbc957a59fb4d2a8b28b667a3c551c8261ab86"
+    },
+    {
+      "path": "fault-02/notebook/synthetic.one",
+      "bytes": 4800,
+      "sha256": "6a1b3b9816497d27648747d7be61582cac3b0405239098d759858a6d46f65199"
+    },
+    {
+      "path": "fault-02/result.json",
+      "bytes": 161,
+      "sha256": "179e92f32c2c70b9bfbc982ac15f4942ce414ca3d75c906f4ef2aa86a8e4f475"
+    },
+    {
+      "path": "fault-03/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "fault-03/notebook/synthetic.one",
+      "bytes": 114096,
+      "sha256": "fd5927a433a4d054567e109e3694e343678c519f291da26e8e4792e782ee72ea"
+    },
+    {
+      "path": "fault-03/result.json",
+      "bytes": 170,
+      "sha256": "6aeb222bff02c90a101628ba2525e7ed1df6408890edb0cc161f424cd2b44703"
+    },
+    {
+      "path": "live/before-native-conflict.xml",
+      "bytes": 7507,
+      "sha256": "a79f4aed3a44587e609d2c53fc63a544dda46cec2ae23385eeb8772c0b7fc76c"
+    },
+    {
+      "path": "live/before-native-edit.xml",
+      "bytes": 7402,
+      "sha256": "0a07362ebfed561f8e694a34537fdd8afc0ff52ba92c1afca4c69ec68b3abe13"
+    },
+    {
+      "path": "live/before.xml",
+      "bytes": 7402,
+      "sha256": "0a07362ebfed561f8e694a34537fdd8afc0ff52ba92c1afca4c69ec68b3abe13"
+    },
+    {
+      "path": "live/merged.xml",
+      "bytes": 7507,
+      "sha256": "a79f4aed3a44587e609d2c53fc63a544dda46cec2ae23385eeb8772c0b7fc76c"
+    },
+    {
+      "path": "live/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "live/notebook/synthetic.one",
+      "bytes": 55352,
+      "sha256": "9802336c345c6d8cea9e7058bf9b2c43d1202fd8087d7422313d8d4e112bff3a"
+    },
+    {
+      "path": "native/stage5-cold-contention-01/read/hierarchy.xml",
+      "bytes": 758,
+      "sha256": "2e87cb096dad398e1bcd43853ad42edb75f973565251ec547ded270d23943e27"
+    },
+    {
+      "path": "native/stage5-cold-contention-01/read/page-000.xml",
+      "bytes": 1252,
+      "sha256": "9d8ddcaba0afe75a8be771204439df454d529f23e47c27b7e259ae35b5afd610"
+    },
+    {
+      "path": "native/stage5-cold-fault-01/read/hierarchy.xml",
+      "bytes": 743,
+      "sha256": "14a1da18d6cb76351dd56645a3a7b7d3842eab0cef42233c1b09cd354b5b694c"
+    },
+    {
+      "path": "native/stage5-cold-fault-01/read/page-000.xml",
+      "bytes": 1113,
+      "sha256": "8caa2b1c4200f31898d672ca7d968c41736eff8e7942af8d74a1794fefa2427c"
+    },
+    {
+      "path": "native/stage5-cold-fault-02/read/hierarchy.xml",
+      "bytes": 743,
+      "sha256": "5a47a77898a95d6c0d552403b32283cc42e977e7645b2ea52b104dafe6d209d6"
+    },
+    {
+      "path": "native/stage5-cold-fault-02/read/page-000.xml",
+      "bytes": 1120,
+      "sha256": "ab729b2bb889b8fcdd48529e1243fbac4ecfd1bb3131ee08048eed3d5b52c18f"
+    },
+    {
+      "path": "native/stage5-cold-fault-03/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "b8e03039b6d6e79d96807ef5697ea361a1cbd9f7bdbd427ddd3ab7a41d189ce8"
+    },
+    {
+      "path": "native/stage5-cold-fault-03/read/page-000.xml",
+      "bytes": 1217,
+      "sha256": "0fdea4db019303f8d193996bf5870d3f441dc921ed24c34fcfa8594213da9058"
+    },
+    {
+      "path": "native/stage5-cold-live-01/read/af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7.attachment",
+      "bytes": 43,
+      "sha256": "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7"
+    },
+    {
+      "path": "native/stage5-cold-live-01/read/hierarchy.xml",
+      "bytes": 750,
+      "sha256": "9b7f7de8fc505667e1c30679069cf28042b874388f01f8310ba360db9dfaa67b"
+    },
+    {
+      "path": "native/stage5-cold-live-01/read/page-000.xml",
+      "bytes": 7494,
+      "sha256": "82f0c26d1168925781e454b2d3194f210cd9bcd970c2938a5aec9a25651a245c"
+    },
+    {
+      "path": "native/stage5-cold-offline-02/read/hierarchy.xml",
+      "bytes": 753,
+      "sha256": "bbf7435614ff86c8593ec53e0cd6cb06a12da6773bef70dbfccfdf0a0f3edde0"
+    },
+    {
+      "path": "native/stage5-cold-offline-02/read/page-000.xml",
+      "bytes": 1130,
+      "sha256": "b4d1a857928c4c329cfe976dcf0a039796e3a651383108d506c8638c238584a4"
+    },
+    {
+      "path": "offline/native-conflict.png",
+      "bytes": 170526,
+      "sha256": "77871e4f23011227a80c8dc8d7cdd5883979763a1ebe0697b733a86fdbdd49b1"
+    },
+    {
+      "path": "offline/notebook/Open Notebook.onetoc2",
+      "bytes": 3780,
+      "sha256": "f5631f3953cdfb7da6ab48a690265bc8558b1800793adcf63290b63cfdf85889"
+    },
+    {
+      "path": "offline/notebook/synthetic.one",
+      "bytes": 15400,
+      "sha256": "01a35591f453c097f544912a69925d2568700bf19f81558ff2c2de35cb66961e"
+    },
+    {
+      "path": "offline/reconnected.xml",
+      "bytes": 1146,
+      "sha256": "f026355e1f746aa915ce4fef4db9cd17a8f3e92ba4fa3c9d91ff9f4e3bf1d455"
+    },
+    {
+      "path": "smb-faults.jsonl",
+      "bytes": 58820,
+      "sha256": "7e482527401fda4d2cd5a80cc6b3bc75c91a3bcb39245f979491c7e0ad89dd09"
+    },
+    {
+      "path": "smb-success.jsonl",
+      "bytes": 17076,
+      "sha256": "f26096684d19aec09af27baf9b7ba9c52e2e423c246963b823ab95473d75b754"
+    }
+  ]
+}

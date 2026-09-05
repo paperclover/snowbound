@@ -1,0 +1,27 @@
+[
+  {
+    "file": "synthetic.one",
+    "page": 1,
+    "paragraphs": 4,
+    "pdf": "page-001.pdf",
+    "pdf_sha256": "d3f834574d212c9fe672bfd79db7aea35181937b9eb38a603d767bbc9dc510d9",
+    "source_sha256": "df80ddabd0288dde9f050db2417c00e48c8af6f65693f754dc8196ee61ae86ac",
+    "xml_omissions": [
+      {
+        "paragraph": 4,
+        "field": "highlight",
+        "stored": "#000000",
+        "native": "automatic",
+        "characters": 6,
+        "positions": [
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ]
+      }
+    ]
+  }
+]

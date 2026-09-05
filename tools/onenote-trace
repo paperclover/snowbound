@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""One timeline of what OneNote does to a .one on the share: file IO captured by
+Procmon on the Windows client, merged with the byte-range locks zenith reports."""
+import argparse
+import calendar
+import csv
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import ntpath
+import os
+import re
+import subprocess
+import sys
+import time
+
+W7 = "/Users/clo/dev/one/tools/w7/mcp_win7.py"
+PML = r"C:\trace\out.pml"
+CSV = r"C:\trace\out.csv"
+LOCAL_CSV = "/tmp/onenote-trace.csv"
+TIME = re.compile(r"(\d+):(\d\d):(\d\d)(?:\.(\d+))?\s*([AaPp])?")
+TARGET = os.environ.get("WIN7_TARGET")
+
+
+def zenith():
+    """The sibling tool, imported for its ssh-agent discovery and BYTERANGE parsing."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "zenith-locks")
+    loader = importlib.machinery.SourceFileLoader("zenith_locks", path)
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(mod)
+    mod.connect()
+    return mod
+
+
+def win(*argv):
+    command = [sys.executable, W7]
+    if TARGET:
+        command += ["--target", TARGET]
+    p = subprocess.run(command + list(argv), capture_output=True, text=True)
+    if p.returncode != 0:
+        sys.exit((p.stderr.strip().splitlines() or ["Windows target is unreachable"])[-1])
+    return p
+
+
+def cmd(command):
+    """(exit code, stdout) of `cmd.exe /c command` on the Windows target."""
+    p = win("cmd", command)
+    code = re.search(r"exit=(\d+)", p.stderr)
+    return (int(code.group(1)) if code else None), p.stdout
+
+
+def procmon_path():
+    """Procmon sits in the payload the agent runs from, wherever that was installed."""
+    vendor = ntpath.dirname(ntpath.dirname(json.loads(win("health").stdout)["python"]))
+    return ntpath.join(vendor, "procmon", "Procmon64.exe")
+
+
+def win_clock():
+    """(epoch of wayback's local midnight, wayback's clock minus ours, round trip)."""
+    before = time.time()
+    _, out = cmd("wmic os get localdatetime /value")
+    after = time.time()
+    m = re.search(r"LocalDateTime=(\d{14})\.(\d{6})([+-]\d+)", out)
+    if not m:
+        sys.exit("could not read wayback's clock: %r" % out.strip()[:120])
+    local = datetime.datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+    utc = int(m.group(3)) * 60
+    midnight = calendar.timegm(local.replace(hour=0, minute=0, second=0).timetuple()) - utc
+    there = calendar.timegm(local.timetuple()) + int(m.group(2)) / 1e6 - utc
+    return midnight, there - (before + after) / 2, after - before
+
+
+def zenith_clock(z):
+    """(zenith's clock minus ours, round trip)."""
+    before = time.time()
+    out = subprocess.run(z.SSH + ["date +%s.%N"], capture_output=True, text=True)
+    after = time.time()
+    try:
+        return float(out.stdout) - (before + after) / 2, after - before
+    except ValueError:
+        sys.exit("could not read zenith's clock: %r" % out.stdout.strip()[:120])
+
+
+def poll_locks(z, seconds, want):
+    """Lock transitions, stamped with our clock at the poll that first saw them.
+
+    BYTERANGE carries no timestamp of its own, so the sample interval is the
+    real resolution of these rows -- zenith's clock never enters the merge.
+    """
+    events, samples, prev, first = [], [], set(), True
+    end = time.time() + seconds
+    while True:
+        now = set(z.locks(z.status("BYTERANGE")[0]))
+        at = time.time()
+        samples.append(at)
+        for sign, changed in (("-", prev - now), ("=" if first else "+", now - prev)):
+            for share, name, _pid, kind, start, size in sorted(changed):
+                if want and want.lower() not in name.lower():
+                    continue
+                events.append((at, "LOCK", sign + kind,
+                               "%s/%s" % (os.path.basename(share), os.path.basename(name)),
+                               start, size))
+        prev, first = now, False
+        if at >= end:
+            return events, samples
+
+
+def seconds_of_day(text):
+    m = TIME.match(text.strip())
+    if not m:
+        sys.exit("unparseable procmon timestamp %r" % text)
+    hour, half = int(m.group(1)), m.group(5)
+    if half:
+        hour = hour % 12 + (12 if half in "Pp" else 0)
+    return (hour * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+            + float("0." + (m.group(4) or "0")))
+
+
+def detail_num(detail, key):
+    m = re.search(key + r":\s*([\d,]+)", detail)
+    return int(m.group(1).replace(",", "")) if m else None
+
+
+def io_events(path, midnight, skew, want, start_sod):
+    """Procmon rows for OneNote's accesses to .one files, on our clock."""
+    with open(path, newline="", encoding="utf-8-sig", errors="replace") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return []
+    missing = {"Time of Day", "Process Name", "Operation", "Path", "Detail"} - set(rows[0])
+    if missing:
+        sys.exit("procmon csv is missing columns: %s" % ", ".join(sorted(missing)))
+    events = []
+    for r in rows:
+        target = r["Path"] or ""
+        if "ONENOTE" not in (r["Process Name"] or "").upper():
+            continue
+        if not (target.upper().startswith("A:") or ".one" in target.lower()):
+            continue
+        if want and want.lower() not in target.lower():
+            continue
+        detail = r["Detail"] or ""
+        sod = seconds_of_day(r["Time of Day"])
+        if sod + 43200 < start_sod:
+            sod += 86400  # Procmon logs a time of day with no date; the trace crossed midnight
+        events.append((midnight + sod - skew, "IO",
+                       r["Operation"], ntpath.basename(target) or target,
+                       detail_num(detail, "Offset"), detail_num(detail, "Length")))
+    return events
+
+
+def render(events):
+    for at, source, what, target, offset, size in sorted(events, key=lambda e: e[0]):
+        span = hexes = ""
+        if offset is not None and size is not None:
+            span, hexes = "%10d +%-8d" % (offset, size), "(0x%x +0x%x)" % (offset, size)
+        print(("  %s  %-4s %-26s %-24s %s %s" %
+               (datetime.datetime.fromtimestamp(at).strftime("%H:%M:%S.%f")[:-3],
+                source, what, target, span, hexes)).rstrip())
+
+
+def trace(seconds, want):
+    z = zenith()
+    procmon = procmon_path()
+    midnight, skew, win_slop = win_clock()
+    zenith_skew, zenith_slop = zenith_clock(z)
+    start_sod = time.time() + skew - midnight
+    cmd(r"if not exist C:\trace mkdir C:\trace")
+    cmd("del /q %s %s" % (PML, CSV))
+    win("spawn", '"%s" /AcceptEula /Quiet /Minimized /BackingFile %s'
+        % (procmon, PML))
+    if cmd('"%s" /WaitForIdle' % procmon)[0]:
+        sys.exit("procmon never started capturing on the Windows target")
+    events, samples = poll_locks(z, seconds, want)
+    cmd('"%s" /Terminate' % procmon)
+    if cmd('"%s" /OpenLog %s /SaveAs %s' % (procmon, PML, CSV))[0]:
+        sys.exit("procmon could not convert %s to csv" % PML)
+    if os.path.exists(LOCAL_CSV):
+        os.remove(LOCAL_CSV)  # a stale csv here would merge as this run's trace
+    win("get", CSV, LOCAL_CSV)
+    if not os.path.exists(LOCAL_CSV) or not os.path.getsize(LOCAL_CSV):
+        sys.exit("no csv came back from wayback; the trace is lost")
+    io = io_events(LOCAL_CSV, midnight, skew, want, start_sod)
+
+    print("onenote-trace  %gs  %s  %d lock transitions, %d procmon rows" %
+          (seconds, "file~%s" % want if want else "every .one and everything on A:",
+           len(events), len(io)))
+    print("  procmon times shifted %+.3fs onto this mac's clock (%s clock %+.3fs, "
+          "measured to +-%.3fs)" % (-skew, TARGET or "wayback", skew, win_slop / 2))
+    print("  lock times are mac-stamped at observation, %.2fs mean sample interval; "
+          "zenith's clock is %+.3fs (+-%.3fs) and does not enter the merge" %
+          ((samples[-1] - samples[0]) / max(len(samples) - 1, 1), zenith_skew, zenith_slop / 2))
+    render(events + io)
+
+
+def main():
+    global TARGET
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("seconds", type=float)
+    ap.add_argument("--file", help="only rows whose path contains this")
+    ap.add_argument("--target", help="Windows MCP target name")
+    args = ap.parse_args()
+    TARGET = args.target or TARGET
+    try:
+        trace(args.seconds, args.file)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

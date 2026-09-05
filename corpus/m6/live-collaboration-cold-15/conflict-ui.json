@@ -1,0 +1,6 @@
+{
+  "action": "Clicked the native unmerged-changes banner in a fresh cache.",
+  "observed_main": "Client B concurrent edit.",
+  "observed_conflict": "Client A concurrent edit.",
+  "native_status": "Conflicting changes are highlighted in red; read-only conflict page."
+}

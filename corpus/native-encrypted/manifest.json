@@ -1,0 +1,56 @@
+{
+  "captured_utc": "2026-09-05T06:05:21.931098+00:00",
+  "native_build": "14.0.7015.1000",
+  "source_fixture": "../native/20260905-05/snapshots/07-table/notebook",
+  "password": "fictitious-only",
+  "operations": [
+    "Fresh isolated cache; opened a disposable copy at C:\\one-tests\\runs\\encrypted-01\\notebook",
+    "Section context menu: Password Protect This Section; Set Password; Lock All; close UI and verify process exit",
+    "Fresh isolated cache at cold-encrypted-02; observed locked section; unlocked in UI with fixture password",
+    "read-current.ps1 -Root C:\\one-tests\\runs\\cold-encrypted-02 -ExpectedPages 1 -UseCurrentCache; exit 0",
+    "Closed UI and verified process exit"
+  ],
+  "files": [
+    {
+      "path": "cold-encrypted-02/notebook/Open Notebook.one",
+      "bytes": 3360,
+      "sha256": "f140e4d90d5cb3cc114864d09bf49a8864d0e2129d1ccb4d19f81d5e61789eb8"
+    },
+    {
+      "path": "cold-encrypted-02/notebook/Open Notebook.onetoc2",
+      "bytes": 5072,
+      "sha256": "8e662d3d07ad6d49c4a84ba3cd2092a293f40926ad5d373420b630a635b3c869"
+    },
+    {
+      "path": "cold-encrypted-02/notebook/synthetic.one",
+      "bytes": 17560,
+      "sha256": "7a6e519cc0ef8de10357ffd52a32bd94c33ea09d8e420ff2d0b216ed141ff695"
+    },
+    {
+      "path": "cold-encrypted-02/read/af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7.attachment",
+      "bytes": 43,
+      "sha256": "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7"
+    },
+    {
+      "path": "cold-encrypted-02/read/hierarchy.xml",
+      "bytes": 1056,
+      "sha256": "4bd3bd85e825a869f6723e4c5a58c3098a681bb4056a84f88254136ac1dd3867"
+    },
+    {
+      "path": "cold-encrypted-02/read/page-000.xml",
+      "bytes": 5588,
+      "sha256": "6109c0d91b13a29df310ec5b9a3fdf9be3730fee1e889e48871622b6c447cf9e"
+    },
+    {
+      "path": "encrypted-01/notebook/Open Notebook.onetoc2",
+      "bytes": 4936,
+      "sha256": "9646f8eedc864b94ecbda3c0aacc5d979b9c1b8d35ad0738ea34863cb55dc90b"
+    },
+    {
+      "path": "encrypted-01/notebook/synthetic.one",
+      "bytes": 17560,
+      "sha256": "7a6e519cc0ef8de10357ffd52a32bd94c33ea09d8e420ff2d0b216ed141ff695"
+    }
+  ],
+  "native_observation": "The cold unlocked page contains one empty leading paragraph before the original four text paragraphs. This UI-produced state is part of the fixture oracle."
+}

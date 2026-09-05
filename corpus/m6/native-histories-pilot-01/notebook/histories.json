@@ -1,0 +1,566 @@
+[
+  {
+    "seed": 0,
+    "title": "History 000000",
+    "initial": {
+      "paragraphs": [
+        {
+          "id": "p0",
+          "text": "Initial 0",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p1",
+          "text": "Initial 1",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p2",
+          "text": "Initial 2",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p3",
+          "text": "Initial 3",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      ],
+      "table": [
+        [
+          "Cell 0,0",
+          "Cell 0,1"
+        ],
+        [
+          "Cell 1,0",
+          "Cell 1,1"
+        ]
+      ],
+      "x": 72,
+      "y": 108
+    },
+    "operations": [
+      {
+        "kind": "text",
+        "index": 3,
+        "value": "simple text"
+      },
+      {
+        "kind": "bold",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "italic",
+        "index": 0,
+        "value": true
+      },
+      {
+        "kind": "underline",
+        "index": 2,
+        "value": true
+      },
+      {
+        "kind": "strike",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "color",
+        "index": 3,
+        "value": "#00ffff"
+      },
+      {
+        "kind": "highlight",
+        "index": 3,
+        "value": "#00ffff"
+      },
+      {
+        "kind": "font_size",
+        "index": 1,
+        "value": 11
+      },
+      {
+        "kind": "link",
+        "index": 2,
+        "value": "https://example.invalid/0/8?a=1&b=2"
+      },
+      {
+        "kind": "tag",
+        "index": 1,
+        "value": true
+      },
+      {
+        "kind": "insert",
+        "index": 0,
+        "paragraph": {
+          "id": "new10",
+          "text": "tabs\there",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      },
+      {
+        "kind": "delete",
+        "index": 2
+      },
+      {
+        "kind": "move",
+        "index": 1,
+        "to": 2
+      },
+      {
+        "kind": "position",
+        "index": 0,
+        "x": 216,
+        "y": 108
+      },
+      {
+        "kind": "cell",
+        "index": 2,
+        "row": 1,
+        "column": 0,
+        "text": "A😀éZ"
+      },
+      {
+        "kind": "text",
+        "index": 3,
+        "value": "A😀éZ"
+      },
+      {
+        "kind": "bold",
+        "index": 1,
+        "value": true
+      },
+      {
+        "kind": "italic",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "underline",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "strike",
+        "index": 2,
+        "value": true
+      }
+    ]
+  },
+  {
+    "seed": 1,
+    "title": "History 000001",
+    "initial": {
+      "paragraphs": [
+        {
+          "id": "p0",
+          "text": "Initial 0",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p1",
+          "text": "Initial 1",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p2",
+          "text": "Initial 2",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p3",
+          "text": "Initial 3",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      ],
+      "table": [
+        [
+          "Cell 0,0",
+          "Cell 0,1"
+        ],
+        [
+          "Cell 1,0",
+          "Cell 1,1"
+        ]
+      ],
+      "x": 72,
+      "y": 108
+    },
+    "operations": [
+      {
+        "kind": "text",
+        "index": 1,
+        "value": "tabs\there"
+      },
+      {
+        "kind": "bold",
+        "index": 0,
+        "value": true
+      },
+      {
+        "kind": "italic",
+        "index": 2,
+        "value": true
+      },
+      {
+        "kind": "underline",
+        "index": 0,
+        "value": true
+      },
+      {
+        "kind": "strike",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "color",
+        "index": 3,
+        "value": "#ffff00"
+      },
+      {
+        "kind": "highlight",
+        "index": 3,
+        "value": "#ff0000"
+      },
+      {
+        "kind": "font_size",
+        "index": 0,
+        "value": 18
+      },
+      {
+        "kind": "link",
+        "index": 0,
+        "value": "https://example.invalid/1/8?a=1&b=2"
+      },
+      {
+        "kind": "tag",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "insert",
+        "index": 3,
+        "paragraph": {
+          "id": "new10",
+          "text": "tabs\there",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      },
+      {
+        "kind": "delete",
+        "index": 0
+      },
+      {
+        "kind": "move",
+        "index": 3,
+        "to": 2
+      },
+      {
+        "kind": "position",
+        "index": 1,
+        "x": 180,
+        "y": 108
+      },
+      {
+        "kind": "cell",
+        "index": 2,
+        "row": 0,
+        "column": 0,
+        "text": "Repeated words"
+      },
+      {
+        "kind": "text",
+        "index": 0,
+        "value": "literal <b> & \"quotes\""
+      },
+      {
+        "kind": "bold",
+        "index": 1,
+        "value": true
+      },
+      {
+        "kind": "italic",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "underline",
+        "index": 0,
+        "value": true
+      },
+      {
+        "kind": "strike",
+        "index": 1,
+        "value": true
+      }
+    ]
+  },
+  {
+    "seed": 2,
+    "title": "History 000002",
+    "initial": {
+      "paragraphs": [
+        {
+          "id": "p0",
+          "text": "Initial 0",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p1",
+          "text": "Initial 1",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p2",
+          "text": "Initial 2",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p3",
+          "text": "Initial 3",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      ],
+      "table": [
+        [
+          "Cell 0,0",
+          "Cell 0,1"
+        ],
+        [
+          "Cell 1,0",
+          "Cell 1,1"
+        ]
+      ],
+      "x": 72,
+      "y": 108
+    },
+    "operations": [
+      {
+        "kind": "text",
+        "index": 0,
+        "value": "Repeated words"
+      },
+      {
+        "kind": "bold",
+        "index": 0,
+        "value": true
+      },
+      {
+        "kind": "italic",
+        "index": 2,
+        "value": true
+      },
+      {
+        "kind": "underline",
+        "index": 1,
+        "value": true
+      },
+      {
+        "kind": "strike",
+        "index": 2,
+        "value": true
+      },
+      {
+        "kind": "color",
+        "index": 2,
+        "value": "#00ff00"
+      },
+      {
+        "kind": "highlight",
+        "index": 1,
+        "value": "#00ff00"
+      },
+      {
+        "kind": "font_size",
+        "index": 0,
+        "value": 11
+      },
+      {
+        "kind": "link",
+        "index": 3,
+        "value": "https://example.invalid/2/8?a=1&b=2"
+      },
+      {
+        "kind": "tag",
+        "index": 3,
+        "value": true
+      },
+      {
+        "kind": "insert",
+        "index": 2,
+        "paragraph": {
+          "id": "new10",
+          "text": "tabs\there",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      },
+      {
+        "kind": "delete",
+        "index": 3
+      },
+      {
+        "kind": "move",
+        "index": 2,
+        "to": 0
+      },
+      {
+        "kind": "position",
+        "index": 0,
+        "x": 108,
+        "y": 324
+      },
+      {
+        "kind": "cell",
+        "index": 2,
+        "row": 1,
+        "column": 1,
+        "text": "tabs\there"
+      },
+      {
+        "kind": "text",
+        "index": 1,
+        "value": "tabs\there"
+      },
+      {
+        "kind": "bold",
+        "index": 1,
+        "value": false
+      },
+      {
+        "kind": "italic",
+        "index": 1,
+        "value": true
+      },
+      {
+        "kind": "underline",
+        "index": 1,
+        "value": true
+      },
+      {
+        "kind": "strike",
+        "index": 0,
+        "value": true
+      }
+    ]
+  }
+]

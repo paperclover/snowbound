@@ -1,0 +1,52 @@
+﻿<?xml version="1.0"?>
+<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2010/onenote" ID="{C4D53463-F8C2-44C9-9380-F3E22325E8A0}{1}{B0}" name="Styled break controls" dateTime="2026-09-06T03:05:48.000Z" lastModifiedTime="2026-09-06T03:06:11.000Z" pageLevel="1" lang="en-US"><one:QuickStyleDef index="0" name="p" fontColor="automatic" highlightColor="automatic" font="Calibri" fontSize="11.0" spaceBefore="0.0" spaceAfter="0.0"/><one:PageSettings RTL="false" color="automatic"><one:PageSize><one:Automatic/></one:PageSize><one:RuleLines visible="false"/></one:PageSettings><one:Title lang="en-US"><one:OE author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{33}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:17.0pt"><one:T><![CDATA[Styled break controls]]></one:T></one:OE></one:Title><one:Outline author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{39}{B0}"><one:Position x="72.0" y="108.0" z="0"/><one:Size width="480.0" height="683.5936279296874"/><one:OEChildren><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{40}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{46}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{51}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A<br>
+</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{56}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'><br>
+A</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{61}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'><br>
+A</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{66}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{71}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'><br>
+</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{76}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A<br>
+B</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{81}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A<br>
+B</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{86}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>AB</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{91}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A<br>
+B</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{96}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>A<br>
+B</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:50.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{101}{B0}" alignment="left" quickStyleIndex="0"><one:T><![CDATA[<a
+href="https://example.invalid/break/0"><span style='font-weight:bold;
+font-size:14.0pt'>A</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{108}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/1"><span style='font-weight:bold'>A</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{114}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/2"><span style='font-weight:bold'>A</span></a><span
+style='font-weight:bold'><br>
+</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{119}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'><br>
+</span><a href="https://example.invalid/break/3"><span
+style='font-weight:bold'>A</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{124}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'><br>
+</span><a href="https://example.invalid/break/4"><span
+style='font-weight:bold'>A</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{129}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{134}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'><br>
+</span>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{139}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/7"><span style='font-weight:bold'>A</span></a><span
+style='font-weight:bold'><br>
+</span><a href="https://example.invalid/break/7"><span
+style='font-weight:bold'>B</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{144}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/8"><span style='font-weight:bold'>A</span></a><span
+style='font-weight:bold'><br>
+</span><a href="https://example.invalid/break/8"><span
+style='font-weight:bold'>B</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{149}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/9"><span style='font-weight:bold'>AB</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{154}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/10"><span style='font-weight:bold'>A</span></a><span
+style='font-weight:bold'><br>
+</span><a href="https://example.invalid/break/10"><span
+style='font-weight:bold'>B</span></a>]]></one:T></one:OE><one:OE creationTime="2026-09-06T03:05:51.000Z" lastModifiedTime="2026-09-06T03:05:51.000Z" objectID="{4D78F0B5-C038-4028-834D-00C583C6B1D3}{159}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:14.0pt"><one:T><![CDATA[<a
+href="https://example.invalid/break/11"><span style='font-weight:bold'>A</span></a><span
+style='font-weight:bold'><br>
+</span><a href="https://example.invalid/break/11"><span
+style='font-weight:bold'>B</span></a>]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>

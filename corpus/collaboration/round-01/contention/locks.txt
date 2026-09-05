@@ -1,0 +1,2 @@
+FILE                 PID      USER  CLIENT      OFFSET  LENGTH  TYPE
+agent/synthetic.one  2721277  clo   10.0.0.222  0       -1      write

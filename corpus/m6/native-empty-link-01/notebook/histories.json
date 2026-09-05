@@ -1,0 +1,103 @@
+[
+  {
+    "seed": 21,
+    "title": "History 000021",
+    "initial": {
+      "paragraphs": [
+        {
+          "id": "p0",
+          "text": "Initial 0",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p1",
+          "text": "Initial 1",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p2",
+          "text": "Initial 2",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        },
+        {
+          "id": "p3",
+          "text": "Initial 3",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      ],
+      "table": [
+        [
+          "Cell 0,0",
+          "Cell 0,1"
+        ],
+        [
+          "Cell 1,0",
+          "Cell 1,1"
+        ]
+      ],
+      "x": 72,
+      "y": 108
+    },
+    "operations": [
+      {
+        "kind": "insert",
+        "index": 1,
+        "paragraph": {
+          "id": "new2",
+          "text": "literal <b> & \"quotes\"",
+          "bold": false,
+          "italic": false,
+          "underline": false,
+          "strike": false,
+          "color": "#000000",
+          "highlight": "#ffff00",
+          "font_size": 11,
+          "link": "",
+          "tag": false
+        }
+      },
+      {
+        "kind": "link",
+        "index": 1,
+        "value": "https://example.invalid/21/4?a=1&b=2"
+      },
+      {
+        "kind": "text",
+        "index": 1,
+        "value": ""
+      }
+    ]
+  }
+]

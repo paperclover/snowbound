@@ -1,0 +1,11 @@
+{
+  "operations": [
+    "New Page dropdown > Page Templates > Decorative > Hearts",
+    "Set title to Hearts template control",
+    "Choose default template > Hearts - Decorative (mouse selection verified)",
+    "New Page: visually verified the Hearts background appeared automatically",
+    "Set title to Default template page"
+  ],
+  "expected_pages": 3,
+  "template": "Hearts"
+}

@@ -1,0 +1,86 @@
+{
+  "sections": [
+    "Features.one",
+    "Group A/Duplicate.one",
+    "Group B/Nested/Duplicate.one",
+    "Empty.one"
+  ],
+  "pages": [
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image png</one:T></one:OE></one:Title><one:Image format=\"auto\" alt=\"Pattern png\" hyperlink=\"https://example.invalid/image/png\"><one:Position x=\"72\" y=\"108\"/><one:Size width=\"144\" height=\"48\"/><one:File path=\"__ASSETS__\\pattern.png\"/></one:Image></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image jpg</one:T></one:OE></one:Title><one:Image format=\"auto\" alt=\"Pattern jpg\" hyperlink=\"https://example.invalid/image/jpg\"><one:Position x=\"72\" y=\"108\"/><one:Size width=\"144\" height=\"48\"/><one:File path=\"__ASSETS__\\pattern.jpg\"/></one:Image></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image bmp</one:T></one:OE></one:Title><one:Image format=\"auto\" alt=\"Pattern bmp\" hyperlink=\"https://example.invalid/image/bmp\"><one:Position x=\"72\" y=\"108\"/><one:Size width=\"144\" height=\"48\"/><one:File path=\"__ASSETS__\\pattern.bmp\"/></one:Image></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image tiff</one:T></one:OE></one:Title><one:Image format=\"auto\" alt=\"Pattern tiff\" hyperlink=\"https://example.invalid/image/tiff\"><one:Position x=\"72\" y=\"108\"/><one:Size width=\"144\" height=\"48\"/><one:File path=\"__ASSETS__\\pattern.tiff\"/></one:Image></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image gif</one:T></one:OE></one:Title><one:Image format=\"auto\" alt=\"Pattern gif\" hyperlink=\"https://example.invalid/image/gif\"><one:Position x=\"72\" y=\"108\"/><one:Size width=\"144\" height=\"48\"/><one:File path=\"__ASSETS__\\pattern.gif\"/></one:Image></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image role background=false, printout=false</one:T></one:OE></one:Title><one:Image format=\"auto\" backgroundImage=\"false\" isPrintOut=\"false\" originalPageNumber=\"2\" alt=\"Role pattern\"><one:Position x=\"36\" y=\"36\"/><one:Size width=\"288\" height=\"192\"/><one:File path=\"__ASSETS__\\pattern.png\"/></one:Image><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Foreground role control</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image role background=true, printout=false</one:T></one:OE></one:Title><one:Image format=\"auto\" backgroundImage=\"true\" isPrintOut=\"false\" originalPageNumber=\"2\" alt=\"Role pattern\"><one:Position x=\"36\" y=\"36\"/><one:Size width=\"288\" height=\"192\"/><one:File path=\"__ASSETS__\\pattern.png\"/></one:Image><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Foreground role control</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image role background=false, printout=true</one:T></one:OE></one:Title><one:Image format=\"auto\" backgroundImage=\"false\" isPrintOut=\"true\" originalPageNumber=\"2\" alt=\"Role pattern\"><one:Position x=\"36\" y=\"36\"/><one:Size width=\"288\" height=\"192\"/><one:File path=\"__ASSETS__\\pattern.png\"/></one:Image><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Foreground role control</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Image role background=true, printout=true</one:T></one:OE></one:Title><one:Image format=\"auto\" backgroundImage=\"true\" isPrintOut=\"true\" originalPageNumber=\"2\" alt=\"Role pattern\"><one:Position x=\"36\" y=\"36\"/><one:Size width=\"288\" height=\"192\"/><one:File path=\"__ASSETS__\\pattern.png\"/></one:Image><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Foreground role control</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Files and recording</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:InsertedFile pathSource=\"__ASSETS__\\attachment.txt\" preferredName=\"Fictitious attachment.txt\"/></one:OE><one:OE><one:MediaFile pathSource=\"__ASSETS__\\silence.wav\" preferredName=\"silence.wav\"><one:MediaReference mediaID=\"{9A418E57-7F64-40C5-87D0-8A8F7C1E5422}\"/></one:MediaFile></one:OE><one:OE><one:MediaIndex timeIndex=\"500\"><one:MediaReference mediaID=\"{9A418E57-7F64-40C5-87D0-8A8F7C1E5422}\"/></one:MediaIndex><one:T>Recording annotation</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:QuickStyleDef index=\"0\" name=\"Fixture style\" font=\"Calibri\" fontSize=\"14\" strikethrough=\"true\" spaceBefore=\"0.25\" spaceAfter=\"0.125\"/><one:Title><one:OE><one:T>Paragraph controls</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE quickStyleIndex=\"0\"><one:T>Inherited strike and spacing</one:T></one:OE><one:OE alignment=\"center\" spaceBefore=\"12\" spaceAfter=\"6\"><one:T>Centered paragraph</one:T></one:OE><one:OE RTL=\"true\" alignment=\"right\"><one:T>مرحبا بالعالم</one:T></one:OE><one:OE collapsed=\"true\"><one:T>Collapsed parent</one:T><one:OEChildren indent=\"2\"><one:OE><one:T>Hidden child remains stored</one:T><one:OEChildren><one:OE><one:T>Grandchild</one:T></one:OE></one:OEChildren></one:OE></one:OEChildren></one:OE><one:OE><one:T><![CDATA[A<br><br>B&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;C]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Numbering controls</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:List><one:Number numberSequence=\"0\" numberFormat=\"##\" restartNumberingAt=\"3\" font=\"Calibri\"/></one:List><one:T>Sequence 0, item 0</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"0\" numberFormat=\"##\" font=\"Calibri\"/></one:List><one:T>Sequence 0, item 1</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"1\" numberFormat=\"##\" restartNumberingAt=\"3\" font=\"Calibri\"/></one:List><one:T>Sequence 1, item 0</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"1\" numberFormat=\"##\" font=\"Calibri\"/></one:List><one:T>Sequence 1, item 1</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"2\" numberFormat=\"##\" restartNumberingAt=\"3\" font=\"Calibri\"/></one:List><one:T>Sequence 2, item 0</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"2\" numberFormat=\"##\" font=\"Calibri\"/></one:List><one:T>Sequence 2, item 1</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"3\" numberFormat=\"##\" restartNumberingAt=\"3\" font=\"Calibri\"/></one:List><one:T>Sequence 3, item 0</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"3\" numberFormat=\"##\" font=\"Calibri\"/></one:List><one:T>Sequence 3, item 1</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"4\" numberFormat=\"##\" restartNumberingAt=\"3\" font=\"Calibri\"/></one:List><one:T>Sequence 4, item 0</one:T></one:OE><one:OE><one:List><one:Number numberSequence=\"4\" numberFormat=\"##\" font=\"Calibri\"/></one:List><one:T>Sequence 4, item 1</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Features.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" ><one:Title><one:OE><one:T>Task controls</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:OutlookTask guidTask=\"{45AF40E3-1D54-463C-90D3-C454F2F71A2E}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-02T00:00:00Z\" dueDate=\"2020-01-03T00:00:00Z\"/><one:T>Disabled standalone task</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Group A/Duplicate.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" pageLevel=\"1\"><one:Title><one:OE><one:T>Repeated title</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Group path Group A/Duplicate.one, level 1</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Group A/Duplicate.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" pageLevel=\"2\"><one:Title><one:OE><one:T>Repeated title</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Group path Group A/Duplicate.one, level 2</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Group A/Duplicate.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" pageLevel=\"3\"><one:Title><one:OE><one:T>Repeated title</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Group path Group A/Duplicate.one, level 3</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Group B/Nested/Duplicate.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" pageLevel=\"1\"><one:Title><one:OE><one:T>Repeated title</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Group path Group B/Nested/Duplicate.one, level 1</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Group B/Nested/Duplicate.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" pageLevel=\"2\"><one:Title><one:OE><one:T>Repeated title</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Group path Group B/Nested/Duplicate.one, level 2</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Group B/Nested/Duplicate.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\" pageLevel=\"3\"><one:Title><one:OE><one:T>Repeated title</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"400\"/><one:OEChildren><one:OE><one:T>Group path Group B/Nested/Duplicate.one, level 3</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    }
+  ]
+}

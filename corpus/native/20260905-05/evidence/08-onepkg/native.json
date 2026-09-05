@@ -1,0 +1,12 @@
+﻿{
+    "fixture":  "08-onepkg",
+    "notebook_id":  "{C8EE19AD-91E0-41CA-85E4-E878444124CF}{1}{B0}",
+    "section_id":  "{C492F1FE-F062-01AA-3B64-DA544197518C}{1}{B0}",
+    "hierarchy_file":  "hierarchy.xml",
+    "pages":  [
+                  {
+                      "id":  "{E8DB0278-79A9-42BB-BC03-72C5BDAF4D93}{1}{B0}",
+                      "file":  "pages\\\\page-00.xml"
+                  }
+              ]
+}

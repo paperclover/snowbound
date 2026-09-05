@@ -1,0 +1,334 @@
+[
+  {
+    "case": 0,
+    "stored": "A",
+    "native": "A",
+    "runs": [
+      [
+        "A",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 1,
+    "stored": "A\r",
+    "native": "A",
+    "runs": [
+      [
+        "A\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 2,
+    "stored": "A\r\r",
+    "native": "A\n",
+    "runs": [
+      [
+        "A\r\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 3,
+    "stored": "\rA",
+    "native": "\nA",
+    "runs": [
+      [
+        "\rA",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 4,
+    "stored": "\rA\r",
+    "native": "\nA",
+    "runs": [
+      [
+        "\rA\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 5,
+    "stored": "\r",
+    "native": "",
+    "runs": [
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 6,
+    "stored": "\r\r",
+    "native": "\n",
+    "runs": [
+      [
+        "\r\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 7,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A\rB\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 8,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A\rB\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 9,
+    "stored": "AB",
+    "native": "AB",
+    "runs": [
+      [
+        "AB",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 10,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A\rB\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 11,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A\rB\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 12,
+    "stored": "A",
+    "native": "A",
+    "runs": [
+      [
+        "A",
+        true
+      ]
+    ]
+  },
+  {
+    "case": 13,
+    "stored": "A\r",
+    "native": "A",
+    "runs": [
+      [
+        "A",
+        true
+      ],
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 14,
+    "stored": "A\r\r",
+    "native": "A\n",
+    "runs": [
+      [
+        "A",
+        true
+      ],
+      [
+        "\r\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 15,
+    "stored": "\rA",
+    "native": "\nA",
+    "runs": [
+      [
+        "\r",
+        false
+      ],
+      [
+        "A",
+        true
+      ]
+    ]
+  },
+  {
+    "case": 16,
+    "stored": "\rA\r",
+    "native": "\nA",
+    "runs": [
+      [
+        "\r",
+        false
+      ],
+      [
+        "A",
+        true
+      ],
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 17,
+    "stored": "\r",
+    "native": "",
+    "runs": [
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 18,
+    "stored": "\r\r",
+    "native": "\n",
+    "runs": [
+      [
+        "\r\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 19,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A",
+        true
+      ],
+      [
+        "\r",
+        false
+      ],
+      [
+        "B",
+        true
+      ],
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 20,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A",
+        true
+      ],
+      [
+        "\r",
+        false
+      ],
+      [
+        "B",
+        true
+      ],
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 21,
+    "stored": "AB",
+    "native": "AB",
+    "runs": [
+      [
+        "AB",
+        true
+      ]
+    ]
+  },
+  {
+    "case": 22,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A",
+        true
+      ],
+      [
+        "\r",
+        false
+      ],
+      [
+        "B",
+        true
+      ],
+      [
+        "\r",
+        false
+      ]
+    ]
+  },
+  {
+    "case": 23,
+    "stored": "A\rB\r",
+    "native": "A\nB",
+    "runs": [
+      [
+        "A",
+        true
+      ],
+      [
+        "\r",
+        false
+      ],
+      [
+        "B",
+        true
+      ],
+      [
+        "\r",
+        false
+      ]
+    ]
+  }
+]

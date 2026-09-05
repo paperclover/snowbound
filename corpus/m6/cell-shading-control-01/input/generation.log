@@ -1,0 +1,4 @@
+   Compiling onestore v0.1.0 (/Users/clo/dev/one)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running `target/debug/examples/cell_probe`
+Changed one cell timestamp property to CellShadingColor yellow at object offset 10284

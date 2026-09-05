@@ -1,0 +1,6 @@
+{
+  "exit": 1,
+  "state": "NotCommitted",
+  "error": "Invalid argument (os error 22)",
+  "cut": "Successful reply to first data FLUSH was withheld; recovered file retains original text."
+}

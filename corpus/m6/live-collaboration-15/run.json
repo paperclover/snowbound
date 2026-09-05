@@ -1,0 +1,8 @@
+{
+  "server": "m6-collaboration",
+  "scripts": {
+    "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+    "network.ps1": "8737a25b9ff28a9a33e99239efdbe6b3f4933889d327c1d704fc27d009eae471",
+    "collaborate.ps1": "0c336b1db52f8878d4eac08fcbe62fce1637b5b3538b97fb6df3f1b8d9f5aa1f"
+  }
+}

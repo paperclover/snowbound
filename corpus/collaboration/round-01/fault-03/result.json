@@ -1,0 +1,5 @@
+{
+  "exit": 1,
+  "stdout": "",
+  "stderr": "Error: CommitError { state: Committed, error: Os { code: 57, kind: NotConnected, message: \"Socket is not connected\" } }\n"
+}

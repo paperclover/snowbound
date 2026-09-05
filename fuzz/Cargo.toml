@@ -1,0 +1,71 @@
+[package]
+name = "onestore-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+onestore = { path = "../crates/onestore" }
+md5 = "0.8.1"
+
+[[bin]]
+name = "store"
+path = "fuzz_targets/store.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+
+[[bin]]
+name = "properties"
+path = "fuzz_targets/properties.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "revisions"
+path = "fuzz_targets/revisions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "write_scalar"
+path = "fuzz_targets/write_scalar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "create"
+path = "fuzz_targets/create.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "commit"
+path = "fuzz_targets/commit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "edit_text"
+path = "fuzz_targets/edit_text.rs"
+test = false
+doc = false
+bench = false

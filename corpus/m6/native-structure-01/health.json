@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "w": 800,
+  "h": 600,
+  "hostname": "ONE-M6-28BC2DAE",
+  "ahk": "C:\\win7-agent\\vendor\\ahk\\AutoHotkey64.exe",
+  "python": "C:\\win7-agent\\vendor\\python\\python.exe",
+  "agent_sha256": "ef7ca89be026695cf4412460a2eec308b0ed253fb9245597a7fe5d6938e49f89"
+}

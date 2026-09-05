@@ -1,0 +1,18 @@
+{
+  "source": "corpus/native-ink/cold-ui-ink/notebook/synthetic.one",
+  "source_sha256": "1326c475cc3a9f412ff4d072cf515c1482b3b9e07798921e582767b064401947",
+  "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+  "page": "{273DB6C4-A230-0679-389F-9DB750E092E4},12",
+  "steps": [
+    {
+      "property": "0x14001d0f",
+      "old": "0000803f",
+      "new": "00004040"
+    },
+    {
+      "property": "0x14001d10",
+      "old": "cdcccc3e",
+      "new": "000080bf"
+    }
+  ]
+}

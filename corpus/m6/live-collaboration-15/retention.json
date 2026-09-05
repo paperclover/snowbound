@@ -1,0 +1,8 @@
+{
+  "main_space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+  "conflict_space": "{905120D2-0C87-0DF5-3211-F19F17E4C1AC},1",
+  "competing_edits": [
+    "Client A concurrent edit.",
+    "Client B concurrent edit."
+  ]
+}

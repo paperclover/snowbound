@@ -1,0 +1,11 @@
+/target/
+/corpus/private/
+/corpus/recovered/
+/evidence/
+/.DS_Store
+__pycache__/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+/tools/w7/payload/vendor/

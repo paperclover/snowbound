@@ -1,0 +1,14 @@
+[
+  {
+    "path": "rtl-and-attachments.one",
+    "sha256": "85aaa8be3dc4662acfc42d4c191471d11ed2e94b2574bc819fd1320b94ce52e7",
+    "source": "evidence/m7/automatic-title-native-04/notebook/synthetic.one",
+    "bytes": 41052
+  },
+  {
+    "path": "widths-and-limits.one",
+    "sha256": "69cc44b8c5ebc7125f442e7a257738bf20d3796156e44b201eaead7da7486d5a",
+    "source": "evidence/m7/automatic-title-native-05/notebook/synthetic.one",
+    "bytes": 37324
+  }
+]

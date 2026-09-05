@@ -1,0 +1,9 @@
+
+Locked files:
+Pid          User(ID)   DenyMode   Access      R/W        Oplock           SharePath   Name   Time
+--------------------------------------------------------------------------------------------------
+4403         1000       DENY_NONE  0x120089    RDONLY     LEASE(H)         /srv/agent   m6-collaboration/synthetic.one   Sun Sep  6 06:04:50 2026
+4403         1000       DENY_WRITE 0x12019f    RDWR       LEASE(H)         /srv/agent   m6-collaboration/synthetic.one   Sun Sep  6 06:04:50 2026
+4382         1000       DENY_NONE  0x20081     RDONLY     LEASE(RH)        /srv/agent   m6-collaboration/synthetic.one   Sun Sep  6 06:04:56 2026
+4382         1000       DENY_NONE  0x20081     RDONLY     LEASE(RH)        /srv/agent   m6-collaboration/Open Notebook.onetoc2   Sun Sep  6 06:04:56 2026
+

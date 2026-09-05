@@ -1,0 +1,157 @@
+{
+  "captured_utc": "2026-09-05T06:38:24.554376+00:00",
+  "native_build": "14.0.7015.1000",
+  "source_fixture": "../native/20260905-05/snapshots/02-text/notebook/synthetic.one",
+  "operations": [
+    "Rust write_demo: equal-length plain-text replacement to edit-01",
+    "read-current.ps1 fresh-cache writer-edit-01: one page with Portable plain text...",
+    "edit-existing.ps1 fresh-cache writer-native-edit-02: replace Portable plain text... with Fictitious plain text.; sync and close",
+    "Rust inventory of native-edit-02: Fictitious plain text.",
+    "Rust write_demo: replace again in edit-02",
+    "read-current.ps1 fresh-cache writer-edit-02: one page with Portable plain text...",
+    "Rust edit_property on native ink fixture: replace Fictitious with Compatible in the Unicode rich-text property",
+    "read-current.ps1 fresh-cache writer-complex-01: four text objects and two ink strokes; only edited outline height reflows",
+    "Rust edit_property on native TOC: change notebook color from 9595aa00 to 33669900; fresh-cache writer-toc-01 reports #336699 and one page",
+    "Rust create_section without a template: Unicode paragraph Created in Rust: café 東京 🦀; fresh-cache writer-create-05 returns exact text and Fixture Author",
+    "Fresh-cache edit-existing.ps1 on writer-created-native-edit replaces that paragraph with Native edited the created page.; Rust inventory confirms native save",
+    "Rust edit_property changes native-saved text to Rust edited it again, with a longer paragraph.; fresh-cache writer-created-return confirms exact text",
+    "Rust create_notebook creates both synthetic.one and Open Notebook.onetoc2; fresh-cache writer-create-notebook-01 returns A notebook created in Rust."
+  ],
+  "files": [
+    {
+      "path": "cold-complex-01/notebook/Open Notebook.one",
+      "bytes": 4016,
+      "sha256": "cd7ef0daf82bf88f106b4b7f23f48f57df6d42c2b8c889f0b8ed6af730e562db"
+    },
+    {
+      "path": "cold-complex-01/notebook/Open Notebook.onetoc2",
+      "bytes": 4944,
+      "sha256": "f02e260a1cd50a7963199fb76a31d58f8dbfa5a67fce59149a793691efd15ecd"
+    },
+    {
+      "path": "cold-complex-01/notebook/synthetic.one",
+      "bytes": 30448,
+      "sha256": "d2c373dca4927d0072e867842544126337e6ad09897ec552013d7f82031f0ac4"
+    },
+    {
+      "path": "cold-complex-01/read/af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7.attachment",
+      "bytes": 43,
+      "sha256": "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7"
+    },
+    {
+      "path": "cold-complex-01/read/hierarchy.xml",
+      "bytes": 963,
+      "sha256": "f41d6342ac112724b03ce0e11b2d51913ceb371816ac681033fc69a87e9d1c7f"
+    },
+    {
+      "path": "cold-complex-01/read/page-000.xml",
+      "bytes": 7402,
+      "sha256": "a28a5f923c8e10208ac7ded1bec283f596b068d0ca5bb3a067b92f683b2b702d"
+    },
+    {
+      "path": "cold-edit-01/notebook/Open Notebook.one",
+      "bytes": 4016,
+      "sha256": "d95a9e04a906cb786d73d61934204bc094ffeb3c586ddcc7d11f487b2d153190"
+    },
+    {
+      "path": "cold-edit-01/notebook/Open Notebook.onetoc2",
+      "bytes": 4944,
+      "sha256": "fff8991ccd803718a1ff12335bb7f636574882d455ff4299bbe01c9b249b0322"
+    },
+    {
+      "path": "cold-edit-01/notebook/synthetic.one",
+      "bytes": 13368,
+      "sha256": "44a9ca3131e0a1baa05a2b64968c32ce59ac97a59bfa9e1329cc7a6096b6fc3f"
+    },
+    {
+      "path": "cold-edit-01/read/hierarchy.xml",
+      "bytes": 939,
+      "sha256": "cbe277489b094e22de6624f6c02212b73ba440514b6346c965930d7470bc432c"
+    },
+    {
+      "path": "cold-edit-01/read/page-000.xml",
+      "bytes": 1209,
+      "sha256": "7141b2236e1f8f1aecfd77914b2ec7564ef4056bd4b4aa1f05f0e3a25871f631"
+    },
+    {
+      "path": "cold-edit-02/read/page-000.xml",
+      "bytes": 1209,
+      "sha256": "2067abd992a1403ecda3127f12c683bf3804569db44e5b88dcd6c71a2808f04c"
+    },
+    {
+      "path": "complex-01/notebook/synthetic.one",
+      "bytes": 30448,
+      "sha256": "d2c373dca4927d0072e867842544126337e6ad09897ec552013d7f82031f0ac4"
+    },
+    {
+      "path": "create-05/native-saved.one",
+      "bytes": 10268,
+      "sha256": "28767fb84b110804aa0c1c1c5b211e649539ca077414e47f678081de8d16ee0d"
+    },
+    {
+      "path": "create-05/notebook/synthetic.one",
+      "bytes": 3348,
+      "sha256": "a8c44edfcad463ec0a05686febd3da6cd58efd6c529ca77bef031f0528838935"
+    },
+    {
+      "path": "create-05/page-000.xml",
+      "bytes": 1132,
+      "sha256": "e2a5c2eda8e7949a100b9816031283d87ec4561d9eaf59202a114c028ca4dd97"
+    },
+    {
+      "path": "create-05/returned-page.xml",
+      "bytes": 1266,
+      "sha256": "b82fb6f47f8b153c6f3067a02a09747ab11956a1dcfc03d9fcb9d5c4b3de93b2"
+    },
+    {
+      "path": "create-05/rust-after-native.one",
+      "bytes": 11456,
+      "sha256": "3de701a3d2199c3021b46e692a07d9ca7e2374825c4adb5613986b4d5499f356"
+    },
+    {
+      "path": "create-notebook-01/hierarchy.xml",
+      "bytes": 753,
+      "sha256": "f4f805113ebba8dfd21cbbf30770d4bdbbd8ece06953c5fac2921ef5a56773e1"
+    },
+    {
+      "path": "create-notebook-01/notebook/Open Notebook.onetoc2",
+      "bytes": 1612,
+      "sha256": "fafa5dcb3cd827c7edd30c8ea2fbc957a59fb4d2a8b28b667a3c551c8261ab86"
+    },
+    {
+      "path": "create-notebook-01/notebook/synthetic.one",
+      "bytes": 3348,
+      "sha256": "b0662387c3fdc256d8dbe809e3b8f73b3586559696467fb1fff8f589095fa797"
+    },
+    {
+      "path": "create-notebook-01/page-000.xml",
+      "bytes": 1113,
+      "sha256": "9086775b199f14ea7d1daf29292c4e055bbfd4e9a92f3c3abc9d29983a1ea065"
+    },
+    {
+      "path": "edit-01/notebook/synthetic.one",
+      "bytes": 13368,
+      "sha256": "44a9ca3131e0a1baa05a2b64968c32ce59ac97a59bfa9e1329cc7a6096b6fc3f"
+    },
+    {
+      "path": "edit-02/notebook/synthetic.one",
+      "bytes": 18288,
+      "sha256": "692c353ee7bcc9b00afe210edfc4ae06e77d836124920b045515657f6ddce331"
+    },
+    {
+      "path": "native-edit-02/notebook/synthetic.one",
+      "bytes": 16384,
+      "sha256": "94cf8ffdb70403df072c9d562b5fa54c47910e44133cc0ec5186bec277888796"
+    },
+    {
+      "path": "toc-01/hierarchy.xml",
+      "bytes": 724,
+      "sha256": "7f62ba95f82c53153afeeb7122ab7476370278198a8521b295439e0f97a0a752"
+    },
+    {
+      "path": "toc-01/notebook/Open Notebook.onetoc2",
+      "bytes": 5904,
+      "sha256": "a7ec443d7534f5aeef5eb7fce09d133f5acfad4f1ac494417691297f5179e6fa"
+    }
+  ]
+}

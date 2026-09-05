@@ -1,0 +1,415 @@
+{
+  "provenance": "Rust append encoding; native OneNote 2010 14.0.7015.1000, independently cold caches. tx-65535 uses independently generated cumulative-CRC empty transactions. tx-511, tx-131071, tx-130816 are durable counter cleanup interruption states; metadata-0..7 enumerate old/new changed numeric header bytes with mixed GUID bytes. shared-rust-after was committed through macOS SMB flock and fsync.",
+  "files": [
+    {
+      "path": "complex/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "complex/notebook/synthetic.one",
+      "bytes": 28296,
+      "sha256": "3990a286cb7e2b4f94e295a915f3d254645b8231d087c2566f4673dcb19cb5a2"
+    },
+    {
+      "path": "metadata-0/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-0/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "bca790bb1c4ba245987e74946e208e3e4434235b12468171cfd75d7c46e92ff1"
+    },
+    {
+      "path": "metadata-1/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-1/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "175bb2b208d429c9d30d09360cc837830b027ecf8f1421ada14006e8cb4f62bc"
+    },
+    {
+      "path": "metadata-2/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-2/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "d84bd1a6151f9366d085a92de9ca38528582e3f35bf87d6703461392f38e0a46"
+    },
+    {
+      "path": "metadata-3/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-3/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "daf502c1bd12230395eeefdadbc70f1060086088d0b3e6c3de83ad792590e2a2"
+    },
+    {
+      "path": "metadata-4/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-4/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "b413ca9927a4c3cc5b865384cdb3e3860f4c93bab7e362dc16d3c3d448294f09"
+    },
+    {
+      "path": "metadata-5/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-5/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "30632c658b5d0efb3c20f37d8eedef3d4d9f93d8dc5a7bfe6150324c7c0c4f6b"
+    },
+    {
+      "path": "metadata-6/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-6/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "06a4991c3c009871ced86eb445fb698b448a05f6d8c6288ca09adfbe022f8f03"
+    },
+    {
+      "path": "metadata-7/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "metadata-7/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "40e70f53134c94e95289e22c877060c1cff33e184753b600834c3519e0bdbcef"
+    },
+    {
+      "path": "native/append-01-complex/read/af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7.attachment",
+      "bytes": 43,
+      "sha256": "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7"
+    },
+    {
+      "path": "native/append-01-complex/read/hierarchy.xml",
+      "bytes": 747,
+      "sha256": "62c88e89c3a71bb5a1225070bf73353fa27b064232c8cf94d2c0786a529e3d2a"
+    },
+    {
+      "path": "native/append-01-complex/read/page-000.xml",
+      "bytes": 7402,
+      "sha256": "2aebcefeef2441ff237fdd46330fa7be92f0c74cff67fc3def7152247df876ae"
+    },
+    {
+      "path": "native/append-01-metadata-0/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "eeed5291ed6e908169f6880d46bb3e500781cd1c65aa1efdd7eef98f5e9bada3"
+    },
+    {
+      "path": "native/append-01-metadata-0/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "ccc3da7267deb0c9095898dab1f7e6e6d46194a8ffe924fb58b97d4400d8c045"
+    },
+    {
+      "path": "native/append-01-metadata-1/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "4e964ca1ae4f920c56a23d14e8d4e818399d15b54a825b5eb646f047774ef918"
+    },
+    {
+      "path": "native/append-01-metadata-1/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "b8417bf1f532bde8b537cb8a7847f019b0272b05e92fef47a72e391287110d2b"
+    },
+    {
+      "path": "native/append-01-metadata-2/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "6057ffef5a578927eca6406d8abf46f70b1184dace9cb25bb1a2ce4ad40a8183"
+    },
+    {
+      "path": "native/append-01-metadata-2/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "b150316fd63eb98e8c8b2444e14d0aa892a6668589d47a7dd3eda848ab9827d7"
+    },
+    {
+      "path": "native/append-01-metadata-3/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "d8cdfe9fd6f82dc16d460c58115a4eb7d28f2e0a25f445ec0fa18a5f4ba2918f"
+    },
+    {
+      "path": "native/append-01-metadata-3/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "a4c9b4be4f0ea2991895c569ef1d31090b3444766c39f87dee334c28f2b21e38"
+    },
+    {
+      "path": "native/append-01-metadata-4/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "02069bd647e10d6fadfdde753d9f83c7e395fe761a1cc6451d3898b3cd9a843f"
+    },
+    {
+      "path": "native/append-01-metadata-4/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "3d60a915876474bf5b336840f3843035d9742654d4a7ddaf9cbff5238afeac77"
+    },
+    {
+      "path": "native/append-01-metadata-5/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "9c3eda81d9b9724eef1c58190544bea05e2b1e17f8506303760e51bbef1d5a3d"
+    },
+    {
+      "path": "native/append-01-metadata-5/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "de123c6cc23aef198900b51acbf4ebc5ecf3aad91c600a1a7a9c17dbabb37a85"
+    },
+    {
+      "path": "native/append-01-metadata-6/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "e33da4f0fe2be615dd67d92a81b2bee4bda66a8d9281c7266eeb44ff5d6dd294"
+    },
+    {
+      "path": "native/append-01-metadata-6/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "da4c3b236b0480cf370bd3cdae0758ba73a4ceaa142702f95c58f0e63a5db449"
+    },
+    {
+      "path": "native/append-01-metadata-7/read/hierarchy.xml",
+      "bytes": 738,
+      "sha256": "7cfd8d3b52839813e29fb186c96d63bfdd3bc5e4233042e9b4046fb63da3f5b2"
+    },
+    {
+      "path": "native/append-01-metadata-7/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "63ee2f1019c19966b4987780bf50705f49eb02572f0b01ae2b536792b6151516"
+    },
+    {
+      "path": "native/append-01-prepared-old/read/hierarchy.xml",
+      "bytes": 742,
+      "sha256": "17a91bb968574445d4a6669c6349f2c665ae70e85a725e19f60f1fb17dc2d534"
+    },
+    {
+      "path": "native/append-01-prepared-old/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "f5d15cd05e7248f4b72b8044c792193f831b8278a0ac62316f06c7dfcd078862"
+    },
+    {
+      "path": "native/append-01-shared-result/read/hierarchy.xml",
+      "bytes": 741,
+      "sha256": "ebae2f490304ca18c0a567eac82bb8d5b8f634978c6f218b6ee42182deeeebee"
+    },
+    {
+      "path": "native/append-01-shared-result/read/page-000.xml",
+      "bytes": 1245,
+      "sha256": "44e8a0be5f8826f770d35f1c0bf7fe13083ea1c337235da96d20cbc18a628d9e"
+    },
+    {
+      "path": "native/append-01-toc/read/hierarchy.xml",
+      "bytes": 724,
+      "sha256": "e9b208e602b66dac470cebb47cfabeff638e57ebf6f1b0c9cbc8da01671140cd"
+    },
+    {
+      "path": "native/append-01-toc/read/page-000.xml",
+      "bytes": 1209,
+      "sha256": "a38fb74b77388ca883a2473e3c7ae11006b2e1be53ec6776b53a1c50ddd23815"
+    },
+    {
+      "path": "native/append-01-tx-130816/read/hierarchy.xml",
+      "bytes": 736,
+      "sha256": "66e57c0265c3ea61d6b7e906f960e9ea7bc085c8d3d48c71bcd3ad387e2e441d"
+    },
+    {
+      "path": "native/append-01-tx-130816/read/page-000.xml",
+      "bytes": 1219,
+      "sha256": "05f01f494097b73a942536d09b6ed2b3e5c867f41fca5839c543d3579fe11097"
+    },
+    {
+      "path": "native/append-01-tx-131071/read/hierarchy.xml",
+      "bytes": 736,
+      "sha256": "4cbab0226ae4f5324afe9532936f7104af1412783397c60fa8c060dfd527873a"
+    },
+    {
+      "path": "native/append-01-tx-131071/read/page-000.xml",
+      "bytes": 1219,
+      "sha256": "751d83958e6eedf8532cf68da32c9257277b2b278c1374fa97ef6c8d66fc5946"
+    },
+    {
+      "path": "native/append-01-tx-17/read/hierarchy.xml",
+      "bytes": 728,
+      "sha256": "8b11acb9971beb4300a50dcd3515a85a5857610ee6a1172feeb05af8dc5bad47"
+    },
+    {
+      "path": "native/append-01-tx-17/read/page-000.xml",
+      "bytes": 1201,
+      "sha256": "48272b3869ce89f3c9380025f9e9b5a59dd87fbe425e8b265e900095f7c86863"
+    },
+    {
+      "path": "native/append-01-tx-255/read/hierarchy.xml",
+      "bytes": 730,
+      "sha256": "ce8a9ff8d234180ba85a97cf9e948404ca99812b1ab867c0a612abebf9e008bf"
+    },
+    {
+      "path": "native/append-01-tx-255/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "643edfa2fa699a5167cc67cba4c6fda19000f18cd92c83a7194a075377b4ca36"
+    },
+    {
+      "path": "native/append-01-tx-256/read/hierarchy.xml",
+      "bytes": 730,
+      "sha256": "4676661c992cb6dac83e8af638f36eba9dcbea10e74a4b1455b5001a192aab70"
+    },
+    {
+      "path": "native/append-01-tx-256/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "dbcd161997db31953e9ebe8ef54dce4c978d672e126eaccb19b693ed078dd6a1"
+    },
+    {
+      "path": "native/append-01-tx-511/read/hierarchy.xml",
+      "bytes": 730,
+      "sha256": "81bbba3b9b33e85e0b3680a7b60d8ce4b67062ba8a55adb0b3040f0e1439c048"
+    },
+    {
+      "path": "native/append-01-tx-511/read/page-000.xml",
+      "bytes": 1202,
+      "sha256": "4f1e5fbc8eee10bae325bda0153f957f441b992c47b1820976ab7452079b2091"
+    },
+    {
+      "path": "native/append-01-tx-65535/read/hierarchy.xml",
+      "bytes": 734,
+      "sha256": "ef03baeb1aeebc307cc0aafd38a4bac8999ad5f21eae6858f883e8da9f2c1732"
+    },
+    {
+      "path": "native/append-01-tx-65535/read/page-000.xml",
+      "bytes": 1209,
+      "sha256": "3cabdf2c22f76583046a0d7ad8889d363381ccb66d740b34bc2c68cb85fb9fb5"
+    },
+    {
+      "path": "native/append-01-tx-65536/read/hierarchy.xml",
+      "bytes": 734,
+      "sha256": "0d5f678afb1744415ff6590b59a38114b262436014dcce6399a7be0ecfdb89ea"
+    },
+    {
+      "path": "native/append-01-tx-65536/read/page-000.xml",
+      "bytes": 1219,
+      "sha256": "cf0a27b4b60a017a8a3ffff096d6bab48413c8e70f19eb5a596b277f05539e59"
+    },
+    {
+      "path": "native-after-511.one",
+      "bytes": 123432,
+      "sha256": "3bcdc91527414ad8bb285057deb90655f38722d8f430062a7970fb54b273bc75"
+    },
+    {
+      "path": "prepared-old/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "prepared-old/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "35ba5beccee3c74e683f8c18cd693916bf20c2648762d5295468ad363d8430c7"
+    },
+    {
+      "path": "shared-native-before.one",
+      "bytes": 10188,
+      "sha256": "afb2d75f474fcb098c22177f58271a148af5cef1b27794eb98d0d4ef188420f9"
+    },
+    {
+      "path": "shared-rust-after.one",
+      "bytes": 10608,
+      "sha256": "06dea7721a4ad44c09589f9b32f270e3fcd3d3e0f87b653368a78c56dd247f02"
+    },
+    {
+      "path": "toc/notebook/Open Notebook.onetoc2",
+      "bytes": 5032,
+      "sha256": "222ad33bf9471e6e0748ccad3cb1573e351cd12df7a44a1217f5ebd368457c3c"
+    },
+    {
+      "path": "toc/notebook/synthetic.one",
+      "bytes": 11808,
+      "sha256": "2237e5fdfeb8d71410b585159bdfb6724599f40dfcda2795794d8e1e47a20058"
+    },
+    {
+      "path": "tx-130816/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-130816/notebook/synthetic.one",
+      "bytes": 1078200,
+      "sha256": "cd3c471b1e0d339b85413ddf4b9615133d3c46aa2284b3d50fa9c8f97a12b382"
+    },
+    {
+      "path": "tx-131071/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-131071/notebook/synthetic.one",
+      "bytes": 1078200,
+      "sha256": "7f9a13ec489750dc3792bc3b3e8f349a21dfa836165964b1649863e9726c6655"
+    },
+    {
+      "path": "tx-17/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-17/notebook/synthetic.one",
+      "bytes": 12200,
+      "sha256": "ed7d6f2721a95e207a67f2a5e16a1bf1ceed52321faf8b716029d703deb99570"
+    },
+    {
+      "path": "tx-255/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-255/notebook/synthetic.one",
+      "bytes": 111640,
+      "sha256": "1448079e91f656513d5f0cb36a35480aab8f9184a3ce33d64c6199285ca3a521"
+    },
+    {
+      "path": "tx-256/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-256/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "66770e32eeddc265b21cdb093ab4d15073de45f53cb790c2ee1bc8a42e6d60ef"
+    },
+    {
+      "path": "tx-511/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-511/notebook/synthetic.one",
+      "bytes": 114080,
+      "sha256": "2ced768e1a8e0ba2a0660df7c0191ca10837e86ac983790c433f6141ddb7b3fa"
+    },
+    {
+      "path": "tx-65535/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-65535/notebook/synthetic.one",
+      "bytes": 545312,
+      "sha256": "cc8821d487195f7cac1822d3ef127867db7a2435ddddc54b7c5d183532248861"
+    },
+    {
+      "path": "tx-65536/notebook/Open Notebook.onetoc2",
+      "bytes": 4816,
+      "sha256": "b2f857961b76258a1582b402c048b340e89962257681426b3bfc58df8e0adbfa"
+    },
+    {
+      "path": "tx-65536/notebook/synthetic.one",
+      "bytes": 1078200,
+      "sha256": "7bc58f1acda7fcb2a86dfe36912a91874c3e4095192688be97104aa3e6d77f2f"
+    }
+  ]
+}

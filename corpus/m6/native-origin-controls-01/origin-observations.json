@@ -1,0 +1,114 @@
+[
+  {
+    "kind": "Outline",
+    "z": "0",
+    "axis": "x",
+    "stored": 36.0,
+    "projected": -36.0,
+    "native": -36.0
+  },
+  {
+    "kind": "Outline",
+    "z": "0",
+    "axis": "y",
+    "stored": 14.400001,
+    "projected": 64.80000100000001,
+    "native": 64.79999542236328
+  },
+  {
+    "kind": "Ink",
+    "z": "5",
+    "axis": "x",
+    "stored": 0.0,
+    "projected": -72.0,
+    "native": 349.5118103027344
+  },
+  {
+    "kind": "Ink",
+    "z": "5",
+    "axis": "y",
+    "stored": 0.0,
+    "projected": 50.4,
+    "native": 135.1558990478516
+  },
+  {
+    "kind": "Ink",
+    "z": "7",
+    "axis": "x",
+    "stored": 0.0,
+    "projected": -72.0,
+    "native": 432.0
+  },
+  {
+    "kind": "Ink",
+    "z": "7",
+    "axis": "y",
+    "stored": 0.0,
+    "projected": 50.4,
+    "native": 142.6393585205078
+  },
+  {
+    "kind": "Outline",
+    "z": "1",
+    "axis": "x",
+    "stored": 144.0,
+    "projected": 72.0,
+    "native": 72.0
+  },
+  {
+    "kind": "Outline",
+    "z": "1",
+    "axis": "y",
+    "stored": 96.0,
+    "projected": 146.4,
+    "native": 146.3999938964844
+  },
+  {
+    "kind": "Outline",
+    "z": "2",
+    "axis": "x",
+    "stored": 144.0,
+    "projected": 72.0,
+    "native": 72.0
+  },
+  {
+    "kind": "Outline",
+    "z": "2",
+    "axis": "y",
+    "stored": 192.0,
+    "projected": 242.4,
+    "native": 242.4000091552734
+  },
+  {
+    "kind": "Outline",
+    "z": "3",
+    "axis": "x",
+    "stored": 264.0,
+    "projected": 192.0,
+    "native": 192.0
+  },
+  {
+    "kind": "Outline",
+    "z": "3",
+    "axis": "y",
+    "stored": 192.0,
+    "projected": 242.4,
+    "native": 242.4000091552734
+  },
+  {
+    "kind": "Outline",
+    "z": "4",
+    "axis": "x",
+    "stored": 144.0,
+    "projected": 72.0,
+    "native": 72.0
+  },
+  {
+    "kind": "Outline",
+    "z": "4",
+    "axis": "y",
+    "stored": 312.0,
+    "projected": 362.4,
+    "native": 362.3999938964844
+  }
+]

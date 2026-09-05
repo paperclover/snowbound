@@ -1,0 +1,16 @@
+{
+  "notebook": "/Users/clo/dev/one/corpus/writer/create-notebook-01/notebook",
+  "expected_pages": 2,
+  "author": "tools/native/features.ps1",
+  "base": {
+    "file": "win7-office-base.qcow2",
+    "format": "qcow2",
+    "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+    "virtual_size": 68719476736
+  },
+  "scripts": {
+    "author.ps1": "24595a13dd04c47aba39b13cf1d05fbc162cd915eac2a1363f51665ef3d8721d",
+    "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+    "read.ps1": "cad23c59e6a6d89d6c2700f50e23a5ae2c0df8df7d9390e02bfba9315bf54b57"
+  }
+}

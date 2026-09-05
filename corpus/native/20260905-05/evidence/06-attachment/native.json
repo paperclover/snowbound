@@ -1,0 +1,12 @@
+﻿{
+    "fixture":  "06-attachment",
+    "notebook_id":  "{97320152-F16F-4B23-9EE4-DAB12780CFC4}{1}{B0}",
+    "section_id":  "{DBB044A3-E570-06B3-04CF-BDFD9C8021D8}{1}{B0}",
+    "hierarchy_file":  "hierarchy.xml",
+    "pages":  [
+                  {
+                      "id":  "{F7F9B725-6CBB-45A2-83A8-156C60B83DC7}{1}{B0}",
+                      "file":  "pages\\\\page-00.xml"
+                  }
+              ]
+}

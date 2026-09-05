@@ -1,0 +1,34 @@
+﻿[
+    {
+        "html":  "\u003cspan style=\"background:black\"\u003eBlack highlight, automatic text\u003c/span\u003e",
+        "name":  "Black highlight control"
+    },
+    {
+        "html":  "\u003cspan style=\"background:black;color:white\"\u003eWhite text on black highlight\u003c/span\u003e",
+        "name":  "White on black"
+    },
+    {
+        "html":  "\u003cspan style=\"background:black;color:black\"\u003eBlack text on black highlight\u003c/span\u003e",
+        "name":  "Black on black"
+    },
+    {
+        "html":  "\u003cb\u003eBefore \u003cspan style=\"background:black\"\u003emiddle\u003c/span\u003e after\u003c/b\u003e",
+        "name":  "Partial black highlight"
+    },
+    {
+        "html":  "\u003cspan style=\"background:yellow\"\u003eYellow highlight, automatic text\u003c/span\u003e",
+        "name":  "Yellow control"
+    },
+    {
+        "html":  "Plain \u003cb\u003ebold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e \u003cu\u003eunderline\u003c/u\u003e \u003cs\u003estrike\u003c/s\u003e \u003csup\u003esuper\u003c/sup\u003e \u003csub\u003esub\u003c/sub\u003e \u003cspan style=\"font-family:Consolas;font-size:18pt;color:#804020;background:#00ffff\"\u003efont and color\u003c/span\u003e",
+        "name":  "Character styles"
+    },
+    {
+        "html":  "BMP \u003cb\u003e😀é\u003c/b\u003e 東京 \u003ci\u003eمرحبا\u003c/i\u003e",
+        "name":  "Unicode runs"
+    },
+    {
+        "html":  "Before \u003ca href=\"https://example.invalid/fixture?x=1\u0026amp;y=2\"\u003e\u003cb\u003eLink label\u003c/b\u003e\u003c/a\u003e after",
+        "name":  "Link runs"
+    }
+]

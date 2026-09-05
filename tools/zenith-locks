@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Watch SMB byte-range locks on zenith (TrueNAS) as OneNote takes and drops them."""
+import json
+import os
+import subprocess
+import sys
+import time
+
+HOST = "10.0.0.1"
+SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ControlMaster=auto",
+       "-o", "ControlPath=/tmp/zenith-locks-%r@%h:%p", "-o", "ControlPersist=30s", HOST]
+SEP = "--%%--"
+
+
+def agent_socket():
+    """SSH_AUTH_SOCK is usually absent here; find a live agent that holds an identity."""
+    pids = subprocess.run(["pgrep", "ssh-agent"], capture_output=True, text=True).stdout.split()
+    for pid in pids:
+        out = subprocess.run(["lsof", "-a", "-U", "-p", pid], capture_output=True, text=True).stdout
+        for word in out.split():
+            if "/agent." not in word:
+                continue
+            env = dict(os.environ, SSH_AUTH_SOCK=word)
+            if subprocess.run(["ssh-add", "-l"], env=env, capture_output=True).returncode == 0:
+                return word
+    return None
+
+
+def connect():
+    if subprocess.run(SSH + ["true"], capture_output=True).returncode == 0:
+        return
+    sock = agent_socket()
+    if sock is None:
+        sys.exit("no ssh-agent with a loaded identity; cannot reach %s" % HOST)
+    os.environ["SSH_AUTH_SOCK"] = sock
+    if subprocess.run(SSH + ["true"], capture_output=True).returncode != 0:
+        sys.exit("ssh %s failed even with agent %s" % (HOST, sock))
+
+
+def status(*views):
+    cmd = (" ; echo %s ; " % SEP).join("midclt call smb.status " + v for v in views)
+    out = subprocess.run(SSH + [cmd], capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit(out.stderr.strip() or "ssh failed")
+    return [json.loads(chunk) for chunk in out.stdout.split(SEP + "\n")]
+
+
+def locks(byterange):
+    """(share_path, file, pid, type, start, size) per held range."""
+    for entry in byterange:
+        for lk in entry["locks"]:
+            yield (entry["share_path"], entry["file_name"], lk["server_id"]["pid"],
+                   lk["type"], lk["start"], lk["size"])
+
+
+def table(rows, headers):
+    rows = [[str(c) for c in r] for r in rows]
+    width = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    for r in [headers] + rows:
+        print("  ".join(c.ljust(w) for c, w in zip(r, width)).rstrip())
+
+
+def show_locks():
+    byterange, openfiles, shares = status("BYTERANGE", "LOCKS", "SHARES")
+    held = sorted(locks(byterange))
+    if not held:
+        print("no byte-range locks held")
+        return
+    machine = {s["server_id"]["pid"]: s["machine"] for s in shares}
+    user = {}
+    for f in openfiles:
+        for o in f["opens"].values():
+            user[(f["service_path"], f["filename"], o["server_id"]["pid"])] = o["username"]
+    rows = []
+    for share, name, pid, typ, start, size in held:
+        who = user.get((share, name, pid), "?")
+        rows.append(["%s/%s" % (os.path.basename(share), os.path.basename(name)), pid, who,
+                     machine.get(pid, "?"), start, size,
+                     {"W": "write", "R": "read"}.get(typ, typ)])
+    table(rows, ["FILE", "PID", "USER", "CLIENT", "OFFSET", "LENGTH", "TYPE"])
+
+
+def show_opens():
+    openfiles, shares = status("LOCKS", "SHARES")
+    machine = {s["server_id"]["pid"]: s["machine"] for s in shares}
+    rows = []
+    for f in openfiles:
+        share = os.path.basename(f["service_path"])
+        for o in f["opens"].values():
+            pid = o["server_id"]["pid"]
+            rows.append(["%s/%s" % (share, f["filename"]), pid, o["username"],
+                         machine.get(pid, "?"), o["access_mask"]["text"] or "-",
+                         o["sharemode"]["text"] or "-", o["opened_at"][11:23]])
+    if not rows:
+        print("no open files")
+        return
+    table(sorted(rows), ["FILE", "PID", "USER", "CLIENT", "ACCESS", "SHAREMODE", "OPENED"])
+
+
+def watch(interval):
+    prev = set()
+    while True:
+        now = set(locks(status("BYTERANGE")[0]))
+        t = time.time()
+        stamp = time.strftime("%H:%M:%S", time.localtime(t)) + ".%03d" % (t % 1 * 1000)
+        for sign, changed in (("-", prev - now), ("+", now - prev)):
+            for share, name, pid, typ, start, size in sorted(changed):
+                print("%s %s %s/%s pid=%s %s %d+%d" %
+                      (stamp, sign, os.path.basename(share), os.path.basename(name), pid,
+                       {"W": "write", "R": "read"}.get(typ, typ), start, size), flush=True)
+        prev = now
+        time.sleep(interval)
+
+
+def main():
+    args = sys.argv[1:]
+    connect()
+    if args and args[0] == "--watch":
+        watch(float(args[1]) if len(args) > 1 else 0.5)
+    elif args == ["--opens"]:
+        show_opens()
+    elif not args:
+        show_locks()
+    else:
+        sys.exit("usage: zenith-locks [--watch [SECONDS] | --opens]")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass

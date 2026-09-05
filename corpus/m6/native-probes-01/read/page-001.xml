@@ -1,0 +1,27 @@
+﻿<?xml version="1.0"?>
+<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2010/onenote" ID="{8FC4998B-2C09-484B-811D-256A8F178F0F}{1}{B0}" name="Native feature probes" dateTime="2026-09-05T23:39:12.000Z" lastModifiedTime="2026-09-05T23:39:48.000Z" pageLevel="1" lang="en-US"><one:QuickStyleDef index="0" name="p" fontColor="automatic" highlightColor="automatic" font="Calibri" fontSize="11.0" spaceBefore="0.0" spaceAfter="0.0"/><one:PageSettings RTL="false" color="automatic"><one:PageSize><one:Automatic/></one:PageSize><one:RuleLines visible="false"/></one:PageSettings><one:Title lang="en-US"><one:OE author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{33}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:17.0pt"><one:T><![CDATA[Native feature probes]]></one:T></one:OE></one:Title><one:Outline author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" lastModifiedTime="2026-09-05T23:39:16.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{39}{B0}"><one:Position x="72.0" y="108.0" z="0"/><one:Size width="354.3946228027344" height="115.9424285888672"/><one:OEChildren><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{40}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt"><one:T><![CDATA[<span
+style='background:black;mso-highlight:black'>Black highlight, automatic text</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{46}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt;color:#CBCBCB"><one:T><![CDATA[<span
+style='background:black;mso-highlight:black'>White text on black highlight</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{52}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt;color:black"><one:T><![CDATA[<span
+style='background:black;mso-highlight:black'>Black text on black highlight</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{58}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt"><one:T><![CDATA[<span
+style='font-weight:bold'>Before middle after</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{65}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt"><one:T><![CDATA[<span
+style='background:yellow;mso-highlight:yellow'>Yellow highlight, automatic text</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{71}{B0}" alignment="left" quickStyleIndex="0"><one:T><![CDATA[<span style='font-family:Calibri;
+font-size:11.0pt'>Plain </span><span style='font-weight:bold;font-family:Calibri;
+font-size:11.0pt'>bold</span><span style='font-family:Calibri;font-size:11.0pt'> </span><span
+style='font-style:italic;font-family:Calibri;font-size:11.0pt'>italic</span><span
+style='font-family:Calibri;font-size:11.0pt'> </span><span style='text-decoration:
+underline;font-family:Calibri;font-size:11.0pt'>underline</span><span
+style='font-family:Calibri;font-size:11.0pt'> </span><span style='text-decoration:
+line-through;font-family:Calibri;font-size:11.0pt'>strike</span><span
+style='font-family:Calibri;font-size:11.0pt'> </span><span style='vertical-align:
+super;font-family:Calibri;font-size:11.0pt'>super</span><span style='font-family:
+Calibri;font-size:11.0pt'> </span><span style='vertical-align:sub;font-family:
+Calibri;font-size:11.0pt'>sub</span><span style='font-family:Calibri;
+font-size:11.0pt'> </span><span style='font-family:Consolas;font-size:18.0pt;
+color:#804020;background:aqua;mso-highlight:aqua'>font and color</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:13.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{82}{B0}" alignment="left" quickStyleIndex="0"><one:T><![CDATA[<span
+style='font-family:Calibri' lang=en-US>BMP </span><span style='font-weight:
+bold;font-family:Calibri' lang=x-none>&#128512;é</span><span style='font-family:
+Calibri' lang=en-US> </span><span style='font-family:SimSun' lang=en-US>東京</span><span
+style='font-family:Calibri' lang=en-US> </span><span style='font-style:italic;
+font-family:Arial;direction:rtl;unicode-bidi:embed' lang=ar-SA>مرحبا</span>]]></one:T></one:OE><one:OE creationTime="2026-09-05T23:39:15.000Z" lastModifiedTime="2026-09-05T23:39:15.000Z" objectID="{00E3B0CF-5BD9-4A2B-852F-F655CC2165BE}{90}{B0}" alignment="left" quickStyleIndex="0"><one:T><![CDATA[Before <a
+href="https://example.invalid/fixture?x=1&amp;y=2"><span style='font-weight:
+bold'>Link label</span></a> after]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>

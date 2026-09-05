@@ -1,0 +1,35 @@
+﻿<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2010/onenote" ID="{0D943231-BF59-4A9E-98CB-2F7946603AA8}{1}{B0}"><one:Title><one:OE><one:T>Styled break controls</one:T></one:OE></one:Title><one:Outline><one:Position x="72" y="108" /><one:Size width="480" height="600" /><one:OEChildren><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+A</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+A
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+B
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A<br>
+B<br>
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A<br><br>B</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+B
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+B
+</span>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/0"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/1"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/2"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/3"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+A</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/4"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+A
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/5"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/6"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">
+
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/7"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+B
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/8"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A<br>
+B<br>
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/9"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A<br><br>B</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/10"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+B
+</span></a>]]></one:T></one:OE><one:OE><one:T><![CDATA[<a href="https://example.invalid/break/11"><span style="font-family:Calibri;font-size:14pt;font-weight:bold">A
+B
+</span></a>]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>
