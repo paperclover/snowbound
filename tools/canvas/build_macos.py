@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+import platform
 import plistlib
 import shutil
 import subprocess
@@ -28,6 +29,10 @@ binary.parent.mkdir(parents=True, exist_ok=True)
 pending = binary.with_suffix('.next')
 shutil.copy2(target / ('release' if args.release else 'debug') / 'one-canvas-app', pending)
 pending.replace(binary)
+icon = 'Snowbound-Tahoe' if int(platform.mac_ver()[0].split('.')[0] or 0) >= 26 else 'Snowbound-Sequoia'
+resources = bundle / 'Contents/Resources'
+resources.mkdir(exist_ok=True)
+shutil.copy2(root / 'crates/snowbound/assets/icon' / f'{icon}.icns', resources / 'Snowbound.icns')
 (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({
     'CFBundleExecutable': binary.name,
     'CFBundleIdentifier': args.bundle_id or 'dev.onecanvas.app',
@@ -37,6 +42,7 @@ pending.replace(binary)
     'CFBundleVersion': '1',
     'NSHighResolutionCapable': True,
     'NSPrincipalClass': 'NSApplication',
+    'CFBundleIconFile': 'Snowbound',
 }))
 subprocess.run(['codesign', '--force', '--sign', '-', str(bundle)], check=True)
 subprocess.run(['codesign', '--verify', '--strict', str(bundle)], check=True)
