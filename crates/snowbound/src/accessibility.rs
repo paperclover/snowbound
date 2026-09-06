@@ -2,12 +2,13 @@ use accesskit::{
     Action, Affine, Node, NodeId, Rect, Role, TextDirection, TextSelection, TreeId, TreeInfo,
     TreeUpdate,
 };
-use one_canvas::{
+use canvas::gpu::Viewport;
+use canvas::{
+    date::DateField,
     document::TextPosition,
     editor::{CanvasEditor, Selection, TextOutline},
     text::EditError,
 };
-use one_canvas_gpu::Viewport;
 use parley::Affinity;
 use std::{collections::HashMap, ops::Range};
 
@@ -33,6 +34,7 @@ pub struct Accessibility {
     runs: Vec<Run>,
     paragraphs: HashMap<ParagraphKey, Range<usize>>,
     read_only: Vec<NodeId>,
+    dates: Vec<(DateField, NodeId)>,
     next_id: u64,
 }
 
@@ -43,6 +45,7 @@ impl Default for Accessibility {
             runs: Vec::new(),
             paragraphs: HashMap::new(),
             read_only: Vec::new(),
+            dates: Vec::new(),
             next_id: 1,
         }
     }
@@ -55,18 +58,20 @@ impl Accessibility {
         self.paragraphs.clear();
         self.outlines.clear();
         self.read_only.clear();
+        self.dates.clear();
     }
 
-    pub fn append_read_only(
+    pub fn append_page_fields(
         &mut self,
         update: &mut TreeUpdate,
-        scene: Option<&(one_canvas_gpu::page::PageScene, [f32; 2])>,
+        scene: Option<&(canvas::gpu::page::PageScene, [f32; 2])>,
+        editor: &CanvasEditor,
         viewport: Viewport,
         focus: Option<usize>,
     ) {
         let mut count = 0;
         if let Some((scene, offset)) = scene {
-            for (index, object) in scene.read_only().enumerate() {
+            for (index, object) in scene.read_only(Some(editor)).enumerate() {
                 if index == self.read_only.len() {
                     let id = self.allocate();
                     self.read_only.push(id);
@@ -79,7 +84,7 @@ impl Accessibility {
                 if focus == Some(index) {
                     update.focus = id;
                 }
-                let [x0, y0, x1, y1] = object.rect;
+                let [x0, y0, x1, y1] = object.rect();
                 let x = |v| f64::from((v + offset[0]) * viewport.scale + viewport.origin[0]);
                 let y = |v| f64::from((v + offset[1]) * viewport.scale + viewport.origin[1]);
                 node.set_bounds(Rect::new(x(x0), y(y0), x(x1), y(y1)));
@@ -95,6 +100,40 @@ impl Accessibility {
             }
         }
         self.read_only.truncate(count);
+        let mut date_count = 0;
+        if let Some((scene, offset)) = scene {
+            for (index, (field, rect)) in scene.date_fields(editor).enumerate() {
+                if index == self.dates.len() {
+                    let id = self.allocate();
+                    self.dates.push((field, id));
+                }
+                self.dates[index].0 = field;
+                let id = self.dates[index].1;
+                let mut node = Node::new(Role::Button);
+                node.set_label(crate::DATE_LABELS[field as usize]);
+                node.set_value(
+                    editor.date().unwrap().source().paragraphs[index]
+                        .text()
+                        .unwrap()
+                        .text
+                        .text(),
+                );
+                node.add_action(Action::Click);
+                let x = |v| f64::from((v + offset[0]) * viewport.scale + viewport.origin[0]);
+                let y = |v| f64::from((v + offset[1]) * viewport.scale + viewport.origin[1]);
+                node.set_bounds(Rect::new(x(rect[0]), y(rect[1]), x(rect[2]), y(rect[3])));
+                update
+                    .nodes
+                    .iter_mut()
+                    .find(|(id, _)| *id == ROOT)
+                    .unwrap()
+                    .1
+                    .push_child(id);
+                update.nodes.push((id, node));
+                date_count += 1;
+            }
+        }
+        self.dates.truncate(date_count);
     }
 
     fn allocate(&mut self) -> NodeId {
@@ -108,6 +147,13 @@ impl Accessibility {
 
     pub fn read_only_for_node(&self, node: NodeId) -> Option<usize> {
         self.read_only.iter().position(|id| *id == node)
+    }
+
+    pub fn date_for_node(&self, node: NodeId) -> Option<DateField> {
+        self.dates
+            .iter()
+            .find(|(_, id)| *id == node)
+            .map(|(field, _)| *field)
     }
 
     pub fn outline_for_node(&self, node: NodeId) -> Option<onestore::ExGuid> {
@@ -127,7 +173,7 @@ impl Accessibility {
         let mut runs = Vec::new();
         let mut outlines = Vec::new();
         let mut paragraph_ranges = HashMap::new();
-        for outline in editor.outlines().iter().chain(editor.caret_outline()) {
+        for outline in editor.visible_outlines().chain(editor.caret_outline()) {
             let field = self
                 .outlines
                 .iter()
@@ -315,7 +361,7 @@ impl Accessibility {
                         .tags
                         .iter()
                         .map(|tag| {
-                            use one_canvas::outline::TagIcon;
+                            use canvas::outline::TagIcon;
                             let fallback = match tag.icon {
                                 TagIcon::CheckBox { .. } => "To do",
                                 TagIcon::Question => "Question",
@@ -392,23 +438,22 @@ impl Accessibility {
         let mut nodes = vec![(ROOT, root)];
         let mut focus = ROOT;
         for (index, (outline, (_, id))) in editor
-            .outlines()
-            .iter()
+            .visible_outlines()
             .chain(editor.caret_outline())
             .zip(&self.outlines)
             .enumerate()
         {
             let mut field = Node::new(Role::MultilineTextInput);
-            field.set_label(
-                if editor
-                    .caret_outline()
-                    .is_some_and(|caret| caret.id == outline.id)
-                {
-                    "Text input".into()
-                } else {
-                    format!("Text outline {}", index + 1)
-                },
-            );
+            field.set_label(if outline.title {
+                "Page title".into()
+            } else if editor
+                .caret_outline()
+                .is_some_and(|caret| caret.id == outline.id)
+            {
+                "Text input".into()
+            } else {
+                format!("Text outline {}", index + 1)
+            });
             field.add_action(Action::Focus);
             field.add_action(Action::SetTextSelection);
             field.add_action(Action::ReplaceSelectedText);
@@ -539,14 +584,122 @@ impl Accessibility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use one_canvas::{document::TextDocument, layout::TextEngine, text::Paragraph};
+    use canvas::{document::TextDocument, layout::TextEngine, text::Paragraph};
     use onestore::document::Format;
 
     #[test]
-    fn read_only_objects_keep_accessibility_identity_through_edits_and_view_changes() {
-        use one_canvas::page::{Page, PageObject, Unsupported};
-        use one_canvas_gpu::page::PageScene;
+    fn title_flow_updates_read_only_hit_and_accessibility_bounds() {
+        use canvas::page::{Page, PageObject, Title, Unsupported};
+        let mut engine = TextEngine::default();
+        let mut title = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(
+                "Header".into(),
+                Format {
+                    font: Some("Arial".into()),
+                    font_size: Some(8.0),
+                    line_spacing: Some(20.0),
+                    ..Default::default()
+                },
+            )])
+            .unwrap(),
+            468.0,
+            [0.0; 2],
+        )
+        .unwrap()
+        .snapshot();
+        title.title = true;
         let page = Page {
+            title: "Header".into(),
+            created: None,
+            margin_origin: [36.0, 14.4],
+            definitions: Default::default(),
+            objects: vec![
+                PageObject::Title(Title {
+                    id: Default::default(),
+                    date: None,
+                    layout: Default::default(),
+                    outlines: vec![title],
+                }),
+                PageObject::Unsupported(Unsupported {
+                    id: Default::default(),
+                    jcid: 0xdead,
+                    layout: onestore::document::Layout {
+                        x: Some(120.0),
+                        y: Some(80.0),
+                        max_width: Some(200.0),
+                        max_height: Some(60.0),
+                        ..Default::default()
+                    },
+                }),
+            ],
+        };
+        let (scene, mut editor) =
+            canvas::gpu::page::PageScene::from_page(page, &mut engine).unwrap();
+        let scene = (scene, [30.0, 40.0]);
+        let viewport = Viewport {
+            size: [800, 600],
+            origin: [10.0, -20.0],
+            scale: 2.0,
+        };
+        let mut access = Accessibility::default();
+        let mut identity = None;
+        for phase in 0..4 {
+            match phase {
+                1 => {
+                    editor.select_all().unwrap();
+                    editor.insert(&mut engine, "Header\u{000b}Second\u{000b}Third\u{000b}Fourth\u{000b}Fifth\u{000b}Sixth").unwrap();
+                }
+                2 => {
+                    editor.undo(&mut engine).unwrap();
+                }
+                3 => {
+                    editor.redo(&mut engine).unwrap();
+                }
+                _ => {}
+            }
+            let mut update = access.update(&editor, viewport, "Test", None).unwrap();
+            access.append_page_fields(&mut update, Some(&scene), &editor, viewport, Some(0));
+            let (id, node) = update
+                .nodes
+                .iter()
+                .find(|(_, node)| node.role() == Role::Label)
+                .unwrap();
+            if let Some(identity) = identity {
+                assert_eq!(*id, identity);
+            }
+            identity = Some(*id);
+            let y = if phase % 2 == 0 { 80.0 } else { 145.92 };
+            let expected = Rect::new(
+                310.0,
+                f64::from((y + 40.0) * 2.0 - 20.0),
+                710.0,
+                f64::from((y + 100.0) * 2.0 - 20.0),
+            );
+            let bounds = node.bounds().unwrap();
+            assert_eq!(bounds.x0, expected.x0);
+            assert_eq!(bounds.x1, expected.x1);
+            assert!((bounds.y0 - expected.y0).abs() < 0.001);
+            assert!((bounds.y1 - expected.y1).abs() < 0.001);
+            assert_eq!(
+                crate::page_hit_test(&editor, Some(&scene), [155.0, y + 45.0], 1.0),
+                Some(crate::Hit::ReadOnly(0))
+            );
+            if phase % 2 == 1 {
+                assert_ne!(
+                    crate::page_hit_test(&editor, Some(&scene), [155.0, 125.0], 1.0),
+                    Some(crate::Hit::ReadOnly(0))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn read_only_objects_keep_accessibility_identity_through_edits_and_view_changes() {
+        use canvas::gpu::page::PageScene;
+        use canvas::page::{Page, PageObject, Unsupported};
+        let page = Page {
+            created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
             definitions: Default::default(),
@@ -575,7 +728,7 @@ mod tests {
                 scale,
             };
             let mut update = access.update(&editor, viewport, "Test", None).unwrap();
-            access.append_read_only(&mut update, Some(&scene), viewport, None);
+            access.append_page_fields(&mut update, Some(&scene), &editor, viewport, None);
             let (id, node) = update
                 .nodes
                 .iter()
@@ -611,7 +764,7 @@ mod tests {
                 "annotation "
             );
             let mut focused = access.update(&editor, viewport, "Test", None).unwrap();
-            access.append_read_only(&mut focused, Some(&scene), viewport, Some(0));
+            access.append_page_fields(&mut focused, Some(&scene), &editor, viewport, Some(0));
             assert_eq!(focused.focus, identity.unwrap());
             assert_eq!(access.read_only_for_node(focused.focus), Some(0));
             let tree = accesskit_consumer::Tree::new(focused, true);
@@ -627,7 +780,7 @@ mod tests {
 
     #[test]
     fn tag_descriptions_preserve_plain_text_and_survive_edit_undo_and_cache_reuse() {
-        use one_canvas::page::{Definition, Outline};
+        use canvas::page::{Definition, Outline};
         use onestore::{
             ExGuid,
             document::{Kind, Layout, Tag},
@@ -668,7 +821,7 @@ mod tests {
                     format: Format::default(),
                 },
             );
-            nodes[index].text[0].tags.push(Tag {
+            nodes[index].text_mut().unwrap().tags.push(Tag {
                 definition: Some(id),
                 action_type: None,
                 status,
@@ -684,6 +837,8 @@ mod tests {
         let mut editor = CanvasEditor::from_outlines(
             &mut engine,
             vec![Outline {
+                title: false,
+                min_width: None,
                 id: ExGuid {
                     n: 900,
                     ..ExGuid::default()
@@ -1055,7 +1210,7 @@ mod tests {
     }
     #[test]
     fn keyboard_and_accessibility_preserve_visual_caret_at_wraps() {
-        use one_canvas::editor::Movement;
+        use canvas::editor::Movement;
         let mut engine = TextEngine::default();
         let document = TextDocument::new(vec![
             Paragraph::new(
@@ -1092,7 +1247,7 @@ mod tests {
             Movement::Right,
             Movement::LineEnd,
         ] {
-            editor.move_selection(movement, false).unwrap();
+            editor.move_selection(&mut engine, movement, false).unwrap();
             let caret = editor.caret(0.0).unwrap();
             let tree = accesskit_consumer::Tree::new(
                 access.update(&editor, viewport, "Test", None).unwrap(),

@@ -1,8 +1,11 @@
 [package]
-name = "one-canvas"
+name = "canvas"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+[features]
+gpu = ["dep:bytemuck", "dep:swash", "dep:wgpu", "dep:image", "dep:roxmltree"]
 
 [dependencies]
 onestore = { path = "../onestore" }
@@ -12,6 +15,12 @@ serde_json = "1.0.151"
 skrifa = "0.44.0"
 getrandom = "0.4.3"
 
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
+swash = { version = "0.2.10", optional = true }
+wgpu = { workspace = true, optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+roxmltree = { version = "0.21", optional = true }
+
 [[bin]]
 name = "layout-probe"
 path = "src/bin/layout_probe.rs"
@@ -19,3 +28,11 @@ path = "src/bin/layout_probe.rs"
 [[bin]]
 name = "page-probe"
 path = "src/bin/page_probe.rs"
+
+[dev-dependencies]
+pollster = "0.4"
+png = "0.18"
+
+[[example]]
+name = "render_page"
+required-features = ["gpu"]

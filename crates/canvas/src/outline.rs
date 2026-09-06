@@ -1,6 +1,7 @@
 use crate::{
+    document::{DocumentEdit, edited_nodes},
     layout::{LayoutError, TextEngine, TextLayout},
-    page::{Definition, Outline, PageParagraph, Title},
+    page::{Definition, Outline, PageParagraph, ParagraphContent, Table, Title},
     text::{Paragraph, TextProjection},
 };
 use onestore::{
@@ -9,11 +10,55 @@ use onestore::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+pub(crate) const TITLE_WIDTH: f32 = 468.0;
+
+#[derive(Clone)]
 pub struct OutlineLayout {
     pub paragraphs: Vec<ParagraphLayout>,
+    pub tables: Vec<TableLayout>,
     pub size: [f32; 2],
 }
 
+#[derive(Clone)]
+pub struct TableLayout {
+    pub id: ExGuid,
+    /// Cells are in paragraph order with disjoint visible ranges.
+    pub cells: Vec<CellLayout>,
+    pub borders: bool,
+}
+
+#[derive(Clone)]
+pub struct CellLayout {
+    pub id: ExGuid,
+    pub rect: [f32; 4],
+    /// Visible paragraph indices, including paragraphs in nested tables.
+    pub paragraphs: std::ops::Range<usize>,
+}
+
+impl CellLayout {
+    /// Native ink gutters extend beyond the cell borders.
+    pub fn text_bounds(&self) -> [f32; 4] {
+        [
+            self.rect[0] - 2.7,
+            self.rect[1],
+            self.rect[2] + 4.62,
+            self.rect[3],
+        ]
+    }
+
+    pub fn clip(&self, rect: parley::BoundingBox) -> Option<parley::BoundingBox> {
+        let [left, top, right, bottom] = self.text_bounds().map(f64::from);
+        let rect = parley::BoundingBox::new(
+            rect.x0.max(left),
+            rect.y0.max(top),
+            rect.x1.min(right),
+            rect.y1.min(bottom),
+        );
+        (rect.width() > 0.0 && rect.height() > 0.0).then_some(rect)
+    }
+}
+
+#[derive(Clone)]
 pub struct ParagraphLayout {
     pub id: ExGuid,
     pub origin: [f32; 2],
@@ -44,7 +89,51 @@ impl ParagraphTag {
     pub const SIZE: f32 = 12.0;
 }
 
+pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32, LayoutError> {
+    if indents.len() < 2 || indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
+        return Err(LayoutError::InvalidIndentation);
+    }
+    let known = (level as usize).min(indents.len() - 1);
+    let indent = (indents[1..=known]
+        .iter()
+        .map(|v| f64::from(*v))
+        .sum::<f64>()
+        + f64::from(level - known as u32) * f64::from(*indents.last().unwrap()))
+        as f32;
+    if !indent.is_finite() || indent >= width {
+        return Err(LayoutError::InvalidIndentation);
+    }
+    Ok(indent)
+}
+
+fn spacing(
+    bottom: &mut f64,
+    previous: &mut Option<f32>,
+    format: &Format,
+) -> Result<f32, LayoutError> {
+    let before = format.space_before.unwrap_or(0.0);
+    let after = format.space_after.unwrap_or(0.0);
+    if [before, after].iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err(LayoutError::InvalidSpacing);
+    }
+    if let Some(previous) = previous {
+        *bottom += f64::from(previous.max(before));
+    }
+    *previous = Some(after);
+    Ok(*bottom as f32)
+}
+
 impl ParagraphLayout {
+    fn size(&self) -> [f32; 2] {
+        [
+            self.origin[0] + self.text.shaped.width(),
+            self.markers
+                .iter()
+                .map(|(layout, _)| layout.height())
+                .fold(self.text.height(), f32::max),
+        ]
+    }
+
     pub(crate) fn shape(
         engine: &mut TextEngine,
         paragraph: &PageParagraph,
@@ -55,27 +144,10 @@ impl ParagraphLayout {
         if !width.is_finite() || width <= 0.0 {
             return Err(LayoutError::InvalidWidth);
         }
-        if indents.len() < 2
-            || indents.iter().any(|v| !v.is_finite() || *v < 0.0)
-            || paragraph.level == 0
-        {
-            return Err(LayoutError::InvalidIndentation);
-        }
-        if !paragraph.unsupported.is_empty() {
-            return Err(LayoutError::UnsupportedContent);
-        }
-        let known = (paragraph.level as usize).min(indents.len() - 1);
-        let indent = (indents[1..=known]
-            .iter()
-            .map(|v| f64::from(*v))
-            .sum::<f64>()
-            + f64::from(paragraph.level - known as u32) * f64::from(*indents.last().unwrap()))
-            as f32;
-        if !indent.is_finite() || indent >= width {
-            return Err(LayoutError::InvalidIndentation);
-        }
-        let projection = paragraph
-            .combined_text()
+        let indent = indentation(paragraph.level, indents, width)?;
+        let source = paragraph.text().ok_or(LayoutError::UnsupportedContent)?;
+        let projection = source
+            .text
             .project()
             .map_err(|_| LayoutError::InvalidSourceRange)?;
         let format = &projection.text().spans()[0].format;
@@ -122,11 +194,7 @@ impl ParagraphLayout {
         }
         text.minimum_line_height(format.line_spacing.unwrap_or(0.0))?;
         let mut tags = Vec::new();
-        for tag in paragraph
-            .tags
-            .iter()
-            .chain(paragraph.text.iter().flat_map(|text| &text.tags))
-        {
+        for tag in paragraph.tags.iter().chain(&source.tags) {
             let Some(Definition {
                 kind:
                     Kind::TagDefinition {
@@ -172,9 +240,11 @@ impl ParagraphLayout {
     }
 }
 
-pub(crate) fn visible_paragraphs(nodes: &[PageParagraph]) -> impl Iterator<Item = &PageParagraph> {
+pub(crate) fn visible_paragraphs<'a>(
+    nodes: impl Iterator<Item = &'a PageParagraph>,
+) -> impl Iterator<Item = &'a PageParagraph> {
     let mut hidden = BTreeSet::new();
-    nodes.iter().filter(move |paragraph| {
+    nodes.filter(move |paragraph| {
         let invisible = paragraph
             .parent
             .is_some_and(|parent| hidden.contains(&parent));
@@ -192,38 +262,17 @@ pub(crate) fn arrange<'a>(
 ) -> Result<(Vec<f32>, [f32; 2]), LayoutError> {
     let mut origins = Vec::new();
     let mut bottom = 0.0_f64;
-    let mut previous_after = 0.0_f32;
+    let mut previous_after = None;
     let mut content_width = 0.0_f32;
     for paragraph in paragraphs {
         let format = &paragraph.projection.text().spans()[0].format;
-        let before = format.space_before.unwrap_or(0.0);
-        let after = format.space_after.unwrap_or(0.0);
-        if [before, after].iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err(LayoutError::InvalidSpacing);
-        }
-        if !origins.is_empty() {
-            bottom += f64::from(previous_after.max(before));
-        }
-        origins.push(bottom as f32);
-        bottom += f64::from(
-            paragraph
-                .markers
-                .iter()
-                .map(|(m, _)| m.height())
-                .fold(paragraph.text.height(), f32::max),
-        );
-        previous_after = after;
+        origins.push(spacing(&mut bottom, &mut previous_after, format)?);
+        let size = paragraph.size();
+        bottom += f64::from(size[1]);
         if !(bottom as f32).is_finite() {
             return Err(LayoutError::InvalidSpacing);
         }
-        content_width = content_width.max(
-            paragraph.origin[0]
-                + paragraph
-                    .text
-                    .lines()
-                    .map(|(line, _)| line.metrics().advance)
-                    .fold(0.0, f32::max),
-        );
+        content_width = content_width.max(size[0]);
     }
     let height = bottom as f32;
     if !height.is_finite() || !content_width.is_finite() {
@@ -243,6 +292,192 @@ pub(crate) fn arrange<'a>(
 }
 
 impl OutlineLayout {
+    /// Innermost table cell containing a visible paragraph index.
+    pub fn paragraph_cell(&self, index: usize) -> Option<&CellLayout> {
+        self.tables.iter().rev().find_map(|table| {
+            let cell = table
+                .cells
+                .partition_point(|cell| cell.paragraphs.end <= index);
+            table
+                .cells
+                .get(cell)
+                .filter(|cell| cell.paragraphs.contains(&index))
+        })
+    }
+
+    fn append(&mut self, mut child: Self, origin: [f32; 2]) {
+        for paragraph in &mut child.paragraphs {
+            paragraph.origin[0] += origin[0];
+            paragraph.origin[1] += origin[1];
+            for (_, marker) in &mut paragraph.markers {
+                marker[0] += origin[0];
+            }
+            for tag in &mut paragraph.tags {
+                tag.origin[0] += origin[0];
+            }
+        }
+        for table in &mut child.tables {
+            for cell in &mut table.cells {
+                cell.paragraphs.start += self.paragraphs.len();
+                cell.paragraphs.end += self.paragraphs.len();
+                for (value, offset) in cell.rect.iter_mut().zip(origin.into_iter().cycle()) {
+                    *value += offset;
+                }
+            }
+        }
+        self.paragraphs.extend(child.paragraphs);
+        self.tables.extend(child.tables);
+    }
+
+    pub(crate) fn flow<'a>(
+        nodes: impl Iterator<Item = &'a PageParagraph>,
+        indents: &[f32],
+        width: f32,
+        fixed_width: bool,
+        depth: usize,
+        edit: Option<&DocumentEdit>,
+        shape: &mut impl FnMut(&PageParagraph, f32, &[f32]) -> Result<ParagraphLayout, LayoutError>,
+    ) -> Result<Self, LayoutError> {
+        if !width.is_finite() || width <= 0.0 {
+            return Err(LayoutError::InvalidWidth);
+        }
+        if depth > 64 {
+            return Err(LayoutError::UnsupportedContent);
+        }
+        let mut result = Self {
+            paragraphs: Vec::new(),
+            tables: Vec::new(),
+            size: [36.0, 0.0],
+        };
+        let mut bottom = 0.0;
+        let mut previous = None;
+        for node in visible_paragraphs(nodes) {
+            match &node.content {
+                ParagraphContent::Text(_) => {
+                    let mut paragraph = shape(node, width, indents)?;
+                    let y = spacing(
+                        &mut bottom,
+                        &mut previous,
+                        &paragraph.projection.text().spans()[0].format,
+                    )?;
+                    let size = paragraph.size();
+                    paragraph.origin[1] = y;
+                    result.paragraphs.push(paragraph);
+                    result.size[0] = result.size[0].max(size[0]);
+                    bottom += f64::from(size[1]);
+                }
+                ParagraphContent::Table(table) => {
+                    let x = indentation(node.level, indents, width)?;
+                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
+                    let child = Self::table(table, depth + 1, edit, shape)?;
+                    result.size[0] = result.size[0].max(x + child.size[0]);
+                    bottom += f64::from(child.size[1]);
+                    result.append(child, [x, y]);
+                }
+                ParagraphContent::Unsupported(_) => return Err(LayoutError::UnsupportedContent),
+            }
+            if !(bottom as f32).is_finite() || !result.size[0].is_finite() {
+                return Err(LayoutError::InvalidSpacing);
+            }
+        }
+        result.size[1] = bottom as f32;
+        result.size[0] = if fixed_width { width } else { result.size[0] }.max(result.table_width());
+        Ok(result)
+    }
+
+    pub(crate) fn table_width(&self) -> f32 {
+        // Stored column widths extend 1.77pt past the final cell border.
+        self.tables
+            .iter()
+            .filter_map(|table| table.cells.last())
+            .map(|cell| cell.rect[2] + 1.77)
+            .fold(0.0, f32::max)
+    }
+
+    fn table(
+        table: &Table,
+        depth: usize,
+        edit: Option<&DocumentEdit>,
+        shape: &mut impl FnMut(&PageParagraph, f32, &[f32]) -> Result<ParagraphLayout, LayoutError>,
+    ) -> Result<Self, LayoutError> {
+        let widths = edit.and_then(|edit| edit.columns.get(&table.id));
+        if widths.is_some_and(|widths| widths.len() != table.columns.len()) {
+            return Err(LayoutError::InvalidWidth);
+        }
+        let width =
+            |index: usize| widths.map_or(table.columns[index].width, |widths| widths[index]);
+        if table.columns.is_empty()
+            || table.rows.is_empty()
+            || table
+                .columns
+                .iter()
+                .enumerate()
+                .any(|(index, _)| !width(index).is_finite() || width(index) < 36.0)
+        {
+            return Err(LayoutError::InvalidWidth);
+        }
+        if !table.tags.is_empty() {
+            return Err(LayoutError::UnsupportedContent);
+        }
+        let mut result = Self {
+            paragraphs: Vec::new(),
+            tables: vec![TableLayout {
+                id: table.id,
+                cells: Vec::new(),
+                borders: table.borders.unwrap_or(true),
+            }],
+            size: [
+                (0..table.columns.len())
+                    .map(|index| width(index) + 4.98)
+                    .sum::<f32>()
+                    - 1.83,
+                3.54,
+            ],
+        };
+        let mut y = 0.0;
+        for row in &table.rows {
+            if row.cells.len() != table.columns.len() {
+                return Err(LayoutError::InvalidWidth);
+            }
+            let start = result.tables[0].cells.len();
+            let mut x = 0.0;
+            let mut height = 0.0_f32;
+            for (index, cell) in row.cells.iter().enumerate() {
+                let width = width(index);
+                if cell.paragraphs.is_empty() || !cell.unsupported.is_empty() {
+                    return Err(LayoutError::UnsupportedContent);
+                }
+                let child = Self::flow(
+                    edited_nodes(&cell.paragraphs, Some(cell.id), edit),
+                    &cell.indents,
+                    width,
+                    false,
+                    depth,
+                    edit,
+                    shape,
+                )?;
+                height = height.max(child.size[1]);
+                let paragraph_start = result.paragraphs.len();
+                result.append(child, [x, y + 3.54]);
+                result.tables[0].cells.push(CellLayout {
+                    id: cell.id,
+                    rect: [x - 3.6, y + 1.86, x + width + 1.38, 0.0],
+                    paragraphs: paragraph_start..result.paragraphs.len(),
+                });
+                x += width + 4.98;
+            }
+            y += height + 4.98;
+            for cell in &mut result.tables[0].cells[start..] {
+                cell.rect[3] = y + 1.86;
+            }
+        }
+        result.size[1] += y;
+        if result.size.iter().any(|v| !v.is_finite()) {
+            return Err(LayoutError::InvalidSpacing);
+        }
+        Ok(result)
+    }
+
     pub(crate) fn new(
         mut paragraphs: Vec<ParagraphLayout>,
         width: f32,
@@ -255,7 +490,11 @@ impl OutlineLayout {
         for (paragraph, y) in paragraphs.iter_mut().zip(origins) {
             paragraph.origin[1] = y;
         }
-        Ok(Self { paragraphs, size })
+        Ok(Self {
+            paragraphs,
+            tables: Vec::new(),
+            size,
+        })
     }
 }
 
@@ -273,7 +512,7 @@ impl Outline {
         self.layout_with_width(engine, definitions, width)
     }
 
-    fn layout_with_width(
+    pub(crate) fn layout_with_width(
         &self,
         engine: &mut TextEngine,
         definitions: &BTreeMap<ExGuid, Definition>,
@@ -285,7 +524,24 @@ impl Outline {
         if !self.unsupported.is_empty() {
             return Err(LayoutError::UnsupportedContent);
         }
-        let paragraphs = visible_paragraphs(&self.paragraphs)
+        if self
+            .paragraphs
+            .iter()
+            .any(|node| matches!(node.content, ParagraphContent::Table(_)))
+        {
+            return OutlineLayout::flow(
+                self.paragraphs.iter(),
+                &self.indents,
+                width,
+                self.layout.width_set_by_user == Some(true),
+                0,
+                None,
+                &mut |node, width, indents| {
+                    ParagraphLayout::shape(engine, node, width, indents, definitions)
+                },
+            );
+        }
+        let paragraphs = visible_paragraphs(self.paragraphs.iter())
             .map(|p| ParagraphLayout::shape(engine, p, width, &self.indents, definitions))
             .collect::<Result<_, _>>()?;
         OutlineLayout::new(
@@ -316,7 +572,7 @@ impl Title {
                 .layout
                 .reserved_width
                 .or(outline.layout.max_width)
-                .unwrap_or(f32::MAX);
+                .unwrap_or(TITLE_WIDTH);
             let layout = outline.layout_with_width(engine, definitions, width)?;
             let origin = [
                 outline.layout.x.unwrap_or(0.0),
@@ -326,7 +582,7 @@ impl Title {
             if origin.iter().any(|v| !v.is_finite()) || !height.is_finite() || height < 0.0 {
                 return Err(LayoutError::InvalidSpacing);
             }
-            bottom = origin[1] + layout.size[1].max(height);
+            bottom = origin[1] + layout.size[1].max(height) + if outline.title { 3.6 } else { 0.0 };
             if !bottom.is_finite() {
                 return Err(LayoutError::InvalidSpacing);
             }
@@ -354,18 +610,281 @@ mod tests {
             }),
             level,
             format: Format::default(),
-            text: vec![TextObject {
+            content: crate::page::ParagraphContent::Text(TextObject {
+                date_field: None,
                 id: ExGuid {
                     n: n + 100,
                     ..ExGuid::default()
                 },
                 text: Paragraph::new(text.into(), Format::default()),
                 tags: Vec::new(),
-            }],
-            unsupported: Vec::new(),
+            }),
             lists: Vec::new(),
             tags: Vec::new(),
             collapsed: false,
+            style: None,
+        }
+    }
+
+    fn table(rows: &[&[&str]], widths: &[f32], mut n: u32) -> PageParagraph {
+        use crate::page::{TableCell, TableColumn, TableRow};
+        let mut id = || {
+            n += 1;
+            ExGuid {
+                n,
+                ..ExGuid::default()
+            }
+        };
+        let mut node = paragraph(id().n, "", 1, None);
+        node.content = ParagraphContent::Table(Table {
+            id: id(),
+            columns: widths
+                .iter()
+                .map(|width| TableColumn {
+                    width: *width,
+                    locked: false,
+                })
+                .collect(),
+            rows: rows
+                .iter()
+                .map(|row| TableRow {
+                    id: id(),
+                    cells: row
+                        .iter()
+                        .map(|text| TableCell {
+                            id: id(),
+                            layout: Layout::default(),
+                            indents: vec![18.0, 0.0, 27.0],
+                            shading: None,
+                            paragraphs: vec![paragraph(id().n, text, 1, None)],
+                            unsupported: Vec::new(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            borders: Some(true),
+            layout: Layout::default(),
+            tags: Vec::new(),
+        });
+        node
+    }
+
+    #[test]
+    fn table_rows_align_cells_and_expand_for_wrapped_text() {
+        let mut engine = TextEngine::default();
+        let mut outline = Outline {
+            id: ExGuid::default(),
+            title: false,
+            min_width: None,
+            layout: Layout {
+                max_width: Some(300.0),
+                ..Layout::default()
+            },
+            indents: vec![18.0, 0.0, 27.0],
+            paragraphs: vec![
+                paragraph(1, "Before", 1, None),
+                table(
+                    &[
+                        &[
+                            "A long paragraph that wraps inside a single table cell",
+                            "B",
+                        ],
+                        &["C", "D"],
+                    ],
+                    &[72.0, 48.0],
+                    1000,
+                ),
+                paragraph(2, "After", 1, None),
+            ],
+            unsupported: Vec::new(),
+        };
+        let definitions = BTreeMap::new();
+        let layout = outline.layout(&mut engine, &definitions).unwrap();
+        assert_eq!(layout.paragraphs.len(), 6);
+        assert_eq!(layout.tables.len(), 1);
+        let cells = &layout.tables[0].cells;
+        assert_eq!(cells.len(), 4);
+        assert_eq!(
+            cells
+                .iter()
+                .map(|cell| cell.paragraphs.clone())
+                .collect::<Vec<_>>(),
+            [1..2, 2..3, 3..4, 4..5]
+        );
+        assert!(layout.paragraph_cell(0).is_none());
+        assert_eq!(layout.paragraph_cell(4).unwrap().id, cells[3].id);
+        assert!(layout.paragraph_cell(5).is_none());
+        let paragraphs = &layout.paragraphs;
+        assert!(paragraphs[1].text.lines().count() > 1);
+        assert_eq!(paragraphs[2].text.lines().count(), 1);
+        assert_eq!(paragraphs[1].origin[1], paragraphs[2].origin[1]);
+        assert_eq!(paragraphs[3].origin[1], paragraphs[4].origin[1]);
+        assert_eq!(cells[0].rect[3], cells[1].rect[3]);
+        assert_eq!(cells[0].rect[3], cells[2].rect[1]);
+        assert!((cells[0].rect[2] - cells[1].rect[0]).abs() < 0.00001);
+        assert_eq!(paragraphs[1].origin[0], 0.0);
+        assert_eq!(paragraphs[2].origin[0], 76.98);
+        assert!(paragraphs[3].origin[1] > paragraphs[1].origin[1] + paragraphs[1].text.height());
+        assert!(paragraphs[5].origin[1] > cells[3].rect[3]);
+        assert_eq!(
+            layout.size[1],
+            paragraphs[5].origin[1] + paragraphs[5].text.height()
+        );
+        let ParagraphContent::Table(source) = &outline.paragraphs[1].content else {
+            panic!()
+        };
+        assert_eq!(layout.tables[0].id, source.id);
+        assert_eq!(
+            cells.iter().map(|c| c.id).collect::<Vec<_>>(),
+            source
+                .rows
+                .iter()
+                .flat_map(|row| row.cells.iter().map(|c| c.id))
+                .collect::<Vec<_>>()
+        );
+
+        outline.layout.width_set_by_user = Some(true);
+        let fixed = outline.layout(&mut engine, &definitions).unwrap();
+        assert_eq!(fixed.size, [300.0, layout.size[1]]);
+        assert_eq!(fixed.paragraphs[2].origin, paragraphs[2].origin);
+        let ParagraphContent::Table(source) = &mut outline.paragraphs[1].content else {
+            panic!()
+        };
+        source.columns[0].width = 160.0;
+        let widened = outline.layout(&mut engine, &definitions).unwrap();
+        assert!(widened.size[1] < fixed.size[1]);
+        assert_eq!(widened.paragraphs[2].origin[0], 164.98);
+    }
+
+    #[test]
+    fn nested_table_layout_translates_cells_and_respects_collapsed_children() {
+        let mut outer = table(&[&["Left", "Right"]], &[160.0, 72.0], 1000);
+        let mut inner = table(&[&["Nested", "Cell"]], &[48.0, 48.0], 2000);
+        inner.level = 2;
+        let ParagraphContent::Table(source) = &mut outer.content else {
+            panic!()
+        };
+        let hidden = paragraph(
+            42,
+            "Hidden descendant",
+            2,
+            Some(source.rows[0].cells[0].paragraphs[0].id.n),
+        );
+        source.rows[0].cells[0].paragraphs[0].collapsed = true;
+        source.rows[0].cells[0].paragraphs.push(hidden);
+        source.rows[0].cells[0].paragraphs.push(inner);
+        let mut engine = TextEngine::default();
+        let layout = OutlineLayout::flow(
+            [&outer].into_iter(),
+            &[18.0, 0.0, 27.0],
+            300.0,
+            false,
+            0,
+            None,
+            &mut |node, width, indents| {
+                ParagraphLayout::shape(&mut engine, node, width, indents, &BTreeMap::new())
+            },
+        )
+        .unwrap();
+        assert_eq!(layout.tables.len(), 2);
+        assert_eq!(layout.tables[0].cells[0].paragraphs, 0..3);
+        assert_eq!(layout.tables[0].cells[1].paragraphs, 3..4);
+        assert_eq!(layout.tables[1].cells[0].paragraphs, 1..2);
+        assert_eq!(layout.tables[1].cells[1].paragraphs, 2..3);
+        assert_eq!(
+            layout.paragraph_cell(1).unwrap().id,
+            layout.tables[1].cells[0].id
+        );
+        assert_eq!(
+            layout
+                .paragraphs
+                .iter()
+                .map(|p| p.projection.text().text())
+                .collect::<Vec<_>>(),
+            ["Left", "Nested", "Cell", "Right"]
+        );
+        assert_eq!(layout.paragraphs[1].origin[0], 27.0);
+        assert_eq!(layout.tables[1].cells[0].rect[0], 27.0 - 3.6);
+        assert!(layout.tables[1].cells[0].rect[1] > layout.tables[0].cells[0].rect[1]);
+        assert!(layout.tables[1].cells[0].rect[3] < layout.tables[0].cells[0].rect[3]);
+        assert_eq!(
+            layout.paragraphs[0].origin[1],
+            layout.paragraphs[3].origin[1]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CANVAS_TEST_SECTION native Tab capture and CANVAS_TEST_SUBSTITUTE Carlito font"]
+    fn native_table_layout() {
+        use crate::page::{Page, PageObject};
+        use onestore::{RevisionIndex, Store, document::Document};
+        let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
+        let store = Store::parse(&bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let mut engine = TextEngine::default();
+        engine
+            .register_substitute(parley::fontique::Blob::new(std::sync::Arc::new(
+                std::fs::read(std::env::var_os("CANVAS_TEST_SUBSTITUTE").unwrap()).unwrap(),
+            )))
+            .unwrap();
+        let page = Page::from_document(&document, "rows").unwrap();
+        let outline = page
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) => Some(outline),
+                _ => None,
+            })
+            .unwrap();
+        let layout = outline.layout(&mut engine, &page.definitions).unwrap();
+        assert!((layout.size[0] - 84.6).abs() < 0.001);
+        assert!((layout.size[1] - 58.76315).abs() < 0.001);
+        for (paragraph, expected) in layout.paragraphs.iter().zip([
+            [0.0, 3.54],
+            [44.34, 3.54],
+            [0.0, 21.947714],
+            [44.34, 21.947714],
+            [0.0, 40.355427],
+            [44.34, 40.355427],
+        ]) {
+            assert_eq!(paragraph.text.lines().count(), 1);
+            for (actual, expected) in paragraph.origin.into_iter().zip(expected) {
+                assert!((actual - expected).abs() < 0.001);
+            }
+        }
+        assert_eq!(layout.tables.len(), 1);
+        assert_eq!(layout.tables[0].cells.len(), 6);
+        for (title, size) in [
+            ("soft-break", [82.350006, 35.375435]),
+            ("fixed", [180.0, 21.947721]),
+        ] {
+            let page = Page::from_document(&document, title).unwrap();
+            let outline = page
+                .objects
+                .iter()
+                .find_map(|object| match object {
+                    PageObject::Outline(outline) => Some(outline),
+                    _ => None,
+                })
+                .unwrap();
+            let layout = outline.layout(&mut engine, &page.definitions).unwrap();
+            for (actual, expected) in layout.size.into_iter().zip(size) {
+                assert!(
+                    (actual - expected).abs() < 0.001,
+                    "{title}: {actual} != {expected}"
+                );
+            }
+            assert_eq!(layout.tables.len(), 1);
+            assert_eq!(layout.tables[0].cells.len(), 2);
+            assert_eq!(
+                layout
+                    .paragraphs
+                    .iter()
+                    .map(|p| p.text.lines().count())
+                    .max(),
+                Some(if title == "soft-break" { 2 } else { 1 })
+            );
         }
     }
 
@@ -382,7 +901,7 @@ mod tests {
         let plain =
             ParagraphLayout::shape(&mut engine, &node, 120.0, &[18.0, 0.0, 27.0], &definitions)
                 .unwrap();
-        node.text[0].tags.push(Tag {
+        node.text_mut().unwrap().tags.push(Tag {
             definition: Some(id),
             status: 3,
             action_type: None,
@@ -465,14 +984,17 @@ mod tests {
     }
 
     #[test]
-    fn title_accepts_intrinsic_width_and_keeps_date_after_wrapped_title() {
+    fn title_uses_a_default_wrap_limit_and_keeps_date_after_wrapped_title() {
         let mut title = Title {
+            date: None,
             id: ExGuid::default(),
             layout: Layout::default(),
             outlines: ["A title with enough words to wrap", "A date"]
                 .into_iter()
                 .enumerate()
                 .map(|(index, text)| Outline {
+                    title: index == 0,
+                    min_width: None,
                     id: ExGuid {
                         n: index as u32,
                         ..ExGuid::default()
@@ -495,11 +1017,19 @@ mod tests {
         ));
         let layouts = title.layout(&mut engine, &definitions).unwrap();
         assert_eq!(layouts[0].1.paragraphs[0].text.lines().count(), 1);
-        assert_eq!(layouts[1].0, [0.0, 21.6]);
+        assert_eq!(layouts[1].0, [0.0, 21.6 + 3.6]);
+        title.outlines[0].paragraphs[0].text_mut().unwrap().text = Paragraph::new(
+            "A title with enough words to wrap ".repeat(12),
+            Format::default(),
+        );
+        let layouts = title.layout(&mut engine, &definitions).unwrap();
+        assert!(layouts[0].1.paragraphs[0].text.lines().count() > 1);
+        assert!(layouts[0].1.size[0] <= 468.0);
+        assert_eq!(layouts[1].0[1], layouts[0].1.size[1] + 3.6);
         title.outlines[0].layout.max_width = Some(70.0);
         let layouts = title.layout(&mut engine, &definitions).unwrap();
         assert!(layouts[0].1.paragraphs[0].text.lines().count() > 1);
-        assert_eq!(layouts[1].0[1], layouts[0].1.size[1]);
+        assert_eq!(layouts[1].0[1], layouts[0].1.size[1] + 3.6);
         for value in [f32::NAN, f32::INFINITY, -1.0] {
             title.outlines[0].layout.max_height = Some(value);
             assert!(matches!(
@@ -518,7 +1048,7 @@ mod tests {
     #[test]
     fn collapses_descendants_and_uses_the_larger_adjacent_spacing() {
         let mut first = paragraph(1, "First", 1, None);
-        first.text[0].text = Paragraph::new(
+        first.text_mut().unwrap().text = Paragraph::new(
             "First".into(),
             Format {
                 space_after: Some(4.0),
@@ -526,7 +1056,7 @@ mod tests {
             },
         );
         let mut second = paragraph(2, "Second", 2, Some(1));
-        second.text[0].text = Paragraph::new(
+        second.text_mut().unwrap().text = Paragraph::new(
             "Second".into(),
             Format {
                 space_before: Some(7.0),
@@ -536,6 +1066,8 @@ mod tests {
         );
         second.collapsed = true;
         let mut outline = Outline {
+            title: false,
+            min_width: None,
             id: ExGuid::default(),
             layout: Layout {
                 max_width: Some(300.0),
@@ -591,6 +1123,8 @@ mod tests {
         );
         long.lists.push(marker_id);
         let outline = Outline {
+            title: false,
+            min_width: None,
             id: ExGuid::default(),
             layout: Layout {
                 max_width: Some(110.0),

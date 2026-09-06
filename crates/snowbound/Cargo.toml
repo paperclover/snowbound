@@ -1,0 +1,22 @@
+[package]
+name = "snowbound"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+canvas = { path = "../canvas", features = ["gpu"] }
+onestore = { path = "../onestore" }
+pollster = "0.4"
+wgpu.workspace = true
+parley.workspace = true
+winit = "0.30.13"
+arboard = { version = "3.6.1", default-features = false }
+accesskit = "0.25.0"
+accesskit_winit = { version = "0.34.0", default-features = false, features = ["rwh_06"] }
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSLocale", "NSTimeZone"] }
+
+[dev-dependencies]
+accesskit_consumer = "0.39.0"

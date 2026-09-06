@@ -1,8 +1,9 @@
 use crate::{
-    document::{DocumentEdit, TextDocument, TextPosition},
+    date::PageDate,
+    document::{DocumentEdit, TextDocument, TextPosition, edited_nodes, leaves},
     layout::{LayoutError, TextEngine},
-    outline::{OutlineLayout, ParagraphLayout, arrange, visible_paragraphs},
-    page::{Definition, Outline},
+    outline::{OutlineLayout, ParagraphLayout, arrange, indentation, visible_paragraphs},
+    page::{Definition, Outline, PageParagraph},
     text::{EditError, Paragraph},
 };
 use onestore::ExGuid;
@@ -16,6 +17,12 @@ use std::{
     ops::Range,
 };
 
+pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
+
+pub(crate) mod page;
+mod table;
+pub use page::ReadOnlyObject;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Movement {
     Left,
@@ -26,12 +33,24 @@ pub enum Movement {
     WordRight,
     LineStart,
     LineEnd,
+    ParagraphStart,
+    ParagraphEnd,
+    DocumentStart,
+    DocumentEnd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionUnit {
+    Grapheme,
+    Word,
+    Paragraph,
 }
 
 #[derive(Debug)]
 pub enum EditorError {
     Edit(EditError),
     Layout(LayoutError),
+    InvalidGeometry,
 }
 
 impl fmt::Display for EditorError {
@@ -39,6 +58,9 @@ impl fmt::Display for EditorError {
         match self {
             Self::Edit(error) => error.fmt(f),
             Self::Layout(error) => error.fmt(f),
+            Self::InvalidGeometry => {
+                f.write_str("The page contains invalid object dimensions or positions.")
+            }
         }
     }
 }
@@ -73,6 +95,8 @@ impl From<[TextPosition; 2]> for Selection {
 }
 
 pub struct CanvasEditor {
+    pub(crate) objects: Vec<page::Content>,
+    date: Option<PageDate>,
     outlines: Vec<TextOutline>,
     definitions: BTreeMap<ExGuid, Definition>,
     active: Focus,
@@ -84,14 +108,21 @@ pub struct CanvasEditor {
 
 enum Focus {
     Outline(usize),
+    Draft {
+        index: usize,
+        outline: Box<TextOutline>,
+    },
     Caret {
         outline: Box<TextOutline>,
         index: usize,
     },
 }
 
+#[derive(Clone)]
 pub struct TextOutline {
     pub id: onestore::ExGuid,
+    pub title: bool,
+    min_width: Option<f32>,
     layout: onestore::document::Layout,
     document: TextDocument,
     indents: Vec<f32>,
@@ -114,6 +145,15 @@ impl TextOutline {
                 .all(|byte| byte == b' ')
     }
 
+    /// Tests an outline-local point against the provisional paragraph band.
+    pub fn contains_extension(&self, point: [f32; 2]) -> bool {
+        !self.title
+            && self.document.validate_flat().is_ok()
+            && (0.0..=self.shaped.size[0]).contains(&point[0])
+            && point[1] > self.shaped.size[1]
+            && point[1] <= self.shaped.size[1] + 27.0
+    }
+
     pub fn new(
         engine: &mut TextEngine,
         document: TextDocument,
@@ -124,19 +164,30 @@ impl TextOutline {
             return Err(EditError::InvalidRange.into());
         }
         let indents = vec![18.0, 0.0, 27.0, 27.0];
-        let shaped = visible_paragraphs(document.nodes())
-            .map(|paragraph| {
-                ParagraphLayout::shape(engine, paragraph, width, &indents, &BTreeMap::new())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let shaped = OutlineLayout::new(shaped, width, true)?;
+        let fixed_width = document.nodes().len() != 1
+            || document.nodes()[0]
+                .text()
+                .is_none_or(|text| !text.text.text().is_empty());
+        let shaped = OutlineLayout::flow(
+            document.nodes().iter(),
+            &indents,
+            width,
+            fixed_width,
+            0,
+            None,
+            &mut |paragraph, width, indents| {
+                ParagraphLayout::shape(engine, paragraph, width, indents, &BTreeMap::new())
+            },
+        )?;
         Ok(Self {
             id: crate::text::new_id()?,
+            title: false,
+            min_width: None,
             layout: onestore::document::Layout {
                 x: Some(position[0]),
                 y: Some(position[1]),
                 max_width: Some(width),
-                width_set_by_user: Some(true),
+                width_set_by_user: Some(fixed_width),
                 ..Default::default()
             },
             document,
@@ -162,10 +213,37 @@ impl TextOutline {
         {
             return Err(EditError::InvalidRange.into());
         }
-        let shaped = outline.layout(engine, definitions)?;
+        if outline
+            .min_width
+            .is_some_and(|width| !width.is_finite() || width <= 0.0)
+        {
+            return Err(LayoutError::InvalidWidth.into());
+        }
+        let shaped = if outline.title {
+            if outline
+                .layout
+                .max_height
+                .is_some_and(|height| !height.is_finite() || height < 0.0)
+            {
+                return Err(LayoutError::InvalidSpacing.into());
+            }
+            outline.layout_with_width(
+                engine,
+                definitions,
+                outline
+                    .layout
+                    .reserved_width
+                    .or(outline.layout.max_width)
+                    .unwrap_or(crate::outline::TITLE_WIDTH),
+            )?
+        } else {
+            outline.layout(engine, definitions)?
+        };
         let document = TextDocument::from_nodes(outline.paragraphs.clone())?;
         Ok(Self {
             id: outline.id,
+            title: outline.title,
+            min_width: outline.min_width,
             layout: outline.layout.clone(),
             indents: outline.indents.clone(),
             document,
@@ -178,9 +256,11 @@ impl TextOutline {
         })
     }
 
-    fn snapshot(&self) -> Outline {
+    pub fn snapshot(&self) -> Outline {
         Outline {
             id: self.id,
+            title: self.title,
+            min_width: self.min_width,
             layout: self.layout.clone(),
             indents: self.indents.clone(),
             paragraphs: self.document.nodes().to_vec(),
@@ -196,25 +276,68 @@ impl TextOutline {
         &self.layout
     }
 
+    pub fn shaped(&self) -> &OutlineLayout {
+        &self.shaped
+    }
+
     pub fn origin(&self) -> [f32; 2] {
         [self.layout.x.unwrap_or(0.0), self.layout.y.unwrap_or(0.0)]
     }
 
+    pub fn wrap_width(&self) -> f32 {
+        self.layout
+            .reserved_width
+            .or(self.layout.max_width)
+            .unwrap_or(crate::outline::TITLE_WIDTH)
+    }
+
+    /// Native typing room expands the interactive bounds without changing the wrap constraint.
     pub fn bounds(&self) -> BoundingBox {
         let [x, y] = self.origin().map(f64::from);
+        let width = if self.layout.width_set_by_user == Some(true) {
+            self.shaped.size[0]
+        } else {
+            let text_width = if self.shaped.tables.is_empty() {
+                Some(self.shaped.size[0])
+            } else {
+                let roots = self
+                    .document
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.text().is_some())
+                    .map(|node| node.id)
+                    .collect::<BTreeSet<_>>();
+                self.shaped
+                    .paragraphs
+                    .iter()
+                    .filter(|paragraph| roots.contains(&paragraph.id))
+                    .map(|paragraph| paragraph.origin[0] + paragraph.text.shaped.width())
+                    .reduce(f32::max)
+            };
+            text_width.map_or(self.shaped.size[0], |width| {
+                (width + 36.0)
+                    .max(72.0)
+                    .min(self.wrap_width())
+                    .max(self.shaped.size[0])
+            })
+        }
+        .max(self.min_width.unwrap_or(0.0));
         BoundingBox {
             x0: x,
             y0: y,
-            x1: x + f64::from(self.shaped.size[0]),
-            y1: y + f64::from(self.shaped.size[1]),
+            x1: x + f64::from(width),
+            y1: y + f64::from(if self.title {
+                self.shaped.size[1].max(self.layout.max_height.unwrap_or(0.0))
+            } else {
+                self.shaped.size[1]
+            }),
         }
     }
 
     pub fn layouts(&self) -> impl Iterator<Item = (usize, &ParagraphLayout)> {
         let mut shaped = self.shaped.paragraphs.iter().peekable();
         self.document
-            .nodes()
-            .iter()
+            .text_nodes()
             .enumerate()
             .filter_map(move |(index, node)| {
                 if shaped
@@ -231,8 +354,8 @@ impl TextOutline {
     fn visible_index(&self, source: usize) -> Result<usize, EditError> {
         let id = self
             .document
-            .nodes()
-            .get(source)
+            .text_nodes()
+            .nth(source)
             .ok_or(EditError::InvalidRange)?
             .id;
         self.shaped
@@ -245,14 +368,167 @@ impl TextOutline {
     fn source_index(&self, visible: usize) -> usize {
         let id = self.shaped.paragraphs[visible].id;
         self.document
-            .nodes()
-            .iter()
+            .text_nodes()
             .position(|paragraph| paragraph.id == id)
             .unwrap()
     }
 
     pub fn paragraph_layout(&self, source: usize) -> Result<&ParagraphLayout, EditError> {
         Ok(&self.shaped.paragraphs[self.visible_index(source)?])
+    }
+
+    fn column(&self, x: f32, current: ExGuid) -> Result<Vec<usize>, EditError> {
+        let paragraphs = self
+            .shaped
+            .paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, paragraph)| (paragraph.id, index))
+            .collect::<BTreeMap<_, _>>();
+        let tables = self
+            .shaped
+            .tables
+            .iter()
+            .map(|table| (table.id, table))
+            .collect::<BTreeMap<_, _>>();
+        let mut result = Vec::new();
+        let mut pending = vec![visible_paragraphs(self.document.nodes().iter())];
+        while let Some(nodes) = pending.last_mut() {
+            let Some(node) = nodes.next() else {
+                pending.pop();
+                continue;
+            };
+            match &node.content {
+                crate::page::ParagraphContent::Text(_) => {
+                    result.push(
+                        *paragraphs
+                            .get(&node.id)
+                            .ok_or(EditError::InvalidStructure)?,
+                    );
+                }
+                crate::page::ParagraphContent::Table(table) => {
+                    let layout = tables.get(&table.id).ok_or(EditError::InvalidStructure)?;
+                    let cells = layout
+                        .cells
+                        .get(..table.columns.len())
+                        .ok_or(EditError::InvalidStructure)?;
+                    let (first, last) = cells
+                        .first()
+                        .zip(cells.last())
+                        .ok_or(EditError::InvalidStructure)?;
+                    let x = x.clamp(first.rect[0], last.rect[2]);
+                    let column = cells
+                        .iter()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| {
+                            let distance = |cell: &crate::outline::CellLayout| {
+                                (f64::from(x) - f64::from(x.clamp(cell.rect[0], cell.rect[2])))
+                                    .abs()
+                            };
+                            distance(a).total_cmp(&distance(b))
+                        })
+                        .ok_or(EditError::InvalidStructure)?
+                        .0;
+                    for row in table.rows.iter().rev() {
+                        let cell = row
+                            .cells
+                            .iter()
+                            .find(|cell| {
+                                leaves(&cell.paragraphs, None)
+                                    .any(|(_, _, node)| node.id == current)
+                            })
+                            .unwrap_or(&row.cells[column]);
+                        pending.push(visible_paragraphs(cell.paragraphs.iter()));
+                    }
+                }
+                crate::page::ParagraphContent::Unsupported(_) => {
+                    return Err(EditError::UnsupportedContent);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn paragraph_at(&self, x: f32, y: f32) -> Result<usize, EditError> {
+        if self.shaped.tables.is_empty() {
+            return Ok(self
+                .shaped
+                .paragraphs
+                .partition_point(|paragraph| paragraph.origin[1] <= y)
+                .saturating_sub(1));
+        }
+        let paragraphs = self
+            .shaped
+            .paragraphs
+            .iter()
+            .enumerate()
+            .map(|(index, paragraph)| (paragraph.id, (index, paragraph)))
+            .collect::<BTreeMap<_, _>>();
+        let tables = self
+            .shaped
+            .tables
+            .iter()
+            .map(|table| (table.id, table))
+            .collect::<BTreeMap<_, _>>();
+        let mut nodes = self.document.nodes();
+        loop {
+            let mut target = None;
+            for node in visible_paragraphs(nodes.iter()) {
+                let top = match &node.content {
+                    crate::page::ParagraphContent::Text(_) => {
+                        paragraphs
+                            .get(&node.id)
+                            .ok_or(EditError::InvalidStructure)?
+                            .1
+                            .origin[1]
+                    }
+                    crate::page::ParagraphContent::Table(table) => {
+                        tables
+                            .get(&table.id)
+                            .and_then(|layout| layout.cells.first())
+                            .ok_or(EditError::InvalidStructure)?
+                            .rect[1]
+                            - 1.86
+                    }
+                    crate::page::ParagraphContent::Unsupported(_) => {
+                        return Err(EditError::UnsupportedContent);
+                    }
+                };
+                if target.is_none() || top <= y {
+                    target = Some(node);
+                }
+                if top > y {
+                    break;
+                }
+            }
+            let target = target.ok_or(EditError::InvalidStructure)?;
+            let crate::page::ParagraphContent::Table(table) = &target.content else {
+                return paragraphs
+                    .get(&target.id)
+                    .map(|(index, _)| *index)
+                    .ok_or(EditError::InvalidStructure);
+            };
+            let layout = tables.get(&table.id).ok_or(EditError::InvalidStructure)?;
+            let (first, last) = layout
+                .cells
+                .first()
+                .zip(layout.cells.last())
+                .ok_or(EditError::InvalidStructure)?;
+            let x = x.clamp(first.rect[0], last.rect[2]);
+            let y = y.clamp(first.rect[1], last.rect[3]);
+            let cell = layout
+                .cells
+                .iter()
+                .map(|cell| {
+                    let dx = f64::from(x) - f64::from(x.clamp(cell.rect[0], cell.rect[2]));
+                    let dy = f64::from(y) - f64::from(y.clamp(cell.rect[1], cell.rect[3]));
+                    (cell, dy.abs(), dx.abs())
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1).then(a.2.total_cmp(&b.2)))
+                .ok_or(EditError::InvalidStructure)?
+                .0;
+            nodes = self.document.container(Some(cell.id))?;
+        }
     }
 }
 
@@ -262,6 +538,17 @@ struct Composition {
 }
 
 impl ParagraphLayout {
+    fn reset_origin(&mut self, x: f32) {
+        let offset = x - self.origin[0];
+        self.origin = [x, 0.0];
+        for (_, origin) in &mut self.markers {
+            origin[0] += offset;
+        }
+        for tag in &mut self.tags {
+            tag.origin[0] += offset;
+        }
+    }
+
     fn cursor(&self, source: u32, affinity: Affinity) -> Result<Cursor, EditError> {
         let visible = self.projection.visible_offset(source)?;
         let byte = self.projection.text().byte_offset(visible)?;
@@ -273,6 +560,13 @@ impl ParagraphLayout {
 struct TextChange {
     edit: DocumentEdit,
     selection: Selection,
+    positions: Vec<Placement>,
+}
+
+#[derive(Clone)]
+struct Placement {
+    id: ExGuid,
+    position: [Option<f32>; 2],
 }
 
 enum RestoreFocus {
@@ -285,13 +579,25 @@ enum RestoreFocus {
 }
 
 enum History {
+    Date(Box<PageDate>),
+    Draft {
+        outlines: Box<[TextOutline; 2]>,
+        index: usize,
+        caret: Box<Outline>,
+        selection: Selection,
+        restore_caret: bool,
+    },
     Text {
         outline: onestore::ExGuid,
-        change: TextChange,
+        change: Box<TextChange>,
     },
     Position {
         outline: onestore::ExGuid,
         position: [Option<f32>; 2],
+    },
+    Layout {
+        outline: ExGuid,
+        layout: onestore::document::Layout,
     },
     Remove {
         outline: onestore::ExGuid,
@@ -331,12 +637,220 @@ impl CanvasEditor {
         Ok(Self {
             outlines,
             definitions: BTreeMap::new(),
+            objects: Vec::new(),
+            date: None,
             active,
             undo: Vec::new(),
             redo: Vec::new(),
             composition: None,
             preferred_x: None,
         })
+    }
+
+    pub fn from_page(
+        mut page: crate::page::Page,
+        engine: &mut TextEngine,
+    ) -> Result<Self, EditorError> {
+        let (objects, mut outlines, date) = page::build(&mut page, engine, true)?;
+        let needs_caret = outlines.is_empty();
+        if needs_caret {
+            let x = objects
+                .iter()
+                .filter_map(|object| match object {
+                    page::Content::ReadOnly(object) => Some(object.rect()[2]),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max);
+            outlines.push(TextOutline::new(
+                engine,
+                TextDocument::new(vec![Paragraph::new(String::new(), Default::default())])?,
+                240.0,
+                [if x > 0.0 { x + 24.0 } else { 0.0 }, 0.0],
+            )?);
+        }
+        let mut editor = Self::from_text_outlines(outlines, page.definitions, date)?;
+        if needs_caret {
+            editor.active = Focus::Caret {
+                outline: Box::new(editor.outlines.pop().unwrap()),
+                index: 0,
+            };
+        }
+        editor.objects = objects;
+        let mut ids = BTreeSet::new();
+        if !editor.object_layouts().all(|(id, _)| ids.insert(id)) {
+            return Err(EditError::InvalidStructure.into());
+        }
+        Ok(editor)
+    }
+
+    /// Whether this outline occupies a slot in the imported page's paint order.
+    pub fn has_page_outline(&self, id: ExGuid) -> bool {
+        self.objects
+            .iter()
+            .any(|object| matches!(object, page::Content::Editable(candidate) if *candidate == id))
+    }
+
+    pub fn object_layouts(&self) -> impl Iterator<Item = (ExGuid, &onestore::document::Layout)> {
+        self.outlines
+            .iter()
+            .map(|outline| (outline.id, &outline.layout))
+            .chain(
+                self.date
+                    .iter()
+                    .map(|date| (date.source().id, &date.source().layout)),
+            )
+            .chain(self.objects.iter().filter_map(page::Content::layout))
+    }
+
+    fn object_layout_mut(&mut self, id: ExGuid) -> Option<&mut onestore::document::Layout> {
+        self.outlines
+            .iter_mut()
+            .map(|outline| (outline.id, &mut outline.layout))
+            .chain(
+                self.objects
+                    .iter_mut()
+                    .filter_map(page::Content::layout_mut),
+            )
+            .find_map(|(candidate, layout)| (candidate == id).then_some(layout))
+    }
+
+    fn header_bottom(&self, title: ExGuid, text_bottom: f32) -> f32 {
+        self.objects
+            .iter()
+            .filter_map(|object| match object {
+                page::Content::Outline {
+                    source,
+                    layout,
+                    below_title,
+                } if *below_title == Some(title) => {
+                    Some(text_bottom + source.layout.y.unwrap_or(0.0) + layout.size[1])
+                }
+                page::Content::Date { below_title } if *below_title == Some(title) => {
+                    self.date.as_ref().map(|date| {
+                        text_bottom + date.source().layout.y.unwrap_or(0.0) + date.layout().size[1]
+                    })
+                }
+                _ => None,
+            })
+            .fold(text_bottom, f32::max)
+    }
+
+    pub fn leave_title(&mut self, engine: &mut TextEngine) -> Result<(), EditorError> {
+        let title = self.active_outline();
+        if !title.title {
+            return Ok(());
+        }
+        let bottom = self.header_bottom(title.id, title.bounds().y1 as f32);
+        let position = [
+            title.origin()[0],
+            ((((f64::from(bottom) - 14.4) / 18.0).ceil() + 1.0) * 18.0 + 14.4) as f32,
+        ];
+        if let Some((id, origin)) = self
+            .outlines()
+            .iter()
+            .rev()
+            .find(|outline| {
+                let bounds = outline.bounds();
+                let [x, y] = position.map(f64::from);
+                !outline.title
+                    && x >= bounds.x0
+                    && x <= bounds.x1
+                    && y >= bounds.y0
+                    && y <= bounds.y1
+            })
+            .map(|outline| (outline.id, outline.origin()))
+        {
+            self.focus_outline(id)?;
+            self.select_at(position[0] - origin[0], position[1] - origin[1], false)?;
+        } else {
+            self.place_caret(engine, position, DEFAULT_OUTLINE_WIDTH)?;
+        }
+        Ok(())
+    }
+
+    fn title_flow(&self, height: f32) -> Result<Vec<Placement>, EditorError> {
+        let title = self.active_outline();
+        if !title.title {
+            return Ok(Vec::new());
+        }
+        // Native flow uses text height even when the stored title bounds are taller.
+        let old = self.header_bottom(title.id, title.origin()[1] + title.shaped.size[1]);
+        let new = self.header_bottom(title.id, title.origin()[1] + height);
+        if !old.is_finite() || !new.is_finite() {
+            return Err(EditorError::InvalidGeometry);
+        }
+        if new <= old {
+            return Ok(Vec::new());
+        }
+        let left = title.origin()[0] - 36.0;
+        let right = title.origin()[0] + title.wrap_width() + 36.0;
+        let destination = new + 11.52;
+        let bodies = || {
+            self.outlines
+                .iter()
+                .filter(|outline| !outline.title)
+                .map(|outline| {
+                    let rect = outline.bounds();
+                    (
+                        outline.id,
+                        &outline.layout,
+                        [
+                            rect.x0 as f32,
+                            rect.y0 as f32,
+                            rect.x1 as f32,
+                            rect.y1 as f32,
+                        ],
+                    )
+                })
+                .chain(self.objects.iter().filter_map(|object| match object {
+                    page::Content::Image(image) if !image.background => {
+                        let x = image.layout.x.unwrap_or(0.0);
+                        let y = image.layout.y.unwrap_or(0.0);
+                        Some((
+                            image.id,
+                            &image.layout,
+                            [
+                                x,
+                                y,
+                                x + image.layout.max_width?,
+                                y + image.layout.max_height?,
+                            ],
+                        ))
+                    }
+                    page::Content::ReadOnly(object)
+                        if !matches!(object.source, crate::page::PageObject::Title(_)) =>
+                    {
+                        Some((object.source.id(), object.source.layout(), object.rect()))
+                    }
+                    _ => None,
+                }))
+        };
+        let Some(first) = bodies()
+            .filter(|(_, _, rect)| {
+                rect[1] >= old + 10.8
+                    && rect[1] < destination
+                    && rect[0] <= right
+                    && rect[2] >= left
+            })
+            .map(|(_, _, rect)| rect[1])
+            .min_by(f32::total_cmp)
+        else {
+            return Ok(Vec::new());
+        };
+        let delta = destination - first;
+        bodies()
+            .filter(|(_, _, rect)| rect[1] >= first)
+            .map(|(id, layout, rect)| {
+                let y = rect[1] + delta;
+                if !y.is_finite() || !(rect[3] + delta).is_finite() {
+                    return Err(EditorError::InvalidGeometry);
+                }
+                Ok(Placement {
+                    id,
+                    position: [layout.x, Some(y)],
+                })
+            })
+            .collect()
     }
 
     pub fn from_outlines(
@@ -348,33 +862,36 @@ impl CanvasEditor {
             .iter()
             .map(|outline| TextOutline::from_outline(engine, outline, &definitions))
             .collect::<Result<_, _>>()?;
-        Self::from_text_outlines(outlines, definitions)
+        Self::from_text_outlines(outlines, definitions, None)
     }
 
     pub fn from_text_outlines(
         outlines: Vec<TextOutline>,
         definitions: BTreeMap<ExGuid, Definition>,
+        date: Option<PageDate>,
     ) -> Result<Self, EditorError> {
         if outlines.is_empty() {
             return Err(EditError::InvalidRange.into());
         }
         let mut ids = BTreeSet::new();
-        for outline in &outlines {
-            for id in
-                std::iter::once(outline.id).chain(
-                    outline.document.nodes().iter().flat_map(|p| {
-                        std::iter::once(p.id).chain(p.text.iter().map(|text| text.id))
-                    }),
-                )
-            {
-                if !ids.insert(id) {
-                    return Err(EditError::InvalidStructure.into());
-                }
+        for (outline_id, paragraphs) in outlines
+            .iter()
+            .map(|outline| (outline.id, outline.document.nodes()))
+            .chain(
+                date.iter()
+                    .map(|date| (date.source().id, date.source().paragraphs.as_slice())),
+            )
+        {
+            if !ids.insert(outline_id) {
+                return Err(EditError::InvalidStructure.into());
             }
+            crate::document::validate_nodes(paragraphs, None, &mut ids)?;
         }
         Ok(Self {
             outlines,
             definitions,
+            objects: Vec::new(),
+            date,
             active: Focus::Outline(0),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -383,20 +900,62 @@ impl CanvasEditor {
         })
     }
 
+    pub fn date(&self) -> Option<&PageDate> {
+        self.date.as_ref()
+    }
+
+    pub fn change_date(
+        &mut self,
+        engine: &mut TextEngine,
+        timestamp: u64,
+        mut text: [String; 2],
+    ) -> Result<bool, EditorError> {
+        let date = self.date.as_ref().ok_or(EditError::InvalidRange)?;
+        if timestamp == date.timestamp() {
+            return Ok(false);
+        }
+        let mut source = date.source().clone();
+        for ((field, _), paragraph) in date.fields().zip(&mut source.paragraphs) {
+            let format = paragraph.text().unwrap().text.format_at(0)?.clone();
+            paragraph.text_mut().unwrap().text =
+                Paragraph::new(std::mem::take(&mut text[field as usize]), format);
+        }
+        let updated = PageDate::new(timestamp, source, engine, &self.definitions)?;
+        self.finish_composition();
+        self.undo
+            .push(History::Date(Box::new(self.date.replace(updated).unwrap())));
+        self.redo.clear();
+        Ok(true)
+    }
+
+    /// Stored content; arrow-created paragraphs appear only in `visible_outlines`.
     pub fn outlines(&self) -> &[TextOutline] {
         &self.outlines
     }
+    pub fn visible_outlines(&self) -> impl DoubleEndedIterator<Item = &TextOutline> {
+        self.outlines
+            .iter()
+            .enumerate()
+            .map(|(index, outline)| match &self.active {
+                Focus::Draft {
+                    index: active,
+                    outline,
+                } if index == *active => outline.as_ref(),
+                _ => outline,
+            })
+    }
+
     pub fn active_outline(&self) -> &TextOutline {
         match &self.active {
             Focus::Outline(index) => &self.outlines[*index],
-            Focus::Caret { outline, .. } => outline,
+            Focus::Caret { outline, .. } | Focus::Draft { outline, .. } => outline,
         }
     }
 
     fn active_outline_mut(&mut self) -> &mut TextOutline {
         match &mut self.active {
             Focus::Outline(index) => &mut self.outlines[*index],
-            Focus::Caret { outline, .. } => outline,
+            Focus::Caret { outline, .. } | Focus::Draft { outline, .. } => outline,
         }
     }
 
@@ -404,7 +963,7 @@ impl CanvasEditor {
     pub fn caret_outline(&self) -> Option<&TextOutline> {
         match &self.active {
             Focus::Caret { outline, .. } => Some(outline),
-            Focus::Outline(_) => None,
+            Focus::Outline(_) | Focus::Draft { .. } => None,
         }
     }
 
@@ -425,12 +984,105 @@ impl CanvasEditor {
         Ok(())
     }
 
+    fn blank_paragraph(&self, base: &PageParagraph) -> Result<PageParagraph, EditError> {
+        let format = match base.style {
+            Some(id) => self
+                .definitions
+                .get(&id)
+                .filter(|definition| {
+                    matches!(definition.kind, onestore::document::Kind::Style { .. })
+                })
+                .ok_or(EditError::InvalidStructure)?
+                .format
+                .clone(),
+            None => Default::default(),
+        };
+        let mut node =
+            crate::document::node(Paragraph::new(String::new(), format.clone()), format)?;
+        node.level = base.level;
+        node.style = base.style;
+        Ok(node)
+    }
+
+    pub fn select_below(
+        &mut self,
+        engine: &mut TextEngine,
+        id: ExGuid,
+        point: [f32; 2],
+    ) -> Result<bool, EditorError> {
+        if point.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(EditError::InvalidRange.into());
+        }
+        self.finish_composition();
+        let Some(index) = self.outlines.iter().position(|outline| outline.id == id) else {
+            return Ok(false);
+        };
+        let outline = &self.outlines[index];
+        if !outline.contains_extension(point) {
+            return Ok(false);
+        }
+        let draft = Box::new(match &self.active {
+            Focus::Draft {
+                outline,
+                index: active,
+            } if *active == index => (**outline).clone(),
+            _ => outline.clone(),
+        });
+        let previous = std::mem::replace(
+            &mut self.active,
+            Focus::Draft {
+                outline: draft,
+                index,
+            },
+        );
+        let preferred_x = self.preferred_x;
+        let result = (|| {
+            // Tiny source font sizes must not make one click generate unbounded paragraphs.
+            for _ in 0..256 {
+                if self.active_outline().shaped.size[1] >= point[1] {
+                    break;
+                }
+                let outline = self.active_outline();
+                let count = outline.document.nodes().len();
+                let height = outline.shaped.size[1];
+                let node = self.blank_paragraph(&outline.document.nodes()[count - 1])?;
+                self.apply(
+                    engine,
+                    DocumentEdit {
+                        columns: BTreeMap::new(),
+                        container: None,
+                        range: count..count,
+                        replacement: vec![node],
+                    },
+                    outline.selection,
+                    false,
+                    None,
+                )?;
+                if self.active_outline().shaped.size[1] <= height {
+                    return Err(EditError::InvalidStructure.into());
+                }
+            }
+            if self.active_outline().shaped.size[1] < point[1] {
+                return Err(EditError::TextTooLong.into());
+            }
+            self.select_at(point[0], point[1], false)?;
+            Ok(true)
+        })();
+        if result.is_err() {
+            self.active = previous;
+            self.preferred_x = preferred_x;
+        }
+        result
+    }
+
     pub fn focus_outline(&mut self, id: onestore::ExGuid) -> Result<(), EditError> {
         if self.active_outline().id != id && !self.outlines.iter().any(|outline| outline.id == id) {
             return Err(EditError::InvalidRange);
         }
         self.finish_composition();
-        if let Some(index) = self.outlines.iter().position(|outline| outline.id == id) {
+        if let Some(index) = self.outlines.iter().position(|outline| outline.id == id)
+            && !matches!(self.active, Focus::Draft { index: active, .. } if active == index)
+        {
             self.active = Focus::Outline(index);
         }
         self.preferred_x = None;
@@ -453,7 +1105,9 @@ impl CanvasEditor {
         self.undo.push(History::Remove {
             outline: id,
             focus: match &self.active {
-                Focus::Outline(index) => RestoreFocus::Outline(self.outlines[*index].id),
+                Focus::Outline(index) | Focus::Draft { index, .. } => {
+                    RestoreFocus::Outline(self.outlines[*index].id)
+                }
                 Focus::Caret { outline, index } => RestoreFocus::Caret {
                     source: Box::new(outline.snapshot()),
                     selection: outline.selection,
@@ -484,6 +1138,9 @@ impl CanvasEditor {
                 .find(|outline| outline.id == id)
                 .ok_or(EditError::InvalidRange)?
         };
+        if outline.title {
+            return Err(EditError::UnsupportedContent);
+        }
         if position == outline.origin() {
             return Ok(());
         }
@@ -524,25 +1181,66 @@ impl CanvasEditor {
         {
             return Ok(());
         }
-        let paragraphs = visible_paragraphs(outline.document.nodes())
-            .map(|paragraph| {
-                ParagraphLayout::shape(
-                    engine,
-                    paragraph,
-                    width,
-                    &outline.indents,
-                    &self.definitions,
-                )
-            })
-            .collect::<Result<_, _>>()?;
-        let shaped = OutlineLayout::new(paragraphs, width, true)?;
-        let outline = self.active_outline_mut();
-        outline.layout.max_width = Some(width);
-        outline.layout.reserved_width = None;
-        outline.layout.width_set_by_user = Some(true);
-        outline.shaped = shaped;
+        let previous = outline.layout.clone();
+        let resized = self.preview_resize(engine, width)?;
+        self.finish_composition();
+        if let Focus::Draft { index, .. } = self.active {
+            self.active = Focus::Outline(index);
+        }
+        let id = resized.id;
+        *self.active_outline_mut() = resized;
+        if self.caret_outline().is_none() {
+            self.undo.push(History::Layout {
+                outline: id,
+                layout: previous,
+            });
+            self.redo.clear();
+        }
         self.preferred_x = None;
         Ok(())
+    }
+
+    pub fn preview_resize(
+        &self,
+        engine: &mut TextEngine,
+        width: f32,
+    ) -> Result<TextOutline, EditorError> {
+        let outline = match &self.active {
+            Focus::Draft { index, .. } => &self.outlines[*index],
+            _ => self.active_outline(),
+        };
+        if outline.title {
+            return Err(EditError::UnsupportedContent.into());
+        }
+        if !width.is_finite() || width <= 0.0 {
+            return Err(LayoutError::InvalidWidth.into());
+        }
+        let width = width.max(outline.shaped.table_width());
+        let shaped = OutlineLayout::flow(
+            outline.document.nodes().iter(),
+            &outline.indents,
+            width,
+            true,
+            0,
+            None,
+            &mut |paragraph, width, indents| {
+                ParagraphLayout::shape(engine, paragraph, width, indents, &self.definitions)
+            },
+        )?;
+        let mut layout = outline.layout.clone();
+        layout.max_width = Some(width);
+        layout.reserved_width = None;
+        layout.width_set_by_user = Some(true);
+        Ok(TextOutline {
+            id: outline.id,
+            title: outline.title,
+            min_width: outline.min_width,
+            layout,
+            document: outline.document.clone(),
+            indents: outline.indents.clone(),
+            shaped,
+            selection: outline.selection,
+        })
     }
 
     pub fn select(&mut self, selection: Selection) -> Result<(), EditError> {
@@ -587,35 +1285,71 @@ impl CanvasEditor {
     }
 
     pub fn select_at(&mut self, x: f32, y: f32, extend: bool) -> Result<(), EditError> {
+        let mut selection = self.selection_at(x, y, SelectionUnit::Grapheme)?;
+        if extend {
+            selection.positions[0] = self.selection().positions[0];
+            selection.affinities[0] = self.selection().affinities[0];
+        }
+        self.select(selection)
+    }
+
+    pub fn selection_at(
+        &self,
+        x: f32,
+        y: f32,
+        unit: SelectionUnit,
+    ) -> Result<Selection, EditError> {
         if !x.is_finite() || !y.is_finite() {
             return Err(EditError::InvalidRange);
         }
-        let index = self
-            .active_outline()
-            .shaped
-            .paragraphs
-            .partition_point(|paragraph| paragraph.origin[1] <= y)
-            .saturating_sub(1);
+        let index = self.active_outline().paragraph_at(x, y)?;
         let paragraph = &self.active_outline().shaped.paragraphs[index];
-        let cursor = paragraph
-            .text
-            .hit_test(x - paragraph.origin[0], y - paragraph.origin[1]);
-        let visible = paragraph.projection.text().utf16_offset(cursor.index())?;
-        let position = TextPosition {
-            paragraph: self.active_outline().source_index(index),
-            offset: paragraph
-                .projection
-                .source_offset(visible, cursor.affinity())?,
+        let layout = &paragraph.text.shaped;
+        let point = [x - paragraph.origin[0], y - paragraph.origin[1]];
+        let cursor = paragraph.text.hit_test(point[0], point[1]);
+        let local = match unit {
+            SelectionUnit::Grapheme => cursor.into(),
+            SelectionUnit::Word => {
+                let rect = cursor.geometry(layout, 1.0);
+                ParagraphSelection::word_from_point(
+                    layout,
+                    point[0],
+                    ((rect.y0 + rect.y1) * 0.5) as f32,
+                )
+            }
+            SelectionUnit::Paragraph => ParagraphSelection::new(
+                Cursor::from_byte_index(layout, 0, Affinity::Downstream),
+                Cursor::from_byte_index(layout, usize::MAX, Affinity::Upstream),
+            ),
         };
-        self.finish_composition();
-        self.preferred_x = None;
-        if !extend {
-            self.active_outline_mut().selection.positions[0] = position;
-            self.active_outline_mut().selection.affinities[0] = cursor.affinity();
+        let mut selection = self.selection();
+        for (slot, cursor) in [local.anchor(), local.focus()].into_iter().enumerate() {
+            let visible = paragraph.projection.text().utf16_offset(cursor.index())?;
+            selection.positions[slot] = TextPosition {
+                paragraph: self.active_outline().source_index(index),
+                offset: paragraph
+                    .projection
+                    .source_offset(visible, cursor.affinity())?,
+            };
+            selection.affinities[slot] = cursor.affinity();
         }
-        self.active_outline_mut().selection.positions[1] = position;
-        self.active_outline_mut().selection.affinities[1] = cursor.affinity();
-        Ok(())
+        if unit == SelectionUnit::Paragraph
+            && index + 1 < self.active_outline().shaped.paragraphs.len()
+        {
+            let document = &self.active_outline().document;
+            let source = selection.positions[0].paragraph;
+            let next = self.active_outline().source_index(index + 1);
+            let (container, local, _) = leaves(document.nodes(), None).nth(source).unwrap();
+            let (next_container, next_local, _) = leaves(document.nodes(), None).nth(next).unwrap();
+            if container == next_container && next_local == local + 1 {
+                selection.positions[1] = TextPosition {
+                    paragraph: next,
+                    offset: 0,
+                };
+                selection.affinities[1] = Affinity::Downstream;
+            }
+        }
+        Ok(selection)
     }
 
     pub fn caret(&self, width: f32) -> Result<BoundingBox, EditError> {
@@ -631,9 +1365,118 @@ impl CanvasEditor {
         Ok(rect)
     }
 
-    pub fn move_selection(&mut self, movement: Movement, extend: bool) -> Result<(), EditError> {
+    pub fn move_selection(
+        &mut self,
+        engine: &mut TextEngine,
+        movement: Movement,
+        extend: bool,
+    ) -> Result<(), EditorError> {
         self.finish_composition();
         let [anchor, focus] = self.active_outline().selection.positions;
+        if !extend
+            && self.caret_outline().is_some()
+            && self
+                .active_outline()
+                .document
+                .paragraphs()
+                .next()
+                .unwrap()
+                .text()
+                .is_empty()
+            && let Some(step) = match movement {
+                Movement::Left => Some([-18.0, 0.0]),
+                Movement::Right => Some([18.0, 0.0]),
+                Movement::Up => Some([0.0, -18.0]),
+                Movement::Down => Some([0.0, 18.0]),
+                _ => None,
+            }
+        {
+            let origin = self.active_outline().origin();
+            let position = [origin[0] + step[0], origin[1] + step[1]];
+            let center_y = position[1] + self.caret(1.0)?.height() as f32 * 0.5;
+            let target = self
+                .outlines
+                .iter()
+                .rev()
+                .find(|outline| {
+                    let rect = outline.bounds();
+                    let bottom = rect.y1
+                        + if matches!(movement, Movement::Up) {
+                            36.0
+                        } else {
+                            0.0
+                        };
+                    (rect.x0..=rect.x1).contains(&f64::from(position[0]))
+                        && (rect.y0..=bottom).contains(&f64::from(center_y))
+                })
+                .map(|outline| (outline.id, outline.origin()));
+            if let Some((id, origin)) = target {
+                let x = position[0]
+                    + if step[0] == 0.0 {
+                        self.preferred_x.unwrap_or(0.0)
+                    } else {
+                        0.0
+                    }
+                    - origin[0];
+                self.focus_outline(id)?;
+                self.select_at(x, center_y - origin[1], false)?;
+                self.preferred_x = (step[0] == 0.0).then_some(x);
+            } else {
+                let outline = self.active_outline_mut();
+                outline.layout.x = Some(position[0]);
+                outline.layout.y = Some(position[1]);
+                if step[0] != 0.0 {
+                    self.preferred_x = None;
+                }
+            }
+            return Ok(());
+        }
+        if matches!(
+            movement,
+            Movement::ParagraphStart
+                | Movement::ParagraphEnd
+                | Movement::DocumentStart
+                | Movement::DocumentEnd
+        ) {
+            let outline = self.active_outline();
+            let current = outline.visible_index(focus.paragraph)?;
+            let end = matches!(movement, Movement::ParagraphEnd | Movement::DocumentEnd);
+            let current_end = outline.document.paragraphs().nth(focus.paragraph).unwrap();
+            let current_end = current_end.utf16_offset(current_end.text().len())?;
+            let index = match movement {
+                Movement::DocumentStart => 0,
+                Movement::DocumentEnd => outline.shaped.paragraphs.len() - 1,
+                Movement::ParagraphStart if focus.offset == 0 => current.saturating_sub(1),
+                Movement::ParagraphEnd if focus.offset == current_end => {
+                    (current + 1).min(outline.shaped.paragraphs.len() - 1)
+                }
+                _ => current,
+            };
+            let source = outline.source_index(index);
+            let paragraph = outline.document.paragraphs().nth(source).unwrap();
+            let position = TextPosition {
+                paragraph: source,
+                offset: if end {
+                    paragraph.utf16_offset(paragraph.text().len())?
+                } else {
+                    0
+                },
+            };
+            let affinity = if end {
+                Affinity::Upstream
+            } else {
+                Affinity::Downstream
+            };
+            let selection = &mut self.active_outline_mut().selection;
+            if !extend {
+                selection.positions[0] = position;
+                selection.affinities[0] = affinity;
+            }
+            selection.positions[1] = position;
+            selection.affinities[1] = affinity;
+            self.preferred_x = None;
+            return Ok(());
+        }
         let horizontal = matches!(
             movement,
             Movement::Left | Movement::Right | Movement::WordLeft | Movement::WordRight
@@ -663,31 +1506,167 @@ impl CanvasEditor {
                 .lines()
                 .position(|(_, line)| f64::from(line.top) == caret.y0)
                 .unwrap();
-            let target = if matches!(movement, Movement::Up) {
-                if line > 0 {
-                    paragraph.text.lines().nth(line - 1).map(|(_, line)| line)
-                } else if index > 0 {
-                    index -= 1;
-                    self.active_outline().shaped.paragraphs[index]
-                        .text
-                        .lines()
-                        .last()
-                        .map(|(_, line)| line)
+            let up = matches!(movement, Movement::Up);
+            let target = if up {
+                line.checked_sub(1)
+                    .and_then(|line| paragraph.text.lines().nth(line))
+            } else {
+                paragraph.text.lines().nth(line + 1)
+            }
+            .map(|(_, line)| line);
+            let target = if target.is_some() {
+                target
+            } else {
+                let neighbor = if self.active_outline().shaped.tables.is_empty() {
+                    if up {
+                        index.checked_sub(1)
+                    } else {
+                        (index + 1 < self.active_outline().shaped.paragraphs.len())
+                            .then_some(index + 1)
+                    }
+                } else {
+                    let column = self.active_outline().column(x, paragraph.id)?;
+                    let current = column
+                        .iter()
+                        .position(|candidate| *candidate == index)
+                        .ok_or(EditError::InvalidStructure)?;
+                    if up {
+                        current.checked_sub(1).map(|i| column[i])
+                    } else {
+                        column.get(current + 1).copied()
+                    }
+                };
+                neighbor.and_then(|neighbor| {
+                    index = neighbor;
+                    let paragraph = &self.active_outline().shaped.paragraphs[index];
+                    if up {
+                        paragraph.text.lines().last()
+                    } else {
+                        paragraph.text.lines().next()
+                    }
+                    .map(|(_, line)| line)
+                })
+            };
+            if target.is_none() && !extend && anchor == focus && !self.active_outline().title {
+                let outline = self.active_outline();
+                crate::document::validate_flat(
+                    outline
+                        .document
+                        .nodes()
+                        .iter()
+                        .filter(|node| node.text().is_some()),
+                )?;
+                let last = outline.document.nodes().len() - 1;
+                let up = matches!(movement, Movement::Up);
+                let base_node = &outline.document.nodes()[if up { 0 } else { last }];
+                let node = self.blank_paragraph(base_node)?;
+                let trailing = outline
+                    .document
+                    .nodes()
+                    .iter()
+                    .rev()
+                    .take_while(|node| {
+                        node.text()
+                            .is_some_and(|text| text.text.text().bytes().all(|byte| byte == b' '))
+                    })
+                    .count();
+                let position = if up {
+                    Some([
+                        outline.origin()[0] + x,
+                        (((f64::from(outline.origin()[1]) / 18.0).ceil() - 3.0) * 18.0 + 14.4)
+                            as f32,
+                    ])
+                } else if outline.origin()[0] >= 180.0 && trailing >= 2 {
+                    let node = &outline.document.nodes()[last.saturating_sub(trailing)];
+                    let bottom = match &node.content {
+                        crate::page::ParagraphContent::Text(_) => {
+                            let paragraph = outline
+                                .shaped
+                                .paragraphs
+                                .iter()
+                                .find(|paragraph| paragraph.id == node.id)
+                                .ok_or(EditError::InvalidStructure)?;
+                            f64::from(paragraph.origin[1]) + f64::from(paragraph.text.height())
+                        }
+                        crate::page::ParagraphContent::Table(table) => {
+                            let cell = outline
+                                .shaped
+                                .tables
+                                .iter()
+                                .find(|layout| layout.id == table.id)
+                                .and_then(|layout| layout.cells.last())
+                                .ok_or(EditError::InvalidStructure)?;
+                            f64::from(cell.rect[3]) + 1.68
+                        }
+                        crate::page::ParagraphContent::Unsupported(_) => {
+                            return Err(EditError::UnsupportedContent.into());
+                        }
+                    } + f64::from(outline.origin()[1]);
+                    let cell = (bottom - 14.4) / 18.0;
+                    // Stored coordinates can straddle a grid boundary by one f32 ULP.
+                    let grid = if (cell - cell.round()).abs()
+                        <= f64::from(f32::EPSILON) * cell.abs().max(1.0)
+                    {
+                        cell.round()
+                    } else {
+                        cell.ceil()
+                    };
+                    Some([outline.origin()[0], ((grid + 3.0) * 18.0 + 14.4) as f32])
                 } else {
                     None
+                };
+                if let Some(position) = position {
+                    let outline = TextOutline::new(
+                        engine,
+                        TextDocument::from_nodes(vec![node])?,
+                        DEFAULT_OUTLINE_WIDTH,
+                        position,
+                    )?;
+                    self.active = Focus::Caret {
+                        outline: Box::new(outline),
+                        index: self.outlines.len(),
+                    };
+                    self.preferred_x = Some(if up { 0.0 } else { x });
+                    return Ok(());
                 }
-            } else if let Some((_, line)) = paragraph.text.lines().nth(line + 1) {
-                Some(line)
-            } else if index + 1 < self.active_outline().shaped.paragraphs.len() {
-                index += 1;
-                self.active_outline().shaped.paragraphs[index]
-                    .text
-                    .lines()
-                    .next()
-                    .map(|(_, line)| line)
-            } else {
-                None
-            };
+                let edit = DocumentEdit {
+                    columns: BTreeMap::new(),
+                    container: None,
+                    range: last + 1..last + 1,
+                    replacement: vec![node],
+                };
+                let paragraph = outline.document.paragraphs().count();
+                let previous = if let Focus::Outline(index) = self.active {
+                    let draft = self.outlines[index].clone();
+                    Some(std::mem::replace(
+                        &mut self.active,
+                        Focus::Draft {
+                            index,
+                            outline: Box::new(draft),
+                        },
+                    ))
+                } else {
+                    None
+                };
+                if let Err(error) = self.apply(
+                    engine,
+                    edit,
+                    [TextPosition {
+                        paragraph,
+                        offset: 0,
+                    }; 2]
+                        .into(),
+                    false,
+                    None,
+                ) {
+                    if let Some(previous) = previous {
+                        self.active = previous;
+                    }
+                    return Err(error);
+                }
+                self.preferred_x = Some(x);
+                return Ok(());
+            }
             next = target
                 .map(|line| {
                     self.active_outline().shaped.paragraphs[index]
@@ -713,11 +1692,16 @@ impl CanvasEditor {
             next = match movement {
                 Movement::Left => local.previous_visual(layout, extend),
                 Movement::Right => local.next_visual(layout, extend),
-                Movement::WordLeft => local.previous_visual_word(layout, extend),
-                Movement::WordRight => local.next_visual_word(layout, extend),
+                Movement::WordLeft => paragraph.text.word_cursor(local.focus(), true).into(),
+                Movement::WordRight => paragraph.text.word_cursor(local.focus(), false).into(),
                 Movement::LineStart => local.line_start(layout, extend),
                 Movement::LineEnd => local.line_end(layout, extend),
-                Movement::Up | Movement::Down => unreachable!(),
+                Movement::Up
+                | Movement::Down
+                | Movement::ParagraphStart
+                | Movement::ParagraphEnd
+                | Movement::DocumentStart
+                | Movement::DocumentEnd => unreachable!(),
             }
             .focus();
             if horizontal && next == cursor && (extend || anchor == focus) {
@@ -741,13 +1725,43 @@ impl CanvasEditor {
                         line.top + line.height * 0.5,
                     );
                     if matches!(movement, Movement::WordLeft | Movement::WordRight) {
-                        next = if left {
-                            next.previous_visual_word(&paragraph.text.shaped)
-                        } else {
-                            next.next_visual_word(&paragraph.text.shaped)
-                        };
+                        next = paragraph.text.word_cursor(next, left);
                     }
                 }
+            }
+        }
+        if !extend
+            && anchor == focus
+            && next == cursor
+            && self.active_outline().source_index(index) == focus.paragraph
+            && matches!(movement, Movement::Left | Movement::Right)
+        {
+            let caret = self.caret(1.0)?;
+            let origin = self.active_outline().origin();
+            let x = caret.x0 + f64::from(origin[0]);
+            let y = (caret.y0 + caret.y1) * 0.5 + f64::from(origin[1]);
+            let target = self
+                .outlines
+                .iter()
+                .filter(|outline| outline.id != self.active_outline().id)
+                .filter_map(|outline| {
+                    let rect = outline.bounds();
+                    let distance = if left { x - rect.x1 } else { rect.x0 - x };
+                    ((rect.y0..rect.y1).contains(&y) && distance > 0.0).then_some((
+                        distance,
+                        outline.id,
+                        outline.origin(),
+                    ))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, id, origin)) = target {
+                self.focus_outline(id)?;
+                self.select_at(
+                    if left { f32::MAX } else { -1.0 },
+                    y as f32 - origin[1],
+                    false,
+                )?;
+                return Ok(());
             }
         }
         if !matches!(movement, Movement::Up | Movement::Down) {
@@ -799,10 +1813,11 @@ impl CanvasEditor {
             )
         };
         let mut rectangles = Vec::new();
-        for (index, paragraph) in self
+        for (visible, (index, paragraph)) in self
             .active_outline()
             .layouts()
-            .filter(|(index, _)| *index >= start.paragraph && *index <= end.paragraph)
+            .enumerate()
+            .filter(|(_, (index, _))| *index >= start.paragraph && *index <= end.paragraph)
         {
             let source = self
                 .active_outline()
@@ -834,6 +1849,12 @@ impl CanvasEditor {
                 rect.x1 += f64::from(paragraph.origin[0]);
                 rect.y0 += f64::from(paragraph.origin[1]);
                 rect.y1 += f64::from(paragraph.origin[1]);
+                if let Some(cell) = self.active_outline().shaped.paragraph_cell(visible) {
+                    let Some(clipped) = cell.clip(rect) else {
+                        continue;
+                    };
+                    rect = clipped;
+                }
                 rectangles.push(rect);
             }
         }
@@ -897,6 +1918,60 @@ impl CanvasEditor {
         self.replace(engine, replacement)
     }
 
+    pub fn indent(&mut self, engine: &mut TextEngine, outdent: bool) -> Result<bool, EditorError> {
+        let outline = self.active_outline();
+        if outline.title {
+            return Ok(false);
+        }
+        let [anchor, focus] = outline.selection.positions;
+        let start = anchor.min(focus);
+        let end = anchor.max(focus);
+        let (container, local_start, _) = leaves(outline.document.nodes(), None)
+            .nth(start.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let (end_container, local_end, _) = leaves(outline.document.nodes(), None)
+            .nth(end.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        if container != end_container {
+            return Err(EditError::UnsupportedContent.into());
+        }
+        let range = local_start
+            ..local_end + usize::from(end.offset != 0 || start.paragraph == end.paragraph);
+        let nodes = outline.document.container(container)?;
+        crate::document::validate_flat(nodes.iter().enumerate().filter_map(|(index, node)| {
+            (range.contains(&index) || node.text().is_some()).then_some(node)
+        }))?;
+        let nodes = &nodes[range.clone()];
+        if outdent && nodes.iter().all(|node| node.level == 1) {
+            return Ok(false);
+        }
+        let replacement = nodes
+            .iter()
+            .map(|node| {
+                let mut node = node.clone();
+                node.level = if outdent {
+                    node.level.saturating_sub(1).max(1)
+                } else {
+                    node.level
+                        .checked_add(1)
+                        .ok_or(EditError::InvalidStructure)?
+                };
+                Ok(node)
+            })
+            .collect::<Result<Vec<_>, EditError>>()?;
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range,
+                replacement,
+            },
+            outline.selection,
+        )?;
+        Ok(true)
+    }
+
     pub fn delete(&mut self, engine: &mut TextEngine, backward: bool) -> Result<bool, EditorError> {
         let [anchor, focus] = self.active_outline().selection.positions;
         let mut range = anchor.min(focus)..anchor.max(focus);
@@ -915,35 +1990,73 @@ impl CanvasEditor {
                 range.end.offset = paragraph
                     .projection
                     .source_offset(visible.utf16_offset(bytes.end)?, Affinity::Upstream)?;
-            } else if backward && focus.paragraph > 0 {
-                let previous = self
-                    .active_outline()
-                    .document
-                    .paragraphs()
-                    .nth(focus.paragraph - 1)
-                    .unwrap();
-                range.start = TextPosition {
-                    paragraph: focus.paragraph - 1,
-                    offset: previous.utf16_offset(previous.text().len())?,
+            } else {
+                let document = &self.active_outline().document;
+                let Some(neighbor) = (if backward {
+                    focus.paragraph.checked_sub(1)
+                } else {
+                    focus.paragraph.checked_add(1)
+                }) else {
+                    return Ok(false);
                 };
-                range.end.offset = 0;
-            } else if !backward
-                && focus.paragraph + 1 < self.active_outline().document.nodes().len()
-            {
-                let current = self
-                    .active_outline()
-                    .document
-                    .paragraphs()
+                let (container, local, current) = leaves(document.nodes(), None)
                     .nth(focus.paragraph)
-                    .unwrap();
-                range.start.offset = current.utf16_offset(current.text().len())?;
-                range.end = TextPosition {
-                    paragraph: focus.paragraph + 1,
+                    .ok_or(EditError::InvalidRange)?;
+                let Some((next_container, next_local, next)) =
+                    leaves(document.nodes(), None).nth(neighbor)
+                else {
+                    return Ok(false);
+                };
+                if container != next_container || local.abs_diff(next_local) != 1 {
+                    return Ok(false);
+                }
+                let (previous, start, end) = if backward {
+                    (next, neighbor, focus.paragraph)
+                } else {
+                    (current, focus.paragraph, neighbor)
+                };
+                let text = &previous.text().unwrap().text;
+                range = TextPosition {
+                    paragraph: start,
+                    offset: text.utf16_offset(text.text().len())?,
+                }..TextPosition {
+                    paragraph: end,
                     offset: 0,
                 };
-            } else {
-                return Ok(false);
             }
+        }
+        self.delete_range(engine, range)
+    }
+
+    pub fn delete_to(
+        &mut self,
+        engine: &mut TextEngine,
+        movement: Movement,
+    ) -> Result<bool, EditorError> {
+        self.finish_composition();
+        let original = self.selection();
+        let preferred_x = self.preferred_x;
+        if original.positions[0] == original.positions[1] {
+            let result = self.move_selection(engine, movement, true);
+            if let Err(error) = result {
+                self.active_outline_mut().selection = original;
+                self.preferred_x = preferred_x;
+                return Err(error);
+            }
+        }
+        let [anchor, focus] = self.selection().positions;
+        self.active_outline_mut().selection = original;
+        self.preferred_x = preferred_x;
+        self.delete_range(engine, anchor.min(focus)..anchor.max(focus))
+    }
+
+    fn delete_range(
+        &mut self,
+        engine: &mut TextEngine,
+        range: Range<TextPosition>,
+    ) -> Result<bool, EditorError> {
+        if range.is_empty() {
+            return Ok(false);
         }
         let caret = range.start;
         let format = self
@@ -1011,7 +2124,23 @@ impl CanvasEditor {
         history: History,
     ) -> Result<History, (History, EditorError)> {
         let valid = match &history {
-            History::Text { outline, .. } | History::Position { outline, .. } => {
+            History::Date(date) => self
+                .date
+                .as_ref()
+                .is_some_and(|current| current.source().id == date.source().id),
+            History::Draft {
+                outlines, index, ..
+            } => {
+                *index <= self.outlines.len()
+                    && self
+                        .outlines
+                        .iter()
+                        .position(|item| item.id == outlines[0].id)
+                        .is_none_or(|found| found == *index)
+            }
+            History::Text { outline, .. }
+            | History::Position { outline, .. }
+            | History::Layout { outline, .. } => {
                 self.outlines.iter().any(|item| item.id == *outline)
             }
             History::Remove { outline, focus } => {
@@ -1031,6 +2160,67 @@ impl CanvasEditor {
             return Err((history, EditError::InvalidRange.into()));
         }
         let inverse = match history {
+            History::Date(date) => History::Date(Box::new(self.date.replace(*date).unwrap())),
+            History::Draft {
+                outlines,
+                index,
+                caret,
+                selection,
+                restore_caret,
+            } => {
+                let draft = if restore_caret {
+                    match TextOutline::from_outline(engine, &caret, &self.definitions) {
+                        Ok(mut draft) => {
+                            draft.selection = selection;
+                            Some(draft)
+                        }
+                        Err(error) => {
+                            return Err((
+                                History::Draft {
+                                    outlines,
+                                    index,
+                                    caret,
+                                    selection,
+                                    restore_caret,
+                                },
+                                error,
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
+                let outline = outlines[usize::from(!restore_caret)].clone();
+                if self
+                    .outlines
+                    .get(index)
+                    .is_some_and(|item| item.id == outline.id)
+                {
+                    self.outlines.remove(index);
+                }
+                self.active = if outline.is_empty() {
+                    Focus::Caret {
+                        outline: Box::new(outline),
+                        index,
+                    }
+                } else {
+                    self.outlines.insert(index, outline);
+                    match draft {
+                        Some(outline) => Focus::Draft {
+                            index,
+                            outline: Box::new(outline),
+                        },
+                        None => Focus::Outline(index),
+                    }
+                };
+                History::Draft {
+                    outlines,
+                    index,
+                    caret,
+                    selection,
+                    restore_caret: !restore_caret,
+                }
+            }
             History::Text { outline, change } => {
                 let index = self
                     .outlines
@@ -1038,8 +2228,13 @@ impl CanvasEditor {
                     .position(|item| item.id == outline)
                     .unwrap();
                 let previous = std::mem::replace(&mut self.active, Focus::Outline(index));
-                let inverse = match self.apply(engine, change.edit.clone(), change.selection, false)
-                {
+                let inverse = match self.apply(
+                    engine,
+                    change.edit.clone(),
+                    change.selection,
+                    false,
+                    Some(&change.positions),
+                ) {
                     Ok(change) => change,
                     Err(error) => {
                         self.active = previous;
@@ -1048,7 +2243,7 @@ impl CanvasEditor {
                 };
                 History::Text {
                     outline,
-                    change: inverse,
+                    change: Box::new(inverse),
                 }
             }
             History::Position { outline, position } => {
@@ -1065,6 +2260,35 @@ impl CanvasEditor {
                 [layout.x, layout.y] = position;
                 self.active = Focus::Outline(index);
                 inverse
+            }
+            History::Layout { outline, layout } => {
+                let index = self
+                    .outlines
+                    .iter()
+                    .position(|item| item.id == outline)
+                    .unwrap();
+                let mut source = self.outlines[index].snapshot();
+                let previous = std::mem::replace(&mut source.layout, layout);
+                let mut resized =
+                    match TextOutline::from_outline(engine, &source, &self.definitions) {
+                        Ok(resized) => resized,
+                        Err(error) => {
+                            return Err((
+                                History::Layout {
+                                    outline,
+                                    layout: source.layout,
+                                },
+                                error,
+                            ));
+                        }
+                    };
+                resized.selection = self.outlines[index].selection;
+                self.outlines[index] = resized;
+                self.active = Focus::Outline(index);
+                History::Layout {
+                    outline,
+                    layout: previous,
+                }
             }
             History::Remove { outline, focus } => {
                 let index = self
@@ -1206,10 +2430,23 @@ impl CanvasEditor {
                 affinities: [Affinity::Downstream; 2],
             },
             false,
+            None,
         )?;
         let original = if let Some(composition) = self.composition.take() {
             let mut original = composition.original;
             original.edit.range = inverse.edit.range;
+            for (id, widths) in inverse.edit.columns {
+                original.edit.columns.entry(id).or_insert(widths);
+            }
+            for position in inverse.positions {
+                if !original
+                    .positions
+                    .iter()
+                    .any(|original| original.id == position.id)
+                {
+                    original.positions.push(position);
+                }
+            }
             original
         } else {
             inverse
@@ -1232,7 +2469,13 @@ impl CanvasEditor {
             return Ok(false);
         };
         let original = composition.original.clone();
-        self.apply(engine, original.edit, original.selection, false)?;
+        self.apply(
+            engine,
+            original.edit,
+            original.selection,
+            false,
+            Some(&original.positions),
+        )?;
         self.composition = None;
         Ok(true)
     }
@@ -1262,13 +2505,122 @@ impl CanvasEditor {
         edit: DocumentEdit,
         selection: Selection,
     ) -> Result<(), EditorError> {
-        let inverse = self.apply(engine, edit, selection, true)?;
+        let inverse = self.apply(engine, edit, selection, true, None)?;
         self.record_change(inverse);
         Ok(())
     }
 
     fn record_change(&mut self, change: TextChange) {
-        if self.caret_outline().is_some() {
+        if let Focus::Draft { index, .. } = self.active {
+            let Focus::Draft { mut outline, .. } =
+                std::mem::replace(&mut self.active, Focus::Outline(index))
+            else {
+                unreachable!()
+            };
+            let mut caret = outline.snapshot();
+            crate::document::container_mut(&mut caret.paragraphs, change.edit.container)
+                .expect("inverse edit container exists")
+                .splice(change.edit.range, change.edit.replacement);
+            let mut columns = change.edit.columns;
+            crate::document::swap_columns(&mut caret.paragraphs, &mut columns);
+            let last_selected = outline.selection.positions[0]
+                .paragraph
+                .max(outline.selection.positions[1].paragraph);
+            let mut count = outline.document.nodes().len();
+            let mut selected_end = 0;
+            let selected_root = outline
+                .document
+                .nodes()
+                .iter()
+                .position(|node| {
+                    selected_end += leaves(std::slice::from_ref(node), None).count();
+                    selected_end > last_selected
+                })
+                .expect("selection addresses a text leaf");
+            let original_ids = self.outlines[index]
+                .document
+                .nodes()
+                .iter()
+                .map(|node| node.id)
+                .collect::<BTreeSet<_>>();
+            while count > selected_root + 1 {
+                let node = &outline.document.nodes()[count - 1];
+                if node.text().is_none_or(|text| !text.text.text().is_empty())
+                    || original_ids.contains(&node.id)
+                {
+                    break;
+                }
+                count -= 1;
+            }
+            if count < outline.document.nodes().len() {
+                let removed = outline.document.nodes().len() - count;
+                outline
+                    .document
+                    .apply(DocumentEdit {
+                        columns: BTreeMap::new(),
+                        container: None,
+                        range: count..outline.document.nodes().len(),
+                        replacement: Vec::new(),
+                    })
+                    .expect("removing a provisional suffix preserves a valid document");
+                outline
+                    .shaped
+                    .paragraphs
+                    .truncate(outline.shaped.paragraphs.len() - removed);
+                if outline.shaped.tables.is_empty() {
+                    let (origins, size) = arrange(
+                        outline.shaped.paragraphs.iter(),
+                        outline.wrap_width(),
+                        outline.layout.width_set_by_user == Some(true),
+                    )
+                    .expect("a prefix of the validated layout fits");
+                    for (paragraph, y) in outline.shaped.paragraphs.iter_mut().zip(origins) {
+                        paragraph.origin[1] = y;
+                    }
+                    outline.shaped.size = size;
+                } else {
+                    let cached = outline
+                        .shaped
+                        .paragraphs
+                        .iter()
+                        .map(|paragraph| (paragraph.id, paragraph))
+                        .collect::<BTreeMap<_, _>>();
+                    let shaped = OutlineLayout::flow(
+                        outline.document.nodes().iter(),
+                        &outline.indents,
+                        outline.wrap_width(),
+                        outline.layout.width_set_by_user == Some(true),
+                        0,
+                        None,
+                        &mut |node, width, indents| {
+                            let mut paragraph = cached[&node.id].clone();
+                            paragraph.reset_origin(indentation(node.level, indents, width)?);
+                            Ok(paragraph)
+                        },
+                    )
+                    .expect("removing a provisional suffix preserves table layout");
+                    outline.shaped = shaped;
+                }
+            }
+            if outline.document == self.outlines[index].document {
+                self.outlines[index].selection = outline.selection;
+                return;
+            }
+            let versions = Box::new([self.outlines[index].clone(), (*outline).clone()]);
+            if outline.is_empty() {
+                self.outlines.remove(index);
+                self.active = Focus::Caret { outline, index };
+            } else {
+                self.outlines[index] = *outline;
+            }
+            self.undo.push(History::Draft {
+                outlines: versions,
+                index,
+                caret: Box::new(caret),
+                selection: change.selection,
+                restore_caret: true,
+            });
+        } else if self.caret_outline().is_some() {
             if self.active_outline().is_empty() {
                 return;
             }
@@ -1291,7 +2643,7 @@ impl CanvasEditor {
                 },
             });
             self.outlines.insert(index, *outline);
-        } else if self.active_outline().is_empty() {
+        } else if self.active_outline().is_empty() && !self.active_outline().title {
             let Focus::Outline(index) = self.active else {
                 unreachable!()
             };
@@ -1316,7 +2668,7 @@ impl CanvasEditor {
         } else {
             self.undo.push(History::Text {
                 outline: self.active_outline().id,
-                change,
+                change: Box::new(change),
             });
         }
         self.redo.clear();
@@ -1328,70 +2680,154 @@ impl CanvasEditor {
         edit: DocumentEdit,
         selection: Selection,
         finish_composition: bool,
+        positions: Option<&[Placement]>,
     ) -> Result<TextChange, EditorError> {
         let outline = self.active_outline();
         outline.document.validate_edit(&edit)?;
-        let width = outline
-            .layout
-            .reserved_width
-            .or(outline.layout.max_width)
-            .unwrap();
-        let visible_start = outline
-            .layouts()
-            .take_while(|(i, _)| *i < edit.range.start)
-            .count();
-        let visible_end = outline
-            .layouts()
-            .take_while(|(i, _)| *i < edit.range.end)
-            .count();
-        if visible_end - visible_start != edit.range.len() {
-            return Err(EditError::UnsupportedContent.into());
-        }
-        let shaped = edit
-            .replacement
+        let width = outline.wrap_width();
+        let (visible, shaped, origins, size, tables) = if outline
+            .document
+            .nodes()
             .iter()
-            .map(|paragraph| {
-                ParagraphLayout::shape(
-                    engine,
-                    paragraph,
-                    width,
-                    &outline.indents,
-                    &self.definitions,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let proposed_layouts = || {
-            outline.shaped.paragraphs[..visible_start]
+            .chain(&edit.replacement)
+            .any(|node| matches!(node.content, crate::page::ParagraphContent::Table(_)))
+        {
+            let sources = outline
+                .document
+                .text_nodes()
+                .map(|node| (node.id, node))
+                .collect::<BTreeMap<_, _>>();
+            let existing = outline
+                .shaped
+                .paragraphs
                 .iter()
-                .chain(&shaped)
-                .chain(&outline.shaped.paragraphs[visible_end..])
+                .map(|layout| (layout.id, (sources[&layout.id], layout)))
+                .collect::<BTreeMap<_, _>>();
+            let layout = OutlineLayout::flow(
+                edited_nodes(outline.document.nodes(), None, Some(&edit)),
+                &outline.indents,
+                width,
+                outline.layout.width_set_by_user == Some(true),
+                0,
+                Some(&edit),
+                &mut |node, width, indents| {
+                    let indent = indentation(node.level, indents, width)?;
+                    if let Some((source, cached)) = existing.get(&node.id)
+                        && *source == node
+                        && cached.text.shaped.layout_max_advance() == width - indent
+                        && cached
+                            .markers
+                            .iter()
+                            .all(|(marker, _)| marker.shaped.layout_max_advance() == width)
+                    {
+                        let mut result = (*cached).clone();
+                        result.reset_origin(indent);
+                        return Ok(result);
+                    }
+                    ParagraphLayout::shape(engine, node, width, indents, &self.definitions)
+                },
+            )?;
+            let origins = layout
+                .paragraphs
+                .iter()
+                .map(|p| p.origin[1])
+                .collect::<Vec<_>>();
+            (
+                0..outline.shaped.paragraphs.len(),
+                layout.paragraphs,
+                origins,
+                layout.size,
+                layout.tables,
+            )
+        } else {
+            let visible_start = outline
+                .layouts()
+                .take_while(|(i, _)| *i < edit.range.start)
+                .count();
+            let visible_end = outline
+                .layouts()
+                .take_while(|(i, _)| *i < edit.range.end)
+                .count();
+            if visible_end - visible_start != edit.range.len() {
+                return Err(EditError::UnsupportedContent.into());
+            }
+            let shaped = edit
+                .replacement
+                .iter()
+                .map(|paragraph| {
+                    ParagraphLayout::shape(
+                        engine,
+                        paragraph,
+                        width,
+                        &outline.indents,
+                        &self.definitions,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (origins, size) = arrange(
+                outline.shaped.paragraphs[..visible_start]
+                    .iter()
+                    .chain(&shaped)
+                    .chain(&outline.shaped.paragraphs[visible_end..]),
+                width,
+                outline.layout.width_set_by_user == Some(true),
+            )?;
+            (
+                visible_start..visible_end,
+                shaped,
+                origins,
+                size,
+                Vec::new(),
+            )
         };
-        let (origins, size) = arrange(
-            proposed_layouts(),
-            width,
-            outline.layout.width_set_by_user == Some(true),
-        )?;
         for position in selection.positions {
-            let node = outline.document.nodes()[..edit.range.start]
-                .iter()
-                .chain(&edit.replacement)
-                .chain(&outline.document.nodes()[edit.range.end..])
+            let (_, _, node) = leaves(outline.document.nodes(), Some(&edit))
                 .nth(position.paragraph)
                 .ok_or(EditError::InvalidRange)?;
-            node.text[0].text.byte_offset(position.offset)?;
-            if !proposed_layouts().any(|paragraph| paragraph.id == node.id) {
+            node.text().unwrap().text.byte_offset(position.offset)?;
+            if !outline.shaped.paragraphs[..visible.start]
+                .iter()
+                .chain(&shaped)
+                .chain(&outline.shaped.paragraphs[visible.end..])
+                .any(|paragraph| paragraph.id == node.id)
+            {
                 return Err(EditError::InvalidRange.into());
             }
         }
-        if finish_composition {
+        let placements = match positions {
+            Some(positions) => positions.to_vec(),
+            None => self.title_flow(size[1])?,
+        };
+        let previous_positions = placements
+            .iter()
+            .map(|placement| {
+                let layout = self
+                    .object_layouts()
+                    .find_map(|(id, layout)| (id == placement.id).then_some(layout))
+                    .ok_or(EditError::InvalidStructure)?;
+                if placement
+                    .position
+                    .iter()
+                    .flatten()
+                    .any(|value| !value.is_finite())
+                {
+                    return Err(EditorError::InvalidGeometry);
+                }
+                Ok(Placement {
+                    id: placement.id,
+                    position: [layout.x, layout.y],
+                })
+            })
+            .collect::<Result<Vec<_>, EditorError>>()?;
+        if finish_composition && self.composition.is_some() {
+            // Committing marked text can remove provisional paragraphs from the validated view.
             self.finish_composition();
+            return self.apply(engine, edit, selection, false, positions);
         }
         let outline = self.active_outline_mut();
         let inverse = outline.document.apply(edit)?;
-        outline
-            .shaped
-            .paragraphs
-            .splice(visible_start..visible_end, shaped);
+        outline.shaped.paragraphs.splice(visible, shaped);
+        outline.shaped.tables = tables;
         for (paragraph, y) in outline.shaped.paragraphs.iter_mut().zip(origins) {
             paragraph.origin[1] = y;
         }
@@ -1399,9 +2835,16 @@ impl CanvasEditor {
         self.preferred_x = None;
         let previous_selection =
             std::mem::replace(&mut self.active_outline_mut().selection, selection);
+        for placement in placements {
+            let layout = self
+                .object_layout_mut(placement.id)
+                .expect("validated object position");
+            [layout.x, layout.y] = placement.position;
+        }
         Ok(TextChange {
             edit: inverse,
             selection: previous_selection,
+            positions: previous_positions,
         })
     }
 }
@@ -1447,6 +2890,2376 @@ mod tests {
     use super::*;
     use onestore::document::Format;
 
+    fn table_editor(engine: &mut TextEngine) -> CanvasEditor {
+        use crate::{
+            page::{ParagraphContent, Table, TableCell, TableColumn, TableRow},
+            text::new_id,
+        };
+        let mut editor = CanvasEditor::new(
+            engine,
+            TextDocument::new(vec![Paragraph::new("Left".into(), Format::default())]).unwrap(),
+            180.0,
+        )
+        .unwrap();
+        let first = editor.active_outline().document.nodes()[0].clone();
+        let wrapper = PageParagraph {
+            id: new_id().unwrap(),
+            parent: None,
+            level: 1,
+            style: None,
+            format: Format::default(),
+            lists: Vec::new(),
+            tags: Vec::new(),
+            collapsed: false,
+            content: ParagraphContent::Table(Table {
+                id: new_id().unwrap(),
+                columns: vec![
+                    TableColumn {
+                        width: 72.0,
+                        locked: true
+                    };
+                    2
+                ],
+                rows: [["Left", "Right"], ["Below", "Last"]]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, texts)| TableRow {
+                        id: new_id().unwrap(),
+                        cells: texts
+                            .into_iter()
+                            .enumerate()
+                            .map(|(column, text)| TableCell {
+                                id: new_id().unwrap(),
+                                layout: Default::default(),
+                                indents: vec![18.0, 0.0, 27.0],
+                                shading: None,
+                                paragraphs: vec![if row == 0 && column == 0 {
+                                    first.clone()
+                                } else {
+                                    crate::document::node(
+                                        Paragraph::new(text.into(), Format::default()),
+                                        Format::default(),
+                                    )
+                                    .unwrap()
+                                }],
+                                unsupported: Vec::new(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                borders: Some(true),
+                layout: Default::default(),
+                tags: Vec::new(),
+            }),
+        };
+        editor
+            .commit(
+                engine,
+                DocumentEdit {
+                    columns: BTreeMap::new(),
+                    container: None,
+                    range: 0..1,
+                    replacement: vec![wrapper],
+                },
+                [TextPosition {
+                    paragraph: 1,
+                    offset: 0,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor
+    }
+
+    #[test]
+    fn structured_construction_and_resize_preserve_cells_and_enclose_locked_columns() {
+        let mut engine = TextEngine::default();
+        let mut source = table_editor(&mut engine).active_outline().snapshot();
+        let crate::page::ParagraphContent::Table(table) = &mut source.paragraphs[0].content else {
+            panic!()
+        };
+        table.rows[0].cells[0].paragraphs[0]
+            .text_mut()
+            .unwrap()
+            .text = Paragraph::new(String::new(), Format::default());
+        source.paragraphs.push(
+            crate::document::node(
+                Paragraph::new(
+                    "Text below the table must use the same width during drag and after release."
+                        .into(),
+                    Format::default(),
+                ),
+                Format::default(),
+            )
+            .unwrap(),
+        );
+        let document = TextDocument::from_nodes(source.paragraphs.clone()).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document.clone(), 180.0).unwrap();
+        let imported = TextOutline::from_outline(&mut engine, &source, &BTreeMap::new()).unwrap();
+        let cells = |outline: &TextOutline| {
+            outline
+                .shaped
+                .tables
+                .iter()
+                .flat_map(|table| {
+                    table
+                        .cells
+                        .iter()
+                        .map(move |cell| (table.id, table.borders, cell.id, cell.rect))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(editor.active_outline().layout.width_set_by_user, Some(true));
+        assert_eq!(editor.active_outline().shaped.size, imported.shaped.size);
+        assert_eq!(cells(editor.active_outline()), cells(&imported));
+        for (actual, expected) in editor
+            .active_outline()
+            .shaped
+            .paragraphs
+            .iter()
+            .zip(&imported.shaped.paragraphs)
+        {
+            assert_eq!(actual.id, expected.id);
+            assert_eq!(actual.origin, expected.origin);
+            assert_eq!(actual.text.height(), expected.text.height());
+        }
+        let minimum = 2.0 * (72.0 + 4.98) - 1.83;
+        let preview = editor.preview_resize(&mut engine, 36.0).unwrap();
+        assert!((preview.bounds().width() as f32 - minimum).abs() < 0.0001);
+        assert_eq!(preview.document, document);
+        assert_eq!(cells(&preview), cells(&imported));
+        assert!((preview.wrap_width() - minimum).abs() < 0.0001);
+        let final_width_preview = editor
+            .preview_resize(&mut engine, preview.bounds().width() as f32)
+            .unwrap();
+        assert_eq!(preview.shaped.size, final_width_preview.shaped.size);
+        assert_eq!(
+            preview
+                .shaped
+                .paragraphs
+                .last()
+                .unwrap()
+                .text
+                .lines()
+                .count(),
+            final_width_preview
+                .shaped
+                .paragraphs
+                .last()
+                .unwrap()
+                .text
+                .lines()
+                .count()
+        );
+        assert_eq!(editor.active_outline().bounds().width(), 180.0);
+        assert!(editor.undo.is_empty());
+        editor.resize(&mut engine, 36.0).unwrap();
+        assert_eq!(editor.active_outline().bounds(), preview.bounds());
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 180.0);
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().bounds(), preview.bounds());
+        assert_eq!(editor.active_outline().document, document);
+    }
+
+    #[test]
+    fn nested_table_extents_remain_reachable_beyond_the_parent_columns() {
+        use crate::page::ParagraphContent;
+        let mut engine = TextEngine::default();
+        let mut source = table_editor(&mut engine).active_outline().snapshot();
+        let mut nested = table_editor(&mut engine).active_outline().document.nodes()[0].clone();
+        let ParagraphContent::Table(table) = &mut nested.content else {
+            panic!()
+        };
+        table.columns[0].width = 240.0;
+        table.columns[1].width = 240.0;
+        let ParagraphContent::Table(table) = &mut source.paragraphs[0].content else {
+            panic!()
+        };
+        table.rows[0].cells[1].paragraphs = vec![nested];
+        source.layout.width_set_by_user = Some(false);
+        let mut editor =
+            CanvasEditor::from_outlines(&mut engine, vec![source], BTreeMap::new()).unwrap();
+        let paragraph = editor.active_outline().paragraph_layout(2).unwrap();
+        let point = [
+            paragraph.origin[0] + 1.0,
+            paragraph.origin[1] + paragraph.text.height() * 0.5,
+        ];
+        assert!(point[0] > 180.0);
+        assert!(f64::from(point[0]) < editor.active_outline().bounds().x1);
+        assert_eq!(
+            editor
+                .selection_at(point[0], point[1], SelectionUnit::Grapheme)
+                .unwrap()
+                .positions[1]
+                .paragraph,
+            2
+        );
+        let preview = editor.preview_resize(&mut engine, 36.0).unwrap();
+        assert!(preview.bounds().x1 > f64::from(point[0]));
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 2,
+                    offset: 0,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, "!").unwrap();
+        assert!(editor.active_outline().bounds().x1 > f64::from(point[0]));
+        editor.undo(&mut engine).unwrap();
+        assert!(editor.active_outline().bounds().x1 > f64::from(point[0]));
+    }
+
+    #[test]
+    fn automatic_table_bounds_add_typing_room_only_to_root_text() {
+        let mut engine = TextEngine::default();
+        let mut source = table_editor(&mut engine).active_outline().snapshot();
+        source.layout.width_set_by_user = Some(false);
+        let outline = TextOutline::from_outline(&mut engine, &source, &BTreeMap::new()).unwrap();
+        assert_eq!(outline.bounds().width(), f64::from(outline.shaped.size[0]));
+        source.paragraphs.push(
+            crate::document::node(
+                Paragraph::new(
+                    "A root paragraph needs room to continue typing".into(),
+                    Format::default(),
+                ),
+                Format::default(),
+            )
+            .unwrap(),
+        );
+        let outline = TextOutline::from_outline(&mut engine, &source, &BTreeMap::new()).unwrap();
+        let paragraph = outline.shaped.paragraphs.last().unwrap();
+        let expected = (paragraph.origin[0] + paragraph.text.shaped.width() + 36.0)
+            .clamp(72.0, 180.0)
+            .max(outline.shaped.size[0]);
+        assert_eq!(outline.bounds().width(), f64::from(expected));
+        assert!(outline.bounds().width() > f64::from(outline.shaped.size[0]));
+    }
+
+    #[test]
+    fn cell_mouse_targets_and_paragraph_selection_follow_columns() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 4,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, "\nSecond\nThird").unwrap();
+        for source in 0..6 {
+            let paragraph = editor.active_outline().paragraph_layout(source).unwrap();
+            let (_, line) = paragraph.text.lines().next().unwrap();
+            let x = paragraph.origin[0] + 1.0;
+            let y = paragraph.origin[1] + line.top + line.height * 0.5;
+            for unit in [
+                SelectionUnit::Grapheme,
+                SelectionUnit::Word,
+                SelectionUnit::Paragraph,
+            ] {
+                let selection = editor.selection_at(x, y, unit).unwrap();
+                assert_eq!(selection.positions[0].paragraph, source);
+                if unit == SelectionUnit::Paragraph {
+                    let end = if source < 2 {
+                        TextPosition {
+                            paragraph: source + 1,
+                            offset: 0,
+                        }
+                    } else {
+                        let text = editor
+                            .active_outline()
+                            .document
+                            .paragraphs()
+                            .nth(source)
+                            .unwrap();
+                        TextPosition {
+                            paragraph: source,
+                            offset: text.utf16_offset(text.text().len()).unwrap(),
+                        }
+                    };
+                    assert_eq!(selection.positions[1], end);
+                }
+            }
+        }
+        let right = editor.active_outline().shaped.tables[0].cells[1].rect;
+        for x in [right[0] + 0.5, right[2] - 0.5, f32::MAX] {
+            let selection = editor
+                .selection_at(x, right[3] - 1.0, SelectionUnit::Grapheme)
+                .unwrap();
+            assert_eq!(selection.positions[1].paragraph, 3);
+        }
+        let left = editor.active_outline().shaped.tables[0].cells[0].rect;
+        let selection = editor
+            .selection_at(-f32::MAX, left[3] - 1.0, SelectionUnit::Grapheme)
+            .unwrap();
+        assert_eq!(selection.positions[1].paragraph, 2);
+        let history = editor.undo.len();
+        let before = editor.active_outline().document.clone();
+        editor
+            .select_at(right[0] + 5.0, right[1] + 8.0, false)
+            .unwrap();
+        editor
+            .select_at(left[0] + 5.0, left[3] - 2.0, true)
+            .unwrap();
+        assert_eq!(editor.selection().positions[0].paragraph, 3);
+        assert_eq!(editor.selection().positions[1].paragraph, 2);
+        assert!(!editor.selection_rects().unwrap().is_empty());
+        assert_eq!(editor.active_outline().document, before);
+        assert_eq!(editor.undo.len(), history);
+    }
+
+    #[test]
+    fn nested_table_mouse_targets_resolve_the_source_cell() {
+        use crate::{page::ParagraphContent, text::new_id};
+        let mut engine = TextEngine::default();
+        let nested = table_editor(&mut engine).active_outline().document.nodes()[0].clone();
+        let mut editor = table_editor(&mut engine);
+        let mut wrapper = editor.active_outline().document.nodes()[0].clone();
+        let ParagraphContent::Table(table) = &mut wrapper.content else {
+            panic!()
+        };
+        table.columns[0].width = 180.0;
+        let cell = &mut table.rows[0].cells[0];
+        cell.paragraphs.push(nested);
+        let mut tail = cell.paragraphs[0].clone();
+        tail.id = new_id().unwrap();
+        tail.text_mut().unwrap().id = new_id().unwrap();
+        cell.paragraphs.push(tail);
+        let before = crate::document::node(
+            Paragraph::new("Before".into(), Format::default()),
+            Format::default(),
+        )
+        .unwrap();
+        let after = crate::document::node(
+            Paragraph::new("After".into(), Format::default()),
+            Format::default(),
+        )
+        .unwrap();
+        editor
+            .commit(
+                &mut engine,
+                DocumentEdit {
+                    columns: BTreeMap::new(),
+                    container: None,
+                    range: 0..1,
+                    replacement: vec![before, wrapper, after],
+                },
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 0,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        assert_eq!(editor.active_outline().document.paragraphs().count(), 11);
+        for source in 0..11 {
+            let paragraph = editor.active_outline().paragraph_layout(source).unwrap();
+            let (_, line) = paragraph.text.lines().next().unwrap();
+            let selection = editor
+                .selection_at(
+                    paragraph.origin[0] + 1.0,
+                    paragraph.origin[1] + line.height * 0.5,
+                    SelectionUnit::Grapheme,
+                )
+                .unwrap();
+            assert_eq!(selection.positions[0].paragraph, source);
+        }
+        let paragraph = editor.active_outline().paragraph_layout(1).unwrap();
+        let selection = editor
+            .selection_at(
+                paragraph.origin[0] + 1.0,
+                paragraph.origin[1] + 5.0,
+                SelectionUnit::Paragraph,
+            )
+            .unwrap();
+        assert_eq!(
+            selection.positions[1],
+            TextPosition {
+                paragraph: 1,
+                offset: 4
+            }
+        );
+        let original = editor.active_outline().document.clone();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 10,
+                    offset: 2,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        assert!(editor.indent(&mut engine, false).unwrap());
+        assert_eq!(editor.active_outline().document.nodes()[2].level, 2);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, original);
+        for (position, backward) in [
+            (
+                TextPosition {
+                    paragraph: 0,
+                    offset: 6,
+                },
+                false,
+            ),
+            (
+                TextPosition {
+                    paragraph: 10,
+                    offset: 0,
+                },
+                true,
+            ),
+        ] {
+            editor.select([position; 2].into()).unwrap();
+            assert!(!editor.delete(&mut engine, backward).unwrap());
+            assert_eq!(editor.active_outline().document, original);
+        }
+    }
+
+    #[test]
+    fn cell_delete_boundaries_and_local_indentation_preserve_neighbors() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        let original = editor.active_outline().document.clone();
+        let history = editor.undo.len();
+        for paragraph in 0..4 {
+            let text = original.paragraphs().nth(paragraph).unwrap();
+            for (backward, offset) in [
+                (true, 0),
+                (false, text.utf16_offset(text.text().len()).unwrap()),
+            ] {
+                let selection = [TextPosition { paragraph, offset }; 2].into();
+                editor.select(selection).unwrap();
+                assert!(!editor.delete(&mut engine, backward).unwrap());
+                assert_eq!(editor.active_outline().document, original);
+                assert_eq!(editor.selection(), selection);
+                assert_eq!(editor.undo.len(), history);
+            }
+        }
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 2,
+                    offset: 2,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, "\n").unwrap();
+        let split = editor.active_outline().document.clone();
+        for backward in [true, false] {
+            let position = if backward {
+                TextPosition {
+                    paragraph: 3,
+                    offset: 0,
+                }
+            } else {
+                TextPosition {
+                    paragraph: 2,
+                    offset: 2,
+                }
+            };
+            let selection = [position; 2].into();
+            editor.select(selection).unwrap();
+            assert!(editor.delete(&mut engine, backward).unwrap());
+            assert_eq!(editor.active_outline().document, original);
+            editor.undo(&mut engine).unwrap();
+            assert_eq!(editor.active_outline().document, split);
+            assert_eq!(editor.selection(), selection);
+        }
+        let selection = [
+            TextPosition {
+                paragraph: 2,
+                offset: 1,
+            },
+            TextPosition {
+                paragraph: 3,
+                offset: 0,
+            },
+        ]
+        .into();
+        editor.select(selection).unwrap();
+        assert!(editor.indent(&mut engine, false).unwrap());
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .text_nodes()
+                .map(|node| node.level)
+                .collect::<Vec<_>>(),
+            [1, 1, 2, 1, 1]
+        );
+        assert_eq!(editor.selection(), selection);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, split);
+        editor.redo(&mut engine).unwrap();
+        assert!(editor.indent(&mut engine, true).unwrap());
+        assert_eq!(editor.active_outline().document, split);
+    }
+
+    #[test]
+    fn overflowing_cell_caret_moves_to_the_next_rows_visual_column() {
+        use crate::page::ParagraphContent;
+        let mut engine = TextEngine::default();
+        let mut source = table_editor(&mut engine).active_outline().snapshot();
+        let ParagraphContent::Table(table) = &mut source.paragraphs[0].content else {
+            panic!()
+        };
+        table.rows[0].cells[0].paragraphs[0]
+            .text_mut()
+            .unwrap()
+            .text = Paragraph::new(
+            "M".into(),
+            Format {
+                font_size: Some(130.0),
+                ..Default::default()
+            },
+        );
+        let mut editor =
+            CanvasEditor::from_outlines(&mut engine, vec![source], BTreeMap::new()).unwrap();
+        let original = editor.active_outline().document.clone();
+        editor
+            .select(
+                [
+                    TextPosition {
+                        paragraph: 0,
+                        offset: 0,
+                    },
+                    TextPosition {
+                        paragraph: 0,
+                        offset: 1,
+                    },
+                ]
+                .into(),
+            )
+            .unwrap();
+        let [_, _, right, _] = editor
+            .active_outline()
+            .shaped
+            .paragraph_cell(0)
+            .unwrap()
+            .text_bounds();
+        let selection = editor.selection_rects().unwrap();
+        assert!(!selection.is_empty());
+        assert!(selection.iter().all(|rect| rect.x1 <= f64::from(right)));
+        for extend in [false, true] {
+            editor
+                .select(
+                    [TextPosition {
+                        paragraph: 0,
+                        offset: 1,
+                    }; 2]
+                        .into(),
+                )
+                .unwrap();
+            let caret = editor.caret(1.0).unwrap();
+            assert!(
+                caret.x0 > f64::from(editor.active_outline().shaped.tables[0].cells[0].rect[2])
+            );
+            editor
+                .move_selection(&mut engine, Movement::Down, extend)
+                .unwrap();
+            assert_eq!(editor.selection().positions[1].paragraph, 3);
+            editor
+                .move_selection(&mut engine, Movement::Up, extend)
+                .unwrap();
+            assert_eq!(
+                editor.selection().positions[1],
+                TextPosition {
+                    paragraph: 1,
+                    offset: 5
+                }
+            );
+            assert_eq!(editor.active_outline().document, original);
+            assert!(editor.undo.is_empty());
+        }
+    }
+
+    #[test]
+    fn table_vertical_arrows_preserve_columns_and_cell_paragraphs() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        let original = editor.active_outline().document.clone();
+        for column in 0..2 {
+            editor
+                .select(
+                    [TextPosition {
+                        paragraph: column,
+                        offset: 2,
+                    }; 2]
+                        .into(),
+                )
+                .unwrap();
+            editor
+                .move_selection(&mut engine, Movement::Down, false)
+                .unwrap();
+            assert_eq!(editor.selection().positions[1].paragraph, column + 2);
+            editor
+                .move_selection(&mut engine, Movement::Up, false)
+                .unwrap();
+            assert_eq!(
+                editor.selection().positions[1],
+                TextPosition {
+                    paragraph: column,
+                    offset: 2
+                }
+            );
+        }
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 2,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, "\n").unwrap();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 1,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
+        assert_eq!(editor.selection().positions[1].paragraph, 1);
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
+        assert_eq!(editor.selection().positions[1].paragraph, 3);
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 2,
+                    offset: 2,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
+        assert_eq!(editor.selection().positions[1].paragraph, 4);
+        editor
+            .move_selection(&mut engine, Movement::Up, false)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions[1],
+            TextPosition {
+                paragraph: 2,
+                offset: 2
+            }
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, original);
+    }
+
+    #[test]
+    fn table_edges_create_provisional_space_and_restore_it_with_history() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        editor.active_outline_mut().layout.x = Some(120.0);
+        editor.active_outline_mut().layout.y = Some(120.0);
+        let source = editor.active_outline().document.clone();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 3,
+                    offset: 4,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        let history = editor.undo.len();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
+        assert_eq!(editor.outlines()[0].document, source);
+        assert_eq!(editor.undo.len(), history);
+        assert_eq!(
+            editor.selection().positions,
+            [TextPosition {
+                paragraph: 4,
+                offset: 0
+            }; 2]
+        );
+        let draft = editor.active_outline().document.clone();
+        let caret = editor.selection();
+        editor.insert(&mut engine, "X").unwrap();
+        let committed = editor.active_outline().document.clone();
+        assert_eq!(committed.nodes().len(), 2);
+        assert_eq!(committed.paragraphs().last().unwrap().text(), "X");
+        for _ in 0..2 {
+            editor.undo(&mut engine).unwrap();
+            assert_eq!(editor.outlines()[0].document, source);
+            assert_eq!(editor.active_outline().document, draft);
+            assert_eq!(editor.selection(), caret);
+            editor.redo(&mut engine).unwrap();
+            assert_eq!(editor.active_outline().document, committed);
+        }
+        editor.undo(&mut engine).unwrap();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 0,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Up, false)
+            .unwrap();
+        assert_eq!(editor.caret_outline().unwrap().origin(), [120.0, 86.4]);
+        assert_eq!(editor.outlines()[0].document, source);
+        editor.insert(&mut engine, "X").unwrap();
+        assert_eq!(editor.outlines().len(), 2);
+        editor.undo(&mut engine).unwrap();
+        assert!(editor.caret_outline().is_some());
+        assert_eq!(editor.outlines().len(), 1);
+        assert_eq!(editor.outlines()[0].document, source);
+    }
+
+    #[test]
+    fn editing_a_cell_trims_only_provisional_root_paragraphs() {
+        let mut engine = TextEngine::default();
+        for compose in [false, true] {
+            let mut editor = table_editor(&mut engine);
+            let source = editor.active_outline().document.clone();
+            editor
+                .select(
+                    [TextPosition {
+                        paragraph: 3,
+                        offset: 4,
+                    }; 2]
+                        .into(),
+                )
+                .unwrap();
+            for _ in 0..2 {
+                editor
+                    .move_selection(&mut engine, Movement::Down, false)
+                    .unwrap();
+            }
+            for _ in 0..2 {
+                editor
+                    .move_selection(&mut engine, Movement::Up, false)
+                    .unwrap();
+            }
+            assert_eq!(editor.selection().positions[1].paragraph, 3);
+            let draft = editor.active_outline().document.clone();
+            assert_eq!(draft.nodes().len(), 3);
+            let selection = editor.selection();
+            if compose {
+                editor
+                    .compose(&mut engine, "temporary".into(), 9..9)
+                    .unwrap();
+                editor.cancel_composition(&mut engine).unwrap();
+                assert_eq!(editor.active_outline().document, draft);
+                editor.compose(&mut engine, "marked".into(), 6..6).unwrap();
+                editor.commit_text(&mut engine, "X".into()).unwrap();
+            } else {
+                editor.insert(&mut engine, "X").unwrap();
+            }
+            let after = editor.active_outline().document.clone();
+            assert_eq!(after.nodes().len(), 1);
+            assert_eq!(after.paragraphs().nth(3).unwrap().text(), "LastX");
+            let fresh = editor
+                .active_outline()
+                .snapshot()
+                .layout(&mut engine, &BTreeMap::new())
+                .unwrap();
+            assert_eq!(editor.active_outline().shaped.size, fresh.size);
+            assert_eq!(editor.active_outline().shaped.paragraphs.len(), 4);
+            editor.undo(&mut engine).unwrap();
+            assert_eq!(editor.outlines()[0].document, source);
+            assert_eq!(editor.active_outline().document, draft);
+            assert_eq!(editor.selection(), selection);
+            editor.redo(&mut engine).unwrap();
+            assert_eq!(editor.active_outline().document, after);
+        }
+    }
+
+    #[test]
+    fn editing_during_cell_composition_keeps_table_flow_and_history() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        let source = editor.active_outline().document.clone();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 3,
+                    offset: 4,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        for _ in 0..2 {
+            editor
+                .move_selection(&mut engine, Movement::Down, false)
+                .unwrap();
+        }
+        for _ in 0..2 {
+            editor
+                .move_selection(&mut engine, Movement::Up, false)
+                .unwrap();
+        }
+        let draft = editor.active_outline().document.clone();
+        editor.compose(&mut engine, "a".into(), 1..1).unwrap();
+        editor.insert(&mut engine, "b").unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .last()
+                .unwrap()
+                .text(),
+            "Lastab"
+        );
+        let fresh = editor
+            .active_outline()
+            .snapshot()
+            .layout(&mut engine, &BTreeMap::new())
+            .unwrap();
+        assert_eq!(editor.active_outline().shaped.size, fresh.size);
+        assert_eq!(
+            editor.active_outline().shaped.paragraphs.len(),
+            fresh.paragraphs.len()
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .last()
+                .unwrap()
+                .text(),
+            "Lasta"
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.outlines()[0].document, source);
+        assert_eq!(editor.active_outline().document, draft);
+    }
+
+    #[test]
+    fn table_horizontal_arrows_follow_reading_order() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        let original = editor.active_outline().document.clone();
+        let history = editor.undo.len();
+        for paragraph in 0..4 {
+            let text = original.paragraphs().nth(paragraph).unwrap();
+            let end = text.utf16_offset(text.text().len()).unwrap();
+            editor
+                .select(
+                    [TextPosition {
+                        paragraph,
+                        offset: end,
+                    }; 2]
+                        .into(),
+                )
+                .unwrap();
+            editor
+                .move_selection(&mut engine, Movement::Right, false)
+                .unwrap();
+            let next = if paragraph < 3 {
+                TextPosition {
+                    paragraph: paragraph + 1,
+                    offset: 0,
+                }
+            } else {
+                TextPosition {
+                    paragraph,
+                    offset: end,
+                }
+            };
+            assert_eq!(editor.selection().positions, [next; 2]);
+            if paragraph < 3 {
+                editor
+                    .move_selection(&mut engine, Movement::Left, false)
+                    .unwrap();
+                assert_eq!(
+                    editor.selection().positions,
+                    [TextPosition {
+                        paragraph,
+                        offset: end
+                    }; 2]
+                );
+            }
+        }
+        assert_eq!(editor.active_outline().document, original);
+        assert_eq!(editor.undo.len(), history);
+        assert!(editor.caret_outline().is_none());
+    }
+
+    #[test]
+    fn column_width_edits_reflow_and_restore_structured_drafts() {
+        use crate::page::ParagraphContent;
+        let mut engine = TextEngine::default();
+        for draft in [false, true] {
+            let mut editor = table_editor(&mut engine);
+            let stored = editor.outlines()[0].document.clone();
+            editor
+                .select(
+                    [TextPosition {
+                        paragraph: 3,
+                        offset: 4,
+                    }; 2]
+                        .into(),
+                )
+                .unwrap();
+            if draft {
+                for _ in 0..2 {
+                    editor
+                        .move_selection(&mut engine, Movement::Down, false)
+                        .unwrap();
+                }
+                for _ in 0..2 {
+                    editor
+                        .move_selection(&mut engine, Movement::Up, false)
+                        .unwrap();
+                }
+            }
+            let before = editor.active_outline().document.clone();
+            let selection = editor.selection();
+            let ParagraphContent::Table(table) = &before.nodes()[0].content else {
+                panic!()
+            };
+            let position = selection.positions[1];
+            let mut edit = before
+                .replace(
+                    position..position,
+                    vec![Paragraph::new(
+                        " long cell content".into(),
+                        Format::default(),
+                    )],
+                )
+                .unwrap();
+            edit.columns.insert(table.id, vec![96.375, 36.0]);
+            editor.commit(&mut engine, edit, selection).unwrap();
+            let after = editor.active_outline().document.clone();
+            let fresh = editor
+                .active_outline()
+                .snapshot()
+                .layout(&mut engine, &BTreeMap::new())
+                .unwrap();
+            assert_eq!(editor.active_outline().shaped.size, fresh.size);
+            assert_eq!(
+                editor.active_outline().shaped.tables[0]
+                    .cells
+                    .iter()
+                    .map(|c| c.rect)
+                    .collect::<Vec<_>>(),
+                fresh.tables[0]
+                    .cells
+                    .iter()
+                    .map(|c| c.rect)
+                    .collect::<Vec<_>>()
+            );
+            for _ in 0..2 {
+                editor.undo(&mut engine).unwrap();
+                assert_eq!(editor.active_outline().document, before);
+                assert_eq!(editor.outlines()[0].document, stored);
+                assert_eq!(editor.selection(), selection);
+                editor.redo(&mut engine).unwrap();
+                assert_eq!(editor.active_outline().document, after);
+            }
+            let selection = editor.selection();
+            let history = editor.undo.len();
+            for widths in [vec![f32::MAX; 2], vec![36.0, f32::NAN]] {
+                let position = selection.positions[1];
+                let mut edit = after
+                    .replace(
+                        position..position,
+                        vec![Paragraph::new("invalid".into(), Format::default())],
+                    )
+                    .unwrap();
+                edit.columns.insert(table.id, widths);
+                assert!(editor.commit(&mut engine, edit, selection).is_err());
+                assert_eq!(editor.active_outline().document, after);
+                assert_eq!(editor.selection(), selection);
+                assert_eq!(editor.undo.len(), history);
+            }
+        }
+    }
+
+    #[test]
+    fn cell_edits_reuse_neighbor_layouts_and_restore_table_geometry() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        let before = editor.active_outline().document.clone();
+        let layout_ids = editor
+            .active_outline()
+            .shaped
+            .paragraphs
+            .iter()
+            .map(|p| p.text.id())
+            .collect::<Vec<_>>();
+        let size = editor.active_outline().shaped.size;
+        let cell_rects = editor.active_outline().shaped.tables[0]
+            .cells
+            .iter()
+            .map(|cell| cell.rect)
+            .collect::<Vec<_>>();
+        let right_text = editor
+            .active_outline()
+            .document
+            .paragraphs()
+            .nth(1)
+            .unwrap()
+            .text()
+            .as_ptr();
+        let selection = [TextPosition {
+            paragraph: 0,
+            offset: 2,
+        }; 2]
+            .into();
+        editor.select(selection).unwrap();
+        editor
+            .insert(&mut engine, " long text that wraps\nsecond paragraph")
+            .unwrap();
+        let outline = editor.active_outline();
+        assert_eq!(outline.document.paragraphs().count(), 5);
+        assert!(outline.shaped.size[1] > size[1]);
+        assert_eq!(
+            outline
+                .document
+                .paragraphs()
+                .nth(2)
+                .unwrap()
+                .text()
+                .as_ptr(),
+            right_text
+        );
+        for (index, original) in layout_ids.iter().enumerate().skip(1) {
+            assert_eq!(
+                outline.paragraph_layout(index + 1).unwrap().text.id(),
+                *original
+            );
+        }
+        assert_eq!(
+            outline
+                .layouts()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            outline.shaped.tables[0].cells[0].rect[3],
+            outline.shaped.tables[0].cells[1].rect[3]
+        );
+        assert!(outline.shaped.tables[0].cells[2].rect[1] > cell_rects[2][1]);
+        let after = outline.document.clone();
+        let after_selection = outline.selection;
+        let after_rects = outline.shaped.tables[0]
+            .cells
+            .iter()
+            .map(|cell| cell.rect)
+            .collect::<Vec<_>>();
+        for _ in 0..3 {
+            editor.undo(&mut engine).unwrap();
+            let outline = editor.active_outline();
+            assert_eq!(outline.document, before);
+            assert_eq!(outline.selection, selection);
+            assert_eq!(outline.shaped.size, size);
+            assert_eq!(
+                outline.shaped.tables[0]
+                    .cells
+                    .iter()
+                    .map(|cell| cell.rect)
+                    .collect::<Vec<_>>(),
+                cell_rects
+            );
+            editor.redo(&mut engine).unwrap();
+            let outline = editor.active_outline();
+            assert_eq!(outline.document, after);
+            assert_eq!(outline.selection, after_selection);
+            assert_eq!(
+                outline.shaped.tables[0]
+                    .cells
+                    .iter()
+                    .map(|cell| cell.rect)
+                    .collect::<Vec<_>>(),
+                after_rects
+            );
+        }
+        editor.undo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .next()
+                .unwrap()
+                .text(),
+            "Left"
+        );
+        assert!(editor.active_outline().shaped.tables.is_empty());
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, before);
+        assert_eq!(editor.active_outline().shaped.size, size);
+    }
+
+    #[test]
+    fn cell_composition_and_failed_layout_leave_atomic_history() {
+        let mut engine = TextEngine::default();
+        let mut editor = table_editor(&mut engine);
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 2,
+                    offset: 2,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        let before = editor.active_outline().document.clone();
+        let selection = editor.selection();
+        let cells = editor.active_outline().shaped.tables[0]
+            .cells
+            .iter()
+            .map(|cell| cell.rect)
+            .collect::<Vec<_>>();
+        let ids = editor
+            .active_outline()
+            .shaped
+            .paragraphs
+            .iter()
+            .map(|p| p.text.id())
+            .collect::<Vec<_>>();
+        let history = editor.undo.len();
+        editor.compose(&mut engine, "🧊\n中".into(), 4..4).unwrap();
+        editor.compose(&mut engine, "short".into(), 5..5).unwrap();
+        assert!(editor.cancel_composition(&mut engine).unwrap());
+        assert_eq!(editor.active_outline().document, before);
+        assert_eq!(editor.selection(), selection);
+        assert_eq!(editor.undo.len(), history);
+        assert_eq!(
+            editor.active_outline().shaped.tables[0]
+                .cells
+                .iter()
+                .map(|cell| cell.rect)
+                .collect::<Vec<_>>(),
+            cells
+        );
+        for index in [0, 1, 3] {
+            assert_eq!(
+                editor
+                    .active_outline()
+                    .paragraph_layout(index)
+                    .unwrap()
+                    .text
+                    .id(),
+                ids[index]
+            );
+        }
+        editor.compose(&mut engine, "🧊\n中".into(), 4..4).unwrap();
+        editor.commit_text(&mut engine, "done".into()).unwrap();
+        assert_eq!(editor.undo.len(), history + 1);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, before);
+        assert_eq!(editor.selection(), selection);
+        let redo = editor.redo.len();
+        assert!(
+            editor
+                .replace(
+                    &mut engine,
+                    vec![Paragraph::new(
+                        "bad".into(),
+                        Format {
+                            font_size: Some(f32::NAN),
+                            ..Format::default()
+                        }
+                    )]
+                )
+                .is_err()
+        );
+        assert_eq!(editor.active_outline().document, before);
+        assert_eq!(editor.selection(), selection);
+        assert_eq!(editor.undo.len(), history);
+        assert_eq!(editor.redo.len(), redo);
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .nth(2)
+                .unwrap()
+                .text(),
+            "Bedonelow"
+        );
+    }
+
+    #[test]
+    fn retained_cell_edits_match_fresh_layout_for_every_text_range() {
+        let mut engine = TextEngine::default();
+        let base = table_editor(&mut engine);
+        for (index, paragraph) in base.active_outline().document.paragraphs().enumerate() {
+            let offsets = paragraph
+                .text()
+                .char_indices()
+                .map(|(byte, _)| paragraph.utf16_offset(byte).unwrap())
+                .chain(std::iter::once(
+                    paragraph.utf16_offset(paragraph.text().len()).unwrap(),
+                ))
+                .collect::<Vec<_>>();
+            for &start in &offsets {
+                for &end in offsets.iter().filter(|&&end| end >= start) {
+                    for text in ["", "🧊", "x\ny"] {
+                        let mut editor = CanvasEditor::from_text_outlines(
+                            vec![base.active_outline().clone()],
+                            BTreeMap::new(),
+                            None,
+                        )
+                        .unwrap();
+                        let selection = [
+                            TextPosition {
+                                paragraph: index,
+                                offset: start,
+                            },
+                            TextPosition {
+                                paragraph: index,
+                                offset: end,
+                            },
+                        ]
+                        .into();
+                        editor.select(selection).unwrap();
+                        editor.insert(&mut engine, text).unwrap();
+                        let retained = &editor.active_outline().shaped;
+                        let fresh = editor
+                            .active_outline()
+                            .snapshot()
+                            .layout(&mut engine, &editor.definitions)
+                            .unwrap();
+                        assert_eq!(retained.size, fresh.size);
+                        assert_eq!(
+                            retained.tables[0]
+                                .cells
+                                .iter()
+                                .map(|c| c.rect)
+                                .collect::<Vec<_>>(),
+                            fresh.tables[0]
+                                .cells
+                                .iter()
+                                .map(|c| c.rect)
+                                .collect::<Vec<_>>()
+                        );
+                        for (retained, fresh) in retained.paragraphs.iter().zip(&fresh.paragraphs) {
+                            assert_eq!(retained.id, fresh.id);
+                            assert_eq!(retained.origin, fresh.origin);
+                            assert_eq!(retained.text.height(), fresh.text.height());
+                            assert_eq!(
+                                retained
+                                    .text
+                                    .lines()
+                                    .map(|(line, bounds)| (
+                                        line.metrics().advance,
+                                        bounds.source.clone()
+                                    ))
+                                    .collect::<Vec<_>>(),
+                                fresh
+                                    .text
+                                    .lines()
+                                    .map(|(line, bounds)| (
+                                        line.metrics().advance,
+                                        bounds.source.clone()
+                                    ))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                        editor.undo(&mut engine).unwrap();
+                        assert_eq!(
+                            editor.active_outline().document,
+                            base.active_outline().document
+                        );
+                        assert_eq!(editor.selection(), selection);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cross_outline_validation_includes_table_row_and_cell_ids() {
+        use crate::page::ParagraphContent;
+        let mut engine = TextEngine::default();
+        let first = table_editor(&mut engine).active_outline().clone();
+        let second = table_editor(&mut engine).active_outline().clone();
+        let ParagraphContent::Table(first_table) = &first.document.nodes()[0].content else {
+            panic!()
+        };
+        for alias in 0..3 {
+            let mut second = second.clone();
+            let mut nodes = second.document.nodes().to_vec();
+            let ParagraphContent::Table(table) = &mut nodes[0].content else {
+                panic!()
+            };
+            match alias {
+                0 => table.id = first_table.id,
+                1 => table.rows[0].id = first_table.rows[0].id,
+                _ => table.rows[0].cells[0].id = first_table.rows[0].cells[0].id,
+            }
+            second.document = TextDocument::from_nodes(nodes).unwrap();
+            assert!(matches!(
+                CanvasEditor::from_text_outlines(
+                    vec![first.clone(), second],
+                    BTreeMap::new(),
+                    None
+                ),
+                Err(EditorError::Edit(EditError::InvalidStructure))
+            ));
+        }
+    }
+
+    #[test]
+    fn title_flow_moves_page_objects_atomically_and_cancels_composition() {
+        use crate::page::{Image, Page, PageObject, Title};
+        let mut engine = TextEngine::default();
+        let mut title = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Header".into(), Default::default())]).unwrap(),
+            468.0,
+            [0.0; 2],
+        )
+        .unwrap()
+        .snapshot();
+        title.title = true;
+        title.layout.max_width = None;
+        title.layout.width_set_by_user = None;
+        let body = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Anchor".into(), Default::default())]).unwrap(),
+            72.0,
+            [120.0, 80.0],
+        )
+        .unwrap()
+        .snapshot();
+        let body_id = body.id;
+        let images = [
+            (120.0, 90.0, false),
+            (600.0, 150.0, false),
+            (120.0, 0.0, false),
+            (120.0, 80.0, true),
+        ]
+        .map(|(x, y, background)| Image {
+            id: crate::text::new_id().unwrap(),
+            layout: onestore::document::Layout {
+                x: Some(x),
+                y: Some(y),
+                max_width: Some(72.0),
+                max_height: Some(40.0),
+                ..Default::default()
+            },
+            bytes: Some(std::sync::Arc::from(b"deferred image payload".as_slice())),
+            alt: None,
+            background,
+        });
+        let image_ids = images.each_ref().map(|image| image.id);
+        let image_bytes = images
+            .each_ref()
+            .map(|image| image.bytes.as_ref().unwrap().clone());
+        let mut objects = vec![
+            PageObject::Title(Title {
+                id: crate::text::new_id().unwrap(),
+                date: None,
+                layout: Default::default(),
+                outlines: vec![title],
+            }),
+            PageObject::Outline(body),
+        ];
+        objects.extend(images.into_iter().map(PageObject::Image));
+        let mut editor = CanvasEditor::from_page(
+            Page {
+                title: "Header".into(),
+                created: None,
+                margin_origin: [36.0, 14.4],
+                definitions: BTreeMap::new(),
+                objects,
+            },
+            &mut engine,
+        )
+        .unwrap();
+        let positions = |editor: &CanvasEditor| {
+            editor
+                .object_layouts()
+                .map(|(id, layout)| (id, layout.clone()))
+                .collect::<Vec<_>>()
+        };
+        let original = positions(&editor);
+        let text = "Header\u{000b}Second\u{000b}Third\u{000b}Fourth\u{000b}Fifth\u{000b}Sixth";
+        let end = text.encode_utf16().count().try_into().unwrap();
+        editor.select_all().unwrap();
+        editor.compose(&mut engine, text.into(), end..end).unwrap();
+        let moved = positions(&editor);
+        let y = |items: &Vec<(ExGuid, onestore::document::Layout)>, id| {
+            items
+                .iter()
+                .find(|(candidate, _)| *candidate == id)
+                .unwrap()
+                .1
+                .y
+                .unwrap()
+        };
+        let delta = y(&moved, body_id) - y(&original, body_id);
+        assert!(delta > 0.0);
+        for id in &image_ids[..2] {
+            assert!((y(&moved, *id) - y(&original, *id) - delta).abs() < 0.001);
+        }
+        for id in &image_ids[2..] {
+            assert_eq!(y(&moved, *id), y(&original, *id));
+        }
+        editor.compose(&mut engine, "Header".into(), 6..6).unwrap();
+        assert_eq!(positions(&editor), moved);
+        editor.cancel_composition(&mut engine).unwrap();
+        assert_eq!(positions(&editor), original);
+        assert!(!editor.undo(&mut engine).unwrap());
+        editor.select_all().unwrap();
+        editor.compose(&mut engine, text.into(), end..end).unwrap();
+        let taller = format!("{text}\u{000b}Seventh\u{000b}Eighth");
+        let taller_end = taller.encode_utf16().count().try_into().unwrap();
+        editor
+            .compose(&mut engine, taller, taller_end..taller_end)
+            .unwrap();
+        let farther = positions(&editor);
+        assert!(y(&farther, body_id) > y(&moved, body_id));
+        editor.commit_text(&mut engine, "Header".into()).unwrap();
+        assert_eq!(positions(&editor), farther);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(positions(&editor), original);
+        assert!(!editor.undo(&mut engine).unwrap());
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(positions(&editor), farther);
+        editor.undo(&mut engine).unwrap();
+        editor.select_all().unwrap();
+        editor.insert(&mut engine, text).unwrap();
+        assert_eq!(positions(&editor), moved);
+        editor.select_all().unwrap();
+        editor.insert(&mut engine, "Header").unwrap();
+        assert_eq!(positions(&editor), moved);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(positions(&editor), moved);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(positions(&editor), original);
+        editor.redo(&mut engine).unwrap();
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(positions(&editor), moved);
+        for (id, bytes) in image_ids.into_iter().zip(image_bytes) {
+            let image = editor
+                .objects
+                .iter()
+                .find_map(|object| match object {
+                    page::Content::Image(image) if image.id == id => Some(image),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                image.bytes.as_ref().unwrap(),
+                &bytes
+            ));
+        }
+    }
+
+    #[test]
+    fn floating_outline_exit_uses_document_position_and_keeps_real_blank_lines() {
+        let mut engine = TextEngine::default();
+        for (x, real_blanks, size, exit_y) in [
+            (179.9, 0, 11.0, None),
+            (180.0, 0, 11.0, Some(230.4)),
+            (270.0, 1, 11.0, Some(230.4)),
+            (270.0, 0, 22.0, Some(248.4)),
+            (270.0, 0, 44.0, Some(320.4)),
+        ] {
+            let mut paragraphs = vec![Paragraph::new(
+                "Text".into(),
+                Format {
+                    font_size: Some(size),
+                    ..Default::default()
+                },
+            )];
+            paragraphs
+                .extend((0..real_blanks).map(|_| Paragraph::new(String::new(), Format::default())));
+            let source = TextDocument::new(paragraphs).unwrap();
+            let outline = TextOutline::new(&mut engine, source.clone(), 72.0, [x, 158.4]).unwrap();
+            let mut editor =
+                CanvasEditor::from_text_outlines(vec![outline], BTreeMap::new(), None).unwrap();
+            editor
+                .move_selection(&mut engine, Movement::DocumentEnd, false)
+                .unwrap();
+            for _ in 0..3 - real_blanks {
+                editor
+                    .move_selection(&mut engine, Movement::Down, false)
+                    .unwrap();
+            }
+            assert_eq!(editor.outlines[0].document, source);
+            assert_eq!(editor.caret_outline().is_some(), exit_y.is_some());
+            if let Some(y) = exit_y {
+                assert_eq!(editor.active_outline().origin(), [x, y]);
+                assert_eq!(
+                    editor.active_outline().layout.max_width,
+                    Some(DEFAULT_OUTLINE_WIDTH)
+                );
+                editor.insert(&mut engine, "New").unwrap();
+                assert_eq!(editor.outlines.len(), 2);
+                editor.undo(&mut engine).unwrap();
+                assert_eq!(editor.outlines.len(), 1);
+                assert_eq!(editor.active_outline().origin(), [x, y]);
+            } else {
+                assert_eq!(editor.active_outline().document.nodes().len(), 4);
+            }
+            assert!(editor.undo.is_empty());
+        }
+    }
+
+    #[test]
+    fn vertical_exit_and_reentry_preserve_the_text_column_and_source() {
+        let mut engine = TextEngine::default();
+        for (x, y, above) in [
+            (36.0, 158.4, 122.4),
+            (180.0, 158.4, 122.4),
+            (180.0, 178.0, 140.4),
+            (180.0, 180.0, 140.4),
+            (180.0, 184.0, 158.4),
+        ] {
+            let source =
+                TextDocument::new(vec![Paragraph::new("Text".into(), Format::default())]).unwrap();
+            let outline = TextOutline::new(&mut engine, source.clone(), 72.0, [x, y]).unwrap();
+            let id = outline.id;
+            let mut editor =
+                CanvasEditor::from_text_outlines(vec![outline], BTreeMap::new(), None).unwrap();
+            editor
+                .move_selection(&mut engine, Movement::DocumentEnd, false)
+                .unwrap();
+            let column = editor.caret(1.0).unwrap().x0 as f32;
+            editor
+                .move_selection(&mut engine, Movement::Up, false)
+                .unwrap();
+            assert_eq!(
+                editor.caret_outline().unwrap().origin(),
+                [x + column, above]
+            );
+            editor.focus_outline(id).unwrap();
+            if x >= 180.0 {
+                for _ in 0..3 {
+                    editor
+                        .move_selection(&mut engine, Movement::Down, false)
+                        .unwrap();
+                }
+                assert!(editor.caret_outline().is_some());
+                editor
+                    .move_selection(&mut engine, Movement::Up, false)
+                    .unwrap();
+                assert!(editor.caret_outline().is_some());
+                editor
+                    .move_selection(&mut engine, Movement::Up, false)
+                    .unwrap();
+                if y == 184.0 {
+                    assert!(editor.caret_outline().is_some());
+                    editor
+                        .move_selection(&mut engine, Movement::Up, false)
+                        .unwrap();
+                }
+                assert_eq!(editor.active_outline().id, id);
+                assert_eq!(editor.selection().positions[1].offset, 4);
+            }
+            assert_eq!(editor.outlines[0].document, source);
+            assert!(editor.undo.is_empty());
+        }
+    }
+
+    #[test]
+    fn provisional_paragraphs_use_the_base_style_instead_of_local_run_formatting() {
+        let mut engine = TextEngine::default();
+        let base = Format {
+            font: Some("Arial".into()),
+            font_size: Some(11.0),
+            ..Default::default()
+        };
+        let style = ExGuid {
+            n: 9,
+            ..Default::default()
+        };
+        let mut nodes = TextDocument::new(vec![Paragraph::new(
+            "Text".into(),
+            Format {
+                font_size: Some(22.0),
+                bold: Some(true),
+                ..base.clone()
+            },
+        )])
+        .unwrap()
+        .nodes()
+        .to_vec();
+        nodes[0].style = Some(style);
+        let outline = TextOutline::new(
+            &mut engine,
+            TextDocument::from_nodes(nodes).unwrap(),
+            240.0,
+            [0.0; 2],
+        )
+        .unwrap();
+        let mut editor = CanvasEditor::from_text_outlines(
+            vec![outline],
+            BTreeMap::from([(
+                style,
+                Definition {
+                    kind: onestore::document::Kind::Style {
+                        name: Some("p".into()),
+                    },
+                    format: base.clone(),
+                },
+            )]),
+            None,
+        )
+        .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
+        let paragraph = &editor.active_outline().document.nodes()[1];
+        assert_eq!(paragraph.style, Some(style));
+        assert_eq!(paragraph.text().unwrap().text.spans()[0].format, base);
+        assert_eq!(
+            editor.active_outline().shaped.paragraphs[1].text.height(),
+            engine
+                .layout(&Paragraph::new(String::new(), base), 240.0)
+                .unwrap()
+                .height()
+        );
+        assert_eq!(editor.outlines[0].document.nodes().len(), 1);
+    }
+
+    #[test]
+    fn clicks_below_use_base_style_preserve_source_and_share_draft_history() {
+        let mut engine = TextEngine::default();
+        for font_size in [11.0, 22.0] {
+            let style = ExGuid {
+                n: 900,
+                ..Default::default()
+            };
+            let base = Format {
+                font: Some("Arial".into()),
+                font_size: Some(font_size),
+                ..Default::default()
+            };
+            let mut nodes = TextDocument::new(vec![Paragraph::new(
+                "Body".into(),
+                Format {
+                    font_size: Some(44.0),
+                    bold: Some(true),
+                    ..base.clone()
+                },
+            )])
+            .unwrap()
+            .nodes()
+            .to_vec();
+            nodes[0].style = Some(style);
+            let outline = TextOutline::new(
+                &mut engine,
+                TextDocument::from_nodes(nodes).unwrap(),
+                240.0,
+                [180.0, 90.0],
+            )
+            .unwrap();
+            let id = outline.id;
+            let source = outline.document.clone();
+            let layout = outline.layout.clone();
+            let text_id = outline.shaped.paragraphs[0].text.id();
+            let bottom = outline.shaped.size[1];
+            let mut editor = CanvasEditor::from_text_outlines(
+                vec![outline],
+                BTreeMap::from([(
+                    style,
+                    Definition {
+                        kind: onestore::document::Kind::Style {
+                            name: Some("p".into()),
+                        },
+                        format: base.clone(),
+                    },
+                )]),
+                None,
+            )
+            .unwrap();
+            assert!(
+                editor
+                    .select_below(&mut engine, id, [10.0, bottom + 20.0])
+                    .unwrap()
+            );
+            let blanks = if font_size == 11.0 { 2 } else { 1 };
+            assert_eq!(editor.active_outline().document.nodes().len(), blanks + 1);
+            assert_eq!(
+                editor.selection().positions[1],
+                TextPosition {
+                    paragraph: blanks,
+                    offset: 0
+                }
+            );
+            assert_eq!(editor.outlines[0].document, source);
+            assert_eq!(
+                editor.active_outline().shaped.paragraphs[0].text.id(),
+                text_id
+            );
+            for paragraph in &editor.active_outline().document.nodes()[1..] {
+                assert_eq!(paragraph.style, Some(style));
+                assert_eq!(paragraph.text().unwrap().text.spans()[0].format, base);
+            }
+            let pending = editor.active_outline().document.clone();
+            let selection = editor.selection();
+            assert!(
+                !editor
+                    .select_below(&mut engine, id, [10.0, bottom + 28.0])
+                    .unwrap()
+            );
+            assert_eq!(editor.active_outline().document, pending);
+            assert_eq!(editor.selection(), selection);
+            assert!(editor.undo.is_empty());
+            editor.compose(&mut engine, "日本".into(), 2..2).unwrap();
+            assert!(editor.cancel_composition(&mut engine).unwrap());
+            assert_eq!(editor.active_outline().document, pending);
+            editor.insert(&mut engine, "X").unwrap();
+            let edited = editor.active_outline().document.clone();
+            assert_eq!(editor.outlines[0].layout, layout);
+            assert_eq!(edited.nodes()[0], source.nodes()[0]);
+            assert!(editor.undo(&mut engine).unwrap());
+            assert_eq!(editor.active_outline().document, pending);
+            assert_eq!(editor.outlines[0].document, source);
+            assert_eq!(editor.selection(), selection);
+            assert!(editor.redo(&mut engine).unwrap());
+            assert_eq!(editor.active_outline().document, edited);
+            assert!(editor.undo(&mut engine).unwrap());
+            assert!(
+                editor
+                    .select_below(&mut engine, id, [10.0, bottom + 1.0])
+                    .unwrap()
+            );
+            assert_eq!(editor.active_outline().document.nodes().len(), blanks + 1);
+            editor
+                .select([selection.positions[1], editor.selection().positions[1]].into())
+                .unwrap();
+            assert_eq!(editor.outlines[0].document, source);
+            assert_eq!(editor.redo.len(), 1);
+            editor
+                .place_caret(&mut engine, [600.0, 600.0], 240.0)
+                .unwrap();
+            let pending = editor.active_outline().document.clone();
+            let selection = editor.selection();
+            editor.definitions.get_mut(&style).unwrap().format.font_size = Some(0.001);
+            assert!(
+                editor
+                    .select_below(&mut engine, id, [10.0, bottom + 20.0])
+                    .is_err()
+            );
+            assert_eq!(editor.active_outline().document, pending);
+            assert_eq!(editor.selection(), selection);
+            assert_eq!(editor.outlines[0].document, source);
+            assert_eq!(editor.redo.len(), 1);
+        }
+    }
+
+    #[test]
+    fn editing_during_provisional_composition_keeps_only_committed_layout_height() {
+        let mut engine = TextEngine::default();
+        let source =
+            TextDocument::new(vec![Paragraph::new("body".into(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 240.0).unwrap();
+        for _ in 0..3 {
+            editor
+                .move_selection(&mut engine, Movement::Down, false)
+                .unwrap();
+        }
+        for _ in 0..2 {
+            editor
+                .move_selection(&mut engine, Movement::Up, false)
+                .unwrap();
+        }
+        editor.compose(&mut engine, "a".into(), 1..1).unwrap();
+        editor.insert(&mut engine, "b").unwrap();
+        let expected = TextOutline::from_outline(
+            &mut engine,
+            &editor.active_outline().snapshot(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(editor.active_outline().shaped.size, expected.shaped.size);
+        assert_eq!(editor.active_outline().document.nodes().len(), 2);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .last()
+                .unwrap()
+                .text(),
+            "a"
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.outlines[0].document, source);
+        assert_eq!(editor.active_outline().document.nodes().len(), 4);
+    }
+
+    #[test]
+    fn arrow_created_paragraphs_are_provisional_and_share_existing_shaping() {
+        let mut engine = TextEngine::default();
+        let source =
+            TextDocument::new(vec![Paragraph::new("body".into(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 240.0).unwrap();
+        let shaped = editor.outlines[0].shaped.paragraphs[0]
+            .text
+            .shaped
+            .styles()
+            .as_ptr();
+        for _ in 0..3 {
+            editor
+                .move_selection(&mut engine, Movement::Down, false)
+                .unwrap();
+        }
+        assert_eq!(editor.outlines[0].document, source);
+        assert_eq!(editor.active_outline().document.nodes().len(), 4);
+        assert_eq!(
+            editor
+                .visible_outlines()
+                .next()
+                .unwrap()
+                .document
+                .nodes()
+                .len(),
+            4
+        );
+        assert_eq!(
+            editor.active_outline().shaped.paragraphs[0]
+                .text
+                .shaped
+                .styles()
+                .as_ptr(),
+            shaped
+        );
+        assert!(editor.undo.is_empty());
+        editor
+            .move_selection(&mut engine, Movement::Up, false)
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Up, false)
+            .unwrap();
+        let pending = editor.active_outline().document.clone();
+        let selection = editor.selection();
+        editor.insert(&mut engine, "X").unwrap();
+        assert_eq!(
+            editor.outlines[0]
+                .document
+                .paragraphs()
+                .map(Paragraph::text)
+                .collect::<Vec<_>>(),
+            ["body", "X"]
+        );
+        assert_eq!(
+            editor.outlines[0].shaped.paragraphs[0]
+                .text
+                .shaped
+                .styles()
+                .as_ptr(),
+            shaped
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.outlines[0].document, source);
+        assert_eq!(editor.active_outline().document, pending);
+        assert_eq!(editor.selection(), selection);
+        editor
+            .place_caret(&mut engine, [500.0, 500.0], 200.0)
+            .unwrap();
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(
+            editor.outlines[0]
+                .document
+                .paragraphs()
+                .map(Paragraph::text)
+                .collect::<Vec<_>>(),
+            ["body", "X"]
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, pending);
+        assert_eq!(editor.selection(), selection);
+        editor
+            .place_caret(&mut engine, [500.0, 500.0], 200.0)
+            .unwrap();
+        assert_eq!(editor.outlines[0].document, source);
+    }
+
+    #[test]
+    fn deleting_through_provisional_paragraphs_removes_the_outline_and_restores_draft_on_undo() {
+        let mut engine = TextEngine::default();
+        let source =
+            TextDocument::new(vec![Paragraph::new("body".into(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 240.0).unwrap();
+        for _ in 0..2 {
+            editor
+                .move_selection(&mut engine, Movement::Down, false)
+                .unwrap();
+        }
+        let pending = editor.active_outline().document.clone();
+        editor.select_all().unwrap();
+        let selection = editor.selection();
+        editor.delete(&mut engine, true).unwrap();
+        assert!(editor.outlines.is_empty());
+        assert!(editor.caret_outline().is_some());
+        editor
+            .place_caret(&mut engine, [500.0, 500.0], 200.0)
+            .unwrap();
+        for _ in 0..2 {
+            editor.undo(&mut engine).unwrap();
+            assert_eq!(editor.outlines[0].document, source);
+            assert_eq!(editor.active_outline().document, pending);
+            assert_eq!(editor.selection(), selection);
+            editor.redo(&mut engine).unwrap();
+            assert!(editor.outlines.is_empty());
+        }
+    }
+
+    #[test]
+    fn provisional_composition_cancels_and_backspace_reenters_without_history() {
+        let mut engine = TextEngine::default();
+        let source =
+            TextDocument::new(vec![Paragraph::new("body".into(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 240.0).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
+        let pending = editor.active_outline().document.clone();
+        editor.compose(&mut engine, "日本".into(), 2..2).unwrap();
+        assert_eq!(editor.outlines[0].document, source);
+        editor.cancel_composition(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, pending);
+        editor.compose(&mut engine, "日本".into(), 2..2).unwrap();
+        editor.finish_composition();
+        assert_eq!(
+            editor.outlines[0]
+                .document
+                .paragraphs()
+                .map(Paragraph::text)
+                .collect::<Vec<_>>(),
+            ["body", "日本"]
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, pending);
+        editor.delete(&mut engine, true).unwrap();
+        assert_eq!(editor.outlines[0].document, source);
+        assert!(matches!(editor.active, Focus::Outline(0)));
+        assert!(editor.undo.is_empty());
+        assert!(editor.redo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn word_navigation_terminates_at_soft_wrapped_bidi_cycles() {
+        let mut engine = TextEngine::default();
+        let paragraph = Paragraph::from_runs(vec![
+            (
+                "العربية".into(),
+                Format {
+                    font_size: Some(12.0),
+                    bold: Some(false),
+                    italic: Some(false),
+                    ..Default::default()
+                },
+            ),
+            ("ية 日本".into(), Format::default()),
+        ]);
+        let source = TextDocument::new(vec![paragraph]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 1.0).unwrap();
+        let selection = Selection {
+            positions: [TextPosition {
+                paragraph: 0,
+                offset: 7,
+            }; 2],
+            affinities: [Affinity::Upstream; 2],
+        };
+        editor.select(selection).unwrap();
+        editor.delete_to(&mut engine, Movement::WordRight).unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .next()
+                .unwrap()
+                .text(),
+            "ية 日本"
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, source);
+        assert_eq!(editor.selection(), selection);
+        for offset in 0..=12 {
+            for affinity in [Affinity::Upstream, Affinity::Downstream] {
+                for movement in [Movement::WordLeft, Movement::WordRight] {
+                    editor
+                        .select(Selection {
+                            positions: [TextPosition {
+                                paragraph: 0,
+                                offset,
+                            }; 2],
+                            affinities: [affinity; 2],
+                        })
+                        .unwrap();
+                    editor.move_selection(&mut engine, movement, true).unwrap();
+                    editor.select(editor.selection()).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indentation_reflows_and_split_join_preserves_levels_and_undo() {
+        let mut engine = TextEngine::default();
+        let source = TextDocument::new(vec![
+            Paragraph::new("alpha beta gamma delta".into(), Format::default()),
+            Paragraph::new("untouched".into(), Format::default()),
+        ])
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 110.0).unwrap();
+        let untouched = editor.active_outline().shaped.paragraphs[1]
+            .text
+            .shaped
+            .styles()
+            .as_ptr();
+        let selection: Selection = [TextPosition {
+            paragraph: 0,
+            offset: 6,
+        }; 2]
+            .into();
+        editor.select(selection).unwrap();
+        editor.indent(&mut engine, false).unwrap();
+        assert_eq!(editor.active_outline().document.nodes()[0].level, 2);
+        assert_eq!(editor.active_outline().shaped.paragraphs[0].origin[0], 27.0);
+        assert_eq!(
+            editor.active_outline().shaped.paragraphs[1]
+                .text
+                .shaped
+                .styles()
+                .as_ptr(),
+            untouched
+        );
+        editor.insert(&mut engine, "\n").unwrap();
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .nodes()
+                .iter()
+                .map(|n| n.level)
+                .collect::<Vec<_>>(),
+            [2, 2, 1]
+        );
+        editor.delete(&mut engine, true).unwrap();
+        assert_eq!(
+            editor.active_outline().document.nodes()[0]
+                .text()
+                .unwrap()
+                .text
+                .text(),
+            "alpha beta gamma delta"
+        );
+        editor.undo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, source);
+        assert_eq!(editor.selection(), selection);
+        assert!(!editor.indent(&mut engine, true).unwrap());
+        assert!(editor.redo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn indentation_excludes_selected_next_paragraph_start_and_rejects_overflow_atomically() {
+        let mut engine = TextEngine::default();
+        let source = TextDocument::new(vec![
+            Paragraph::new("first".into(), Format::default()),
+            Paragraph::new("second".into(), Format::default()),
+        ])
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source, 50.0).unwrap();
+        let selection: Selection = [
+            TextPosition {
+                paragraph: 1,
+                offset: 0,
+            },
+            TextPosition {
+                paragraph: 0,
+                offset: 0,
+            },
+        ]
+        .into();
+        editor.select(selection).unwrap();
+        editor.indent(&mut engine, false).unwrap();
+        let indented = editor.active_outline().document.clone();
+        assert_eq!(
+            indented.nodes().iter().map(|n| n.level).collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert!(editor.indent(&mut engine, false).is_err());
+        assert_eq!(editor.active_outline().document, indented);
+        assert_eq!(editor.selection(), selection);
+        editor.undo(&mut engine).unwrap();
+        assert!(!editor.undo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn paragraph_and_document_navigation_preserve_selection_anchor() {
+        let mut engine = TextEngine::default();
+        let source = TextDocument::new(vec![
+            Paragraph::new("one two three four five".into(), Format::default()),
+            Paragraph::new("🌳 last".into(), Format::default()),
+        ])
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 45.0).unwrap();
+        let start = TextPosition {
+            paragraph: 0,
+            offset: 8,
+        };
+        editor.select([start; 2].into()).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::ParagraphEnd, true)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions,
+            [
+                start,
+                TextPosition {
+                    paragraph: 0,
+                    offset: 23
+                }
+            ]
+        );
+        editor
+            .move_selection(&mut engine, Movement::ParagraphEnd, true)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions,
+            [
+                start,
+                TextPosition {
+                    paragraph: 1,
+                    offset: 7
+                }
+            ]
+        );
+        editor
+            .move_selection(&mut engine, Movement::DocumentStart, true)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions,
+            [
+                start,
+                TextPosition {
+                    paragraph: 0,
+                    offset: 0
+                }
+            ]
+        );
+        editor
+            .move_selection(&mut engine, Movement::DocumentEnd, false)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions,
+            [TextPosition {
+                paragraph: 1,
+                offset: 7
+            }; 2]
+        );
+        editor
+            .move_selection(&mut engine, Movement::ParagraphStart, false)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions,
+            [TextPosition {
+                paragraph: 1,
+                offset: 0
+            }; 2]
+        );
+        editor
+            .move_selection(&mut engine, Movement::ParagraphStart, false)
+            .unwrap();
+        assert_eq!(
+            editor.selection().positions,
+            [TextPosition {
+                paragraph: 0,
+                offset: 0
+            }; 2]
+        );
+        assert_eq!(editor.active_outline().document, source);
+        assert!(!editor.undo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn word_deletion_restores_original_caret_and_styled_source_on_undo() {
+        let mut engine = TextEngine::default();
+        let source = TextDocument::new(vec![Paragraph::new(
+            "first café 🌳 last".into(),
+            Format {
+                bold: Some(true),
+                ..Default::default()
+            },
+        )])
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source.clone(), 200.0).unwrap();
+        let selection: Selection = [TextPosition {
+            paragraph: 0,
+            offset: 10,
+        }; 2]
+            .into();
+        editor.select(selection).unwrap();
+        assert!(editor.delete_to(&mut engine, Movement::WordLeft).unwrap());
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .next()
+                .unwrap()
+                .text(),
+            "first  🌳 last"
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, source);
+        assert_eq!(editor.selection(), selection);
+        editor.redo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::DocumentStart, false)
+            .unwrap();
+        assert!(!editor.delete_to(&mut engine, Movement::WordLeft).unwrap());
+        assert!(editor.redo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn horizontal_navigation_and_blank_grid_keep_documents_and_history_unchanged() {
+        let mut engine = TextEngine::default();
+        let mut outlines = Vec::new();
+        for (text, origin) in [
+            ("Solo", [36.0, 158.4]),
+            ("Right", [504.0, 158.4]),
+            ("Below", [504.0, 320.4]),
+        ] {
+            let document =
+                TextDocument::new(vec![Paragraph::new(text.into(), Format::default())]).unwrap();
+            outlines.push(TextOutline::new(&mut engine, document, 72.0, origin).unwrap());
+        }
+        let ids: Vec<_> = outlines.iter().map(|outline| outline.id).collect();
+        let originals: Vec<_> = outlines
+            .iter()
+            .map(|outline| outline.document.clone())
+            .collect();
+        let mut editor = CanvasEditor::from_text_outlines(outlines, BTreeMap::new(), None).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::LineEnd, false)
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Right, true)
+            .unwrap();
+        assert_eq!(editor.active_outline().id, ids[0]);
+        editor
+            .move_selection(&mut engine, Movement::Right, false)
+            .unwrap();
+        assert_eq!(editor.active_outline().id, ids[1]);
+        assert_eq!(editor.selection().positions[1].offset, 0);
+        editor
+            .move_selection(&mut engine, Movement::Left, false)
+            .unwrap();
+        assert_eq!(editor.active_outline().id, ids[0]);
+        assert_eq!(editor.selection().positions[1].offset, 4);
+        editor.focus_outline(ids[1]).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::LineEnd, false)
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Right, false)
+            .unwrap();
+        assert_eq!(editor.active_outline().id, ids[1]);
+        assert_eq!(editor.selection().positions[1].offset, 5);
+        editor
+            .place_caret(&mut engine, [486.0, 194.4], 468.0)
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Right, false)
+            .unwrap();
+        assert_eq!(editor.active_outline().origin(), [504.0, 194.4]);
+        editor
+            .move_selection(&mut engine, Movement::Up, false)
+            .unwrap();
+        assert_eq!(editor.active_outline().id, ids[1]);
+        assert_eq!(editor.selection().positions[1].offset, 0);
+        assert!(
+            editor
+                .outlines
+                .iter()
+                .zip(&originals)
+                .all(|(outline, original)| &outline.document == original)
+        );
+        assert!(!editor.undo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn word_and_paragraph_selection_use_source_ranges_across_wraps() {
+        let mut engine = TextEngine::default();
+        let document = TextDocument::new(vec![Paragraph::new(
+            "alpha beta gamma 🌳 delta".into(),
+            Format::default(),
+        )])
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document, 70.0).unwrap();
+        let point = TextPosition {
+            paragraph: 0,
+            offset: 7,
+        };
+        editor.select([point; 2].into()).unwrap();
+        let caret = editor.caret(1.0).unwrap();
+        let x = caret.x0 as f32;
+        let y = ((caret.y0 + caret.y1) * 0.5) as f32;
+        let word = editor.selection_at(x, y, SelectionUnit::Word).unwrap();
+        assert_eq!(word.positions.map(|p| p.offset), [6, 10]);
+        let paragraph = editor.selection_at(x, y, SelectionUnit::Paragraph).unwrap();
+        assert_eq!(paragraph.positions.map(|p| p.offset), [0, 25]);
+        assert_eq!(editor.selection().positions, [point; 2]);
+    }
+
+    #[test]
+    fn pointer_selection_uses_canvas_line_boxes_after_many_emoji_lines() {
+        let text = "alpha 🌳 beta\n".repeat(30);
+        let start = text[..text.rfind("beta").unwrap()].encode_utf16().count() as u32;
+        let mut engine = TextEngine::default();
+        let document = TextDocument::new(vec![Paragraph::new(text, Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document, 70.0).unwrap();
+        let position = TextPosition {
+            paragraph: 0,
+            offset: start + 1,
+        };
+        editor.select([position; 2].into()).unwrap();
+        let caret = editor.caret(1.0).unwrap();
+        let point = [caret.x0 as f32, ((caret.y0 + caret.y1) * 0.5) as f32];
+        assert_eq!(
+            editor
+                .selection_at(point[0], point[1], SelectionUnit::Word)
+                .unwrap()
+                .positions
+                .map(|p| p.offset),
+            [start, start + 4]
+        );
+        assert_eq!(
+            editor
+                .selection_at(point[0], point[1], SelectionUnit::Grapheme)
+                .unwrap()
+                .positions,
+            [position; 2]
+        );
+    }
+
     #[test]
     fn retiring_text_restores_source_selection_order_and_geometry_through_history() {
         let mut engine = TextEngine::default();
@@ -1476,7 +5289,7 @@ mod tests {
             .iter()
             .map(|outline| outline.id)
             .collect::<Vec<_>>();
-        let mut editor = CanvasEditor::from_text_outlines(outlines, BTreeMap::new()).unwrap();
+        let mut editor = CanvasEditor::from_text_outlines(outlines, BTreeMap::new(), None).unwrap();
         editor.focus_outline(id).unwrap();
         editor.select_all().unwrap();
         let selection = editor.selection();
@@ -1551,7 +5364,8 @@ mod tests {
             let first = outlines[0].id;
             let second = outlines[1].id;
             let original = outlines[0].document.clone();
-            let mut editor = CanvasEditor::from_text_outlines(outlines, BTreeMap::new()).unwrap();
+            let mut editor =
+                CanvasEditor::from_text_outlines(outlines, BTreeMap::new(), None).unwrap();
             editor.select_all().unwrap();
             editor.compose(&mut engine, String::new(), 0..0).unwrap();
             assert_eq!(editor.outlines.len(), 2);
@@ -1625,6 +5439,24 @@ mod tests {
         assert_eq!(editor.outlines.len(), 1);
         editor.delete(&mut engine, true).unwrap();
         assert!(editor.outlines.is_empty());
+        assert_eq!(editor.active_outline().document, spaces);
+        let undo_count = editor.undo.len();
+        editor.select_all().unwrap();
+        assert!(editor.delete_to(&mut engine, Movement::LineStart).unwrap());
+        assert!(editor.outlines.is_empty());
+        assert_eq!(editor.undo.len(), undo_count);
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .next()
+                .unwrap()
+                .text(),
+            "   x"
+        );
+        assert!(editor.redo(&mut engine).unwrap());
         assert_eq!(editor.active_outline().document, spaces);
         for _ in 0..2 {
             editor.undo(&mut engine).unwrap();
@@ -1779,7 +5611,7 @@ mod tests {
             .into_iter()
             .find_map(|object| match object {
                 PageObject::Outline(outline)
-                    if outline.paragraphs[0].combined_text().text() == "Spacing first" =>
+                    if outline.paragraphs[0].text().unwrap().text.text() == "Spacing first" =>
                 {
                     Some(outline)
                 }
@@ -1812,6 +5644,89 @@ mod tests {
     }
 
     #[test]
+    fn resize_preview_preserves_history_and_commit_restores_automatic_width_on_undo() {
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(String::new(), Format::default())]).unwrap(),
+            468.0,
+        )
+        .unwrap();
+        editor.insert(&mut engine, "One").unwrap();
+        let source = editor.active_outline().snapshot();
+        let selection = editor.selection();
+        editor.insert(&mut engine, "!").unwrap();
+        editor.undo(&mut engine).unwrap();
+        for width in [120.0, 360.0, 180.0] {
+            let preview = editor.preview_resize(&mut engine, width).unwrap();
+            assert_eq!(preview.bounds().width(), f64::from(width));
+            assert_eq!(preview.document, editor.active_outline().document);
+            assert_eq!(editor.active_outline().layout, source.layout);
+            assert_eq!(editor.undo.len(), 1);
+            assert_eq!(editor.redo.len(), 1);
+        }
+        assert!(editor.preview_resize(&mut engine, f32::NAN).is_err());
+        editor.resize(&mut engine, 180.0).unwrap();
+        assert!(editor.redo.is_empty());
+        assert_eq!(editor.undo.len(), 2);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().layout, source.layout);
+        assert_eq!(editor.active_outline().bounds().width(), 72.0);
+        assert_eq!(editor.selection(), selection);
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 180.0);
+        editor.resize(&mut engine, 180.0).unwrap();
+        assert_eq!(editor.undo.len(), 2);
+    }
+
+    #[test]
+    fn new_empty_outline_grows_shrinks_and_keeps_a_manually_set_width() {
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(String::new(), Format::default())]).unwrap(),
+            468.0,
+        )
+        .unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 72.0);
+        assert_eq!(
+            editor.active_outline().layout.width_set_by_user,
+            Some(false)
+        );
+        editor
+            .insert(&mut engine, "A short sentence expands the container")
+            .unwrap();
+        let expanded = editor.active_outline().bounds().width();
+        assert!(expanded > 72.0 && expanded < 468.0);
+        editor.select_all().unwrap();
+        editor.insert(&mut engine, &"words ".repeat(80)).unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 468.0);
+        assert!(
+            editor
+                .active_outline()
+                .paragraph_layout(0)
+                .unwrap()
+                .text
+                .lines()
+                .count()
+                > 1
+        );
+        editor.select_all().unwrap();
+        editor.insert(&mut engine, "One").unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 72.0);
+        editor.resize(&mut engine, 180.0).unwrap();
+        editor.select_all().unwrap();
+        editor.insert(&mut engine, "Tiny").unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 180.0);
+        editor
+            .insert(&mut engine, &" longer words".repeat(10))
+            .unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 180.0);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 180.0);
+    }
+
+    #[test]
     fn resizing_an_automatic_outline_sets_its_explicit_width_and_preserves_spacing_metadata() {
         let document = TextDocument::new(vec![Paragraph::new(
             "short".into(),
@@ -1823,6 +5738,8 @@ mod tests {
         .unwrap();
         let source = document.nodes().to_vec();
         let outline = Outline {
+            title: false,
+            min_width: None,
             id: crate::text::new_id().unwrap(),
             layout: onestore::document::Layout {
                 max_width: Some(220.0),
@@ -1913,6 +5830,8 @@ mod tests {
             },
         )]);
         let outline = Outline {
+            title: false,
+            min_width: None,
             id: crate::text::new_id().unwrap(),
             layout: onestore::document::Layout {
                 x: Some(30.0),
@@ -1975,6 +5894,8 @@ mod tests {
         );
         let rebuilt = Outline {
             id,
+            title: false,
+            min_width: None,
             layout: editor.active_outline().layout.clone(),
             indents: vec![18.0, 0.0, 27.0],
             paragraphs: editor.active_outline().document.nodes().to_vec(),
@@ -2019,13 +5940,21 @@ mod tests {
                     .into(),
             )
             .unwrap();
-        editor.move_selection(Movement::Right, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Right, false)
+            .unwrap();
         assert_eq!(editor.selection().positions[1].paragraph, 4);
-        editor.move_selection(Movement::Left, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Left, false)
+            .unwrap();
         assert_eq!(editor.selection().positions[1].paragraph, 2);
-        editor.move_selection(Movement::Down, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
         assert_eq!(editor.selection().positions[1].paragraph, 4);
-        editor.move_selection(Movement::Up, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Up, false)
+            .unwrap();
         assert_eq!(editor.selection().positions[1].paragraph, 2);
         editor.select_all().unwrap();
         assert!(!editor.selection_rects().unwrap().is_empty());
@@ -2083,7 +6012,7 @@ mod tests {
             assert_eq!(layout_snapshot(&editor.active_outline().shaped), expected);
             let visible: Vec<_> = editor.active_outline().layouts().map(|(i, _)| i).collect();
             for paragraph in visible {
-                let text = &nodes[paragraph].text[0].text;
+                let text = &nodes[paragraph].text().unwrap().text;
                 let byte = text
                     .text()
                     .char_indices()
@@ -2099,6 +6028,8 @@ mod tests {
                 let edited = editor.active_outline().document.clone();
                 let rebuilt = Outline {
                     id,
+                    title: false,
+                    min_width: None,
                     layout: source_layout.clone(),
                     indents: editor.active_outline().indents.clone(),
                     paragraphs: edited.nodes().to_vec(),
@@ -2145,14 +6076,18 @@ mod tests {
             offset: 3,
         };
         for _ in 0..32 {
-            editor.move_selection(Movement::Right, false).unwrap();
+            editor
+                .move_selection(&mut engine, Movement::Right, false)
+                .unwrap();
             if editor.selection().positions[1] == last {
                 break;
             }
         }
         assert_eq!(editor.selection().positions[1], last);
         for _ in 0..32 {
-            editor.move_selection(Movement::Left, false).unwrap();
+            editor
+                .move_selection(&mut engine, Movement::Left, false)
+                .unwrap();
             if editor.selection().positions[1] == first {
                 break;
             }
@@ -2188,11 +6123,16 @@ mod tests {
         let after = editor.active_outline().document.clone();
         editor.resize(&mut engine, 35.0).unwrap();
         editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, after);
+        assert_eq!(editor.active_outline().layout.max_width, Some(100.0));
+        editor.undo(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document, original);
         assert_eq!(editor.selection().positions, [anchor, focus]);
         editor.redo(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document, after);
         assert_eq!(editor.selection().positions[1].offset, 4);
+        editor.redo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().layout.max_width, Some(35.0));
         let styles = editor.active_outline().shaped.paragraphs[0]
             .text
             .shaped
@@ -2206,7 +6146,7 @@ mod tests {
             Movement::LineStart,
             Movement::LineEnd,
         ] {
-            editor.move_selection(movement, false).unwrap();
+            editor.move_selection(&mut engine, movement, false).unwrap();
             assert_eq!(
                 editor.active_outline().shaped.paragraphs[0]
                     .text
@@ -2358,7 +6298,10 @@ mod tests {
         assert_eq!(editor.active_outline().document, provisional);
         assert_eq!(editor.selection().positions, selection);
         assert_eq!(editor.marked_range(), marked);
-        editor.resize(&mut engine, 25.0).unwrap();
+        let preview = editor.preview_resize(&mut engine, 25.0).unwrap();
+        assert_eq!(preview.document, provisional);
+        assert_eq!(preview.layout.max_width, Some(25.0));
+        assert_eq!(editor.active_outline().layout.max_width, Some(70.0));
         editor.cancel_composition(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document, original);
         assert_eq!(editor.selection().positions, [last, first]);
@@ -2391,7 +6334,9 @@ mod tests {
         };
         editor.select([start, start].into()).unwrap();
         let x = editor.caret(1.0).unwrap().x0;
-        editor.move_selection(Movement::Down, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
         assert_eq!(
             editor.selection().positions[1],
             TextPosition {
@@ -2399,7 +6344,9 @@ mod tests {
                 offset: 0
             }
         );
-        editor.move_selection(Movement::Down, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Down, false)
+            .unwrap();
         assert_eq!(
             editor.selection().positions[1],
             TextPosition {
@@ -2408,8 +6355,12 @@ mod tests {
             }
         );
         assert_eq!(editor.caret(1.0).unwrap().x0, x);
-        editor.move_selection(Movement::Up, true).unwrap();
-        editor.move_selection(Movement::Up, true).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Up, true)
+            .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Up, true)
+            .unwrap();
         assert_eq!(
             editor.selection().positions,
             [
@@ -2420,14 +6371,18 @@ mod tests {
                 start
             ]
         );
-        editor.move_selection(Movement::Left, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Left, false)
+            .unwrap();
         assert_eq!(editor.selection().positions, [start; 2]);
         let boundary = TextPosition {
             paragraph: 1,
             offset: 0,
         };
         editor.select([boundary, boundary].into()).unwrap();
-        editor.move_selection(Movement::Left, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Left, false)
+            .unwrap();
         assert_eq!(
             editor.selection().positions[1],
             TextPosition {
@@ -2435,7 +6390,9 @@ mod tests {
                 offset: 10
             }
         );
-        editor.move_selection(Movement::Right, false).unwrap();
+        editor
+            .move_selection(&mut engine, Movement::Right, false)
+            .unwrap();
         assert_eq!(editor.selection().positions[1], boundary);
     }
 
@@ -2829,6 +6786,7 @@ mod tests {
             rebuilt.active_outline().document
         );
         let selection = editor.selection().positions;
+        let previous_width = editor.active_outline().layout.max_width.unwrap();
         editor.resize(&mut engine, 30.0).unwrap();
         let rebuilt =
             CanvasEditor::new(&mut engine, editor.active_outline().document.clone(), 30.0).unwrap();
@@ -2837,8 +6795,16 @@ mod tests {
         assert!(editor.resize(&mut engine, f32::NAN).is_err());
         assert_eq!(ys(editor.active_outline()), ys(rebuilt.active_outline()));
         editor.undo(&mut engine).unwrap();
-        let rebuilt =
-            CanvasEditor::new(&mut engine, editor.active_outline().document.clone(), 30.0).unwrap();
+        assert_eq!(
+            editor.active_outline().layout.max_width,
+            Some(previous_width)
+        );
+        let rebuilt = CanvasEditor::new(
+            &mut engine,
+            editor.active_outline().document.clone(),
+            previous_width,
+        )
+        .unwrap();
         assert_eq!(ys(editor.active_outline()), ys(rebuilt.active_outline()));
     }
 

@@ -3,12 +3,12 @@ pub mod page;
 mod profile;
 mod tags;
 
-use bytemuck::{Pod, Zeroable};
-use image::ImageDecoder;
-use one_canvas::{
+use crate::{
     layout::TextLayout,
     outline::{ParagraphTag, TagIcon},
 };
+use bytemuck::{Pod, Zeroable};
+use image::ImageDecoder;
 use parley::{PositionedLayoutItem, fontique::Blob};
 use std::{
     collections::{HashMap, HashSet},
@@ -102,6 +102,7 @@ struct CachedImage {
 struct Batch {
     vertices: Range<u32>,
     image: Option<u64>,
+    scissor: [u32; 4],
 }
 
 #[repr(C)]
@@ -110,6 +111,9 @@ struct Vertex {
     position: [f32; 2],
     uv: [f32; 2],
     color: [f32; 4],
+    local: [f32; 2],
+    shape: [f32; 4],
+    stroke: f32,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -179,6 +183,13 @@ impl Viewport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Stroke {
+    Solid(f32),
+    /// Dash and gap lengths are twice the stroke width.
+    Dashed(f32),
+}
+
 /// Coordinates are document points; colors are linear RGBA.
 pub enum Primitive<'a> {
     Tag {
@@ -188,9 +199,18 @@ pub enum Primitive<'a> {
     Text {
         layout: &'a TextLayout,
         origin: [f32; 2],
+        /// Document-space paint bounds preserve the full shaping and caret advances.
+        clip: Option<[f32; 4]>,
     },
     Rect {
         rect: [f32; 4],
+        color: [f32; 4],
+    },
+    RoundedRect {
+        rect: [f32; 4],
+        radius: [f32; 2],
+        /// None fills the shape; stroke widths are positive document points.
+        stroke: Option<Stroke>,
         color: [f32; 4],
     },
     Image {
@@ -271,7 +291,7 @@ impl Renderer {
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4, 5 => Float32],
                     })],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -434,6 +454,8 @@ impl Renderer {
             });
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             for batch in &self.batches {
+                let [x, y, width, height] = batch.scissor;
+                pass.set_scissor_rect(x, y, width, height);
                 pass.set_pipeline(if batch.image.is_some() {
                     &self.image_pipeline
                 } else {
@@ -460,6 +482,7 @@ impl Renderer {
         for primitive in primitives {
             let start = self.vertices.len() as u32;
             let mut image_id = None;
+            let mut scissor = [0, 0, viewport.size[0], viewport.size[1]];
             match primitive {
                 Primitive::Tag { tag, origin } => {
                     let origin = [
@@ -468,13 +491,27 @@ impl Renderer {
                     ];
                     self.tag(Viewport { origin, ..viewport }, tag)?;
                 }
-                Primitive::Text { layout, origin } => {
+                Primitive::Text {
+                    layout,
+                    origin,
+                    clip,
+                } => {
                     let origin = [
                         viewport.origin[0] + origin[0] * viewport.scale,
                         viewport.origin[1] + origin[1] * viewport.scale,
                     ];
                     if origin.iter().any(|v| !v.is_finite()) {
                         return Err(RenderError::InvalidPrimitive);
+                    }
+                    if let Some(clip) = clip {
+                        let Some(rect) = viewport.visible_image_rect(*clip)? else {
+                            continue;
+                        };
+                        let left = rect[0].max(0.0).floor() as u32;
+                        let top = rect[1].max(0.0).floor() as u32;
+                        let right = rect[2].min(viewport.size[0] as f32).ceil() as u32;
+                        let bottom = rect[3].min(viewport.size[1] as f32).ceil() as u32;
+                        scissor = [left, top, right - left, bottom - top];
                     }
                     self.text(Viewport { origin, ..viewport }, layout)?;
                 }
@@ -491,6 +528,56 @@ impl Renderer {
                         *color,
                     )?;
                 }
+                Primitive::RoundedRect {
+                    rect,
+                    radius,
+                    stroke,
+                    color,
+                } => {
+                    if radius
+                        .iter()
+                        .any(|value| !value.is_finite() || *value < 0.0)
+                    {
+                        return Err(RenderError::InvalidPrimitive);
+                    }
+                    let width = match stroke {
+                        None => 0.0,
+                        Some(Stroke::Solid(width) | Stroke::Dashed(width)) => {
+                            if !width.is_finite() || *width <= 0.0 || width * viewport.scale == 0.0
+                            {
+                                return Err(RenderError::InvalidPrimitive);
+                            }
+                            *width
+                        }
+                    };
+                    let rect = [
+                        rect[0] * viewport.scale + viewport.origin[0],
+                        rect[1] * viewport.scale + viewport.origin[1],
+                        rect[2] * viewport.scale + viewport.origin[0],
+                        rect[3] * viewport.scale + viewport.origin[1],
+                    ];
+                    self.quad(viewport, rect, [0.5 / ATLAS_SIZE as f32; 4], *color)?;
+                    let half = [(rect[2] - rect[0]) * 0.5, (rect[3] - rect[1]) * 0.5];
+                    if !(4.0 * (half[0] + half[1])).is_finite() {
+                        return Err(RenderError::InvalidPrimitive);
+                    }
+                    let radius = if radius.contains(&0.0) {
+                        [0.0; 2]
+                    } else {
+                        std::array::from_fn(|axis| (radius[axis] * viewport.scale).min(half[axis]))
+                    };
+                    let width = (width * viewport.scale).min(half[0].min(half[1]));
+                    // The stroke sign selects its dash pattern at the shader boundary.
+                    let width = if matches!(stroke, Some(Stroke::Dashed(_))) {
+                        -width
+                    } else {
+                        width
+                    };
+                    for vertex in &mut self.vertices[start as usize..] {
+                        vertex.shape = [half[0], half[1], radius[0], radius[1]];
+                        vertex.stroke = width;
+                    }
+                }
                 Primitive::Image { image, rect } => {
                     if let Some(rect) = viewport.visible_image_rect(*rect)? {
                         self.image(image, active_images)?;
@@ -503,12 +590,14 @@ impl Renderer {
             if start != end {
                 if let Some(last) = self.batches.last_mut()
                     && last.image == image_id
+                    && last.scissor == scissor
                 {
                     last.vertices.end = end;
                 } else {
                     self.batches.push(Batch {
                         vertices: start..end,
                         image: image_id,
+                        scissor,
                     });
                 }
             }
@@ -678,17 +767,24 @@ impl Renderer {
                         cached
                     };
                     if let Some(glyph) = cached {
-                        let left = x.floor() + glyph.left as f32;
-                        let top = y.floor() - glyph.top as f32;
+                        let mut left = x.floor() + glyph.left as f32;
+                        let mut top = y.floor() - glyph.top as f32;
+                        let mut width = glyph.width as f32;
+                        let mut height = glyph.height as f32;
+                        if glyph.color {
+                            let line_top = line_box.top * scale + origin[1];
+                            let line_height = line_box.height * scale;
+                            let ratio = (line_height / height).min(1.0);
+                            left += width * (1.0 - ratio) * 0.5;
+                            width *= ratio;
+                            height *= ratio;
+                            top = top
+                                .clamp(line_top, (line_top + line_height - height).max(line_top));
+                        }
                         let atlas_size = ATLAS_SIZE as f32;
                         self.quad(
                             viewport,
-                            [
-                                left,
-                                top,
-                                left + glyph.width as f32,
-                                top + glyph.height as f32,
-                            ],
+                            [left, top, left + width, top + height],
                             [
                                 glyph.x as f32 / atlas_size,
                                 glyph.y as f32 / atlas_size,
@@ -877,18 +973,22 @@ impl Renderer {
         if [x0, x1, y0, y1].iter().any(|v| !v.is_finite()) {
             return Err(RenderError::InvalidPrimitive);
         }
-        for (position, uv) in [
-            ([x0, y0], [uv[0], uv[1]]),
-            ([x0, y1], [uv[0], uv[3]]),
-            ([x1, y1], [uv[2], uv[3]]),
-            ([x0, y0], [uv[0], uv[1]]),
-            ([x1, y1], [uv[2], uv[3]]),
-            ([x1, y0], [uv[2], uv[1]]),
+        let [hx, hy] = [(rect[2] - rect[0]) * 0.5, (rect[3] - rect[1]) * 0.5];
+        for (position, uv, local) in [
+            ([x0, y0], [uv[0], uv[1]], [-hx, -hy]),
+            ([x0, y1], [uv[0], uv[3]], [-hx, hy]),
+            ([x1, y1], [uv[2], uv[3]], [hx, hy]),
+            ([x0, y0], [uv[0], uv[1]], [-hx, -hy]),
+            ([x1, y1], [uv[2], uv[3]], [hx, hy]),
+            ([x1, y0], [uv[2], uv[1]], [hx, -hy]),
         ] {
             self.vertices.push(Vertex {
                 position,
                 uv,
                 color,
+                local,
+                shape: [0.0; 4],
+                stroke: 0.0,
             });
         }
         Ok(())
@@ -919,7 +1019,7 @@ pub fn colorref(color: u32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use one_canvas::{layout::TextEngine, text::Paragraph};
+    use crate::{layout::TextEngine, text::Paragraph};
     use onestore::document::Format as TextFormat;
     use std::time::Duration;
 
@@ -1077,10 +1177,12 @@ mod tests {
                 color: [0.55, 0.73, 1.0, 0.5],
             },
             Primitive::Text {
+                clip: None,
                 layout: &layout,
                 origin: [0.0; 2],
             },
             Primitive::Text {
+                clip: None,
                 layout: &layout,
                 origin: [8.0, 64.0],
             },
@@ -1095,6 +1197,24 @@ mod tests {
             Primitive::Image {
                 image: &transparent_edge,
                 rect: [176.0, 8.0, 208.0, 40.0],
+            },
+            Primitive::RoundedRect {
+                rect: [128.0, 48.0, 148.0, 68.0],
+                radius: [5.0, 10.0],
+                stroke: None,
+                color: [1.0, 0.0, 0.0, 1.0],
+            },
+            Primitive::RoundedRect {
+                rect: [164.0, 48.0, 184.0, 68.0],
+                radius: [5.0; 2],
+                stroke: Some(Stroke::Solid(1.0)),
+                color: [0.0, 0.0, 1.0, 1.0],
+            },
+            Primitive::RoundedRect {
+                rect: [200.0, 48.0, 240.0, 68.0],
+                radius: [3.0, 10.0],
+                stroke: Some(Stroke::Dashed(1.0)),
+                color: [0.0, 0.0, 1.0, 1.0],
             },
             Primitive::Tag {
                 tag: &tags[0],
@@ -1114,21 +1234,33 @@ mod tests {
             },
         ];
         primitives.extend((0..9).map(|step| Primitive::Text {
+            clip: None,
             layout: &phase_layout,
             origin: [8.0 + 24.0 * step as f32, 96.0 + 0.125 * step as f32],
         }));
-        for pass in 0..4 {
+        for pass in 0..6 {
             if pass == 2 {
                 renderer.clear_glyph_cache();
                 renderer.images.clear();
             } else if pass == 3 {
                 renderer = Renderer::new(renderer.device.clone(), renderer.queue.clone(), format);
             }
+            let clipping = [
+                Primitive::Text {
+                    layout: &layout,
+                    origin: [0.0; 2],
+                    clip: (pass == 5).then_some([2.5, 1.25, 30.75, 20.5]),
+                },
+                Primitive::Rect {
+                    rect: [40.0, 40.0, 70.0, 50.0],
+                    color: [0.0, 0.0, 1.0, 1.0],
+                },
+            ];
             renderer
                 .draw(
                     &target.create_view(&Default::default()),
                     viewport,
-                    &primitives,
+                    if pass < 4 { &primitives } else { &clipping },
                 )
                 .unwrap();
             let mut encoder = renderer.device.create_command_encoder(&Default::default());
@@ -1183,6 +1315,21 @@ mod tests {
                 moment / weight
             })
             .collect();
+        let pixel = |x: usize, y: usize| &captures[0][(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];
+        assert_eq!(pixel(300, 140), [255, 0, 0, 255]);
+        assert_eq!(pixel(280, 120), [255; 4]);
+        assert_eq!(pixel(282, 124), [255; 4]);
+        assert_eq!(pixel(281, 140), [255, 0, 0, 255]);
+        assert_eq!(pixel(372, 140), [255; 4]);
+        assert_eq!(pixel(372, 120), [0, 0, 255, 255]);
+        assert_eq!(pixel(352, 120), [255; 4]);
+        assert_eq!(pixel(424, 120), [255; 4]);
+        assert_eq!(pixel(464, 140), [255; 4]);
+        assert!((440..480).any(|x| pixel(x, 120)[0] < 40));
+        assert!((440..480).any(|x| pixel(x, 120)[0] > 250));
+        for x in 440..472 {
+            assert!(pixel(x, 120)[0].abs_diff(pixel(x + 8, 120)[0]) <= 1);
+        }
         for (step, centroid) in centroids.iter().enumerate() {
             let movement = centroid - centroids[0];
             assert!(
@@ -1229,6 +1376,24 @@ mod tests {
         assert_eq!(captures[0], captures[1]);
         assert_eq!(captures[0], captures[2]);
         assert_eq!(captures[0], captures[3]);
+        assert_ne!(captures[4], captures[5]);
+        for y in 0..256 {
+            for x in 0..512 {
+                let offset = (y * 512 + x) * 4;
+                let expected = if ((29..86).contains(&x) && (26..65).contains(&y))
+                    || ((104..164).contains(&x) && (104..124).contains(&y))
+                {
+                    &captures[4][offset..offset + 4]
+                } else {
+                    &[255; 4]
+                };
+                assert_eq!(
+                    &captures[5][offset..offset + 4],
+                    expected,
+                    "clipping at {x},{y}"
+                );
+            }
+        }
         for (x, y, color) in [
             (288, 48, [255, 0, 0, 255]),
             (336, 96, [255; 4]),
@@ -1243,6 +1408,30 @@ mod tests {
         assert!((180..=200).contains(&edge[1]), "{edge:?}");
         assert_eq!(renderer.images.len(), 2);
         for primitive in [
+            Primitive::RoundedRect {
+                rect: [-1e38, 0.0, 1e38, 1e38],
+                radius: [3.0; 2],
+                stroke: Some(Stroke::Dashed(1.0)),
+                color: [1.0; 4],
+            },
+            Primitive::RoundedRect {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                radius: [f32::NAN, 2.0],
+                stroke: None,
+                color: [1.0; 4],
+            },
+            Primitive::RoundedRect {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                radius: [2.0; 2],
+                stroke: Some(Stroke::Solid(0.0)),
+                color: [1.0; 4],
+            },
+            Primitive::RoundedRect {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                radius: [2.0; 2],
+                stroke: Some(Stroke::Dashed(f32::NAN)),
+                color: [1.0; 4],
+            },
             Primitive::Rect {
                 rect: [0.0, 0.0, f32::NAN, 1.0],
                 color: [1.0; 4],
@@ -1252,8 +1441,19 @@ mod tests {
                 color: [1.0; 4],
             },
             Primitive::Text {
+                clip: None,
                 layout: &layout,
                 origin: [f32::MAX; 2],
+            },
+            Primitive::Text {
+                clip: Some([0.0, 0.0, f32::NAN, 1.0]),
+                layout: &layout,
+                origin: [0.0; 2],
+            },
+            Primitive::Text {
+                clip: Some([2.0, 0.0, 1.0, 1.0]),
+                layout: &layout,
+                origin: [0.0; 2],
             },
         ] {
             assert!(matches!(

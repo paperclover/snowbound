@@ -1,4 +1,4 @@
-use one_canvas::{layout::TextEngine, text::Paragraph};
+use canvas::{layout::TextEngine, text::Paragraph};
 use onestore::document::Format;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

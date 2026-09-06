@@ -16,12 +16,14 @@ pub struct Paragraph {
     spans: Vec<Span>,
 }
 
+#[derive(Clone)]
 pub struct TextProjection {
     text: Paragraph,
     spans: Vec<ProjectedSpan>,
     source_len: u32,
 }
 
+#[derive(Clone)]
 struct ProjectedSpan {
     visible: Range<u32>,
     source_start: u32,
@@ -148,7 +150,7 @@ impl Paragraph {
                 .map_err(|_| EditError::TextTooLong)?;
             let source_end = source.checked_add(length).ok_or(EditError::TextTooLong)?;
             if span.format.hidden != Some(true) {
-                runs.push((fragment.to_owned(), span.format.clone()));
+                runs.push((fragment.replace('\u{000b}', "\n"), span.format.clone()));
                 if length > 0 {
                     if let Some(last) = spans.last_mut()
                         && last.source_start + (last.visible.end - last.visible.start) == source
@@ -354,6 +356,27 @@ mod tests {
             bold: Some(true),
             ..regular()
         }
+    }
+
+    #[test]
+    fn soft_breaks_keep_source_offsets_and_formatting() {
+        let source = Paragraph::from_runs([("A\u{000b}".into(), regular()), ("🌳".into(), bold())]);
+        let projection = source.project().unwrap();
+        assert_eq!(source.text(), "A\u{000b}🌳");
+        assert_eq!(projection.text().text(), "A\n🌳");
+        assert_eq!(projection.text().spans(), source.spans());
+        assert_eq!(
+            projection.source_boundaries().collect::<Vec<_>>(),
+            [(0, 0), (1, 1), (2, 2), (6, 4)]
+        );
+        for offset in [0, 1, 2, 4] {
+            assert_eq!(projection.visible_offset(offset), Ok(offset));
+            assert_eq!(
+                projection.source_offset(offset, Affinity::Downstream),
+                Ok(offset)
+            );
+        }
+        assert!(projection.visible_offset(3).is_err());
     }
 
     #[test]

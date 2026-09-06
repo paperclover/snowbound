@@ -390,6 +390,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "getrandom 0.4.3",
+ "image",
+ "onestore",
+ "parley",
+ "png",
+ "pollster",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "skrifa",
+ "swash",
+ "wgpu",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1888,53 +1907,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "one-canvas"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.4.3",
- "onestore",
- "parley",
- "serde",
- "serde_json",
- "skrifa",
-]
-
-[[package]]
-name = "one-canvas-app"
-version = "0.1.0"
-dependencies = [
- "accesskit",
- "accesskit_consumer",
- "accesskit_winit",
- "arboard",
- "objc2 0.5.2",
- "objc2-app-kit 0.2.2",
- "objc2-foundation 0.2.2",
- "one-canvas",
- "one-canvas-gpu",
- "onestore",
- "parley",
- "pollster",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "one-canvas-gpu"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "image",
- "one-canvas",
- "onestore",
- "parley",
- "png",
- "pollster",
- "swash",
- "wgpu",
-]
-
-[[package]]
 name = "onestore"
 version = "0.1.0"
 dependencies = [
@@ -2663,6 +2635,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "snowbound"
+version = "0.1.0"
+dependencies = [
+ "accesskit",
+ "accesskit_consumer",
+ "accesskit_winit",
+ "arboard",
+ "canvas",
+ "objc2 0.5.2",
+ "objc2-app-kit 0.2.2",
+ "objc2-foundation 0.2.2",
+ "onestore",
+ "parley",
+ "pollster",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 use super::*;
-use one_canvas::document::TextPosition;
+use canvas::document::TextPosition;
 use std::{hint::black_box, process::Command};
 
 fn timed<T>(case: &str, phase: &str, sample: usize, operation: impl FnOnce() -> T) -> T {

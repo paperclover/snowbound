@@ -9,7 +9,10 @@ use std::{
     collections::BTreeSet,
     fmt,
     ops::Range,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Default)]
@@ -33,9 +36,10 @@ pub struct LineBox {
     pub height: f32,
 }
 
+#[derive(Clone)]
 pub struct TextLayout {
     id: u64,
-    pub(crate) shaped: Layout<TextBrush>,
+    pub(crate) shaped: Arc<Layout<TextBrush>>,
     lines: Vec<LineBox>,
 }
 
@@ -112,7 +116,11 @@ impl TextEngine {
         Ok(target)
     }
 
-    pub fn layout(&mut self, paragraph: &Paragraph, width: f32) -> Result<TextLayout, LayoutError> {
+    fn shape(
+        &mut self,
+        paragraph: &Paragraph,
+        width: f32,
+    ) -> Result<Layout<TextBrush>, LayoutError> {
         if !width.is_finite() || width <= 0.0 {
             return Err(LayoutError::InvalidWidth);
         }
@@ -121,6 +129,8 @@ impl TextEngine {
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
         builder.push_default(StyleProperty::OverflowWrap(OverflowWrap::BreakWord));
+        // OneNote 2010 uses unkerned advances for text and table widths.
+        builder.push_default(StyleProperty::FontFeatures(r#""kern" 0"#.into()));
         let mut start = 0;
         for (index, span) in paragraph.spans().iter().enumerate() {
             let format = &span.format;
@@ -161,6 +171,43 @@ impl TextEngine {
         let mut shaped = builder.build(text);
         shaped.break_all_lines(Some(width));
         shaped.align(Alignment::Start, AlignmentOptions::default());
+        Ok(shaped)
+    }
+
+    fn font_extents(
+        &self,
+        run: parley::layout::Run<'_, TextBrush>,
+    ) -> Result<(f32, f32), LayoutError> {
+        let data = &run.font().font;
+        let font = FontRef::from_index(data.data.as_ref(), data.index)
+            .map_err(|_| LayoutError::InvalidFontMetrics)?;
+        Ok(if self.arial_substitutes.contains(&data.data.id()) {
+            // Arimo's hhea extents match Arial's Windows extents; omit hhea line gap.
+            let head = font.head().map_err(|_| LayoutError::InvalidFontMetrics)?;
+            let hhea = font.hhea().map_err(|_| LayoutError::InvalidFontMetrics)?;
+            let scale = run.font_size() / f32::from(head.units_per_em());
+            (
+                f32::from(hhea.ascender().to_i16()) * scale,
+                -f32::from(hhea.descender().to_i16()) * scale,
+            )
+        } else if let (Ok(head), Ok(os2)) = (font.head(), font.os2())
+            && head.units_per_em() != 0
+            && (os2.us_win_ascent() != 0 || os2.us_win_descent() != 0)
+        {
+            let scale = run.font_size() / f32::from(head.units_per_em());
+            (
+                f32::from(os2.us_win_ascent()) * scale,
+                f32::from(os2.us_win_descent()) * scale,
+            )
+        } else {
+            let metrics = run.font_metrics();
+            (metrics.ascent, metrics.descent)
+        })
+    }
+
+    pub fn layout(&mut self, paragraph: &Paragraph, width: f32) -> Result<TextLayout, LayoutError> {
+        let shaped = self.shape(paragraph, width)?;
+        let text = paragraph.text();
         let mut lines = Vec::with_capacity(shaped.len());
         let mut top = 0.0_f64;
         let mut source_end = 0;
@@ -189,27 +236,25 @@ impl TextEngine {
                 let data = &run.font().font;
                 let font = FontRef::from_index(data.data.as_ref(), data.index)
                     .map_err(|_| LayoutError::InvalidFontMetrics)?;
-                let (a, d) = if self.arial_substitutes.contains(&data.data.id()) {
-                    // Arimo's hhea extents match Arial's Windows extents; omit hhea line gap.
-                    let head = font.head().map_err(|_| LayoutError::InvalidFontMetrics)?;
-                    let hhea = font.hhea().map_err(|_| LayoutError::InvalidFontMetrics)?;
-                    let scale = run.font_size() / f32::from(head.units_per_em());
-                    (
-                        f32::from(hhea.ascender().to_i16()) * scale,
-                        -f32::from(hhea.descender().to_i16()) * scale,
-                    )
-                } else if let (Ok(head), Ok(os2)) = (font.head(), font.os2())
-                    && head.units_per_em() != 0
-                    && (os2.us_win_ascent() != 0 || os2.us_win_descent() != 0)
-                {
-                    let scale = run.font_size() / f32::from(head.units_per_em());
-                    (
-                        f32::from(os2.us_win_ascent()) * scale,
-                        f32::from(os2.us_win_descent()) * scale,
-                    )
+                // Color glyphs fit the source font's line box instead of shifting annotation rows.
+                let (a, d) = if font.colr().is_ok() || font.sbix().is_ok() || font.cbdt().is_ok() {
+                    let format = &paragraph
+                        .spans()
+                        .iter()
+                        .find(|span| span.end > run.text_range().start)
+                        .unwrap_or_else(|| paragraph.spans().last().unwrap())
+                        .format;
+                    let sample =
+                        self.shape(&Paragraph::new("Mg".into(), format.clone()), f32::MAX)?;
+                    sample.lines().flat_map(|line| line.runs()).try_fold(
+                        (0.0_f32, 0.0_f32),
+                        |(a, d), run| {
+                            let (next_a, next_d) = self.font_extents(run)?;
+                            Ok::<_, LayoutError>((a.max(next_a), d.max(next_d)))
+                        },
+                    )?
                 } else {
-                    let metrics = run.font_metrics();
-                    (metrics.ascent, metrics.descent)
+                    self.font_extents(run)?
                 };
                 if !a.is_finite() || !d.is_finite() || a < 0.0 || d < 0.0 {
                     return Err(LayoutError::InvalidFontMetrics);
@@ -239,7 +284,11 @@ impl TextEngine {
         let id = NEXT_ID
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .expect("Text layout identities exhausted");
-        Ok(TextLayout { id, shaped, lines })
+        Ok(TextLayout {
+            id,
+            shaped: Arc::new(shaped),
+            lines,
+        })
     }
 }
 
@@ -303,6 +352,59 @@ impl TextLayout {
         Cursor::from_byte_index(&self.shaped, byte, affinity)
     }
 
+    pub(crate) fn word_cursor(&self, cursor: Cursor, backward: bool) -> Cursor {
+        let mut current = cursor;
+        let mut visited = BTreeSet::new();
+        loop {
+            if !visited.insert((current.index(), current.affinity() == Affinity::Upstream)) {
+                // Parley visual cursors can cycle at soft-wrapped bidi boundaries.
+                let [left, right] = cursor.visual_clusters(&self.shaped);
+                let rtl = if backward {
+                    left.or(right)
+                } else {
+                    right.or(left)
+                }
+                .is_some_and(|cluster| cluster.is_rtl());
+                return if backward != rtl {
+                    cursor.previous_logical_word(&self.shaped)
+                } else {
+                    cursor.next_logical_word(&self.shaped)
+                };
+            }
+            let next = if backward {
+                current.previous_visual(&self.shaped)
+            } else {
+                current.next_visual(&self.shaped)
+            };
+            if next == current {
+                return current;
+            }
+            current = next;
+            let [Some(left), Some(right)] = current.visual_clusters(&self.shaped) else {
+                return current;
+            };
+            let boundary = if left.is_rtl() {
+                left.is_word_boundary()
+                    && if backward {
+                        left.is_space_or_nbsp()
+                            || (right.is_word_boundary() && !right.is_space_or_nbsp())
+                    } else {
+                        !left.is_space_or_nbsp()
+                    }
+            } else {
+                right.is_word_boundary()
+                    && if backward {
+                        !right.is_space_or_nbsp()
+                    } else {
+                        !left.is_space_or_nbsp()
+                    }
+            };
+            if boundary {
+                return current;
+            }
+        }
+    }
+
     pub fn hit_test(&self, x: f32, y: f32) -> Cursor {
         let index = self
             .lines
@@ -347,6 +449,30 @@ impl TextLayout {
 mod tests {
     use super::*;
     use onestore::document::Format;
+
+    #[test]
+    #[ignore = "requires Arial and CANVAS_TEST_SUBSTITUTE pointing to Carlito"]
+    fn native_unkerned_advances() {
+        let mut engine = TextEngine::default();
+        engine
+            .register_substitute(parley::fontique::Blob::new(Arc::new(
+                std::fs::read(std::env::var_os("CANVAS_TEST_SUBSTITUTE").unwrap()).unwrap(),
+            )))
+            .unwrap();
+        for (font, expected) in [("Calibri", 149.63843), ("Arial", 184.58305)] {
+            let paragraph = Paragraph::new(
+                "AVATAR AVATAR SECOND OFFICE".into(),
+                onestore::document::Format {
+                    font: Some(font.into()),
+                    font_size: Some(11.0),
+                    ..Default::default()
+                },
+            );
+            let layout = engine.layout(&paragraph, 400.0).unwrap();
+            assert_eq!(layout.lines().count(), 1);
+            assert!((layout.lines().next().unwrap().0.metrics().advance - expected).abs() < 0.001);
+        }
+    }
 
     #[test]
     fn rejected_substitute_leaves_font_selection_unchanged() {
@@ -590,6 +716,33 @@ mod tests {
         assert!(layout.height() > 0.0);
         let caret = layout.caret(layout.cursor(0, Affinity::Downstream), 1.0);
         assert!(caret.height() > 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn color_emoji_preserve_text_baselines_and_respect_explicit_font_size() {
+        let mut engine = TextEngine::default();
+        for size in [11.0, 22.0] {
+            let format = Format {
+                font_size: Some(size),
+                ..Default::default()
+            };
+            let base = engine
+                .layout(&Paragraph::new("Mg".into(), format.clone()), 1000.0)
+                .unwrap();
+            for text in ["🌳", "👩‍👩‍👧‍👦", "before 🌳 after", "Mg\n🌳\nMg"] {
+                let layout = engine
+                    .layout(&Paragraph::new(text.into(), format.clone()), 1000.0)
+                    .unwrap();
+                for (_, line) in layout.lines() {
+                    assert_eq!(line.height, base.lines[0].height, "{text}");
+                    assert!(
+                        (line.baseline - line.top - base.lines[0].baseline).abs() < 0.0001,
+                        "{text}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::*;
-use one_canvas::{layout::TextEngine, page::Page, text::Paragraph};
+use crate::{layout::TextEngine, page::Page, text::Paragraph};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -99,6 +99,7 @@ fn renderer_cost() {
                 scene.append_primitives(&mut primitives, [0.0; 2]).unwrap();
             } else {
                 primitives.push(Primitive::Text {
+                    clip: None,
                     layout: layout.as_ref().unwrap(),
                     origin: [36.0, 90.0],
                 });

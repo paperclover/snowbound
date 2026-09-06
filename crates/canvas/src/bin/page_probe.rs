@@ -1,4 +1,5 @@
-use one_canvas::{
+use canvas::{
+    document::TextDocument,
     layout::TextEngine,
     outline::OutlineLayout,
     page::{Outline, Page, PageObject},
@@ -49,8 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
             )?),
             PageObject::Title(title) => {
-                title_areas.push(json!({"id": title.id, "layout": title.layout,
-                    "outlines": title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()}));
+                title_areas.push(
+                    json!({"id": title.id, "layout": title.layout, "date_outline": title.date,
+                    "outlines": title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()}),
+                );
                 for (outline, (origin, layout)) in title
                     .outlines
                     .iter()
@@ -69,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     serde_json::to_writer_pretty(
         io::stdout().lock(),
         &json!({
-            "title": page.title, "title_areas": title_areas, "margin_origin": page.margin_origin, "objects": objects,
+            "title": page.title, "created_filetime": page.created, "title_areas": title_areas, "margin_origin": page.margin_origin, "objects": objects,
             "definitions": page.definitions.iter().map(|(id, definition)| (id.to_string(), json!({
                 "kind": definition.kind, "format": definition.format,
             }))).collect::<serde_json::Map<_, _>>(), "import_ms": import_ms,
@@ -86,9 +89,13 @@ fn outline_json(
     title_origin: Option<[f32; 2]>,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut paragraphs = Vec::new();
-    for paragraph in &outline.paragraphs {
+    let document = TextDocument::from_nodes(outline.paragraphs.clone())?;
+    for paragraph in document.text_nodes() {
         let placed = laid_out.paragraphs.iter().find(|p| p.id == paragraph.id);
-        let source = paragraph.combined_text();
+        let source = &paragraph
+            .text()
+            .ok_or("Unsupported paragraph content")?
+            .text;
         let projection;
         let visible = if let Some(placed) = placed {
             placed.projection.text()
@@ -115,13 +122,13 @@ fn outline_json(
             .collect();
         paragraphs.push(json!({
                         "id": paragraph.id, "parent": paragraph.parent, "level": paragraph.level,
+                        "date_fields": paragraph.text().into_iter().filter_map(|text| text.date_field).map(|field| format!("{field:?}")).collect::<Vec<_>>(),
                         "format": paragraph.format, "collapsed": paragraph.collapsed,
                         "lists": paragraph.lists,
-                        "tags": paragraph.tags.iter().chain(paragraph.text.iter().flat_map(|t| &t.tags)).collect::<Vec<_>>(),
+                        "tags": paragraph.tags.iter().chain(paragraph.text().into_iter().flat_map(|t| &t.tags)).collect::<Vec<_>>(),
                         "source_utf16": source.text().encode_utf16().count(),
                         "visible_utf16": visible.text().encode_utf16().count(),
                         "visible_text": visible.text(), "spans": visible.spans().iter().map(|s| json!({"end_utf8": s.end, "format": s.format})).collect::<Vec<_>>(),
-                        "unsupported": paragraph.unsupported.iter().map(|u| u.jcid).collect::<Vec<_>>(),
                         "height": layout.as_ref().map(|l| l.height()), "lines": lines,
                         "origin": placed.map(|p| p.origin),
                         "tag_icons": placed.map(|p| p.tags.iter().map(|tag| json!({
@@ -137,8 +144,12 @@ fn outline_json(
     }
     Ok(
         json!({"kind": "outline", "id": outline.id, "layout": outline.layout,
-                    "indents": outline.indents, "is_title": title_origin.is_some(), "title_origin": title_origin, "paragraphs": paragraphs,
+                    "indents": outline.indents, "is_title": title_origin.is_some(), "is_title_text": outline.title, "minimum_width": outline.min_width, "title_origin": title_origin, "paragraphs": paragraphs,
                     "size": laid_out.size,
+                    "tables": laid_out.tables.iter().map(|table| json!({
+                        "id": table.id, "borders": table.borders,
+                        "cells": table.cells.iter().map(|cell| json!({"id": cell.id, "rect": cell.rect})).collect::<Vec<_>>()
+                    })).collect::<Vec<_>>(),
                     "unsupported": outline.unsupported.iter().map(|u| u.jcid).collect::<Vec<_>>() }),
     )
 }

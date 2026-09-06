@@ -18,16 +18,16 @@ if bool(args.output) != bool(args.bundle_id):
 if args.output and (args.output.suffix != '.app' or args.output.exists()):
     parser.error('Choose a new output path ending in .app.')
 root = Path(__file__).resolve().parents[2]
-subprocess.run(['cargo', 'build', '-p', 'one-canvas-app'] + (['--release'] if args.release else []), cwd=root, check=True)
+subprocess.run(['cargo', 'build', '-p', 'snowbound'] + (['--release'] if args.release else []), cwd=root, check=True)
 metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--format-version=1', '--no-deps'], cwd=root))
 target = Path(metadata['target_directory'])
-bundle = args.output.resolve() if args.output else target / 'One Canvas.app'
+bundle = args.output.resolve() if args.output else target / 'Snowbound.app'
 if args.output:
     bundle.mkdir(parents=True, exist_ok=False)
-binary = bundle / 'Contents/MacOS/OneCanvas'
+binary = bundle / 'Contents/MacOS/Snowbound'
 binary.parent.mkdir(parents=True, exist_ok=True)
 pending = binary.with_suffix('.next')
-shutil.copy2(target / ('release' if args.release else 'debug') / 'one-canvas-app', pending)
+shutil.copy2(target / ('release' if args.release else 'debug') / 'snowbound', pending)
 pending.replace(binary)
 icon = 'Snowbound-Tahoe' if int(platform.mac_ver()[0].split('.')[0] or 0) >= 26 else 'Snowbound-Sequoia'
 resources = bundle / 'Contents/Resources'
@@ -35,7 +35,7 @@ resources.mkdir(exist_ok=True)
 shutil.copy2(root / 'crates/snowbound/assets/icon' / f'{icon}.icns', resources / 'Snowbound.icns')
 (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps({
     'CFBundleExecutable': binary.name,
-    'CFBundleIdentifier': args.bundle_id or 'dev.onecanvas.app',
+    'CFBundleIdentifier': args.bundle_id or 'dev.snowbound.app',
     'CFBundleName': bundle.stem,
     'CFBundleDisplayName': bundle.stem,
     'CFBundlePackageType': 'APPL',

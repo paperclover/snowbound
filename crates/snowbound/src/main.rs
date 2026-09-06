@@ -2,15 +2,19 @@ mod accessibility;
 mod macos;
 #[cfg(test)]
 mod profile;
+mod scroll;
 
-use one_canvas::{
+use canvas::gpu::{Primitive, Renderer, Stroke, Viewport, page::PageScene};
+use canvas::{
+    date::DateField,
     document::TextDocument,
-    editor::{CanvasEditor, Movement, TextOutline},
+    editor::{
+        CanvasEditor, DEFAULT_OUTLINE_WIDTH, Movement, Selection, SelectionUnit, TextOutline,
+    },
     layout::TextEngine,
     page::Page,
     text::Paragraph,
 };
-use one_canvas_gpu::{Primitive, Renderer, Viewport, page::PageScene};
 use onestore::document::Format;
 use std::{
     error::Error,
@@ -28,11 +32,12 @@ use winit::{
 };
 
 const HANDLE_HEIGHT: f32 = 6.75;
-const NEW_OUTLINE_WIDTH: f32 = 240.0;
+const DATE_LABELS: [&str; 2] = ["Page date", "Page time"];
 
 #[derive(Debug)]
 enum UserEvent {
     Quit,
+    InsertText(String),
     Accessibility(accesskit_winit::Event),
 }
 
@@ -43,7 +48,7 @@ impl From<accesskit_winit::Event> for UserEvent {
 }
 
 fn trace_input(event: &impl std::fmt::Debug) {
-    if std::env::var_os("ONE_CANVAS_TRACE_INPUT").is_some() {
+    if std::env::var_os("SNOWBOUND_TRACE_INPUT").is_some() {
         eprintln!("Input {:?}: {event:?}", std::time::SystemTime::now());
     }
 }
@@ -73,12 +78,30 @@ enum Input {
 }
 
 enum Drag {
-    Text,
+    Text {
+        anchor: Selection,
+        unit: SelectionUnit,
+    },
+    Scrollbar {
+        axis: usize,
+        grab: f32,
+    },
+    Resize {
+        outline: Option<Box<TextOutline>>,
+        grab: f32,
+    },
     Outline {
         id: onestore::ExGuid,
         grab: [f32; 2],
         pending_press: Option<[f32; 2]>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum PointerFeedback<'a> {
+    Hover(onestore::ExGuid),
+    Move(onestore::ExGuid, [f32; 2]),
+    Resize(&'a TextOutline),
 }
 
 struct State {
@@ -89,11 +112,15 @@ struct State {
     renderer: Renderer,
     engine: TextEngine,
     editor: CanvasEditor,
-    initial: Vec<(onestore::ExGuid, onestore::document::Layout, TextDocument)>,
+    initial: Vec<(onestore::ExGuid, TextDocument)>,
+    initial_layouts: Vec<(onestore::ExGuid, onestore::document::Layout)>,
+    initial_date: Option<u64>,
     scene: Option<(PageScene, [f32; 2])>,
     viewport: Viewport,
     display_scale: f32,
     pointer: [f32; 2],
+    pointer_inside: bool,
+    last_click: Option<(Instant, [f32; 2], u8)>,
     drag: Option<Drag>,
     read_only_focus: Option<usize>,
     modifiers: ModifiersState,
@@ -107,6 +134,20 @@ struct State {
 }
 
 impl State {
+    fn edit_date(&mut self, field: DateField) -> Result<(), Box<dyn Error>> {
+        let Some(date) = self.editor.date() else {
+            return Ok(());
+        };
+        let timestamp = date.timestamp();
+        self.editor.finish_composition();
+        macos::clear_marked_text(&self.window);
+        self.drag = None;
+        if let Some((timestamp, text)) = macos::edit_date(timestamp, field)? {
+            self.editor.change_date(&mut self.engine, timestamp, text)?;
+        }
+        self.changed()
+    }
+
     async fn new(
         event_loop: &ActiveEventLoop,
         proxy: EventLoopProxy<UserEvent>,
@@ -130,6 +171,7 @@ impl State {
                     .with_inner_size(LogicalSize::new(1000.0, 720.0)),
             )?,
         );
+        macos::install_text_input(&window);
         let access_adapter =
             accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, proxy);
         window.set_visible(true);
@@ -137,6 +179,7 @@ impl State {
             Box::new(window.clone()),
         ));
         let surface = instance.create_surface(window.clone())?;
+        macos::configure_presentation(&surface);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
@@ -175,16 +218,15 @@ impl State {
                 (editor, Some((scene, [0.0; 2])))
             }
         };
+        let initial_date = editor.date().map(|date| date.timestamp());
+        let initial_layouts = editor
+            .object_layouts()
+            .map(|(id, layout)| (id, layout.clone()))
+            .collect();
         let initial = editor
             .outlines()
             .iter()
-            .map(|outline| {
-                (
-                    outline.id,
-                    outline.layout().clone(),
-                    outline.document().clone(),
-                )
-            })
+            .map(|outline| (outline.id, outline.document().clone()))
             .collect();
         let dpr = window.scale_factor() as f32;
         window.set_ime_allowed(true);
@@ -200,6 +242,8 @@ impl State {
             engine,
             editor,
             initial,
+            initial_date,
+            initial_layouts,
             scene,
             viewport: Viewport {
                 size: [size.width, size.height],
@@ -208,6 +252,8 @@ impl State {
             },
             display_scale: dpr,
             pointer: [0.0; 2],
+            pointer_inside: false,
+            last_click: None,
             drag: None,
             read_only_focus: None,
             modifiers: ModifiersState::empty(),
@@ -261,6 +307,7 @@ impl State {
     }
 
     fn changed(&mut self) -> Result<(), Box<dyn Error>> {
+        self.scroll().clamp(&mut self.viewport);
         self.caret = true;
         self.blink_at = Instant::now() + Duration::from_millis(500);
         let mut rect = self.editor.caret(1.0)?;
@@ -284,6 +331,28 @@ impl State {
             ),
         );
         self.update_accessibility()?;
+        if self.editor.active_outline().title {
+            let title = self
+                .editor
+                .active_outline()
+                .document()
+                .paragraphs()
+                .next()
+                .unwrap()
+                .text()
+                .split(['\u{000b}', '\n', '\r'])
+                .next()
+                .unwrap();
+            let title = if title.trim().is_empty() {
+                "Untitled"
+            } else {
+                title
+            };
+            let title = format!("{title} · Temporary page");
+            if self.window.title() != title {
+                self.window.set_title(&title);
+            }
+        }
         self.window.request_redraw();
         Ok(())
     }
@@ -299,9 +368,10 @@ impl State {
                 preview,
             ) {
                 Ok(mut update) => {
-                    self.accessibility.append_read_only(
+                    self.accessibility.append_page_fields(
                         &mut update,
                         self.scene.as_ref(),
+                        &self.editor,
                         self.viewport,
                         self.read_only_focus,
                     );
@@ -331,6 +401,12 @@ impl State {
         trace_input(&request);
         use accesskit::{Action, ActionData};
         if request.target_tree != accesskit::TreeId::ROOT {
+            return Ok(());
+        }
+        if let Some(field) = self.accessibility.date_for_node(request.target_node) {
+            if request.action == Action::Click {
+                self.edit_date(field)?;
+            }
             return Ok(());
         }
         if let Some(index) = self.accessibility.read_only_for_node(request.target_node) {
@@ -378,7 +454,11 @@ impl State {
         }
         let rect = if let Some(index) = self.read_only_focus {
             let (scene, offset) = self.scene.as_ref().unwrap();
-            let [x0, y0, x1, y1] = scene.read_only().nth(index).unwrap().rect;
+            let [x0, y0, x1, y1] = scene
+                .read_only(Some(&self.editor))
+                .nth(index)
+                .unwrap()
+                .rect();
             parley::BoundingBox {
                 x0: f64::from(x0 + offset[0]),
                 y0: f64::from(y0 + offset[1]),
@@ -437,6 +517,39 @@ impl State {
         ];
     }
 
+    fn scroll(&self) -> scroll::Scroll {
+        let editable = self
+            .editor
+            .visible_outlines()
+            .chain(self.editor.caret_outline())
+            .map(|outline| {
+                let rect = outline.bounds();
+                let offset = self
+                    .scene
+                    .as_ref()
+                    .filter(|_| self.editor.has_page_outline(outline.id))
+                    .map(|(_, offset)| *offset)
+                    .unwrap_or([0.0; 2]);
+                [
+                    rect.x0 as f32 + offset[0],
+                    rect.y0 as f32 + offset[1],
+                    rect.x1 as f32 + offset[0],
+                    rect.y1 as f32 + offset[1],
+                ]
+            });
+        let fixed = self.scene.iter().flat_map(|(scene, offset)| {
+            scene.content_bounds(&self.editor).map(|rect| {
+                [
+                    rect[0] + offset[0],
+                    rect[1] + offset[1],
+                    rect[2] + offset[0],
+                    rect[3] + offset[1],
+                ]
+            })
+        });
+        scroll::Scroll::new(self.viewport, editable.chain(fixed))
+    }
+
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
         trace_input(&("Draw", self.viewport.origin, self.viewport.scale));
         if self.occluded || self.viewport.size.contains(&0) {
@@ -456,6 +569,7 @@ impl State {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface = self.instance.create_surface(self.window.clone())?;
+                macos::configure_presentation(&self.surface);
                 self.surface.configure(&self.renderer.device, &self.config);
                 self.window.request_redraw();
                 return Ok(());
@@ -472,15 +586,45 @@ impl State {
                 return Err("Canvas surface validation failed".into());
             }
         };
-        let primitives = page_primitives(
+        let mut primitives = page_primitives(
             &self.editor,
             self.scene.as_ref(),
-            self.preview(),
+            match &self.drag {
+                Some(Drag::Resize {
+                    outline: Some(outline),
+                    ..
+                }) => Some(PointerFeedback::Resize(outline)),
+                _ => self
+                    .preview()
+                    .map(|(id, origin)| PointerFeedback::Move(id, origin))
+                    .or_else(|| {
+                        if !self.pointer_inside {
+                            return None;
+                        }
+                        match page_hit_test(
+                            &self.editor,
+                            self.scene.as_ref(),
+                            self.viewport.document_point(self.pointer),
+                            self.display_scale / self.viewport.scale,
+                        ) {
+                            Some(
+                                Hit::Text { id, .. }
+                                | Hit::Handle { id, .. }
+                                | Hit::Resize { id, .. },
+                            ) => Some(PointerFeedback::Hover(id)),
+                            _ => None,
+                        }
+                    }),
+            },
             self.read_only_focus,
-            self.caret && self.focused && !matches!(self.drag, Some(Drag::Outline { .. })),
+            self.caret
+                && self.focused
+                && !matches!(self.drag, Some(Drag::Outline { .. } | Drag::Resize { .. })),
             self.viewport.scale,
             self.display_scale,
         )?;
+        self.scroll()
+            .append(self.viewport, self.display_scale, &mut primitives);
         self.renderer
             .draw(
                 &frame.texture.create_view(&Default::default()),
@@ -511,7 +655,11 @@ impl State {
                 return self.changed();
             }
         }
-        if matches!(self.drag, Some(Drag::Outline { .. })) {
+        if command && self.modifiers.control_key() && key == &Key::Named(NamedKey::Space) {
+            macos::show_character_palette();
+            return Ok(());
+        }
+        if matches!(self.drag, Some(Drag::Outline { .. } | Drag::Resize { .. })) {
             if matches!(
                 key,
                 Key::Named(
@@ -556,7 +704,7 @@ impl State {
                 + self
                     .scene
                     .as_ref()
-                    .map_or(0, |(scene, _)| scene.read_only().count());
+                    .map_or(0, |(scene, _)| scene.read_only(Some(&self.editor)).count());
             if count == 0 {
                 return self.changed();
             }
@@ -589,7 +737,11 @@ impl State {
                 "n" if shift => {
                     let position = if let Some(index) = self.read_only_focus {
                         let (scene, offset) = self.scene.as_ref().unwrap();
-                        let rect = scene.read_only().nth(index).unwrap().rect;
+                        let rect = scene
+                            .read_only(Some(&self.editor))
+                            .nth(index)
+                            .unwrap()
+                            .rect();
                         [rect[2] + offset[0] + 24.0, rect[1] + offset[1]]
                     } else {
                         let bounds = self.editor.active_outline().bounds();
@@ -598,7 +750,7 @@ impl State {
                     self.editor.place_caret(
                         &mut self.engine,
                         snap_to_grid(position),
-                        NEW_OUTLINE_WIDTH,
+                        DEFAULT_OUTLINE_WIDTH,
                     )?;
                     self.set_read_only_focus(None);
                 }
@@ -667,24 +819,98 @@ impl State {
                 } else {
                     Movement::Right
                 }),
-                Key::Named(NamedKey::ArrowUp) => Some(Movement::Up),
-                Key::Named(NamedKey::ArrowDown) => Some(Movement::Down),
-                Key::Named(NamedKey::Home) => Some(Movement::LineStart),
-                Key::Named(NamedKey::End) => Some(Movement::LineEnd),
+                Key::Named(NamedKey::ArrowUp) => Some(if command {
+                    Movement::DocumentStart
+                } else if option {
+                    Movement::ParagraphStart
+                } else {
+                    Movement::Up
+                }),
+                Key::Named(NamedKey::ArrowDown) => Some(if command {
+                    Movement::DocumentEnd
+                } else if option {
+                    Movement::ParagraphEnd
+                } else {
+                    Movement::Down
+                }),
+                Key::Named(NamedKey::Home) if shift => Some(Movement::DocumentStart),
+                Key::Named(NamedKey::End) if shift => Some(Movement::DocumentEnd),
+                Key::Character(key) if self.modifiers.control_key() && !option => {
+                    match key.as_str() {
+                        "a" => Some(Movement::LineStart),
+                        "e" => Some(Movement::LineEnd),
+                        "b" => Some(Movement::Left),
+                        "f" => Some(Movement::Right),
+                        "p" => Some(Movement::Up),
+                        "n" => Some(Movement::Down),
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             if let Some(movement) = movement {
-                self.editor.move_selection(movement, shift)?;
+                self.editor
+                    .move_selection(&mut self.engine, movement, shift)?;
             } else if self.editor.marked_range().is_none() {
                 match key {
+                    Key::Named(NamedKey::Backspace) if command || option => {
+                        self.editor.delete_to(
+                            &mut self.engine,
+                            if command {
+                                Movement::LineStart
+                            } else {
+                                Movement::WordLeft
+                            },
+                        )?;
+                    }
+                    Key::Named(NamedKey::Delete) if command || option => {
+                        self.editor.delete_to(
+                            &mut self.engine,
+                            if command {
+                                Movement::LineEnd
+                            } else {
+                                Movement::WordRight
+                            },
+                        )?;
+                    }
                     Key::Named(NamedKey::Backspace) => {
                         self.editor.delete(&mut self.engine, true)?;
                     }
                     Key::Named(NamedKey::Delete) => {
                         self.editor.delete(&mut self.engine, false)?;
                     }
-                    Key::Named(NamedKey::Enter) => self.editor.insert(&mut self.engine, "\n")?,
-                    Key::Named(NamedKey::Tab) => self.editor.insert(&mut self.engine, "\t")?,
+                    Key::Named(NamedKey::Home | NamedKey::End) => {
+                        let limits = self.scroll();
+                        self.viewport.origin[1] = -if key == &Key::Named(NamedKey::Home) {
+                            limits.min[1]
+                        } else {
+                            limits.max[1]
+                        };
+                        return self.changed();
+                    }
+                    Key::Character(key) if self.modifiers.control_key() && !option => {
+                        match key.as_str() {
+                            "h" => {
+                                self.editor.delete(&mut self.engine, true)?;
+                            }
+                            "d" => {
+                                self.editor.delete(&mut self.engine, false)?;
+                            }
+                            "k" if !self
+                                .editor
+                                .delete_to(&mut self.engine, Movement::LineEnd)? =>
+                            {
+                                self.editor.delete(&mut self.engine, false)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        self.editor.enter(&mut self.engine, shift)?;
+                    }
+                    Key::Named(NamedKey::Tab) => {
+                        self.editor.tab(&mut self.engine, shift)?;
+                    }
                     _ if !command && !self.modifiers.control_key() => {
                         if let Some(text) = text
                             .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
@@ -710,15 +936,21 @@ impl App {
                 .editor
                 .caret_outline()
                 .is_none_or(TextOutline::is_empty)
+                && state.initial_date == state.editor.date().map(|date| date.timestamp())
+                && state
+                    .initial_layouts
+                    .iter()
+                    .map(|(id, layout)| (*id, layout))
+                    .eq(state.editor.object_layouts())
                 && state
                     .initial
                     .iter()
-                    .map(|(id, layout, document)| (id, layout, document))
+                    .map(|(id, document)| (id, document))
                     .eq(state
                         .editor
                         .outlines()
                         .iter()
-                        .map(|outline| (&outline.id, outline.layout(), outline.document())))
+                        .map(|outline| (&outline.id, outline.document())))
         }) || macos::discard_changes()
         {
             event_loop.exit();
@@ -729,6 +961,23 @@ impl App {
 impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let event = match event {
+            UserEvent::InsertText(text) => {
+                if let Some(state) = &mut self.state
+                    && state.read_only_focus.is_none()
+                    && !text.is_empty()
+                    && !text.chars().any(char::is_control)
+                {
+                    let result = (|| -> Result<(), Box<dyn Error>> {
+                        state.editor.commit_text(&mut state.engine, text)?;
+                        state.reveal_focus()?;
+                        state.changed()
+                    })();
+                    if let Err(error) = result {
+                        eprintln!("{error}");
+                    }
+                }
+                return;
+            }
             UserEvent::Quit => {
                 self.close(event_loop);
                 return;
@@ -844,17 +1093,59 @@ impl ApplicationHandler<UserEvent> for App {
                         state.changed()?;
                     }
                 }
+                WindowEvent::CursorLeft { .. } => {
+                    state.pointer_inside = false;
+                    state.window.request_redraw();
+                }
                 WindowEvent::CursorMoved { position, .. } => {
+                    state.pointer_inside = true;
                     state.pointer = [position.x as f32, position.y as f32];
+                    let hit = page_hit_test(
+                        &state.editor,
+                        state.scene.as_ref(),
+                        state.viewport.document_point(state.pointer),
+                        state.display_scale / state.viewport.scale,
+                    );
+                    let scrollbar = state
+                        .scroll()
+                        .hit_test(state.viewport, state.display_scale, state.pointer)
+                        .is_some();
+                    state.window.set_cursor(match (&state.drag, hit) {
+                        (Some(Drag::Scrollbar { .. }), _) => winit::window::CursorIcon::Default,
+                        (None, _) if scrollbar => winit::window::CursorIcon::Default,
+                        (Some(Drag::Resize { .. }), _) | (None, Some(Hit::Resize { .. })) => {
+                            winit::window::CursorIcon::EwResize
+                        }
+                        (Some(Drag::Outline { .. }), _) | (None, Some(Hit::Handle { .. })) => {
+                            winit::window::CursorIcon::Move
+                        }
+                        (None, Some(Hit::Date(_))) => winit::window::CursorIcon::Pointer,
+                        (None, Some(Hit::ReadOnly(_))) => winit::window::CursorIcon::Default,
+                        _ => winit::window::CursorIcon::Text,
+                    });
                     match &mut state.drag {
-                        Some(Drag::Text) => {
+                        Some(Drag::Scrollbar { axis, grab }) => {
+                            let (axis, grab) = (*axis, *grab);
+                            state.scroll().drag(
+                                &mut state.viewport,
+                                state.display_scale,
+                                axis,
+                                state.pointer[axis],
+                                grab,
+                            );
+                            state.changed()?;
+                        }
+                        Some(Drag::Text { anchor, unit }) => {
                             let point = state.viewport.document_point(state.pointer);
                             let origin = state.editor.active_outline().origin();
-                            state.editor.select_at(
+                            let target = state.editor.selection_at(
                                 point[0] - origin[0],
                                 point[1] - origin[1],
-                                true,
+                                *unit,
                             )?;
+                            state
+                                .editor
+                                .select(drag_selection(*anchor, target, *unit))?;
                             state.changed()?;
                         }
                         Some(Drag::Outline { pending_press, .. }) => {
@@ -868,7 +1159,24 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             state.changed()?;
                         }
-                        None => {}
+                        Some(Drag::Resize { outline, grab }) => {
+                            let point = state.viewport.document_point(state.pointer);
+                            let width =
+                                (point[0] - state.editor.active_outline().origin()[0] - *grab)
+                                    .max(36.0);
+                            if outline.is_some()
+                                || (width - state.editor.active_outline().bounds().width() as f32)
+                                    .abs()
+                                    * state.viewport.scale
+                                    > 2.0 * state.display_scale
+                            {
+                                *outline = Some(Box::new(
+                                    state.editor.preview_resize(&mut state.engine, width)?,
+                                ));
+                                state.changed()?;
+                            }
+                        }
+                        None => state.window.request_redraw(),
                     }
                 }
                 WindowEvent::MouseInput {
@@ -878,53 +1186,121 @@ impl ApplicationHandler<UserEvent> for App {
                 } => {
                     let point = state.viewport.document_point(state.pointer);
                     if button_state == ElementState::Pressed {
-                        match page_hit_test(
-                            &state.editor,
-                            state.scene.as_ref(),
-                            point,
-                            state.display_scale / state.viewport.scale,
-                        ) {
-                            Some(Hit::ReadOnly(index)) => state.set_read_only_focus(Some(index)),
-                            Some(Hit::Handle { id, grab }) => {
-                                state.set_read_only_focus(None);
-                                state.editor.focus_outline(id)?;
-                                state.drag = Some(Drag::Outline {
-                                    id,
-                                    grab,
-                                    pending_press: Some(state.pointer),
-                                });
-                            }
-                            Some(Hit::Text { id, point }) => {
-                                let extend = state.modifiers.shift_key()
-                                    && state.read_only_focus.is_none()
-                                    && id == state.editor.active_outline().id;
-                                state.set_read_only_focus(None);
-                                state.editor.focus_outline(id)?;
-                                state.editor.select_at(point[0], point[1], extend)?;
-                                state.drag = Some(Drag::Text);
-                            }
-                            None => {
-                                let position = [
-                                    point[0],
-                                    point[1] - 7.0 * state.display_scale / state.viewport.scale,
-                                ];
-                                let position = if state.modifiers.alt_key() {
-                                    position
-                                } else {
-                                    snap_to_grid(position)
-                                };
-                                state.editor.place_caret(
-                                    &mut state.engine,
-                                    position,
-                                    NEW_OUTLINE_WIDTH,
-                                )?;
-                                state.set_read_only_focus(None);
-                                state.drag = Some(Drag::Text);
+                        let now = Instant::now();
+                        let count = state
+                            .last_click
+                            .filter(|(time, point, _)| {
+                                now.duration_since(*time) <= macos::double_click_interval()
+                                    && (0..2).all(|axis| {
+                                        (point[axis] - state.pointer[axis]).abs()
+                                            <= 4.0 * state.display_scale
+                                    })
+                            })
+                            .map_or(1, |(_, _, count)| (count % 3) + 1);
+                        state.last_click = Some((now, state.pointer, count));
+                        let scrollbar = state
+                            .scroll()
+                            .hit_test(state.viewport, state.display_scale, state.pointer)
+                            .map(|(axis, grab)| Drag::Scrollbar { axis, grab });
+                        if scrollbar.is_some() {
+                            state.drag = scrollbar;
+                        } else {
+                            match page_hit_test(
+                                &state.editor,
+                                state.scene.as_ref(),
+                                point,
+                                state.display_scale / state.viewport.scale,
+                            ) {
+                                Some(Hit::Date(field)) => state.edit_date(field)?,
+                                Some(Hit::ReadOnly(index)) => {
+                                    state.set_read_only_focus(Some(index))
+                                }
+                                Some(Hit::Handle { id, grab }) => {
+                                    state.set_read_only_focus(None);
+                                    state.editor.focus_outline(id)?;
+                                    state.drag = Some(Drag::Outline {
+                                        id,
+                                        grab,
+                                        pending_press: Some(state.pointer),
+                                    });
+                                }
+                                Some(Hit::Resize { id, grab }) => {
+                                    state.set_read_only_focus(None);
+                                    state.editor.focus_outline(id)?;
+                                    state.drag = Some(Drag::Resize {
+                                        outline: None,
+                                        grab,
+                                    });
+                                }
+                                Some(Hit::Text { id, point }) => {
+                                    let extend = state.modifiers.shift_key()
+                                        && state.read_only_focus.is_none()
+                                        && id == state.editor.active_outline().id;
+                                    state.set_read_only_focus(None);
+                                    state.editor.focus_outline(id)?;
+                                    let previous = state.editor.selection();
+                                    state.editor.select_below(&mut state.engine, id, point)?;
+                                    let unit = match count {
+                                        2 => SelectionUnit::Word,
+                                        3 => SelectionUnit::Paragraph,
+                                        _ => SelectionUnit::Grapheme,
+                                    };
+                                    let selection =
+                                        state.editor.selection_at(point[0], point[1], unit)?;
+                                    let selection = if extend {
+                                        Selection {
+                                            positions: [
+                                                previous.positions[0],
+                                                selection.positions[1],
+                                            ],
+                                            affinities: [
+                                                previous.affinities[0],
+                                                selection.affinities[1],
+                                            ],
+                                        }
+                                    } else {
+                                        selection
+                                    };
+                                    state.editor.select(selection)?;
+                                    state.drag = Some(Drag::Text {
+                                        anchor: selection,
+                                        unit,
+                                    });
+                                }
+                                None => {
+                                    let position = [
+                                        point[0],
+                                        point[1] - 7.0 * state.display_scale / state.viewport.scale,
+                                    ];
+                                    let position = if state.modifiers.alt_key() {
+                                        position
+                                    } else {
+                                        snap_to_grid(position)
+                                    };
+                                    state.editor.place_caret(
+                                        &mut state.engine,
+                                        position,
+                                        DEFAULT_OUTLINE_WIDTH,
+                                    )?;
+                                    state.set_read_only_focus(None);
+                                    state.drag = Some(Drag::Text {
+                                        anchor: state.editor.selection(),
+                                        unit: SelectionUnit::Grapheme,
+                                    });
+                                }
                             }
                         }
                     } else {
                         let preview = state.preview();
-                        state.drag = None;
+                        if let Some(Drag::Resize {
+                            outline: Some(outline),
+                            ..
+                        }) = state.drag.take()
+                        {
+                            state
+                                .editor
+                                .resize(&mut state.engine, outline.bounds().width() as f32)?;
+                        }
                         if let Some((id, origin)) = preview {
                             state.editor.move_outline(id, origin)?;
                         }
@@ -1016,6 +1392,11 @@ impl ApplicationHandler<UserEvent> for App {
 
 #[derive(Debug, PartialEq)]
 enum Hit {
+    Date(DateField),
+    Resize {
+        id: onestore::ExGuid,
+        grab: f32,
+    },
     Text {
         id: onestore::ExGuid,
         point: [f32; 2],
@@ -1033,11 +1414,31 @@ fn page_hit_test(
     point: [f32; 2],
     pixel: f32,
 ) -> Option<Hit> {
-    let hit = |outline: &TextOutline, offset: [f32; 2]| {
+    let hit = |outline: &TextOutline, offset: [f32; 2], below: bool| {
+        if below {
+            let outline = editor
+                .outlines()
+                .iter()
+                .find(|source| source.id == outline.id)?;
+            let local = [
+                point[0] - offset[0] - outline.origin()[0],
+                point[1] - offset[1] - outline.origin()[1],
+            ];
+            return outline.contains_extension(local).then_some(Hit::Text {
+                id: outline.id,
+                point: local,
+            });
+        }
         let (bounds, body_top) = outline_chrome(outline, pixel);
         let local = [point[0] - offset[0], point[1] - offset[1]];
         let [x, y] = local;
         if x >= bounds[0] && x <= bounds[2] && y >= bounds[1] && y < body_top {
+            if x >= bounds[2] - 9.0 * pixel {
+                return Some(Hit::Resize {
+                    id: outline.id,
+                    grab: point[0] - outline.bounds().x1 as f32,
+                });
+            }
             return Some(Hit::Handle {
                 id: outline.id,
                 grab: [
@@ -1052,7 +1453,7 @@ fn page_hit_test(
                     let origin = outline.origin();
                     let x = origin[0] + tag.origin[0];
                     let y = origin[1] + paragraph.origin[1] + tag.origin[1];
-                    let size = one_canvas::outline::ParagraphTag::SIZE;
+                    let size = canvas::outline::ParagraphTag::SIZE;
                     (x..=x + size).contains(&local[0]) && (y..=y + size).contains(&local[1])
                 })
             })
@@ -1067,32 +1468,38 @@ fn page_hit_test(
         }
         None
     };
-    if let Some(hit) = editor
-        .outlines()
-        .iter()
-        .rev()
-        .filter(|outline| scene.is_none_or(|(scene, _)| !scene.contains_outline(outline.id)))
-        .find_map(|outline| hit(outline, [0.0; 2]))
-    {
-        return Some(hit);
-    }
-    let (scene, offset) = scene?;
-    match scene.hit_test([point[0] - offset[0], point[1] - offset[1]], |id| {
-        editor
-            .outlines()
-            .iter()
-            .find(|outline| outline.id == id)
-            .and_then(|outline| hit(outline, *offset))
-    })? {
-        one_canvas_gpu::page::SceneHit::Outline(hit) => Some(hit),
-        one_canvas_gpu::page::SceneHit::ReadOnly(index) => Some(Hit::ReadOnly(index)),
-    }
+    let pass = |below| {
+        if let Some(hit) = editor
+            .visible_outlines()
+            .rev()
+            .filter(|outline| scene.is_none() || !editor.has_page_outline(outline.id))
+            .find_map(|outline| hit(outline, [0.0; 2], below))
+        {
+            return Some(hit);
+        }
+        let (scene, offset) = scene?;
+        match scene.hit_test(
+            [point[0] - offset[0], point[1] - offset[1]],
+            Some(editor),
+            |id| {
+                editor
+                    .visible_outlines()
+                    .find(|outline| outline.id == id)
+                    .and_then(|outline| hit(outline, *offset, below))
+            },
+        )? {
+            canvas::gpu::page::SceneHit::Outline(hit) => Some(hit),
+            canvas::gpu::page::SceneHit::Date(field) => Some(Hit::Date(field)),
+            canvas::gpu::page::SceneHit::ReadOnly(index) => Some(Hit::ReadOnly(index)),
+        }
+    };
+    pass(false).or_else(|| pass(true))
 }
 
 fn page_primitives<'a>(
     editor: &'a CanvasEditor,
     scene: Option<&'a (PageScene, [f32; 2])>,
-    preview: Option<(onestore::ExGuid, [f32; 2])>,
+    preview: Option<PointerFeedback<'a>>,
     read_only_focus: Option<usize>,
     show_caret: bool,
     scale: f32,
@@ -1101,17 +1508,33 @@ fn page_primitives<'a>(
     let mut primitives = Vec::new();
     let paint = |id, offset: [f32; 2], primitives: &mut Vec<_>| {
         let outline = editor
-            .outlines()
-            .iter()
+            .visible_outlines()
             .find(|outline| outline.id == id)
-            .ok_or(one_canvas_gpu::page::SceneError::MissingOutline)?;
-        let origin = preview
-            .filter(|(id, _)| *id == outline.id)
-            .map(|(_, origin)| origin)
-            .unwrap_or_else(|| outline.origin());
+            .ok_or(canvas::gpu::page::SceneError::MissingOutline)?;
+        let outline = match preview {
+            Some(PointerFeedback::Resize(resized)) if resized.id == outline.id => resized,
+            _ => outline,
+        };
+        let origin = match preview {
+            Some(PointerFeedback::Move(id, origin)) if id == outline.id => origin,
+            _ => outline.origin(),
+        };
+        if (read_only_focus.is_none() && outline.id == editor.active_outline().id)
+            || matches!(preview, Some(PointerFeedback::Hover(id) | PointerFeedback::Move(id, _)) if id == outline.id)
+            || matches!(preview, Some(PointerFeedback::Resize(resized)) if resized.id == outline.id)
+        {
+            append_outline_chrome(
+                outline,
+                [origin[0] + offset[0], origin[1] + offset[1]],
+                display_scale / scale,
+                primitives,
+            );
+        }
         append_outline(
-            (read_only_focus.is_none() && outline.id == editor.active_outline().id)
-                .then_some(editor),
+            (read_only_focus.is_none()
+                && outline.id == editor.active_outline().id
+                && !matches!(preview, Some(PointerFeedback::Resize(_))))
+            .then_some(editor),
             outline,
             [origin[0] + offset[0], origin[1] + offset[1]],
             show_caret,
@@ -1121,12 +1544,11 @@ fn page_primitives<'a>(
         )
     };
     if let Some((scene, origin)) = scene {
-        scene.append_primitives_with(&mut primitives, *origin, &paint)?;
+        scene.append_primitives_with(&mut primitives, *origin, Some(editor), &paint)?;
     }
     for outline in editor
-        .outlines()
-        .iter()
-        .filter(|outline| scene.is_none_or(|(scene, _)| !scene.contains_outline(outline.id)))
+        .visible_outlines()
+        .filter(|outline| scene.is_none() || !editor.has_page_outline(outline.id))
     {
         paint(outline.id, [0.0; 2], &mut primitives)?;
     }
@@ -1145,7 +1567,7 @@ fn page_primitives<'a>(
     }
     if let Some(index) = read_only_focus {
         let (scene, offset) = scene.unwrap();
-        let [x0, y0, x1, y1] = scene.read_only().nth(index).unwrap().rect;
+        let [x0, y0, x1, y1] = scene.read_only(Some(editor)).nth(index).unwrap().rect();
         let [x0, y0, x1, y1] = [
             x0 + offset[0],
             y0 + offset[1],
@@ -1168,6 +1590,22 @@ fn page_primitives<'a>(
     Ok(primitives)
 }
 
+fn drag_selection(anchor: Selection, target: Selection, unit: SelectionUnit) -> Selection {
+    if unit == SelectionUnit::Grapheme {
+        return Selection {
+            positions: [anchor.positions[0], target.positions[1]],
+            affinities: [anchor.affinities[0], target.affinities[1]],
+        };
+    }
+    let backwards = target.positions[0] < anchor.positions[0].min(anchor.positions[1]);
+    let start = usize::from((anchor.positions[0] > anchor.positions[1]) != backwards);
+    let end = usize::from((target.positions[0] > target.positions[1]) == backwards);
+    Selection {
+        positions: [anchor.positions[start], target.positions[end]],
+        affinities: [anchor.affinities[start], target.affinities[end]],
+    }
+}
+
 fn snap_to_grid(point: [f32; 2]) -> [f32; 2] {
     std::array::from_fn(|axis| {
         let offset = [0.0, 14.4][axis];
@@ -1187,6 +1625,19 @@ fn outline_chrome(outline: &TextOutline, pixel: f32) -> ([f32; 4], f32) {
     // Native chrome combines page-scaled gutters with a fixed screen inset.
     let inset = 5.0 * pixel;
     let body_top = bounds.y0 as f32 - inset;
+    if outline.title {
+        let (_, paragraph) = outline.layouts().last().unwrap();
+        let bottom = outline.origin()[1] + paragraph.origin[1] + paragraph.text.height();
+        return (
+            [
+                bounds.x0 as f32 - inset - 6.0 * pixel,
+                body_top,
+                bounds.x1 as f32 + inset - 2.0 * pixel,
+                bottom + inset,
+            ],
+            body_top,
+        );
+    }
     (
         [
             bounds.x0 as f32 - 7.5 - inset,
@@ -1196,6 +1647,78 @@ fn outline_chrome(outline: &TextOutline, pixel: f32) -> ([f32; 4], f32) {
         ],
         body_top,
     )
+}
+
+fn append_outline_chrome(
+    outline: &TextOutline,
+    origin: [f32; 2],
+    pixel: f32,
+    primitives: &mut Vec<Primitive<'_>>,
+) {
+    let [x, y] = origin;
+    let (bounds, body_top) = outline_chrome(outline, pixel);
+    let [dx, dy] = [x - outline.origin()[0], y - outline.origin()[1]];
+    let [left, top, right, bottom] = [
+        bounds[0] + dx,
+        bounds[1] + dy,
+        bounds[2] + dx,
+        bounds[3] + dy,
+    ];
+    let body_top = body_top + dy;
+    if outline.title {
+        primitives.push(Primitive::RoundedRect {
+            rect: [left, top, right, bottom],
+            radius: [6.0 * pixel, (bottom - top) * 0.5],
+            stroke: Some(Stroke::Dashed(pixel)),
+            color: canvas::gpu::colorref(0x007f7f7f),
+        });
+        return;
+    }
+    primitives.push(Primitive::RoundedRect {
+        rect: [left, top, right, body_top],
+        radius: [3.0 * pixel; 2],
+        stroke: None,
+        color: canvas::gpu::colorref(0x00e8ebed),
+    });
+    primitives.push(Primitive::RoundedRect {
+        rect: [right - 9.0 * pixel, top, right, body_top],
+        radius: [3.0 * pixel; 2],
+        stroke: None,
+        color: canvas::gpu::colorref(0x00e5dee7),
+    });
+    primitives.push(Primitive::RoundedRect {
+        rect: [left, top, right, bottom],
+        radius: [3.0 * pixel; 2],
+        stroke: Some(Stroke::Solid(pixel)),
+        color: canvas::gpu::colorref(0x00d9cfd8),
+    });
+    let middle = (top + body_top) * 0.5;
+    for offset in [-3.0, 0.0, 3.0] {
+        let center = (left + right) * 0.5 + offset * pixel;
+        primitives.push(Primitive::RoundedRect {
+            rect: [
+                center - pixel * 0.5,
+                middle - pixel * 0.5,
+                center + pixel * 0.5,
+                middle + pixel * 0.5,
+            ],
+            radius: [pixel * 0.5; 2],
+            stroke: None,
+            color: canvas::gpu::colorref(0x00b4a5b4),
+        });
+    }
+    for column in [0.0, 1.0, 2.0] {
+        let half = (column + 0.5) * pixel;
+        for x in [
+            right - (8.0 - column) * pixel,
+            right - (2.0 + column) * pixel,
+        ] {
+            primitives.push(Primitive::Rect {
+                rect: [x, middle - half, x + pixel, middle + half],
+                color: canvas::gpu::colorref(0x00b4a5b4),
+            });
+        }
+    }
 }
 
 fn append_outline<'a>(
@@ -1208,49 +1731,12 @@ fn append_outline<'a>(
     primitives: &mut Vec<Primitive<'a>>,
 ) -> Result<(), Box<dyn Error>> {
     let [x, y] = origin;
-    let (bounds, body_top) = outline_chrome(outline, pixel);
-    let [dx, dy] = [x - outline.origin()[0], y - outline.origin()[1]];
-    let [left, top, right, bottom] = [
-        bounds[0] + dx,
-        bounds[1] + dy,
-        bounds[2] + dx,
-        bounds[3] + dy,
-    ];
-    let body_top = body_top + dy;
-    let border = if editor.is_some() {
-        [0.25, 0.45, 0.7, 0.65]
-    } else {
-        [0.5, 0.5, 0.5, 0.2]
-    };
-    if editor.is_none_or(|editor| editor.caret_outline().is_none()) {
-        for rect in [
-            [left, top, right, body_top],
-            [left, body_top, left + pixel, bottom],
-            [right - pixel, body_top, right, bottom],
-            [left + pixel, bottom - pixel, right - pixel, bottom],
-        ] {
-            primitives.push(Primitive::Rect {
-                rect,
-                color: border,
-            });
-        }
-    }
-    for (_, paragraph) in outline.layouts() {
-        let layout = &paragraph.text;
-        let paragraph_origin = paragraph.origin;
-        for (rect, color) in layout.backgrounds() {
-            primitives.push(Primitive::Rect {
-                rect: [
-                    rect.x0 as f32 + x + paragraph_origin[0],
-                    rect.y0 as f32 + y + paragraph_origin[1],
-                    rect.x1 as f32 + x + paragraph_origin[0],
-                    rect.y1 as f32 + y + paragraph_origin[1],
-                ],
-                color: one_canvas_gpu::colorref(color),
-            });
-        }
-    }
+    outline.shaped().append_table_primitives(primitives, origin);
+    outline
+        .shaped()
+        .append_background_primitives(primitives, origin);
     if let Some(editor) = editor {
+        let [_, selection_color] = macos::text_colors();
         for rect in editor.selection_rects()? {
             primitives.push(Primitive::Rect {
                 rect: [
@@ -1259,19 +1745,25 @@ fn append_outline<'a>(
                     rect.x1 as f32 + x,
                     rect.y1 as f32 + y,
                 ],
-                color: [0.55, 0.73, 1.0, 0.5],
+                color: selection_color,
             });
         }
     }
-    for (_, paragraph) in outline.layouts() {
+    for (index, (_, paragraph)) in outline.layouts().enumerate() {
         let layout = &paragraph.text;
         let paragraph_origin = paragraph.origin;
+        let clip = outline.shaped().paragraph_cell(index).map(|cell| {
+            let [left, top, right, bottom] = cell.text_bounds();
+            [left + x, top + y, right + x, bottom + y]
+        });
         primitives.push(Primitive::Text {
+            clip,
             layout,
             origin: [x + paragraph_origin[0], y + paragraph_origin[1]],
         });
         for (layout, origin) in &paragraph.markers {
             primitives.push(Primitive::Text {
+                clip,
                 layout,
                 origin: [x + origin[0], y + (origin[1] + paragraph_origin[1])],
             });
@@ -1297,15 +1789,17 @@ fn append_outline<'a>(
         }
         let [anchor, focus] = editor.selection().positions;
         if show_caret && anchor == focus {
-            let rect = editor.caret(1.0 / scale)?;
-            primitives.push(Primitive::Rect {
+            let rect = editor.caret(2.0 * pixel)?;
+            primitives.push(Primitive::RoundedRect {
                 rect: [
                     rect.x0 as f32 + x,
                     rect.y0 as f32 + y,
                     rect.x1 as f32 + x,
                     rect.y1 as f32 + y,
                 ],
-                color: [0.0, 0.0, 0.0, 1.0],
+                radius: [pixel; 2],
+                stroke: None,
+                color: macos::text_colors()[0],
             });
         }
     }
@@ -1355,7 +1849,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if positional.len() > 2 {
         return Err(
-            "Usage: one-canvas-app [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE] [--substitute-font FONT_FILE]..."
+            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE] [--substitute-font FONT_FILE]..."
                 .into(),
         );
     }
@@ -1369,7 +1863,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|value| value.to_string_lossy().parse::<f32>())
         .transpose()?
         .unwrap_or(if reference.is_some() {
-            NEW_OUTLINE_WIDTH
+            DEFAULT_OUTLINE_WIDTH
         } else {
             480.0
         });
@@ -1401,6 +1895,353 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_buttons_keep_accessibility_identity_and_match_mouse_hits_after_reflow() {
+        let mut engine = TextEngine::default();
+        let mut fields = [vec!["Header"], vec!["Monday", "6:14 AM"]].map(|text| {
+            TextOutline::new(
+                &mut engine,
+                TextDocument::new(
+                    text.into_iter()
+                        .map(|text| Paragraph::new(text.into(), Default::default()))
+                        .collect(),
+                )
+                .unwrap(),
+                468.0,
+                [0.0; 2],
+            )
+            .unwrap()
+            .snapshot()
+        });
+        fields[0].title = true;
+        let page = Page {
+            title: "Header".into(),
+            created: Some(1),
+            margin_origin: [36.0, 14.4],
+            definitions: Default::default(),
+            objects: vec![canvas::page::PageObject::Title(canvas::page::Title {
+                id: onestore::ExGuid::default(),
+                date: Some(fields[1].id),
+                layout: Default::default(),
+                outlines: fields.into(),
+            })],
+        };
+        let (scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();
+        let scene = (scene, [20.0, 40.0]);
+        let viewport = Viewport {
+            size: [1000, 700],
+            scale: 2.0,
+            origin: [-30.0, -50.0],
+        };
+        let mut access = accessibility::Accessibility::default();
+        let mut identities = Vec::new();
+        for phase in 0..3 {
+            if phase == 1 {
+                editor
+                    .insert(&mut engine, &"A wrapped title ".repeat(25))
+                    .unwrap();
+            }
+            if phase == 2 {
+                editor
+                    .change_date(&mut engine, 2, ["Wednesday".into(), "8:40 AM".into()])
+                    .unwrap();
+            }
+            let mut update = access.update(&editor, viewport, "Header", None).unwrap();
+            access.append_page_fields(&mut update, Some(&scene), &editor, viewport, None);
+            let buttons: Vec<_> = update
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == accesskit::Role::Button)
+                .collect();
+            assert_eq!(buttons.len(), 2);
+            for (index, (id, node)) in buttons.iter().enumerate() {
+                let field = [DateField::Date, DateField::Time][index];
+                assert_eq!(access.date_for_node(*id), Some(field));
+                assert!(node.supports_action(accesskit::Action::Click));
+                let rect = node.bounds().unwrap();
+                let point = viewport.document_point([
+                    ((rect.x0 + rect.x1) * 0.5) as f32,
+                    ((rect.y0 + rect.y1) * 0.5) as f32,
+                ]);
+                assert_eq!(
+                    page_hit_test(&editor, Some(&scene), point, 0.5),
+                    Some(Hit::Date(field))
+                );
+                if phase == 0 {
+                    identities.push(*id);
+                } else {
+                    assert_eq!(*id, identities[index]);
+                }
+            }
+            if phase == 2 {
+                assert_eq!(buttons[1].1.value(), Some("8:40 AM"));
+            }
+            accesskit_consumer::Tree::new(update, true);
+        }
+    }
+
+    #[test]
+    fn extension_hits_yield_to_objects_and_keep_their_source_coordinate_frame() {
+        let mut engine = TextEngine::default();
+        let upper = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Upper".into(), Default::default())]).unwrap(),
+            240.0,
+            [36.0, 90.0],
+        )
+        .unwrap();
+        let bottom = upper.bounds().y1 as f32;
+        let id = upper.id;
+        let lower = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Lower".into(), Default::default())]).unwrap(),
+            240.0,
+            [36.0, bottom + 20.0],
+        )
+        .unwrap();
+        let lower_id = lower.id;
+        let source = upper.snapshot();
+        let mut editor =
+            CanvasEditor::from_text_outlines(vec![lower, upper], Default::default(), None).unwrap();
+        assert!(
+            matches!(page_hit_test(&editor, None, [60.0, bottom + 22.0], 0.75), Some(Hit::Text { id, .. }) if id == lower_id)
+        );
+        editor.move_outline(lower_id, [600.0, 500.0]).unwrap();
+        for pixel in [0.375, 0.75, 1.5] {
+            let hit = page_hit_test(&editor, None, [60.0, bottom + 26.0], pixel).unwrap();
+            assert!(
+                matches!(hit, Hit::Text { id: hit_id, point } if hit_id == id && (point[1] - (bottom + 26.0 - 90.0)).abs() < 0.001)
+            );
+            assert_eq!(
+                page_hit_test(&editor, None, [60.0, bottom + 30.0], pixel),
+                None
+            );
+        }
+        let page = canvas::page::Page {
+            title: String::new(),
+            created: None,
+            margin_origin: [0.0; 2],
+            definitions: Default::default(),
+            objects: vec![canvas::page::PageObject::Outline(source)],
+        };
+        let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+        let offset = [50.0, 300.0];
+        assert!(
+            matches!(page_hit_test(&editor, Some(&(scene, offset)), [60.0 + offset[0], bottom + 26.0 + offset[1]], 0.75), Some(Hit::Text { id: hit_id, .. }) if hit_id == id)
+        );
+    }
+
+    #[test]
+    fn title_chrome_selects_text_and_exposes_a_named_editable_field() {
+        let mut engine = TextEngine::default();
+        let mut source = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(
+                "Header".into(),
+                Format {
+                    font_size: Some(8.0),
+                    line_spacing: Some(20.751953),
+                    ..Default::default()
+                },
+            )])
+            .unwrap(),
+            468.0,
+            [36.0, 14.4],
+        )
+        .unwrap()
+        .snapshot();
+        source.title = true;
+        source.min_width = Some(162.0);
+        source.layout.max_width = None;
+        source.layout.width_set_by_user = None;
+        source.layout.max_height = Some(21.6);
+        let outline = TextOutline::from_outline(&mut engine, &source, &Default::default()).unwrap();
+        let editor =
+            CanvasEditor::from_text_outlines(vec![outline], Default::default(), None).unwrap();
+        assert_eq!(editor.active_outline().bounds().width(), 162.0);
+        assert_eq!(editor.active_outline().snapshot().min_width, Some(162.0));
+        let (native_rect, _) = outline_chrome(editor.active_outline(), 0.75);
+        for (axis, (actual, expected)) in native_rect
+            .iter()
+            .zip([85.0, 98.0, 315.0, 134.0])
+            .enumerate()
+        {
+            let origin = if axis % 2 == 0 { 48.0 } else { 83.0 };
+            assert!((actual / 0.75 + origin - expected).abs() < 1.5);
+        }
+        let id = editor.active_outline().id;
+        let (rect, _) = outline_chrome(editor.active_outline(), 1.0);
+        for point in [
+            [rect[0] + 1.0, rect[1] + 1.0],
+            [rect[2] - 1.0, rect[1] + 1.0],
+            [40.0, 20.0],
+        ] {
+            assert!(
+                matches!(page_hit_test(&editor, None, point, 1.0), Some(Hit::Text { id: hit, .. }) if hit == id)
+            );
+        }
+        let primitives = page_primitives(&editor, None, None, None, false, 1.0, 1.0).unwrap();
+        let borders = primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::RoundedRect { stroke, .. } => Some(*stroke),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(borders, [Some(Stroke::Dashed(1.0))]);
+        assert!(primitives.iter().any(|primitive| matches!(primitive, Primitive::RoundedRect { rect, radius, stroke: Some(Stroke::Dashed(_)), .. } if radius[0] == 6.0 && radius[1] * 2.0 == rect[3] - rect[1])));
+        let mut access = accessibility::Accessibility::default();
+        let update = access
+            .update(
+                &editor,
+                Viewport {
+                    size: [800, 600],
+                    scale: 1.0,
+                    origin: [0.0; 2],
+                },
+                "Header",
+                None,
+            )
+            .unwrap();
+        assert!(update.nodes.iter().any(|(_, node)| node.role()
+            == accesskit::Role::MultilineTextInput
+            && node.label() == Some("Page title")));
+    }
+
+    #[test]
+    fn provisional_lines_share_one_drawn_hit_tested_and_accessible_outline() {
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("body".into(), Format::default())]).unwrap(),
+            240.0,
+        )
+        .unwrap();
+        let id = editor.active_outline().id;
+        for _ in 0..2 {
+            editor
+                .move_selection(&mut engine, Movement::Down, false)
+                .unwrap();
+        }
+        let primitives = page_primitives(&editor, None, None, None, true, 1.0, 1.0).unwrap();
+        assert_eq!(
+            primitives
+                .iter()
+                .filter(|p| matches!(p, Primitive::Text { .. }))
+                .count(),
+            3
+        );
+        let caret = editor.caret(1.0).unwrap();
+        assert!(
+            matches!(page_hit_test(&editor, None, [caret.x0 as f32, ((caret.y0 + caret.y1) * 0.5) as f32], 1.0), Some(Hit::Text { id: hit, .. }) if hit == id)
+        );
+        let mut access = accessibility::Accessibility::default();
+        let update = access
+            .update(
+                &editor,
+                Viewport {
+                    size: [800, 600],
+                    scale: 1.0,
+                    origin: [0.0; 2],
+                },
+                "Test",
+                None,
+            )
+            .unwrap();
+        let fields = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.role() == accesskit::Role::MultilineTextInput)
+            .collect::<Vec<_>>();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].1.value(), Some("body\n\n"));
+        assert_eq!(editor.outlines()[0].document().nodes().len(), 1);
+        editor
+            .place_caret(&mut engine, [300.0, 200.0], 240.0)
+            .unwrap();
+        assert_eq!(
+            editor
+                .visible_outlines()
+                .next()
+                .unwrap()
+                .document()
+                .nodes()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn chrome_follows_focus_hover_and_drag_without_changing_hit_geometry() {
+        let mut engine = TextEngine::default();
+        let outlines = [[0.0, 0.0], [220.0, 0.0]]
+            .into_iter()
+            .map(|origin| {
+                TextOutline::new(
+                    &mut engine,
+                    TextDocument::new(vec![Paragraph::new("text".into(), Format::default())])
+                        .unwrap(),
+                    100.0,
+                    origin,
+                )
+                .unwrap()
+            })
+            .collect();
+        let editor = CanvasEditor::from_text_outlines(outlines, Default::default(), None).unwrap();
+        let second = editor.outlines()[1].id;
+        let borders = |feedback| {
+            page_primitives(&editor, None, feedback, None, false, 1.0, 1.0)
+                .unwrap()
+                .into_iter()
+                .filter_map(|p| match p {
+                    Primitive::RoundedRect {
+                        rect,
+                        stroke: Some(Stroke::Solid(1.0)),
+                        ..
+                    } => Some(rect),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(borders(None).len(), 1);
+        let hovered = borders(Some(PointerFeedback::Hover(second)));
+        assert_eq!(hovered.len(), 2);
+        let moved = borders(Some(PointerFeedback::Move(second, [240.0, 50.0])));
+        assert_eq!(moved[1][0] - hovered[1][0], 20.0);
+        assert_eq!(moved[1][1] - hovered[1][1], 50.0);
+        assert!(
+            matches!(page_hit_test(&editor, None, [225.0, 5.0], 1.0), Some(Hit::Text { id, .. }) if id == second)
+        );
+    }
+
+    #[test]
+    fn grouped_drag_keeps_the_initial_word_when_reversing_direction() {
+        let selection = |start, end| {
+            Selection::from([start, end].map(|offset| canvas::document::TextPosition {
+                paragraph: 0,
+                offset,
+            }))
+        };
+        let anchor = selection(6, 10);
+        assert_eq!(
+            drag_selection(anchor, selection(11, 16), SelectionUnit::Word).positions,
+            selection(6, 16).positions
+        );
+        assert_eq!(
+            drag_selection(anchor, selection(0, 5), SelectionUnit::Word).positions,
+            selection(10, 0).positions
+        );
+        assert_eq!(
+            drag_selection(anchor, anchor, SelectionUnit::Word).positions,
+            anchor.positions
+        );
+        let anchor = selection(10, 3);
+        assert_eq!(
+            drag_selection(anchor, selection(7, 7), SelectionUnit::Grapheme).positions,
+            selection(10, 7).positions
+        );
+    }
 
     #[test]
     fn native_grid_matches_drag_offsets_midpoints_and_zoom() {
@@ -1508,7 +2349,8 @@ mod tests {
                 .unwrap()
                 .into_iter()
                 .filter_map(|p| match p {
-                    Primitive::Rect { rect, color } => Some((rect, color)),
+                    Primitive::Rect { rect, color }
+                    | Primitive::RoundedRect { rect, color, .. } => Some((rect, color)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1523,14 +2365,15 @@ mod tests {
         assert!(
             rectangles(&editor)
                 .iter()
-                .all(|(_, color)| *color == [0.0, 0.0, 0.0, 1.0])
+                .all(|(_, color)| *color == [0.0, 0.0, 0.0, 1.0]
+                    || *color == macos::text_colors()[0])
         );
         let preedit = access.update(&editor, viewport, "Page", None).unwrap();
         assert_eq!(preedit.focus, initial.focus);
         editor.commit_text(&mut engine, "日本".into()).unwrap();
         let committed = access.update(&editor, viewport, "Page", None).unwrap();
         assert_eq!(committed.focus, initial.focus);
-        assert_eq!(rectangles(&editor).len(), 5);
+        assert!(rectangles(&editor).len() > 1);
         editor.undo(&mut engine).unwrap();
         assert!(editor.outlines().is_empty());
         assert_eq!(rectangles(&editor).len(), 1);
@@ -1546,7 +2389,7 @@ mod tests {
         assert_eq!(retired.focus, committed.focus);
         assert_eq!(access.outline_for_node(retired.focus), Some(id));
         editor.undo(&mut engine).unwrap();
-        assert_eq!(rectangles(&editor).len(), 5);
+        assert!(rectangles(&editor).len() > 1);
         let restored = access.update(&editor, viewport, "Page", None).unwrap();
         assert_eq!(restored.focus, committed.focus);
         editor.redo(&mut engine).unwrap();
@@ -1556,6 +2399,200 @@ mod tests {
         assert!(editor.caret_outline().unwrap().is_empty());
         editor.compose(&mut engine, "に".into(), 1..1).unwrap();
         assert!(!editor.caret_outline().unwrap().is_empty());
+    }
+
+    #[test]
+    fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(
+                "M".into(),
+                Format {
+                    font_size: Some(130.0),
+                    highlight: Some(0xffff),
+                    ..Default::default()
+                },
+            )])
+            .unwrap(),
+            180.0,
+        )
+        .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::LineEnd, false)
+            .unwrap();
+        editor.tab(&mut engine, false).unwrap();
+        editor.insert(&mut engine, "R").unwrap();
+        editor.tab(&mut engine, true).unwrap();
+        let mut primitives = Vec::new();
+        append_outline(
+            Some(&editor),
+            editor.active_outline(),
+            [24.0, 48.0],
+            false,
+            1.0,
+            1.0,
+            &mut primitives,
+        )
+        .unwrap();
+        let bounds = editor.active_outline().shaped().tables[0]
+            .cells
+            .iter()
+            .map(|cell| {
+                let [left, top, right, bottom] = cell.text_bounds();
+                [left + 24.0, top + 48.0, right + 24.0, bottom + 48.0]
+            })
+            .collect::<Vec<_>>();
+        let text = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text { clip, .. } => Some(clip.unwrap()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text, bounds);
+        let highlights = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Rect { rect, color } if *color == canvas::gpu::colorref(0xffff) => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(highlights.len(), 2);
+        for (rect, bounds) in highlights.iter().zip(&bounds) {
+            assert_eq!(rect[2], bounds[2]);
+            assert!(rect[0] >= bounds[0] && rect[1] >= bounds[1] && rect[3] <= bounds[3]);
+        }
+        let selection = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Rect { rect, color } if *color == macos::text_colors()[1] => Some(*rect),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(selection[2], bounds[0][2]);
+        assert!(editor.caret(1.0).unwrap().x0 + 24.0 > f64::from(bounds[0][2]));
+    }
+
+    #[test]
+    fn editable_tables_paint_borders_before_selection_and_cell_text() {
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Left".into(), Format::default())]).unwrap(),
+            180.0,
+        )
+        .unwrap();
+        editor
+            .move_selection(&mut engine, Movement::LineEnd, false)
+            .unwrap();
+        editor.tab(&mut engine, false).unwrap();
+        editor.insert(&mut engine, "Right").unwrap();
+        editor.tab(&mut engine, true).unwrap();
+        let mut primitives = Vec::new();
+        append_outline(
+            Some(&editor),
+            editor.active_outline(),
+            [24.0, 48.0],
+            false,
+            1.0,
+            1.0,
+            &mut primitives,
+        )
+        .unwrap();
+        let color = canvas::gpu::colorref(0x00a3a3a3);
+        assert!(matches!(primitives[0], Primitive::RoundedRect {
+            stroke: Some(canvas::gpu::Stroke::Solid(0.75)), color: actual, ..
+        } if actual == color));
+        assert!(matches!(primitives[1], Primitive::Rect { color: actual, .. } if actual == color));
+        assert!(
+            matches!(primitives[2], Primitive::Rect { color, .. } if color == macos::text_colors()[1])
+        );
+        let painted = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Text { layout, origin, .. } => Some((layout.id(), *origin)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let expected = editor
+            .active_outline()
+            .layouts()
+            .map(|(_, paragraph)| {
+                (
+                    paragraph.text.id(),
+                    [paragraph.origin[0] + 24.0, paragraph.origin[1] + 48.0],
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(painted, expected);
+        assert_eq!(painted.len(), 2);
+    }
+
+    #[test]
+    fn resize_preview_paints_reflowed_text_without_changing_the_editor() {
+        let mut engine = TextEngine::default();
+        let editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(
+                "A paragraph with enough words to wrap when the resize handle moves inward.".into(),
+                Format::default(),
+            )])
+            .unwrap(),
+            240.0,
+        )
+        .unwrap();
+        let original = editor.active_outline().snapshot();
+        let original_layout = editor
+            .active_outline()
+            .paragraph_layout(0)
+            .unwrap()
+            .text
+            .id();
+        let resized = editor.preview_resize(&mut engine, 72.0).unwrap();
+        let primitives = page_primitives(
+            &editor,
+            None,
+            Some(PointerFeedback::Resize(&resized)),
+            None,
+            false,
+            96.0 / 72.0,
+            1.0,
+        )
+        .unwrap();
+        let painted = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Text { layout, .. } => Some(*layout),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(painted.id(), resized.paragraph_layout(0).unwrap().text.id());
+        assert!(
+            painted.lines().count()
+                > editor
+                    .active_outline()
+                    .paragraph_layout(0)
+                    .unwrap()
+                    .text
+                    .lines()
+                    .count()
+        );
+        assert_eq!(editor.active_outline().layout(), &original.layout);
+        assert_eq!(
+            editor
+                .active_outline()
+                .paragraph_layout(0)
+                .unwrap()
+                .text
+                .id(),
+            original_layout
+        );
+        assert!(primitives.iter().any(
+            |primitive| matches!(primitive, Primitive::RoundedRect { stroke, .. } if stroke.is_some())
+        ));
     }
 
     #[test]
@@ -1601,6 +2638,10 @@ mod tests {
                 assert!(
                     matches!(page_hit_test(&editor, None, header, pixel), Some(Hit::Handle {id: hit, ..}) if hit == id)
                 );
+                assert!(matches!(
+                    page_hit_test(&editor, None, [frame[2] - 4.0 * pixel, header[1]], pixel),
+                    Some(Hit::Resize { id: hit, .. }) if hit == id
+                ));
                 let padding = [frame[0] + pixel, 90.0];
                 assert!(
                     matches!(page_hit_test(&editor, None, padding, pixel), Some(Hit::Text {id: hit, ..}) if hit == id)
@@ -1612,7 +2653,7 @@ mod tests {
                 let primitives =
                     page_primitives(&editor, None, None, None, false, scale, dpr).unwrap();
                 assert!(
-                    matches!(&primitives[0], Primitive::Rect {rect, ..} if *rect == [frame[0], frame[1], frame[2], body_top])
+                    matches!(&primitives[0], Primitive::RoundedRect {rect, ..} if *rect == [frame[0], frame[1], frame[2], body_top])
                 );
                 assert!(
                     primitives.iter().any(
@@ -1672,7 +2713,7 @@ mod tests {
 
     #[test]
     fn overlapping_objects_follow_paint_order_through_creation_movement_and_undo() {
-        use one_canvas::page::{Outline, PageObject, Unsupported};
+        use canvas::page::{Outline, PageObject, Unsupported};
         for readonly_on_top in [false, true] {
             let mut engine = TextEngine::default();
             let document = TextDocument::new(vec![Paragraph::new(
@@ -1687,6 +2728,8 @@ mod tests {
             let mut objects = vec![
                 PageObject::Outline(Outline {
                     id,
+                    title: false,
+                    min_width: None,
                     layout: onestore::document::Layout {
                         x: Some(30.0),
                         y: Some(40.0),
@@ -1713,6 +2756,7 @@ mod tests {
                 objects.reverse();
             }
             let page = Page {
+                created: None,
                 title: String::new(),
                 margin_origin: [0.0; 2],
                 definitions: Default::default(),
@@ -1880,7 +2924,7 @@ mod tests {
 
     #[test]
     fn read_only_focus_retires_text_overlays_and_draws_a_scaled_focus_border() {
-        use one_canvas::page::{PageObject, Unsupported};
+        use canvas::page::{PageObject, Unsupported};
         let mut engine = TextEngine::default();
         let mut editor = CanvasEditor::new(
             &mut engine,
@@ -1889,6 +2933,7 @@ mod tests {
         )
         .unwrap();
         let page = Page {
+            created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
             definitions: Default::default(),
@@ -1910,7 +2955,8 @@ mod tests {
             primitives
                 .into_iter()
                 .filter_map(|p| match p {
-                    Primitive::Rect { rect, color } => Some((rect, color)),
+                    Primitive::Rect { rect, color }
+                    | Primitive::RoundedRect { rect, color, .. } => Some((rect, color)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -1919,14 +2965,17 @@ mod tests {
             let text = rectangles(
                 page_primitives(&editor, Some(&scene), None, None, true, scale, 1.0).unwrap(),
             );
-            assert!(text.iter().any(|(_, color)| *color == [0.0, 0.0, 0.0, 1.0]));
+            assert!(
+                text.iter()
+                    .any(|(_, color)| *color == macos::text_colors()[0])
+            );
             let selected = rectangles(
                 page_primitives(&editor, Some(&scene), None, Some(0), true, scale, 1.0).unwrap(),
             );
             assert!(
                 !selected
                     .iter()
-                    .any(|(_, color)| *color == [0.0, 0.0, 0.0, 1.0])
+                    .any(|(_, color)| *color == macos::text_colors()[0])
             );
             assert_eq!(
                 selected,
@@ -1946,7 +2995,7 @@ mod tests {
         );
         assert!(
             text.iter()
-                .any(|(_, color)| *color == [0.55, 0.73, 1.0, 0.5])
+                .any(|(_, color)| *color == macos::text_colors()[1])
         );
         let selected = rectangles(
             page_primitives(&editor, Some(&scene), None, Some(0), true, 1.0, 1.0).unwrap(),
@@ -1954,7 +3003,7 @@ mod tests {
         assert!(
             !selected
                 .iter()
-                .any(|(_, color)| *color == [0.55, 0.73, 1.0, 0.5])
+                .any(|(_, color)| *color == macos::text_colors()[1])
         );
         assert_eq!(editor.active_outline().document(), &original);
     }
@@ -1995,11 +3044,11 @@ mod tests {
                     let point = [
                         outline.origin()[0]
                             + tag.origin[0]
-                            + one_canvas::outline::ParagraphTag::SIZE / 2.0,
+                            + canvas::outline::ParagraphTag::SIZE / 2.0,
                         outline.origin()[1]
                             + paragraph.origin[1]
                             + tag.origin[1]
-                            + one_canvas::outline::ParagraphTag::SIZE / 2.0,
+                            + canvas::outline::ParagraphTag::SIZE / 2.0,
                     ];
                     assert!(
                         matches!(page_hit_test(&editor, Some(&scene), point, 1.0), Some(Hit::Text { id, .. }) if id == outline.id),
@@ -2029,7 +3078,7 @@ mod tests {
             let original = editor.active_outline().document().clone();
             editor
                 .select(
-                    [one_canvas::document::TextPosition {
+                    [canvas::document::TextPosition {
                         paragraph: 0,
                         offset: 0,
                     }; 2]

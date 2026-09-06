@@ -78,6 +78,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "canvas"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "onestore",
+ "parley",
+ "serde",
+ "serde_json",
+ "skrifa",
+]
+
+[[package]]
 name = "cbc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -617,18 +629,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "one-canvas"
-version = "0.1.0"
-dependencies = [
- "getrandom",
- "onestore",
- "parley",
- "serde",
- "serde_json",
- "skrifa",
-]
-
-[[package]]
 name = "onestore"
 version = "0.1.0"
 dependencies = [
@@ -649,9 +649,9 @@ dependencies = [
 name = "onestore-fuzz"
 version = "0.0.0"
 dependencies = [
+ "canvas",
  "libfuzzer-sys",
  "md5",
- "one-canvas",
  "onestore",
  "onestore-offline",
  "serde_json",
