@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 type Result<T> = std::result::Result<T, Error>;
 
-fn string(value: &str) -> Vec<u8> {
+pub(crate) fn string(value: &str) -> Vec<u8> {
     value
         .encode_utf16()
         .chain([0])
@@ -16,7 +16,15 @@ fn string(value: &str) -> Vec<u8> {
         .collect()
 }
 
-fn properties(values: &[(u32, Vec<u8>)]) -> Result<Vec<u8>> {
+pub(crate) fn default_text_style() -> Vec<(u32, Vec<u8>)> {
+    vec![
+        (0x14001c3b, 0x409_u32.to_le_bytes().to_vec()),
+        (0x1c001c0a, string("Calibri")),
+        (0x10001c0b, 22_u16.to_le_bytes().to_vec()),
+    ]
+}
+
+pub(crate) fn properties(values: &[(u32, Vec<u8>)]) -> Result<Vec<u8>> {
     let mut streams: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
     let mut fields = Vec::new();
     for (id, value) in values {
@@ -239,11 +247,7 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
                 NewObject {
                     id: 27,
                     jcid: 0x12004d,
-                    properties: vec![
-                        (0x14001c3b, id(0x409)),
-                        (0x1c001c0a, string("Calibri")),
-                        (0x10001c0b, 22_u16.to_le_bytes().to_vec()),
-                    ],
+                    properties: default_text_style(),
                 },
             ],
         },

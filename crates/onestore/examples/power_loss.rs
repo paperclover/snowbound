@@ -1,74 +1,27 @@
+#[path = "../tests/support/current.rs"]
+mod current;
+use current::current;
+
+#[path = "../tests/support/trace.rs"]
+mod trace;
+use trace::{Event, Trace};
+
 #[path = "../tests/support/checkpoint.rs"]
 mod checkpoint;
 
 use onestore::{
-    CommitIo, ExGuid, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
 };
-use std::{collections::BTreeMap, fs, io, path::PathBuf};
-
-enum Event {
-    Write(usize, Vec<u8>),
-    Flush,
-}
-
-struct Trace {
-    bytes: Vec<u8>,
-    events: Vec<Event>,
-}
-
-impl CommitIo for Trace {
-    fn read_at(&mut self, offset: u64, output: &mut [u8]) -> io::Result<usize> {
-        let offset = offset as usize;
-        let count = output.len().min(self.bytes.len().saturating_sub(offset));
-        output[..count].copy_from_slice(&self.bytes[offset..offset + count]);
-        Ok(count)
-    }
-    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<usize> {
-        let offset = offset as usize;
-        let count = bytes.len().min(4096);
-        self.bytes.resize(self.bytes.len().max(offset + count), 0);
-        self.bytes[offset..offset + count].copy_from_slice(&bytes[..count]);
-        self.events
-            .push(Event::Write(offset, bytes[..count].to_vec()));
-        Ok(count)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.events.push(Event::Flush);
-        Ok(())
-    }
-}
-
-fn current(bytes: &[u8]) -> BTreeMap<ExGuid, String> {
-    let store = Store::parse(bytes).unwrap();
-    assert!(store.checksum_mismatches.is_empty());
-    let index = RevisionIndex::parse(&store).unwrap();
-    index.validate_current().unwrap();
-    Document::parse(&index).unwrap();
-    index
-        .spaces
-        .iter()
-        .map(|(sid, space)| {
-            let rid = space.labels[&(ExGuid::default(), 1)];
-            let revision = index.resolve(*sid, rid).unwrap();
-            for object in revision.objects.values() {
-                if let Some(onestore::FileDataReference::Internal(guid)) =
-                    object.file_reference().unwrap()
-                {
-                    store.file_data(guid).unwrap();
-                }
-            }
-            (*sid, format!("{revision:?}"))
-        })
-        .collect()
-}
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let destination = PathBuf::from(
-        std::env::args_os()
-            .nth(1)
-            .ok_or("Provide a new evidence directory")?,
-    );
+    let mut args = std::env::args_os().skip(1);
+    let destination = PathBuf::from(args.next().ok_or("Provide a new evidence directory")?);
+    let option = args.next();
+    if option.as_deref().is_some_and(|flag| flag != "--toc") || args.next().is_some() {
+        return Err("Usage: power_loss NEW_DIRECTORY [--toc]".into());
+    }
     fs::create_dir(&destination)?;
     let fixtures = [
         (
@@ -107,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut records = Vec::new();
     let mut saved = BTreeMap::new();
     for (name, path) in fixtures {
-        if std::env::args().nth(2).as_deref() == Some("--toc") && !name.starts_with("toc") {
+        if option.is_some() && !name.starts_with("toc") {
             continue;
         }
         println!("Checking {name}");

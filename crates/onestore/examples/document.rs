@@ -2,7 +2,22 @@ use onestore::{
     FileDataReference, RevisionIndex, Store,
     document::{Document, Kind},
 };
-use std::{collections::BTreeSet, env, fs, io, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    env, fs,
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+};
+
+fn write_json(
+    path: impl AsRef<Path>,
+    value: &impl serde::Serialize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = BufWriter::new(fs::File::create(path)?);
+    serde_json::to_writer(&mut output, value)?;
+    output.flush()?;
+    Ok(())
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
@@ -38,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assets.push(serde_json::json!({"reference": FileDataReference::Internal(*guid), "path": path}));
             }
         }
-        serde_json::to_writer(fs::File::create(destination.join("assets.json"))?, &assets)?;
+        write_json(destination.join("assets.json"), &assets)?;
         let mut text = std::collections::BTreeMap::new();
         for (sid, space) in &document.spaces {
             let mut revisions = std::collections::BTreeMap::new();
@@ -53,11 +68,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             text.insert(*sid, revisions);
         }
-        serde_json::to_writer(fs::File::create(destination.join("text.json"))?, &text)?;
-        serde_json::to_writer(
-            fs::File::create(destination.join("document.json"))?,
-            &document,
-        )?;
+        write_json(destination.join("text.json"), &text)?;
+        write_json(destination.join("document.json"), &document)?;
     } else {
         serde_json::to_writer(io::stdout().lock(), &document)?;
     }

@@ -47,20 +47,27 @@ def verify_final_state(model):
     return {'main_space': sid, 'conflict_space': conflict_sid, 'competing_edits': sorted(edits)}
 
 
-def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1, rust_writers=4, rust_readers=3, edit=False, seed=710, conflict_clients=0, abrupt=False):
+def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1, rust_writers=4, rust_readers=3, edit=False, seed=710, conflict_clients=0, abrupt=False, embedded_smb=False, maintenance=False, fixture=None, disconnect=False, client_timeout=600, offline=False, offline_outage=False, offline_lost_reply=False, client_profile="debug", document_operations=False, record_writes=False, offline_client_reply=False):
+    if fixture is not None and not stress_clients:
+        raise ValueError('Use a fixture with stress mode.')
     if linux_vm.instance_path(server).exists():
         raise ValueError('Choose a new Linux VM name; existing machines are not owned by this run.')
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     mount = output / 'mount'
     mount.mkdir()
-    mounted = False
     scripts = output / 'scripts'
     scripts.mkdir()
     for name in ('cold.ps1', 'collaborate.ps1', 'network.ps1', 'stress.ps1', 'text.ps1'):
         shutil.copyfile(ROOT / 'tools/native' / name, scripts / name)
-    (output / 'run.json').write_text(json.dumps({'server': server, 'stress_clients': stress_clients, 'conflict_clients': conflict_clients, 'stress_operations': stress_operations, 'sync_every': sync_every, 'rust_writers': rust_writers, 'rust_readers': rust_readers, 'edit': edit, 'seed': seed, 'abrupt': abrupt,
-        'harness_sha256': {name: hashlib.sha256((ROOT / 'tools' / name).read_bytes()).hexdigest() for name in ('native_collaboration.py', 'native_stress.py', 'concurrent_rust.py', 'native_runner.py')}, 'scripts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in scripts.iterdir()}}, indent=2))
+    harness = ('native_collaboration.py', 'native_maintenance.py', 'native_disconnect.py', 'native_stress.py', 'offline_history.py', 'offline_document_history.py', 'offline_outage.py', 'verify_offline.py', 'concurrent_rust.py', 'native_runner.py',
+               'crash_recovery.py', 'smb-proxy.py', 'verify_smb_overlap.py', 'w7/crash.py', 'w7/vm.py', 'w7/linux_vm.py')
+    for name in harness:
+        saved = output / 'harness' / name
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / 'tools' / name, saved)
+    (output / 'run.json').write_text(json.dumps({'server': server, 'stress_clients': stress_clients, 'conflict_clients': conflict_clients, 'stress_operations': stress_operations, 'sync_every': sync_every, 'rust_writers': rust_writers, 'rust_readers': rust_readers, 'edit': edit, 'seed': seed, 'abrupt': abrupt, 'embedded_smb': embedded_smb, 'maintenance': maintenance, 'fixture': str(fixture) if fixture is not None else None,
+        'disconnect': disconnect, 'client_timeout': client_timeout, 'client_profile': client_profile, 'offline': offline, 'document_operations': document_operations, 'record_writes': record_writes, 'offline_outage': offline_outage, 'offline_lost_reply': offline_lost_reply, 'offline_client_reply': offline_client_reply, 'harness_sha256': {name: hashlib.sha256((output / 'harness' / name).read_bytes()).hexdigest() for name in harness}, 'scripts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in scripts.iterdir()}}, indent=2))
 
     def ssh(text):
         result = linux_vm.run_ssh(server, text, timeout=90)
@@ -76,18 +83,39 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
         linux_vm.wait_instance(server, 600)
         config = linux_vm.load_instance(server)
         (output / 'linux.json').write_text(json.dumps(config, indent=2))
-        def reconnect_mount():
-            nonlocal mounted
+        if embedded_smb:
+            subprocess.run(linux_vm.ssh_argv(server, 'cat > /tmp/smb-proxy.py'),
+                           input=(output / 'harness/smb-proxy.py').read_bytes(), check=True)
+            ssh("sudo sed -i '/^\\[global\\]/a smb ports = 1445' /etc/samba/smb.conf && sudo systemctl restart smbd")
+            subprocess.run(linux_vm.ssh_argv(server, 'cat > /tmp/smb-control.json'),
+                           input=json.dumps({'record_writes': record_writes}).encode(), check=True)
+            ssh("sudo sh -c 'nohup python3 /tmp/smb-proxy.py /tmp/smb-control.json --port 445 --bind 0.0.0.0 --server 127.0.0.1 --server-port 1445 > /tmp/smb-trace.jsonl 2>&1 < /dev/null &'")
+            ssh("sleep 1; sudo ss -ltn | grep ':445 '")
+            os.environ['ONESTORE_SMB_LAB'] = f'127.0.0.1:{config["samba_port"]}'
+            os.environ['ONESTORE_SMB_SHARE'] = 'agent'
+        def unmount(force=False):
+            for options in ([['-f']] if force else [[], ['-f']]):
+                if not os.path.ismount(mount): return
+                result = subprocess.run(['/sbin/umount', *options, str(mount)], capture_output=True, text=True, timeout=60)
+                with (output / 'unmounts.jsonl').open('a') as log:
+                    log.write(json.dumps({'force': bool(options), 'exit': result.returncode, 'stderr': result.stderr}) + '\n')
             if os.path.ismount(mount):
-                subprocess.run(['/sbin/umount', str(mount)], check=True)
-            mounted = False
+                raise RuntimeError('The owned SMB mount remains attached; preserve its server until it is unmounted.')
+        def reconnect_mount():
+            unmount()
             subprocess.run(['/sbin/mount_smbfs', '-N', f'//guest@127.0.0.1:{config["samba_port"]}/agent', mount], check=True, stdin=subprocess.DEVNULL)
-            mounted = True
         ssh('mkdir /srv/agent/m6-collaboration')
         source = ROOT / 'corpus/native-ink/cold-ui-ink/notebook'
         if stress_clients or conflict_clients or abrupt:
             source = output / 'input'
-            subprocess.run([ROOT / 'target/debug/examples/create_notebook', source, 'Concurrent edits:', 'Concurrency test'], check=True)
+            if fixture is not None:
+                source.mkdir()
+                for name in ('synthetic.one', 'Open Notebook.onetoc2'):
+                    shutil.copyfile(Path(fixture) / name, source / name)
+            elif maintenance:
+                subprocess.run([ROOT / 'target/debug/examples/maintenance_fixture', source, 'Concurrent edits:'], check=True)
+            else:
+                subprocess.run([ROOT / 'target/debug/examples/create_notebook', source, 'Concurrent edits:', 'Concurrency test'], check=True)
         with tarfile.open(output / 'input.tar', 'w', dereference=True) as archive:
             for name in ('synthetic.one', 'Open Notebook.onetoc2'):
                 archive.add(source / name, arcname=name)
@@ -127,8 +155,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
             # Joining workers before stack exit retains ownership even if another boot fails.
             with ThreadPoolExecutor(max_workers=len(labels)) as pool:
                 names = dict(zip(labels, pool.map(start_clone, labels)))
-            clients = []
-            for label in labels:
+            def prepare_client(label):
                 folder = output / label
                 name = names[label]
                 for local in scripts.iterdir():
@@ -139,10 +166,13 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                 command(name, 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\\one-tests\\network.ps1 -LabMac ' + vm.lab_mac(name), folder)
                 command(name, 'ipconfig', folder)
                 command(name, 'dir \\\\192.168.77.1\\agent\\m6-collaboration', folder)
-                clients.append({'name': name, 'folder': folder, 'sequence': 0})
-                start_controller(clients[-1])
+                client = {'name': name, 'folder': folder, 'sequence': 0}
+                start_controller(client)
                 command(name, 'ipconfig', folder)
                 print('Collaboration ready:', label, name, flush=True)
+                return client
+            with ThreadPoolExecutor(max_workers=len(labels)) as pool:
+                clients = list(pool.map(prepare_client, labels))
 
             def action(client, action, wait=True, **parameters):
                 client['sequence'] += 1
@@ -166,10 +196,19 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     time.sleep(.5)
                 else: raise TimeoutError(f'Native command {sequence} did not complete')
                 if action == 'snapshot':
-                    destination = client['folder'] / f'snapshot-{sequence:04}.xml'
-                    result = windows.do_get(remote + '\\page-0.xml', destination, client['name'])
+                    hierarchy = client['folder'] / f'hierarchy-{sequence:04}.xml'
+                    result = windows.do_get(remote + '\\hierarchy.xml', hierarchy, client['name'])
                     if result.get('error'): raise RuntimeError(result['error'])
-                    return texts(ET.parse(destination).getroot())
+                    xml = hierarchy.read_text(encoding='utf-8-sig').strip()
+                    if xml == '<?xml version="1.0"?>': return []
+                    pages = [node for node in ET.fromstring(xml).iter() if node.tag.endswith('}Page')]
+                    observed = []
+                    for i in range(len(pages)):
+                        destination = client['folder'] / f'snapshot-{sequence:04}-{i}.xml'
+                        result = windows.do_get(remote + f'\\page-{i}.xml', destination, client['name'])
+                        if result.get('error'): raise RuntimeError(result['error'])
+                        observed.extend(texts(ET.parse(destination).getroot()))
+                    return observed
 
             def wait_text(client, expected):
                 deadline = time.monotonic() + 120
@@ -201,6 +240,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     return stream.read()
 
             def checkpoint(label):
+                if embedded_smb: reconnect_mount()
                 deadline, previous, incomplete = time.monotonic() + 120, None, 0
                 while time.monotonic() < deadline:
                     snapshot = {name: snapshot_file(name) for name in ('synthetic.one', 'Open Notebook.onetoc2')}
@@ -228,7 +268,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
 
             if abrupt and not conflict_clients:
                 from concurrent_rust import running_clients
-                from crash_recovery import verify_text
+                from crash_recovery import active_text, verify_text
                 import crash
 
                 action(clients[0], 'prepare-stress', clients=len(clients))
@@ -244,6 +284,8 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                             changed = native_text[i] + ' Before server stop.'
                             action(client, 'edit', expected=native_text[i], text=changed)
                             native_text[i] = changed
+                        for client in clients: action(client, 'sync')
+                        for client in clients: wait_text(client, native_text)
                         deadline = time.monotonic() + 60
                         while True:
                             commits = sum(line.count('"event":"commit"') for path in folder.glob('w*.jsonl') for line in path.read_text().splitlines())
@@ -254,6 +296,8 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                         assert all(p.poll() is None for p in processes.values()), 'A client stopped before the planned interruption'
                         (output / 'server-crash.json').write_text(json.dumps(crash.stop('linux', server), indent=2))
                         for client in clients: vm.qmp(client['name'], 'set_link', {'name': 'lab', 'up': False})
+                        for process in processes.values(): process.terminate()
+                        unmount(force=True)
                         raise InterruptedError('Recorded server interruption')
                 except InterruptedError:
                     pass
@@ -267,11 +311,12 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     subprocess.run(linux_vm.ssh_argv(server, 'cat /srv/agent/m6-collaboration/synthetic.one'), stdout=stream, check=True, timeout=60)
                 subprocess.run([ROOT / 'target/debug/examples/document', recovered / 'synthetic.one', recovered / 'model'], check=True)
                 model = json.loads((recovered / 'model/document.json').read_text())
-                text, = [text for values in reachable_page_text(model).values() for text in values if text.startswith('Concurrent edits:')]
+                text = active_text(model)
                 retained = verify_text('Concurrent edits:', text, logs)
                 (output / 'server-retention.json').write_text(json.dumps(retained, indent=2))
                 reconnect_mount()
                 for client in clients: vm.qmp(client['name'], 'set_link', {'name': 'lab', 'up': True})
+                for client in clients: action(client, 'sync')
                 for client in clients: wait_text(client, [text, *native_text])
                 checkpoint('server-recovered')
 
@@ -302,6 +347,14 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                 (output / 'native-cache-result.json').write_text(json.dumps({'cache_acknowledged': pending_text, 'retained_after_abrupt_stop': survived, 'server_durability_acknowledged': False}, indent=2))
                 for client in clients: wait_text(client, [text, *native_text])
                 checkpoint('client-recovered')
+                recovered_model = json.loads((output / 'client-recovered/model/document.json').read_text())
+                recovered_pages = reachable_page_text(recovered_model)
+                main_space, *conflict_spaces = recovered_pages
+                known = {'Concurrent edits:', *[f'Native {i}:' for i in range(len(clients))], *native_text, pending_text}
+                conflicts = {sid: recovered_pages[sid] for sid in conflict_spaces}
+                assert all(value in known or (value.endswith(']') and text.startswith(value))
+                           for values in conflicts.values() for value in values), 'A recovered conflict contains unrecorded content'
+                (output / 'cache-conflicts.json').write_text(json.dumps(conflicts, indent=2))
 
                 continued = output / 'rust-continued'
                 continued.mkdir()
@@ -310,7 +363,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                 continuation = {actor: [json.loads(line) for line in (continued / f'{actor}.jsonl').read_text().splitlines()] for actor in processes}
                 checkpoint('continued')
                 model = json.loads((output / 'continued/model/document.json').read_text())
-                final_text, = [value for values in reachable_page_text(model).values() for value in values if value.startswith('Concurrent edits:')]
+                final_text = active_text(model)
                 result = verify_text(text, final_text, continuation)
                 for client in clients: wait_text(client, [final_text, *native_text])
                 (output / 'result.json').write_text(json.dumps({'server': retained, 'continuation': result, 'native_cache_retained': survived, 'expected_text': sorted([final_text, *native_text])}, indent=2))
@@ -370,7 +423,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     for client in clients: action(client, 'sync')
             elif stress_clients:
                 from native_stress import exercise
-                exercise(output, shared, clients, action, wait_action, wait_text, checkpoint, stress_operations, sync_every, rust_writers, rust_readers, edit, seed)
+                exercise(output, shared, clients, action, wait_action, wait_text, checkpoint, stress_operations, sync_every, rust_writers, rust_readers, edit, seed, embedded_smb)
             else:
                 a, b = clients
                 original = 'Fictitious: café, 東京, مرحبا'
@@ -450,8 +503,9 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
             if abrupt and not conflict_clients:
                 checkpoint('crash-closed')
                 model = json.loads((output / 'crash-closed/model/document.json').read_text())
-                actual = sorted(value for values in reachable_page_text(model).values() for value in values)
-                assert actual == sorted([final_text, *native_text]), 'Application closure changed recovered edits'
+                actual = reachable_page_text(model)
+                assert actual.pop(main_space) == sorted([final_text, *native_text]), 'Application closure changed recovered edits'
+                assert actual == conflicts, 'Application closure changed recovered conflict pages'
             elif stress_clients:
                 checkpoint('stress-closed')
             elif conflict_clients:
@@ -476,9 +530,13 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                 (failure / 'capture-error.txt').write_text(str(error))
         raise
     finally:
-        if mounted:
-            result = subprocess.run(['/sbin/umount', str(mount)], capture_output=True, text=True)
-            (output / 'unmount.json').write_text(json.dumps({'exit': result.returncode, 'stderr': result.stderr}))
+        if embedded_smb and linux_vm.instance_path(server).exists() and linux_vm.running(server):
+            try:
+                with (output / 'smb-trace.jsonl').open('wb') as trace:
+                    subprocess.run(linux_vm.ssh_argv(server, 'cat /tmp/smb-trace.jsonl'), stdout=trace, check=True, timeout=30)
+            except Exception as error:
+                (output / 'trace-error.txt').write_text(str(error))
+        if os.path.ismount(mount): unmount()
         if linux_vm.instance_path(server).exists():
             try:
                 if linux_vm.running(server): linux_vm.shutdown(server, 60)
@@ -488,6 +546,20 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                 while linux_vm.running(server) and time.monotonic() < deadline: time.sleep(.1)
                 linux_vm.delete_instance(server)
         (output / 'teardown.json').write_text(json.dumps({'linux_absent': not linux_vm.instance_path(server).exists()}, indent=2))
+    if embedded_smb:
+        from verify_smb_overlap import verify
+        with (output / 'smb-trace.jsonl').open() as trace:
+            overlap = verify(json.loads(line) for line in trace)
+        (output / 'overlap.json').write_text(json.dumps(overlap, indent=2))
+        if offline_lost_reply:
+            from offline_outage import verify_lost_reply
+            (output / 'offline-lost-reply-verification.json').write_text(json.dumps(verify_lost_reply(output), indent=2))
+        if offline_outage:
+            from offline_outage import verify_outage
+            (output / 'offline-outage-verification.json').write_text(json.dumps(verify_outage(output), indent=2))
+        if disconnect:
+            from native_disconnect import verify_disconnect
+            (output / 'disconnect-verification.json').write_text(json.dumps(verify_disconnect(output), indent=2))
 
 
 if __name__ == '__main__':
@@ -503,7 +575,29 @@ if __name__ == '__main__':
     parser.add_argument('--edit', action='store_true', help='Use random text replacements in every writer.')
     parser.add_argument('--seed', type=int, default=710)
     parser.add_argument('--abrupt', action='store_true', help='Abrupt server and client stops with preserved-disk recovery and intent accounting.')
+    parser.add_argument('--embedded-smb', action='store_true', help='Run Rust stress clients through the embedded SMB adapter.')
+    parser.add_argument('--maintenance', action='store_true', help='Pause the workload for the owned maintenance controller.')
+    parser.add_argument('--offline', action='store_true', help='Use durable local queues and traced offline workers for Rust writers.')
+    parser.add_argument('--document-operations', action='store_true', help='Queue paragraph/outline creation and formatting alongside offline text edits.')
+    parser.add_argument('--record-writes', action='store_true', help='Retain owned lab write payloads for revision replay.')
+    parser.add_argument('--offline-lost-reply', action='store_true', help='Drop a publication reply and require confirmation of its original revision.')
+    parser.add_argument('--offline-client-reply', action='store_true', help='Disconnect only the formatting writer and require peer publication before it reconciles.')
+    parser.add_argument('--offline-outage', action='store_true', help='Queue local edits during an owned SMB outage, then require recovery.')
+    parser.add_argument('--disconnect', action='store_true', help='Interrupt and reconnect the embedded append workload twice.')
+    parser.add_argument('--client-profile', choices=('debug', 'release'), default='debug', help='Cargo build profile for Rust stress clients')
+    parser.add_argument('--client-timeout', type=float, default=600, help='Maximum seconds for the Rust workload, including its start barrier.')
+    parser.add_argument('--fixture', type=Path, help='Copy this fixture directory into the disposable stress notebook.')
     args = parser.parse_args()
+    if not 0 < args.client_timeout < 2**64 / 1000: parser.error('Choose a finite positive client timeout.')
+    if args.maintenance and not (args.embedded_smb and args.stress_clients): parser.error('--maintenance requires embedded SMB stress mode.')
+    if args.document_operations and not args.offline: parser.error('--document-operations requires --offline.')
+    if args.record_writes and not args.embedded_smb: parser.error('--record-writes requires --embedded-smb.')
+    if args.offline_client_reply and not (args.offline_lost_reply and args.document_operations): parser.error('--offline-client-reply requires --offline-lost-reply and --document-operations.')
+    if args.offline_lost_reply and (not args.offline or args.offline_outage or args.sync_every or args.stress_operations < 8): parser.error('--offline-lost-reply requires --offline, --sync-every 0, at least eight operations and no --offline-outage.')
+    if args.offline_outage and (not args.offline or args.sync_every or args.stress_operations < 8): parser.error('--offline-outage requires --offline, --sync-every 0 and at least eight operations.')
+    if args.offline and (not args.embedded_smb or not args.stress_clients or args.edit or args.disconnect or args.maintenance): parser.error('--offline requires embedded append stress without disconnect or maintenance.')
+    if args.embedded_smb and not args.stress_clients: parser.error('--embedded-smb requires --stress-clients.')
+    if args.disconnect and (not args.embedded_smb or args.edit or args.maintenance or args.sync_every): parser.error('--disconnect requires embedded append stress with --sync-every 0 and no maintenance.')
     if args.rust_writers < 2 or args.rust_readers < 1: parser.error('Use at least two Rust writers and one reader.')
     if args.sync_every < 0 or args.stress_operations <= 0: parser.error('Use a nonnegative sync interval and positive operation count.')
     if args.stress_clients and args.stress_clients < 3: parser.error('Stress mode requires at least three native clients.')
@@ -511,4 +605,4 @@ if __name__ == '__main__':
     if args.abrupt and (args.stress_clients or args.edit): parser.error('Abrupt recovery uses append intents or the offline-conflict workload.')
     def interrupted(_signal, _frame): raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
-    replay(args.output, args.linux, args.stress_clients, args.stress_operations, args.sync_every, args.rust_writers, args.rust_readers, args.edit, args.seed, args.conflict_clients, args.abrupt)
+    replay(args.output, args.linux, args.stress_clients, args.stress_operations, args.sync_every, args.rust_writers, args.rust_readers, args.edit, args.seed, args.conflict_clients, args.abrupt, args.embedded_smb, args.maintenance, args.fixture, args.disconnect, args.client_timeout, args.offline, args.offline_outage, args.offline_lost_reply, args.client_profile, args.document_operations, args.record_writes, args.offline_client_reply)

@@ -28,7 +28,7 @@ for before, after in [
     source = before.read_bytes()
     assert after.read_bytes()[1024:len(source)] == source[1024:]
 
-native_saved = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'inventory', '--', str(corpus / 'native-edit-02/notebook/synthetic.one')], cwd=root, text=True)
+native_saved = subprocess.check_output(['cargo', 'run', '-p', 'onestore', '--quiet', '--example', 'inventory', '--', str(corpus / 'native-edit-02/notebook/synthetic.one')], cwd=root, text=True)
 assert [bytes.fromhex(row.split('\t')[2]).decode('ascii') for row in native_saved.splitlines() if row.startswith('ascii\t')] == ['Fictitious plain text.']
 
 before = pages(root / 'corpus/native-ink/cold-ui-ink/read')[0]
@@ -93,6 +93,6 @@ after = pages(append / 'native/append-01-complex/read')[0]
 assert fingerprint(normalized(before)) == fingerprint(normalized(after))
 assert next((root / 'corpus/native-ink/cold-ui-ink/read').glob('*.attachment')).read_bytes() == next((append / 'native/append-01-complex/read').glob('*.attachment')).read_bytes()
 assert ET.parse(append / 'native/append-01-toc/read/hierarchy.xml').getroot().get('color') == '#336699'
-saved = subprocess.check_output(['cargo', 'run', '--quiet', '--example', 'inventory', '--', str(append / 'native-after-511.one')], cwd=root, text=True)
+saved = subprocess.check_output(['cargo', 'run', '-p', 'onestore', '--quiet', '--example', 'inventory', '--', str(append / 'native-after-511.one')], cwd=root, text=True)
 assert [bytes.fromhex(row.split('\t')[2]).decode('ascii') for row in saved.splitlines() if row.startswith('ascii\t')] == ['Native after interrupted cleanup.']
 print('Passed: append encoding, native metadata and counter recovery, post-recovery native save, and filesystem-backed SMB commit')

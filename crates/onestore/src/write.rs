@@ -4,7 +4,13 @@ use crate::{
     store::{crc, transaction_crc},
 };
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+#[cfg(test)]
+mod tests;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -98,109 +104,183 @@ fn compact(id: ExGuid, table: &BTreeMap<u32, [u8; 16]>) -> Result<[u8; 4]> {
     Ok(((index << 8) | id.n).to_le_bytes())
 }
 
+fn field_length(property: &crate::Property<'_>, set_lengths: &[usize]) -> usize {
+    match &property.value {
+        Value::NoData => 0,
+        Value::Bytes(bytes) => bytes.len() + usize::from(property.id >> 26 & 31 == 7) * 4,
+        Value::References { .. } => usize::from(property.id >> 26 & 1 != 0) * 4,
+        Value::Sets(children) => {
+            let prefix = if property.id >> 26 & 31 == 16 {
+                if children.is_empty() { 4 } else { 8 }
+            } else {
+                0
+            };
+            prefix + children.clone().map(|i| set_lengths[i]).sum::<usize>()
+        }
+    }
+}
+
 fn patch_properties(
     blob: &[u8],
     updates: &[(u32, &[u8])],
-    insert: Option<(u32, &[u8])>,
+    inserts: &[(u32, &[u8])],
 ) -> Result<Vec<u8>> {
     let properties = PropertySets::parse(blob)?;
+    let root = &properties.sets[0];
+    let ids = properties.root_ids.as_ptr().addr() - blob.as_ptr().addr();
+    let ids_end = ids + properties.root_ids.len();
+    let body_end = blob.len() - properties.padding.len();
+    let mut set_lengths = vec![0; properties.sets.len()];
+    for (i, set) in properties.sets.iter().enumerate().rev() {
+        set_lengths[i] = 2
+            + set.len() * 4
+            + set
+                .iter()
+                .map(|p| field_length(p, &set_lengths))
+                .sum::<usize>();
+    }
+    let mut offsets = Vec::with_capacity(root.len());
+    let mut offset = ids_end;
+    for property in root {
+        offsets.push(offset);
+        offset += field_length(property, &set_lengths);
+    }
     let mut patches = Vec::new();
-    for (i, &(property, value)) in updates.iter().chain(insert.iter()).enumerate() {
-        if updates[..i.min(updates.len())]
-            .iter()
-            .any(|(id, _)| *id == property)
-        {
+    let mut added_ids = Vec::new();
+    let mut added_fields = Vec::new();
+    let mut added_references = Vec::new();
+    let object_header = u32::from_le_bytes(blob[..4].try_into().unwrap());
+    let mut object_count = i64::from(object_header & 0xffffff);
+    let mut seen = BTreeSet::new();
+    for (i, &(property, value)) in updates.iter().chain(inserts).enumerate() {
+        if !seen.insert(property & 0x7fffffff) {
             return Err(Error {
                 offset: 0,
                 message: "Duplicate property update",
             });
         }
-        let kind = (property >> 26) & 0x1f;
-        if !(3..=7).contains(&kind) {
+        let kind = (property >> 26) & 31;
+        let valid = match kind {
+            2 => value.is_empty(),
+            3..=6 => value.len() == 1 << (kind - 3),
+            7 => value.len() < 0x40000000,
+            8 => value.len() == 4,
+            9 => value.len().is_multiple_of(4) && value.len() / 4 <= 0xffffff,
+            _ => {
+                return Err(Error {
+                    offset: 0,
+                    message: "Property type cannot be patched",
+                });
+            }
+        };
+        if !valid || (kind != 2 && property & 0x80000000 != 0) {
             return Err(Error {
                 offset: 0,
-                message: "Property does not contain scalar bytes",
+                message: "Replacement has an invalid property value",
             });
         }
-        if (kind == 7 && value.len() >= 0x40000000) || (kind != 7 && value.len() != 1 << (kind - 3))
-        {
-            return Err(Error {
-                offset: 0,
-                message: "Replacement has an invalid property length",
-            });
-        }
-        let matches: Vec<_> = properties.sets[0]
+        let matches: Vec<_> = root
             .iter()
-            .filter(|candidate| candidate.id == property)
+            .enumerate()
+            .filter(|(_, p)| p.id & 0x7fffffff == property & 0x7fffffff)
             .collect();
-        let adding = i == updates.len();
+        let adding = i >= updates.len();
         if matches.len() != usize::from(!adding) {
             return Err(Error {
                 offset: 0,
                 message: "Property is missing or duplicated",
             });
         }
-        let previous = if adding {
-            None
-        } else {
-            let Value::Bytes(previous) = matches[0].value else {
-                return Err(Error {
-                    offset: 0,
-                    message: "Property does not contain scalar bytes",
-                });
-            };
-            if previous == value {
-                continue;
-            }
-            Some(previous)
-        };
         let mut encoded = Vec::new();
-        if kind == 7 {
-            encoded.extend_from_slice(&u32::try_from(value.len()).unwrap().to_le_bytes());
+        match kind {
+            7 => encoded.extend_from_slice(&(value.len() as u32).to_le_bytes()),
+            9 => encoded.extend_from_slice(&(value.len() as u32 / 4).to_le_bytes()),
+            _ => {}
         }
-        encoded.extend_from_slice(value);
-        if let Some(previous) = previous {
-            let start = previous.as_ptr().addr() - blob.as_ptr().addr();
-            patches.push((
-                start - if kind == 7 { 4 } else { 0 },
-                start + previous.len(),
-                encoded,
-            ));
+        if (3..=7).contains(&kind) {
+            encoded.extend_from_slice(value);
+        }
+        if adding {
+            added_ids.extend_from_slice(&property.to_le_bytes());
+            added_fields.extend_from_slice(&encoded);
+            if kind >= 8 {
+                object_count += (value.len() / 4) as i64;
+                added_references.extend_from_slice(value);
+            }
         } else {
-            let count = u16::try_from(properties.sets[0].len() + 1).map_err(|_| Error {
-                offset: 0,
-                message: "Root property count exceeds the format limit",
-            })?;
-            let ids = properties.root_ids.as_ptr().addr() - blob.as_ptr().addr();
-            patches.push((ids - 2, ids, count.to_le_bytes().to_vec()));
-            let end = ids + properties.root_ids.len();
-            patches.push((end, end, property.to_le_bytes().to_vec()));
-            let end = blob.len() - properties.padding.len();
-            patches.push((end, end, encoded));
+            let (index, previous) = matches[0];
+            if kind == 2 && previous.id != property {
+                patches.push((
+                    ids + index * 4,
+                    ids + index * 4 + 4,
+                    index,
+                    property.to_le_bytes().to_vec(),
+                ));
+            }
+            let start = offsets[index];
+            let end = start + field_length(previous, &set_lengths);
+            if blob[start..end] != encoded {
+                patches.push((start, end, index, encoded));
+            }
+            if let Value::References { compact_ids, .. } = previous.value {
+                object_count += (value.len() / 4) as i64 - (compact_ids.len() / 4) as i64;
+                if compact_ids != value {
+                    let start = compact_ids.as_ptr().addr() - blob.as_ptr().addr();
+                    patches.push((start, start + compact_ids.len(), index, value.to_vec()));
+                }
+            }
         }
+    }
+    if !(0..=0xffffff).contains(&object_count) {
+        return Err(Error {
+            offset: 0,
+            message: "Object reference stream exceeds the format limit",
+        });
+    }
+    let header = (object_header & 0xff000000) | object_count as u32;
+    if header != object_header {
+        patches.push((0, 4, 0, header.to_le_bytes().to_vec()));
+    }
+    if !added_references.is_empty() {
+        let end = 4 + (object_header as usize & 0xffffff) * 4;
+        patches.push((end, end, usize::MAX, added_references));
+    }
+    if !inserts.is_empty() {
+        let count = u16::try_from(root.len() + inserts.len()).map_err(|_| Error {
+            offset: ids - 2,
+            message: "Root property count exceeds the format limit",
+        })?;
+        patches.push((ids - 2, ids, 0, count.to_le_bytes().to_vec()));
+        patches.push((ids_end, ids_end, usize::MAX - 1, added_ids));
+        patches.push((body_end, body_end, usize::MAX, added_fields));
     }
     if patches.is_empty() {
         return Ok(blob.to_vec());
     }
-    patches.sort_by_key(|(start, end, _)| (*start, *end));
+    patches.sort_by_key(|(start, end, order, _)| (*start, *end, *order));
     let mut changed = Vec::new();
     let mut cursor = 0;
-    for (start, end, value) in patches {
+    for (start, end, _, value) in patches {
+        if start < cursor {
+            return Err(Error {
+                offset: start,
+                message: "Property patches overlap",
+            });
+        }
         changed.extend_from_slice(&blob[cursor..start]);
         changed.extend_from_slice(&value);
         cursor = end;
     }
-    changed.extend_from_slice(&blob[cursor..blob.len() - properties.padding.len()]);
+    changed.extend_from_slice(&blob[cursor..body_end]);
     changed.resize(changed.len().next_multiple_of(8), 0);
     PropertySets::parse(&changed)?;
-
     Ok(changed)
 }
 
 pub(crate) struct ObjectEdit<'a> {
     pub object: ExGuid,
     pub updates: &'a [(u32, &'a [u8])],
-    pub insert: Option<(u32, &'a [u8])>,
+    pub inserts: &'a [(u32, &'a [u8])],
 }
 
 /// Replaces a root-level scalar byte property in the default active revision.
@@ -213,13 +293,19 @@ pub fn replace_property_bytes(
     property: u32,
     value: &[u8],
 ) -> Result<Vec<u8>> {
+    if !(3..=7).contains(&((property >> 26) & 31)) {
+        return Err(Error {
+            offset: 0,
+            message: "Property does not contain scalar bytes",
+        });
+    }
     replace_objects(
         source,
         space,
         &[ObjectEdit {
             object: object_id,
             updates: &[(property, value)],
-            insert: None,
+            inserts: &[],
         }],
     )
 }
@@ -228,6 +314,96 @@ pub(crate) fn replace_objects(
     source: &[u8],
     space: ExGuid,
     edits: &[ObjectEdit<'_>],
+) -> Result<Vec<u8>> {
+    write_revision(source, space, |revision| {
+        let mut changed = BTreeMap::new();
+        for edit in edits {
+            if changed.contains_key(&edit.object) {
+                return Err(Error {
+                    offset: 0,
+                    message: "Duplicate object edit",
+                });
+            }
+            let object = revision.objects.get(&edit.object).ok_or(Error {
+                offset: 0,
+                message: "Object is absent from the active revision",
+            })?;
+            let ObjectData::Properties(blob) = object.data else {
+                return Err(Error {
+                    offset: 0,
+                    message: "Object does not contain editable properties",
+                });
+            };
+            changed.insert(
+                edit.object,
+                PropertyObject {
+                    jcid: object.jcid,
+                    bytes: patch_properties(blob, edit.updates, edit.inserts)?,
+                    global_ids: Arc::clone(&object.global_ids),
+                },
+            );
+        }
+        Ok(changed)
+    })
+}
+
+pub(crate) struct PropertyObject {
+    pub jcid: u32,
+    pub bytes: Vec<u8>,
+    pub global_ids: Arc<BTreeMap<u32, [u8; 16]>>,
+}
+
+impl PropertyObject {
+    pub fn from_object(object: &crate::Object<'_>) -> Result<Self> {
+        let ObjectData::Properties(bytes) = object.data else {
+            return Err(Error {
+                offset: 0,
+                message: "Object does not contain editable properties",
+            });
+        };
+        Ok(Self {
+            jcid: object.jcid,
+            bytes: bytes.to_vec(),
+            global_ids: Arc::clone(&object.global_ids),
+        })
+    }
+
+    pub fn set(&mut self, values: &[(u32, &[u8])]) -> Result<()> {
+        let properties = PropertySets::parse(&self.bytes)?;
+        let (updates, inserts): (Vec<_>, Vec<_>) = values.iter().copied().partition(|(id, _)| {
+            properties.sets[0]
+                .iter()
+                .any(|p| p.id & 0x7fffffff == id & 0x7fffffff)
+        });
+        self.bytes = patch_properties(&self.bytes, &updates, &inserts)?;
+        Ok(())
+    }
+
+    pub fn reference(&mut self, id: ExGuid) -> Result<[u8; 4]> {
+        if !self.global_ids.values().any(|guid| *guid == id.guid) {
+            let mut index = 0;
+            for key in self.global_ids.keys() {
+                if *key != index {
+                    break;
+                }
+                index += 1;
+            }
+            if index >= 0xffffff || id.guid == [0; 16] {
+                return Err(Error {
+                    offset: 0,
+                    message: "Object identity cannot be added to the global ID table",
+                });
+            }
+            Arc::make_mut(&mut self.global_ids).insert(index, id.guid);
+        }
+        compact(id, &self.global_ids)
+    }
+}
+
+pub(crate) fn write_revision(
+    source: &[u8],
+    space: ExGuid,
+    edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
     let store = Store::parse(source)?;
     let is_section = store.header.file_type == FileType::Section;
@@ -247,45 +423,135 @@ pub(crate) fn replace_objects(
             offset: 0,
             message: "Object space has no active default revision",
         })?;
-    let revision = index.resolve(space, rid)?;
+    let mut revision = index.resolve(space, rid)?;
     let reachable = revision.reachable()?;
-    let mut changed = BTreeMap::new();
-    for (i, edit) in edits.iter().enumerate() {
-        if edits[..i]
-            .iter()
-            .any(|previous| previous.object == edit.object)
+    let mut replacements = edit(&revision)?;
+    for (id, replacement) in &replacements {
+        if let Some(object) = revision.objects.get(id) {
+            if !reachable.contains(id) {
+                return Err(Error {
+                    offset: 0,
+                    message: "Object is not reachable in the active revision",
+                });
+            }
+            if object.jcid & 0x100000 != 0 {
+                return Err(Error {
+                    offset: 0,
+                    message: "Read-only object requires a new identity",
+                });
+            }
+            if replacement.jcid != object.jcid || !matches!(object.data, ObjectData::Properties(_))
+            {
+                return Err(Error {
+                    offset: 0,
+                    message: "An existing object's type cannot be changed",
+                });
+            }
+        } else if !is_section {
+            return Err(Error {
+                offset: 0,
+                message: "New objects require a section file",
+            });
+        }
+        if replacement.jcid & 0x20000 == 0 || replacement.global_ids.keys().any(|i| *i > 0xffffff) {
+            return Err(Error {
+                offset: 0,
+                message: "Invalid property object declaration",
+            });
+        }
+        compact(*id, &replacement.global_ids)?;
+        PropertySets::parse(&replacement.bytes)?;
+    }
+    // Native coalescing of duplicate readonly styles can leave dangling references.
+    let mut aliases = BTreeMap::new();
+    for (id, replacement) in &replacements {
+        if revision.objects.contains_key(id)
+            || replacement.jcid & 0x100000 == 0
+            || PropertySets::parse(&replacement.bytes)?
+                .sets
+                .iter()
+                .flatten()
+                .any(|p| matches!(p.value, Value::References { .. }))
         {
-            return Err(Error {
-                offset: 0,
-                message: "Duplicate object edit",
-            });
+            continue;
         }
-        if !reachable.contains(&edit.object) {
-            return Err(Error {
-                offset: 0,
-                message: "Object is not reachable in the active revision",
-            });
-        }
-        let object = &revision.objects[&edit.object];
-        if object.jcid & 0x100000 != 0 {
-            return Err(Error {
-                offset: 0,
-                message: "Read-only object requires a new identity",
-            });
-        }
-        let ObjectData::Properties(blob) = object.data else {
-            return Err(Error {
-                offset: 0,
-                message: "Object does not contain editable properties",
-            });
-        };
-        let bytes = patch_properties(blob, edit.updates, edit.insert)?;
-        if bytes != blob {
-            changed.insert(edit.object, bytes);
+        let existing = revision.objects.iter().find_map(|(other, object)| {
+            (reachable.contains(other)
+                && object.jcid == replacement.jcid
+                && object.data == ObjectData::Properties(&replacement.bytes))
+            .then_some(*other)
+        });
+        let existing = existing.or_else(|| {
+            replacements.range(..id).find_map(|(other, object)| {
+                (object.jcid == replacement.jcid && object.bytes == replacement.bytes)
+                    .then_some(*aliases.get(other).unwrap_or(other))
+            })
+        });
+        if let Some(existing) = existing {
+            aliases.insert(*id, existing);
         }
     }
-    if changed.is_empty() {
+    for id in aliases.keys() {
+        replacements.remove(id);
+    }
+    for object in replacements.values_mut() {
+        let mut remapped = Vec::new();
+        for property in PropertySets::parse(&object.bytes)?.sets.iter().flatten() {
+            if let Value::References {
+                stream: crate::IdStream::Objects,
+                compact_ids,
+            } = property.value
+            {
+                for bytes in compact_ids.chunks_exact(4) {
+                    let offset = bytes.as_ptr().addr() - object.bytes.as_ptr().addr();
+                    let id = crate::bytes::Cursor { bytes, offset }.compact(&object.global_ids)?;
+                    if let Some(existing) = aliases.get(&id) {
+                        remapped.push((offset, *existing));
+                    }
+                }
+            }
+        }
+        for (offset, id) in remapped {
+            let reference = object.reference(id)?;
+            object.bytes[offset..offset + 4].copy_from_slice(&reference);
+        }
+    }
+    replacements.retain(|id, replacement| {
+        !revision.objects.get(id).is_some_and(|object| {
+            object.data == ObjectData::Properties(&replacement.bytes)
+                && object.global_ids == replacement.global_ids
+        })
+    });
+    if replacements.is_empty() {
         return Ok(source.to_vec());
+    }
+    let mut changed: BTreeSet<_> = replacements.keys().copied().collect();
+    for (id, replacement) in &replacements {
+        revision.objects.insert(
+            *id,
+            crate::Object {
+                jcid: replacement.jcid,
+                reference_count: 0,
+                data: ObjectData::Properties(&replacement.bytes),
+                global_ids: Arc::clone(&replacement.global_ids),
+            },
+        );
+    }
+    let incoming = revision.reference_counts()?;
+    if replacements.keys().any(|id| !incoming.contains_key(id)) {
+        return Err(Error {
+            offset: 0,
+            message: "Edited object is not reachable in the resulting revision",
+        });
+    }
+    for (id, object) in &mut revision.objects {
+        if reachable.contains(id) || incoming.contains_key(id) {
+            let count = incoming.get(id).copied().unwrap_or(0);
+            if object.reference_count != count {
+                object.reference_count = count;
+                changed.insert(*id);
+            }
+        }
     }
 
     // Native cold-open fails on long dependency chains; cap their depth at 512.
@@ -297,7 +563,7 @@ pub(crate) fn replace_objects(
     let selected: Vec<_> = revision
         .objects
         .iter()
-        .filter(|(id, _)| checkpoint || changed.contains_key(id))
+        .filter(|(id, _)| checkpoint || changed.contains(id))
         .collect();
     let toc_table = if checkpoint && !is_section {
         if selected.iter().any(|(_, object)| {
@@ -398,8 +664,7 @@ pub(crate) fn replace_objects(
                     }
                     group.push(node(0x73, None, &declaration)?);
                 }
-                ObjectData::Properties(previous) => {
-                    let bytes = changed.get(&id).map(Vec::as_slice).unwrap_or(previous);
+                ObjectData::Properties(bytes) => {
                     let references = object.references()?;
                     let flags = u8::from(!references.objects.is_empty())
                         | (u8::from(
@@ -422,7 +687,7 @@ pub(crate) fn replace_objects(
                             }
                         }
                         append(&mut output, &mapped)?
-                    } else if changed.contains_key(&id) {
+                    } else if replacements.contains_key(&id) {
                         append(&mut output, bytes)?
                     } else {
                         Chunk {

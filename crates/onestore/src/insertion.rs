@@ -1,0 +1,343 @@
+use crate::{
+    Error, ExGuid, Object, ObjectData, RevisionIndex, Store,
+    create::{current_timestamps, default_text_style, properties, string},
+    document::{Document, Element, Kind},
+    edit::{editable_parents, page_title},
+    write::{PropertyObject, fresh_guid, write_revision},
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
+
+fn invalid(message: &'static str) -> Error {
+    Error { offset: 0, message }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum Placement {
+    Paragraph { before: Option<ExGuid> },
+    Outline { x: f32, y: f32 },
+}
+
+/// A paragraph or outline insertion with stable object identities and creation time.
+/// Retain this intent across rebases; constructing another intent allocates different identities.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Insertion {
+    guid: [u8; 16],
+    parent: ExGuid,
+    placement: Placement,
+    text: String,
+    author: String,
+    created: u32,
+}
+
+impl Insertion {
+    /// Inserts before a direct child, or appends when `before` is None.
+    /// The parent must be an editable outline, paragraph, outline group or table cell.
+    /// Carriage returns represent soft line breaks; line feeds and embedded-field markers are rejected.
+    pub fn paragraph(
+        parent: ExGuid,
+        before: Option<ExGuid>,
+        text: &str,
+        author: &str,
+    ) -> Result<Self, Error> {
+        Self::new(parent, Placement::Paragraph { before }, text, author)
+    }
+
+    /// Adds an outline to an editable page at coordinates measured in points.
+    pub fn outline(page: ExGuid, x: f32, y: f32, text: &str, author: &str) -> Result<Self, Error> {
+        Self::new(page, Placement::Outline { x, y }, text, author)
+    }
+
+    /// Changes a paragraph intent's placement while retaining its identities, text and author.
+    pub fn reposition_paragraph(
+        &self,
+        parent: ExGuid,
+        before: Option<ExGuid>,
+    ) -> Result<Self, Error> {
+        if !matches!(self.placement, Placement::Paragraph { .. }) {
+            return Err(invalid("An outline intent cannot become a paragraph"));
+        }
+        let mut intent = self.clone();
+        intent.parent = parent;
+        intent.placement = Placement::Paragraph { before };
+        intent.validate()?;
+        Ok(intent)
+    }
+
+    /// Changes an outline intent's placement while retaining its identities, text and author.
+    pub fn reposition_outline(&self, page: ExGuid, x: f32, y: f32) -> Result<Self, Error> {
+        if !matches!(self.placement, Placement::Outline { .. }) {
+            return Err(invalid("A paragraph intent cannot become an outline"));
+        }
+        let mut intent = self.clone();
+        intent.parent = page;
+        intent.placement = Placement::Outline { x, y };
+        intent.validate()?;
+        Ok(intent)
+    }
+
+    fn new(parent: ExGuid, placement: Placement, text: &str, author: &str) -> Result<Self, Error> {
+        let intent = Self {
+            guid: fresh_guid()?,
+            parent,
+            placement,
+            text: text.to_owned(),
+            author: author.to_owned(),
+            created: current_timestamps()?.0,
+        };
+        intent.validate()?;
+        Ok(intent)
+    }
+
+    /// Identity of the new paragraph, or the new outline for an outline insertion.
+    pub fn object(&self) -> ExGuid {
+        ExGuid {
+            guid: self.guid,
+            n: 1,
+        }
+    }
+
+    /// Identity of the insertion's ordinary rich-text object.
+    pub fn text_object(&self) -> ExGuid {
+        ExGuid {
+            guid: self.guid,
+            n: 2,
+        }
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        if self.guid == [0; 16]
+            || self.parent.guid == [0; 16]
+            || self.text.contains(['\0', '\n', '\u{fffc}', '\u{fddf}'])
+            || self.author.contains('\0')
+        {
+            return Err(invalid(
+                "Use an editable parent, ordinary paragraph text and a valid author",
+            ));
+        }
+        if let Placement::Outline { x, y } = self.placement
+            && (!x.is_finite() || !y.is_finite())
+        {
+            return Err(invalid("Outline coordinates must be finite"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        let store = Store::parse(source)?;
+        let index = RevisionIndex::parse(&store)?;
+        index.validate_current()?;
+        let mut document = Document::parse(&index)?;
+        let pages: Vec<_> = document
+            .pages()?
+            .into_iter()
+            .filter_map(|(sid, id)| (sid == space).then_some(id))
+            .collect();
+        let [page] = pages.as_slice() else {
+            return Err(invalid("Insertion requires a single active page"));
+        };
+        let semantic_space = document
+            .spaces
+            .remove(&space)
+            .ok_or_else(|| invalid("The active page is unavailable"))?;
+        let rid = semantic_space.contexts[&ExGuid::default()];
+        let mut view = semantic_space
+            .revisions
+            .into_iter()
+            .find_map(|(id, revision)| (id == rid).then_some(revision))
+            .unwrap();
+        let parents = editable_parents(&view, &pages, self.parent)?;
+        let parent = &view.nodes[&self.parent];
+        let position = match self.placement {
+            Placement::Paragraph { before } => {
+                if !matches!(
+                    parent.kind,
+                    Kind::Outline { .. }
+                        | Kind::Paragraph { .. }
+                        | Kind::OutlineGroup
+                        | Kind::Cell { .. }
+                ) {
+                    return Err(invalid(
+                        "Select an outline, paragraph, outline group or table cell",
+                    ));
+                }
+                if let Some(id) = before {
+                    parent
+                        .children
+                        .iter()
+                        .position(|child| *child == id)
+                        .ok_or_else(|| {
+                            invalid("The insertion anchor is no longer a direct child")
+                        })?
+                } else {
+                    parent.children.len()
+                }
+            }
+            Placement::Outline { .. } => {
+                if self.parent != *page || !matches!(parent.kind, Kind::Page { .. }) {
+                    return Err(invalid("Select an active page for the new outline"));
+                }
+                parent.children.len()
+            }
+        };
+        let mut ancestors = BTreeSet::new();
+        let mut pending = vec![self.parent];
+        while let Some(id) = pending.pop() {
+            if !ancestors.insert(id) {
+                continue;
+            }
+            if matches!(view.nodes[&id].kind, Kind::Title) {
+                return Err(invalid(
+                    "Title containers do not accept ordinary paragraphs",
+                ));
+            }
+            pending.extend(parents.get(&id).into_iter().flatten().copied());
+        }
+        let modified = current_timestamps()?.0.to_le_bytes();
+        let paragraph_n = if matches!(self.placement, Placement::Outline { .. }) {
+            3
+        } else {
+            1
+        };
+        let table = Arc::new(BTreeMap::from([(0, self.guid)]));
+        let reference = |n: u32| n.to_le_bytes().to_vec();
+        let mut new = BTreeMap::new();
+        for (n, jcid, values) in [
+            (
+                paragraph_n,
+                0x6000d,
+                vec![
+                    (0x14001d7a, modified.to_vec()),
+                    (0x14001d09, self.created.to_le_bytes().to_vec()),
+                    (0x0c001c03, vec![1]),
+                    (0x24001c1f, reference(2)),
+                    (0x20001d78, reference(4)),
+                    (0x20001d79, reference(4)),
+                ],
+            ),
+            (
+                2,
+                0x6000e,
+                vec![
+                    (0x14001d7a, modified.to_vec()),
+                    (0x1c001c22, string(&self.text)),
+                    (0x24001e13, reference(5)),
+                    (0x10001cfe, 0x409_u16.to_le_bytes().to_vec()),
+                ],
+            ),
+            (4, 0x120001, vec![(0x1c001d75, string(&self.author))]),
+            (5, 0x12004d, default_text_style()),
+        ] {
+            new.insert(
+                ExGuid { guid: self.guid, n },
+                PropertyObject {
+                    jcid,
+                    bytes: properties(&values)?,
+                    global_ids: Arc::clone(&table),
+                },
+            );
+        }
+        if let Placement::Outline { x, y } = self.placement {
+            new.insert(
+                self.object(),
+                PropertyObject {
+                    jcid: 0x6000c,
+                    global_ids: table,
+                    bytes: properties(&[
+                        (0x14001d7a, modified.to_vec()),
+                        (0x24001c20, reference(3)),
+                        (0x0c001c03, vec![1]),
+                        (0x1c001c12, vec![1, 0, 0, 0, 0, 0, 0, 0]),
+                        (0x14001c14, (x / 36.0).to_le_bytes().to_vec()),
+                        (0x14001c15, (y / 36.0).to_le_bytes().to_vec()),
+                        (0x14001c1b, 13_f32.to_le_bytes().to_vec()),
+                        (0x14001c1c, 0.6_f32.to_le_bytes().to_vec()),
+                    ])?,
+                },
+            );
+        }
+        let raw = index.resolve(space, rid)?;
+        if new.keys().any(|id| raw.objects.contains_key(id)) {
+            return Err(invalid(
+                "An insertion identity is already present; reconcile the existing edit",
+            ));
+        }
+        // Drop the semantic view before moving the property bytes it borrows.
+        let title = {
+            view.nodes
+                .get_mut(&self.parent)
+                .unwrap()
+                .children
+                .insert(position, self.object());
+            for (id, object) in &new {
+                view.nodes.insert(
+                    *id,
+                    Element::parse(
+                        &Object {
+                            jcid: object.jcid,
+                            reference_count: 0,
+                            data: ObjectData::Properties(&object.bytes),
+                            global_ids: Arc::clone(&object.global_ids),
+                        },
+                        &store,
+                    )?,
+                );
+            }
+            let title = page_title(&view, &pages, None)?;
+            drop(view);
+            title
+        };
+        write_revision(source, space, |raw| {
+            let mut changed = new;
+            for id in &ancestors {
+                let mut object = PropertyObject::from_object(&raw.objects[id])?;
+                object.set(&[(0x14001d7a, &modified)])?;
+                changed.insert(*id, object);
+            }
+            let parent = changed.get_mut(&self.parent).unwrap();
+            let properties = crate::PropertySets::parse(&parent.bytes)?;
+            let existing = properties.sets[0].iter().find(|p| p.id == 0x24001c20);
+            let mut ids = match existing.map(|p| &p.value) {
+                Some(crate::Value::References { compact_ids, .. }) => compact_ids.to_vec(),
+                None => Vec::new(),
+                _ => return Err(invalid("The parent has an invalid child list")),
+            };
+            let child = parent.reference(self.object())?;
+            if position > ids.len() / 4 {
+                return Err(invalid("The parent has an invalid child list"));
+            }
+            ids.splice(position * 4..position * 4, child);
+            parent.set(&[(0x24001c20, &ids)])?;
+            if matches!(self.placement, Placement::Paragraph { .. }) {
+                let properties = crate::PropertySets::parse(&parent.bytes)?;
+                if !properties.sets[0].iter().any(|p| p.id == 0x0c001c03) {
+                    parent.set(&[(0x0c001c03, &[1])])?;
+                }
+            }
+            if let Some((page, automatic, title)) = title {
+                let metadata = raw
+                    .roots
+                    .get(&2)
+                    .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
+                if raw.objects[metadata].jcid != 0x20030 {
+                    return Err(invalid("Page title metadata is unavailable"));
+                }
+                let title = string(&title);
+                let mut metadata_object = PropertyObject::from_object(&raw.objects[metadata])?;
+                metadata_object.set(&[(0x1c001cf3, &title)])?;
+                changed.insert(*metadata, metadata_object);
+                changed
+                    .get_mut(&page)
+                    .unwrap()
+                    .set(&[(0x1c001d3c, if automatic { &title } else { &[0, 0] })])?;
+            }
+            Ok(changed)
+        })
+    }
+}

@@ -82,7 +82,7 @@ pub struct Header {
 }
 
 impl Header {
-    fn parse(data: &[u8]) -> Result<Self> {
+    pub(crate) fn parse(data: &[u8]) -> Result<Self> {
         let mut c = Cursor {
             bytes: data,
             offset: 0,

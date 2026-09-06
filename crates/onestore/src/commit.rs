@@ -153,14 +153,113 @@ pub fn commit_text(
     range: std::ops::Range<u32>,
     replacement: &str,
 ) -> Result<(), CommitError> {
-    let written =
-        crate::replace_text(source, space, object, range, replacement).map_err(|error| {
-            CommitError {
-                state: CommitState::NotCommitted,
-                error: io::Error::new(ErrorKind::InvalidData, error),
-            }
+    PreparedEdit::text(source, space, object, range, replacement)
+        .map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error: io::Error::new(ErrorKind::InvalidData, error),
+        })?
+        .commit(io)
+}
+
+/// An immutable writer-generated transition tied to its original snapshot.
+/// Persist intended revision identities from `as_bytes` before publishing an offline edit.
+/// Missing identities after native maintenance do not prove an edit was never published.
+pub struct PreparedEdit<'a> {
+    source: &'a [u8],
+    written: Vec<u8>,
+}
+
+impl<'a> PreparedEdit<'a> {
+    /// Prepares an insertion and its dependent metadata in one revision, without I/O.
+    pub fn insert(
+        source: &'a [u8],
+        space: ExGuid,
+        insertion: &crate::Insertion,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: insertion.apply(source, space)?,
+        })
+    }
+
+    /// Validates and prepares a text edit without I/O, with `replace_text` semantics.
+    pub fn text(
+        source: &'a [u8],
+        space: ExGuid,
+        object: ExGuid,
+        range: std::ops::Range<u32>,
+        replacement: &str,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: crate::replace_text(source, space, object, range, replacement)?,
+        })
+    }
+
+    /// Changes character formatting over a UTF-16 range, preserving unselected runs and styles.
+    /// A zero-length range sets the insertion style only when the paragraph is empty.
+    /// Fields, associated run objects and boundaries splitting preserved run data are rejected.
+    pub fn format(
+        source: &'a [u8],
+        space: ExGuid,
+        object: ExGuid,
+        range: std::ops::Range<u32>,
+        attributes: &[crate::TextAttribute],
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: crate::formatting::format_text(source, space, object, range, attributes)?,
+        })
+    }
+
+    /// The exact complete image this edit will publish; identities do not regenerate on commit.
+    /// Do not overwrite a live notebook with this image; use `commit` under exclusion.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.written
+    }
+
+    /// Publishes these prepared bytes after comparing the entire original snapshot.
+    /// The caller must retain OneNote-compatible exclusion through the returned outcome.
+    pub fn commit(&self, io: &mut impl CommitIo) -> Result<(), CommitError> {
+        commit_bytes(io, self.source, &self.written)
+    }
+
+    /// Publishes these exact bytes through the conservative whole-file filesystem adapter.
+    /// A changed source returns ResourceBusy; an uncertain outcome must be reconciled before replay.
+    #[cfg(any(unix, windows))]
+    pub fn commit_file(&self, path: impl AsRef<Path>) -> Result<(), CommitError> {
+        let mut io = FileIo::open(path, true).map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error,
         })?;
-    commit_bytes(io, source, &written)
+        let result = self.commit(&mut io);
+        io.finish(result)
+    }
+}
+
+/// Compares and flushes a snapshot, then refreshes its header version metadata.
+/// No revision is added; reread before using the snapshot for another physical commit.
+/// The caller must hold OneNote-compatible exclusion and independently establish which
+/// intents the snapshot contains. A successful read alone is not a durable acknowledgement.
+pub fn confirm_snapshot(io: &mut impl CommitIo, source: &[u8]) -> Result<(), CommitError> {
+    let mut state = CommitState::NotCommitted;
+    let result = (|| -> io::Result<()> {
+        let header = crate::Header::parse(source).map_err(io::Error::other)?;
+        let generation = header
+            .generation
+            .checked_add(1)
+            .ok_or(ErrorKind::InvalidData)?;
+        let mut version = [0; 40];
+        version[..16].copy_from_slice(&crate::write::fresh_guid().map_err(io::Error::other)?);
+        version[16..24].copy_from_slice(&generation.to_le_bytes());
+        version[24..].copy_from_slice(&crate::write::fresh_guid().map_err(io::Error::other)?);
+        compare_snapshot(io, source)?;
+        state = CommitState::Unknown;
+        io.flush()?;
+        write_all(io, 212, &version)?;
+        io.flush()
+    })();
+    result.map_err(|error| CommitError { state, error })
 }
 
 /// The caller must hold OneNote-compatible exclusion for the entire operation.
@@ -221,7 +320,7 @@ fn write_all(io: &mut impl CommitIo, mut offset: usize, mut bytes: &[u8]) -> io:
 }
 
 /// Publishes a scalar revision after checking the locked file against its snapshot.
-/// Unknown outcomes require rereading; Committed errors affect counter cleanup or lock release.
+/// Unknown outcomes require rereading; Committed errors affect lock release.
 pub fn commit_property_bytes(
     io: &mut impl CommitIo,
     source: &[u8],
@@ -240,6 +339,40 @@ pub fn commit_property_bytes(
     commit_bytes(io, source, &written)
 }
 
+fn compare_snapshot(io: &mut impl CommitIo, source: &[u8]) -> io::Result<()> {
+    let capacity = source.len().clamp(1, 1024 * 1024);
+    let mut buffer = Vec::new();
+    buffer
+        .try_reserve_exact(capacity)
+        .map_err(io::Error::other)?;
+    buffer.resize(capacity, 0);
+    let mut offset = 0;
+    while offset < source.len() {
+        let size = buffer.len().min(source.len() - offset);
+        let count = match io.read_at(offset as u64, &mut buffer[..size]) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            return Err(io::Error::from(ErrorKind::UnexpectedEof));
+        }
+        if count > size || buffer[..count] != source[offset..offset + count] {
+            return Err(io::Error::new(
+                ErrorKind::ResourceBusy,
+                "The locked file differs from the edit snapshot",
+            ));
+        }
+        offset += count;
+    }
+    if io.read_at(source.len() as u64, &mut buffer[..1])? != 0 {
+        return Err(io::Error::new(
+            ErrorKind::ResourceBusy,
+            "The locked file grew after the edit snapshot",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn commit_bytes(
     io: &mut impl CommitIo,
     source: &[u8],
@@ -247,31 +380,7 @@ pub(crate) fn commit_bytes(
 ) -> Result<(), CommitError> {
     let mut state = CommitState::NotCommitted;
     let result = (|| -> io::Result<()> {
-        let mut buffer = [0; 65536];
-        let mut offset = 0;
-        while offset < source.len() {
-            let size = buffer.len().min(source.len() - offset);
-            let count = match io.read_at(offset as u64, &mut buffer[..size]) {
-                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                result => result?,
-            };
-            if count == 0 {
-                return Err(io::Error::from(ErrorKind::UnexpectedEof));
-            }
-            if count > size || buffer[..count] != source[offset..offset + count] {
-                return Err(io::Error::new(
-                    ErrorKind::ResourceBusy,
-                    "The locked file differs from the edit snapshot",
-                ));
-            }
-            offset += count;
-        }
-        if io.read_at(source.len() as u64, &mut buffer[..1])? != 0 {
-            return Err(io::Error::new(
-                ErrorKind::ResourceBusy,
-                "The locked file grew after the edit snapshot",
-            ));
-        }
+        compare_snapshot(io, source)?;
         if written == source {
             state = CommitState::Unknown;
             io.flush()?;
@@ -291,17 +400,20 @@ pub(crate) fn commit_bytes(
             write_all(io, start, &written[start..offset])?;
         }
         io.flush()?;
-        write_all(io, 100, &written[100..1024])?;
+        write_all(io, 100, &written[100..212])?;
+        write_all(io, 252, &written[252..1024])?;
         io.flush()?;
         let highest = (96..100).rfind(|at| source[*at] != written[*at]).unwrap();
         state = CommitState::Unknown;
         write_all(io, highest, &written[highest..highest + 1])?;
         io.flush()?;
-        state = CommitState::Committed;
         if highest > 96 {
             write_all(io, 96, &written[96..highest])?;
             io.flush()?;
         }
+        // Native readers cache the version GUID without rechecking the transaction count.
+        write_all(io, 212, &written[212..252])?;
+        io.flush()?;
         Ok(())
     })();
     result.map_err(|error| CommitError { state, error })

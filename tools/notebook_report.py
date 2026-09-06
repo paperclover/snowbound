@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 from html import escape as esc
 import json
+import os
 from io import BytesIO
 from pathlib import Path, PureWindowsPath
 from PIL import Image
@@ -64,13 +65,16 @@ def css(fmt):
     return ';'.join(rules)
 
 
-def html_page(title, nav, body):
+def html_page(title, nav, body, editable=False):
+    policy = "default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; media-src 'self'; base-uri 'none'"
+    if editable:
+        policy += "; script-src 'self'; connect-src 'self'"
     return '''<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; media-src 'self'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="''' + policy + '''">
 <title>''' + esc(title) + '''</title><style>
 *{box-sizing:border-box}body{margin:0;color:#000;background:#fff;font:15px/1.5 system-ui,sans-serif}a{color:#175bb2}nav{position:fixed;inset:0 auto 0 0;width:240px;overflow:auto;background:#f5f6f7;padding:20px}nav a{display:block;padding:3px 0;overflow-wrap:anywhere}nav h2{font-size:14px;margin:20px 0 4px}main{margin-left:240px;padding:30px 40px;max-width:1250px}h1{font-size:28px;line-height:1.2}h2{font-size:18px}p{margin:6px 0}.outline{margin:24px 0;border-top:1px solid #d9dde2;padding-top:12px}.location,.meta{font:12px/1.5 system-ui;color:#666;margin:6px 0}.paragraph{min-height:1.3em;position:relative;overflow-wrap:anywhere}.nested{margin-left:24px}.text{white-space:pre-wrap}.tag{display:inline-block;font:12px system-ui;padding:2px 5px;border:1px solid #aaa;border-radius:3px;margin-right:5px}.list-marker{display:inline-block;min-width:22px;margin-left:-22px}.listed{margin-left:22px}img.content{max-width:100%;height:auto;vertical-align:top}figure{margin:12px 0}figcaption{font-size:12px;color:#666}table{border-collapse:collapse;margin:8px 0;max-width:100%}td{border:1px solid #bbb;padding:5px 8px;vertical-align:top;min-width:30px}table.no-borders td{border-color:transparent}.opaque{border:1px dashed #9aa2ad;padding:12px;margin:12px 0;background:#f7f8fa}details{margin:14px 0}summary{cursor:pointer;font:13px system-ui}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.4 ui-monospace,monospace;max-height:560px;overflow:auto}.page-link{padding-left:12px}code{font-size:12px}.references a{margin-right:14px}@media(max-width:750px){nav{position:static;width:auto;max-height:220px}main{margin:0;padding:20px}}@media print{nav{display:none}main{margin:0}details{display:none}}
-</style><nav>''' + nav + '</nav><main>' + body + '</main></html>'
+</style>''' + ('<link rel="stylesheet" href="/editor.css"><script src="/editor.js" defer></script>' if editable else '') + '<nav>' + nav + '</nav><main>' + body + '</main></html>'
 
 
 class Page:
@@ -117,7 +121,7 @@ class Page:
             body = ''
             structured_math = any(c in kind['text'] for c in '\ufdd0\ufdee\ufdef')
             equation = False
-            for run in self.text[oid]:
+            for run_index, run in enumerate(self.text[oid]):
                 if run['format']['hidden']:
                     continue
                 if structured_math and run['format'].get('math'):
@@ -129,7 +133,7 @@ class Page:
                 style = {**run['format'], **tag_format}
                 if (style['superscript'] or style['subscript']) and style['font_size'] is not None:
                     style['font_size'] *= 2 / 3
-                fragment = '<span style="' + esc(css(style)) + '">' + esc(run['text']) + '</span>'
+                fragment = '<span data-text-object="' + esc(oid) + '" data-run="' + str(run_index) + '" style="' + esc(css(style)) + '">' + esc(run['text']) + '</span>'
                 if run['format']['superscript']:
                     fragment = '<sup>' + fragment + '</sup>'
                 if run['format']['subscript']:
@@ -262,19 +266,28 @@ class Page:
         return '<div data-object="' + esc(oid) + '">' + body + '</div>' if typ not in ('RichText', 'Row', 'Cell') else body
 
 
-def generate(source, destination, native=None, versions=(), zone=timezone.utc):
+def generate(source, destination, native=None, versions=(), zone=timezone.utc, editable=False, previous=None):
     source = source.resolve(strict=True)
     if destination.resolve().is_relative_to(source):
         raise ValueError('Choose an export directory outside the source notebook.')
     destination.mkdir(parents=True, exist_ok=False)
     (destination / 'model').mkdir(); (destination / 'assets').mkdir()
+    cached = {row['path']: (row['sha256'], previous / 'model' / str(index))
+              for index, row in enumerate(json.loads((previous / 'source.json').read_text()))} if previous else {}
     sections = []; tocs = {}; manifest = []
     for index, path in enumerate(sorted(p for p in source.rglob('*') if p.suffix.lower() in ('.one', '.onetoc2'))):
         relative = path.relative_to(source)
         before = path.read_bytes()
         manifest.append({'path': relative.as_posix(), 'sha256': hashlib.sha256(before).hexdigest(), 'bytes': len(before)})
         exported = destination / 'model' / str(index)
-        subprocess.run([EXPORTER, path, exported], check=True)
+        reusable = cached.get(relative.as_posix())
+        reused = reusable is not None and reusable[0] == manifest[-1]['sha256']
+        if reused:
+            exported.mkdir()
+            for name in ('document.json', 'text.json', 'assets.json'):
+                os.link(reusable[1] / name, exported / name)
+        else:
+            subprocess.run([EXPORTER, path, exported], check=True)
         document = json.loads((exported / 'document.json').read_text())
         if path.read_bytes() != before:
             raise ValueError('A source file changed during export.')
@@ -291,6 +304,18 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc):
         }
         rows = json.loads((exported / 'assets.json').read_text())
         for asset in rows:
+            reference = json.dumps(asset['reference'], sort_keys=True)
+            if reused:
+                name = Path(asset['path']).name
+                assets[reference] = 'assets/' + name
+                if not (destination / 'assets' / name).exists():
+                    os.link(previous / 'assets' / name, destination / 'assets' / name)
+                preview = name + '.png'
+                if name.endswith('.tiff') and reference in image_references:
+                    if not (destination / 'assets' / preview).exists():
+                        os.link(previous / 'assets' / preview, destination / 'assets' / preview)
+                    previews['assets/' + name] = 'assets/' + preview
+                continue
             original = exported / asset['path']; data = original.read_bytes()
             extension = '.png' if data.startswith(b'\x89PNG') else '.jpg' if data.startswith(b'\xff\xd8') else '.gif' if data.startswith(b'GIF8') else '.bmp' if data.startswith(b'BM') else '.tiff' if data.startswith((b'II*\0', b'MM\0*')) else '.bin'
             name = hashlib.sha256(data).hexdigest() + extension
@@ -300,7 +325,6 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc):
             else:
                 original.rename(target)
             asset['path'] = '../../assets/' + name
-            reference = json.dumps(asset['reference'], sort_keys=True)
             assets[reference] = 'assets/' + name
             if extension == '.tiff' and reference in image_references:
                 preview = name + '.png'
@@ -309,8 +333,9 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc):
                         raise ValueError('Multipage TIFF requires frame interpretation before report generation.')
                     image.convert('RGBA').save(destination / 'assets' / preview)
                 previews['assets/' + name] = 'assets/' + preview
-        (exported / 'assets').rmdir()
-        (exported / 'assets.json').write_text(json.dumps(rows, indent=2))
+        if not reused:
+            (exported / 'assets').rmdir()
+            (exported / 'assets.json').write_text(json.dumps(rows, indent=2))
         if path.suffix.lower() == '.one':
             sections.append({'path': relative, 'export': exported.relative_to(destination), 'document': document,
                              'text': json.loads((exported / 'text.json').read_text()), 'assets': assets, 'previews': previews})
@@ -443,14 +468,14 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc):
         body += page.render(oid)
         body += '<details><summary>Document structure and source identities</summary><pre>' + esc(json.dumps(page.space, indent=2, ensure_ascii=False)) + '</pre></details>'
         body += '<p class="references"><a href="' + section['export'].as_posix() + '/document.json">Document JSON</a><a href="' + section['export'].as_posix() + '/assets.json">Asset references</a></p>'
-        (destination / filename).write_text(html_page(title, nav, body))
+        (destination / filename).write_text(html_page(title, nav, body, editable and category == 'Page'))
         accounting.append({'section': str(section['path']), 'ordinal': ordinal, 'space': sid, 'revision': rid, 'object': oid, 'title': title, 'report': filename, 'category': category, 'context': context, 'version_modified': version['modified'] if version else None, 'source_report': source_page, 'native_reference': reference.as_posix() if reference else None, 'rendered': dict(page.counts)})
     (destination / 'source.json').write_text(json.dumps(manifest, indent=2))
     (destination / 'pages.json').write_text(json.dumps(accounting, indent=2, ensure_ascii=False))
     intro = '<h1>Notebook review</h1><p>' + str(len(sections)) + ' sections · ' + str(len(pages)) + ' stored pages</p><p>Readable content follows the stored object order. Outline positions are shown in points. The document structure retains properties and identities that the readable view does not interpret.</p><p><a href="source.json">Source hashes</a> · <a href="pages.json">Page inventory</a></p>'
     if locked_sections:
         intro += '<p>Page counts are unavailable for locked sections: ' + esc(', '.join(locked_sections)) + '.</p>'
-    (destination / 'index.html').write_text(html_page('Notebook review', nav, intro))
+    (destination / 'index.html').write_text(html_page('Notebook review', nav, intro, editable))
 
 
 if __name__ == '__main__':

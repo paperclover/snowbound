@@ -1,0 +1,24 @@
+.diagnostic{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:-30px -40px 24px;padding:12px 20px;background:#f2f6fa;border-bottom:1px solid #aab9c8;font:13px/1.5 system-ui}
+.diagnostic button,.edit-actions button{font:inherit;padding:6px 12px;cursor:pointer}
+.diagnostic [role=status]{flex-basis:100%}
+.diagnostic [role=status]:empty{display:none}
+.editing [data-text-object]{cursor:pointer;outline:1px dashed #5182b1;outline-offset:2px}
+.editing [data-text-object]:hover,.editing [data-text-object]:focus{outline:2px solid #175bb2}
+.editing [data-text-object]:empty::before{content:'Empty text';color:#666;font:12px system-ui}
+dialog{width:min(720px,90vw);max-height:90vh;overflow:auto;border:1px solid #8a9aab;border-radius:6px;padding:24px;color:#000;background:#fff;font:15px/1.5 system-ui}
+dialog::backdrop{background:#0005}
+dialog h2{margin:0 0 12px}dialog label{display:block;margin-top:16px;font-weight:600}
+dialog textarea{display:block;width:100%;font:16px/1.6 system-ui;resize:vertical;min-height:140px}
+dialog [hidden]{display:none}
+dialog fieldset{margin:16px 0;padding:12px;border:1px solid #c1ccd6}
+dialog fieldset label{margin-top:8px}
+dialog input,dialog select,.diagnostic select{font:inherit;padding:4px;max-width:100%}
+dialog select{display:block}
+.format-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+#coordinates:not([hidden]){display:flex;gap:20px}
+#coordinates input{width:120px}
+#format-range{margin:0}
+dialog input[type=color]{width:64px;height:32px;vertical-align:middle}
+.edit-actions{display:flex;justify-content:flex-end;gap:12px;margin-top:20px}
+button:disabled{cursor:default}
+@media(max-width:750px){.diagnostic{margin:-20px -20px 20px}}

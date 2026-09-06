@@ -1,9 +1,44 @@
 import copy
+import json
+from pathlib import Path
+import sys
+import tempfile
 import unittest
-from concurrent_rust import verify
+from concurrent_rust import running_clients, verify
 
 
 class OracleTests(unittest.TestCase):
+    def test_timeout_and_environment_reach_every_subprocess(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            executable = output / 'client'
+            executable.write_text(f'#!{sys.executable}\nimport json, os, sys, time\nprint(json.dumps(dict(os.environ)), flush=True)\nwhile not os.path.exists(sys.argv[5]): time.sleep(.001)\n')
+            executable.chmod(0o700)
+            with running_clients(output, 'unused.one', 2, 1, 1, 7, timeout=1.25,
+                                 executable=executable, environment={'KEPT': 'value'}):
+                (output / 'start').touch()
+            for actor in ['w0', 'w1', 'r0']:
+                environment = json.loads((output / f'{actor}.jsonl').read_text())
+                self.assertEqual(environment['ONESTORE_CLIENT_TIMEOUT_MS'], '1250')
+                self.assertEqual(environment['KEPT'], 'value')
+            self.assertEqual(json.loads((output / 'clients.json').read_text())['timeout_ms'], 1250)
+
+    def test_distinct_reader_binary_is_launched_and_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            for mode in ('writer', 'reader'):
+                executable = output / mode
+                executable.write_text(f'#!{sys.executable}\nimport os, sys, time\nprint({mode!r}, flush=True)\nwhile not os.path.exists(sys.argv[5]): time.sleep(.001)\n')
+                executable.chmod(0o700)
+            with running_clients(output, 'unused.one', 2, 1, 1, 7,
+                                 executable=output / 'writer', reader_executable=output / 'reader'):
+                (output / 'start').touch()
+            self.assertEqual((output / 'w0.jsonl').read_text().strip(), 'writer')
+            self.assertEqual((output / 'r0.jsonl').read_text().strip(), 'reader')
+            import hashlib
+            manifest = json.loads((output / 'clients.json').read_text())
+            self.assertEqual(manifest['reader_sha256'], hashlib.sha256((output / 'reader').read_bytes()).hexdigest())
+
     def setUp(self):
         self.logs = {
             'w0': [{'event': 'ready'}, {'event': 'commit', 'source_transaction': 1,

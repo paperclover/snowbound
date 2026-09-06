@@ -1,0 +1,167 @@
+use super::*;
+use std::{
+    collections::hash_map::RandomState,
+    hash::BuildHasher,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, SyncSender},
+    },
+    thread::{self, JoinHandle},
+    time::Instant,
+};
+
+pub(super) struct Signal {
+    stopped: AtomicBool,
+    sender: SyncSender<()>,
+}
+
+impl Signal {
+    pub(super) fn wake(&self) {
+        // One retained notification covers edits that arrive during network I/O.
+        let _ = self.sender.try_send(());
+    }
+}
+
+/// Owns automatic reconciliation. Dropping requests cancellation without blocking.
+/// The in-flight sync step finishes before ownership is released; `stop` waits for it.
+pub struct SyncWorker {
+    signal: Arc<Signal>,
+    thread: Option<JoinHandle<Result<()>>>,
+}
+
+impl SyncWorker {
+    /// Requests a retry, for example after a network reachability change.
+    /// A pending contention backoff finishes before processing the notification.
+    pub fn wake(&self) {
+        self.signal.wake();
+    }
+
+    /// Cancels future steps and waits for the current step and callback to finish.
+    /// A stopped worker leaves pending edits and uncertain attempts in the cache.
+    /// Call outside the worker's own callback, which cannot join its calling thread.
+    pub fn stop(mut self) -> Result<()> {
+        self.signal.stopped.store(true, Ordering::Release);
+        self.signal.wake();
+        self.thread
+            .take()
+            .expect("Worker owns its thread")
+            .join()
+            .map_err(|_| io::Error::other("Synchronization worker panicked"))?
+    }
+}
+
+impl Drop for SyncWorker {
+    fn drop(&mut self) {
+        self.signal.stopped.store(true, Ordering::Release);
+        self.signal.wake();
+    }
+}
+
+impl Replica {
+    /// Starts one worker, reconnecting through `connect` after transport failures.
+    /// Local edits wake it; `interval` controls idle polling and transport retries.
+    /// Contended operations returning `NotCommitted` also back off by up to one second.
+    /// `observe` runs on the worker after each attempt, including connection errors.
+    /// Cache/document errors stop the worker; inspect them through `observe` or `stop`.
+    /// Remote calls and callbacks must be bounded for `stop` to have bounded latency.
+    pub fn start_sync<R, F, O>(
+        self: &Arc<Self>,
+        interval: Duration,
+        mut connect: F,
+        mut observe: O,
+    ) -> io::Result<SyncWorker>
+    where
+        R: Remote + 'static,
+        F: FnMut() -> io::Result<R> + Send + 'static,
+        O: FnMut(&Result<Option<(u64, EditStatus)>>) + Send + 'static,
+    {
+        if interval.is_zero() || Instant::now().checked_add(interval).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Synchronization interval must be positive and representable",
+            ));
+        }
+        let mut owner = self
+            .worker
+            .lock()
+            .map_err(|_| io::Error::other("Synchronization worker registration panicked"))?;
+        if owner.upgrade().is_some() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let signal = Arc::new(Signal {
+            stopped: AtomicBool::new(false),
+            sender,
+        });
+        let replica = Arc::clone(self);
+        let worker_signal = Arc::clone(&signal);
+        let thread = thread::Builder::new()
+            .name("onestore-sync".into())
+            .spawn(move || {
+                let mut remote = None;
+                let jitter = RandomState::new();
+                let mut contention = 0_u32;
+                while !worker_signal.stopped.load(Ordering::Acquire) {
+                    let result = match remote.as_mut() {
+                        Some(remote) => replica.sync_once(remote),
+                        None => match connect() {
+                            Ok(connected) => {
+                                remote = Some(connected);
+                                continue;
+                            }
+                            Err(error) => Err(Error::RemoteIo(error)),
+                        },
+                    };
+                    observe(&result);
+                    match result {
+                        Ok(Some((_, EditStatus::Published { .. }))) => {
+                            contention = 0;
+                            continue;
+                        }
+                        Ok(None) => contention = 0,
+                        Ok(_) => {}
+                        Err(Error::Remote(onestore::CommitError {
+                            state: onestore::CommitState::NotCommitted,
+                            ref error,
+                        })) if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy
+                        ) =>
+                        {
+                            contention = contention.saturating_add(1);
+                            let ceiling = (50_u64 << contention.min(5)).min(1000);
+                            let until = Instant::now()
+                                + Duration::from_millis(jitter.hash_one(contention) % ceiling);
+                            // Local wakes must not keep competing writers in the same retry phase.
+                            while !worker_signal.stopped.load(Ordering::Acquire) {
+                                let Some(remaining) = until.checked_duration_since(Instant::now())
+                                else {
+                                    break;
+                                };
+                                let _ = receiver.recv_timeout(remaining);
+                            }
+                            continue;
+                        }
+                        Err(Error::RemoteIo(ref error))
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy
+                            ) => {}
+                        Err(Error::RemoteIo(_) | Error::Remote(_)) => remote = None,
+                        Err(Error::Io(ref error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+                        Err(error) => return Err(error),
+                    }
+                    if !worker_signal.stopped.load(Ordering::Acquire) {
+                        let _ = receiver.recv_timeout(interval);
+                    }
+                }
+                Ok(())
+            })?;
+        *owner = Arc::downgrade(&signal);
+        Ok(SyncWorker {
+            signal,
+            thread: Some(thread),
+        })
+    }
+}

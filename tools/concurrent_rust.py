@@ -70,21 +70,31 @@ def verify(logs, initial_transaction, writers, operations, edit=False):
 
 
 @contextmanager
-def running_clients(output, source, writers, readers, operations, seed, timeout=600, edit=False):
+def running_clients(output, source, writers, readers, operations, seed, timeout=600, edit=False, executable=CLIENT, environment=None, reader_executable=None):
+    if not 0 < timeout < 2**64 / 1000:
+        raise ValueError('Choose a finite positive client timeout.')
+    timeout_ms = int(timeout * 1000)
+    if not 0 < timeout_ms < 2**64:
+        raise ValueError('Client timeout does not fit the subprocess clock.')
+    environment = {**(os.environ if environment is None else environment), 'ONESTORE_CLIENT_TIMEOUT_MS': str(timeout_ms)}
     start, stop = output / 'start', output / 'stop'
-    (output / 'clients.json').write_text(json.dumps({'writers': writers, 'readers': readers, 'operations': operations,
-        'seed': seed, 'edit': edit, 'client_sha256': hashlib.sha256(CLIENT.read_bytes()).hexdigest()}, indent=2))
+    manifest = {'writers': writers, 'readers': readers, 'operations': operations,
+        'seed': seed, 'edit': edit, 'timeout_ms': timeout_ms, 'client_sha256': hashlib.sha256(executable.read_bytes()).hexdigest(), 'executable': str(executable)}
+    if reader_executable is not None:
+        manifest.update(reader_executable=str(reader_executable), reader_sha256=hashlib.sha256(reader_executable.read_bytes()).hexdigest())
+    (output / 'clients.json').write_text(json.dumps(manifest, indent=2))
     processes = {}
     streams = []
     try:
         for mode, count in [('write', writers), ('read', readers)]:
+            client = reader_executable if mode == 'read' and reader_executable is not None else executable
             for i in range(count):
                 actor = mode[0] + str(i)
                 out = (output / f'{actor}.jsonl').open('w')
                 err = (output / f'{actor}.stderr').open('w')
                 streams.extend([out, err])
-                processes[actor] = subprocess.Popen([CLIENT, 'edit' if edit and mode == 'write' else mode, source, actor, str(operations), start, stop,
-                    str(seed + i + (10000 if mode == 'read' else 0))], stdout=out, stderr=err)
+                processes[actor] = subprocess.Popen([client, 'edit' if edit and mode == 'write' else mode, source, actor, str(operations), start, stop,
+                    str(seed + i + (10000 if mode == 'read' else 0))], stdout=out, stderr=err, env=environment)
         deadline = time.monotonic() + timeout
         while not all((output / f'{actor}.jsonl').stat().st_size for actor in processes):
             if any(p.poll() is not None for p in processes.values()) or time.monotonic() > deadline:

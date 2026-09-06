@@ -747,7 +747,7 @@ impl<'a> Document<'a> {
 }
 
 impl<'a> Element<'a> {
-    fn parse(object: &Object<'a>, store: &Store<'a>) -> Result<Self> {
+    pub(crate) fn parse(object: &Object<'a>, store: &Store<'a>) -> Result<Self> {
         let empty = |kind| Self {
             jcid: object.jcid,
             children: vec![],

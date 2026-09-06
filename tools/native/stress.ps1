@@ -1,6 +1,7 @@
 function Invoke-Stress($app, $section, $command, $output, $shared) {
     $hierarchy = ''
     $app.GetHierarchy($section, 4, [ref]$hierarchy, 1)
+    [IO.File]::WriteAllText("$output\hierarchy.xml", $hierarchy, [Text.Encoding]::UTF8)
     [xml]$tree = $hierarchy
     $pages = @($tree.SelectNodes('//*[local-name()="Page"]'))
     if ($pages.Count -ne 1) { throw 'Expected one stress-test page.' }
@@ -23,6 +24,13 @@ function Invoke-Stress($app, $section, $command, $output, $shared) {
             Start-Sleep -Milliseconds 20
         }
         for ($i = 0; $i -lt $command.operations; $i++) {
+            if (($command.PSObject.Properties.Name -contains 'maintenance') -and $command.maintenance -and $i -eq [Math]::Floor($command.operations / 2)) {
+                [IO.File]::WriteAllText("$shared\maintenance-paused-n$($command.actor)", 'paused')
+                while (-not (Test-Path "$shared\maintenance-resume")) {
+                    if ([DateTime]::UtcNow -gt $deadline) { throw 'Maintenance pause timed out.' }
+                    Start-Sleep -Milliseconds 100
+                }
+            }
             Start-Sleep -Milliseconds $random.Next(10, 100)
             $started = [DateTime]::UtcNow.Ticks
             $content = ''

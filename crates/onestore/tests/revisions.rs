@@ -4,6 +4,68 @@ use std::fs;
 const TABLE: &str = "../../corpus/native/20260905-05/snapshots/07-table/notebook/synthetic.one";
 
 #[test]
+fn persisted_identities_preserve_native_byte_order_and_canonical_form() {
+    let text = "{00112233-4455-6677-8899-AABBCCDDEEFF},42";
+    let id: ExGuid = text.parse().unwrap();
+    assert_eq!(
+        id.guid,
+        [
+            0x33, 0x22, 0x11, 0, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff
+        ]
+    );
+    assert_eq!(id.n, 42);
+    assert_eq!(text.to_lowercase().parse::<ExGuid>().unwrap(), id);
+    assert_eq!(id.to_string(), text);
+    let mut random = 7_u64;
+    for n in 0..1024 {
+        let guid = std::array::from_fn(|_| {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            random.to_le_bytes()[0]
+        });
+        let id = ExGuid { guid, n };
+        assert_eq!(id.to_string().parse::<ExGuid>().unwrap(), id);
+        assert_eq!(
+            serde_json::from_str::<ExGuid>(&serde_json::to_string(&id).unwrap()).unwrap(),
+            id
+        );
+    }
+    for id in [
+        ExGuid::default(),
+        ExGuid {
+            guid: [255; 16],
+            n: u32::MAX,
+        },
+    ] {
+        assert_eq!(id.to_string().parse::<ExGuid>().unwrap(), id);
+    }
+    for at in 0..text.len() {
+        let mut changed = text.as_bytes().to_vec();
+        changed[at] = b'?';
+        assert!(
+            String::from_utf8(changed)
+                .unwrap()
+                .parse::<ExGuid>()
+                .is_err()
+        );
+    }
+    for changed in [
+        text.replace(",42", ",+42"),
+        text.replace(",42", ",042"),
+        text.replace(",42", ",4294967296"),
+        text.replace(",42", ",-1"),
+        text.replace("00", "+0"),
+        text.replace("00", "é"),
+        "{00000000-0000-0000-0000-000000000000},1".to_owned(),
+        format!(" {text}"),
+        format!("{text} "),
+    ] {
+        assert!(changed.parse::<ExGuid>().is_err(), "{changed}");
+        assert!(serde_json::from_str::<ExGuid>(&serde_json::to_string(&changed).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn native_encryption_remains_opaque() {
     let bytes =
         fs::read("../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one").unwrap();

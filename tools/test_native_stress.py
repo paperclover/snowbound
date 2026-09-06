@@ -1,9 +1,12 @@
 import copy
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
+import native_stress
 from native_stress import edit_history, native_history, verify_capture
 from native_collaboration import reachable_page_text
 from document_model import DEFAULT_CONTEXT
@@ -49,6 +52,19 @@ class NativeHistoryTests(unittest.TestCase):
             text += token
         self.logs['r0'] = [{'event': 'ready'}, {'event': 'read', 'text': text,
             'started_us': 40, 'finished_us': 50}, {'event': 'done'}]
+
+    def test_incomplete_capture_requires_explicit_retention_mode(self):
+        self.logs['w0'].pop()
+        with self.assertRaisesRegex(AssertionError, 'Incomplete client log'):
+            edit_history(self.logs, 2)
+        self.assertEqual(len(edit_history(self.logs, 2, partial=True)[0]), 2)
+        self.logs['w1'][2]['operation'] = 1
+        with self.assertRaisesRegex(AssertionError, 'acknowledgements'):
+            edit_history(self.logs, 2, partial=True)
+        self.logs['w1'][2]['operation'] = 0
+        self.logs['w1'].pop(2)
+        with self.assertRaisesRegex(AssertionError, 'reader observed'):
+            edit_history(self.logs, 2, partial=True)
 
     def test_counter_renumbering_preserves_one_content_history(self):
         commits, text = edit_history(self.logs, 1)
@@ -136,3 +152,35 @@ class NativeHistoryTests(unittest.TestCase):
             for changed in (body + native, body.replace(native, ''), body.replace('bold', 'normal')):
                 page.write_text(f'<Page xmlns="http://schemas.microsoft.com/office/onenote/2010/onenote"><Outline>{changed}</Outline></Page>')
                 with self.assertRaises(AssertionError): verify_capture(root, root)
+
+
+class FailureArtifacts(unittest.TestCase):
+    def test_failed_clients_preserve_native_logs_without_masking_the_failure(self):
+        @contextmanager
+        def failed_clients(*args, **kwargs):
+            yield {}
+            raise RuntimeError('Rust client exited')
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            (output / 'run.json').write_text(json.dumps({'maintenance': False}))
+            shared = output / 'shared'
+            shared.mkdir()
+            clients = [{'name': f'n{i}', 'folder': output / f'n{i}'} for i in range(2)]
+            for client in clients: client['folder'].mkdir()
+
+            def capture(remote, local, name):
+                self.assertTrue(remote.endswith('\\outbox\\7\\events.jsonl'))
+                if name == 'n0': raise OSError('Native client unavailable')
+                local.write_text('{"operation":0}\n')
+                return {'error': None}
+
+            with patch.object(native_stress, 'running_clients', failed_clients), \
+                 patch.object(native_stress.windows, 'do_health', return_value={'utc_us': 0}), \
+                 patch.object(native_stress.windows, 'do_cmd', return_value={'stdout': 'ready editing'}), \
+                 patch.object(native_stress.windows, 'do_get', side_effect=capture):
+                with self.assertRaisesRegex(RuntimeError, 'Rust client exited'):
+                    native_stress.exercise(output, shared, clients, lambda *a, **kw: 7,
+                        lambda *a: None, lambda *a: None, lambda *a: None, 40, 1, 4, 4)
+            self.assertEqual(json.loads((output / 'n0/stress-capture.json').read_text())['error'], 'Native client unavailable')
+            self.assertEqual((output / 'n1/stress-events.jsonl').read_text(), '{"operation":0}\n')

@@ -9,11 +9,14 @@ import zipfile
 from native_runner import ROOT, clone, command, windows, collect_artifacts
 
 
-def run(inputs, output):
+def run(inputs, output, scripts=None):
     output.mkdir(parents=True, exist_ok=False)
     files = sorted(inputs.glob('*.one'))
     assert files, 'No section candidates'
-    scripts = [ROOT / 'tools/native/cold.ps1', ROOT / 'tools/native/probe.ps1']
+    if scripts is None:
+        (output / 'scripts').mkdir()
+        scripts = [output / 'scripts' / name for name in ('cold.ps1', 'probe.ps1')]
+        for path in scripts: path.write_bytes((ROOT / 'tools/native' / path.name).read_bytes())
     (output / 'run.json').write_text(json.dumps({'inputs': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files},
         'scripts': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in scripts}}, indent=2))
     archive = output / 'inputs.zip'
@@ -28,7 +31,7 @@ def run(inputs, output):
                 if result.get('error'): raise RuntimeError(result['error'])
             command(name, r'powershell -NoProfile -Command "Expand-Archive C:\one-tests\inputs.zip C:\one-tests\runs\capture\inputs"', output)
             command(name, r'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\one-tests\probe.ps1 -Root C:\one-tests\runs\capture -CloneHost ONE-' + name.upper(), output, (len(files) * 60 + 120) * 1000)
-            collect_artifacts(name, output, r'results, C:\one-tests\runs\capture\results.json')
+            collect_artifacts(name, output, r'results, C:\one-tests\runs\capture\results.json, C:\one-tests\runs\capture\progress.jsonl')
     finally:
         archive.unlink(missing_ok=True)
 

@@ -5,8 +5,43 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExGuid {
+    /// GUID bytes in Microsoft's mixed-endian order.
     pub guid: [u8; 16],
     pub n: u32,
+}
+
+impl std::str::FromStr for ExGuid {
+    type Err = Error;
+
+    /// Parses the display form, accepting either hexadecimal letter case.
+    fn from_str(value: &str) -> Result<Self> {
+        let invalid = || Error {
+            offset: 0,
+            message: "Invalid extended GUID",
+        };
+        let (guid_text, extension) = value.split_once(',').ok_or_else(invalid)?;
+        if guid_text.len() != 38 || !guid_text.is_ascii() || !(40..=49).contains(&value.len()) {
+            return Err(invalid());
+        }
+        let mut guid = [0; 16];
+        for (byte, at) in guid
+            .iter_mut()
+            .zip([1, 3, 5, 7, 10, 12, 15, 17, 20, 22, 25, 27, 29, 31, 33, 35])
+        {
+            *byte = u8::from_str_radix(&guid_text[at..at + 2], 16).map_err(|_| invalid())?;
+        }
+        guid[..4].reverse();
+        guid[4..6].reverse();
+        guid[6..8].reverse();
+        let id = Self {
+            guid,
+            n: extension.parse().map_err(|_| invalid())?,
+        };
+        if (id.guid == [0; 16] && id.n != 0) || !id.to_string().eq_ignore_ascii_case(value) {
+            return Err(invalid());
+        }
+        Ok(id)
+    }
 }
 
 impl fmt::Display for ExGuid {
@@ -37,6 +72,15 @@ impl serde::Serialize for ExGuid {
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
         serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ExGuid {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 

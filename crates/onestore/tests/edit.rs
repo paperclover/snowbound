@@ -2,6 +2,8 @@
 mod checkpoint;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/trace.rs"]
+mod trace;
 
 use disk::Disk;
 use onestore::{
@@ -42,6 +44,201 @@ fn text_runs(source: &[u8], sid: ExGuid, oid: ExGuid) -> serde_json::Value {
             .unwrap(),
     )
     .unwrap()
+}
+
+fn assert_refreshed(source: &[u8], confirmed: &[u8]) {
+    assert_eq!(&source[..212], &confirmed[..212]);
+    assert_eq!(&source[252..], &confirmed[252..]);
+    let before = Store::parse(source).unwrap().header;
+    let after = Store::parse(confirmed).unwrap().header;
+    assert_ne!(before.version_id, after.version_id);
+    assert_ne!(before.deny_read_id, after.deny_read_id);
+    assert_eq!(after.generation, before.generation + 1);
+}
+
+#[test]
+fn prepared_publication_preserves_its_identity_through_every_io_failure() {
+    let source =
+        onestore::create_section("prepared.one", "Fictitious: café 🦀", "Fixture").unwrap();
+    let (sid, oid) = target(&source);
+    let source = checkpoint::pending(&source, sid, oid, 0x14001d7a);
+    let edit = onestore::PreparedEdit::text(&source, sid, oid, 0..0, "Prepared 🐈 ").unwrap();
+    let store = Store::parse(edit.as_bytes()).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let planned = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
+    let persisted: ExGuid =
+        serde_json::from_str(&serde_json::to_string(&planned).unwrap()).unwrap();
+    let before_store = Store::parse(&source).unwrap();
+    let before_index = RevisionIndex::parse(&before_store).unwrap();
+    assert!(!before_index.spaces[&sid].revisions.contains_key(&persisted));
+    let before = text_runs(&source, sid, oid);
+    let after = text_runs(edit.as_bytes(), sid, oid);
+    for write_limit in [17, 4096] {
+        let disk = |fail_at| Disk {
+            visible: source.clone(),
+            durable: source.clone(),
+            operation: 0,
+            fail_at,
+            write_limit,
+            random: 911,
+        };
+        let mut success = disk(None);
+        edit.commit(&mut success).unwrap();
+        assert_eq!(success.durable, edit.as_bytes());
+        let operations = success.operation;
+        let error = edit.commit(&mut success).unwrap_err();
+        assert_eq!(error.state, CommitState::NotCommitted);
+        assert_eq!(error.error.kind(), std::io::ErrorKind::ResourceBusy);
+        assert_eq!(success.durable, edit.as_bytes());
+        for at in 1..=operations {
+            let mut interrupted = disk(Some(at));
+            let error = edit.commit(&mut interrupted).unwrap_err();
+            let observed = text_runs(&interrupted.durable, sid, oid);
+            let store = Store::parse(&interrupted.durable).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let present = index.spaces[&sid].revisions.contains_key(&persisted);
+            assert_eq!(observed, if present { &after } else { &before }.clone());
+            match error.state {
+                CommitState::NotCommitted => assert!(!present),
+                CommitState::Committed => assert!(present),
+                CommitState::Unknown => {}
+            }
+            if present {
+                let snapshot = interrupted.durable.clone();
+                interrupted.visible.clone_from(&snapshot);
+                interrupted.fail_at = None;
+                interrupted.write_limit = 17;
+                onestore::confirm_snapshot(&mut interrupted, &snapshot).unwrap();
+                assert_refreshed(&snapshot, &interrupted.durable);
+            }
+        }
+    }
+}
+
+#[test]
+fn snapshot_confirmation_needs_no_surviving_edit_target() {
+    let mut disk = Disk {
+        visible: SOURCE.to_vec(),
+        durable: Vec::new(),
+        operation: 0,
+        fail_at: None,
+        write_limit: 17,
+        random: 911,
+    };
+    assert!(
+        onestore::replace_text(SOURCE, ExGuid::default(), ExGuid::default(), 0..0, "").is_err()
+    );
+    onestore::confirm_snapshot(&mut disk, SOURCE).unwrap();
+    assert_refreshed(SOURCE, &disk.durable);
+    let flush = disk.operation;
+    for (failure, state) in [
+        (1, CommitState::NotCommitted),
+        (flush, CommitState::Unknown),
+    ] {
+        disk.visible = SOURCE.to_vec();
+        disk.durable.clear();
+        disk.operation = 0;
+        disk.fail_at = Some(failure);
+        assert_eq!(
+            onestore::confirm_snapshot(&mut disk, SOURCE)
+                .unwrap_err()
+                .state,
+            state
+        );
+    }
+}
+
+#[test]
+fn confirmation_notifies_cached_readers_after_interrupted_version_publication() {
+    let source =
+        onestore::create_section("confirmation.one", "Fictitious: before", "Fixture").unwrap();
+    let (sid, oid) = target(&source);
+    let mut snapshot = onestore::replace_text(&source, sid, oid, 0..0, "Recovered ").unwrap();
+    snapshot[212..252].copy_from_slice(&source[212..252]);
+    let expected = text_runs(&snapshot, sid, oid);
+    assert_ne!(expected, text_runs(&source, sid, oid));
+    for write_limit in [1, 17, 40] {
+        let disk = |fail_at| Disk {
+            visible: snapshot.clone(),
+            durable: snapshot.clone(),
+            operation: 0,
+            fail_at,
+            write_limit,
+            random: 911,
+        };
+        let mut success = disk(None);
+        onestore::confirm_snapshot(&mut success, &snapshot).unwrap();
+        assert_refreshed(&snapshot, &success.durable);
+        for failure in 1..=success.operation {
+            let mut interrupted = disk(Some(failure));
+            let error = onestore::confirm_snapshot(&mut interrupted, &snapshot).unwrap_err();
+            assert_ne!(error.state, CommitState::Committed);
+            assert_eq!(text_runs(&interrupted.durable, sid, oid), expected);
+            assert_eq!(&interrupted.durable[..212], &snapshot[..212]);
+            assert_eq!(&interrupted.durable[252..], &snapshot[252..]);
+        }
+    }
+}
+
+#[test]
+fn confirming_visible_text_requires_flush_without_another_revision() {
+    let (sid, oid) = target(SOURCE);
+    let visible = onestore::replace_text(SOURCE, sid, oid, 0..0, "Recovered ").unwrap();
+    let mut disk = Disk {
+        visible: visible.clone(),
+        durable: SOURCE.to_vec(),
+        operation: 0,
+        fail_at: None,
+        write_limit: 0,
+        random: 1,
+    };
+    onestore::commit_text(&mut disk, &visible, sid, oid, 0..0, "").unwrap();
+    assert_eq!(disk.visible, visible);
+    assert_eq!(disk.durable, visible);
+    let flush = disk.operation;
+    for (failure, state) in [
+        (1, CommitState::NotCommitted),
+        (flush, CommitState::Unknown),
+    ] {
+        disk.durable = SOURCE.to_vec();
+        disk.operation = 0;
+        disk.fail_at = Some(failure);
+        let error = onestore::commit_text(&mut disk, &visible, sid, oid, 0..0, "").unwrap_err();
+        assert_eq!(error.state, state);
+        assert_eq!(disk.visible, visible);
+    }
+}
+
+#[test]
+fn confirmation_rejects_changed_or_truncated_physical_tail_before_any_write() {
+    let (sid, oid) = target(SOURCE);
+    let mut source = SOURCE.to_vec();
+    source.resize(3 * 1024 * 1024 + 131, 0);
+    let mut disk = trace::Trace {
+        bytes: source.clone(),
+        events: Vec::new(),
+    };
+    onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap();
+    assert_eq!(disk.events.len(), 1);
+    if let trace::Event::Write(offset, bytes) = &disk.events[0] {
+        panic!("Confirmation wrote {} bytes at {offset}", bytes.len());
+    }
+    for changed in [65535, 65536, 1048575, 1048576, 2097152, source.len() - 1] {
+        disk.bytes.clone_from(&source);
+        disk.bytes[changed] ^= 1;
+        disk.events.clear();
+        let error = onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap_err();
+        assert_eq!(error.state, CommitState::NotCommitted);
+        assert_eq!(error.error.kind(), std::io::ErrorKind::ResourceBusy);
+        assert!(disk.events.is_empty());
+    }
+    for length in [source.len() - 1, source.len() + 1] {
+        disk.bytes.clone_from(&source);
+        disk.bytes.resize(length, 0);
+        let error = onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap_err();
+        assert_eq!(error.state, CommitState::NotCommitted);
+        assert!(disk.events.is_empty());
+    }
 }
 
 fn assert_other_objects_preserved(
@@ -398,6 +595,8 @@ fn title_text_and_navigation_caches_publish_together() {
     for (source, write_limit) in [(source.as_slice(), 17), (checkpoint.as_slice(), 257)] {
         let before = state(source);
         for replacement in ["Renamed 🦀 日本語", ""] {
+            let edit =
+                onestore::PreparedEdit::text(source, sid, *oid, 0..end, replacement).unwrap();
             let disk = |fail_at| Disk {
                 visible: source.to_vec(),
                 durable: source.to_vec(),
@@ -407,7 +606,7 @@ fn title_text_and_navigation_caches_publish_together() {
                 random: 42,
             };
             let mut success = disk(None);
-            onestore::commit_text(&mut success, source, sid, *oid, 0..end, replacement).unwrap();
+            edit.commit(&mut success).unwrap();
             let after = state(&success.durable);
             assert_eq!(after[0]["text"], replacement);
             assert_eq!(
@@ -445,9 +644,7 @@ fn title_text_and_navigation_caches_publish_together() {
             assert_other_objects_preserved(&old, &current, *oid);
             for at in source.len().div_ceil(193)..=success.operation {
                 let mut interrupted = disk(Some(at));
-                let error =
-                    onestore::commit_text(&mut interrupted, source, sid, *oid, 0..end, replacement)
-                        .unwrap_err();
+                let error = edit.commit(&mut interrupted).unwrap_err();
                 let observed = state(&interrupted.durable);
                 match error.state {
                     CommitState::NotCommitted => assert_eq!(observed, before),

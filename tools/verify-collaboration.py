@@ -27,7 +27,7 @@ for name, text in expected.items():
     captured = pages(corpus / 'native' / f'stage5-cold-{name}' / 'read')
     assert len(captured) == 1 and texts(captured[0]) == text, name
 
-subprocess.run(['cargo', 'build', '--quiet', '--example', 'inventory'], cwd=root, check=True)
+subprocess.run(['cargo', 'build', '-p', 'onestore', '--quiet', '--example', 'inventory'], cwd=root, check=True)
 for case, main, conflict in [
     ('live', 'Rust same paragraph.', 'Native same paragraph.'),
     ('offline', 'Rust edited during the native outage.', 'Native edited while disconnected.'),

@@ -2,31 +2,38 @@
 
 An experimental native Rust library for OneNote revision stores (`.one` and
 `.onetoc2`). It reads committed object graphs, creates a small notebook without
-a template, appends scalar-property and text edits with a recoverable commit protocol,
-and interprets MS-ONE document structure, formatting, media, and historical pages.
-The storage gates are recorded in [PROGRESS.md](PROGRESS.md); document-model
-verification is recorded in [M6-ACCEPTANCE.md](M6-ACCEPTANCE.md). Concurrent-editing
-verification is recorded in [MILESTONE7.md](MILESTONE7.md).
+a template, appends property, text, paragraph, outline and formatting edits with a
+recoverable commit protocol, and interprets MS-ONE document structure, formatting, media, and historical pages.
+The storage gates are recorded in [PROGRESS.md](../../evidence/PROGRESS.md); document-model
+verification is recorded in [M6-ACCEPTANCE.md](../../evidence/M6-ACCEPTANCE.md). Concurrent-editing
+verification is recorded in [MILESTONE7.md](../../evidence/MILESTONE7.md). Crash recovery and the
+read/write HTML diagnostic editor are recorded in [MILESTONE8.md](../../evidence/MILESTONE8.md).
+Embedded SMB coordination, durable offline editing and document-growth acceptance
+are recorded in [MILESTONE9.md](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance).
 
-Text edits publish ancestor modification timestamps with the changed content.
-Omitting those timestamps caused acknowledged edits to disappear during native
-conflict merging. The repaired eight-client replay retains all four competing
-results after reconnection, application closure and fresh-cache native inspection;
-see `mixed-conflict-06` in the milestone evidence. Use disposable copies for
-notebook editing.
+Use disposable copies for notebook editing. Header version notification now
+follows durable transaction publication, fixing a native cached-reader race.
+The [lost-reply acceptance](../../evidence/MILESTONE9.md#lost-reply-acceptance-with-version-notification-published-last)
+records the failure, reduced regression model, twelve-client repeat and cold
+OneNote verification of all 3200 editing intents.
 
 ## Workspace
 
 `crates/onestore` contains the library, examples and integration tests. New Rust
 prototypes belong in sibling directories under `crates/` and depend on
 `onestore = { path = "../onestore" }`. The root manifest discovers these crates.
-The consumer boundary and API tradeoffs are recorded in [API-AUDIT.md](API-AUDIT.md).
+The consumer boundary and API tradeoffs are recorded in [API-AUDIT.md](../../evidence/API-AUDIT.md).
+`crates/onestore-diagnostic` backs the [HTML diagnostic editor](../../evidence/DIAGNOSTIC.md).
+[`onestore-smb`](../onestore-smb/README.md) provides optional embedded network
+access; [`onestore-offline`](../onestore-offline/README.md) provides local
+SQLite persistence and reconnect reconciliation for text, insertion and formatting.
 Shared native fixtures, specifications, evidence and Python/VM tools stay at the
 repository root; `fuzz/` remains an independent cargo-fuzz workspace.
 
 Run Cargo commands from the root. Select `-p onestore` when working only on the
 library, or `--workspace` for checks across all crates. Example binary paths
-remain `target/debug/examples/…` for the native verification tools.
+remain `target/debug/examples/…` for the native verification tools. The collaboration
+harness also accepts `--client-profile release`.
 
 ## Supported surface
 
@@ -40,7 +47,11 @@ remain `target/debug/examples/…` for the native verification tools.
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range within one ordinary text run; publish text, run boundaries and modification time together |
+| `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |
+| `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
+| `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |
+| `read_snapshot` | Read a validated snapshot through fresh positioned I/O while the caller excludes maintenance |
 | `commit_file_property` | Lock, compare the source snapshot, append and flush, then publish the revision |
 | `CommitIo`, `commit_property_bytes` | Supply another storage backend with equivalent exclusion and ordered durability |
 
@@ -54,13 +65,24 @@ while retaining historical revisions. TOC snapshots can remap encoded CompactIDs
 without changing their resolved references. Password-protected
 sections retain their encrypted structure and payloads; the library does not
 derive password keys or decrypt their pages.
+Insertions update child references, reference counts, modification times and automatic
+titles atomically. Paragraphs can be nested or inserted into table cells; outline
+coordinates use points. Retain the `Insertion` value for rebasing: creating another
+value creates different object identities. Duplicate insertion identities require
+reconciliation. Formatting accepts explicit attributes, preserves inherited values,
+and gives retired immutable styles zero current references while retaining history.
+Generated fields, protected targets and unsupported run-data boundary changes are
+rejected before publication. Local caches expose text, insertion and formatting edits;
+the [document-writer acceptance](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance)
+includes twelve mixed native/Rust clients, outages, lost replies and native revision retirement.
+
 External `.onebin` references identify payloads for the caller to obtain. Cloud
 FSSHTTP synchronization and a C ABI are outside the implemented surface.
 
 ## Try it
 
 Requires Rust 1.97 or later for the verified build. Examples create new destinations
-and refuse to overwrite them. The Python report requires Pillow.
+and refuse to overwrite them. The Python tools require Python 3.10 or later and Pillow.
 
 ```sh
 cargo run --example create_notebook -- /tmp/one-demo 'Hello from Rust.' 'Example Author'
@@ -115,7 +137,8 @@ exclusive lock → exact snapshot comparison
               → append data                 → flush
               → prepare header metadata     → flush
               → publish transaction counter → flush
-              → finish counter rollover     → flush → unlock
+              → finish counter rollover     → flush
+              → notify cached readers       → flush → unlock
 ```
 
 Stale snapshots fail before writing. Live readers must use equivalent exclusion.
@@ -143,11 +166,22 @@ calls allowed overlapping exclusive holders and stranded server locks under
 multi-process SMB contention. `tools/smb_lock_race.py` reproduces that failure
 without notebook parsing or writing. On the tested macOS SMB mount,
 POSIX byte-range locks returned `ENOTSUP`; whole-file locks excluded native
-OneNote's lock ranges. `sync_all` falls back to `fsync` on macOS only when
-`F_FULLFSYNC` is unsupported. Successful SMB FLUSH replies were observed on the
+OneNote's lock ranges. This adapter serializes readers and writers during each
+operation; it does not reproduce native reader/writer concurrency. The
+[locking audit](../../evidence/LOCKING.md) records native coordination bytes, write-open share
+modes, and a working macOS SMB-specific byte-range lock probe. `sync_all` falls
+back to `fsync` on macOS only when `F_FULLFSYNC` is unsupported. Successful SMB FLUSH replies were observed on the
 wire. Correctness requires the backend to honor exclusion and ordered flushes.
 The evidence covers transport failures, not physical server power loss or every
 filesystem's lock implementation.
+
+For shared network notebooks, use the optional
+[`onestore-smb`](../onestore-smb/README.md) crate. It uses native share modes,
+shared reader guards, writer exclusion and fresh pathname identity checks without
+an OS-mounted share. Its [coordination acceptance](../../evidence/MILESTONE9.md) covers native
+maintenance, mixed readers/writers, reconnects and uncertain publication. The
+filesystem adapter retains its conservative locking; mounted-path freshness
+across native replacement is not established by that exclusion.
 
 ## Verification
 
@@ -186,11 +220,11 @@ traverses every retained revision and resolved text run. Its public seeds live i
 the source target; private seeds are supplied only at runtime. Native edit-history
 tests compare independently generated operations, OneNote XML and the Rust model;
 failed histories can be replayed and shrunk in fresh disposable clones. The
-document feature matrix is in [FEATURES.md](FEATURES.md), and the milestone's
-acceptance contract is in [MILESTONE6.md](MILESTONE6.md).
+document feature matrix is in [FEATURES.md](../../evidence/FEATURES.md), and the milestone's
+acceptance contract is in [MILESTONE6.md](../../evidence/MILESTONE6.md).
 
 The stage-5 gate uses OneNote 2010 build 14.0.7015.1000 on Windows 7, a macOS SMB
-mount, and Samba on zenith. [The collaboration corpus](corpus/collaboration/round-01)
+mount, and Samba on zenith. [The collaboration corpus](../../corpus/collaboration/round-01)
 captures native lock contention, different-paragraph merging, same-paragraph
 conflicts, offline editing/reconnection, and lost successful FLUSH replies at
 preparation, publication, and counter cleanup. Each final notebook was reopened

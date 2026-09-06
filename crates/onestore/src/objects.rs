@@ -81,6 +81,19 @@ impl Object<'_> {
 
 impl ResolvedRevision<'_> {
     pub fn reachable(&self) -> Result<BTreeSet<ExGuid>> {
+        let incoming = self.reference_counts()?;
+        for (id, count) in &incoming {
+            if self.objects[id].reference_count != *count {
+                return Err(Error {
+                    offset: 0,
+                    message: "Stored object reference count disagrees with the reachable graph",
+                });
+            }
+        }
+        Ok(incoming.into_keys().collect())
+    }
+
+    pub(crate) fn reference_counts(&self) -> Result<BTreeMap<ExGuid, u32>> {
         let mut pending: Vec<_> = self.roots.values().copied().collect();
         let mut incoming = BTreeMap::<ExGuid, u32>::new();
         for id in &pending {
@@ -137,15 +150,7 @@ impl ResolvedRevision<'_> {
                 message: "Object references form a cycle",
             });
         }
-        for (id, count) in &incoming {
-            if self.objects[id].reference_count != *count {
-                return Err(Error {
-                    offset: 0,
-                    message: "Stored object reference count disagrees with the reachable graph",
-                });
-            }
-        }
-        Ok(edges.into_keys().collect())
+        Ok(incoming)
     }
 }
 

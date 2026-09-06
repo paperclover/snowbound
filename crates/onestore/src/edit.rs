@@ -58,38 +58,7 @@ pub fn replace_text(
         .into_iter()
         .filter_map(|(sid, page)| (sid == space).then_some(page))
         .collect();
-    let mut pending: Vec<_> = pages.iter().map(|page| (*page, false)).collect();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut parents = std::collections::BTreeMap::<_, Vec<_>>::new();
-    let mut editable = false;
-    while let Some((id, read_only)) = pending.pop() {
-        if !seen.insert((id, read_only)) {
-            continue;
-        }
-        let element = revision
-            .nodes
-            .get(&id)
-            .ok_or_else(|| invalid("Page content is unavailable"))?;
-        let read_only = read_only || element.extra[0].iter().any(|field| field.id == 0x88001cde);
-        if id == object {
-            if read_only {
-                return Err(invalid("This page or its content is read-only"));
-            }
-            editable = true;
-        }
-        for child in element
-            .children
-            .iter()
-            .chain(&element.content)
-            .chain(&element.structure)
-        {
-            parents.entry(*child).or_default().push(id);
-            pending.push((*child, read_only));
-        }
-    }
-    if !editable {
-        return Err(invalid("Select text on an active editable page"));
-    }
+    let parents = editable_parents(revision, &pages, object)?;
     let node = revision
         .nodes
         .get(&object)
@@ -219,7 +188,7 @@ pub fn replace_text(
     let mut edits = vec![crate::write::ObjectEdit {
         object,
         updates: &updates,
-        insert,
+        inserts: insert.as_slice(),
     }];
     // Native conflict merges can discard descendant edits when ancestor timestamps stay stale.
     let modified_update = [(0x14001d7a, modified.as_slice())];
@@ -233,18 +202,143 @@ pub fn replace_text(
             edits.push(crate::write::ObjectEdit {
                 object: id,
                 updates: &modified_update,
-                insert: None,
+                inserts: &[],
             });
         }
         pending.extend(parents.get(&id).into_iter().flatten().copied());
+    }
+    let Some((page, automatic, title_text)) =
+        page_title(revision, &pages, Some((object, &changed)))?
+    else {
+        return crate::write::replace_objects(source, space, &edits);
+    };
+    let Kind::Page {
+        alternate_title, ..
+    } = &revision.nodes[&page].kind
+    else {
+        unreachable!()
+    };
+    let metadata = revision
+        .roots
+        .get(&2)
+        .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
+    let Kind::Metadata { title, .. } = &revision.nodes[metadata].kind else {
+        return Err(invalid("Page title metadata is unavailable"));
+    };
+    let cached: Vec<_> = title_text
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let metadata_update = [(0x1c001cf3, cached.as_slice())];
+    edits.push(crate::write::ObjectEdit {
+        object: *metadata,
+        updates: if title.is_some() {
+            &metadata_update
+        } else {
+            &[]
+        },
+        inserts: if title.is_none() {
+            &metadata_update
+        } else {
+            &[]
+        },
+    });
+    let mut alternate_update = vec![(
+        0x1c001d3c,
+        if automatic {
+            cached.as_slice()
+        } else {
+            &[0u8, 0][..]
+        },
+    )];
+    if revision.nodes[&page].modified.is_some() {
+        alternate_update.push(modified_update[0]);
+    }
+    edits.retain(|edit| edit.object != page);
+    edits.push(crate::write::ObjectEdit {
+        object: page,
+        updates: if alternate_title.is_some() {
+            &alternate_update
+        } else {
+            &alternate_update[1..]
+        },
+        inserts: if alternate_title.is_none() {
+            &alternate_update[..1]
+        } else {
+            &[]
+        },
+    });
+    crate::write::replace_objects(source, space, &edits)
+}
+
+pub(crate) fn editable_parents(
+    revision: &crate::document::Revision<'_>,
+    pages: &[ExGuid],
+    object: ExGuid,
+) -> Result<std::collections::BTreeMap<ExGuid, Vec<ExGuid>>, Error> {
+    let invalid = |message| Error { offset: 0, message };
+    let mut pending: Vec<_> = pages.iter().map(|page| (*page, false)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut parents = std::collections::BTreeMap::<_, Vec<_>>::new();
+    let mut editable = false;
+    while let Some((id, read_only)) = pending.pop() {
+        if !seen.insert((id, read_only)) {
+            continue;
+        }
+        let element = revision
+            .nodes
+            .get(&id)
+            .ok_or_else(|| invalid("Page content is unavailable"))?;
+        let read_only = read_only || element.extra[0].iter().any(|field| field.id == 0x88001cde);
+        if id == object {
+            if read_only {
+                return Err(invalid("This page or its content is read-only"));
+            }
+            editable = true;
+        }
+        for child in element
+            .children
+            .iter()
+            .chain(&element.content)
+            .chain(&element.structure)
+        {
+            parents.entry(*child).or_default().push(id);
+            pending.push((*child, read_only));
+        }
+    }
+    if !editable {
+        return Err(invalid("Select content on an active editable page"));
+    }
+    Ok(parents)
+}
+
+pub(crate) fn page_title(
+    revision: &crate::document::Revision<'_>,
+    pages: &[ExGuid],
+    text_update: Option<(ExGuid, &str)>,
+) -> Result<Option<(ExGuid, bool, String)>, Error> {
+    let invalid = |message| Error { offset: 0, message };
+    let mut pending = pages.to_vec();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = &revision.nodes[&id];
+        pending.extend(
+            node.children
+                .iter()
+                .chain(&node.content)
+                .chain(&node.structure)
+                .copied(),
+        );
     }
     let titles: Vec<_> = revision
         .nodes
         .iter()
         .filter_map(|(id, node)| {
-            if !(seen.contains(&(*id, false)) || seen.contains(&(*id, true)))
-                || !node.extra[0].iter().any(|field| field.id == 0x88001cb4)
-            {
+            if !seen.contains(id) || !node.extra[0].iter().any(|field| field.id == 0x88001cb4) {
                 return None;
             }
             match &node.kind {
@@ -260,8 +354,8 @@ pub fn replace_text(
     let title_text = match titles.as_slice() {
         [] => "",
         [(id, text)] => {
-            if *id == object {
-                changed.as_str()
+            if let Some((_, changed)) = text_update.filter(|(object, _)| object == id) {
+                changed
             } else {
                 text
             }
@@ -269,18 +363,13 @@ pub fn replace_text(
         _ => return Err(invalid("Title editing requires a single title text object")),
     };
     let automatic = title_line(title_text).is_empty();
-    if !automatic && titles[0].0 != object {
-        return crate::write::replace_objects(source, space, &edits);
+    if !automatic && text_update.is_none_or(|(id, _)| titles[0].0 != id) {
+        return Ok(None);
     }
-    let [page] = pages.as_slice() else {
+    let [page] = pages else {
         return Err(invalid("Title editing requires a single active page"));
     };
-    let Kind::Page {
-        alternate_title,
-        rtl,
-        ..
-    } = &revision.nodes[page].kind
-    else {
+    let Kind::Page { rtl, .. } = &revision.nodes[page].kind else {
         unreachable!()
     };
     let mut title_text = title_line(title_text);
@@ -312,7 +401,13 @@ pub fn replace_text(
                 ..
             } = &node.kind
             {
-                title_text = automatic_title(if id == object { &changed } else { text });
+                title_text = automatic_title(
+                    if let Some((_, changed)) = text_update.filter(|(object, _)| *object == id) {
+                        changed
+                    } else {
+                        text
+                    },
+                );
                 if !title_text.is_empty() {
                     break;
                 }
@@ -326,48 +421,5 @@ pub fn replace_text(
             pending.extend(node.structure.iter().rev().copied());
         }
     }
-    let metadata = revision
-        .roots
-        .get(&2)
-        .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-    let Kind::Metadata { title, .. } = &revision.nodes[metadata].kind else {
-        return Err(invalid("Page title metadata is unavailable"));
-    };
-    let cached: Vec<_> = title_text
-        .encode_utf16()
-        .chain([0])
-        .flat_map(u16::to_le_bytes)
-        .collect();
-    let metadata_update = [(0x1c001cf3, cached.as_slice())];
-    edits.push(crate::write::ObjectEdit {
-        object: *metadata,
-        updates: if title.is_some() {
-            &metadata_update
-        } else {
-            &[]
-        },
-        insert: title.is_none().then_some(metadata_update[0]),
-    });
-    let mut alternate_update = vec![(
-        0x1c001d3c,
-        if automatic {
-            cached.as_slice()
-        } else {
-            &[0u8, 0][..]
-        },
-    )];
-    if revision.nodes[page].modified.is_some() {
-        alternate_update.push(modified_update[0]);
-    }
-    edits.retain(|edit| edit.object != *page);
-    edits.push(crate::write::ObjectEdit {
-        object: *page,
-        updates: if alternate_title.is_some() {
-            &alternate_update
-        } else {
-            &alternate_update[1..]
-        },
-        insert: alternate_title.is_none().then_some(alternate_update[0]),
-    });
-    crate::write::replace_objects(source, space, &edits)
+    Ok(Some((*page, automatic, title_text.to_owned())))
 }

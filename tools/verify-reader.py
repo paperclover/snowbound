@@ -12,7 +12,7 @@ root = Path(__file__).resolve().parent.parent
 private = root / 'corpus/private'
 paths = sorted((private / 'original').rglob('*.one'))
 output = subprocess.check_output(
-    ['cargo', 'run', '--quiet', '--example', 'inventory', '--', *map(str, paths)],
+    ['cargo', 'run', '-p', 'onestore', '--quiet', '--example', 'inventory', '--', *map(str, paths)],
     cwd=root, text=True,
 )
 records = [line.split('\t') for line in output.splitlines()]
