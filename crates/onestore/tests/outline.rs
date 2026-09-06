@@ -227,11 +227,7 @@ fn resizing_a_native_reserved_width_preserves_content() {
         .unwrap();
     let space = &document.spaces[&sid];
     let before = &space.revisions[&space.contexts[&ExGuid::default()]];
-    assert!(
-        before.nodes[&object].extra[0]
-            .iter()
-            .any(|p| p.id == 0x14001cdb)
-    );
+    assert!(before.nodes[&object].layout.reserved_width.is_some());
     let edit = PreparedEdit::outline(
         source,
         sid,
@@ -247,11 +243,7 @@ fn resizing_a_native_reserved_width_preserves_content() {
     let after_document = Document::parse(&after_index).unwrap();
     let space = &after_document.spaces[&sid];
     let after = &space.revisions[&space.contexts[&ExGuid::default()]];
-    assert!(
-        !after.nodes[&object].extra[0]
-            .iter()
-            .any(|p| p.id == 0x14001cdb)
-    );
+    assert_eq!(after.nodes[&object].layout.reserved_width, None);
     assert_eq!(after.nodes[&object].layout.max_width, Some(144.0));
     for (id, node) in &before.nodes {
         assert_eq!(node.children, after.nodes[id].children);

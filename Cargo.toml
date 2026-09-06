@@ -2,3 +2,7 @@
 members = ["crates/*"]
 exclude = ["fuzz"]
 resolver = "3"
+
+[workspace.dependencies]
+parley = { git = "https://github.com/linebender/parley", rev = "4f67747d3690bb21d25cc70b674ab0d269595759", features = ["complex-scripts"] }
+wgpu = "30.0.1"

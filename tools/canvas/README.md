@@ -1,0 +1,232 @@
+# Canvas experiments
+
+The [active goal and design record](../../resources/canvas-research.md#active-implementation-goal) define the implementation scope.
+
+## macOS text canvas
+
+The host opens nonempty UTF-8 text as paragraphs in one temporary text outline. Its editor reuses `onestore::document::Format`, retains paragraph layout across selection changes, and keeps notebook storage outside the editing boundary. The window title and close/quit guard expose the temporary lifetime. Escape and Return dismiss the discard dialog and keep the page open.
+
+```sh
+python3 tools/canvas/build_macos.py
+"target/One Canvas.app/Contents/MacOS/OneCanvas"
+cargo test -p one-canvas
+cargo test -p one-canvas-gpu -- --ignored
+```
+
+The builder ad-hoc signs and verifies the local bundle. To preserve an existing app during review, provide a new bundle path and a distinct identifier together:
+
+```sh
+python3 tools/canvas/build_macos.py --release --output '/PATH/One Canvas Review.app' --bundle-id dev.onecanvas.review
+```
+
+The explicit output path must not exist. Its filename supplies the bundle's display name; the default build continues to update `target/One Canvas.app`. Local ad-hoc signing does not provide a Developer ID or notarization.
+
+Omit both arguments for a blank page with provisional caret placement, or provide a UTF-8 file and optional document width (default 480 pt). Typing, drag selection, arrow/word/line navigation, Backspace/Delete, clipboard shortcuts, Cmd-Z/Shift-Cmd-Z and IME use the shared editor. Scrolling pans; Cmd-wheel or Cmd-plus/minus zooms without changing document width, and Cmd-0 returns to 100%. The GPU test requires an available native adapter and compares readback pixels before/after repaint and forced glyph/image-cache eviction.
+
+```text
+onestore::Format
+       ↓
+one-canvas       text edits · inverse history · composition · paragraph layout · structural edits
+       ↓
+one-canvas-gpu   Swash glyph rasterization · custom wgpu quads · bounded glyph/image caches
+       ↓
+one-canvas-app   Winit window/input · AppKit quit guard · clipboard · AccessKit
+```
+
+The renderer allocates a 2048² RGBA glyph atlas and a 2 MiB vertex buffer, limits combined text-glyph and tag-icon entries to 8192, and rebuilds a frame after atlas eviction. Font scaling uses 32 cache entries. These limits bound those caches; they are not a process-memory or worst-case rasterization budget. Drawing and hit-testing share Windows-metric line boxes. First-baseline fidelity and substitute-font metric selection remain experimental; the `windows_*` probe values expose that policy independently from Parley's original metrics.
+
+Drawing accepts a flat sequence of positioned text layouts, tag icons, rectangles and immutable raster images. Consecutive primitives with the same texture share a batch without changing paint order. The host emits selection, composition and caret rectangles through that same interface; repainting multiple placements reuses the retained layout and glyph cache.
+
+Glyph coverage uses quarter-pixel phases with the vertical sign converted to Swash's Y-up coordinates. The GPU readback test checks nine successive quarter-pixel translations by their linear-light ink centroids, then requires identical pixels on repaint, cache eviction and renderer reconstruction on the same device. The native caret experiment exposed the previous inverted vertical phase; correcting raster placement does not change line metrics or wrapping.
+
+Image textures have a separate 64 MiB / 256-entry cache. Offscreen images do not upload or consume the active-frame budget; a frame whose visible images exceed that budget returns an error. Under pressure, eviction preserves every image needed by the current frame. PNG/JPEG decoding checks encoded size, dimensions and decoded output size, with a best-effort codec allocation limit. These limits do not bound all CPU buffers or driver allocations. Images use linear filtering of premultiplied, linear-light colors; glyphs retain their own sampling/blending policy. Decoded color values are currently interpreted as sRGB; ICC and orientation metadata are not transformed by this experiment.
+
+## Note tags
+
+Paragraph layout retains blue checkbox (shape 3), question mark (15) and musical note (121) tags from paragraph and rich-text nodes. Their 12 pt tiles precede the list marker or text origin with a 20.25 pt gutter; they do not change text advances, wrapping or line height. These dimensions cover the three reference pages' 17 tags. Hand-authored vector paths use Swash's existing rasterizer and the text atlas, including its subpixel phases, offscreen culling and eviction. No Office bitmap assets or tag fonts are bundled.
+
+Checkboxes display completion; noncheckable tags ignore the completion bit required by the file format. Disabled tags dim. Accessibility descriptions expose source labels and checkbox/disabled state without changing selectable text. Tag state is read-only; text edits and undo retain it. Clicking a tag gutter focuses its outline. Unsupported icon shapes, task tags and tag color/highlight overrides return `UnsupportedContent` during layout.
+
+## Optional font substitution
+
+The host and `layout-probe` accept repeated `--substitute-font FONT_FILE` options. Supply Arimo regular/italic variable fonts or Carlito regular/bold/italic/bold-italic files. Each file is registered only in this process, as Arial or Calibri respectively; this explicitly replaces that family even when a system copy exists. Stored `Format.font` values remain unchanged. No font files are installed or bundled by this option.
+
+```sh
+"target/One Canvas.app/Contents/MacOS/OneCanvas" TEXT_FILE 240 --substitute-font ARIMO_FILE
+cargo run -p one-canvas --bin layout-probe -- resources/canvas/text-cases.json --substitute-font ARIMO_FILE --substitute-font CARLITO_FILE
+```
+
+Arimo's horizontal-header ascent/descent match the measured Arial Windows extents; its larger OS/2 Windows extents do not. The substitute uses those horizontal-header extents without line gap, scoped to the registered font data. Carlito uses its OS/2 Windows extents. Other fonts selected for missing glyphs retain their own metrics, including emoji. The comparator reports actual `canvas_height` and `canvas_height_residual` separately from the raw Windows-table hypothesis.
+
+Arimo 1.341 and Carlito 1.104 match all 14 recoverable native ASCII wrap controls, with maximum outline-height residual 0.000054 pt. This does not establish matching coverage or advances for every script: the mixed Hebrew/Arabic control rewraps under substitution and resolves Arabic to Geeza Pro on this Mac. The 500-case Unicode source-coverage test passes with these substitutes across 1804 visual lines. Font files, hashes, native comparisons and host paste/undo captures remain in the external evidence bundle.
+
+## Structural text editing
+
+`TextDocument` owns a nonempty sequence of `PageParagraph` nodes, each with one rich-text object. Paragraph and rich-text identities survive edits; split/join preserves surviving identities and allocates new ones only for new objects. Construction and replacement reject duplicate identities, missing or forward parent links, and children at the same or shallower indentation level as their parent. In-paragraph replacement retains modeled hierarchy, lists, tags, collapse state and paragraph formatting. Structural replacement requires flat, untagged content. Document changes are internal to the canvas crate; callers edit through `CanvasEditor`.
+
+`CanvasEditor` owns independently positioned text outlines and one undo history, retaining one visible projection and layout per paragraph, with source UTF-16 selections and affinity at wrap boundaries. `CanvasEditor::from_outlines` takes owned outlines and their list/tag definitions, preserving source coordinates, widths, indentation and identities. Rendering and editing share `ParagraphLayout` shaping and outline arrangement, including list-marker height and adjacent spacing. Paragraph spacing contributes only between visible paragraphs; leading and trailing spacing properties remain stored without expanding the outline boundary. Collapsed descendants retain source nodes while navigation, hit-testing and selection geometry use visible paragraphs. LF insertion splits flat paragraphs; boundary Backspace/Delete joins them. Replacements stage every affected paragraph's layout before publishing the edit. Undo restores full affected nodes, including their identities, empty styles and reversed selections; untouched paragraphs retain their layouts. Resizing keeps source selection and history while recomputing geometry at the new width.
+
+The macOS host uses this same editor for typing, pointer/keyboard selection, clipboard text, IME, split/join and undo. Click blank canvas or press Cmd-Shift-N to place a provisional caret with a 240 pt text constraint; the keyboard command places it beside the focused outline or read-only object. The first committed input creates an outline in one undo step; placement alone preserves history and does not dirty the page. Drag an outline's top bar to move it on the default page grid. Hold Option for free pointer placement or dragging; Escape cancels a drag. Use Cmd-Option-arrows (1 pt; Shift makes it 10 pt). Ctrl-Tab and Ctrl-Shift-Tab cycle text outlines and read-only placeholders. A drag previews placement and commits one undo step on release; Escape or loss of window focus cancels the preview. Creation, movement and text edits share one history, while untouched outlines retain their text layouts. Composition can provisionally replace a selection spanning paragraphs; cancellation restores the original paragraphs, selection and redo, while commitment creates one undo step. Vertical navigation retains its preferred column across short or empty paragraphs. Horizontal navigation enters the neighboring paragraph at its visual edge, including when text direction changes.
+
+Core tests compare 220 Unicode range/replacement combinations with plain-text replacement, and compare incremental layout with full recomputation through a 64-edit structural history and an 80-step multi-outline history followed by complete undo/redo. They also exercise hidden-field mapping, paragraph-separator selection, grapheme deletion, multiline IME and failed-layout atomicity. Live macOS captures verify Enter, Backspace join, undo/redo, Option-E dead-key commit and the close guard. Native Pinyin input verifies Escape cancellation over single- and cross-paragraph selections: original text, selection and redo survive. Accepting a candidate across paragraphs commits one undo step. Input-event logs distinguish empty preedit cancellation from candidate commitment. Escape commits the spacing acute accent in both this host and a native TextEdit control; that dead-key case is not evidence of composition cancellation.
+
+`cargo +nightly fuzz run canvas-editor /absolute/corpus-directory -- -max_total_time=60 -max_len=256 -artifact_prefix=/absolute/artifact-directory/` runs the canvas state machine under AddressSanitizer. Create both external directories first. Each input applies up to 32 Unicode range replacements with mixed formatting, optional provisional composition/cancellation, undo/redo and width changes. Plain-text replacement is checked independently; paragraph metadata and selections must survive undo/redo, and retained line geometry must match a freshly constructed editor. The target uses installed fonts and a retained text engine; it does not read notebooks or exercise GPU drawing. Keep generated corpus and failure artifacts outside the repository.
+
+The private import check edits and restores each body and title paragraph after dropping the source file bytes. It compares complete modeled nodes before/after undo and redo, including metadata on nested and tagged content. It exercises the document boundary without launching or modifying the live app:
+
+```sh
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE cargo test -p one-canvas imported_nodes_preserve_identity_through_edit_and_undo -- --ignored --nocapture
+```
+
+The editor integration check additionally edits every visible body paragraph, compares incremental geometry with fresh outline layout, and requires undo/redo to restore the original/edited geometry exactly. All 269 body paragraphs in the three frozen references pass. Set `CANVAS_TEST_SUBSTITUTE` to the optional Carlito font file when reproducing that check:
+
+```sh
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test -p one-canvas imported_editor_reflows_and_restores_native_outline_geometry -- --ignored --nocapture
+```
+
+## Native text accessibility
+
+AccessKit exposes each text outline as an independent editable macOS text area. Logical text runs carry the canvas line boxes, cluster advances and source positions, including blank paragraphs and hidden-field projection. They use the editor's retained projections and explicit source indices; separators connect the next visible paragraph across collapsed children. Native selection, whole-field replacement and keyboard edits share the editor history. Focus transfers retire native AppKit preedit when the canvas commits or cancels composition, preventing dead-key state from transferring to another outline. Selection/navigation reveals the caret; pan and zoom keep their own viewport behavior. Accessibility updates run only when the adapter is active and the host changes, not for caret-blink redraws. Cached paragraph runs reuse text and character geometry when the shaped-layout identity, source index, next visible paragraph and local origin match; reflow or changed source mappings invalidate them. The cache retains only the current page’s paragraph ranges and clears on adapter deactivation. IDs survive geometry/selection updates; changed run text or source mappings receive fresh IDs so obsolete action positions are rejected.
+
+```sh
+cargo test -p one-canvas-app
+ONE_CANVAS_TRACE_INPUT=1 "target/One Canvas.app/Contents/MacOS/OneCanvas" SYNTHETIC_TEXT_FILE
+```
+
+Input tracing logs Winit keyboard/IME, pointer, modifier and focus events, AccessKit action payloads and applied accessibility selections to stderr, including text. Consumer tests check Unicode/hidden-field mappings, stale actions, undo, exact document text and transformed caret geometry in both affinities at wraps and bidirectional boundaries; native captures exercise AX value/selection setters. Those checks do not substitute for a VoiceOver walkthrough.
+
+## Reference pages in the macOS host
+
+```sh
+"target/One Canvas.app/Contents/MacOS/OneCanvas" --reference PRIVATE_SECTION_COPY EXACT_PAGE_TITLE --substitute-font CARLITO_REGULAR_FILE
+```
+
+This integration mode keeps imported objects read-only and opens a separate editable canvas to their left. The initial notes width defaults to 240 pt in this mode, and the reference starts 24 pt to its right. Existing text-file and width arguments also work. Typing, outline creation/movement, paste and undo operate on the temporary notes. The close guard protects those notes. Reference text is rendered but is not exposed through the host’s editable accessibility fields.
+
+The host and offscreen renderer both use `one_canvas_gpu::page::PageScene`. Layout and image decoding happen when the scene is built; drawing reuses that data. Scene coordinates stay in source document points, while the comparison example applies its captured margin normalization through the viewport. All three shared-scene outputs are pixel-identical to their preceding title-rendering captures. Decoded image residency is capped at 64 MiB per scene, in addition to the renderer’s GPU cache budget; encoded source payloads and temporary decoder allocations are separate.
+
+The host sleeps its caret timer while macOS reports the window occluded and requests a redraw when visibility returns. Input tracing includes draw attempts, surface occlusion/timeouts and submitted presents; submission is not a measurement of display completion. Startup failures propagate a nonzero exit code after the event loop exits.
+
+## Editing an imported page
+
+```sh
+"target/One Canvas.app/Contents/MacOS/OneCanvas" --page PRIVATE_SECTION_COPY EXACT_PAGE_TITLE --substitute-font CARLITO_REGULAR_FILE
+```
+
+`--page` opens the imported body outlines as temporary editable objects in their source positions. It accepts a section copy and exact page title, without the separate text-file/width arguments. Titles, dates and images remain fixed. Character editing, selection, IME and undo use the same outline model as new pages. Existing structured or tagged paragraphs accept in-paragraph edits; their structural split/join remains restricted. Newly created flat outlines support the full structural workflow. The app never writes the section file.
+
+`PageScene::from_page` transfers body outlines and definitions to `CanvasEditor`, retaining static drawing data and ordered outline identities in the scene. Each dynamic slot invokes the host's outline painter; moving or editing an outline changes its drawing without re-decoding images or duplicating its paragraph layout. New outlines draw after the imported page. The close guard compares every outline's identity, layout and document against the opening state, so changing any imported outline or creating one requires confirmation before discarding.
+
+The app's private integration test exercises the actual outline painter and accessibility consumer for each imported outline, then verifies text restoration through undo:
+
+```sh
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test -p one-canvas-app imported_page_widgets_and_accessibility_follow_edits -- --ignored --nocapture
+```
+
+## Unsupported page content
+
+Unsupported top-level objects, outlines or titles render as read-only placeholders in source order. Missing image payloads or dimensions produce an image-unavailable placeholder. The scene owns the imported source values for those objects; the importer’s `Unsupported` record contains identity, class and layout metadata, not an opaque copy of unparsed notebook bytes. Supported body outlines still enter the editor. If none exist, the page receives a separate empty annotation outline to the right of the placeholders.
+
+Placeholders use source positions and at least 160 pt width, expanding their height to contain the status text. This is an explicit substitute for unavailable rendering, not a geometric reconstruction. Pointer presses focus placeholders, hide the previous text caret/selection and retire its IME composition. Typing, deletion, paste, text-selection commands, undo/redo and outline movement are suppressed while a placeholder has focus. Escape restores the previous text focus; Ctrl-Tab cycles through text outlines and placeholders. Zoom remains available, and Cmd-Shift-N creates an editable annotation beside the focused object. AccessKit exposes placeholder focus, status and bounds without text-edit actions; identities persist across editor updates and viewport changes. Focus reveals offscreen placeholders and suspends caret-blink scheduling. Hit-testing follows paint order for overlapping editable outlines and placeholders: new annotations draw last and receive hits first, while imported objects resolve from front to back. Each outline’s header, body and tag gutters participate at its own position in that order; static titles and decoded images have no editable hit target. Invalid geometry, malformed image data and resource-budget failures remain errors.
+
+`TextOutline::from_outline` shapes supported content once before the scene transfers the prepared outline into `CanvasEditor::from_text_outlines`. The document and layout fields are read-only outside the editor, keeping their retained geometry tied to editor operations. The source-based `CanvasEditor::from_outlines` constructor uses the same path.
+
+## Owned page import
+
+`Page::from_revision` copies one page's text, outline hierarchy, list/tag definitions and image payloads into canvas-owned values. The source revision and file bytes can then be dropped. Hidden text has a separate visible projection with UTF-16 mappings on both sides of a hidden field; the full source paragraph remains available. This import path does not write a notebook.
+
+```sh
+cargo run -p one-canvas --bin page-probe -- PRIVATE_SECTION_COPY EXACT_PAGE_TITLE > PRIVATE_PAGE_JSON
+python3 tools/canvas/compare_page.py PRIVATE_PAGE_JSON NATIVE_PAGE_XML > PRIVATE_COMPARISON_JSON
+```
+
+The page probe uses retained outline layout: cumulative indentation, collapsed descendants, adjacent paragraph spacing, minimum line spacing and bullet layout. Title containers retain their IDs, parent geometry and ordered child outlines. Children use intrinsic text width when no width is stored; each following child starts after the larger of the preceding child’s content height and stored suggested height. The probe emits title parent geometry once in `title_areas`, linked to the flattened outline diagnostics by ID. The comparator identifies outlines by their complete paragraph text and rejects ambiguous matches. `--allow-native-empty-nbsp` explicitly records the observed native conversion of a sole nonbreaking space to an empty paragraph; it does not report those paragraphs as exact text matches.
+
+The PDF companion verifies the matching native XML first, then recovers paragraph wraps from its adjacent PDF export:
+
+```sh
+python3 tools/canvas/compare_page_pdf.py PRIVATE_PAGE_JSON NATIVE_PAGE_XML --allow-native-empty-nbsp > PRIVATE_LINE_COMPARISON_JSON
+```
+
+Complete-outline text identifies repeated paragraphs. Otherwise, a paragraph needs unique source context; repeated PDF instances must agree on every recovered break. Glyph boxes group visual lines even when bold/regular PDF runs have slightly different baselines. The report retains each instance's original baseline range and print-scale observation. Current source probes match all 159 nonblank body paragraphs across the three references (214 visible lines); 110 whitespace-only paragraphs have no PDF glyph-position evidence. This establishes body wrap agreement for these captures, not screen baselines, empty-line placement or title/tag rendering.
+
+`--include-titles` also compares title/date/time paragraphs against PDF glyphs. All eight such paragraphs in the three references match with Carlito explicitly substituted for Calibri. Both `page-probe` and `render_page` accept repeated `--substitute-font FONT_FILE` arguments after their positional arguments, using the same substitution path as the app. The title comparison screenshot uses the existing image-derived viewport translations; no title-specific translation is fitted. Wrap agreement does not establish title screen baselines or general title alignment behavior.
+
+All three private reference pages pass owned import after the source document is dropped. All 15 body outline heights agree with native XML within 0.002 pt. Album's Courier New bullet height participates in the whole paragraph box; expanding the first text line instead incorrectly adds space to wrapped paragraphs. The importer retains note tags attached to rich-text objects as well as paragraph nodes. These are total-height measurements, not proof of matching line breaks or first baselines. Full reports remain in the external evidence bundle.
+
+```sh
+cargo run -p one-canvas-gpu --example render_page -- PRIVATE_SECTION_COPY EXACT_PAGE_TITLE NEW_PNG_PATH
+```
+
+This comparison renderer draws body text, title text, date/time fields, bullet glyphs, supported tag icons, highlights and images in source object order at 100% / 96 DPI into the frozen viewport size, writing only a new PNG. It normalizes the three measured page margin origins to 36 pt / 14.4 pt. The title container is placed relative to that normalized margin. The optional fourth argument is the physical Y position of the document origin (default zero). Image-region comparison against the frozen viewport finds native translations of +6 px for Video and +30 px for Lore. Those are measured capture transforms, not paragraph-baseline corrections or a general scrolling rule; the native screenshots and geometry reports accompany these images.
+
+## Text and native-reference probes
+
+`resources/canvas/text-cases.json` is the input shared by the Rust/Parley probe, the Swift/Core Text probe and the synthetic native-page generator. Probe coordinates are logical points, without pixel quantization. Both probes accept additional font-file paths after the JSON path and register those fonts only within the process.
+
+```sh
+cargo run -p one-canvas --bin layout-probe -- resources/canvas/text-cases.json > PARLEY_JSON
+swift tools/canvas/core_text_probe.swift resources/canvas/text-cases.json > CORE_TEXT_JSON
+python3 tools/canvas/native_fixture.py resources/canvas/text-cases.json NEW_NOTEBOOK_DIRECTORY
+python3 tools/native_runner.py NEW_NOTEBOOK_DIRECTORY NEW_CAPTURE_DIRECTORY --author tools/native/pages.ps1 --pdf --screenshots
+python3 tools/canvas/compare.py resources/canvas/text-cases.json PARLEY_JSON CORE_TEXT_JSON NEW_CAPTURE_DIRECTORY/read > COMPARISON_JSON
+python3 -m unittest discover -s tools/canvas -p 'test_*.py'
+python3 tools/canvas/range_stress.py NEW_STRESS_DIRECTORY target/debug/layout-probe
+python3 tools/canvas/range_stress.py NEW_CORE_TEXT_STRESS_DIRECTORY swift tools/canvas/core_text_probe.swift
+```
+
+The comparison and its tests require `pdfplumber`. The native runner uses the existing disposable Windows lab. Choose new artifact destinations outside version control. Original notebooks are never capture destinations. Font substitutes can be tested using a derived case file with just the requested font names changed; the comparator records those overrides and rejects changed text, sizes, styles or widths. It also verifies the native capture's input fixture against the canonical cases.
+
+Native PDF ranges are supplementary evidence: the comparator accepts only unambiguous ASCII content and groups characters by intersecting vertical glyph boxes, preserving mixed-style lines without fitting to expected canvas wraps. Unmapped PDF glyphs and ambiguous matches do not produce passing expectations. Screen captures still require a recorded zoom/DPI before becoming the frozen raster reference.
+
+For controlled screen captures, run `native_runner.py` with `--inspect --pdf`. Once it reports the clone is ready for inspection, run `capture_view.py CLONE CAPTURE/read/page-NNN.xml NEW_VIEW_DIRECTORY --scrolls 2` for a long page, or omit the scroll option for a short page. The tool targets OneNote's main frame, fixes 1600×900/100%, records measured DPI and captures overlapping views. The zoom screenshot verifies the visible setting. Creating `CAPTURE/finish` asks the runner to collect final artifacts and delete the clone; the captured view's source XML is then under `before-read`. Inspect the images before accepting them as references.
+
+`compare_scroll.py` measures downward integer scrolling between native captures from identical foreground rows, then scores the overlapping foreground pixels. It reports all candidates and leaves the offset unset when the best score is ambiguous. Blank or unrelated captures cannot establish an offset. The comparison requires unchanged horizontal position and at least 64 pixels of overlap; it does not use canvas geometry. The selected 1600×900 captures use this recorded content crop:
+
+```sh
+python3 tools/canvas/compare_scroll.py NATIVE_TOP.png NATIVE_SCROLLED.png --crop 48 83 1434 842
+```
+
+Use the measured offset to render the corresponding viewport with `render_page` by subtracting it from the page's top-view translation. Keep top-view registration separate: the Video and Lore comparisons establish their translations from image regions, independently of text layout. Pixel-color bounds alone cannot establish a text baseline when caret, outline-border or background pixels overlap the text region.
+
+The [native baseline fixture](../../resources/canvas/baseline-anchors.md) adds three opaque image anchors and paragraph-spacing controls. `compare_baselines.py PROBE_JSON NATIVE_XML NATIVE_PDF` matches decoded image pixels, rejects ambiguous or masked images, and reports baseline residuals under independently measured image translations. It preserves wrap mismatches and unregistered pages; no passing tolerance is inferred from the canvas output.
+
+The initial native experiment establishes three useful controls:
+
+- Ordinary Arial outline heights, including mixed sizes, agree with sums of Windows ascent/descent metrics within 0.00004 pt; first-baseline placement is a separate measurement.
+- The tested COM imports clamp requested outline widths below 72 pt and remove wholly empty outlines. Those outcomes must not be mistaken for paragraph-engine failures or generalized into an editor-wide width restriction.
+- This Mac lacks Calibri: both engines initially resolve it to Helvetica. Resolved faces accompany results so matching a few wrap offsets cannot conceal substitution.
+
+Carlito matches the initial native Calibri wrap cases, including bold. Arimo matches the tested Arial advances, but its Windows metric tables have larger extents than Arial's; blindly selecting those tables would add vertical drift. Its horizontal-header ascent/descent match Arial in these probes. Font substitution therefore needs a measured metric policy as well as matching advances.
+
+The [Parley dependency](../../Cargo.toml) pins upstream source for the experiment. Published 0.11.1 returned a line boundary inside an emoji's UTF-8 encoding in the deterministic stress cases. An isolated two-location correction removed that failure but still lost a leading space in another case; those local changes were not adopted. The unmodified upstream commit in the manifest passes all 500 source-coverage cases, as does Core Text, and retains the measured native ASCII break agreement. This establishes a tested candidate, not whole-canvas compatibility.
+
+Full native captures, candidate font binaries/licenses and probe outputs remain in the external evidence bundle linked from the research session. The current tools are experiments, not the finished editor.
+
+## CPU pipeline profiling
+
+The opt-in release probe measures engine construction, document baseline cloning, editing, undo, the host’s production page primitive collection and accessibility construction. Synthetic cases contain 100, 1,000 and 5,000 paragraphs. Each runs 32 insertion/undo samples alternating between the first and last paragraph; assertions require one changed layout per insertion, retained layouts through drawing/accessibility, and exact document restoration after undo. The accessibility regression compares cached output with full reconstruction through 160 mixed editing operations and complete undo/redo, including composition, source index changes, resize and viewport transforms.
+
+```sh
+cargo test --release -p one-canvas-app canvas_pipeline_cost -- --ignored --nocapture --test-threads=1
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test --release -p one-canvas-app canvas_pipeline_cost -- --ignored --nocapture --test-threads=1
+```
+
+Private-page mode reads the section once and measures 16 parse/open/close cycles with one retained text engine, recording first construction separately from repeated cycles. Set `CANVAS_PROFILE_CYCLES` to a positive count for longer retention runs. It samples this process’s resident memory through macOS `ps` with each page open and closed. Tab-separated `canvas_profile` records report nanoseconds; `canvas_count` records report object counts; `canvas_rss_kib` records report KiB. The test harness can prefix the first record on a line. Times exclude log output, layout identity scans and memory sampling. Primitive collection includes its temporary allocation and destruction but excludes GPU preparation, submission and presentation. File reads can hit the OS cache. Resident memory includes allocator retention and is neither live allocation accounting nor GPU occupancy; these measurements do not establish input-to-present latency or a process memory limit.
+
+The GPU probe uses a 1386×759 offscreen target and runs 32 samples each for repeated drawing, vertical pan, eight zoom levels, forced eviction, horizontal/vertical offscreen placement, and native page reconstruction. Without private inputs it draws 2,000 synthetic text lines. The first repeated-draw sample includes initial pipeline and atlas work; later samples reuse the renderer. Native reconstruction preserves the text engine and renderer while replacing the decoded scene. Parsing, layout, primitive collection and logging are outside the measured draw interval.
+
+```sh
+cargo test --release -p one-canvas-gpu renderer_cost -- --ignored --nocapture
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_FILE cargo test --release -p one-canvas-gpu renderer_cost -- --ignored --nocapture
+```
+
+Each `canvas_gpu_sample` row contains phase, sample, draw/submit nanoseconds, elapsed nanoseconds through queue completion, glyph/tag entries, occupied atlas texels, image entries, image texture bytes, vertices, batches, CPU vertex capacity bytes, CPU batch capacity bytes, and glyph/image table capacities. GPU resources are reported at their requested sizes; driver overhead, staging buffers, allocator overhead and the font scaler's internal cache are excluded. Queue completion includes CPU preparation and waiting; it is neither GPU execution time nor input-to-display latency. Each sample waits for the queue, so this experiment does not measure display frame pacing. Assertions enforce the existing entry, vertex and image-byte budgets throughout every phase.
+
+## Native interaction captures
+
+`capture_interaction.py` records one saved AutoHotkey script, a settled screenshot and a subsequent COM page export while `native_runner.py --inspect` holds a disposable clone. It checks that the source page belongs to the supplied target and refuses an existing output directory. Script bytes stay at their original path; the input record includes their hash. Finish and remove the clone through the owning runner after collecting the sequence.
+
+```sh
+python3 tools/canvas/capture_interaction.py CLONE NATIVE_RUN/read/page-000.xml ACTION.ahk NEW_OUTPUT_DIRECTORY
+```

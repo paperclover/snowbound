@@ -81,6 +81,7 @@ pub struct Layout {
     /// An explicit user width when true; false or absent leaves an automatic layout hint.
     pub width_set_by_user: Option<bool>,
     pub max_height: Option<f32>,
+    pub reserved_width: Option<f32>,
 }
 
 macro_rules! format_fields {
@@ -119,6 +120,7 @@ format_fields! {
     space_before: f32,
     space_after: f32,
     line_spacing: f32,
+    list_spacing: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -876,6 +878,7 @@ impl<'a> Element<'a> {
             max_width: f.float(0x14001c1b, 36.0)?,
             width_set_by_user: f.boolean(0x08001cbd)?,
             max_height: f.float(0x14001c1c, 36.0)?,
+            reserved_width: f.float(0x14001cdb, 36.0)?,
         };
         let format = Format {
             bold: f.boolean(0x08001c04)?,
@@ -899,6 +902,7 @@ impl<'a> Element<'a> {
             space_before: f.float(0x1400342e, 36.0)?,
             space_after: f.float(0x1400342f, 36.0)?,
             line_spacing: f.float(0x14003430, 36.0)?,
+            list_spacing: f.float(0x14001ccb, 36.0)?,
         };
         let mut tags = Vec::new();
         if let Some(property) = f.take(0x40003489) {

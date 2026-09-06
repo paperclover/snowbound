@@ -685,13 +685,7 @@ fn a_new_native_wrap_reservation_requires_review_before_width_replacement() {
         old["layout"]["width_set_by_user"],
         remote["layout"]["width_set_by_user"]
     );
-    assert!(
-        remote["extra"][0]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|field| field["id"] == 0x14001cdb_u32)
-    );
+    assert!(remote["layout"]["reserved_width"].is_number());
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("cache.sqlite"), source).unwrap();
     let id = cache
@@ -721,11 +715,5 @@ fn a_new_native_wrap_reservation_requires_review_before_width_replacement() {
     assert_eq!(after["layout"]["x"], remote["layout"]["x"]);
     assert_eq!(after["layout"]["y"], remote["layout"]["y"]);
     assert_eq!(after["layout"]["max_width"], 144.0);
-    assert!(
-        !after["extra"][0]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|field| field["id"] == 0x14001cdb_u32)
-    );
+    assert!(after["layout"]["reserved_width"].is_null());
 }

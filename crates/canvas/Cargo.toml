@@ -1,0 +1,21 @@
+[package]
+name = "one-canvas"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+onestore = { path = "../onestore" }
+parley.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+skrifa = "0.44.0"
+getrandom = "0.4.3"
+
+[[bin]]
+name = "layout-probe"
+path = "src/bin/layout_probe.rs"
+
+[[bin]]
+name = "page-probe"
+path = "src/bin/page_probe.rs"

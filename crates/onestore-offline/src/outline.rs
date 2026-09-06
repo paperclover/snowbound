@@ -47,7 +47,7 @@ fn observe(
             vec![
                 json!(node.layout.max_width),
                 json!(node.layout.width_set_by_user.unwrap_or(false)),
-                json!(node.extra[0].iter().find(|field| field.id == 0x14001cdb)),
+                json!(node.layout.reserved_width),
             ]
         }
         (onestore::OutlineEdit::Collapsed(_), Kind::Paragraph { collapse_state, .. }) => {
