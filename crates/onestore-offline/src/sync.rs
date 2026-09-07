@@ -36,45 +36,11 @@ pub enum EditStatus {
 impl Replica {
     /// Returns a durable receipt or the persisted state of a locally acknowledged edit.
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
-        let id = i64::try_from(id).map_err(io::Error::other)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        if let Some(revision) = connection
-            .query_row(
-                "SELECT revision FROM receipts WHERE edit_id=?1",
-                [id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            return Ok(Some(EditStatus::Published {
-                revision: revision.parse()?,
-            }));
-        }
-        let record: Option<(Option<String>, Option<i64>)> = connection.query_row(
-            "SELECT attempt.revision, conflicts.kind FROM edits LEFT JOIN attempt ON attempt.edit_id=edits.id LEFT JOIN conflicts ON conflicts.edit_id=edits.id WHERE edits.id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-        Ok(match record {
-            None => None,
-            Some((Some(revision), _)) => Some(EditStatus::AwaitingConfirmation {
-                revision: revision.parse()?,
-            }),
-            Some((None, Some(kind))) => Some(EditStatus::Conflict(match kind {
-                0 => ConflictKind::TextChanged,
-                1 => ConflictKind::TargetUnavailable,
-                2 => ConflictKind::UnsupportedEdit,
-                3 => ConflictKind::FormattingChanged,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Unknown cached conflict kind",
-                    )
-                    .into());
-                }
-            })),
-            Some((None, None)) => Some(EditStatus::Pending),
-        })
+        status(&connection, id)
     }
 
     /// The last observed remote image, retained alongside the complete local working image.
@@ -455,4 +421,42 @@ impl Replica {
         transaction.commit()?;
         Ok(())
     }
+}
+
+pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStatus>> {
+    let id = i64::try_from(id).map_err(io::Error::other)?;
+    if let Some(revision) = connection
+        .query_row(
+            "SELECT revision FROM receipts WHERE edit_id=?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Ok(Some(EditStatus::Published {
+            revision: revision.parse()?,
+        }));
+    }
+    let record: Option<(Option<String>, Option<i64>)> = connection.query_row(
+        "SELECT attempt.revision, conflicts.kind FROM edits LEFT JOIN attempt ON attempt.edit_id=edits.id LEFT JOIN conflicts ON conflicts.edit_id=edits.id WHERE edits.id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    Ok(match record {
+        None => None,
+        Some((Some(revision), _)) => Some(EditStatus::AwaitingConfirmation {
+            revision: revision.parse()?,
+        }),
+        Some((None, Some(kind))) => Some(EditStatus::Conflict(match kind {
+            0 => ConflictKind::TextChanged,
+            1 => ConflictKind::TargetUnavailable,
+            2 => ConflictKind::UnsupportedEdit,
+            3 => ConflictKind::FormattingChanged,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unknown cached conflict kind",
+                )
+                .into());
+            }
+        })),
+        Some((None, None)) => Some(EditStatus::Pending),
+    })
 }

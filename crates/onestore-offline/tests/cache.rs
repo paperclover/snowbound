@@ -113,6 +113,67 @@ fn failed_edits_preserve_both_intent_queue_and_working_image() {
 }
 
 #[test]
+fn concurrent_recovery_exports_capture_one_complete_acknowledged_queue() {
+    use onestore_offline::{Operation, Recovery};
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = onestore::create_section("recovery.one", "base", "Fixture").unwrap();
+    let (space, object, _) = target(&source);
+    let replica = Replica::create(directory.path().join("live.sqlite"), &source).unwrap();
+    let start = Barrier::new(4);
+    std::thread::scope(|scope| {
+        for writer in 0..3 {
+            let (replica, start) = (&replica, &start);
+            scope.spawn(move || {
+                start.wait();
+                for edit in 0..20 {
+                    loop {
+                        let source = replica.snapshot().unwrap();
+                        match replica.edit_text(
+                            &source,
+                            space,
+                            object,
+                            0..0,
+                            &format!("[{writer}:{edit}] "),
+                        ) {
+                            Ok(Some(_)) => break,
+                            Err(Error::Io(error)) if error.kind() == ErrorKind::ResourceBusy => {
+                                continue;
+                            }
+                            other => panic!("Unexpected local edit: {other:?}"),
+                        }
+                    }
+                }
+            });
+        }
+        start.wait();
+        for n in 0..12 {
+            let path = directory.path().join(format!("recovery-{n}.sqlite"));
+            replica.export_recovery(&path).unwrap();
+            let archive = Recovery::open(path).unwrap();
+            let pending = archive.pending().unwrap();
+            let mut expected = String::new();
+            for edit in pending.iter().rev() {
+                let Operation::Text(edit) = &edit.operation else {
+                    panic!()
+                };
+                assert_eq!(edit.range, 0..0);
+                expected.push_str(&edit.replacement);
+            }
+            expected.push_str("base");
+            assert_eq!(target(&archive.snapshot().unwrap()).2, expected);
+            assert_eq!(archive.remote_snapshot().unwrap(), source);
+            assert_eq!(
+                archive.summary().unwrap().queued_edits,
+                pending.len() as u64
+            );
+            assert!(archive.receipts().unwrap().is_empty());
+        }
+    });
+    assert_eq!(replica.pending().unwrap().len(), 60);
+}
+
+#[test]
 fn ownership_and_foreign_file_rejection_preserve_existing_data() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("section.sqlite");

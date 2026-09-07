@@ -10,8 +10,10 @@ use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Durati
 
 mod formatting;
 mod rebase;
+mod recovery;
 mod schema;
 pub use formatting::FormatEdit;
+pub use recovery::{Recovery, RecoverySummary};
 mod sync;
 pub use sync::{ConflictKind, EditStatus, Remote};
 mod worker;
@@ -97,31 +99,7 @@ impl Replica {
     }
 
     fn connect(path: &Path, source: Option<&[u8]>) -> Result<Self> {
-        let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.busy_timeout(Duration::ZERO)?;
-        connection.execute_batch(
-            "PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=EXTRA; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;",
-        )?;
-        for (name, expected) in [("locking_mode", "exclusive"), ("journal_mode", "delete")] {
-            let actual: String = connection.pragma_query_value(None, name, |row| row.get(0))?;
-            if actual != expected {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unsupported cache locking or journal mode",
-                )
-                .into());
-            }
-        }
-        for (name, expected) in [("synchronous", 3), ("fullfsync", 1), ("foreign_keys", 1)] {
-            let actual: i64 = connection.pragma_query_value(None, name, |row| row.get(0))?;
-            if actual != expected {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Required cache synchronization is unavailable",
-                )
-                .into());
-            }
-        }
+        let mut connection = cache_connection(path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
         let application: u32 =
             transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
@@ -159,27 +137,7 @@ impl Replica {
                 )
                 .into());
             }
-            let integrity: String =
-                transaction.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-            if integrity != "ok" {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Cache integrity check failed",
-                )
-                .into());
-            }
-            let (base, working): (Vec<u8>, Vec<u8>) = transaction.query_row(
-                "SELECT base, working FROM replica WHERE id=1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            if validate(&base)? != validate(&working)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Cache images belong to different documents",
-                )
-                .into());
-            }
+            validate_images(&transaction)?;
             if version < SCHEMA_VERSION {
                 schema::migrate(&transaction, version)?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -359,4 +317,54 @@ fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {
         });
     }
     Ok(edits)
+}
+
+fn cache_connection(path: &Path) -> Result<Connection> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(Duration::ZERO)?;
+    connection.execute_batch(
+        "PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=EXTRA; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;",
+    )?;
+    for (name, expected) in [("locking_mode", "exclusive"), ("journal_mode", "delete")] {
+        let actual: String = connection.pragma_query_value(None, name, |row| row.get(0))?;
+        if actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unsupported cache locking or journal mode",
+            )
+            .into());
+        }
+    }
+    for (name, expected) in [("synchronous", 3), ("fullfsync", 1), ("foreign_keys", 1)] {
+        let actual: i64 = connection.pragma_query_value(None, name, |row| row.get(0))?;
+        if actual != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Required cache synchronization is unavailable",
+            )
+            .into());
+        }
+    }
+    Ok(connection)
+}
+
+fn validate_images(connection: &Connection) -> Result<()> {
+    let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidData, "Cache integrity check failed").into(),
+        );
+    }
+    let (base, working): (Vec<u8>, Vec<u8>) =
+        connection.query_row("SELECT base, working FROM replica WHERE id=1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+    if validate(&base)? != validate(&working)? {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cache images belong to different documents",
+        )
+        .into());
+    }
+    Ok(())
 }

@@ -189,3 +189,35 @@ The SMB-enabled `smb_offline_client` example is an owned-lab workload for
 acknowledgements, remote publication attempts, persisted receipts and cache reopen
 checks. Its append-specific conflict review policy lives in the test client;
 the library continues to preserve conflicts requiring an explicit decision.
+
+## Recovery archives
+
+`export_recovery(new_path)` captures both complete notebook images, the typed
+queue, uncertain attempts, conflicts, receipts and the edit-ID sequence in one
+SQLite snapshot. It refuses existing destinations and leaves the live queue
+unchanged. Export to a local directory from a background thread: copying holds
+the cache mutex while capturing the database. Failure after the final rename can
+leave a complete archive at the requested path; it never acknowledges a remote
+edit. Archives contain notebook content and use a separate database identity, so
+`Replica::open` rejects them as writable caches.
+
+```no_run
+use onestore_offline::{Recovery, Replica};
+# fn example(cache: &Replica) -> Result<(), Box<dyn std::error::Error>> {
+cache.export_recovery("review.sqlite")?;
+let review = Recovery::open("review.sqlite")?;
+let counts = review.summary()?;
+let local = review.snapshot()?;
+let remote = review.remote_snapshot()?;
+let pending = review.pending()?;
+let receipts = review.receipts()?;
+# Ok(())
+# }
+```
+
+`Recovery` provides read-only inspection and no synchronization or restore method.
+`status(id)` preserves the same state interpretation as the live replica.
+`recovery_summary()` on the live replica and `summary()` on an archive return
+counts and byte sizes without notebook text, paths, authors or credentials.
+Opening an archive validates its schema and images without migration. A recovery
+archive is evidence for a reviewed recovery decision, not a second active queue.

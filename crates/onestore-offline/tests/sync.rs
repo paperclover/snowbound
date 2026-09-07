@@ -129,6 +129,189 @@ fn text(source: &[u8]) -> (ExGuid, ExGuid, String) {
 }
 
 #[test]
+fn recovery_archive_preserves_typed_queue_uncertainty_and_receipts_without_becoming_a_writer() {
+    use onestore::{Insertion, TextAttribute};
+    use onestore_offline::{Recovery, RecoverySummary};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("live.sqlite");
+    let archive_path = directory.path().join("recovery.sqlite");
+    let source = onestore::create_section("recovery.one", "Original", "Fixture").unwrap();
+    let (space, object, _) = text(&source);
+    let cache = Replica::create(&path, &source).unwrap();
+    let published = cache
+        .edit_text(&source, space, object, 0..0, "Published ")
+        .unwrap()
+        .unwrap();
+    let mut server = Server::new(&source);
+    let (_, receipt) = cache.sync_once(&mut server).unwrap().unwrap();
+    let source = cache.snapshot().unwrap();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (page_space, page) = document.pages().unwrap()[0];
+    let outline = Insertion::outline(page, 100.0, 200.0, "Outline", "Fixture").unwrap();
+    let inserted = cache
+        .insert(&source, page_space, &outline)
+        .unwrap()
+        .unwrap();
+    let paragraph = Insertion::paragraph(outline.object(), None, "Recovery 🦀", "Fixture").unwrap();
+    cache
+        .insert(&cache.snapshot().unwrap(), page_space, &paragraph)
+        .unwrap();
+    cache
+        .format(
+            &cache.snapshot().unwrap(),
+            page_space,
+            paragraph.text_object(),
+            0..3,
+            &[TextAttribute::Bold(true)],
+        )
+        .unwrap();
+    cache
+        .edit_text(
+            &cache.snapshot().unwrap(),
+            page_space,
+            paragraph.text_object(),
+            0..0,
+            "Pending ",
+        )
+        .unwrap();
+    server.fault = Fault::UnknownBefore;
+    assert!(matches!(
+        cache.sync_once(&mut server),
+        Err(Error::Remote(CommitError {
+            state: CommitState::Unknown,
+            ..
+        }))
+    ));
+    let working = cache.snapshot().unwrap();
+    let remote = cache.remote_snapshot().unwrap();
+    let pending = cache.pending().unwrap();
+    let uncertain = cache.status(inserted).unwrap();
+    let source_file = std::fs::read(&path).unwrap();
+    let summary = RecoverySummary {
+        queued_edits: 4,
+        conflicts: 0,
+        uncertain_edits: 1,
+        published_receipts: 1,
+        working_bytes: working.len() as u64,
+        remote_bytes: remote.len() as u64,
+    };
+    assert_eq!(cache.recovery_summary().unwrap(), summary);
+    cache.export_recovery(&archive_path).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), source_file);
+    let archive_bytes = std::fs::read(&archive_path).unwrap();
+    assert!(Replica::open(&archive_path).is_err());
+    assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+    assert!(Recovery::open(&path).is_err());
+    let archive = Recovery::open(&archive_path).unwrap();
+    assert_eq!(archive.summary().unwrap(), summary);
+    assert_eq!(archive.snapshot().unwrap(), working);
+    assert_eq!(archive.remote_snapshot().unwrap(), remote);
+    assert_eq!(archive.pending().unwrap(), pending);
+    assert_eq!(archive.status(published).unwrap(), Some(receipt));
+    assert_eq!(archive.status(inserted).unwrap(), uncertain);
+    for edit in &pending {
+        assert_eq!(
+            archive.status(edit.id).unwrap(),
+            cache.status(edit.id).unwrap()
+        );
+    }
+    let EditStatus::Published { revision } = receipt else {
+        panic!()
+    };
+    assert_eq!(archive.receipts().unwrap(), [(published, revision)].into());
+    assert_eq!(
+        archive.status(u64::MAX - 1).unwrap_err().to_string(),
+        cache.status(u64::MAX - 1).unwrap_err().to_string()
+    );
+    for existing in [&path, &archive_path] {
+        assert!(
+            matches!(cache.export_recovery(existing), Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists)
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), source_file);
+    assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+    cache
+        .edit_text(&working, space, object, 0..0, "Later ")
+        .unwrap();
+    assert_eq!(archive.snapshot().unwrap(), working);
+    assert_eq!(archive.pending().unwrap(), pending);
+    drop(archive);
+    assert_eq!(
+        Recovery::open(&archive_path).unwrap().summary().unwrap(),
+        summary
+    );
+    assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&archive_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    let remaining: Vec<_> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(
+        remaining
+            .iter()
+            .all(|name| !name.to_string_lossy().starts_with(".onestore-recovery-")),
+        "Temporary recovery files remain: {remaining:?}"
+    );
+}
+
+#[test]
+fn recovery_archive_retains_conflict_images_and_rejects_foreign_or_future_archives() {
+    use onestore_offline::Recovery;
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = onestore::create_section("recovery.one", "Original", "Fixture").unwrap();
+    let (space, object, _) = text(&source);
+    let cache = Replica::create(directory.path().join("live.sqlite"), &source).unwrap();
+    let id = cache
+        .edit_text(&source, space, object, 0..8, "Local")
+        .unwrap()
+        .unwrap();
+    let changed = onestore::replace_text(&source, space, object, 0..8, "Remote").unwrap();
+    let mut server = Server::new(&changed);
+    let outcome = cache.sync_once(&mut server).unwrap().unwrap();
+    assert_eq!(
+        outcome,
+        (id, EditStatus::Conflict(ConflictKind::TextChanged))
+    );
+    let path = directory.path().join("conflict.sqlite");
+    cache.export_recovery(&path).unwrap();
+    let archive = Recovery::open(&path).unwrap();
+    assert_eq!(text(&archive.snapshot().unwrap()).2, "Local");
+    assert_eq!(archive.remote_snapshot().unwrap(), changed);
+    assert_eq!(archive.status(id).unwrap(), Some(outcome.1));
+    assert_eq!(archive.summary().unwrap().conflicts, 1);
+    assert_eq!(archive.summary().unwrap().uncertain_edits, 0);
+    drop(archive);
+    for sql in [
+        "PRAGMA user_version=99",
+        "PRAGMA user_version=4; PRAGMA application_id=0",
+    ] {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(sql).unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        assert!(Recovery::open(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    assert_eq!(cache.status(id).unwrap(), Some(outcome.1));
+    assert_eq!(text(&cache.snapshot().unwrap()).2, "Local");
+}
+
+#[test]
 fn rebases_multiple_disjoint_remote_changes_and_persists_the_remote_receipt() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("cache.sqlite");
