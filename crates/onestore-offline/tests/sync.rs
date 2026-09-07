@@ -2076,6 +2076,57 @@ fn retired_format_attempts_require_the_complete_durable_effect_without_replay() 
 }
 
 #[test]
+fn retired_text_with_equal_plaintext_but_a_different_surviving_run_remains_uncertain() {
+    use onestore::TextAttribute;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("repeated.sqlite");
+    let plain = onestore::create_section("repeated.one", "aa", "Fixture").unwrap();
+    let (space, object, _) = text(&plain);
+    let source = PreparedEdit::format(&plain, space, object, 0..1, &[TextAttribute::Bold(true)])
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let cache = Replica::create(&path, &source).unwrap();
+    let id = cache
+        .edit_text(&source, space, object, 0..1, "")
+        .unwrap()
+        .unwrap();
+    let local = cache.snapshot().unwrap();
+    let mut server = Server::new(&source);
+    server.fault = Fault::UnknownAfter;
+    assert!(cache.sync_once(&mut server).is_err());
+    let attempt = cache.status(id).unwrap();
+    server.visible = onestore::replace_text(&source, space, object, 1..2, "").unwrap();
+    assert_eq!(text(&server.visible).2, text(&local).2);
+    let bold = |bytes: &[u8]| {
+        let store = Store::parse(bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let space = &document.spaces[&space];
+        space.revisions[&space.contexts[&ExGuid::default()]]
+            .text_runs(object)
+            .unwrap()
+            .into_iter()
+            .find(|run| !run.text.is_empty())
+            .unwrap()
+            .format
+            .bold
+    };
+    assert_eq!(bold(&server.visible), Some(true));
+    assert_ne!(bold(&server.visible), bold(&local));
+    drop(cache);
+    let cache = Replica::open(&path).unwrap();
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        attempt.map(|state| (id, state))
+    );
+    assert_eq!(server.publications, 1);
+    assert_eq!(server.confirmations, 0);
+    assert_eq!(cache.snapshot().unwrap(), local);
+}
+
+#[test]
 fn uncertain_formatting_keeps_the_original_attempt_and_never_replays() {
     use onestore::TextAttribute as A;
     for fault in [Fault::UnknownBefore, Fault::UnknownAfter] {
