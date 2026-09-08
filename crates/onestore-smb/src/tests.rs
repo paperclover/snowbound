@@ -10,6 +10,87 @@ use std::{
 
 mod faults;
 
+#[test]
+#[ignore = "requires an owned Samba directory and ONESTORE_SMB_DIRECTORY_ORACLE from its local filesystem"]
+fn live_directory() {
+    let client = client();
+    let bytes = fs::read(std::env::var("ONESTORE_SMB_DIRECTORY_ORACLE").unwrap()).unwrap();
+    let oracle: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let root = oracle["path"].as_str().unwrap();
+    let expected = oracle["entries"].as_array().unwrap();
+    let entries = client.read_dir(root, expected.len()).unwrap();
+    assert_eq!(entries.len(), expected.len());
+    for expected in expected {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.name == expected["name"])
+            .unwrap();
+        let directory = expected["directory"].as_bool().unwrap();
+        assert_eq!(entry.attributes & 0x10 != 0, directory, "{}", entry.name);
+        if !directory {
+            assert_eq!(
+                entry.size,
+                expected["size"].as_u64().unwrap(),
+                "{}",
+                entry.name
+            );
+        }
+    }
+    assert_eq!(
+        client.read_dir(root, entries.len() - 1).unwrap_err().kind(),
+        io::ErrorKind::FileTooLarge
+    );
+    assert_eq!(client.read_dir(root, entries.len()).unwrap(), entries);
+    assert!(
+        client
+            .read_dir(&format!("{root}/empty"), 0)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        client
+            .read_dir(&format!("{root}/missing"), 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        client
+            .read_dir(&format!("{root}/file.one"), 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotADirectory
+    );
+    assert_eq!(
+        client
+            .read_dir(&format!("{root}/denied"), 1)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(
+        client
+            .read_dir("", 10_000)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.name == root)
+    );
+}
+
+#[test]
+#[ignore = "requires an owned Samba directory through a proxy that interrupts a later directory page or close"]
+fn live_directory_interruption() {
+    let client = client();
+    let root = std::env::var("ONESTORE_SMB_DIRECTORY").unwrap();
+    let started = Instant::now();
+    assert!(client.read_dir(&root, 10_000).is_err());
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(
+        client.read_dir(&root, 10_000).unwrap_err().kind(),
+        io::ErrorKind::NotConnected
+    );
+}
+
 fn client() -> Client {
     Client::connect(
         &std::env::var("ONESTORE_SMB_LAB").unwrap(),

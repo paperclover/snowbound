@@ -38,6 +38,21 @@ identity is checked after acquiring the guards. Connection loss retires the
 client. Reconnect for subsequent operations, and reconcile an `Unknown` edit
 before retrying it. The transport does not automatically replay requests.
 
+`Client::read_dir(path, entry_limit)` enumerates a directory, including the share
+root with an empty path. It follows every response page and returns no partial
+list on interruption, entry-limit overflow or close failure. Entries retain exact
+Unicode names, observed sizes and MS-FSCC attributes, including directory/reparse
+flags. Concurrent directory changes are not an atomic snapshot; repeated names
+are rejected with `ResourceBusy`. Notebook identities come from the files, not
+directory names or sizes. Missing paths, denied access and non-directory paths
+have distinct I/O error kinds.
+
+`python3 tools/test_smb_directory.py VM OUTPUT` checks a caller-owned disposable
+Linux lab VM against its filesystem listing and interrupts directory requests,
+responses and close. It creates synthetic files in that VM; the caller retains
+responsibility for VM teardown. The parser also has bounded-record/truncation
+tests independent of the server.
+
 Device and simulator builds link for iOS. Native acceptance uses disposable
 OneNote 2010 clients and Samba; it does not establish on-device execution or
 physical power-loss durability.
