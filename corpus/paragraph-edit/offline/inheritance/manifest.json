@@ -1,0 +1,62 @@
+[
+  {
+    "case": "Join inherited styles",
+    "id": 1,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{10952FC5-A849-0DE5-03A7-5D9304627DA7},44",
+      "right": "{10952FC5-A849-0DE5-03A7-5D9304627DA7},50"
+    },
+    "remote_prefix": true,
+    "revision": "{E109048E-057D-41DC-B2A8-B9F11839B9C9},1",
+    "space": "{D6CEB12D-D1B7-033B-20A2-E9B6FF501602},1"
+  },
+  {
+    "case": "Join empty left tag",
+    "id": 2,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{8BAFC64A-8457-0253-3906-57D27F8546B7},45",
+      "right": "{8BAFC64A-8457-0253-3906-57D27F8546B7},51"
+    },
+    "remote_prefix": false,
+    "revision": "{19A52AE8-D897-467C-956F-26CA42CEDA1B},1",
+    "space": "{F6E7A6F0-805F-0858-2B5A-4B1260940CF9},1"
+  },
+  {
+    "case": "Join right tag",
+    "id": 3,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{2E9A20A9-1E0E-0F04-0FCE-8497CF032068},44",
+      "right": "{2E9A20A9-1E0E-0F04-0FCE-8497CF032068},49"
+    },
+    "remote_prefix": true,
+    "revision": "{BDDFFFE4-439A-4466-9D85-20B88D5A5E61},1",
+    "space": "{04EE80E5-584B-04E0-1F05-07D86902DFA1},1"
+  },
+  {
+    "case": "Join both tags",
+    "id": 4,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{7A5195E3-F792-0C49-1F3C-EBBFCE774FE6},44",
+      "right": "{7A5195E3-F792-0C49-1F3C-EBBFCE774FE6},50"
+    },
+    "remote_prefix": true,
+    "revision": "{694A9A93-E1AA-48DD-AD67-6BD2C0EF5D6F},1",
+    "space": "{631A0B54-DBB1-0988-22E1-96E8B1202B59},1"
+  },
+  {
+    "case": "Join both children",
+    "id": 5,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{0384F5F6-5F0B-0164-32C6-6E97A4F1B661},49",
+      "right": "{0384F5F6-5F0B-0164-32C6-6E97A4F1B661},54"
+    },
+    "remote_prefix": true,
+    "revision": "{B3100F21-58B5-4417-9797-B397AC0F7BE3},1",
+    "space": "{D7D982D1-A3D3-0690-1181-A9703CF717E5},1"
+  }
+]

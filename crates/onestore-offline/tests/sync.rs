@@ -5,6 +5,528 @@ use onestore::{
 use onestore_offline::{ConflictKind, EditStatus, Error, Remote, Replica};
 use std::io;
 
+mod paragraph {
+    use super::*;
+    use onestore::{Insertion, ParagraphJoin, ParagraphSplit, TextAttribute};
+
+    fn fixture() -> (Vec<u8>, ExGuid, ExGuid, ExGuid) {
+        let source = onestore::create_section("paragraph.one", "ab🦀cd", "Fixture").unwrap();
+        let (sid, left, _) = text(&source);
+        let store = Store::parse(&source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let doc = Document::parse(&index).unwrap();
+        let space = &doc.spaces[&sid];
+        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let parent = *view
+            .nodes
+            .iter()
+            .find(|(_, node)| node.content == [left])
+            .unwrap()
+            .0;
+        (source, sid, left, parent)
+    }
+
+    #[test]
+    fn split_join_dependencies_reopen_and_rebase_with_remote_text_and_styles() {
+        let (source, sid, left, parent) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("paragraph.sqlite");
+        let mut cache = Replica::create(&path, &source).unwrap();
+        let split = ParagraphSplit::new(left, 2, "Local").unwrap();
+        let child = Insertion::paragraph(split.object(), None, "Child", "Local").unwrap();
+        let join = ParagraphJoin::new(left, split.text_object(), "Local").unwrap();
+        let mut ids = Vec::new();
+        for step in 0..6 {
+            let current = cache.snapshot().unwrap();
+            let id = match step {
+                0 => cache.split(&current, sid, &split),
+                1 => cache.edit_text(&current, sid, split.text_object(), 0..2, "🦋"),
+                2 => cache.format(
+                    &current,
+                    sid,
+                    split.text_object(),
+                    2..3,
+                    &[TextAttribute::Bold(true)],
+                ),
+                3 => cache.insert(&current, sid, &child),
+                4 => cache.join(&current, sid, &join),
+                5 => cache.edit_text(&current, sid, left, 5..6, "D"),
+                _ => unreachable!(),
+            }
+            .unwrap()
+            .unwrap();
+            ids.push(id);
+            let saved = cache.snapshot().unwrap();
+            let pending = cache.pending().unwrap();
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            assert_eq!(cache.snapshot().unwrap(), saved);
+            assert_eq!(cache.pending().unwrap(), pending);
+        }
+        let remote = onestore::replace_text(&source, sid, left, 0..0, "Z").unwrap();
+        let remote =
+            PreparedEdit::format(&remote, sid, left, 1..2, &[TextAttribute::Italic(true)]).unwrap();
+        let mut server = Server::new(remote.as_bytes());
+        let local = cache.snapshot().unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            let (published, state) = cache.sync_once(&mut server).unwrap().unwrap();
+            assert_eq!(published, *id);
+            assert!(matches!(state, EditStatus::Published { .. }), "{state:?}");
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            assert_eq!(cache.status(*id).unwrap(), Some(state));
+            if i != ids.len() - 1 {
+                assert_eq!(cache.snapshot().unwrap(), local);
+            }
+        }
+        assert_eq!(server.publications, ids.len());
+        assert_eq!(server.visible, server.durable);
+        assert_eq!(cache.snapshot().unwrap(), server.durable);
+        let store = Store::parse(&server.durable).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        index.validate_current().unwrap();
+        let doc = Document::parse(&index).unwrap();
+        let space = &doc.spaces[&sid];
+        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        assert!(
+            matches!(&view.nodes[&left].kind, Kind::RichText { text, .. } if text == "Zab🦋cD")
+        );
+        assert_eq!(view.nodes[&parent].children, [child.object()]);
+        assert_eq!(view.nodes[&parent].content, [left]);
+        let runs = view.text_runs(left).unwrap();
+        let chars: Vec<_> = runs
+            .iter()
+            .flat_map(|run| {
+                run.text
+                    .chars()
+                    .map(|c| (c, run.format.bold, run.format.italic))
+            })
+            .collect();
+        assert_eq!(chars.iter().find(|v| v.0 == 'a').unwrap().2, Some(true));
+        assert_eq!(chars.iter().find(|v| v.0 == 'c').unwrap().1, Some(true));
+    }
+
+    #[test]
+    fn changed_split_children_require_fresh_review_without_reallocating_dependents() {
+        let (source, sid, left, parent) = fixture();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("paragraph.sqlite");
+        let cache = Replica::create(&path, &source).unwrap();
+        let split = ParagraphSplit::new(left, 2, "Local").unwrap();
+        let id = cache.split(&source, sid, &split).unwrap().unwrap();
+        let dependent = cache
+            .edit_text(
+                &cache.snapshot().unwrap(),
+                sid,
+                split.text_object(),
+                0..2,
+                "🦋",
+            )
+            .unwrap()
+            .unwrap();
+        let local = cache.snapshot().unwrap();
+        let child = Insertion::paragraph(parent, None, "Remote child", "Remote").unwrap();
+        let remote = PreparedEdit::insert(&source, sid, &child).unwrap();
+        let mut server = Server::new(remote.as_bytes());
+        assert_eq!(
+            cache.sync_once(&mut server).unwrap(),
+            Some((id, EditStatus::Conflict(ConflictKind::StructureChanged)))
+        );
+        assert_eq!(server.publications, 0);
+        assert_eq!(cache.snapshot().unwrap(), local);
+        assert!(
+            cache
+                .rebase_conflict(id, &source, &server.visible, 2..2)
+                .is_err()
+        );
+        assert!(
+            cache
+                .rebase_conflict(id, &local, &server.visible, 2..3)
+                .is_err()
+        );
+        cache
+            .rebase_conflict(id, &local, &server.visible, 2..2)
+            .unwrap();
+        let pending = cache.pending().unwrap();
+        let onestore_offline::Operation::Split(edit) = &pending[0].operation else {
+            panic!()
+        };
+        assert_eq!(edit.intent, split);
+        assert_eq!(pending[1].id, dependent);
+        drop(cache);
+        let cache = Replica::open(&path).unwrap();
+        for expected in [id, dependent] {
+            let (actual, state) = cache.sync_once(&mut server).unwrap().unwrap();
+            assert_eq!(actual, expected);
+            assert!(matches!(state, EditStatus::Published { .. }));
+        }
+        let store = Store::parse(&server.durable).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let doc = Document::parse(&index).unwrap();
+        let space = &doc.spaces[&sid];
+        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        assert_eq!(view.nodes[&split.object()].children, [child.object()]);
+        assert!(
+            matches!(&view.nodes[&split.text_object()].kind, Kind::RichText { text, .. } if text == "🦋cd")
+        );
+    }
+
+    #[test]
+    fn uncertain_paragraph_operations_keep_the_original_attempt_across_reopen() {
+        for join in [false, true] {
+            for fault in [
+                Fault::Before,
+                Fault::UnknownBefore,
+                Fault::UnknownAfter,
+                Fault::Committed,
+            ] {
+                let (source, sid, left, _) = fixture();
+                let split = ParagraphSplit::new(left, 2, "Local").unwrap();
+                let source = if join {
+                    PreparedEdit::split(&source, sid, &split)
+                        .unwrap()
+                        .as_bytes()
+                        .to_vec()
+                } else {
+                    source
+                };
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("paragraph.sqlite");
+                let cache = Replica::create(&path, &source).unwrap();
+                let id = if join {
+                    cache.join(
+                        &source,
+                        sid,
+                        &ParagraphJoin::new(left, split.text_object(), "Local").unwrap(),
+                    )
+                } else {
+                    cache.split(&source, sid, &split)
+                }
+                .unwrap()
+                .unwrap();
+                let local = cache.snapshot().unwrap();
+                let intent = cache.pending().unwrap();
+                let mut server = Server::new(&source);
+                server.fault = fault;
+                assert!(cache.sync_once(&mut server).is_err());
+                let state = cache.status(id).unwrap().unwrap();
+                drop(cache);
+                let cache = Replica::open(&path).unwrap();
+                assert_eq!(cache.status(id).unwrap(), Some(state));
+                if matches!(fault, Fault::UnknownBefore | Fault::UnknownAfter) {
+                    assert!(matches!(state, EditStatus::AwaitingConfirmation { .. }));
+                    assert_eq!(cache.pending().unwrap(), intent);
+                    assert_eq!(cache.snapshot().unwrap(), local);
+                    if matches!(fault, Fault::UnknownBefore) {
+                        assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, state)));
+                        assert_eq!(server.publications, 1);
+                        continue;
+                    }
+                    server.fault = Fault::Confirm;
+                    assert!(cache.sync_once(&mut server).is_err());
+                    assert_eq!(cache.status(id).unwrap(), Some(state));
+                    let (_, state) = cache.sync_once(&mut server).unwrap().unwrap();
+                    assert!(matches!(state, EditStatus::Published { .. }));
+                    assert_eq!(server.publications, 1);
+                } else if matches!(fault, Fault::Before) {
+                    assert_eq!(state, EditStatus::Pending);
+                    assert!(matches!(
+                        cache.sync_once(&mut server).unwrap().unwrap().1,
+                        EditStatus::Published { .. }
+                    ));
+                    assert_eq!(server.publications, 2);
+                } else {
+                    assert!(matches!(state, EditStatus::Published { .. }));
+                    assert_eq!(server.publications, 1);
+                }
+                assert!(cache.pending().unwrap().is_empty());
+                let saved = cache.snapshot().unwrap();
+                if matches!(fault, Fault::UnknownAfter) {
+                    // Confirmation refreshes version metadata after reading the acknowledged snapshot.
+                    assert!(saved[..212] == server.durable[..212]);
+                    assert!(saved[252..] == server.durable[252..]);
+                    assert_eq!(
+                        Store::parse(&server.durable).unwrap().header.generation,
+                        Store::parse(&saved).unwrap().header.generation + 1
+                    );
+                } else {
+                    assert!(saved == server.durable);
+                }
+                assert_eq!(cache.sync_once(&mut server).unwrap(), None);
+                assert!(cache.snapshot().unwrap() == server.durable);
+            }
+        }
+    }
+
+    #[test]
+    fn join_reviews_preserve_survivors_and_require_current_child_placement() {
+        for empty in [false, true] {
+            let (source, sid, left, _) = fixture();
+            let split = ParagraphSplit::new(left, if empty { 0 } else { 2 }, "Local").unwrap();
+            let source = PreparedEdit::split(&source, sid, &split)
+                .unwrap()
+                .as_bytes()
+                .to_vec();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("join.sqlite");
+            let cache = Replica::create(&path, &source).unwrap();
+            let intent = ParagraphJoin::new(left, split.text_object(), "Local").unwrap();
+            let id = cache.join(&source, sid, &intent).unwrap().unwrap();
+            let survivor = if empty { split.text_object() } else { left };
+            let dependent = cache
+                .edit_text(&cache.snapshot().unwrap(), sid, survivor, 0..0, "Local ")
+                .unwrap()
+                .unwrap();
+            let local = cache.snapshot().unwrap();
+            let child =
+                Insertion::paragraph(split.object(), None, "Remote child", "Remote").unwrap();
+            let remote = PreparedEdit::insert(&source, sid, &child)
+                .unwrap()
+                .as_bytes()
+                .to_vec();
+            let mut server = Server::new(&remote);
+            assert_eq!(
+                cache.sync_once(&mut server).unwrap(),
+                Some((id, EditStatus::Conflict(ConflictKind::StructureChanged)))
+            );
+            assert!(cache.rebase_join_conflict(id, &source, &remote).is_err());
+            assert_eq!(server.publications, 0);
+            cache.rebase_join_conflict(id, &local, &remote).unwrap();
+            assert!(
+                matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
+            );
+            assert!(
+                matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == dependent)
+            );
+            let store = Store::parse(&server.durable).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let doc = Document::parse(&index).unwrap();
+            let space = &doc.spaces[&sid];
+            let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let parent = view
+                .nodes
+                .values()
+                .find(|node| node.content == [survivor])
+                .unwrap();
+            assert_eq!(parent.children, [child.object()]);
+            assert!(
+                matches!(&view.nodes[&survivor].kind, Kind::RichText { text, .. } if text == "Local ab🦀cd")
+            );
+        }
+
+        let (source, sid, left, _) = fixture();
+        let split = ParagraphSplit::new(left, 0, "Local").unwrap();
+        let source = PreparedEdit::split(&source, sid, &split)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("identity.sqlite");
+        let cache = Replica::create(&path, &source).unwrap();
+        let intent = ParagraphJoin::new(left, split.text_object(), "Local").unwrap();
+        let id = cache.join(&source, sid, &intent).unwrap().unwrap();
+        let local = cache.snapshot().unwrap();
+        let remote = onestore::replace_text(&source, sid, left, 0..0, "Remote").unwrap();
+        let mut server = Server::new(&remote);
+        assert_eq!(
+            cache.sync_once(&mut server).unwrap(),
+            Some((id, EditStatus::Conflict(ConflictKind::TextChanged)))
+        );
+        assert!(cache.rebase_join_conflict(id, &local, &remote).is_err());
+        assert!(cache.snapshot().unwrap() == local);
+        assert_eq!(server.publications, 0);
+        assert_eq!(cache.pending().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn overlapping_clients_retain_each_local_branch_without_replaying_removed_targets() {
+        let (source, sid, left, _) = fixture();
+        let split = ParagraphSplit::new(left, 2, "Seed").unwrap();
+        let source = PreparedEdit::split(&source, sid, &split)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let directory = tempfile::tempdir().unwrap();
+        let first = Replica::create(directory.path().join("first.sqlite"), &source).unwrap();
+        let second_path = directory.path().join("second.sqlite");
+        let second = Replica::create(&second_path, &source).unwrap();
+        let join = ParagraphJoin::new(left, split.text_object(), "First").unwrap();
+        first.join(&source, sid, &join).unwrap();
+        let right_split = ParagraphSplit::new(split.text_object(), 2, "Second").unwrap();
+        let id = second.split(&source, sid, &right_split).unwrap().unwrap();
+        second
+            .edit_text(
+                &second.snapshot().unwrap(),
+                sid,
+                right_split.text_object(),
+                0..0,
+                "Second ",
+            )
+            .unwrap();
+        let local = second.snapshot().unwrap();
+        let pending = second.pending().unwrap();
+        let mut server = Server::new(&source);
+        assert!(matches!(
+            first.sync_once(&mut server).unwrap().unwrap().1,
+            EditStatus::Published { .. }
+        ));
+        assert_eq!(
+            second.sync_once(&mut server).unwrap(),
+            Some((id, EditStatus::Conflict(ConflictKind::TargetUnavailable)))
+        );
+        drop(second);
+        let second = Replica::open(&second_path).unwrap();
+        assert_eq!(second.pending().unwrap(), pending);
+        assert!(second.snapshot().unwrap() == local);
+        assert_eq!(server.publications, 1);
+        assert_eq!(
+            second.status(id).unwrap(),
+            Some(EditStatus::Conflict(ConflictKind::TargetUnavailable))
+        );
+    }
+
+    #[test]
+    #[ignore = "exports reconciled paragraph edits for independent native validation"]
+    fn export_native_offline_paragraphs() {
+        use std::{fs, path::PathBuf};
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/paragraph-edit");
+        let output = PathBuf::from(std::env::var_os("ONESTORE_OFFLINE_PARAGRAPH_OUTPUT").unwrap());
+        assert!(output.is_absolute());
+        fs::create_dir(&output).unwrap();
+        for (name, source, manifest, split) in [
+            (
+                "splits",
+                "before/notebook/synthetic.one",
+                "rust-split/manifest.json",
+                true,
+            ),
+            (
+                "joins",
+                "split/notebook/synthetic.one",
+                "rust-join/split/manifest.json",
+                false,
+            ),
+            (
+                "inheritance",
+                "join-edges/before/notebook/synthetic.one",
+                "rust-join/inheritance/manifest.json",
+                false,
+            ),
+            (
+                "tags",
+                "join-tags/before/notebook/synthetic.one",
+                "rust-join/tags/manifest.json",
+                false,
+            ),
+        ] {
+            let source = fs::read(root.join(source)).unwrap();
+            let folder = output.join(name);
+            fs::create_dir(&folder).unwrap();
+            let path = folder.join("cache.sqlite");
+            let mut cache = Replica::create(&path, &source).unwrap();
+            let mut server = Server::new(&source);
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join(manifest)).unwrap()).unwrap();
+            let cases = if split { &manifest["cases"] } else { &manifest };
+            let mut recorded = Vec::new();
+            for case in cases
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|case| case.get("intent").is_some())
+            {
+                let local = cache.snapshot().unwrap();
+                let (text, offset) = if split {
+                    serde_json::from_value::<ParagraphSplit>(case["intent"].clone())
+                        .unwrap()
+                        .position()
+                } else {
+                    (
+                        serde_json::from_value::<ParagraphJoin>(case["intent"].clone())
+                            .unwrap()
+                            .texts()[0],
+                        1,
+                    )
+                };
+                let store = Store::parse(&local).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                let doc = Document::parse(&index).unwrap();
+                let (sid, space) = doc
+                    .spaces
+                    .iter()
+                    .find(|(_, space)| {
+                        space.revisions[&space.contexts[&ExGuid::default()]]
+                            .nodes
+                            .contains_key(&text)
+                    })
+                    .unwrap();
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let Kind::RichText { text: content, .. } = &view.nodes[&text].kind else {
+                    panic!()
+                };
+                let remote_prefix = offset > 0 && !content.is_empty();
+                assert!(!content.contains('☂'));
+                if remote_prefix {
+                    server.visible =
+                        onestore::replace_text(&server.visible, *sid, text, 0..0, "☂").unwrap();
+                    server.durable.clone_from(&server.visible);
+                }
+                let id = if split {
+                    cache.split(
+                        &local,
+                        *sid,
+                        &serde_json::from_value(case["intent"].clone()).unwrap(),
+                    )
+                } else {
+                    cache.join(
+                        &local,
+                        *sid,
+                        &serde_json::from_value(case["intent"].clone()).unwrap(),
+                    )
+                }
+                .unwrap()
+                .unwrap();
+                recorded.push(serde_json::json!({"case": case["case"], "id": id,
+                    "space": sid, "intent": case["intent"], "remote_prefix": remote_prefix}));
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+            }
+            for case in &mut recorded {
+                let id = case["id"].as_u64().unwrap();
+                if id % 2 == 0 {
+                    server.fault = Fault::UnknownAfter;
+                    assert!(cache.sync_once(&mut server).is_err());
+                    assert!(matches!(
+                        cache.status(id).unwrap(),
+                        Some(EditStatus::AwaitingConfirmation { .. })
+                    ));
+                    drop(cache);
+                    cache = Replica::open(&path).unwrap();
+                }
+                let (actual, status) = cache.sync_once(&mut server).unwrap().unwrap();
+                assert_eq!(actual, id);
+                let EditStatus::Published { revision } = status else {
+                    panic!("{name}: {status:?}")
+                };
+                case["revision"] = serde_json::to_value(revision).unwrap();
+            }
+            assert_eq!(server.publications, recorded.len());
+            assert_eq!(cache.sync_once(&mut server).unwrap(), None);
+            assert!(cache.snapshot().unwrap() == server.durable);
+            cache
+                .export_recovery(folder.join("recovery.sqlite"))
+                .unwrap();
+            fs::create_dir(folder.join("candidate")).unwrap();
+            fs::write(folder.join("candidate/synthetic.one"), &server.durable).unwrap();
+            fs::write(
+                folder.join("manifest.json"),
+                serde_json::to_vec_pretty(&recorded).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 enum Fault {
     #[default]
@@ -739,7 +1261,7 @@ fn version_one_cache_migration_preserves_images_intents_and_local_ids() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap(),
-        5
+        6
     );
 }
 

@@ -60,3 +60,11 @@ XML, preserve exact child/content identities across reopening, and compare
 the native-rendered result to the corresponding keyboard-generated control.
 `export_native_paragraph_joins` regenerates candidates in a new directory specified
 by `ONESTORE_PARAGRAPH_JOIN_OUTPUT`.
+
+`offline` retains reconciled split/join candidates and cold native captures.
+The cache queues edits before observing independent remote `☂` prefixes, reopens
+between acknowledgements, and confirms modeled lost replies without replaying
+operations. Tests compare native text/styles to the original keyboard controls,
+account for the remote prefixes, and retain exact graph identities after reopening.
+The ignored offline test `export_native_offline_paragraphs` regenerates candidates
+in a new directory specified by `ONESTORE_OFFLINE_PARAGRAPH_OUTPUT`.

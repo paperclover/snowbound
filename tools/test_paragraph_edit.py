@@ -17,31 +17,64 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class ParagraphEditTest(unittest.TestCase):
+    def assert_cold_graph(self, fixture):
+        with TemporaryDirectory() as temporary:
+            models = []
+            for source in ('candidate', 'native/notebook'):
+                folder = Path(temporary) / source.replace('/', '-')
+                shutil.copytree(fixture / 'native/read', folder / 'read')
+                compare(fixture / source, folder / 'read')
+                subprocess.run([EXPORTER, fixture / source / 'synthetic.one', folder / 'model'], check=True)
+                model = json.loads((folder / 'model/document.json').read_text())
+                models.append({r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                               for _, _, r, page in ordered_pages(model)})
+            self.assertEqual(models[0].keys(), models[1].keys())
+            for title, (old, page) in models[0].items():
+                saved, saved_page = models[1][title]
+                self.assertEqual(saved_page, page)
+                for outline in old['nodes'][page]['children']:
+                    if old['nodes'][outline]['kind']['type'] != 'Outline': continue
+                    for oid, node in walk(old, outline):
+                        self.assertEqual(saved['nodes'][oid]['children'], node['children'])
+                        self.assertEqual(saved['nodes'][oid]['content'], node['content'])
+
+    def test_offline_boundaries_retain_remote_edits_and_match_native_controls(self):
+        groups = [('splits', 'cold-split/read', 12), ('joins', 'joined/read', 12),
+                  ('inheritance', 'join-edges/joined/read', 5), ('tags', 'join-tags/joined/read', 3)]
+        for name, control, count in groups:
+            fixture = FIXTURE / 'offline' / name
+            manifest = json.loads((fixture / 'manifest.json').read_text())
+            self.assertEqual(len(manifest), count)
+            with self.subTest(group=name):
+                self.assert_cold_graph(fixture)
+                captures = []
+                for folder in (FIXTURE / control, fixture / 'native/read'):
+                    captures.append({page.get('name'): native_characters(page, page.findall('one:Outline', ns))
+                                     for path in folder.glob('page-*.xml') for page in [ET.parse(path).getroot()]})
+                for case in manifest:
+                    self.assertTrue(case['revision'])
+                    original = captures[0][case['case']]
+                    current = captures[1][case['case']]
+                    markers = 0
+                    for old, new in zip(original, current, strict=True):
+                        if new and new[0][0] == '☂':
+                            markers += 1
+                            new = new[1:]
+                        for (a, left), (b, right) in zip(old, new, strict=True):
+                            self.assertEqual(a, b)
+                            for key in left.keys() | right.keys():
+                                default = 'automatic' if key in ('color', 'highlight') else False
+                                self.assertEqual(left.get(key, default), right.get(key, default))
+                    self.assertEqual(markers, int(case['remote_prefix']))
+
     def test_rust_joins_match_native_controls_and_retain_cold_graph_identities(self):
         for name, control in [('split', FIXTURE / 'joined/read'),
                               ('inheritance', FIXTURE / 'join-edges/joined/read'),
                               ('tags', FIXTURE / 'join-tags/joined/read')]:
             fixture = FIXTURE / 'rust-join' / name
             manifest = json.loads((fixture / 'manifest.json').read_text())
-            with self.subTest(fixture=name), TemporaryDirectory() as temporary:
-                models = []
-                for source in ('candidate', 'native/notebook'):
-                    folder = Path(temporary) / source.replace('/', '-')
-                    shutil.copytree(fixture / 'native/read', folder / 'read')
-                    compare(fixture / source, folder / 'read')
-                    subprocess.run([EXPORTER, fixture / source / 'synthetic.one', folder / 'model'], check=True)
-                    document = json.loads((folder / 'model/document.json').read_text())
-                    models.append({r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
-                                   for _, _, r, page in ordered_pages(document)})
-                self.assertEqual(models[0].keys(), models[1].keys())
-                for title, (old, page) in models[0].items():
-                    saved, saved_page = models[1][title]
-                    self.assertEqual(page, saved_page)
-                    for outline in old['nodes'][page]['children']:
-                        if old['nodes'][outline]['kind']['type'] != 'Outline': continue
-                        for oid, node in walk(old, outline):
-                            self.assertEqual(saved['nodes'][oid]['children'], node['children'])
-                            self.assertEqual(saved['nodes'][oid]['content'], node['content'])
+            with self.subTest(fixture=name):
+                self.assert_cold_graph(fixture)
                 captures = []
                 for folder in (control, fixture / 'native/read'):
                     captures.append({page.get('name'): native_characters(page, page.findall('one:Outline', ns))

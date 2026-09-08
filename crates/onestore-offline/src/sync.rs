@@ -18,6 +18,7 @@ pub enum ConflictKind {
     TargetUnavailable = 1,
     UnsupportedEdit = 2,
     FormattingChanged = 3,
+    StructureChanged = 4,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +132,8 @@ impl Replica {
         }
         let candidate = match &intent.operation {
             Operation::Format(edit) => edit.prepare(&snapshot, intent.space)?,
+            Operation::Split(edit) => edit.prepare(&snapshot, intent.space)?,
+            Operation::Join(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Insert(insertion) => {
                 PreparedEdit::insert(&snapshot, intent.space, insertion)
                     .map_err(|_| ConflictKind::UnsupportedEdit)
@@ -222,7 +225,7 @@ impl Replica {
         Ok(Some((intent.id, EditStatus::Published { revision })))
     }
 
-    /// Places the oldest text or formatting conflict at a reviewed remote UTF-16 range.
+    /// Places the oldest text, formatting or split conflict at a reviewed remote UTF-16 range.
     /// The requested replacement/attributes, local image, intent ID and later edits are preserved.
     /// Both supplied images must match `snapshot` and `remote_snapshot`; stale review
     /// returns `Io(ResourceBusy)`. Uncertain publication attempts cannot be rebased.
@@ -270,6 +273,30 @@ impl Replica {
                     )?
                     .0,
                 ),
+                Operation::Split(edit) => {
+                    if !range.is_empty() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "Choose a single split boundary",
+                        )
+                        .into());
+                    }
+                    Operation::Split(
+                        crate::paragraph::SplitEdit::capture(
+                            remote,
+                            intent.space,
+                            &edit.intent.reposition(range.start),
+                        )?
+                        .0,
+                    )
+                }
+                Operation::Join(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Review the paragraph join using rebase_join_conflict",
+                    )
+                    .into());
+                }
                 Operation::Insert(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -278,6 +305,21 @@ impl Replica {
                     .into());
                 }
             })
+        })
+    }
+
+    /// Reviews a join against both current cache images, retaining its original text identities.
+    /// The surviving text identity must remain the same for dependent edits.
+    pub fn rebase_join_conflict(&self, id: u64, local: &[u8], remote: &[u8]) -> Result<()> {
+        self.resolve_conflict(id, local, remote, |intent| {
+            let Operation::Join(edit) = intent.operation else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Select a paragraph join conflict",
+                )
+                .into());
+            };
+            Ok(Operation::Join(edit.review(remote, intent.space)?))
         })
     }
 
@@ -449,6 +491,7 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
             1 => ConflictKind::TargetUnavailable,
             2 => ConflictKind::UnsupportedEdit,
             3 => ConflictKind::FormattingChanged,
+            4 => ConflictKind::StructureChanged,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

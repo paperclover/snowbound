@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, Transaction};
 
 const CONFLICTS: &str = "CREATE TABLE conflicts (
     edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE,
-    kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3)
+    kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 4)
 ) STRICT;";
 
 const ASSETS: &str = "CREATE TABLE assets (
@@ -35,17 +35,15 @@ pub(crate) fn create(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub(crate) fn migrate(transaction: &Transaction<'_>, version: u32) -> Result<()> {
-    if version == 4 {
-        transaction.execute_batch(ASSETS)?;
-        return Ok(());
-    }
-    if version == 3 {
+    if version >= 3 {
         transaction.execute_batch("ALTER TABLE conflicts RENAME TO old_conflicts;")?;
         transaction.execute_batch(CONFLICTS)?;
         transaction.execute_batch(
             "INSERT INTO conflicts SELECT * FROM old_conflicts; DROP TABLE old_conflicts;",
         )?;
-        transaction.execute_batch(ASSETS)?;
+        if version < 5 {
+            transaction.execute_batch(ASSETS)?;
+        }
         return Ok(());
     }
 

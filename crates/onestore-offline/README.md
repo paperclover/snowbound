@@ -1,7 +1,7 @@
 # onestore-offline
 
 Durable local editing for a OneNote file, in an optional sibling crate. The current
-foundation stores a complete working image and typed text, insertion and formatting intents in a local
+foundation stores a complete working image and typed editing intents in a local
 SQLite database. `sync_once` provides a reconciliation step and `start_sync` owns
 automatic polling and reconnects. Local success does not
 acknowledge publication to a shared notebook.
@@ -29,11 +29,29 @@ assert_eq!(pending.last().map(|edit| edit.id), local_id);
 intent identities. `Insertion::with_formatting` queues text and
 its styles as one intent and one publication. Keep that value across retries; its `text_object()` identifies
 the new text for subsequent offline edits. Pending entries expose
-`Operation::Text(TextEdit)`, `Operation::Insert(Insertion)` or
-`Operation::Format(FormatEdit)` through their
+`Operation::Text(TextEdit)`, `Operation::Insert(Insertion)`,
+`Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)` and
+`Operation::Join(JoinEdit)` through their
 `operation` field. Synchronization applies these in queue order, so an inserted
 outline can precede its paragraphs and their later edits. Missing anchors or
 existing insertion identities preserve a conflict and the complete local image.
+
+`split` and `join` accept the core `ParagraphSplit` and `ParagraphJoin` intents.
+Splits retain allocated identities when the original UTF-16 boundary rebases;
+dependent edits can address `ParagraphSplit::text_object()` immediately after
+local acknowledgement. Both operations retain observed parent paths, children,
+indentation, paragraph/list state and tags. Changed structure produces
+`StructureChanged`. Remote text changes must leave unambiguous boundary mappings;
+current remote character styles are preserved. Reconciliation does not silently
+discard a newly added right tag or move an unobserved child.
+
+`rebase_conflict` accepts a zero-length reviewed range for a split, preserving its
+allocated identities. `rebase_join_conflict(id, local, remote)` reviews the original
+join against current images. It rejects a change in which text identity survives,
+because dependent edits still address that identity. As with other conflict
+reviews, stale images, pending operations and uncertain attempts cannot be rebased.
+An uncertain structural operation requires its original attempted revision for
+confirmation; matching text or structure does not establish a receipt.
 
 `rebase_paragraph_conflict(id, local, remote, parent, before)` and
 `rebase_outline_conflict(id, local, remote, page, x, y)` accept reviewed replacement
@@ -70,8 +88,9 @@ requested value is accepted. Enabling superscript or subscript also checks the
 opposite attribute that the operation clears. If the remote image already satisfies
 the whole operation, guarded confirmation still precedes a durable receipt.
 
-Recognized version-one through version-three caches migrate transactionally to the typed
-queue. The migration retains images, local IDs, publication attempts, conflicts,
+Recognized earlier caches migrate transactionally to version six, which adds
+paragraph split/join intents and structural conflicts. The migration retains
+images, local IDs, publication attempts, conflicts,
 receipts and the autoincrement sequence; it does not reuse acknowledged IDs when
 the pending queue is empty.
 

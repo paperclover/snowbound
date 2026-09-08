@@ -10,6 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 onestore = { path = "../crates/onestore", features = ["protected"] }
+onestore-offline = { path = "../crates/onestore-offline" }
+tempfile = "3"
 md5 = "0.8.1"
 serde_json = "1"
 
@@ -88,6 +90,13 @@ bench = false
 [[bin]]
 name = "paragraph"
 path = "fuzz_targets/paragraph.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "offline_paragraph"
+path = "fuzz_targets/offline_paragraph.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,38 @@
+[
+  {
+    "case": "Join empty left right tag",
+    "id": 1,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{0D11242E-6A38-0F74-261A-A6FC444FA262},45",
+      "right": "{0D11242E-6A38-0F74-261A-A6FC444FA262},50"
+    },
+    "remote_prefix": false,
+    "revision": "{E906B028-AA9F-4772-877F-CCBED45A8645},1",
+    "space": "{FC64EF0A-5CCB-0557-20E0-6C847015B691},1"
+  },
+  {
+    "case": "Join empty left two tags",
+    "id": 2,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{84061027-77E3-03F1-3E0D-A8F744B19C18},45",
+      "right": "{84061027-77E3-03F1-3E0D-A8F744B19C18},51"
+    },
+    "remote_prefix": false,
+    "revision": "{98BB5C37-4F68-408F-AE2F-4D9EFD75022F},1",
+    "space": "{A05CB25D-C95D-043F-3B9A-CE333AD171AD},1"
+  },
+  {
+    "case": "Join different tags",
+    "id": 3,
+    "intent": {
+      "author": "Rust join author",
+      "left": "{4FBF7D4A-6F4D-048E-0913-5BD9A184C25B},44",
+      "right": "{4FBF7D4A-6F4D-048E-0913-5BD9A184C25B},50"
+    },
+    "remote_prefix": true,
+    "revision": "{AA6105EC-5A3B-4038-887A-DDADB2911713},1",
+    "space": "{6F0F6556-17D3-03AF-20EF-C465A856A153},1"
+  }
+]

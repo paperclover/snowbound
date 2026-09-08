@@ -95,8 +95,9 @@ Ambiguous ancestry, unsupported indentation transitions and unknown implicit
 font/language inheritance reject before I/O. This is a logical join, so keyboard
 actions that only change list or indentation state remain separate operations.
 Generated fields, protected targets and unsupported run-data boundary changes are
-rejected before publication. Local caches expose text, insertion and formatting edits;
-the [document-writer acceptance](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance)
+rejected before publication. The [offline crate](../onestore-offline/README.md)
+documents durable local operations and reconciliation. The
+[document-writer acceptance](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance)
 includes twelve mixed native/Rust clients, outages, lost replies and native revision retirement.
 
 External `.onebin` references identify payloads for the caller to obtain. Cloud

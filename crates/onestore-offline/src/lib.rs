@@ -10,10 +10,12 @@ use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Durati
 
 mod assets;
 mod formatting;
+mod paragraph;
 mod rebase;
 mod recovery;
 mod schema;
 pub use formatting::FormatEdit;
+pub use paragraph::{JoinEdit, SplitEdit};
 pub use recovery::{Recovery, RecoverySummary};
 mod sync;
 pub use sync::{ConflictKind, EditStatus, Remote};
@@ -45,7 +47,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 /// Text and its observed precondition, retained across cache reopen and rebasing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -63,6 +65,8 @@ pub enum Operation {
     Text(TextEdit),
     Insert(Insertion),
     Format(FormatEdit),
+    Split(SplitEdit),
+    Join(JoinEdit),
 }
 
 /// A locally acknowledged intent; its ID remains stable across cache reopen.

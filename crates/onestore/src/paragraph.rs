@@ -61,6 +61,19 @@ impl ParagraphSplit {
         }
     }
 
+    /// Original text identity and UTF-16 split boundary.
+    pub fn position(&self) -> (ExGuid, u32) {
+        (self.text, self.offset)
+    }
+
+    /// Changes the split boundary while retaining allocated identities and creation time.
+    /// Preparing the edit validates the offset against the supplied text.
+    pub fn reposition(&self, offset: u32) -> Self {
+        let mut split = self.clone();
+        split.offset = offset;
+        split
+    }
+
     pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
         if self.guid == [0; 16] || self.text.guid == [0; 16] || self.author.contains('\0') {
             return Err(invalid(
@@ -418,6 +431,11 @@ pub struct ParagraphJoin {
 }
 
 impl ParagraphJoin {
+    /// Ordered left and right text identities.
+    pub fn texts(&self) -> [ExGuid; 2] {
+        [self.left, self.right]
+    }
+
     /// Select the preceding leaf paragraph's text and the following paragraph's text.
     pub fn new(left: ExGuid, right: ExGuid, author: &str) -> Result<Self, Error> {
         if left == right || left.guid == [0; 16] || right.guid == [0; 16] || author.contains('\0') {
