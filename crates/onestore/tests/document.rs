@@ -438,21 +438,25 @@ fn native_unicode_table_assets_and_coordinates_are_typed() {
 
 #[test]
 fn encrypted_content_is_accounted_without_fabricated_plaintext() {
-    let bytes =
-        fs::read("../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one").unwrap();
-    let store = Store::parse(&bytes).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
-    assert!(!document.spaces.is_empty());
-    let nodes: Vec<_> = document
-        .spaces
-        .values()
-        .flat_map(|s| s.revisions.values())
-        .flat_map(|r| r.nodes.values())
-        .collect();
-    assert!(!nodes.is_empty());
-    for node in nodes {
-        assert!(matches!(node.kind, Kind::Encrypted { ciphertext } if !ciphertext.is_empty()));
+    for path in [
+        "../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one",
+        "../../corpus/native-protected-boundaries/notebook/synthetic.one",
+    ] {
+        let bytes = fs::read(path).unwrap();
+        let store = Store::parse(&bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        assert!(!document.spaces.is_empty());
+        let nodes: Vec<_> = document
+            .spaces
+            .values()
+            .flat_map(|s| s.revisions.values())
+            .flat_map(|r| r.nodes.values())
+            .collect();
+        assert!(!nodes.is_empty());
+        for node in nodes {
+            assert!(matches!(node.kind, Kind::Encrypted { ciphertext } if !ciphertext.is_empty()));
+        }
     }
 }
 

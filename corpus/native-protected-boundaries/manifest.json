@@ -1,0 +1,113 @@
+{
+  "captured_utc": "2026-09-08T03:41:36.733670+00:00",
+  "native_build": "14.0.4763.1000",
+  "password": "native-payloads-🦀-é",
+  "generator": "../../tools/native/external-assets.ps1",
+  "lengths": [
+    0,
+    1,
+    15,
+    16,
+    17,
+    4095,
+    4096,
+    4097,
+    65537,
+    1048577
+  ],
+  "native_pages": 11,
+  "operations": [
+    "Native generated synthetic attachment pages; clean image retained before protection.",
+    "Set password in OneNote UI on owned clone; native lock and unlock passed.",
+    "Fresh clone and isolated native cache; observed locked section and unlocked with the exact fixture password.",
+    "Native cold-read returned all 11 pages; titles and text matched the pre-protection capture; every attachment matched byte for byte.",
+    "Both owned clones removed."
+  ],
+  "cold_cache": {
+    "pages": 11,
+    "hostname": "ONE-M6-139963EF",
+    "cold": true
+  },
+  "files": [
+    {
+      "path": "notebook/Open Notebook.onetoc2",
+      "bytes": 4936,
+      "sha256": "bc2400e03c8ae5f309ddb2a1640f54a4ed2b02127b99b7599e2899e7f399773a"
+    },
+    {
+      "path": "notebook/synthetic.one",
+      "bytes": 1235272,
+      "sha256": "d490a6f6d27a79e9c726a958ab6cdc70a49a28d27fe8fdd19619d85e622619bd"
+    },
+    {
+      "path": "read/environment.json",
+      "bytes": 165,
+      "sha256": "d2a40090b6074bef02f6b3267436397b37072cd792d070d237451163ec71ae0c"
+    },
+    {
+      "path": "read/hierarchy.xml",
+      "bytes": 2597,
+      "sha256": "dcc0305a7d8c5d1c5873908811399b56af64200c807503c297d236cf74cb4794"
+    },
+    {
+      "path": "read/page-000.xml",
+      "bytes": 1699,
+      "sha256": "88bf95c8482a696571b812bd82773442a2000d05b0dd92772316ae96485c2dfc"
+    },
+    {
+      "path": "read/page-001.xml",
+      "bytes": 1699,
+      "sha256": "c83d007a3bccffd34b5e565b3e09f9f12faf84d934311be876f9c7344b0adc00"
+    },
+    {
+      "path": "read/page-002.xml",
+      "bytes": 1703,
+      "sha256": "7c925ccdb1f84440afb2e7b64beaf93fad8373fad80a71e279c988ac1c7d47f0"
+    },
+    {
+      "path": "read/page-003.xml",
+      "bytes": 1703,
+      "sha256": "fd31e47e9b51a2f02327c220682967d6b2b492787ddaaf1c4af36755d5913532"
+    },
+    {
+      "path": "read/page-004.xml",
+      "bytes": 1703,
+      "sha256": "78b1b2f4fe7cc9ee4f8d3830e3b01e8ae1a58060833d85a33a7e7a017022d7a6"
+    },
+    {
+      "path": "read/page-005.xml",
+      "bytes": 1711,
+      "sha256": "e24344d38c142b640f86ce586cdff9ff7b1fccda019253a76e246bc68cc4ec1f"
+    },
+    {
+      "path": "read/page-006.xml",
+      "bytes": 1711,
+      "sha256": "33e0703d598f63fa6caa2c13429a3a33c7930b1cc5fd84d808f2ade8e8782297"
+    },
+    {
+      "path": "read/page-007.xml",
+      "bytes": 1711,
+      "sha256": "e2c1d3efebba92924533c00f8c1f071c81b4a834e494138c4a26640f7f825c49"
+    },
+    {
+      "path": "read/page-008.xml",
+      "bytes": 1715,
+      "sha256": "73b09d4378e5d31faf07303085a0d2e127f878b35ada88ec6c4d26caa8ef4993"
+    },
+    {
+      "path": "read/page-009.xml",
+      "bytes": 1723,
+      "sha256": "2c06ec16c7f5933d471df036ea4238254e6f537f92c5187f5cb854e45c4f8e3f"
+    },
+    {
+      "path": "read/page-010.xml",
+      "bytes": 1235,
+      "sha256": "54f597866ce44693af9f947f7a2f226c06b326b35f420422083e453d1d6eab6a"
+    },
+    {
+      "path": "read/payloads.json",
+      "bytes": 3280,
+      "sha256": "cfbb46f2a69ad78acf9459826456d23b0c008b8920919a2ccf938df36d4b5701"
+    }
+  ]
+}

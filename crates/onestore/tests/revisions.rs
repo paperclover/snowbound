@@ -67,31 +67,35 @@ fn persisted_identities_preserve_native_byte_order_and_canonical_form() {
 
 #[test]
 fn native_encryption_remains_opaque() {
-    let bytes =
-        fs::read("../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one").unwrap();
-    let store = Store::parse(&bytes).unwrap();
-    assert!(store.checksum_mismatches.is_empty());
-    let index = RevisionIndex::parse(&store).unwrap();
-    let mut encrypted = 0;
-    for (osid, space) in &index.spaces {
-        for (rid, revision) in &space.revisions {
-            let resolved = index.resolve(*osid, *rid).unwrap();
-            if revision.encrypted {
-                encrypted += 1;
-                assert!(
-                    resolved
-                        .objects
-                        .values()
-                        .any(|object| matches!(object.data, ObjectData::Encrypted(_)))
-                );
-                assert_eq!(
-                    resolved.reachable().unwrap_err().message,
-                    "Encrypted property references are unavailable"
-                );
+    for path in [
+        "../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one",
+        "../../corpus/native-protected-boundaries/notebook/synthetic.one",
+    ] {
+        let bytes = fs::read(path).unwrap();
+        let store = Store::parse(&bytes).unwrap();
+        assert!(store.checksum_mismatches.is_empty());
+        let index = RevisionIndex::parse(&store).unwrap();
+        let mut encrypted = 0;
+        for (osid, space) in &index.spaces {
+            for (rid, revision) in &space.revisions {
+                let resolved = index.resolve(*osid, *rid).unwrap();
+                if revision.encrypted {
+                    encrypted += 1;
+                    assert!(
+                        resolved
+                            .objects
+                            .values()
+                            .any(|object| matches!(object.data, ObjectData::Encrypted(_)))
+                    );
+                    assert_eq!(
+                        resolved.reachable().unwrap_err().message,
+                        "Encrypted property references are unavailable"
+                    );
+                }
             }
         }
+        assert!(encrypted > 0);
     }
-    assert!(encrypted > 0);
 }
 
 #[test]

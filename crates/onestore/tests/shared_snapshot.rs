@@ -19,6 +19,7 @@ use trace::{Event, Trace};
 fn storage_inspection_preserves_opaque_images_without_claiming_edit_readiness() {
     for path in [
         "native-encrypted/encrypted-01/notebook/synthetic.one",
+        "native-protected-boundaries/notebook/synthetic.one",
         "native-encrypted/cold-encrypted-02/notebook/Open Notebook.one",
         "malformed/native-inflight.one",
     ] {
