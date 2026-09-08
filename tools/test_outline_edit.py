@@ -1,7 +1,9 @@
+import copy
 import json
 from pathlib import Path
 import runpy
 import shutil
+import struct
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
@@ -17,6 +19,122 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class OutlineEditTest(unittest.TestCase):
+    def test_native_group_list_and_cell_tree_controls(self):
+        fixture = FIXTURE / 'tree'
+        models = {}
+        with TemporaryDirectory() as temporary:
+            for phase in ('before', 'after', 'cold'):
+                folder = Path(temporary) / phase
+                shutil.copytree(fixture / phase / 'read', folder / 'read')
+                compare(fixture / phase / 'notebook', folder / 'read')
+                subprocess.run([EXPORTER, fixture / phase / 'notebook/synthetic.one', folder / 'model'], check=True)
+                model = json.loads((folder / 'model/document.json').read_text())
+                models[phase] = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                                 for _, _, r, page in ordered_pages(model)}
+                self.assertEqual(len(models[phase]), 12)
+        cases = json.loads((fixture / 'cases.json').read_text(encoding='utf-8-sig'))
+        self.assertEqual(len(cases), 11)
+        for name, (saved, page) in models['after'].items():
+            cold, cold_page = models['cold'][name]
+            self.assertEqual(page, cold_page)
+            self.assertEqual(dict(walk(saved, page)), dict(walk(cold, cold_page)))
+            for _, node in walk(saved, page):
+                for oid in node['kind'].get('lists', []):
+                    self.assertEqual(saved['nodes'][oid], cold['nodes'][oid])
+        for case in cases:
+            name = case['name']
+            with self.subTest(case=name):
+                old, page = models['before'][name]
+                new, new_page = models['after'][name]
+                self.assertEqual(page, new_page)
+                self.assertEqual(old['nodes'][page]['children'], new['nodes'][page]['children'])
+                outline, other = [oid for oid in old['nodes'][page]['children']
+                                  if old['nodes'][oid]['kind']['type'] == 'Outline']
+                original = dict(walk(old, outline))
+                expected = copy.deepcopy(original)
+                actual = dict(walk(new, outline))
+                paragraphs = {old['nodes'][n['content'][0]]['kind']['text']: oid
+                              for oid, n in original.items() if n['kind']['type'] == 'Paragraph'
+                              and n['content'] and old['nodes'][n['content'][0]]['kind']['type'] == 'RichText'}
+                target, = [oid for text, oid in paragraphs.items() if text.startswith('Target ')]
+                parents = {child: oid for oid, node in original.items() for child in node['children']}
+                parent = parents[target]
+                if name.startswith('Delete'):
+                    for oid, _ in walk(old, target):
+                        del expected[oid]
+                    expected[parent]['children'].remove(target)
+                    if name == 'Delete only grouped subtree':
+                        del expected[parent]
+                        expected[outline]['children'].remove(parent)
+                    elif name == 'Delete unindented sibling after group':
+                        group, = expected[outline]['children']
+                        expected[outline]['children'] = expected[group]['children']
+                        expected[outline]['child_level'] = 2
+                        del expected[group]
+                    elif name == 'Delete sole cell paragraph':
+                        replacement, = actual[parent]['children']
+                        self.assertNotIn(replacement, original)
+                        blank = actual[replacement]
+                        self.assertEqual(blank['kind'], {'type': 'Paragraph', 'lists': [],
+                                                        'paragraph_style': None, 'collapse_state': None})
+                        self.assertEqual((blank['children'], blank['tags'], blank['child_level']), ([], [], 1))
+                        text, = blank['content']
+                        self.assertNotIn(text, original)
+                        self.assertEqual(actual[text]['kind'], {'type': 'RichText', 'text': '',
+                                         'runs': [{'start': 0, 'end': 0, 'format': None, 'extra_set': None}],
+                                         'paragraph_style': None, 'boilerplate': False})
+                        expected[parent]['children'] = [replacement]
+                        expected.update({replacement: blank, text: actual[text]})
+                elif name in ('Move numbered subtree down', 'Move cell subtree down'):
+                    children = expected[parent]['children']
+                    index = children.index(target)
+                    children[index:index + 2] = reversed(children[index:index + 2])
+                    if name == 'Move numbered subtree down':
+                        expected[paragraphs['Anchor']]['child_level'] = 2
+                elif name == 'Indent first subtree':
+                    group, = actual.keys() - original.keys()
+                    self.assertEqual(actual[group]['kind'], {'type': 'OutlineGroup'})
+                    self.assertEqual(actual[group]['children'], [target])
+                    self.assertEqual((actual[group]['child_level'], actual[group]['content'],
+                                      actual[group]['structure'], actual[group]['tags']), (1, [], [], []))
+                    expected[group] = actual[group]
+                    expected[outline]['children'][0] = group
+                elif name == 'Outdent first group':
+                    del expected[parent]
+                    expected[outline]['children'][0] = target
+                elif name == 'Indent bullet subtree':
+                    expected[outline]['children'].remove(target)
+                    expected[paragraphs['Anchor']]['children'] = [target]
+                    before_list, = expected[target]['kind']['lists']
+                    after_list, = actual[target]['kind']['lists']
+                    self.assertNotEqual(before_list, after_list)
+                    self.assertEqual(old['nodes'][before_list]['kind'], {'type': 'List', 'font': 'Courier New',
+                                     'format': '○', 'restart': None, 'bullet': 4})
+                    self.assertEqual(new['nodes'][after_list]['kind'], {'type': 'List', 'font': 'Calibri',
+                                     'format': '•', 'restart': None, 'bullet': 1})
+                    expected[target]['kind']['lists'] = [after_list]
+                elif name == 'Outdent child across indentation gap':
+                    self.assertEqual(expected[parent]['child_level'], 2)
+                    expected[parent]['child_level'] = 1
+                    expected[parent]['children'].remove(paragraphs['Other child'])
+                    expected[target]['children'].append(paragraphs['Other child'])
+                else:
+                    self.fail(name)
+                if case['shape'] not in ('cell', 'cell-only'):
+                    reservation = actual[outline]['extra'][0][-1]
+                    self.assertEqual(reservation['id'], 0x14001cdb)
+                    width, = struct.unpack('<f', bytes.fromhex(reservation['value']['Bytes']))
+                    self.assertAlmostEqual(width * 36, 423.75, places=3)
+                    expected[outline]['extra'][0].append(reservation)
+                self.assertEqual(actual.keys(), expected.keys())
+                for oid, node in expected.items():
+                    self.preserved_node(node, actual[oid])
+                    for list_id in node['kind'].get('lists', []):
+                        if list_id in old['nodes']:
+                            self.preserved_node(old['nodes'][list_id], new['nodes'][list_id])
+                for oid, node in walk(old, other):
+                    self.preserved_node(node, new['nodes'][oid])
+
     def cold_layout(self, fixture):
         models = {}
         with TemporaryDirectory() as temporary:

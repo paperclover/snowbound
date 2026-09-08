@@ -76,3 +76,28 @@ with `ONESTORE_OFFLINE_OUTLINE_OUTPUT` set to a new absolute directory, then use
 the same cold runner arguments. The test also retains a JSON record next to that
 directory. Cache migration, uncertain revision retention, stale review, and twelve
 offline writers are exercised in `crates/onestore-offline/tests`.
+
+`tree` extends the native controls with eleven cases involving outline groups,
+indentation gaps, numbered/bulleted subtrees, and table cells. The stored graphs,
+identities, tags, fields, and formatting survive a fresh-cache reopen. Deleting
+a group's last subtree removes the empty group. Removing the last unindented
+sibling unwraps the preceding group and transfers its indentation to the outline.
+Deleting a cell's only paragraph creates new empty paragraph/text identities;
+the cell and table remain intact. Outdenting across a two-level gap reduces the
+gap and reparents a following sibling beneath the outdented target, preserving
+that sibling's indentation. Native bullet indentation additionally substitutes
+its list marker; it is distinct from moving a subtree with unchanged formatting.
+
+These keyboard controls retain rich-text identities. Eight edits also establish
+a 423.75-point reserved wrapping width on the selected outline in the captured
+800×600 desktop. The test permits that specific property separately from
+timestamp/bookkeeping changes and verifies all other retained object fields.
+Before/after/cold native comparisons cover twelve pages, eleven/six/six tags,
+and 8,321/7,081/7,081 explicit character-format values.
+
+Regenerate using the same source notebook and runner, with
+`--author corpus/outline-edit/tree/scripts/author.ps1 --expected-pages 12
+--inspect --collect-notebook`. Run the shared `tools/native_outline_editing.py`
+controller at inspection readiness, move `before-read` to `before/read`, then
+cold-open the returned notebook with `--expected-pages 12 --collect-notebook`.
+The exact authoring script has one home in the reference corpus.

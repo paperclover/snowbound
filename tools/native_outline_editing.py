@@ -24,7 +24,8 @@ def apply(output):
         page = pages[case['name']]
         outline = page.find('one:Outline', ns)
         paragraph, = [node for node in outline.findall('.//one:OE', ns)
-                      if ''.join(Text(node.find('one:T', ns).text or '').parts).startswith('Target ')]
+                      if node.find('one:T', ns) is not None
+                      and ''.join(Text(node.find('one:T', ns).text or '').parts).startswith('Target ')]
         page_id = page.get('ID')
         object_id = (outline if case.get('delete') == 'outline' else paragraph).get('objectID')
         stem = actions / case['name'].lower().replace(' ', '-')

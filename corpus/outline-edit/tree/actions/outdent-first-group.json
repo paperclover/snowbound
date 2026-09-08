@@ -1,0 +1,13 @@
+{
+  "exit": 0,
+  "stdout": "",
+  "stderr": "",
+  "w": 800,
+  "h": 600,
+  "error": null,
+  "win": {
+    "title": "Outdent first group - Microsoft OneNote",
+    "class": "Framework::CFrame",
+    "dialog": false
+  }
+}

@@ -1,0 +1,57 @@
+﻿[
+    {
+        "keys":  "{Left}^+{-}!+{Right}",
+        "name":  "Indent first subtree",
+        "shape":  "first"
+    },
+    {
+        "keys":  "{Left}^+{-}!+{Left}",
+        "name":  "Outdent first group",
+        "shape":  "group"
+    },
+    {
+        "keys":  "{Left}^+{-}{Delete}",
+        "name":  "Delete only grouped subtree",
+        "shape":  "group"
+    },
+    {
+        "keys":  "{Left}^+{-}{Delete}",
+        "name":  "Delete unindented sibling after group",
+        "shape":  "tail"
+    },
+    {
+        "keys":  "{Left}^+{-}{Delete}",
+        "name":  "Delete cell subtree",
+        "shape":  "cell"
+    },
+    {
+        "keys":  "{Left}^+{-}{Delete}",
+        "name":  "Delete sole cell paragraph",
+        "shape":  "cell-only"
+    },
+    {
+        "keys":  "{Left}^+{-}!+{Down}",
+        "name":  "Move numbered subtree down",
+        "shape":  "number"
+    },
+    {
+        "keys":  "{Left}^+{-}{Delete}",
+        "name":  "Delete numbered subtree",
+        "shape":  "number"
+    },
+    {
+        "keys":  "{Left}^+{-}!+{Right}",
+        "name":  "Indent bullet subtree",
+        "shape":  "bullet"
+    },
+    {
+        "keys":  "{Left}^+{-}!+{Left}",
+        "name":  "Outdent child across indentation gap",
+        "shape":  "gap"
+    },
+    {
+        "keys":  "{Left}^+{-}!+{Down}",
+        "name":  "Move cell subtree down",
+        "shape":  "cell"
+    }
+]
