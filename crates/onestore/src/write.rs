@@ -472,6 +472,114 @@ impl PropertyObject {
         }
         compact(id, &self.global_ids)
     }
+
+    pub fn copy_property(&mut self, source: &Self, id: u32) -> Result<()> {
+        let properties = PropertySets::parse(&source.bytes)?;
+        let mut target = Self {
+            jcid: self.jcid,
+            bytes: self.bytes.clone(),
+            global_ids: Arc::clone(&self.global_ids),
+        };
+        target.remove(&[id])?;
+        let lengths = property_set_lengths(&properties);
+        let mut offset = properties.root_ids.as_ptr().addr() - source.bytes.as_ptr().addr()
+            + properties.root_ids.len();
+        let mut selected = None;
+        for property in &properties.sets[0] {
+            let end = offset + field_length(property, &lengths);
+            if property.id & 0x7fffffff == id & 0x7fffffff {
+                selected = Some((property, &source.bytes[offset..end]));
+                break;
+            }
+            offset = end;
+        }
+        if let Some((property, field)) = selected {
+            let mut added: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut pending = vec![property];
+            while let Some(property) = pending.pop() {
+                match &property.value {
+                    Value::References {
+                        stream,
+                        compact_ids,
+                    } => {
+                        let index = match stream {
+                            crate::IdStream::Objects => 0,
+                            crate::IdStream::ObjectSpaces => 1,
+                            crate::IdStream::Contexts => 2,
+                        };
+                        let mut cursor = crate::bytes::Cursor {
+                            bytes: compact_ids,
+                            offset: 0,
+                        };
+                        while cursor.offset < cursor.bytes.len() {
+                            let id = cursor.compact(&source.global_ids)?;
+                            added[index].extend_from_slice(&target.reference(id)?);
+                        }
+                    }
+                    Value::Sets(children) => {
+                        for child in children.clone().rev() {
+                            pending.extend(properties.sets[child].iter().rev());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let old = PropertySets::parse(&target.bytes)?;
+            let count = u16::try_from(old.sets[0].len() + 1).map_err(|_| Error {
+                offset: 0,
+                message: "Root property count exceeds the format limit",
+            })?;
+            let streams = crate::properties::reference_streams(&mut crate::bytes::Cursor {
+                bytes: &target.bytes,
+                offset: 0,
+            })?;
+            let stream_count = (0..3)
+                .rev()
+                .find(|i| streams[*i].offset != 0 || !added[*i].is_empty())
+                .unwrap()
+                + 1;
+            let mut bytes = Vec::new();
+            for i in 0..stream_count {
+                let stream = &streams[i];
+                let count = u32::try_from((stream.bytes.len() + added[i].len()) / 4)
+                    .ok()
+                    .filter(|n| *n <= 0xffffff)
+                    .ok_or(Error {
+                        offset: 0,
+                        message: "Reference stream exceeds the format limit",
+                    })?;
+                let reserved = if stream.offset == 0 {
+                    0
+                } else {
+                    u32::from_le_bytes(
+                        target.bytes[stream.offset - 4..stream.offset]
+                            .try_into()
+                            .unwrap(),
+                    ) & 0x3f000000
+                };
+                let flags = match (i, stream_count) {
+                    (0, 1) => 0x80000000,
+                    (0 | 1, 3) => 0x40000000,
+                    _ => 0,
+                };
+                bytes.extend_from_slice(&(count | reserved | flags).to_le_bytes());
+                bytes.extend_from_slice(stream.bytes);
+                bytes.extend_from_slice(&added[i]);
+            }
+            bytes.extend_from_slice(&count.to_le_bytes());
+            bytes.extend_from_slice(old.root_ids);
+            bytes.extend_from_slice(&property.id.to_le_bytes());
+            let start =
+                old.root_ids.as_ptr().addr() - target.bytes.as_ptr().addr() + old.root_ids.len();
+            bytes.extend_from_slice(&target.bytes[start..target.bytes.len() - old.padding.len()]);
+            bytes.extend_from_slice(field);
+            bytes.resize(bytes.len().next_multiple_of(8), 0);
+            PropertySets::parse(&bytes)?;
+            target.bytes = bytes;
+        }
+        *self = target;
+        Ok(())
+    }
 }
 
 pub(crate) fn write_revision(

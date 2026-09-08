@@ -34,8 +34,7 @@ directory comes from `ONESTORE_PARAGRAPH_OUTPUT`. Native character/style compari
 use both the keyboard-generated controls and the Rust-written notebooks. Empty
 typing checks extend the preexisting empty run in an independent expected model.
 
-`tools/test_paragraph_edit.py` verifies these controls without a VM. The native
-join captures establish behavior for subsequent join implementation.
+`tools/test_paragraph_edit.py` verifies these controls without a VM.
 Identical captured files link to one canonical copy within this corpus.
 
 `join-edges`, authored with `tools/native/paragraph-joins.ps1`, adds five native
@@ -48,3 +47,16 @@ The untouched parent's text gains a timestamp and `0x880034dd`, as in the earlie
 native controls; its content and other properties stay unchanged. The test fixes
 these observed graph, identity and metadata effects alongside independent native
 character-style comparisons.
+
+`join-tags`, authored with `tools/native/paragraph-tag-joins.ps1`, confirms the
+left-tag rule for an empty untagged left paragraph, an empty tagged left paragraph
+with a different right tag, and two nonempty paragraphs with different tags.
+Right-side tags disappear in all three cases; only the left tag survives.
+
+`rust-join` retains twenty Rust joins across the original splits, inheritance
+edges and additional tag controls. Each group has a cold OneNote capture and
+saved notebook. Public tests compare the Rust and native-saved images to native
+XML, preserve exact child/content identities across reopening, and compare
+the native-rendered result to the corresponding keyboard-generated control.
+`export_native_paragraph_joins` regenerates candidates in a new directory specified
+by `ONESTORE_PARAGRAPH_JOIN_OUTPUT`.

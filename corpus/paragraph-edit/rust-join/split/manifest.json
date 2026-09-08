@@ -1,0 +1,110 @@
+[
+  {
+    "case": "Split middle",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{DFE950EF-6BEB-0F5B-2403-7B74F1AE5002},44",
+      "right": "{0BA342F5-0690-087C-24FE-8EE6D81C2041},12"
+    },
+    "space": "{FE224563-B517-023E-0D75-9904B1952A26},1"
+  },
+  {
+    "case": "Split style boundary",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{5FB484E2-1E3E-0A9D-1989-271A3EBBEC42},44",
+      "right": "{051BC1DE-5AE6-0D04-0CEF-9D05F53C8EAE},12"
+    },
+    "space": "{DED48A05-0DB1-0712-086D-09237C982341},1"
+  },
+  {
+    "case": "Split start",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{012ED94B-43B3-079A-3050-B1CBE25C1C09},44",
+      "right": "{B230A510-9428-0CE7-1B89-7CA970F8F676},12"
+    },
+    "space": "{7919E933-0809-00D8-1754-A21684215860},1"
+  },
+  {
+    "case": "Split end",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{DAF723A3-C2A3-0798-2EAB-34613166A794},44",
+      "right": "{601DAE0A-2A53-0C28-3077-1FE8FCB26FC2},12"
+    },
+    "space": "{927F2809-173C-036E-37B6-60A6568F7723},1"
+  },
+  {
+    "case": "Split empty",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{0B467F31-D287-08CD-09F4-A6FBB2F5418F},45",
+      "right": "{EACB4A2C-2444-0A1F-03D6-68187F2FB345},12"
+    },
+    "space": "{E4D8C4CC-508B-04D2-36CE-C5B8C9D2FEC4},1"
+  },
+  {
+    "case": "Split parent",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{3860EA13-D444-0598-35D6-CF96769C6A21},44",
+      "right": "{C84CA5DB-61A8-0F9B-3F91-D6E0C74536F7},12"
+    },
+    "space": "{7A363D4C-73C2-0ABE-0931-E6F62A90B95E},1"
+  },
+  {
+    "case": "Split child",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{B587CBC6-0BCC-0A23-16F6-E1B0B3C5D061},49",
+      "right": "{DC240C63-FC8E-0267-0AFD-A53062C25702},12"
+    },
+    "space": "{3CC2C4DC-651A-07C9-2F7B-375C6663F3CA},1"
+  },
+  {
+    "case": "Split bullet",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{8C65E427-477C-02ED-1807-2F10E277019D},44",
+      "right": "{28F3F5EC-E687-02CA-2CFD-E73A184B875F},12"
+    },
+    "space": "{942EF5E4-FFD1-0FE4-23D2-7429899577BD},1"
+  },
+  {
+    "case": "Split number",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{D4ABBE4F-2165-0122-1F9F-ACE3FE92C703},44",
+      "right": "{DD3FA0E7-15A6-01C4-1B77-F85F779BCBC8},12"
+    },
+    "space": "{A4AE40FF-DD80-0003-2856-17D8295C1B91},1"
+  },
+  {
+    "case": "Split tag",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{37AA5877-2980-0227-169F-8B1E8EE0795A},44",
+      "right": "{1480427A-E9ED-04EC-0409-0653AE11FF78},12"
+    },
+    "space": "{739DB38B-4239-0A7C-2652-4E525D219638},1"
+  },
+  {
+    "case": "Split cell",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{F0832BC9-1578-0A96-08AF-99344644FFB8},50",
+      "right": "{1E353497-5C26-0459-3C0C-0E8D29ED8C5A},12"
+    },
+    "space": "{4432E3EC-5E5F-0A04-2108-E9A2C17BDBEC},1"
+  },
+  {
+    "case": "Split soft break",
+    "intent": {
+      "author": "Rust join author",
+      "left": "{88189BA1-2F19-0282-05ED-A0B83153F143},44",
+      "right": "{C1568E82-003F-016B-041A-CA304E1A5138},12"
+    },
+    "space": "{D8E15673-A45E-0914-291A-7767C3222F19},1"
+  }
+]

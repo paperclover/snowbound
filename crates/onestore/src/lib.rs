@@ -32,7 +32,7 @@ pub use files::FileDataReference;
 pub use formatting::TextAttribute;
 pub use insertion::Insertion;
 pub use objects::{Object, ObjectData, ObjectReferences, ResolvedRevision};
-pub use paragraph::ParagraphSplit;
+pub use paragraph::{ParagraphJoin, ParagraphSplit};
 pub use properties::{IdStream, Property, PropertySets, Value};
 pub use revisions::{ExGuid, ObjectSpace, Revision, RevisionIndex};
 pub use snapshot::{read_snapshot, read_storage_snapshot};

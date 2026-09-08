@@ -1,8 +1,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    CommitState, ExGuid, Insertion, ParagraphSplit, PreparedEdit, RevisionIndex, Store,
-    TextAttribute as A,
+    CommitState, ExGuid, Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit, RevisionIndex,
+    Store, TextAttribute as A,
     document::{Document, Kind},
 };
 use std::sync::LazyLock;
@@ -43,6 +43,11 @@ fuzz_target!(|input: &[u8]| {
     {
         current::current(edit.as_bytes());
     }
+    if let Ok(intent) = serde_json::from_slice::<ParagraphJoin>(input)
+        && let Ok(edit) = PreparedEdit::join(source, *sid, &intent)
+    {
+        current::current(edit.as_bytes());
+    }
     let mut persisted = source.clone();
     let mut caches = std::array::from_fn::<_, 12, _>(|_| source.clone());
     for step in input.chunks_exact(8).take(20) {
@@ -65,57 +70,91 @@ fuzz_target!(|input: &[u8]| {
                 paragraphs.push(id);
             }
         }
-        let paragraph = paragraphs[usize::from(step[2]) % paragraphs.len()];
-        let text = view.nodes[&paragraph].content[0];
-        let characters: Vec<_> = view
-            .text_runs(text)
-            .unwrap()
-            .into_iter()
-            .flat_map(|run| {
-                let style = serde_json::to_value(run.format).unwrap();
-                run.text.chars().map(move |c| (c, style.clone()))
-            })
-            .collect();
-        let offsets: Vec<u32> = std::iter::once(0)
-            .chain(characters.iter().scan(0, |n, (c, _)| {
-                *n += u32::try_from(c.len_utf16()).unwrap();
-                Some(*n)
-            }))
-            .collect();
-        let offset = u32::from(step[3]) % (offsets.last().unwrap() + 2);
-        let intent = ParagraphSplit::new(text, offset, "Paragraph fuzz").unwrap();
-        let intent = serde_json::from_value(serde_json::to_value(intent).unwrap()).unwrap();
-        let edit = PreparedEdit::split(source, *sid, &intent);
-        let Some(position) = offsets.iter().position(|n| *n == offset) else {
-            assert!(edit.is_err());
-            continue;
-        };
-        let edit = edit.unwrap();
-        let after_store = Store::parse(edit.as_bytes()).unwrap();
-        let after_index = RevisionIndex::parse(&after_store).unwrap();
-        let after_document = Document::parse(&after_index).unwrap();
-        let space = &after_document.spaces[sid];
-        let after_view = &space.revisions[&space.contexts[&ExGuid::default()]];
-        for (id, expected) in [
-            (text, &characters[..position]),
-            (intent.text_object(), &characters[position..]),
-        ] {
-            let actual: Vec<_> = after_view
-                .text_runs(id)
+        let characters = |view: &onestore::document::Revision<'_>, id| {
+            view.text_runs(id)
                 .unwrap()
                 .into_iter()
                 .flat_map(|run| {
                     let style = serde_json::to_value(run.format).unwrap();
                     run.text.chars().map(move |c| (c, style.clone()))
                 })
+                .collect::<Vec<_>>()
+        };
+        let pairs: Vec<_> = view
+            .nodes
+            .iter()
+            .flat_map(|(parent, node)| {
+                node.children.windows(2).filter_map(|pair| {
+                    (paragraphs.contains(&pair[0])
+                        && paragraphs.contains(&pair[1])
+                        && view.nodes[&pair[0]].children.is_empty())
+                    .then_some((*parent, pair[0], pair[1]))
+                })
+            })
+            .collect();
+        let mut expected_text = Vec::new();
+        let mut expected_graph = Vec::new();
+        let edit = if step[1] & 8 != 0 && !pairs.is_empty() {
+            let (parent, left, right) = pairs[usize::from(step[2]) % pairs.len()];
+            let a = view.nodes[&left].content[0];
+            let b = view.nodes[&right].content[0];
+            let mut expected = characters(view, a);
+            let survivor = if expected.is_empty() { b } else { a };
+            expected.extend(characters(view, b));
+            expected_text.push((survivor, expected));
+            let children: Vec<_> = view.nodes[&parent]
+                .children
+                .iter()
+                .filter(|id| **id != right)
+                .copied()
                 .collect();
-            assert_eq!(actual, expected);
+            expected_graph.push((parent, children, view.nodes[&parent].content.clone()));
+            expected_graph.push((left, view.nodes[&right].children.clone(), vec![survivor]));
+            let intent = ParagraphJoin::new(a, b, "Paragraph fuzz").unwrap();
+            let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
+            assert_eq!(intent, restored);
+            PreparedEdit::join(source, *sid, &restored).unwrap()
+        } else {
+            let paragraph = paragraphs[usize::from(step[2]) % paragraphs.len()];
+            let text = view.nodes[&paragraph].content[0];
+            let before = characters(view, text);
+            let offsets: Vec<u32> = std::iter::once(0)
+                .chain(before.iter().scan(0, |n, (c, _)| {
+                    *n += u32::try_from(c.len_utf16()).unwrap();
+                    Some(*n)
+                }))
+                .collect();
+            let offset = u32::from(step[3]) % (offsets.last().unwrap() + 2);
+            let intent = ParagraphSplit::new(text, offset, "Paragraph fuzz").unwrap();
+            let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
+            assert_eq!(intent, restored);
+            let edit = PreparedEdit::split(source, *sid, &restored);
+            let Some(position) = offsets.iter().position(|n| *n == offset) else {
+                assert!(edit.is_err());
+                continue;
+            };
+            expected_text.push((text, before[..position].to_vec()));
+            expected_text.push((intent.text_object(), before[position..].to_vec()));
+            expected_graph.push((paragraph, vec![], vec![text]));
+            expected_graph.push((
+                intent.object(),
+                view.nodes[&paragraph].children.clone(),
+                vec![intent.text_object()],
+            ));
+            edit.unwrap()
+        };
+        let after_store = Store::parse(edit.as_bytes()).unwrap();
+        let after_index = RevisionIndex::parse(&after_store).unwrap();
+        let after_document = Document::parse(&after_index).unwrap();
+        let space = &after_document.spaces[sid];
+        let after_view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        for (id, expected) in expected_text {
+            assert_eq!(characters(after_view, id), expected);
         }
-        assert!(after_view.nodes[&paragraph].children.is_empty());
-        assert_eq!(
-            after_view.nodes[&intent.object()].children,
-            view.nodes[&paragraph].children
-        );
+        for (id, children, content) in expected_graph {
+            assert_eq!(after_view.nodes[&id].children, children);
+            assert_eq!(after_view.nodes[&id].content, content);
+        }
         let before = current::current(&persisted);
         let after = current::current(edit.as_bytes());
         let mut disk = disk::Disk {

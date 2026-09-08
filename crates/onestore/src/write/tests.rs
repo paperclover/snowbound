@@ -29,8 +29,11 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
             ))
         })
         .unwrap();
+    let right = Insertion::paragraph(outline, None, "Right", "Author").unwrap();
+    let expanded = PreparedEdit::insert(&source, sid, &right).unwrap();
+    let source = expanded.as_bytes();
     for blocked in [page, outline, paragraph] {
-        let protected = write_revision(&source, sid, |raw| {
+        let protected = write_revision(source, sid, |raw| {
             let mut object = PropertyObject::from_object(&raw.objects[&blocked])?;
             object.set(&[(0x88001cde, &[])])?;
             Ok(BTreeMap::from([(blocked, object)]))
@@ -48,6 +51,8 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
             .unwrap();
         let split = crate::ParagraphSplit::new(text, 1, "Author").unwrap();
         assert!(PreparedEdit::split(&protected, sid, &split).is_err());
+        let join = crate::ParagraphJoin::new(text, right.text_object(), "Author").unwrap();
+        assert!(PreparedEdit::join(&protected, sid, &join).is_err());
         assert!(
             PreparedEdit::format(
                 &protected,
@@ -63,6 +68,18 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
             assert!(PreparedEdit::insert(&protected, sid, &outline).is_err());
         }
     }
+    let protected = write_revision(source, sid, |raw| {
+        let mut object = PropertyObject::from_object(&raw.objects[&right.object()])?;
+        object.set(&[(0x88001cde, &[])])?;
+        Ok(BTreeMap::from([(right.object(), object)]))
+    })
+    .unwrap();
+    let document = crate::document::Document::parse(&index).unwrap();
+    let space = &document.spaces[&sid];
+    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+    let text = view.nodes[&paragraph].content[0];
+    let join = crate::ParagraphJoin::new(text, right.text_object(), "Author").unwrap();
+    assert!(PreparedEdit::join(&protected, sid, &join).is_err());
 }
 
 fn add_paragraph(source: &[u8], number: u32) -> Vec<u8> {
@@ -572,6 +589,56 @@ fn nested_fields_and_other_reference_streams_remain_byte_exact() {
         object.remove(&ids).unwrap();
         assert_eq!(object.bytes, before);
     }
+    let source = super::PropertyObject {
+        jcid: 0x6000e,
+        bytes: original.clone(),
+        global_ids: std::sync::Arc::new(std::collections::BTreeMap::from([(0, [1; 16])])),
+    };
+    let mut target = super::PropertyObject {
+        jcid: 0x6000e,
+        bytes: properties(&[(0x20000001, vec![6, 0, 0, 0])]).unwrap(),
+        global_ids: std::sync::Arc::new(std::collections::BTreeMap::from([(0, [9; 16])])),
+    };
+    target.copy_property(&source, 0x40000002).unwrap();
+    let copied = PropertySets::parse(&target.bytes).unwrap();
+    assert_eq!(target.global_ids[&0], [9; 16]);
+    assert_eq!(target.global_ids[&1], [1; 16]);
+    assert_eq!(
+        copied.sets[0][0].value,
+        Value::References {
+            stream: crate::IdStream::Objects,
+            compact_ids: &[6, 0, 0, 0],
+        }
+    );
+    for (i, n) in [2, 4, 5].into_iter().enumerate() {
+        let Value::References { compact_ids, .. } = copied.sets[1][i].value else {
+            panic!()
+        };
+        assert_eq!(compact_ids, &[n, 1, 0, 0]);
+    }
+    assert_eq!(copied.sets[1][3], previous.sets[1][3]);
+    assert_eq!(
+        target
+            .bytes
+            .windows(nested.len())
+            .filter(|b| *b == nested)
+            .count(),
+        1
+    );
+    let before = target.bytes.clone();
+    target.copy_property(&source, 0x40000002).unwrap();
+    assert_eq!(target.bytes, before);
+    target.copy_property(&source, 0x20000001).unwrap();
+    assert_eq!(PropertySets::parse(&target.bytes).unwrap().sets[0].len(), 1);
+    let before = target.bytes.clone();
+    let ids = std::sync::Arc::clone(&target.global_ids);
+    let invalid = super::PropertyObject {
+        global_ids: Default::default(),
+        ..source
+    };
+    assert!(target.copy_property(&invalid, 0x40000002).is_err());
+    assert_eq!(target.bytes, before);
+    assert_eq!(target.global_ids, ids);
 }
 
 #[test]
@@ -599,6 +666,13 @@ fn deep_property_splices_do_not_use_the_call_stack() {
     let parsed = PropertySets::parse(&object.bytes).unwrap();
     assert_eq!(parsed.sets.len(), 100_001);
     assert_eq!(&object.bytes[..bytes.len()], &bytes);
+    let mut copied = super::PropertyObject {
+        jcid: object.jcid,
+        bytes: properties(&[]).unwrap(),
+        global_ids: Default::default(),
+    };
+    copied.copy_property(&object, 0x44000001).unwrap();
+    assert_eq!(copied.bytes, object.bytes);
     object.remove(&[0x44000001]).unwrap();
     let parsed = PropertySets::parse(&object.bytes).unwrap();
     assert_eq!(parsed.sets.len(), 1);

@@ -183,6 +183,18 @@ pub struct PreparedEdit<'a> {
 }
 
 impl<'a> PreparedEdit<'a> {
+    /// Joins adjacent ordinary paragraphs with native left-tag and text-identity semantics.
+    pub fn join(
+        source: &'a [u8],
+        space: ExGuid,
+        join: &crate::ParagraphJoin,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: join.apply(source, space)?,
+        })
+    }
+
     /// Splits a paragraph and updates its children, lists, tags and title metadata atomically.
     /// Fields and associated run metadata are rejected before I/O.
     pub fn split(

@@ -1,0 +1,17 @@
+﻿[
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:T\u003e\u003c![CDATA[]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:Tag index=\"1\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join empty left right tag",
+        "page":  "{110D64A5-F4AB-4699-B620-CF39E7595E3D}{1}{B0}"
+    },
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:Tag index=\"0\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:Tag index=\"1\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join empty left two tags",
+        "page":  "{4D3539F2-613D-47F1-AD5A-6D8EAD9D9901}{1}{B0}"
+    },
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:Tag index=\"0\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003eLeft\u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:Tag index=\"1\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join different tags",
+        "page":  "{8266EEF9-BFB3-4061-B62F-67D83F1A49FF}{1}{B0}"
+    }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "case": "Join empty left right tag",
+    "page": "{2A557903-2906-4962-90DB-1DBBD4B4F368}{1}{B0}",
+    "object": "{DB20B227-1FF5-4341-9621-D7C3E0EEE79B}{46}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "case": "Join empty left two tags",
+    "page": "{766D2454-BC90-480A-8BA1-BF0C9E703454}{1}{B0}",
+    "object": "{5237862E-022E-4FC4-8E36-D9C8E010D9E1}{47}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "case": "Join different tags",
+    "page": "{B93EF35F-621E-4F9A-90D4-B55A0CF7E4AA}{1}{B0}",
+    "object": "{998EEB43-1A80-48BB-B928-2AE6052587A2}{46}{B0}",
+    "keys": "{Left}{Backspace}"
+  }
+]

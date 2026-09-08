@@ -50,6 +50,7 @@ harness also accepts `--client-profile release`.
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
 | `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |
 | `ParagraphSplit`, `PreparedEdit::split` | Split ordinary text at a UTF-16 scalar boundary, retaining the original left identities and moving children to the right |
+| `ParagraphJoin`, `PreparedEdit::join` | Join adjacent ordinary text while preserving inherited character styles and native text-identity rules |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |
@@ -85,6 +86,14 @@ the complete child graph and title metadata; repeating an existing identity requ
 reconciliation. Title containers, generated fields, recording-linked text and
 associated run metadata are rejected before I/O. Native split controls and subsequent
 typing checks reside in [the paragraph corpus](../../corpus/paragraph-edit/README.md).
+Joins retain the left paragraph. Nonempty left text keeps its identity; empty left
+text adopts the right text identity. **The left tags win: right-side tags are removed
+from active text even when the left text is empty.** History retains the original
+objects. Select the preceding leaf text; where that leaf is deeper than the right
+paragraph, right children move to its ancestor at the right paragraph's level.
+Ambiguous ancestry, unsupported indentation transitions and unknown implicit
+font/language inheritance reject before I/O. This is a logical join, so keyboard
+actions that only change list or indentation state remain separate operations.
 Generated fields, protected targets and unsupported run-data boundary changes are
 rejected before publication. Local caches expose text, insertion and formatting edits;
 the [document-writer acceptance](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance)

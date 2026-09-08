@@ -76,7 +76,7 @@ impl ParagraphSplit {
             .into_iter()
             .filter_map(|(sid, page)| (sid == space).then_some(page))
             .collect();
-        let [page] = pages.as_slice() else {
+        let [_] = pages.as_slice() else {
             return Err(invalid("Splitting requires a single active page"));
         };
         let semantic = document
@@ -84,7 +84,7 @@ impl ParagraphSplit {
             .remove(&space)
             .ok_or_else(|| invalid("The active page is unavailable"))?;
         let rid = semantic.contexts[&ExGuid::default()];
-        let mut view = semantic
+        let view = semantic
             .revisions
             .into_iter()
             .find_map(|(id, view)| (id == rid).then_some(view))
@@ -134,48 +134,9 @@ impl ParagraphSplit {
             }
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
-        let node = &view.nodes[&self.text];
-        let Kind::RichText {
-            text,
-            runs,
-            boilerplate,
-            ..
-        } = &node.kind
-        else {
-            return Err(invalid("Select ordinary paragraph text"));
-        };
-        if *boilerplate || !node.media_ids.is_empty() || node.media_time_ms.is_some() {
-            return Err(invalid(
-                "Generated or recording-linked text cannot be split",
-            ));
-        }
-        for run in view.text_runs(self.text)? {
-            if [
-                run.format.hidden,
-                run.format.hyperlink,
-                run.format.math,
-                run.format.embedded_object,
-            ]
-            .contains(&Some(true))
-                || run.text.contains(['\u{fffc}', '\u{fddf}'])
-            {
-                return Err(invalid(
-                    "This paragraph contains a field or embedded object that cannot be split",
-                ));
-            }
-        }
         let raw = index.resolve(space, rid)?;
-        let ObjectData::Properties(blob) = raw.objects[&self.text].data else {
-            unreachable!()
-        };
-        if PropertySets::parse(blob)?.sets[0]
-            .iter()
-            .any(|p| matches!(p.id, 0x40003499 | 0x24003458))
-        {
-            return Err(invalid(
-                "This paragraph contains run metadata that cannot be split",
-            ));
-        }
+        let (text, runs) = ordinary_text(&view, &raw, self.text)?;
+        let node = &view.nodes[&self.text];
         let length = u32::try_from(text.encode_utf16().count())
             .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
         if self.offset > length || lists.len() > 251 {
@@ -286,39 +247,7 @@ impl ParagraphSplit {
             };
             object.set(&[(0x14001d7a, &modified)])?;
         }
-        for (id, object) in &changed {
-            view.nodes.insert(
-                *id,
-                Element::parse(
-                    &Object {
-                        jcid: object.jcid,
-                        reference_count: 0,
-                        data: ObjectData::Properties(&object.bytes),
-                        global_ids: Arc::clone(&object.global_ids),
-                    },
-                    &store,
-                )?,
-            );
-        }
-        let title = page_title(&view, &pages, None)?;
-        drop(view);
-        if let Some((_, automatic, title)) = title {
-            let metadata = raw
-                .roots
-                .get(&2)
-                .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-            if raw.objects[metadata].jcid != 0x20030 {
-                return Err(invalid("Page title metadata is unavailable"));
-            }
-            let title = string(&title);
-            let mut object = PropertyObject::from_object(&raw.objects[metadata])?;
-            object.set(&[(0x1c001cf3, &title)])?;
-            changed.insert(*metadata, object);
-            changed
-                .get_mut(page)
-                .unwrap()
-                .set(&[(0x1c001d3c, if automatic { &title } else { &[0, 0] })])?;
-        }
+        update_title(&store, &raw, view, &pages, &mut changed)?;
         write_revision(source, space, |_| Ok(changed))
     }
 }
@@ -380,4 +309,474 @@ fn fragment(
         (0x24001e13, &references),
     ])?;
     Ok(object)
+}
+
+fn ordinary_text<'a>(
+    view: &'a crate::document::Revision<'_>,
+    raw: &crate::ResolvedRevision<'_>,
+    id: ExGuid,
+) -> Result<(&'a str, &'a [crate::document::TextRun]), Error> {
+    let node = &view.nodes[&id];
+    let Kind::RichText {
+        text,
+        runs,
+        boilerplate,
+        ..
+    } = &node.kind
+    else {
+        return Err(invalid("Select ordinary paragraph text"));
+    };
+    if *boilerplate || !node.media_ids.is_empty() || node.media_time_ms.is_some() {
+        return Err(invalid(
+            "Generated or recording-linked text cannot be split or joined",
+        ));
+    }
+    for run in view.text_runs(id)? {
+        if [
+            run.format.hidden,
+            run.format.hyperlink,
+            run.format.math,
+            run.format.embedded_object,
+        ]
+        .contains(&Some(true))
+            || run.text.contains(['\u{fffc}', '\u{fddf}'])
+        {
+            return Err(invalid(
+                "This paragraph contains a field or embedded object that cannot be split or joined",
+            ));
+        }
+    }
+    let ObjectData::Properties(blob) = raw.objects[&id].data else {
+        unreachable!()
+    };
+    if PropertySets::parse(blob)?.sets[0]
+        .iter()
+        .any(|p| matches!(p.id, 0x40003499 | 0x24003458))
+    {
+        return Err(invalid(
+            "This paragraph contains run metadata that cannot be split or joined",
+        ));
+    }
+    Ok((text, runs))
+}
+
+fn update_title(
+    store: &Store<'_>,
+    raw: &crate::ResolvedRevision<'_>,
+    view: crate::document::Revision<'_>,
+    pages: &[ExGuid],
+    changed: &mut BTreeMap<ExGuid, PropertyObject>,
+) -> Result<(), Error> {
+    // Shorten the moved view's lifetime to the changed property buffers.
+    let mut view = view;
+    for (id, object) in changed.iter() {
+        view.nodes.insert(
+            *id,
+            Element::parse(
+                &Object {
+                    jcid: object.jcid,
+                    reference_count: 0,
+                    data: ObjectData::Properties(&object.bytes),
+                    global_ids: Arc::clone(&object.global_ids),
+                },
+                store,
+            )?,
+        );
+    }
+    let title = page_title(&view, pages, None)?;
+    drop(view);
+    if let Some((_, automatic, title)) = title {
+        let metadata = raw
+            .roots
+            .get(&2)
+            .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
+        if raw.objects[metadata].jcid != 0x20030 {
+            return Err(invalid("Page title metadata is unavailable"));
+        }
+        let title = string(&title);
+        let mut object = PropertyObject::from_object(&raw.objects[metadata])?;
+        object.set(&[(0x1c001cf3, &title)])?;
+        changed.insert(*metadata, object);
+        changed
+            .get_mut(&pages[0])
+            .unwrap()
+            .set(&[(0x1c001d3c, if automatic { &title } else { &[0, 0] })])?;
+    }
+    Ok(())
+}
+
+/// Joins adjacent ordinary text in one outline or table cell.
+/// The left paragraph survives. Empty left text adopts the right text identity;
+/// otherwise the left text survives. The left paragraph's tags are retained.
+/// Right-side tags are removed from active text, including when the left text is empty.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParagraphJoin {
+    left: ExGuid,
+    right: ExGuid,
+    author: String,
+}
+
+impl ParagraphJoin {
+    /// Select the preceding leaf paragraph's text and the following paragraph's text.
+    pub fn new(left: ExGuid, right: ExGuid, author: &str) -> Result<Self, Error> {
+        if left == right || left.guid == [0; 16] || right.guid == [0; 16] || author.contains('\0') {
+            return Err(invalid(
+                "Choose two distinct text objects and an author name without NUL",
+            ));
+        }
+        Ok(Self {
+            left,
+            right,
+            author: author.to_owned(),
+        })
+    }
+
+    pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
+        if self.left == self.right
+            || self.left.guid == [0; 16]
+            || self.right.guid == [0; 16]
+            || self.author.contains('\0')
+        {
+            return Err(invalid(
+                "Choose two distinct text objects and an author name without NUL",
+            ));
+        }
+        let store = Store::parse(source)?;
+        let index = RevisionIndex::parse(&store)?;
+        index.validate_current()?;
+        let mut document = Document::parse(&index)?;
+        let pages: Vec<_> = document
+            .pages()?
+            .into_iter()
+            .filter_map(|(sid, page)| (sid == space).then_some(page))
+            .collect();
+        if pages.len() != 1 {
+            return Err(invalid("Joining requires a single active page"));
+        }
+        let semantic = document
+            .spaces
+            .remove(&space)
+            .ok_or_else(|| invalid("The active page is unavailable"))?;
+        let rid = semantic.contexts[&ExGuid::default()];
+        let view = semantic
+            .revisions
+            .into_iter()
+            .find_map(|(id, view)| (id == rid).then_some(view))
+            .unwrap();
+        let parents = editable_parents(&view, &pages, self.left)?;
+        editable_parents(&view, &pages, self.right)?;
+        let parent = |id| -> Result<ExGuid, Error> {
+            let [parent] = parents.get(&id).map(Vec::as_slice).unwrap_or_default() else {
+                return Err(invalid("Select text with a unique editable parent"));
+            };
+            Ok(*parent)
+        };
+        let left = parent(self.left)?;
+        let right = parent(self.right)?;
+        for (paragraph, text) in [(left, self.left), (right, self.right)] {
+            if !matches!(view.nodes[&paragraph].kind, Kind::Paragraph { .. })
+                || view.nodes[&paragraph].content != [text]
+            {
+                return Err(invalid("Select ordinary paragraph text"));
+            }
+            let mut at = paragraph;
+            while at != pages[0] {
+                if matches!(view.nodes[&at].kind, Kind::Title) {
+                    return Err(invalid(
+                        "Title containers cannot be joined with ordinary paragraphs",
+                    ));
+                }
+                at = parent(at)?;
+            }
+        }
+        if !view.nodes[&left].children.is_empty() {
+            return Err(invalid("Select the preceding paragraph's last descendant"));
+        }
+        let right_parent = parent(right)?;
+        if !matches!(
+            view.nodes[&right_parent].kind,
+            Kind::Outline { .. } | Kind::OutlineGroup | Kind::Paragraph { .. } | Kind::Cell { .. }
+        ) {
+            return Err(invalid("Select paragraphs in one outline or table cell"));
+        }
+        let mut stem = left;
+        while parent(stem)? != right_parent {
+            let previous = stem;
+            stem = parent(stem)?;
+            if !matches!(
+                view.nodes[&stem].kind,
+                Kind::Paragraph { .. } | Kind::OutlineGroup
+            ) || view.nodes[&stem].children.last() != Some(&previous)
+            {
+                return Err(invalid(
+                    "Select adjacent text within one outline or table cell",
+                ));
+            }
+        }
+        let siblings = &view.nodes[&right_parent].children;
+        if !siblings.windows(2).any(|pair| pair == [stem, right]) {
+            return Err(invalid("Select adjacent paragraph text in document order"));
+        }
+        let children = &view.nodes[&right].children;
+        if !children.is_empty()
+            && !view.nodes[&stem].children.is_empty()
+            && view.nodes[&stem].child_level != view.nodes[&right].child_level
+        {
+            return Err(invalid(
+                "Joining these child indentation levels requires a hierarchy edit",
+            ));
+        }
+        let raw = index.resolve(space, rid)?;
+        let (a, a_runs) = ordinary_text(&view, &raw, self.left)?;
+        let (b, b_runs) = ordinary_text(&view, &raw, self.right)?;
+        let length = u32::try_from(a.encode_utf16().count())
+            .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
+        let right_length = u32::try_from(b.encode_utf16().count())
+            .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
+        length
+            .checked_add(right_length)
+            .ok_or_else(|| invalid("Joined text exceeds the UTF-16 offset range"))?;
+        let modified = current_timestamps()?.0.to_le_bytes();
+        let mut changed = BTreeMap::new();
+        let (survivor, mut text) = if a.is_empty() {
+            let mut target = PropertyObject::from_object(&raw.objects[&self.right])?;
+            target.copy_property(
+                &PropertyObject::from_object(&raw.objects[&self.left])?,
+                0x40003489,
+            )?;
+            (self.right, target)
+        } else {
+            let mut target = PropertyObject::from_object(&raw.objects[&self.left])?;
+            let mut styles = BTreeMap::new();
+            let mut ends = Vec::new();
+            let mut references = Vec::new();
+            let mut empty_style = None;
+            for run in a_runs.iter().filter(|run| run.start < run.end) {
+                let id = if let Some(id) = run.format {
+                    id
+                } else if let Some(id) = empty_style {
+                    id
+                } else {
+                    let id = ExGuid {
+                        guid: fresh_guid()?,
+                        n: 1,
+                    };
+                    changed.insert(
+                        id,
+                        PropertyObject {
+                            jcid: 0x12004d,
+                            bytes: properties(&[])?,
+                            global_ids: Arc::new(BTreeMap::from([(0, id.guid)])),
+                        },
+                    );
+                    empty_style = Some(id);
+                    id
+                };
+                references.extend_from_slice(&target.reference(id)?);
+                ends.extend_from_slice(&run.end.to_le_bytes());
+            }
+            let left_base = character_properties(&view, &raw, self.left)?;
+            let right_base = character_properties(&view, &raw, self.right)?;
+            for (i, run) in b_runs.iter().enumerate() {
+                if run.start == run.end && i != b_runs.len() - 1 {
+                    continue;
+                }
+                let id = if let Some(id) = styles.get(&run.format) {
+                    *id
+                } else {
+                    let mut style = if let Some(id) = run.format {
+                        PropertyObject::from_object(&raw.objects[&id])?
+                    } else {
+                        PropertyObject {
+                            jcid: 0x12004d,
+                            bytes: properties(&[])?,
+                            global_ids: Arc::new(BTreeMap::new()),
+                        }
+                    };
+                    if left_base != right_base {
+                        let mut values = right_base.clone();
+                        for property in &PropertySets::parse(&style.bytes)?.sets[0] {
+                            let key = property.id & 0x7fffffff;
+                            if is_character_property(key) {
+                                let value = match property.value {
+                                    crate::Value::NoData => &[][..],
+                                    crate::Value::Bytes(bytes) => bytes,
+                                    _ => unreachable!(),
+                                };
+                                values.insert(key, (property.id, value.to_vec()));
+                            }
+                        }
+                        for key in left_base.keys() {
+                            if values.contains_key(key) {
+                                continue;
+                            }
+                            let value = match key >> 26 & 31 {
+                                2 => Vec::new(),
+                                _ if matches!(*key, 0x14001c0c | 0x14001c0d) => {
+                                    0xff000000_u32.to_le_bytes().to_vec()
+                                }
+                                _ => {
+                                    return Err(invalid(
+                                        "The right paragraph's implicit font or language cannot be preserved under the left style",
+                                    ));
+                                }
+                            };
+                            values.insert(*key, (*key, value));
+                        }
+                        style.set(
+                            &values
+                                .values()
+                                .map(|(id, value)| (*id, value.as_slice()))
+                                .collect::<Vec<_>>(),
+                        )?;
+                    }
+                    let id = if let Some(id) = run
+                        .format
+                        .filter(|id| raw.objects[id].data == ObjectData::Properties(&style.bytes))
+                    {
+                        id
+                    } else {
+                        let id = ExGuid {
+                            guid: fresh_guid()?,
+                            n: 1,
+                        };
+                        style.reference(id)?;
+                        changed.insert(id, style);
+                        id
+                    };
+                    styles.insert(run.format, id);
+                    id
+                };
+                references.extend_from_slice(&target.reference(id)?);
+                ends.extend_from_slice(&(length + run.end).to_le_bytes());
+            }
+            ends.truncate(ends.len() - 4);
+            if ends
+                .chunks_exact(4)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            {
+                return Err(invalid("Text-run boundaries must be strictly increasing"));
+            }
+            target.set(&[
+                (0x1c001c22, &string(&format!("{a}{b}"))),
+                (0x1c001e12, &ends),
+                (0x24001e13, &references),
+            ])?;
+            (self.left, target)
+        };
+        text.set(&[(0x14001d7a, &modified)])?;
+        changed.insert(survivor, text);
+        let author = ExGuid {
+            guid: fresh_guid()?,
+            n: 1,
+        };
+        changed.insert(
+            author,
+            PropertyObject {
+                jcid: 0x120001,
+                bytes: properties(&[(0x1c001d75, string(&self.author))])?,
+                global_ids: Arc::new(BTreeMap::from([(0, author.guid)])),
+            },
+        );
+        let mut left_object = PropertyObject::from_object(&raw.objects[&left])?;
+        let content = left_object.reference(survivor)?;
+        let author = left_object.reference(author)?;
+        left_object.set(&[(0x24001c1f, &content), (0x20001d79, &author)])?;
+        changed.insert(left, left_object);
+        if !children.is_empty() {
+            let target = match changed.entry(stem) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(PropertyObject::from_object(&raw.objects[&stem])?)
+                }
+            };
+            let mut references = Vec::new();
+            for id in view.nodes[&stem].children.iter().chain(children) {
+                references.extend_from_slice(&target.reference(*id)?);
+            }
+            target.set(&[(0x24001c20, &references)])?;
+            target.copy_property(
+                &PropertyObject::from_object(&raw.objects[&right])?,
+                0x0c001c03,
+            )?;
+        }
+        let mut container = PropertyObject::from_object(&raw.objects[&right_parent])?;
+        let mut references = Vec::new();
+        for id in siblings.iter().filter(|id| **id != right) {
+            references.extend_from_slice(&container.reference(*id)?);
+        }
+        container.set(&[(0x24001c20, &references)])?;
+        changed.insert(right_parent, container);
+        let mut pending = vec![left, right_parent];
+        let mut ancestors = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !ancestors.insert(id) {
+                continue;
+            }
+            let object = match changed.entry(id) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(PropertyObject::from_object(&raw.objects[&id])?)
+                }
+            };
+            object.set(&[(0x14001d7a, &modified)])?;
+            pending.extend(parents.get(&id).into_iter().flatten().copied());
+        }
+        update_title(&store, &raw, view, &pages, &mut changed)?;
+        write_revision(source, space, |_| Ok(changed))
+    }
+}
+
+fn is_character_property(id: u32) -> bool {
+    matches!(
+        id,
+        0x08001c04
+            ..=0x08001c09
+                | 0x08001e16
+                | 0x08001e14
+                | 0x08001e19
+                | 0x08003401
+                | 0x08001e22
+                | 0x08003476
+                | 0x1c001c0a
+                | 0x10001c0b
+                | 0x14001c0c
+                | 0x14001c0d
+                | 0x14001c3b
+    )
+}
+
+fn character_properties(
+    view: &crate::document::Revision<'_>,
+    raw: &crate::ResolvedRevision<'_>,
+    text: ExGuid,
+) -> Result<BTreeMap<u32, (u32, Vec<u8>)>, Error> {
+    let Kind::RichText {
+        paragraph_style, ..
+    } = view.nodes[&text].kind
+    else {
+        unreachable!()
+    };
+    let mut values = BTreeMap::new();
+    for id in paragraph_style.into_iter().chain([text]) {
+        let ObjectData::Properties(bytes) = raw.objects[&id].data else {
+            unreachable!()
+        };
+        for property in &PropertySets::parse(bytes)?.sets[0] {
+            let key = property.id & 0x7fffffff;
+            if is_character_property(key) {
+                let value = match property.value {
+                    crate::Value::NoData => &[][..],
+                    crate::Value::Bytes(bytes) => bytes,
+                    _ => unreachable!(),
+                };
+                values.insert(key, (property.id, value.to_vec()));
+            }
+        }
+    }
+    Ok(values)
 }
