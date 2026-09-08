@@ -19,6 +19,36 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class OutlineEditTest(unittest.TestCase):
+    def test_rust_subtree_moves_and_deletions_survive_cold_native_reopen(self):
+        for name, pages in [('ordinary', 15), ('groups-cells', 12), ('cross-container', 12), ('unequal-groups', 1)]:
+            fixture = FIXTURE / 'rust-tree' / name
+            with self.subTest(case=name), TemporaryDirectory() as temporary:
+                models = {}
+                for phase, notebook in [('candidate', fixture / 'candidate'), ('cold', fixture / 'cold/notebook')]:
+                    folder = Path(temporary) / phase
+                    shutil.copytree(fixture / 'cold/read', folder / 'read')
+                    compare(notebook, folder / 'read')
+                    section, = notebook.glob('*.one')
+                    subprocess.run([EXPORTER, section, folder / 'model'], check=True)
+                    model = json.loads((folder / 'model/document.json').read_text())
+                    models[phase] = {sid: (r, page) for sid, _, r, page in ordered_pages(model)}
+                    self.assertEqual(len(models[phase]), pages)
+                self.assertEqual(models['candidate'].keys(), models['cold'].keys())
+                for sid, (old, page) in models['candidate'].items():
+                    saved, saved_page = models['cold'][sid]
+                    self.assertEqual(page, saved_page)
+                    self.assertEqual(dict(walk(old, page)), dict(walk(saved, page)))
+                    self.assertEqual(old['nodes'][old['roots']['2']]['kind'], saved['nodes'][saved['roots']['2']]['kind'])
+                    for _, node in walk(old, page):
+                        for oid in node['kind'].get('lists', []):
+                            self.assertEqual(old['nodes'][oid], saved['nodes'][oid])
+                if name == 'unequal-groups':
+                    capture, = (fixture / 'cold/read').glob('page-*.xml')
+                    root = ET.parse(capture).getroot()
+                    self.assertEqual([(group.get('indent'), ''.join(Text(group.find('one:OE/one:T', ns).text or '').parts))
+                                      for group in root.findall('one:Outline/one:OEChildren', ns)],
+                                     [('3', 'First'), ('2', 'Second')])
+
     def test_native_group_list_and_cell_tree_controls(self):
         fixture = FIXTURE / 'tree'
         models = {}

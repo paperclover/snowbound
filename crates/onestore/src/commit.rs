@@ -183,6 +183,18 @@ pub struct PreparedEdit<'a> {
 }
 
 impl<'a> PreparedEdit<'a> {
+    /// Moves or removes a subtree and normalizes its containers in one revision.
+    pub fn tree(
+        source: &'a [u8],
+        space: ExGuid,
+        edit: &crate::TreeEdit,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: edit.apply(source, space)?,
+        })
+    }
+
     /// Changes outline geometry or a paragraph's saved expansion state, preserving content.
     pub fn outline(
         source: &'a [u8],

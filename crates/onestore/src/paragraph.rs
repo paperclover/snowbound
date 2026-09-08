@@ -2,7 +2,7 @@ use crate::{
     Error, ExGuid, Object, ObjectData, PropertySets, RevisionIndex, Store,
     create::{current_timestamps, properties, string},
     document::{Document, Element, Kind},
-    edit::{editable_parents, page_title},
+    edit::{editable_parents, update_title},
     write::{PropertyObject, fresh_guid, write_revision},
 };
 use serde::{Deserialize, Serialize};
@@ -371,51 +371,6 @@ fn ordinary_text<'a>(
         ));
     }
     Ok((text, runs))
-}
-
-fn update_title(
-    store: &Store<'_>,
-    raw: &crate::ResolvedRevision<'_>,
-    view: crate::document::Revision<'_>,
-    pages: &[ExGuid],
-    changed: &mut BTreeMap<ExGuid, PropertyObject>,
-) -> Result<(), Error> {
-    // Shorten the moved view's lifetime to the changed property buffers.
-    let mut view = view;
-    for (id, object) in changed.iter() {
-        view.nodes.insert(
-            *id,
-            Element::parse(
-                &Object {
-                    jcid: object.jcid,
-                    reference_count: 0,
-                    data: ObjectData::Properties(&object.bytes),
-                    global_ids: Arc::clone(&object.global_ids),
-                },
-                store,
-            )?,
-        );
-    }
-    let title = page_title(&view, pages, None)?;
-    drop(view);
-    if let Some((_, automatic, title)) = title {
-        let metadata = raw
-            .roots
-            .get(&2)
-            .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-        if raw.objects[metadata].jcid != 0x20030 {
-            return Err(invalid("Page title metadata is unavailable"));
-        }
-        let title = string(&title);
-        let mut object = PropertyObject::from_object(&raw.objects[metadata])?;
-        object.set(&[(0x1c001cf3, &title)])?;
-        changed.insert(*metadata, object);
-        changed
-            .get_mut(&pages[0])
-            .unwrap()
-            .set(&[(0x1c001d3c, if automatic { &title } else { &[0, 0] })])?;
-    }
-    Ok(())
 }
 
 /// Joins adjacent ordinary text in one outline or table cell.

@@ -53,6 +53,7 @@ harness also accepts `--client-profile release`.
 | `ParagraphJoin`, `PreparedEdit::join` | Join adjacent ordinary text while preserving inherited character styles and native text-identity rules |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `OutlineEdit`, `PreparedEdit::outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
+| `TreeEdit`, `PreparedEdit::tree` | Move or delete a subtree on one page, normalize surviving containers, and replace an emptied table cell's paragraph atomically |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |
 | `read_snapshot` | Read a validated snapshot through fresh positioned I/O while the caller excludes maintenance |
@@ -85,6 +86,17 @@ and an automatic maximum-width hint remain distinct. Native layout generates the
 rendered height. Saved paragraph collapse defaults can be overridden by the native
 client's cached view. [Native layout captures](../../corpus/outline-edit/README.md)
 verify these edits through a fresh OneNote cache, including fields and nested content.
+`TreeEdit::move_to` takes an existing parent and an optional direct sibling to insert
+before; `None` appends. Paragraphs retain their descendants and explicit list styles.
+Outlines remain page children, so reordering changes their stacking order while
+retaining coordinates. `TreeEdit::delete` removes the selected subtree from the active
+graph and preserves historical objects. Empty outlines/groups are removed; surviving
+group indentation is normalized without shifting other paragraphs. Empty table cells
+receive new empty paragraph/text objects with identities retained in the intent.
+Title/protected content, ambiguous ancestry, cycles, and incompatible destinations
+reject before publication. Modification times, move attribution and automatic titles
+publish with the tree change. These explicit destinations differ from keyboard list
+indentation, which can also substitute list markers.
 Paragraph splits preserve character formatting, retain tags on the left, and clone
 mutable list objects without restarting numbering. The new right paragraph/text
 identities belong to the retained `ParagraphSplit` intent. Its publication includes

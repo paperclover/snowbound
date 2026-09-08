@@ -100,3 +100,10 @@ path = "fuzz_targets/offline_paragraph.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tree"
+path = "fuzz_targets/tree.rs"
+test = false
+doc = false
+bench = false

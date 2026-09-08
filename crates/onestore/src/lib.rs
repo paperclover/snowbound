@@ -19,6 +19,7 @@ pub mod protected;
 mod revisions;
 mod snapshot;
 mod store;
+mod tree;
 mod write;
 
 pub use commit::{
@@ -39,4 +40,5 @@ pub use properties::{IdStream, Property, PropertySets, Value};
 pub use revisions::{ExGuid, ObjectSpace, Revision, RevisionIndex};
 pub use snapshot::{read_snapshot, read_storage_snapshot};
 pub use store::{Chunk, Error, FileType, Header, Node, NodeList, Reference, Store};
+pub use tree::TreeEdit;
 pub use write::replace_property_bytes;

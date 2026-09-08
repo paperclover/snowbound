@@ -101,3 +101,30 @@ Regenerate using the same source notebook and runner, with
 controller at inspection readiness, move `before-read` to `before/read`, then
 cold-open the returned notebook with `--expected-pages 12 --collect-notebook`.
 The exact authoring script has one home in the reference corpus.
+
+`rust-tree` retains four Rust-generated notebooks and their fresh-cache OneNote
+captures. `ordinary` and `groups-cells` apply eighteen moves/deletions from the
+native controls. Explicit bullet-subtree movement preserves its original marker.
+`cross-container` moves content between cells and outlines, moves a whole table,
+and moves a sibling beneath a paragraph while its enclosing group is normalized.
+`unequal-groups` deletes a trailing paragraph after two differently indented
+groups; native XML reports the surviving paragraphs at indentation levels three
+and two. Every surviving content identity, field, tag and table remains intact;
+an emptied cell receives new empty paragraph/text identities.
+
+The four captures cover forty pages. Public tests compare native text and
+formatting, the complete active graphs before/after cold reopen, metadata, and
+list objects. Core tests additionally compare eighteen native transformations,
+every historical object's property bytes, selected move attribution, protected
+content, reused intents, and interrupted publication. The shared stateful model
+in `crates/onestore/tests/support/tree_model.rs` checks paragraph order,
+indentation, content, automatic titles and old/new publication outcomes across
+twelve cached clients; `fuzz/fuzz_targets/tree.rs` runs that oracle under ASan.
+
+Set `ONESTORE_TREE_OUTPUT` to a new absolute directory and run the
+`native_subtree_controls_match_with_preserved_fields_and_history` and
+`cross_container_moves_keep_tables_and_replace_emptied_cells` integration tests,
+plus the `tree::tests::group_normalization_preserves_unequal_indentation_and_overlapping_moves`
+unit test. Cold-open the resulting `ordinary`, `groups-cells`, `cross-container`
+and `unequal-groups` notebooks with expected page counts 15, 12, 12 and 1,
+respectively, using `tools/native_runner.py --collect-notebook`.
