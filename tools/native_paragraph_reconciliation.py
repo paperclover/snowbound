@@ -4,10 +4,9 @@ import argparse
 import base64
 import json
 from pathlib import Path
-import re
 import xml.etree.ElementTree as ET
 
-from native_runner import windows
+from native_runner import navigation_script, windows
 from native_xml import ns
 
 
@@ -41,19 +40,8 @@ def apply(output):
         steps = [(paragraphs[at].get('objectID'), keys)]
         if join and change == 'prefix':
             steps.append((paragraphs[1].get('objectID'), '{Right}Y'))
-        script = ('#Requires AutoHotkey v2.0\n'
-                  'OnError((exception, mode) => (FileAppend(exception.Message, "**"), ExitApp(1)))\n'
-                  'app := ComObject("OneNote.Application")\n')
-        for oid, keys in steps:
-            for identifier in (page.get('ID'), oid):
-                if not re.fullmatch(r'\{[0-9A-Fa-f-]+\}\{[0-9]+\}\{[0-9A-Fa-f]+\}', identifier):
-                    raise ValueError('Invalid native fixture identity')
-            script += (f'app.NavigateTo("{page.get("ID")}", "{oid}", false)\n'
-                       'hwnd := WinWait("ahk_class Framework::CFrame ahk_exe ONENOTE.EXE",, 10)\n'
-                       'if !hwnd\n    throw Error("OneNote window did not appear")\n'
-                       'WinMaximize(hwnd)\nWinActivate(hwnd)\n'
-                       'if !WinWaitActive(hwnd,, 10)\n    throw Error("OneNote did not become active")\n'
-                       f'Sleep 300\nSend "{keys}"\nSleep 300\n')
+        script = ''.join(navigation_script(page.get('ID'), oid) + f'Send "{keys}"\nSleep 300\n'
+                         for oid, keys in steps)
         stem = scripts / case['name'].lower().replace(' ', '-')
         stem.with_suffix('.ahk').write_text(script)
         result = windows.do_exec(script, target=target, shot_delay_ms=500)

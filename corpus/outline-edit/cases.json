@@ -1,0 +1,76 @@
+﻿[
+    {
+        "name":  "Move leaf down",
+        "keys":  "{Left}^+{-}!+{Down}",
+        "leaf":  true
+    },
+    {
+        "name":  "Move subtree down",
+        "keys":  "{Left}^+{-}!+{Down}"
+    },
+    {
+        "name":  "Move subtree up",
+        "keys":  "{Left}^+{-}!+{Up}"
+    },
+    {
+        "name":  "Indent subtree",
+        "keys":  "{Left}^+{-}!+{Right}"
+    },
+    {
+        "name":  "Outdent subtree",
+        "keys":  "{Left}^+{-}!+{Left}",
+        "nested":  true
+    },
+    {
+        "collapse":  true,
+        "name":  "Collapse subtree"
+    },
+    {
+        "collapse":  false,
+        "name":  "Expand subtree",
+        "collapsed":  true
+    },
+    {
+        "name":  "Delete leaf",
+        "keys":  "{Left}^+{-}{Delete}",
+        "leaf":  true
+    },
+    {
+        "name":  "Delete subtree",
+        "keys":  "{Left}^+{-}{Delete}"
+    },
+    {
+        "only":  true,
+        "name":  "Delete only paragraph",
+        "keys":  "{Left}^+{-}{Delete}",
+        "leaf":  true
+    },
+    {
+        "name":  "Delete outline",
+        "delete":  "outline"
+    },
+    {
+        "name":  "Move outline",
+        "position":  {
+                         "y":  216,
+                         "x":  180
+                     }
+    },
+    {
+        "name":  "Resize outline",
+        "size":  {
+                     "isSetByUser":  true,
+                     "width":  144,
+                     "height":  180
+                 }
+    },
+    {
+        "fixed":  true,
+        "name":  "Automatic outline size",
+        "size":  {
+                     "isSetByUser":  false,
+                     "width":  360,
+                     "height":  180
+                 }
+    }
+]

@@ -273,7 +273,7 @@ pub enum Kind<'a> {
     Paragraph {
         lists: Vec<ExGuid>,
         paragraph_style: Option<ExGuid>,
-        /// Native saved defaults: 0 expanded, 1 collapsed; other values remain uninterpreted.
+        /// Saved state: 0 expanded, 1 collapsed, otherwise opaque; native UI overrides can stay cache-local.
         collapse_state: Option<u8>,
     },
     OutlineGroup,

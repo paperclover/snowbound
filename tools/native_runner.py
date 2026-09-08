@@ -28,6 +28,21 @@ def command(target, text, output, timeout_ms=120000):
         raise RuntimeError(windows.text_result(result))
 
 
+def navigation_script(page, object_id=''):
+    for identifier in [page] + ([object_id] if object_id else []):
+        if not re.fullmatch(r'\{[0-9A-Fa-f-]+\}\{[0-9]+\}\{[0-9A-Fa-f]+\}', identifier):
+            raise ValueError('The native identity cannot be used for navigation.')
+    return ('OnError((exception, mode) => (FileAppend(exception.Message, "**"), ExitApp(1)))\n'
+            'DetectHiddenWindows false\napp := ComObject("OneNote.Application")\n'
+            f'app.NavigateTo("{page}", "{object_id}", false)\n'
+            'hwnd := WinWait("ahk_class Framework::CFrame ahk_exe ONENOTE.EXE",, 10)\n'
+            'if !hwnd\n    throw Error("OneNote window did not appear")\n'
+            'WinMaximize(hwnd)\nWinActivate(hwnd)\n'
+            'if !WinWaitActive(hwnd,, 10)\n    throw Error("OneNote window did not become active")\n'
+            f'app.NavigateTo("{page}", "{object_id}", false)\n'
+            'Sleep 300\n')
+
+
 def install_agent(name, output):
     source = output / 'agent.py'
     source.write_bytes((ROOT / 'tools/w7/payload/agent.py').read_bytes())
@@ -170,16 +185,8 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
             if screenshots:
                 for page in sorted((output / 'read').glob('page-*.xml')):
                     page_id = ET.parse(page).getroot().attrib['ID']
-                    if not re.fullmatch(r'\{[0-9A-Fa-f-]+\}\{[0-9]+\}\{[0-9A-Fa-f]+\}', page_id):
-                        raise ValueError('The native page identity cannot be used for navigation.')
                     result = windows.do_exec(
-                        'OnError((exception, mode) => (FileAppend(exception.Message, "**"), ExitApp(1)))\n'
-                        'DetectHiddenWindows false\napp := ComObject("OneNote.Application")\n'
-                        f'app.NavigateTo("{page_id}", "", false)\n'
-                        'hwnd := WinWait("ahk_class Framework::CFrame ahk_exe ONENOTE.EXE",, 10)\n'
-                        'if !hwnd\n    throw Error("OneNote window did not appear")\n'
-                        'WinMaximize(hwnd)\nWinActivate(hwnd)\n'
-                        'if !WinWaitActive(hwnd,, 10)\n    throw Error("OneNote window did not become active")\n',
+                        navigation_script(page_id),
                         target=name, shot_delay_ms=1500)
                     page.with_suffix('.navigation.json').write_text(json.dumps({k: v for k, v in result.items() if k != 'png_b64'}, indent=2))
                     if result.get('png_b64'):
