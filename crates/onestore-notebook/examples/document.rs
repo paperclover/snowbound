@@ -3,6 +3,7 @@ use onestore::{
     document::{Document, Kind},
 };
 use std::{
+    borrow::Cow,
     collections::BTreeSet,
     env, fs,
     io::{self, BufWriter, Write},
@@ -26,13 +27,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.next().is_some() {
         return Err("Provide a source file and an optional new export directory.".into());
     }
-    let bytes = onestore::read_file(path)?;
+    let source_path = PathBuf::from(path);
+    let bytes = onestore::read_file(&source_path)?;
     let store = Store::parse(&bytes)?;
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
     if let Some(destination) = destination {
         fs::create_dir(&destination)?;
         fs::create_dir(destination.join("assets"))?;
+        let parent = source_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut source = onestore_notebook::Local::open(parent)?;
+        let section = source_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("Use a UTF-8 section filename")?;
         let mut assets = Vec::new();
         let mut seen = BTreeSet::new();
         for node in document
@@ -42,15 +53,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .flat_map(|r| r.nodes.values())
         {
             if let Kind::File {
-                reference: FileDataReference::Internal(guid),
-                payload: Some(data),
-                ..
+                reference, payload, ..
             } = &node.kind
-                && seen.insert(guid)
+                && seen.insert(serde_json::to_string(reference)?)
             {
+                let data = match reference {
+                    FileDataReference::Internal(_) => {
+                        Cow::Borrowed(payload.ok_or("Missing embedded file data")?)
+                    }
+                    FileDataReference::External(filename) => {
+                        match onestore_notebook::read_external_asset(
+                            &mut source,
+                            section,
+                            filename,
+                            256 * 1024 * 1024,
+                        ) {
+                            Ok(bytes) => Cow::Owned(bytes),
+                            Err(error) => {
+                                let kind = match &error {
+                                    onestore_notebook::Error::Io { error, .. } => {
+                                        format!("{:?}", error.kind())
+                                    }
+                                    _ => "InvalidData".into(),
+                                };
+                                assets.push(serde_json::json!({"reference":reference,"path":null,"error":{"kind":kind,"message":error.to_string()}}));
+                                continue;
+                            }
+                        }
+                    }
+                    FileDataReference::Invalid => {
+                        assets.push(serde_json::json!({"reference":reference,"path":null,"error":{"kind":"InvalidData","message":"The document marks this payload as unavailable"}}));
+                        continue;
+                    }
+                };
                 let path = format!("assets/{}.bin", assets.len());
                 fs::write(destination.join(&path), data)?;
-                assets.push(serde_json::json!({"reference": FileDataReference::Internal(*guid), "path": path}));
+                assets.push(serde_json::json!({"reference":reference,"path":path}));
             }
         }
         write_json(destination.join("assets.json"), &assets)?;

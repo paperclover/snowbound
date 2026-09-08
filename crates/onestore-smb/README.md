@@ -47,6 +47,11 @@ are rejected with `ResourceBusy`. Notebook identities come from the files, not
 directory names or sizes. Missing paths, denied access and non-directory paths
 have distinct I/O error kinds.
 
+`Client::read_asset(path, byte_limit)` reads an external payload under a read-only
+share handle that excludes writes and deletion. Empty files succeed; limits,
+interrupted reads and failed close never return partial bytes. This payload read
+does not parse a OneStore header or acquire its reader-coordination bytes.
+
 `python3 tools/test_smb_directory.py VM OUTPUT` checks a caller-owned disposable
 Linux lab VM against its filesystem listing and interrupts directory requests,
 responses and close. It creates synthetic files in that VM; the caller retains

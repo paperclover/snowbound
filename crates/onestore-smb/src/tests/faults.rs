@@ -171,14 +171,7 @@ fn configure(output: &Path, state: Value) -> usize {
     }
 }
 
-#[test]
-#[ignore = "requires an owned Samba share and a new ONESTORE_SMB_EVIDENCE directory"]
-fn live_message_loss() {
-    let output = std::path::PathBuf::from(std::env::var("ONESTORE_SMB_EVIDENCE").unwrap());
-    fs::create_dir(&output).unwrap();
-    fs::create_dir(output.join("interrupted")).unwrap();
-    fs::create_dir(output.join("recovered")).unwrap();
-    fs::create_dir(output.join("source")).unwrap();
+fn proxy(output: &Path) -> (Proxy, String) {
     let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
     let (host, port) = address.rsplit_once(':').unwrap();
     let mut proxy = Proxy(
@@ -193,7 +186,7 @@ fn live_message_loss() {
     );
     let deadline = Instant::now() + Duration::from_secs(5);
     let port = loop {
-        if let Some(port) = records(&output)
+        if let Some(port) = records(output)
             .iter()
             .find_map(|event| event["listening"].as_u64())
         {
@@ -203,7 +196,81 @@ fn live_message_loss() {
         assert!(Instant::now() < deadline, "proxy did not start");
         std::thread::sleep(Duration::from_millis(5));
     };
-    let proxied = format!("127.0.0.1:{port}");
+    (proxy, format!("127.0.0.1:{port}"))
+}
+
+#[test]
+#[ignore = "requires an owned Samba share and a new ONESTORE_SMB_EVIDENCE directory"]
+fn live_asset_loss() {
+    let output = std::path::PathBuf::from(std::env::var("ONESTORE_SMB_EVIDENCE").unwrap());
+    fs::create_dir(&output).unwrap();
+    let (_proxy, address) = proxy(&output);
+    let observer = client();
+    let bytes: Vec<_> = (0..1048577).map(|index| (index % 251) as u8).collect();
+    let path = format!(
+        "asset-loss-{}.onebin",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    create(&observer, &path, &bytes);
+    for (command, occurrence) in [(8, 1), (8, 9), (8, 17), (8, 18), (6, 1)] {
+        for direction in ["request", "response"] {
+            let reader = Client::connect(
+                &address,
+                "agent",
+                Credentials::default(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            // Response occurrences count only replies with the selected status.
+            let begin = configure(
+                &output,
+                json!({"cut":command,"occurrence":if command == 8 && occurrence == 18 && direction == "response" { 1 } else { occurrence },
+                    "direction":direction,"status":if command == 8 && occurrence == 18 { "0xc0000011" } else { "0x0" }}),
+            );
+            assert!(
+                reader.read_asset(&path, bytes.len()).is_err(),
+                "{command}/{occurrence}/{direction}"
+            );
+            assert_eq!(
+                reader.read_asset(&path, bytes.len()).unwrap_err().kind(),
+                io::ErrorKind::NotConnected
+            );
+            assert_eq!(
+                records(&output)[begin..]
+                    .iter()
+                    .filter(|row| row.get("cut").is_some())
+                    .count(),
+                1
+            );
+            configure(
+                &output,
+                json!({"phase":format!("{command}-{occurrence}-{direction}-reconnected")}),
+            );
+            let reconnected = Client::connect(
+                &address,
+                "agent",
+                Credentials::default(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(reconnected.read_asset(&path, bytes.len()).unwrap(), bytes);
+        }
+    }
+    assert_eq!(observer.read_asset(&path, bytes.len()).unwrap(), bytes);
+}
+
+#[test]
+#[ignore = "requires an owned Samba share and a new ONESTORE_SMB_EVIDENCE directory"]
+fn live_message_loss() {
+    let output = std::path::PathBuf::from(std::env::var("ONESTORE_SMB_EVIDENCE").unwrap());
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(output.join("interrupted")).unwrap();
+    fs::create_dir(output.join("recovered")).unwrap();
+    fs::create_dir(output.join("source")).unwrap();
+    let (_proxy, proxied) = proxy(&output);
     let observer = client();
     let prefix = SystemTime::now()
         .duration_since(UNIX_EPOCH)

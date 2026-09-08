@@ -49,6 +49,14 @@ impl Object<'_> {
             offset: 0,
             message: "Invalid UTF-16 file-data reference",
         })?;
+        text.parse().map(Some)
+    }
+}
+
+impl std::str::FromStr for FileDataReference {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self, Error> {
         let parsed = if let Some(name) = text.strip_prefix("<file>") {
             name.strip_suffix(".onebin")
                 .and_then(guid)
@@ -63,7 +71,7 @@ impl Object<'_> {
         } else {
             None
         };
-        parsed.map(Some).ok_or(Error {
+        parsed.ok_or(Error {
             offset: 0,
             message: "Invalid file-data reference syntax",
         })

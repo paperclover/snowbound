@@ -61,7 +61,7 @@ class Session:
         source = pending / 'snapshot'
         source.mkdir(parents=True)
         for path in sorted((self.output / 'notebook').rglob('*')):
-            if path.suffix.lower() not in ('.one', '.onetoc2'): continue
+            if path.suffix.lower() not in ('.one', '.onetoc2', '.onebin'): continue
             saved = source / path.relative_to(self.output / 'notebook')
             saved.parent.mkdir(parents=True, exist_ok=True)
             result = bridge('snapshot', path, saved)

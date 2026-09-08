@@ -298,6 +298,8 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc, e
         exported = destination / 'model' / str(index)
         reusable = cached.get(relative.as_posix())
         reused = reusable is not None and reusable[0] == manifest[-1]['sha256']
+        if reused and any('External' in asset['reference'] for asset in json.loads((reusable[1] / 'assets.json').read_text())):
+            reused = False
         if reused:
             exported.mkdir()
             for name in ('document.json', 'text.json', 'assets.json'):
@@ -317,6 +319,7 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc, e
         }
         rows = json.loads((exported / 'assets.json').read_text())
         for asset in rows:
+            if asset['path'] is None: continue
             reference = json.dumps(asset['reference'], sort_keys=True)
             if reused:
                 name = Path(asset['path']).name

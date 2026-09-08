@@ -1,0 +1,18 @@
+﻿[
+    {
+        "sha256":  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "name":  "0.bin",
+        "object":  "{068F783A-8A63-4688-A2AC-32EB81A6EA31}{40}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{2001177A-A50B-470C-A3B4-C397629432DC}{1}{B0}",
+        "bytes":  0
+    },
+    {
+        "sha256":  "2bce1ba628720664be4b9fdd77aae0678e5f0f3f02fc6ff641ec879094f6a404",
+        "name":  "1024.bin",
+        "object":  "{F876120D-4126-473B-9D5F-F961FAF66D65}{40}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{5B886F89-E2CC-4184-AF00-42A8CB7EEDBF}{1}{B0}",
+        "bytes":  1024
+    }
+]

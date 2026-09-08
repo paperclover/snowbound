@@ -114,4 +114,8 @@ impl Source for Smb<'_> {
     fn read(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
         self.client.read_storage(&self.path(path)?, limit)
     }
+
+    fn read_asset(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        self.client.read_asset(&self.path(path)?, limit)
+    }
 }

@@ -382,6 +382,55 @@ fn live_storage_inspection() {
 }
 
 #[test]
+#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
+fn live_assets() {
+    let reader = client();
+    let writer = client();
+    for size in [0, 1, 65535, 65536, 65537, 1048577] {
+        let bytes: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
+        let path = format!(
+            "asset-{size}-{}.onebin",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        create(&writer, &path, &bytes);
+        assert_eq!(reader.read_asset(&path, size).unwrap(), bytes);
+        if size != 0 {
+            assert_eq!(
+                reader.read_asset(&path, size - 1).unwrap_err().kind(),
+                io::ErrorKind::FileTooLarge
+            );
+            assert_eq!(reader.read_asset(&path, size).unwrap(), bytes);
+        }
+        let writing = writer.open(&path, true).unwrap();
+        assert_eq!(
+            reader.read_asset(&path, size).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        writing.close().unwrap();
+        let asset = reader.open_shared(&path, false, 1).unwrap();
+        assert_eq!(
+            writer.open(&path, true).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let other = writer.open_shared(&path, false, 1).unwrap();
+        other.close().unwrap();
+        asset.close().unwrap();
+        writer.open(&path, true).unwrap().close().unwrap();
+        assert_eq!(reader.read_asset(&path, size).unwrap(), bytes);
+    }
+    assert_eq!(
+        reader
+            .read_asset("absent-payload.onebin", 0)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
+#[test]
 #[ignore = "requires an owned Samba fixture and maintenance controller"]
 fn live_reader_hold() {
     let client = client();

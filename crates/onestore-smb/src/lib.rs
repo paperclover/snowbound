@@ -175,6 +175,10 @@ impl Client {
     }
 
     fn open(&self, path: &str, write: bool) -> io::Result<File<'_>> {
+        self.open_shared(path, write, if write { 5 } else { 7 })
+    }
+
+    fn open_shared(&self, path: &str, write: bool, sharing: u32) -> io::Result<File<'_>> {
         if path.is_empty() || path.contains('\0') || path.encode_utf16().count() > 32767 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -185,7 +189,7 @@ impl Client {
                 impersonation_level: ImpersonationLevel::Impersonation,
                 desired_access: FileAccessMask::new(if write { 0xc0000000 } else { 0x80000000 }),
                 file_attributes: 0,
-                share_access: ShareAccess(if write { 5 } else { 7 }),
+                share_access: ShareAccess(sharing),
                 create_disposition: CreateDisposition::FileOpen,
                 create_options: 0x42,
                 name: smb2::encode_path(&path.replace('\\', "/")),
@@ -196,6 +200,30 @@ impl Client {
             client: self,
             id: Some(response.file_id),
         })
+    }
+
+    /// Reads a bounded external payload while denying concurrent writes and deletion.
+    /// Empty files succeed; limits, sharing contention and failed close return no payload.
+    pub fn read_asset(&self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        let mut file = self.open_shared(path, false, 1)?;
+        let mut bytes = Vec::new();
+        let mut block = [0; 65536];
+        loop {
+            let count = (limit - bytes.len()).min(block.len() - 1) + 1;
+            let read = file.read_at(
+                u64::try_from(bytes.len()).map_err(|_| io::ErrorKind::InvalidInput)?,
+                &mut block[..count],
+            )?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&block[..read]);
+            if bytes.len() > limit {
+                return Err(io::ErrorKind::FileTooLarge.into());
+            }
+        }
+        file.close()?;
+        Ok(bytes)
     }
 
     /// Reads one bounded, consistent snapshot; contention returns WouldBlock.

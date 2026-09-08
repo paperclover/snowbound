@@ -1,0 +1,23 @@
+{
+  "native_author": "tools/native/external-assets.ps1",
+  "generator": "crates/onestore-notebook/examples/externalize_fixture.rs",
+  "native_capture": "evidence/m10/external-assets-small-native",
+  "cold_capture": "evidence/m10/external-assets-small-cold",
+  "source_sha256": {
+    "native/synthetic.one": "3a4dcb0b6f9e46044a3cdc663ae505878911c2a7255a7787c55ae2c71a7f4fd6",
+    "read/page-002.xml": "4104b7f1b2a8bcc98c5ce73c335d365ae67d565a72f9da2ba78304dd7226944f",
+    "read/page-001.xml": "8c1a503344f3d6893a3df1a3ff5d51d591c0a61e04101c360aa1546d386f5a15",
+    "read/page-000.xml": "6796df2c0594a3263416dfbd1210ec412e0694d30115869f3ceab768c95a3e32",
+    "read/hierarchy.xml": "4a1207f82678cd2020ee175979074601bd9f85c102bd68e5df34c54e37616574",
+    "read/payloads.json": "0b31ae5e576ba7ee5eab7c9a62d8f673659a76865ad07f9e75f45458c06a7e65",
+    "read/environment.json": "1cd7ab391d85fe504344cd63bd786f969770ce09aef0008623eaf0abb880e655",
+    "notebook/Open Notebook.onetoc2": "8fec3cc6f72a9e0fff45ce604f62c184b0bb63d077018f90086b31396c8500b0",
+    "notebook/synthetic.one": "7343061e2a44c67b5f306c747e707fc1b99d126c51db510cc010885c2b016ca2",
+    "notebook/synthetic_onefiles/15575137-1653-47BC-9C05-78420499168B.onebin": "38b0469c7f0cddba0fa7739b44061117b2621bfe477348150cfc98396f41daf1",
+    "notebook/synthetic_onefiles/C5EABC1E-5091-4685-BAC1-2C785D6046DB.onebin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "notebook/synthetic_onefiles/04DC5FD1-10FD-4404-A37C-D035399F9D9E.onebin": "2bce1ba628720664be4b9fdd77aae0678e5f0f3f02fc6ff641ec879094f6a404"
+  },
+  "cold_teardown": {
+    "absent": true
+  }
+}

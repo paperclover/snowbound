@@ -77,6 +77,46 @@ pub trait Source {
     fn entries(&mut self, path: &str, limit: usize) -> io::Result<Vec<Entry>>;
     /// Return a consistent file snapshot, rejecting images larger than the byte limit.
     fn read(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>>;
+    /// Reads an external payload with the same completeness and size guarantees.
+    fn read_asset(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        self.read(path, limit)
+    }
+}
+
+/// Reads an external file-data reference from the section's sibling `_onefiles` folder.
+/// `NotFound` in `Error::Io` is distinct from a successfully read zero-byte payload.
+pub fn read_external_asset(
+    source: &mut impl Source,
+    section: &str,
+    filename: &str,
+    limit: usize,
+) -> Result<Vec<u8>, Error> {
+    let (stem, extension) = section.rsplit_once('.').ok_or_else(|| Error::Entry {
+        path: section.into(),
+    })?;
+    if !extension.eq_ignore_ascii_case("one")
+        || !section.split('/').all(component)
+        || stem.ends_with('/')
+        || stem.is_empty()
+    {
+        return Err(Error::Entry {
+            path: section.into(),
+        });
+    }
+    format!("<file>{filename}")
+        .parse::<onestore::FileDataReference>()
+        .map_err(|_| Error::Entry {
+            path: filename.into(),
+        })?;
+    let path = format!("{stem}_onefiles/{filename}");
+    let bytes = source.read_asset(&path, limit).map_err(|error| Error::Io {
+        path: path.clone(),
+        error,
+    })?;
+    if bytes.len() > limit {
+        return Err(Error::Limit { path });
+    }
+    Ok(bytes)
 }
 
 pub struct Limits {
@@ -113,7 +153,8 @@ pub enum Error {
     },
 }
 
-/// Discovers the complete rooted directory within caller-specified work and size limits.
+/// Discovers rooted notebook topology within caller-specified work and size limits.
+/// Reserved `_onefiles` directories contain payloads, not section groups.
 pub fn discover(source: &mut impl Source, limits: Limits) -> Result<Folder, Error> {
     let mut remaining = limits.entries;
     let mut identities = BTreeMap::new();
@@ -158,6 +199,9 @@ fn scan(
     for entry in &listing {
         let child = join(path, &entry.name);
         if entry.kind == EntryKind::Directory {
+            if entry.name.to_ascii_lowercase().ends_with("_onefiles") {
+                continue;
+            }
             result.groups.push(scan(
                 source,
                 &child,

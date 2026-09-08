@@ -1,6 +1,7 @@
 import base64
 from io import BytesIO
 import json
+import hashlib
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -16,6 +17,40 @@ from document_model import EXPORTER
 
 
 class NotebookReportTest(unittest.TestCase):
+    def test_external_assets_match_native_bytes_and_refresh_without_a_section_edit(self):
+        from notebook_editor import Session
+        fixture = Path(__file__).resolve().parent.parent / 'corpus/native-external-assets'
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source'
+            shutil.copytree(fixture / 'notebook', source)
+            session = Session(source, root / 'session')
+            first = root / 'session/g/0/report'
+            section = next(p.parent for p in (first / 'model').glob('*/assets.json')
+                           if json.loads(p.read_text()))
+            rows = json.loads((section / 'assets.json').read_text())
+            expected = {row['sha256'] for row in json.loads((fixture / 'read/payloads.json').read_text(encoding='utf-8-sig'))}
+            actual = {hashlib.sha256((section / row['path']).read_bytes()).hexdigest() for row in rows}
+            self.assertTrue(expected <= actual)
+            for payload in source.rglob('*.onebin'):
+                self.assertEqual(payload.read_bytes(), (root / 'session/g/0/snapshot' / payload.relative_to(source)).read_bytes())
+            payload, = [p for p in source.rglob('*.onebin') if p.stat().st_size == 1024]
+            reference = {'External': payload.name}
+            old, = [row for row in rows if row['reference'] == reference]
+            previous_bytes = (section / old['path']).read_bytes()
+            payload.unlink()
+            generate(source, root / 'missing', previous=first)
+            missing, = [row for p in (root / 'missing/model').glob('*/assets.json')
+                        for row in json.loads(p.read_text()) if row['reference'] == reference]
+            self.assertIsNone(missing['path'])
+            self.assertEqual(missing['error']['kind'], 'NotFound')
+            payload.write_bytes(b'Changed external payload')
+            generate(source, root / 'changed', previous=root / 'missing')
+            changed, = [(p.parent, row) for p in (root / 'changed/model').glob('*/assets.json')
+                        for row in json.loads(p.read_text()) if row['reference'] == reference]
+            self.assertEqual((changed[0] / changed[1]['path']).read_bytes(), payload.read_bytes())
+            self.assertEqual((section / old['path']).read_bytes(), previous_bytes)
+
     def test_locked_and_unreadable_sections_remain_visible_in_cached_reports(self):
         fixture = Path(__file__).resolve().parent.parent / 'corpus/native-encrypted/cold-encrypted-02/notebook'
         with TemporaryDirectory() as temporary:

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class NativeDiscovery(unittest.TestCase):
     def test_native_hierarchies(self):
         fixtures = ['m6/native-features-01', 'native-encrypted/cold-encrypted-02',
-                    'native-delete/cold-deletion-05']
+                    'native-delete/cold-deletion-05', 'native-external-assets']
         if os.environ.get('ONESTORE_NOTEBOOK_NATIVE'):
             fixtures.append(str(Path(os.environ['ONESTORE_NOTEBOOK_NATIVE']).resolve()))
         for fixture in fixtures:
