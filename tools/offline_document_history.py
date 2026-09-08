@@ -80,6 +80,11 @@ def document_history(logs, operations):
             assert formatted['range'] == [1, len(text.encode('utf-16-le')) // 2 - 2]
             assert formatted['attributes'] == [{'Bold': True}, {'FontSize': 18 + number % 9}, {'Color': [18, 52, 86]}]
             old = [(char, False, 11, 0xff000000) for char in text]
+            if insertion.get('formats'):
+                span, = insertion['formats']
+                assert span['range'] == {'start': 0, 'end': len(text.encode('utf-16-le')) // 2}, 'Initial formatting range differs from workload'
+                assert span['attributes'] == [{'FontSize': 13.5}, {'Color': [68, 85, 102]}], 'Initial formatting attributes differ from workload'
+                old = [(char, False, 13.5, 0x665544) for char in text]
             new = [(char, True, 18 + number % 9, 0x563412) if 0 < i < len(text)-1 else old[i] for i, char in enumerate(text)]
             assert target not in documents, 'Two insertion intents share an object identity'
             created, changed = linked[inserted['id']], linked[formatted['id']]
@@ -158,6 +163,6 @@ def verify_native(paragraphs, documents):
             if color == 0xff000000:
                 assert native_color in ('automatic', None), 'Native automatic color changed'
             else:
-                assert ImageColor.getrgb(native_color) == (18, 52, 86), 'Native color differs from intent'
+                assert ImageColor.getrgb(native_color) == (color & 255, (color >> 8) & 255, (color >> 16) & 255), 'Native color differs from intent'
             checks += 3
     return checks

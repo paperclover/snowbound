@@ -77,3 +77,10 @@ path = "fuzz_targets/edit_text.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "insert"
+path = "fuzz_targets/insert.rs"
+test = false
+doc = false
+bench = false

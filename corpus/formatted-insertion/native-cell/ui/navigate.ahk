@@ -1,0 +1,20 @@
+#Requires AutoHotkey v2.0
+OnError((exception, mode) => (FileAppend(exception.Message, "**"), ExitApp(1)))
+dm := Buffer(220, 0)
+NumPut("UShort", 220, dm, 68)
+if !DllCall("EnumDisplaySettingsW", "Ptr", 0, "UInt", 0xFFFFFFFF, "Ptr", dm)
+    throw Error("Cannot inspect display mode")
+NumPut("UInt", NumGet(dm, 72, "UInt") | 0x180000, dm, 72)
+NumPut("UInt", 1280, dm, 172)
+NumPut("UInt", 720, dm, 176)
+if DllCall("ChangeDisplaySettingsW", "Ptr", dm, "UInt", 0, "Int") != 0
+    throw Error("Display mode rejected")
+app := ComObject("OneNote.Application")
+app.NavigateTo("{522867B0-C8C0-4F8D-A589-C6589E6AA49F}{1}{B0}", "{5F18EBB1-FBEF-079C-2689-78693371A9D4}{1}{B0}", false)
+hwnd := WinWait("ahk_class Framework::CFrame ahk_exe ONENOTE.EXE",, 10)
+if !hwnd
+    throw Error("OneNote window did not appear")
+WinMaximize(hwnd)
+WinActivate(hwnd)
+if !WinWaitActive(hwnd,, 10)
+    throw Error("OneNote window did not become active")

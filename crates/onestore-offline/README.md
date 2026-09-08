@@ -26,7 +26,8 @@ assert_eq!(pending.last().map(|edit| edit.id), local_id);
 ```
 
 `insert` accepts the core library's `Insertion` value and durably retains its
-object identities. Keep that value across retries; its `text_object()` identifies
+intent identities. `Insertion::with_formatting` queues text and
+its styles as one intent and one publication. Keep that value across retries; its `text_object()` identifies
 the new text for subsequent offline edits. Pending entries expose
 `Operation::Text(TextEdit)`, `Operation::Insert(Insertion)` or
 `Operation::Format(FormatEdit)` through their
@@ -47,12 +48,9 @@ use onestore::{ExGuid, Insertion, TextAttribute};
 use onestore_offline::{EditStatus, Replica};
 # fn add_outline(cache: &Replica, space: ExGuid, page: ExGuid)
 # -> Result<(), Box<dyn std::error::Error>> {
-let outline = Insertion::outline(page, 144.0, 216.0, "Offline outline", "Author")?;
+let outline = Insertion::outline(page, 144.0, 216.0, "Offline outline", "Author")?
+    .with_formatting(0..7, &[TextAttribute::Bold(true)])?;
 let id = cache.insert(&cache.snapshot()?, space, &outline)?;
-cache.format(
-    &cache.snapshot()?, space, outline.text_object(), 0..7,
-    &[TextAttribute::Bold(true)],
-)?;
 if let Some(id) = id {
     // A running worker may already have advanced this state.
     match cache.status(id)? {

@@ -8,6 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ops::Range,
     sync::Arc,
 };
 
@@ -22,6 +23,14 @@ enum Placement {
     Outline { x: f32, y: f32 },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FormatSpan {
+    guid: [u8; 16],
+    range: Range<u32>,
+    attributes: Vec<crate::TextAttribute>,
+}
+
 /// A paragraph or outline insertion with stable object identities and creation time.
 /// Retain this intent across rebases; constructing another intent allocates different identities.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -33,9 +42,29 @@ pub struct Insertion {
     text: String,
     author: String,
     created: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    formats: Vec<FormatSpan>,
 }
 
 impl Insertion {
+    /// Adds a nonoverlapping UTF-16 formatting span, retaining all existing identities.
+    /// Gaps use the ordinary insertion style; only empty text accepts a zero-length span.
+    pub fn with_formatting(
+        &self,
+        range: Range<u32>,
+        attributes: &[crate::TextAttribute],
+    ) -> Result<Self, Error> {
+        let mut intent = self.clone();
+        intent.formats.push(FormatSpan {
+            guid: fresh_guid()?,
+            range,
+            attributes: attributes.to_vec(),
+        });
+        intent.formats.sort_by_key(|span| span.range.start);
+        intent.validate()?;
+        Ok(intent)
+    }
+
     /// Inserts before a direct child, or appends when `before` is None.
     /// The parent must be an editable outline, paragraph, outline group or table cell.
     /// Carriage returns represent soft line breaks; line feeds and embedded-field markers are rejected.
@@ -89,6 +118,7 @@ impl Insertion {
             text: text.to_owned(),
             author: author.to_owned(),
             created: current_timestamps()?.0,
+            formats: Vec::new(),
         };
         intent.validate()?;
         Ok(intent)
@@ -124,6 +154,37 @@ impl Insertion {
             && (!x.is_finite() || !y.is_finite())
         {
             return Err(invalid("Outline coordinates must be finite"));
+        }
+        if !self.formats.is_empty() {
+            let units: Vec<_> = self.text.encode_utf16().collect();
+            let length = u32::try_from(units.len())
+                .map_err(|_| invalid("Text exceeds UTF-16 offset range"))?;
+            let mut identities = BTreeSet::from([self.guid]);
+            let mut end = 0;
+            for span in &self.formats {
+                if span.guid == [0; 16] || !identities.insert(span.guid) {
+                    return Err(invalid("Formatting identities must be distinct"));
+                }
+                if span.range.start > span.range.end
+                    || span.range.end > length
+                    || span.range.start < end
+                    || (span.range.is_empty() && (!units.is_empty() || self.formats.len() != 1))
+                {
+                    return Err(invalid(
+                        "Formatting spans must be nonoverlapping ranges within the new text",
+                    ));
+                }
+                for boundary in [span.range.start, span.range.end] {
+                    if boundary > 0
+                        && boundary < length
+                        && (0xd800..=0xdbff).contains(&units[boundary as usize - 1])
+                    {
+                        return Err(invalid("Formatting boundary splits a surrogate pair"));
+                    }
+                }
+                crate::formatting::attribute_values(&span.attributes)?;
+                end = span.range.end;
+            }
         }
         Ok(())
     }
@@ -242,6 +303,55 @@ impl Insertion {
                     global_ids: Arc::clone(&table),
                 },
             );
+        }
+        if !self.formats.is_empty() {
+            let default = ExGuid {
+                guid: self.guid,
+                n: 5,
+            };
+            let mut segments = Vec::new();
+            let mut end = 0;
+            for span in &self.formats {
+                if end < span.range.start {
+                    segments.push((span.range.start, default));
+                }
+                let id = ExGuid {
+                    guid: span.guid,
+                    n: 1,
+                };
+                let mut style = PropertyObject {
+                    jcid: 0x12004d,
+                    bytes: properties(&default_text_style())?,
+                    global_ids: Arc::new(BTreeMap::from([(0, span.guid)])),
+                };
+                let values = crate::formatting::attribute_values(&span.attributes)?;
+                style.set(
+                    &values
+                        .iter()
+                        .map(|(id, value)| (*id, value.as_slice()))
+                        .collect::<Vec<_>>(),
+                )?;
+                new.insert(id, style);
+                segments.push((span.range.end, id));
+                end = span.range.end;
+            }
+            let length = u32::try_from(self.text.encode_utf16().count())
+                .map_err(|_| invalid("Text exceeds UTF-16 offset range"))?;
+            if end < length {
+                segments.push((length, default));
+            }
+            if !segments.iter().any(|(_, id)| *id == default) {
+                new.remove(&default);
+            }
+            let target = new.get_mut(&self.text_object()).unwrap();
+            let mut references = Vec::new();
+            let mut ends = Vec::new();
+            for (end, id) in segments {
+                references.extend_from_slice(&target.reference(id)?);
+                ends.extend_from_slice(&end.to_le_bytes());
+            }
+            ends.truncate(ends.len() - 4);
+            target.set(&[(0x24001e13, &references), (0x1c001e12, &ends)])?;
         }
         if let Placement::Outline { x, y } = self.placement {
             new.insert(

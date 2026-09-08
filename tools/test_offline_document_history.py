@@ -60,6 +60,34 @@ class DocumentHistoryTests(unittest.TestCase):
             events.remove(next(row for row in events if row['event'] == name))
             with self.subTest(event=name), self.assertRaises(AssertionError): document_history(logs, 2)
 
+    def test_formatted_insertions_are_atomic_in_every_observed_snapshot(self):
+        for events in self.logs.values():
+            for row in events:
+                insertion = row.get('insertion')
+                if insertion:
+                    insertion['formats'] = [{'guid': list(uuid.uuid4().bytes_le),
+                        'range': {'start': 0, 'end': len(insertion['text'].encode('utf-16-le')) // 2},
+                        'attributes': [{'FontSize': 13.5}, {'Color': [68, 85, 102]}]}]
+                for key in ('documents', 'document_changes'):
+                    for document in (row.get(key) or {}).values():
+                        for run in document['runs']:
+                            if run['size'] == 11:
+                                run['size'] = 13.5
+                                run['color'] = 0x665544
+        documents = document_history(self.logs, 2)
+        paragraphs = [[(char, {'bold': bold, 'font_size': size,
+                       'color': '#123456' if color == 0x563412 else '#445566'})
+                       for char, bold, size, color in row['new']] for row in documents.values()]
+        self.assertEqual(verify_native(paragraphs, documents), sum(len(row['new'])*3 for row in documents.values()))
+        baseline = copy.deepcopy(self.logs)
+        for event, key in [('remote_attempt', 'document_changes'), ('read', 'documents')]:
+            for field, value in [('size', 11), ('color', 0xff000000)]:
+                logs = copy.deepcopy(baseline)
+                row = next(row for row in logs['w0'] if row['event'] == event)
+                next(iter(row[key].values()))['runs'][0][field] = value
+                with self.subTest(event=event, field=field), self.assertRaises(AssertionError):
+                    document_history(logs, 2)
+
     def test_retired_format_receipt_requires_current_revision_and_exact_observed_effect(self):
         events = self.logs['w0']
         attempt = next(row for row in events if row['event'] == 'remote_attempt' and row['revision'] == 'revision-3')

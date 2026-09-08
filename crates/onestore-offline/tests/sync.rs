@@ -1736,8 +1736,10 @@ fn offline_insertions_survive_reopen_rebase_and_dependent_text_edits() {
     let doc = Document::parse(&index).unwrap();
     let (_, page) = doc.pages().unwrap()[0];
     let cache = Replica::create(&path, &source).unwrap();
-    let outline =
-        Insertion::outline(page, 72.0, 144.0, "Offline outline", "Offline author").unwrap();
+    let outline = Insertion::outline(page, 72.0, 144.0, "Offline outline", "Offline author")
+        .unwrap()
+        .with_formatting(0..7, &[onestore::TextAttribute::Italic(true)])
+        .unwrap();
     let first = cache.insert(&source, sid, &outline).unwrap().unwrap();
     let snapshot = cache.snapshot().unwrap();
     let paragraph = Insertion::paragraph(
@@ -1746,6 +1748,8 @@ fn offline_insertions_survive_reopen_rebase_and_dependent_text_edits() {
         "Offline paragraph 🦀",
         "Offline author",
     )
+    .unwrap()
+    .with_formatting(8..17, &[onestore::TextAttribute::Bold(true)])
     .unwrap();
     let second = cache.insert(&snapshot, sid, &paragraph).unwrap().unwrap();
     let third = cache
@@ -1786,6 +1790,12 @@ fn offline_insertions_survive_reopen_rebase_and_dependent_text_edits() {
     ] {
         assert!(matches!(&v.nodes[&id].kind,Kind::RichText{text,..} if text==wanted));
     }
+    let outline_runs = v.text_runs(outline.text_object()).unwrap();
+    assert_eq!(outline_runs[0].text, "Offline");
+    assert_eq!(outline_runs[0].format.italic, Some(true));
+    let runs = v.text_runs(paragraph.text_object()).unwrap();
+    assert_eq!(runs[1].text, "paragraph");
+    assert_eq!(runs[1].format.bold, Some(true));
     assert_eq!(
         v.nodes[&outline.object()].children.last(),
         Some(&paragraph.object())
@@ -1811,8 +1821,12 @@ fn uncertain_insertions_reconcile_the_original_revision_without_duplicate_object
         let doc = Document::parse(&index).unwrap();
         let (sid, page) = doc.pages().unwrap()[0];
         let cache = Replica::create(&path, &source).unwrap();
-        let insertion =
-            Insertion::outline(page, 144.0, 144.0, "Uncertain insertion", "Author").unwrap();
+        let insertion = Insertion::outline(page, 144.0, 144.0, "Uncertain insertion", "Author")
+            .unwrap()
+            .with_formatting(0..9, &[onestore::TextAttribute::Bold(true)])
+            .unwrap()
+            .with_formatting(10..19, &[onestore::TextAttribute::Italic(true)])
+            .unwrap();
         let id = cache.insert(&source, sid, &insertion).unwrap().unwrap();
         let local = cache.snapshot().unwrap();
         let mut server = Server::new(&source);
@@ -1860,6 +1874,15 @@ fn uncertain_insertions_reconcile_the_original_revision_without_duplicate_object
             let v = &s.revisions[&s.contexts[&ExGuid::default()]];
             assert_eq!(v.nodes.values().filter(|node|matches!(&node.kind,Kind::RichText{text,..} if text=="Uncertain insertion")).count(),1);
             assert!(v.nodes.contains_key(&insertion.object()));
+            let runs = v.text_runs(insertion.text_object()).unwrap();
+            assert_eq!(runs.len(), 3);
+            assert_eq!(runs[0].text, "Uncertain");
+            assert_eq!(runs[0].format.bold, Some(true));
+            assert_eq!(runs[1].text, " ");
+            assert_ne!(runs[1].format.bold, Some(true));
+            assert_ne!(runs[1].format.italic, Some(true));
+            assert_eq!(runs[2].text, "insertion");
+            assert_eq!(runs[2].format.italic, Some(true));
             assert!(cache.pending().unwrap().is_empty());
         }
     }
@@ -2668,7 +2691,9 @@ fn reviewed_insertion_placements_preserve_identity_and_dependent_operations() {
             Insertion::outline(page, 144.0, 144.0, "Offline", "Author").unwrap()
         } else {
             Insertion::paragraph(parent, Some(anchor.object()), "Offline", "Author").unwrap()
-        };
+        }
+        .with_formatting(0..7, &[A::Italic(true)])
+        .unwrap();
         let cache = Replica::create(&path, &source).unwrap();
         let first = cache.insert(&source, sid, &insertion).unwrap().unwrap();
         let second = cache
@@ -2754,6 +2779,10 @@ fn reviewed_insertion_placements_preserve_identity_and_dependent_operations() {
         };
         assert_eq!(rebased.object(), insertion.object());
         assert_eq!(rebased.text_object(), insertion.text_object());
+        assert_eq!(
+            serde_json::to_value(&rebased).unwrap()["formats"],
+            serde_json::to_value(&insertion).unwrap()["formats"]
+        );
         assert_eq!(cache.status(first).unwrap(), Some(EditStatus::Pending));
         drop(cache);
         let cache = Replica::open(&path).unwrap();
@@ -2775,6 +2804,7 @@ fn reviewed_insertion_placements_preserve_identity_and_dependent_operations() {
             "Offline 🦀"
         );
         assert!(runs.iter().all(|r| r.format.bold == Some(true)));
+        assert!(runs.iter().all(|r| r.format.italic == Some(true)));
         if outline_case {
             assert_eq!(
                 (

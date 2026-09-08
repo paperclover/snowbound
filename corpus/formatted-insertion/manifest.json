@@ -1,0 +1,963 @@
+{
+  "generator": "crates/onestore/tests/insertion.rs:export_native_formatted_insertions",
+  "cases": [
+    {
+      "intent": {
+        "author": "Rich author",
+        "created": 1473310044,
+        "formats": [
+          {
+            "attributes": [
+              {
+                "Bold": true
+              },
+              {
+                "Underline": true
+              }
+            ],
+            "guid": [
+              207,
+              169,
+              223,
+              216,
+              230,
+              235,
+              235,
+              75,
+              185,
+              94,
+              69,
+              228,
+              117,
+              205,
+              151,
+              134
+            ],
+            "range": {
+              "end": 4,
+              "start": 0
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Font": "Arial"
+              },
+              {
+                "FontSize": 13.5
+              }
+            ],
+            "guid": [
+              233,
+              34,
+              183,
+              44,
+              7,
+              99,
+              201,
+              75,
+              140,
+              220,
+              83,
+              226,
+              209,
+              176,
+              83,
+              88
+            ],
+            "range": {
+              "end": 7,
+              "start": 5
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Italic": true
+              },
+              {
+                "Strike": true
+              }
+            ],
+            "guid": [
+              30,
+              196,
+              121,
+              136,
+              27,
+              75,
+              93,
+              79,
+              181,
+              130,
+              25,
+              17,
+              13,
+              139,
+              35,
+              217
+            ],
+            "range": {
+              "end": 14,
+              "start": 8
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Superscript": true
+              }
+            ],
+            "guid": [
+              101,
+              236,
+              26,
+              203,
+              134,
+              120,
+              215,
+              67,
+              170,
+              155,
+              81,
+              250,
+              86,
+              214,
+              214,
+              111
+            ],
+            "range": {
+              "end": 17,
+              "start": 15
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Color": [
+                  12,
+                  34,
+                  56
+                ]
+              },
+              {
+                "Highlight": [
+                  255,
+                  255,
+                  0
+                ]
+              }
+            ],
+            "guid": [
+              57,
+              2,
+              72,
+              237,
+              92,
+              155,
+              100,
+              72,
+              130,
+              100,
+              120,
+              181,
+              179,
+              69,
+              97,
+              11
+            ],
+            "range": {
+              "end": 23,
+              "start": 18
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Subscript": true
+              }
+            ],
+            "guid": [
+              189,
+              73,
+              14,
+              147,
+              222,
+              140,
+              144,
+              65,
+              176,
+              86,
+              229,
+              249,
+              220,
+              119,
+              252,
+              192
+            ],
+            "range": {
+              "end": 26,
+              "start": 24
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Bold": false
+              },
+              {
+                "Italic": false
+              },
+              {
+                "Color": null
+              },
+              {
+                "Highlight": null
+              }
+            ],
+            "guid": [
+              165,
+              80,
+              86,
+              53,
+              207,
+              121,
+              164,
+              68,
+              169,
+              152,
+              106,
+              34,
+              115,
+              110,
+              230,
+              151
+            ],
+            "range": {
+              "end": 30,
+              "start": 27
+            }
+          }
+        ],
+        "guid": [
+          205,
+          161,
+          237,
+          192,
+          33,
+          131,
+          161,
+          64,
+          168,
+          94,
+          233,
+          150,
+          178,
+          37,
+          36,
+          190
+        ],
+        "parent": "{71AF36A5-6150-452F-B7F3-66BFFF4C3582},22",
+        "placement": {
+          "Outline": {
+            "x": 72.0,
+            "y": 144.0
+          }
+        },
+        "text": "Bold \ud83e\udd80 italic e\u0301 color \u6771\u4eac\rEnd"
+      },
+      "name": "outline",
+      "space": "{A8C9EFCE-DF4E-462A-866B-6AD8DFFE4C30},1",
+      "candidate_sha256": "76f6b743caa9dc2b5ab342d6e6a742125ecbcd0ca2372062b42acbd08b5ebb4c",
+      "cold_sha256": "151a49d8cf2e607a10a9c948286ce7eb3eb754fa90e9557a74a2cb1f1f0204cb",
+      "reverse_sha256": "8127b63d52ecbc2ad88a0d4f0eccb7fc8b086983f25db40b5f3396616f39cc53",
+      "omitted_table_outline_size": false
+    },
+    {
+      "intent": {
+        "author": "Rich author",
+        "created": 1473310044,
+        "formats": [
+          {
+            "attributes": [
+              {
+                "Bold": true
+              },
+              {
+                "Underline": true
+              }
+            ],
+            "guid": [
+              141,
+              194,
+              83,
+              170,
+              169,
+              68,
+              33,
+              76,
+              139,
+              83,
+              12,
+              156,
+              72,
+              95,
+              145,
+              140
+            ],
+            "range": {
+              "end": 4,
+              "start": 0
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Font": "Arial"
+              },
+              {
+                "FontSize": 13.5
+              }
+            ],
+            "guid": [
+              168,
+              249,
+              0,
+              182,
+              1,
+              200,
+              117,
+              66,
+              179,
+              210,
+              69,
+              6,
+              83,
+              62,
+              157,
+              171
+            ],
+            "range": {
+              "end": 7,
+              "start": 5
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Italic": true
+              },
+              {
+                "Strike": true
+              }
+            ],
+            "guid": [
+              152,
+              84,
+              172,
+              67,
+              218,
+              72,
+              77,
+              67,
+              143,
+              158,
+              58,
+              16,
+              177,
+              251,
+              222,
+              20
+            ],
+            "range": {
+              "end": 14,
+              "start": 8
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Superscript": true
+              }
+            ],
+            "guid": [
+              29,
+              165,
+              47,
+              217,
+              107,
+              120,
+              31,
+              79,
+              148,
+              67,
+              148,
+              232,
+              78,
+              245,
+              157,
+              68
+            ],
+            "range": {
+              "end": 17,
+              "start": 15
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Color": [
+                  12,
+                  34,
+                  56
+                ]
+              },
+              {
+                "Highlight": [
+                  255,
+                  255,
+                  0
+                ]
+              }
+            ],
+            "guid": [
+              165,
+              189,
+              67,
+              237,
+              2,
+              56,
+              67,
+              70,
+              169,
+              71,
+              239,
+              10,
+              236,
+              192,
+              119,
+              48
+            ],
+            "range": {
+              "end": 23,
+              "start": 18
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Subscript": true
+              }
+            ],
+            "guid": [
+              116,
+              118,
+              37,
+              115,
+              74,
+              111,
+              247,
+              70,
+              172,
+              126,
+              100,
+              131,
+              159,
+              151,
+              38,
+              234
+            ],
+            "range": {
+              "end": 26,
+              "start": 24
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Bold": false
+              },
+              {
+                "Italic": false
+              },
+              {
+                "Color": null
+              },
+              {
+                "Highlight": null
+              }
+            ],
+            "guid": [
+              32,
+              151,
+              42,
+              7,
+              76,
+              55,
+              143,
+              75,
+              178,
+              217,
+              234,
+              71,
+              135,
+              25,
+              75,
+              145
+            ],
+            "range": {
+              "end": 30,
+              "start": 27
+            }
+          }
+        ],
+        "guid": [
+          191,
+          62,
+          177,
+          4,
+          17,
+          246,
+          2,
+          68,
+          130,
+          157,
+          199,
+          46,
+          35,
+          34,
+          28,
+          139
+        ],
+        "parent": "{03D49648-056C-0F08-32C9-0424E8496E7D},10",
+        "placement": {
+          "Paragraph": {
+            "before": "{03D49648-056C-0F08-32C9-0424E8496E7D},11"
+          }
+        },
+        "text": "Bold \ud83e\udd80 italic e\u0301 color \u6771\u4eac\rEnd"
+      },
+      "name": "native-paragraph",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "202823512283be980b6a139adcf5f4f369d15f17d60ed7b23f9f2289513aa4e9",
+      "cold_sha256": "efb61aaedbe12cb00434f7e581259d112480158cacb66961d4168081b77a1112",
+      "reverse_sha256": "753b320528748faa1ae11ee5eb710530d15636361674aab37f4c442ee5b9dd7b",
+      "omitted_table_outline_size": false
+    },
+    {
+      "intent": {
+        "author": "Rich author",
+        "created": 1473310044,
+        "formats": [
+          {
+            "attributes": [
+              {
+                "Bold": true
+              },
+              {
+                "Underline": true
+              }
+            ],
+            "guid": [
+              148,
+              53,
+              156,
+              113,
+              44,
+              188,
+              95,
+              71,
+              170,
+              198,
+              38,
+              41,
+              148,
+              201,
+              99,
+              234
+            ],
+            "range": {
+              "end": 4,
+              "start": 0
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Font": "Arial"
+              },
+              {
+                "FontSize": 13.5
+              }
+            ],
+            "guid": [
+              17,
+              187,
+              223,
+              32,
+              237,
+              203,
+              222,
+              66,
+              134,
+              24,
+              65,
+              131,
+              32,
+              188,
+              202,
+              177
+            ],
+            "range": {
+              "end": 7,
+              "start": 5
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Italic": true
+              },
+              {
+                "Strike": true
+              }
+            ],
+            "guid": [
+              201,
+              233,
+              230,
+              86,
+              91,
+              117,
+              20,
+              68,
+              142,
+              220,
+              224,
+              178,
+              139,
+              52,
+              180,
+              203
+            ],
+            "range": {
+              "end": 14,
+              "start": 8
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Superscript": true
+              }
+            ],
+            "guid": [
+              145,
+              203,
+              90,
+              115,
+              34,
+              107,
+              73,
+              66,
+              160,
+              157,
+              25,
+              141,
+              249,
+              128,
+              72,
+              159
+            ],
+            "range": {
+              "end": 17,
+              "start": 15
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Color": [
+                  12,
+                  34,
+                  56
+                ]
+              },
+              {
+                "Highlight": [
+                  255,
+                  255,
+                  0
+                ]
+              }
+            ],
+            "guid": [
+              53,
+              51,
+              180,
+              64,
+              45,
+              92,
+              153,
+              70,
+              163,
+              88,
+              171,
+              172,
+              200,
+              222,
+              35,
+              19
+            ],
+            "range": {
+              "end": 23,
+              "start": 18
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Subscript": true
+              }
+            ],
+            "guid": [
+              249,
+              231,
+              26,
+              88,
+              247,
+              6,
+              107,
+              65,
+              131,
+              6,
+              89,
+              211,
+              188,
+              246,
+              100,
+              155
+            ],
+            "range": {
+              "end": 26,
+              "start": 24
+            }
+          },
+          {
+            "attributes": [
+              {
+                "Bold": false
+              },
+              {
+                "Italic": false
+              },
+              {
+                "Color": null
+              },
+              {
+                "Highlight": null
+              }
+            ],
+            "guid": [
+              136,
+              160,
+              124,
+              20,
+              185,
+              141,
+              156,
+              75,
+              163,
+              89,
+              177,
+              152,
+              149,
+              251,
+              1,
+              204
+            ],
+            "range": {
+              "end": 30,
+              "start": 27
+            }
+          }
+        ],
+        "guid": [
+          245,
+          178,
+          40,
+          105,
+          54,
+          125,
+          175,
+          68,
+          190,
+          59,
+          54,
+          206,
+          186,
+          206,
+          134,
+          87
+        ],
+        "parent": "{C38843E2-F74B-04BD-24AA-A8F3BCAAF6CF},14",
+        "placement": {
+          "Paragraph": {
+            "before": null
+          }
+        },
+        "text": "Bold \ud83e\udd80 italic e\u0301 color \u6771\u4eac\rEnd"
+      },
+      "name": "native-cell",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "2d01da4a2c8a0cba582d97460b708c77eca38617f9103f4a3cc9eea33f0e0351",
+      "cold_sha256": "b7324075349e45f31d9e9fb8638691f58efff1989be65f12f7711dc359898a64",
+      "reverse_sha256": "04134b8db9b52aaf43dc5dfc90464d54802890e5d4966e7163a977e2ebd77e1e",
+      "omitted_table_outline_size": true,
+      "ui_sha256": "d67b70016af71db07a8012b85a5016897c08b715c6db8953e1fc45cfe008bc27"
+    },
+    {
+      "intent": {
+        "author": "Rich author",
+        "created": 1473310044,
+        "formats": [
+          {
+            "attributes": [
+              {
+                "Italic": true
+              },
+              {
+                "FontSize": 18.0
+              }
+            ],
+            "guid": [
+              135,
+              82,
+              13,
+              244,
+              205,
+              187,
+              105,
+              65,
+              153,
+              17,
+              70,
+              241,
+              83,
+              89,
+              99,
+              163
+            ],
+            "range": {
+              "end": 0,
+              "start": 0
+            }
+          }
+        ],
+        "guid": [
+          201,
+          196,
+          43,
+          177,
+          4,
+          133,
+          60,
+          73,
+          128,
+          208,
+          16,
+          248,
+          199,
+          36,
+          237,
+          179
+        ],
+        "parent": "{71AF36A5-6150-452F-B7F3-66BFFF4C3582},22",
+        "placement": {
+          "Outline": {
+            "x": 72.0,
+            "y": 144.0
+          }
+        },
+        "text": ""
+      },
+      "name": "empty",
+      "space": "{A8C9EFCE-DF4E-462A-866B-6AD8DFFE4C30},1",
+      "candidate_sha256": "bd592be42dc93e95444174ceceb19d1fc718fbe53c08403f87b6dec3207dc38d",
+      "cold_sha256": "a0a59d1c5676e2b6742e13791f888c91a3e0494c980b66fb6ef0a3bf324fac7a"
+    },
+    {
+      "intent": {
+        "author": "Rich author",
+        "created": 1473310044,
+        "formats": [
+          {
+            "attributes": [
+              {
+                "Italic": true
+              },
+              {
+                "FontSize": 18.0
+              }
+            ],
+            "guid": [
+              183,
+              9,
+              145,
+              10,
+              11,
+              69,
+              244,
+              73,
+              144,
+              49,
+              203,
+              207,
+              41,
+              174,
+              161,
+              107
+            ],
+            "range": {
+              "end": 0,
+              "start": 0
+            }
+          }
+        ],
+        "guid": [
+          38,
+          199,
+          125,
+          238,
+          88,
+          20,
+          244,
+          67,
+          146,
+          95,
+          200,
+          15,
+          97,
+          115,
+          247,
+          221
+        ],
+        "parent": "{71AF36A5-6150-452F-B7F3-66BFFF4C3582},22",
+        "placement": {
+          "Outline": {
+            "x": 72.0,
+            "y": 144.0
+          }
+        },
+        "text": ""
+      },
+      "name": "empty-typed",
+      "space": "{A8C9EFCE-DF4E-462A-866B-6AD8DFFE4C30},1",
+      "candidate_sha256": "855460055414c52034d0cf62b2e855b460deaedc17d1f276d6b3738458608f2e",
+      "cold_sha256": "12dcec5c696b989e0f78d76db6af8542104dec82e90b705269d53a8c52332871",
+      "reverse_sha256": "bc64aba71aba93596edff6ed270ea8ff17285c31cb79e357a5640edf6e934112",
+      "omitted_table_outline_size": false
+    }
+  ],
+  "native_author": "tools/native/formatted-insertion.ps1"
+}

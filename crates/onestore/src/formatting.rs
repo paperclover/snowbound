@@ -91,26 +91,7 @@ pub(crate) fn format_text(
             "Select a text range and at least one formatting attribute",
         ));
     }
-    let mut values = Vec::new();
-    let mut seen = BTreeSet::new();
-    for attribute in attributes {
-        let (id, value) = attribute.property()?;
-        if !seen.insert(id & 0x7fffffff) {
-            return Err(invalid("Specify each formatting attribute once"));
-        }
-        values.push((id, value));
-    }
-    if attributes.contains(&TextAttribute::Superscript(true))
-        && attributes.contains(&TextAttribute::Subscript(true))
-    {
-        return Err(invalid("Text cannot be both superscript and subscript"));
-    }
-    // Setting either script position clears its mutually exclusive counterpart.
-    for (set, opposite) in [(0x88001c08, 0x08001c09), (0x88001c09, 0x08001c08)] {
-        if values.iter().any(|(id, _)| *id == set) && !seen.contains(&opposite) {
-            values.push((opposite, Vec::new()));
-        }
-    }
+    let values = attribute_values(attributes)?;
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     index.validate_current()?;
@@ -285,4 +266,31 @@ pub(crate) fn format_text(
         }
         Ok(changed)
     })
+}
+
+pub(crate) fn attribute_values(attributes: &[TextAttribute]) -> Result<Vec<(u32, Vec<u8>)>, Error> {
+    if attributes.is_empty() {
+        return Err(invalid("Choose at least one formatting attribute"));
+    }
+    let mut values = Vec::new();
+    let mut seen = BTreeSet::new();
+    for attribute in attributes {
+        let (id, value) = attribute.property()?;
+        if !seen.insert(id & 0x7fffffff) {
+            return Err(invalid("Specify each formatting attribute once"));
+        }
+        values.push((id, value));
+    }
+    if attributes.contains(&TextAttribute::Superscript(true))
+        && attributes.contains(&TextAttribute::Subscript(true))
+    {
+        return Err(invalid("Text cannot be both superscript and subscript"));
+    }
+    // Setting either script position clears its mutually exclusive counterpart.
+    for (set, opposite) in [(0x88001c08, 0x08001c09), (0x88001c09, 0x08001c08)] {
+        if values.iter().any(|(id, _)| *id == set) && !seen.contains(&opposite) {
+            values.push((opposite, Vec::new()));
+        }
+    }
+    Ok(values)
 }

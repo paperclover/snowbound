@@ -609,7 +609,9 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
                                 "Author",
                             )
                             .unwrap()
-                        };
+                        }
+                        .with_formatting(0..6, &[onestore::TextAttribute::Italic(true)])
+                        .unwrap();
                         loop {
                             assert!(
                                 Instant::now() < deadline,
@@ -691,6 +693,17 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
                 format!("Edited Paragraph {client}:{sequence}")
             };
             assert!(matches!(&v.nodes[id].kind,Kind::RichText{text,..} if *text==wanted));
+            let runs = v.text_runs(*id).unwrap();
+            assert_eq!(runs[0].format.italic, Some(true));
+            assert_eq!(
+                runs[0].text,
+                if sequence == 0 {
+                    "Client"
+                } else {
+                    "Edited Paragr"
+                }
+            );
+            assert!(runs[1..].iter().all(|run| run.format.italic != Some(true)));
         }
     }
 }

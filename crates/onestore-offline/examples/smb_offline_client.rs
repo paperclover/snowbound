@@ -301,7 +301,14 @@ fn queue_document(
             &text,
             "Offline document writer",
         )?
-    };
+    }
+    .with_formatting(
+        0..u32::try_from(text.encode_utf16().count())?,
+        &[
+            TextAttribute::FontSize(13.5),
+            TextAttribute::Color(Some([0x44, 0x55, 0x66])),
+        ],
+    )?;
     let parent = if operation.is_multiple_of(2) {
         insertion.object()
     } else {

@@ -40,6 +40,7 @@ try {
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(300)
     $previous = ''
+    $lastChange = ''
     $stableSince = [DateTime]::UtcNow
     $settled = $false
     do {
@@ -62,6 +63,7 @@ try {
         }
         $signature = [String]::Join('|', @($pages.Keys | Sort-Object | ForEach-Object { $_ + $pages[$_] }))
         if ($signature -ne $previous) {
+            $lastChange = $previous
             $previous = $signature
             $stableSince = [DateTime]::UtcNow
         }
@@ -71,6 +73,7 @@ try {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
     if (-not $settled -or ($ExpectedPages -ge 0 -and $pages.Count -ne $ExpectedPages) -or ($ExpectedPages -lt 0 -and $pages.Count -eq 0)) {
+        [IO.File]::WriteAllText((Join-Path $output 'previous-signature.txt'), $lastChange, [Text.Encoding]::UTF8)
         $index = 0
         foreach ($id in @($pages.Keys | Sort-Object)) {
             [IO.File]::WriteAllText((Join-Path $output ('unsettled-{0:d3}.xml' -f $index)), $pages[$id], [Text.Encoding]::UTF8)
@@ -79,7 +82,7 @@ try {
         $hierarchy = ''
         $app.GetHierarchy($notebookId, 4, [ref]$hierarchy, 1)
         [IO.File]::WriteAllText((Join-Path $output 'unsettled-hierarchy.xml'), $hierarchy, [Text.Encoding]::UTF8)
-        throw "Expected $ExpectedPages pages; OneNote returned $($pages.Count)."
+        throw "Expected $ExpectedPages stable pages; OneNote returned $($pages.Count), settled=$settled."
     }
     $index = 0
     $payloads = @()

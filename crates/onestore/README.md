@@ -71,7 +71,9 @@ passwords, unsupported protection profiles and work-limit failures remain distin
 The source stays encrypted; protected writes are rejected.
 Insertions update child references, reference counts, modification times and automatic
 titles atomically. Paragraphs can be nested or inserted into table cells; outline
-coordinates use points. Retain the `Insertion` value for rebasing: creating another
+coordinates use points. `Insertion::with_formatting` includes nonoverlapping UTF-16
+spans in that same publication; gaps keep the default insertion style. Empty text
+accepts one `0..0` span for subsequent typing. Retain the `Insertion` value for rebasing: creating another
 value creates different object identities. Duplicate insertion identities require
 reconciliation. Formatting accepts explicit attributes, preserves inherited values,
 and gives retired immutable styles zero current references while retaining history.
