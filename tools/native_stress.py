@@ -96,7 +96,7 @@ def verify_capture(output, capture):
     if config.get('document_operations'):
         from offline_document_history import document_history
         documents = document_history(logs, operations)
-        expected.extend(document['text'] for document in documents.values())
+        expected.extend(''.join(char for char, *_ in list(document['states'].values())[-1]['characters']) for document in documents.values())
     page_file, = capture.glob('page-*.xml')
     page = ET.parse(page_file).getroot()
     paragraphs = native_characters(page, page.findall('one:Outline', ns))
@@ -111,8 +111,8 @@ def verify_capture(output, capture):
                     checks += 1
     if documents:
         from offline_document_history import verify_native
-        checks += verify_native(paragraphs, documents)
-    return {'rust_intents': len(commits), 'document_intents': len(documents)*2, 'native_intents': sum(map(len, native)),
+        checks += verify_native(paragraphs, (list(document['states'].values())[-1]['characters'] for document in documents.values()))
+    return {'rust_intents': len(commits), 'document_intents': sum(len(document['states']) for document in documents.values()), 'native_intents': sum(map(len, native)),
             'exact_paragraphs': len(expected), 'native_intended_format_checks': checks}
 
 
@@ -231,7 +231,7 @@ def exercise(output, shared, clients, action, wait_action, wait_text, checkpoint
     if config.get('document_operations'):
         from offline_document_history import document_history
         documents = document_history(rust, operations)
-        expected.extend(document['text'] for document in documents.values())
+        expected.extend(''.join(char for char, *_ in list(document['states'].values())[-1]['characters']) for document in documents.values())
     for client in clients: wait_text(client, expected)
     checkpoint('stress-final')
     model = json.loads((output / 'stress-final/model/document.json').read_text())
@@ -262,7 +262,7 @@ def exercise(output, shared, clients, action, wait_action, wait_text, checkpoint
             earliest_end = (native['updated_ticks'] - 621355968000000000) // 10 - high
             overlap += sum(max(latest_start, rust['started_us']) < min(earliest_end, rust['finished_us']) for rust in commits)
     result = {'native_writers': len(clients), 'rust_writers': rust_writers, 'rust_readers': rust_readers,
-              'sync_every': sync_every, 'edit': edit, 'seed': seed, 'offline': config.get('offline', False), 'native_edits': operations * len(clients), 'rust_commits': len(commits), 'document_commits': len(documents)*2, 'rust_reads': len(reads),
+              'sync_every': sync_every, 'edit': edit, 'seed': seed, 'offline': config.get('offline', False), 'native_edits': operations * len(clients), 'rust_commits': len(commits), 'document_commits': sum(len(document['states']) for document in documents.values()), 'rust_reads': len(reads),
               'clock_bounded_native_rust_call_overlaps': overlap, 'converged_paragraphs': len(expected)}
     (output / 'result.json').write_text(json.dumps(result, indent=2))
     assert overlap, 'No native/Rust call overlap established within clock uncertainty'

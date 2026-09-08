@@ -1,0 +1,89 @@
+{
+  "generator": "crates/onestore/tests/edit.rs:export_native_cross_run_edits",
+  "cases": [
+    {
+      "name": "partial",
+      "object": "{04B13EBF-F611-4402-829D-C72E23221C8B},2",
+      "range": {
+        "end": 16,
+        "start": 2
+      },
+      "replacement": "\u4e2d\ud83e\udd80",
+      "retype": false,
+      "source": "formatted-insertion/native-paragraph/candidate/synthetic.one",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "0a93fdb8c8378989a6522b5de803f073109b8972088e61afdf97639eeaea6a02",
+      "native_sha256": "85e90850f7f0582cd9e4e8f93bb8f77cd773d883cd993b24280b57bd70078a4f"
+    },
+    {
+      "name": "table",
+      "object": "{6928B2F5-7D36-44AF-BE3B-36CEBACE8657},2",
+      "range": {
+        "end": 24,
+        "start": 0
+      },
+      "replacement": "Across \ud83d\udc08 ",
+      "retype": false,
+      "source": "formatted-insertion/native-cell/candidate/synthetic.one",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "89ce5a50f050c05ecbfb92c8c8eb0538bd041d0596290a5b974a9878e171e6e9",
+      "native_sha256": "561222f0ecb1ccc17592c9fd44f08f6f4e0b0bfc6120f3b099a902f46c3e8ed2"
+    },
+    {
+      "name": "clear",
+      "object": "{04B13EBF-F611-4402-829D-C72E23221C8B},2",
+      "range": {
+        "end": 30,
+        "start": 0
+      },
+      "replacement": "",
+      "retype": false,
+      "source": "formatted-insertion/native-paragraph/candidate/synthetic.one",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "d6d8c775b4b87e3b8379757773c313a0a720da52dd5e76b4799f2b8e16bb5320",
+      "native_sha256": "30dfd26ad6912225f3e637f529f5135f67f45de0c1a0b705ad70bf97866a554e"
+    },
+    {
+      "name": "replace",
+      "object": "{04B13EBF-F611-4402-829D-C72E23221C8B},2",
+      "range": {
+        "end": 30,
+        "start": 0
+      },
+      "replacement": "Replacement e\u0301\ud83e\udd80",
+      "retype": false,
+      "source": "formatted-insertion/native-paragraph/candidate/synthetic.one",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "4b0ae05431ade4777541592cd8040f7ff18dbfe4ada35a686cda963299988e81",
+      "native_sha256": "f0cca32ec56e15b7d19aa581dbe7ae3d59bd0cc498450a0576ae9d168365c377"
+    },
+    {
+      "name": "retype",
+      "object": "{04B13EBF-F611-4402-829D-C72E23221C8B},2",
+      "range": {
+        "end": 30,
+        "start": 0
+      },
+      "replacement": "",
+      "retype": true,
+      "source": "formatted-insertion/native-paragraph/candidate/synthetic.one",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "0d37a5a762e9b08f40ea47b2fad48591fcb5f782d1a130f5363f5116b1175fb3",
+      "native_sha256": "7b70f0ebe27f09c31a623f27b37ffac4362f9513dd26b2d1a69d1e2c0a38c15a"
+    },
+    {
+      "name": "boundary",
+      "object": "{04B13EBF-F611-4402-829D-C72E23221C8B},2",
+      "range": {
+        "end": 8,
+        "start": 4
+      },
+      "replacement": "Middle",
+      "retype": false,
+      "source": "formatted-insertion/native-paragraph/candidate/synthetic.one",
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "candidate_sha256": "a3fac402a10648e99d4bdb4b37b41c825e2b8b34f12d8b1c234e28bd2ec8ac0b",
+      "native_sha256": "e9852bed7545600f4fec537be8e614a1cdb4ec8d7ee40c7933a609bd51a7ce8b"
+    }
+  ]
+}

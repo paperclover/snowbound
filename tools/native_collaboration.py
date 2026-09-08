@@ -54,6 +54,14 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
         raise ValueError('Choose a new Linux VM name; existing machines are not owned by this run.')
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    for profile in (('debug', 'release') if client_profile == 'release' else ('debug',)):
+        build = ['cargo', 'build', '--locked', '--workspace', '--all-features', '--examples']
+        if profile == 'release': build.append('--release')
+        with (output / f'build-{profile}.log').open('w') as log:
+            result = subprocess.run(build, cwd=ROOT, env={**os.environ, 'CARGO_TARGET_DIR': str(ROOT / 'target')},
+                                    stdout=log, stderr=subprocess.STDOUT)
+        (output / f'build-{profile}.json').write_text(json.dumps({'command': build, 'exit': result.returncode}, indent=2))
+        result.check_returncode()
     mount = output / 'mount'
     mount.mkdir()
     scripts = output / 'scripts'

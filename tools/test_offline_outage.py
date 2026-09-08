@@ -85,7 +85,7 @@ class OutageOracle(unittest.TestCase):
                 (self.root / 'rust' / f'{actor}.jsonl').write_text('\n'.join(map(json.dumps, rows)))
             with patch('offline_history.publication_links') as ledger, patch('offline_document_history.document_history') as documents, patch('offline_outage.verify', return_value={'guarded_pairs': 1}) as overlap:
                 if self.config.get('offline_client_reply'):
-                    documents.return_value = {'target': {'format': {'receipt_revision': 'effect-revision'}}}
+                    documents.return_value = {'target': {'states': {'format': {'attempt': {'receipt_revision': 'effect-revision'}}}}}
                 result = verify_lost_reply(self.root)
                 ledger.assert_called_once_with(self.logs, self.config['stress_operations'])
                 if self.config.get('document_operations'):

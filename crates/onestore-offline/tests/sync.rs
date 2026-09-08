@@ -1889,6 +1889,82 @@ fn uncertain_insertions_reconcile_the_original_revision_without_duplicate_object
 }
 
 #[test]
+fn cross_run_text_rebases_preserve_remote_styles_and_survive_lost_replies() {
+    use onestore::TextAttribute as A;
+    for fault in [Fault::None, Fault::UnknownAfter, Fault::PanicAfter] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cross-run.sqlite");
+        let plain = onestore::create_section("cross.one", "ab🦀cde\u{301}fg", "Author").unwrap();
+        let (sid, oid, _) = text(&plain);
+        let bold = PreparedEdit::format(&plain, sid, oid, 1..4, &[A::Bold(true)]).unwrap();
+        let source = PreparedEdit::format(bold.as_bytes(), sid, oid, 4..7, &[A::Italic(true)])
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let cache = Replica::create(&path, &source).unwrap();
+        let first = cache
+            .edit_text(&source, sid, oid, 2..7, "日本語")
+            .unwrap()
+            .unwrap();
+        let local = cache.snapshot().unwrap();
+        let second = cache
+            .edit_text(&local, sid, oid, 3..4, "🐈")
+            .unwrap()
+            .unwrap();
+        let pending = cache.pending().unwrap();
+        drop(cache);
+        let cache = Replica::open(&path).unwrap();
+        assert_eq!(cache.pending().unwrap(), pending);
+        let prefix = PreparedEdit::text(&source, sid, oid, 0..0, "Prefix ").unwrap();
+        let remote =
+            PreparedEdit::format(prefix.as_bytes(), sid, oid, 9..11, &[A::Underline(true)])
+                .unwrap();
+        let mut server = Server::new(remote.as_bytes());
+        server.fault = fault;
+        let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.sync_once(&mut server)
+        }));
+        if matches!(fault, Fault::None) {
+            assert!(
+                matches!(attempted.unwrap().unwrap(), Some((id, EditStatus::Published { .. })) if id == first)
+            );
+        } else {
+            assert!(matches!(
+                cache.status(first).unwrap(),
+                Some(EditStatus::AwaitingConfirmation { .. })
+            ));
+        }
+        drop(cache);
+        let cache = Replica::open(&path).unwrap();
+        while let Some((_, status)) = cache.sync_once(&mut server).unwrap() {
+            assert!(matches!(status, EditStatus::Published { .. }));
+        }
+        assert_eq!(server.publications, 2);
+        assert!(matches!(
+            cache.status(second).unwrap(),
+            Some(EditStatus::Published { .. })
+        ));
+        assert_eq!(text(&server.durable).2, "Prefix ab日🐈語\u{301}fg");
+        assert_eq!(cache.snapshot().unwrap(), server.durable);
+        let store = Store::parse(&server.durable).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let space = &document.spaces[&sid];
+        let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let runs = revision.text_runs(oid).unwrap();
+        let replacement = runs.iter().find(|run| run.text == "日🐈語").unwrap();
+        assert_eq!(replacement.format.bold, Some(true));
+        assert_eq!(replacement.format.underline, Some(true));
+        assert_ne!(replacement.format.italic, Some(true));
+        let suffix = runs.last().unwrap();
+        assert_eq!(suffix.text, "\u{301}fg");
+        assert_ne!(suffix.format.bold, Some(true));
+        assert_ne!(suffix.format.underline, Some(true));
+        assert_ne!(suffix.format.italic, Some(true));
+    }
+}
+
+#[test]
 fn offline_formatting_rebases_text_and_merges_independent_attributes() {
     use onestore::TextAttribute as A;
     let directory = tempfile::tempdir().unwrap();

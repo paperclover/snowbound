@@ -23,6 +23,8 @@ mod support {
 use concurrent::document_view;
 use support::view::view;
 
+const DOCUMENT_OPERATIONS: [&str; 3] = ["insert", "format", "text"];
+
 fn now() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -275,7 +277,7 @@ fn queue_document(
     operation: usize,
     parent: Option<ExGuid>,
     deadline: Instant,
-) -> Result<(ExGuid, [u64; 2]), Box<dyn std::error::Error>> {
+) -> Result<(ExGuid, [u64; DOCUMENT_OPERATIONS.len()]), Box<dyn std::error::Error>> {
     let source = cache.snapshot()?;
     let store = Store::parse(&source)?;
     let index = RevisionIndex::parse(&store)?;
@@ -320,8 +322,15 @@ fn queue_document(
         TextAttribute::FontSize(18.0 + (operation % 9) as f32),
         TextAttribute::Color(Some([0x12, 0x34, 0x56])),
     ];
-    let mut ids = [0; 2];
+    let mut ids = [0; DOCUMENT_OPERATIONS.len()];
     for (step, id) in ids.iter_mut().enumerate() {
+        let kind = DOCUMENT_OPERATIONS[step];
+        let range = if step == 2 {
+            let end = u32::try_from(text.encode_utf16().count())?;
+            end - 3..end
+        } else {
+            range.clone()
+        };
         loop {
             if Instant::now() >= deadline {
                 return Err("Document queue timed out; cache retained".into());
@@ -330,7 +339,7 @@ fn queue_document(
             let started = now();
             let result = if step == 0 {
                 cache.insert(&source, space, &insertion)
-            } else {
+            } else if step == 1 {
                 cache.format(
                     &source,
                     space,
@@ -338,13 +347,21 @@ fn queue_document(
                     range.clone(),
                     &attributes,
                 )
+            } else {
+                cache.edit_text(
+                    &source,
+                    space,
+                    insertion.text_object(),
+                    range.clone(),
+                    " e\u{301}🐈",
+                )
             };
             match result {
                 Ok(Some(acknowledged)) => {
                     *id = acknowledged;
                     println!(
                         "{}",
-                        json!({"event":"local_document_commit","id":acknowledged,"operation":operation,"kind":if step==0 {"insert"} else {"format"},"space":space.to_string(),"object":insertion.text_object().to_string(),"text":text,"insertion":if step==0 {Some(&insertion)} else {None},"range":[range.start,range.end],"attributes":attributes,"started_us":started,"finished_us":now()})
+                        json!({"event":"local_document_commit","id":acknowledged,"operation":operation,"kind":kind,"space":space.to_string(),"object":insertion.text_object().to_string(),"text":text,"insertion":if step==0 {Some(&insertion)} else {None},"range":[range.start,range.end],"attributes":attributes,"replacement":if step==2 {Some(" e\u{301}🐈")} else {None},"started_us":started,"finished_us":now()})
                     );
                     break;
                 }
@@ -400,7 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(Replica::create(&cache_path, &source)?);
     println!(
         "{}",
-        json!({"event":"ready", "pid":std::process::id(), "actor":args[2], "offline":true, "document_operations":documents})
+        json!({"event":"ready", "pid":std::process::id(), "actor":args[2], "offline":true, "document_operations":documents,"document_kinds":if documents {DOCUMENT_OPERATIONS.as_slice()} else {&[]}})
     );
     while !Path::new(&args[4]).exists() {
         if Instant::now() >= deadline {
@@ -470,7 +487,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             {
                 1
             } else if documents && outage.is_some() {
-                24
+                8 * (1 + DOCUMENT_OPERATIONS.len())
             } else {
                 8
             };

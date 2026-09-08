@@ -8,6 +8,7 @@ import time
 from native_runner import windows
 import linux_vm
 from verify_smb_overlap import verify
+from offline_document_history import operation_kinds
 
 
 def interrupt(output, clients, sequences, processes):
@@ -104,7 +105,7 @@ def interrupt(output, clients, sequences, processes):
         return
     wait_for(lambda: all((folder / f'offline-paused-{actor}').exists() for actor in writers)
              and (not config.get('document_operations') or all(
-                 sum(row['event'] == 'local_document_commit' for row in logs()[actor]) == 2 for actor in writers))
+                 sum(row['event'] == 'local_document_commit' for row in logs()[actor]) == len(operation_kinds(logs()[actor])) for actor in writers))
              and all(any(row['event'] == 'read' for row in logs()[actor]) for actor in readers),
              'Clients did not reach the pre-publication outage barrier')
     samples['native_before'] = native_counts('before')
@@ -115,7 +116,7 @@ def interrupt(output, clients, sequences, processes):
         (folder / 'offline-outage-down').touch()
         wait_for(lambda: all(sum(row['event'] == 'local_commit' for row in events) == 8 for actor, events in logs().items() if actor in writers)
                  and (not config.get('document_operations') or all(
-                     sum(row['event'] == 'local_document_commit' for row in logs()[actor]) == 16 for actor in writers))
+                     sum(row['event'] == 'local_document_commit' for row in logs()[actor]) == 8 * len(operation_kinds(logs()[actor])) for actor in writers))
                  and all(sum(row['event'] == 'transport_read_error' for row in logs()[actor]) > samples['reader_errors_before'][actor] for actor in readers),
                  'Local queues or disconnected readers failed to progress during the outage')
         time.sleep(3)
@@ -185,16 +186,17 @@ def verify_outage(output):
             receipts = [row for row in events if row['event'] == 'remote_receipt']
             assert len(receipts) == config['stress_operations'] and all(row['at_us'] > up for row in receipts)
             if config.get('document_operations'):
+                kinds = operation_kinds(events)
                 edits = [row for row in events if row['event'] == 'local_document_commit']
                 assert [(row['operation'], row['kind']) for row in edits] == [
-                    (operation, kind) for operation in range(config['stress_operations']) for kind in ('insert', 'format')]
-                assert all(row['finished_us'] < down for row in edits[:2]), 'Initial document edits missed the outage barrier'
+                    (operation, kind) for operation in range(config['stress_operations']) for kind in kinds]
+                assert all(row['finished_us'] < down for row in edits[:len(kinds)]), 'Initial document edits missed the outage barrier'
                 queued = [row for row in edits if down < row['started_us'] <= row['finished_us'] < up]
                 assert [(row['operation'], row['kind']) for row in queued] == [
-                    (operation, kind) for operation in range(1, 8) for kind in ('insert', 'format')], 'Document edits did not persist during the outage'
+                    (operation, kind) for operation in range(1, 8) for kind in kinds], 'Document edits did not persist during the outage'
                 queues[actor] += len(queued)
                 receipts = [row for row in events if row['event'] == 'document_receipt']
-                assert len(receipts) == config['stress_operations'] * 2 and all(row['at_us'] > up for row in receipts)
+                assert len(receipts) == config['stress_operations'] * len(kinds) and all(row['at_us'] > up for row in receipts)
     trace = [json.loads(line) for line in (output / 'smb-trace.jsonl').read_text().splitlines()]
     controls = [row['control'] for row in trace if row.get('control', {}).get('phase', '').startswith('offline-')]
     assert controls == [{'phase': 'offline-down', 'mode': 'down'}, {'phase': 'offline-reconnected'}], 'Unexpected outage control sequence'
@@ -233,7 +235,7 @@ def verify_lost_reply(output):
     receipts = [row for row in logs[actor] if row['event'] in ('remote_receipt', 'document_receipt') and row['revision'] == attempt['revision']]
     if not receipts and documents:
         target, = attempt['document_changes']
-        confirmed_revision = documents[target]['format']['receipt_revision']
+        confirmed_revision = documents[target]['states']['format']['attempt']['receipt_revision']
         receipts = [row for row in logs[actor] if row['event'] == 'document_receipt' and row['revision'] == confirmed_revision]
     assert len(receipts) == 1 and receipts[0]['at_us'] > sample['up_started_us']
     peer_progress = {}

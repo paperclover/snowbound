@@ -6,52 +6,92 @@ from unittest.mock import patch
 from offline_document_history import document_history, identity, verify_model, verify_native
 
 
+def history(text_edits=False):
+    logs = {'w0': [{'event': 'ready', 'document_operations': True, 'document_kinds': ['insert', 'format', 'text'] if text_edits else ['insert', 'format']}]}
+    events = logs['w0']
+    observed = {}
+    previous = None
+    for operation in range(2):
+        insertion = {'guid': list(uuid.UUID(int=operation+1).bytes_le), 'text': f'Document w0:{operation} 🦀',
+                     'parent': 'page' if operation == 0 else identity(previous, 1), 'author': 'Offline document writer',
+                     'placement': {'Outline': {'x': 144, 'y': 144}} if operation == 0 else {'Paragraph': {'before': None}}}
+        previous = insertion
+        target = identity(insertion, 2)
+        for step, kind in enumerate(('insert', 'format', 'text') if text_edits else ('insert', 'format')):
+            timestamp = 10 + operation*30 + step*10
+            local_id = operation*3 + step + 2
+            event = {'event': 'local_document_commit', 'id': local_id, 'operation': operation, 'kind': kind,
+                     'space': 'space', 'object': target, 'text': insertion['text'], 'insertion': insertion if step == 0 else None,
+                     'range': [1, len(insertion['text'].encode('utf-16-le'))//2-2],
+                     'attributes': [{'Bold': True}, {'FontSize': 18+operation}, {'Color': [18, 52, 86]}],
+                     'started_us': timestamp-2, 'finished_us': timestamp-1}
+            if kind == 'text':
+                end = len(insertion['text'].encode('utf-16-le'))//2
+                event.update(range=[end-3, end], replacement=' e\u0301🐈')
+            events.append(event)
+            value = insertion['text'].replace(' 🦀', ' e\u0301🐈') if kind == 'text' else insertion['text']
+            runs = []
+            for index, char in enumerate(value):
+                selected = index > 0 and (kind == 'text' or (kind == 'format' and index < len(value)-1))
+                runs.append({'text': char, 'bold': selected, 'size': 18+operation if selected else 11,
+                             'color': 0x563412 if selected else 0xff000000})
+            observed[target] = {'text': value, 'runs': runs}
+            revision = f'revision-{local_id}'
+            events.append({'event': 'remote_attempt', 'revision': revision, 'state': 'Committed',
+                           'document_changes': {target: copy.deepcopy(observed[target])},
+                           'documents': copy.deepcopy(observed), 'started_us': timestamp, 'finished_us': timestamp+1})
+            events.append({'event': 'document_receipt', 'id': local_id, 'revision': revision, 'at_us': timestamp+2})
+            if text_edits:
+                events.append({'event': 'read', 'started_us': timestamp+3, 'finished_us': timestamp+4, 'documents': copy.deepcopy(observed)})
+    events.extend({'event': 'reopened_document_receipt', 'id': row['id'], 'revision': row['revision']}
+                  for row in list(events) if row['event'] == 'document_receipt')
+    read = {'event': 'read', 'started_us': 100, 'finished_us': 101, 'documents': observed}
+    events.extend([read, {'event': 'done'}])
+    logs['r0'] = [{'event': 'ready'}, copy.deepcopy(read), {'event': 'done'}]
+    return logs
+
+
 class DocumentHistoryTests(unittest.TestCase):
     def setUp(self):
-        self.logs = {'w0': [{'event': 'ready', 'document_operations': True}]}
-        events = self.logs['w0']
-        observed = {}
-        previous = None
-        for operation in range(2):
-            insertion = {'guid': list(uuid.UUID(int=operation+1).bytes_le), 'text': f'Document w0:{operation} 🦀',
-                         'parent': 'page' if operation == 0 else identity(previous, 1), 'author': 'Offline document writer',
-                         'placement': {'Outline': {'x': 144, 'y': 144}} if operation == 0 else {'Paragraph': {'before': None}}}
-            previous = insertion
-            target = identity(insertion, 2)
-            for step, kind in enumerate(('insert', 'format')):
-                timestamp = 10 + operation*30 + step*10
-                local_id = operation*3 + step + 2
-                event = {'event': 'local_document_commit', 'id': local_id, 'operation': operation, 'kind': kind,
-                         'space': 'space', 'object': target, 'text': insertion['text'], 'insertion': insertion if step == 0 else None,
-                         'range': [1, len(insertion['text'].encode('utf-16-le'))//2-2],
-                         'attributes': [{'Bold': True}, {'FontSize': 18+operation}, {'Color': [18, 52, 86]}],
-                         'started_us': timestamp-2, 'finished_us': timestamp-1}
-                events.append(event)
-                runs = []
-                for index, char in enumerate(insertion['text']):
-                    selected = kind == 'format' and 0 < index < len(insertion['text'])-1
-                    runs.append({'text': char, 'bold': selected, 'size': 18+operation if selected else 11,
-                                 'color': 0x563412 if selected else 0xff000000})
-                observed[target] = {'text': insertion['text'], 'runs': runs}
-                revision = f'revision-{local_id}'
-                events.append({'event': 'remote_attempt', 'revision': revision, 'state': 'Committed',
-                               'document_changes': {target: copy.deepcopy(observed[target])},
-                               'documents': copy.deepcopy(observed), 'started_us': timestamp, 'finished_us': timestamp+1})
-                events.append({'event': 'document_receipt', 'id': local_id, 'revision': revision, 'at_us': timestamp+2})
-        events.extend({'event': 'reopened_document_receipt', 'id': row['id'], 'revision': row['revision']}
-                      for row in list(events) if row['event'] == 'document_receipt')
-        read = {'event': 'read', 'started_us': 100, 'finished_us': 101, 'documents': observed}
-        events.extend([read, {'event': 'done'}])
-        self.logs['r0'] = [{'event': 'ready'}, copy.deepcopy(read), {'event': 'done'}]
+        self.logs = history()
 
     def test_document_receipts_and_reader_states_match_the_intents(self):
         documents = document_history(self.logs, 2)
         self.assertEqual(len(documents), 2)
+        expected = [list(row['states'].values())[-1]['characters'] for row in documents.values()]
         paragraphs = [[(char, {'bold': bold, 'font_size': size, 'color': 'automatic' if color == 0xff000000 else '#123456'})
-                       for char, bold, size, color in row['new']] for row in documents.values()]
-        self.assertEqual(verify_native(paragraphs, documents), sum(len(row['new'])*3 for row in documents.values()))
+                       for char, bold, size, color in row] for row in expected]
+        self.assertEqual(verify_native(paragraphs, expected), sum(len(row)*3 for row in expected))
         paragraphs[0][1][1]['font_size'] = 19
-        with self.assertRaisesRegex(AssertionError, 'font size'): verify_native(paragraphs, documents)
+        with self.assertRaisesRegex(AssertionError, 'font size'): verify_native(paragraphs, expected)
+
+    def test_cross_run_text_requires_complete_ordered_states_and_exact_receipts(self):
+        logs = history(True)
+        documents = document_history(logs, 2)
+        for document in documents.values():
+            self.assertEqual(list(document['states']), ['insert', 'format', 'text'])
+            final = document['states']['text']['characters']
+            self.assertEqual(''.join(char for char, *_ in final), document['insertion']['text'].replace(' 🦀', ' e\u0301🐈'))
+        for event, field, value in [('local_document_commit', 'replacement', 'wrong'),
+                                    ('local_document_commit', 'range', [0, 1]),
+                                    ('document_receipt', 'revision', 'wrong')]:
+            changed = copy.deepcopy(logs)
+            row = next(row for row in changed['w0'] if row['event'] == event and
+                       (row.get('kind') == 'text' or row.get('id') == 4))
+            row[field] = value
+            with self.subTest(event=event, field=field), self.assertRaises(AssertionError):
+                document_history(changed, 2)
+        changed = copy.deepcopy(logs)
+        read = changed['r0'][1]
+        target = next(iter(read['documents']))
+        read['documents'][target]['runs'][-1]['bold'] = False
+        with self.assertRaisesRegex(AssertionError, 'partial or invented'):
+            document_history(changed, 2)
+        prior = next(row for row in logs['w0'] if row['event'] == 'read' and row['started_us'] == 23)
+        changed = copy.deepcopy(logs)
+        changed['r0'][1]['documents'][target] = copy.deepcopy(prior['documents'][target])
+        with self.assertRaisesRegex(AssertionError, 'missed acknowledged'):
+            document_history(changed, 2)
 
     def test_missing_intents_receipts_or_reopen_records_are_rejected(self):
         for name in ('local_document_commit', 'document_receipt', 'reopened_document_receipt', 'remote_attempt'):
@@ -75,10 +115,11 @@ class DocumentHistoryTests(unittest.TestCase):
                                 run['size'] = 13.5
                                 run['color'] = 0x665544
         documents = document_history(self.logs, 2)
+        expected = [list(row['states'].values())[-1]['characters'] for row in documents.values()]
         paragraphs = [[(char, {'bold': bold, 'font_size': size,
                        'color': '#123456' if color == 0x563412 else '#445566'})
-                       for char, bold, size, color in row['new']] for row in documents.values()]
-        self.assertEqual(verify_native(paragraphs, documents), sum(len(row['new'])*3 for row in documents.values()))
+                       for char, bold, size, color in row] for row in expected]
+        self.assertEqual(verify_native(paragraphs, expected), sum(len(row)*3 for row in expected))
         baseline = copy.deepcopy(self.logs)
         for event, key in [('remote_attempt', 'document_changes'), ('read', 'documents')]:
             for field, value in [('size', 11), ('color', 0xff000000)]:
@@ -102,7 +143,7 @@ class DocumentHistoryTests(unittest.TestCase):
         events[index:index] = [read, confirmation]
         result = document_history(self.logs, 2)
         target, = attempt['document_changes']
-        self.assertEqual(result[target]['format']['receipt_revision'], 'current-revision')
+        self.assertEqual(result[target]['states']['format']['attempt']['receipt_revision'], 'current-revision')
         for field, value in [('current_revisions', {'space': 'unrelated'}),
                              ('revisions', {'space': ['revision-3', 'current-revision']}),
                              ('state', 'NotCommitted')]:
@@ -123,7 +164,7 @@ class DocumentHistoryTests(unittest.TestCase):
         nodes[outline].update(children=[paragraph, appended], layout={'x': 144, 'y': 144})
         for parent, (target, document) in zip([paragraph, appended], documents.items(), strict=True):
             nodes[parent]['content'] = [target]
-            nodes[target]['kind'] = {'text': document['text']}
+            nodes[target]['kind'] = {'text': ''.join(char for char, *_ in list(document['states'].values())[-1]['characters'])}
         revision = {'nodes': nodes}
         with patch('offline_document_history.ordered_pages', return_value=[('space', 'revision', revision, 'page')]):
             verify_model({}, documents)

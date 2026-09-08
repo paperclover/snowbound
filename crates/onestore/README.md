@@ -47,7 +47,7 @@ harness also accepts `--client-profile release`.
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
-| `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range within one ordinary text run; publish text, run boundaries and modification time together |
+| `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
 | `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |

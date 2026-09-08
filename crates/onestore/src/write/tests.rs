@@ -589,7 +589,7 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
                 .find_map(|(id, o)| (o.jcid == 0x6000e).then_some((*sid, *id)))
         })
         .unwrap();
-    for variant in 0..7 {
+    for variant in 0..10 {
         let fixture = write_revision(&source, sid, |raw| {
             let mut target = PropertyObject::from_object(&raw.objects[&text])?;
             target.bytes = properties(&[
@@ -617,8 +617,17 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
                     let reference = target.reference(author)?;
                     target.set(&[(0x24003458, &reference)])?;
                 }
-                3 => {
-                    // An unknown nested run property must survive a style-only edit byte for byte.
+                3 | 7 | 8 | 9 => {
+                    if variant != 3 {
+                        let ends = if variant == 9 { [2_u32, 2] } else { [2, 4] };
+                        target.set(&[(
+                            0x1c001e12,
+                            &ends
+                                .into_iter()
+                                .flat_map(u32::to_le_bytes)
+                                .collect::<Vec<_>>(),
+                        )])?;
+                    }
                     let parsed = PropertySets::parse(&target.bytes)?;
                     let at = parsed.root_ids.as_ptr().addr() - target.bytes.as_ptr().addr();
                     let count = parsed.sets[0].len();
@@ -626,11 +635,17 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
                     let mut bytes = target.bytes[..end].to_vec();
                     bytes[at - 2..at].copy_from_slice(&((count + 1) as u16).to_le_bytes());
                     bytes.splice(at + count * 4..at + count * 4, 0x40003499_u32.to_le_bytes());
-                    bytes.extend_from_slice(&1_u32.to_le_bytes());
+                    let runs: u32 = if variant == 3 { 1 } else { 3 };
+                    bytes.extend_from_slice(&runs.to_le_bytes());
                     bytes.extend_from_slice(&0x44001234_u32.to_le_bytes());
-                    bytes.extend_from_slice(&1_u16.to_le_bytes());
-                    bytes.extend_from_slice(&0x14001234_u32.to_le_bytes());
-                    bytes.extend_from_slice(&0xdeadbeef_u32.to_le_bytes());
+                    for run in 0..runs {
+                        let populated = (variant == 3 || variant == 8) && run == runs - 1;
+                        bytes.extend_from_slice(&u16::from(populated).to_le_bytes());
+                        if populated {
+                            bytes.extend_from_slice(&0x14001234_u32.to_le_bytes());
+                            bytes.extend_from_slice(&0xdeadbeef_u32.to_le_bytes());
+                        }
+                    }
                     bytes.resize(bytes.len().next_multiple_of(8), 0);
                     target.bytes = bytes;
                 }
@@ -639,6 +654,34 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
             Ok(BTreeMap::from([(text, target)]))
         })
         .unwrap();
+        if variant == 9 {
+            assert!(PreparedEdit::text(&fixture, sid, text, 0..0, "x").is_err());
+            continue;
+        }
+        if variant >= 7 {
+            let edit = PreparedEdit::text(&fixture, sid, text, 1..3, "longer").unwrap();
+            let [before, after] = [&fixture, edit.as_bytes()].map(|bytes| {
+                let store = Store::parse(bytes).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                let document = Document::parse(&index).unwrap();
+                let space = &document.spaces[&sid];
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let Kind::RichText { runs, .. } = &view.nodes[&text].kind else {
+                    panic!()
+                };
+                assert_eq!(runs.len(), 3);
+                format!("{:?}", view.nodes[&text].extra)
+            });
+            assert_eq!(before, after);
+            assert!(PreparedEdit::text(&fixture, sid, text, 0..4, "x").is_err());
+            assert_eq!(
+                PreparedEdit::text(&fixture, sid, text, 3..5, "x").is_ok(),
+                variant == 7
+            );
+            continue;
+        }
+        let text_edit = PreparedEdit::text(&fixture, sid, text, 1..5, "x");
+        assert_eq!(text_edit.is_ok(), variant == 0);
         let edit = PreparedEdit::format(&fixture, sid, text, 0..6, &[TextAttribute::Bold(true)]);
         if matches!(variant, 1 | 2 | 4 | 5 | 6) {
             assert!(edit.is_err());

@@ -68,9 +68,8 @@ def verify(output, cold, *, partial=False):
         paragraphs.remove(expected)
         if observed:
             from offline_document_history import characters, verify_native
-            expected_documents = {target: {'text': documents[target]['text'], 'new': characters(value)} for target, value in observed.items()}
-            format_checks += verify_native(formatted, expected_documents)
-            for document in expected_documents.values():
+            format_checks += verify_native(formatted, (characters(value) for value in observed.values()))
+            for document in observed.values():
                 assert paragraphs.count(document['text']) == 1, 'Confirmation duplicated a document paragraph'
                 paragraphs.remove(document['text'])
         for index, versions in enumerate(native):
@@ -78,7 +77,7 @@ def verify(output, cold, *, partial=False):
             assert len(selected) == 1 and selected[0] in versions, 'Native confirmation image contains an unrecorded edit or loses a prefix'
         checks += len(native) + 1 + len(observed)
     assert json.loads((cold / 'teardown.json').read_text()) == {'absent': True}
-    confirmed_revision = documents[next(iter(attempt['document_changes']))]['format']['receipt_revision'] if documents else attempt['revision']
+    confirmed_revision = documents[next(iter(attempt['document_changes']))]['states']['format']['attempt']['receipt_revision'] if documents else attempt['revision']
     return {'complete_workload': not partial, 'attempted_revision': attempt['revision'], 'confirmed_revision': confirmed_revision, 'native_images': len(results), 'exact_rust_paragraphs': len(results),
             'validated_paragraphs': checks, 'native_intended_format_checks': format_checks,
             'maximum_native_export_seconds': max(row['seconds'] for row in results)}

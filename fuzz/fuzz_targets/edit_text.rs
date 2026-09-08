@@ -129,7 +129,7 @@ fuzz_target!(|input: &[u8]| {
     let (source, sid, oid) = &CASES[usize::from(input.last().copied().unwrap_or(0)) % CASES.len()];
     let (sid, oid) = (*sid, *oid);
     let mut persisted_source = source.clone();
-    let mut caches = std::array::from_fn::<_, 6, _>(|_| source.clone());
+    let mut caches = std::array::from_fn::<_, 12, _>(|_| source.clone());
     for step in input.chunks_exact(8).take(16) {
         let actor = usize::from(step[6]) % caches.len();
         if step[7] % 3 == 0 {
@@ -154,7 +154,14 @@ fuzz_target!(|input: &[u8]| {
         let replacement = ["", "a", "🦀e\u{301}", "日本語", "\n", "\0"][usize::from(step[2]) % 6];
         let mut expected = before.clone();
         let format = before[start].1.clone();
-        expected.splice(start..end, replacement.chars().map(|c| (c, format.clone())));
+        if before[start..end]
+            .iter()
+            .map(|(c, _)| *c)
+            .collect::<String>()
+            != replacement
+        {
+            expected.splice(start..end, replacement.chars().map(|c| (c, format.clone())));
+        }
         let mut storage = Disk {
             visible: persisted_source.clone(),
             durable: persisted_source.clone(),
@@ -173,6 +180,15 @@ fuzz_target!(|input: &[u8]| {
             replacement,
         );
         let persisted = characters(&storage.durable, sid, oid);
+        if !replacement.contains(['\n', '\0']) {
+            assert!(
+                result
+                    .as_ref()
+                    .err()
+                    .is_none_or(|error| error.error.kind() != std::io::ErrorKind::InvalidData),
+                "Valid ordinary text edit was rejected: {result:?}"
+            );
+        }
         match result {
             Ok(()) => assert_eq!(persisted, expected),
             Err(error) => match error.state {

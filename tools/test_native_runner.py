@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +9,26 @@ import native_runner as runner
 
 
 class NativeRunnerTest(unittest.TestCase):
+    def test_failed_client_build_cannot_start_a_lab_with_stale_binaries(self):
+        import native_collaboration as collaboration
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for profile, failed in (('debug', 'debug'), ('release', 'debug'), ('release', 'release')):
+                output = root / (profile + '-' + failed)
+                results = [subprocess.CompletedProcess(['cargo'], 1)]
+                if failed == 'release': results.insert(0, subprocess.CompletedProcess(['cargo'], 0))
+                with patch.object(collaboration, 'linux_vm') as linux, \
+                     patch.object(collaboration.subprocess, 'run', side_effect=results) as build:
+                    linux.instance_path.return_value = root / 'absent'
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        collaboration.replay(output, 'fixture', client_profile=profile)
+                    self.assertEqual(build.call_count, len(results))
+                    linux.create_instance.assert_not_called()
+                    linux.launch.assert_not_called()
+                receipt = json.loads((output / f'build-{failed}.json').read_text())
+                self.assertEqual(receipt['exit'], 1)
+                self.assertEqual('--release' in receipt['command'], failed == 'release')
+
     def test_shutdown_timeout_still_removes_the_owned_clone(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)

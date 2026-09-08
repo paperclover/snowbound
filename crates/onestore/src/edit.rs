@@ -18,9 +18,11 @@ pub(crate) fn automatic_title(text: &str) -> &str {
     line
 }
 
-/// Replaces UTF-16 character positions within one ordinary text run.
-/// The inserted text inherits that run's formatting; other runs retain their identities.
+/// Replaces UTF-16 character positions across ordinary text runs.
+/// Inserted text inherits the run at the start; surviving text retains its formatting.
 /// Insertion at a run boundary uses the following run, except at the end of text.
+/// The final run retains its insertion style even when emptied.
+/// Replacing a range with identical text leaves its existing formatting unchanged.
 /// Returns a complete file image without I/O; use `commit_file_text` to update an existing file.
 pub fn replace_text(
     source: &[u8],
@@ -79,22 +81,25 @@ pub fn replace_text(
     }
     let selected = runs
         .iter()
-        .rposition(|run| run.start <= range.start && range.end <= run.end)
-        .ok_or_else(|| invalid("The edit must stay within one text run"))?;
+        .rposition(|run| run.start <= range.start && range.start <= run.end)
+        .ok_or_else(|| invalid("The edit range exceeds the text"))?;
     let resolved = revision.text_runs(object)?;
-    let format = &resolved[selected].format;
-    if [
-        format.hidden,
-        format.hyperlink,
-        format.math,
-        format.embedded_object,
-    ]
-    .contains(&Some(true))
-        || runs[selected]
-            .extra_set
-            .is_some_and(|set| !node.extra[set].is_empty())
-    {
-        return Err(invalid("This text run contains a field or embedded data"));
+    for (i, run) in runs.iter().enumerate() {
+        if i == selected || (run.start < range.end && range.start < run.end) {
+            let format = &resolved[i].format;
+            if [
+                format.hidden,
+                format.hyperlink,
+                format.math,
+                format.embedded_object,
+            ]
+            .contains(&Some(true))
+                || resolved[i].text.contains(['\u{fffc}', '\u{fddf}'])
+                || run.extra_set.is_some_and(|set| !node.extra[set].is_empty())
+            {
+                return Err(invalid("This text run contains a field or embedded data"));
+            }
+        }
     }
     let ObjectData::Properties(blob) = raw.objects[&object].data else {
         unreachable!()
@@ -141,20 +146,47 @@ pub fn replace_text(
         .checked_sub(removed)
         .and_then(|n| n.checked_add(added))
         .ok_or_else(|| invalid("Edited text exceeds the UTF-16 offset range"))?;
-    let mut boundaries = Vec::new();
-    let mut previous = None;
-    for (i, run) in runs[..runs.len() - 1].iter().enumerate() {
-        let end = if i >= selected {
-            run.end - removed + added
-        } else {
-            run.end
-        };
-        if previous.is_some_and(|p| p >= end) {
-            return Err(invalid("The edit would collapse a formatting boundary"));
+    let mut segments = Vec::new();
+    let mut position = 0;
+    for (i, run) in runs.iter().enumerate() {
+        let length = run.end.min(range.start).saturating_sub(run.start)
+            + run.end.saturating_sub(run.start.max(range.end))
+            + if i == selected { added } else { 0 };
+        let untouched = i != selected && (run.end <= range.start || range.end <= run.start);
+        if length > 0 || i == runs.len() - 1 || untouched {
+            position += length;
+            segments.push((i, position));
         }
-        previous = Some(end);
-        boundaries.extend_from_slice(&end.to_le_bytes());
     }
+    if segments.len() != runs.len() && properties.sets[0].iter().any(|p| p.id == 0x40003499) {
+        return Err(invalid("Text edits cannot remove preserved run data"));
+    }
+    if segments[..segments.len() - 1]
+        .windows(2)
+        .any(|pair| pair[0].1 >= pair[1].1)
+    {
+        return Err(invalid("Text-run boundaries must be strictly increasing"));
+    }
+    let boundaries: Vec<_> = segments[..segments.len() - 1]
+        .iter()
+        .flat_map(|(_, end)| end.to_le_bytes())
+        .collect();
+    let formats = properties.sets[0]
+        .iter()
+        .find(|p| p.id == 0x24001e13)
+        .map(|p| {
+            let crate::Value::References { compact_ids, .. } = p.value else {
+                unreachable!()
+            };
+            if compact_ids.is_empty() {
+                Vec::new()
+            } else {
+                segments
+                    .iter()
+                    .flat_map(|(i, _)| compact_ids[i * 4..i * 4 + 4].iter().copied())
+                    .collect()
+            }
+        });
     let mut changed = String::with_capacity(text.len() - (end - start) + replacement.len());
     changed.push_str(&text[..start]);
     changed.push_str(replacement);
@@ -182,6 +214,9 @@ pub fn replace_text(
     };
     if properties.sets[0].iter().any(|p| p.id == 0x1c001e12) {
         updates.push((0x1c001e12, &boundaries));
+    }
+    if let Some(formats) = &formats {
+        updates.push((0x24001e13, formats));
     }
     let modified = crate::create::current_timestamps()?.0.to_le_bytes();
     updates.push((0x14001d7a, &modified));

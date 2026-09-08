@@ -180,6 +180,7 @@ impl Replica {
 
     /// Atomically records an intent and its resulting local image; returns its durable ID.
     /// Unchanged text returns `None`. A stale image returns `Io(ResourceBusy)`.
+    /// On synchronization, replacement text inherits the remote style at the rebased start.
     /// After a database error, reopen and inspect the cache before retrying the edit.
     pub fn edit_text(
         &self,

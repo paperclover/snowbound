@@ -62,14 +62,14 @@ class ConfirmationOracle(unittest.TestCase):
                 markup = '<one:OE><one:T><![CDATA[<span style="font-weight:bold;font-size:18pt;color:#123456">x</span>]]></one:T></one:OE>'
                 content = xml('Concurrent edits: [w0:0]', 'Native 0:').replace('</one:OEChildren>', markup + '</one:OEChildren>')
                 page.write_text(content)
-                with patch('offline_document_history.document_history', return_value={'target': {'text': 'x', 'format': {'receipt_revision': 'revision'}}}) as documents:
+                with patch('offline_document_history.document_history', return_value={'target': {'states': {'format': {'attempt': {'receipt_revision': 'revision'}}}}}) as documents:
                     result = verify(root, cold)
                     self.assertEqual(result['validated_paragraphs'], 3)
                     self.assertEqual(result['native_intended_format_checks'], 3)
                     documents.assert_called_once_with({'w0': rows}, 1)
                     rows[3]['revisions'] = {'space': ['current']}
                     rows[3]['current_revisions'] = {'space': 'current'}
-                    documents.return_value['target']['format']['receipt_revision'] = 'current'
+                    documents.return_value['target']['states']['format']['attempt']['receipt_revision'] = 'current'
                     (root / 'rust/w0.jsonl').write_text('\n'.join(map(json.dumps, rows)))
                     self.assertEqual(verify(root, cold)['confirmed_revision'], 'current')
                     rows[3]['current_revisions'] = {'space': 'unrelated'}

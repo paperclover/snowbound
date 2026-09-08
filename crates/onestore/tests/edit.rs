@@ -368,9 +368,10 @@ fn invalid_text_edits_never_touch_storage() {
     for (range, replacement) in [
         (1..1, "x"),
         (0..999, "x"),
-        (0..21, "x"),
         (0..0, "\n"),
         (0..0, "\0"),
+        (0..0, "\u{fffc}"),
+        (0..0, "\u{fddf}"),
     ] {
         let mut disk = Disk {
             visible: source.clone(),
@@ -386,6 +387,179 @@ fn invalid_text_edits_never_touch_storage() {
         assert_eq!(disk.operation, 0);
         assert_eq!(disk.durable, source);
     }
+}
+
+#[test]
+fn cross_run_edits_reject_native_fields_before_storage_io() {
+    let source = include_bytes!("../../../corpus/m6/native-probes-01/notebook/synthetic.one");
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let mut fields = 0;
+    for (sid, space) in &document.spaces {
+        let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
+        for (oid, node) in &revision.nodes {
+            let Kind::RichText { text, runs, .. } = &node.kind else {
+                continue;
+            };
+            let resolved = revision.text_runs(*oid).unwrap();
+            for (run, resolved) in runs.iter().zip(resolved) {
+                if resolved.format.hyperlink != Some(true) {
+                    continue;
+                }
+                fields += 1;
+                for range in [0..run.end, run.start..text.encode_utf16().count() as u32] {
+                    let mut disk = Disk {
+                        visible: source.to_vec(),
+                        durable: source.to_vec(),
+                        operation: 0,
+                        fail_at: None,
+                        write_limit: 17,
+                        random: 9,
+                    };
+                    let error = onestore::commit_text(&mut disk, source, *sid, *oid, range, "x")
+                        .unwrap_err();
+                    assert_eq!(error.state, CommitState::NotCommitted);
+                    assert_eq!(disk.operation, 0);
+                    assert_eq!(disk.durable, source);
+                }
+            }
+        }
+    }
+    assert!(fields > 0);
+}
+
+#[test]
+fn cross_run_splices_match_a_character_model_and_preserve_history() {
+    let (sid, oid) = target(SOURCE);
+    let characters = |source: &[u8]| {
+        let runs = text_runs(source, sid, oid);
+        let runs = runs.as_array().unwrap();
+        let mut result = Vec::new();
+        for run in runs {
+            result.extend(
+                run["text"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .map(|c| (c, run["format"].clone())),
+            );
+        }
+        result.push(('\0', runs.last().unwrap()["format"].clone()));
+        result
+    };
+    let before = characters(SOURCE);
+    let offsets: Vec<_> = std::iter::once(0)
+        .chain(before[..before.len() - 1].iter().scan(0, |at, (c, _)| {
+            *at += c.len_utf16() as u32;
+            Some(*at)
+        }))
+        .collect();
+    let store = Store::parse(SOURCE).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    for a in 0..before.len() {
+        for b in a..before.len() {
+            let replacement = ["", "🦀e\u{301}", "日本語"][b % 3];
+            let mut expected = before.clone();
+            expected.splice(a..b, replacement.chars().map(|c| (c, before[a].1.clone())));
+            let edited =
+                onestore::replace_text(SOURCE, sid, oid, offsets[a]..offsets[b], replacement)
+                    .unwrap();
+            assert_eq!(characters(&edited), expected, "characters {a}..{b}");
+            let current_store = Store::parse(&edited).unwrap();
+            assert_eq!(
+                current_store.header.transaction_count,
+                store.header.transaction_count
+                    + usize::from(a != b || !replacement.is_empty()) as u32
+            );
+            let current = RevisionIndex::parse(&current_store).unwrap();
+            for (space, history) in &index.spaces {
+                for revision in history.revisions.keys() {
+                    let old = index.resolve(*space, *revision).unwrap();
+                    let retained = current.resolve(*space, *revision).unwrap();
+                    assert_eq!(old.roots, retained.roots);
+                    for (id, object) in old.objects {
+                        assert_eq!(object.data, retained.objects[&id].data);
+                    }
+                }
+            }
+        }
+    }
+    let cleared =
+        onestore::replace_text(SOURCE, sid, oid, 0..*offsets.last().unwrap(), "").unwrap();
+    let typed = onestore::replace_text(&cleared, sid, oid, 0..0, "new").unwrap();
+    let format = &before.last().unwrap().1;
+    assert_eq!(
+        characters(&typed),
+        "new\0"
+            .chars()
+            .map(|c| (c, format.clone()))
+            .collect::<Vec<_>>()
+    );
+    let text: String = before[..before.len() - 1].iter().map(|(c, _)| *c).collect();
+    assert_eq!(
+        onestore::replace_text(SOURCE, sid, oid, 0..*offsets.last().unwrap(), &text).unwrap(),
+        SOURCE
+    );
+}
+
+#[test]
+#[ignore = "exports cross-run edits for independent native validation"]
+fn export_native_cross_run_edits() {
+    use std::{fs, path::PathBuf};
+    let output = PathBuf::from(std::env::var_os("ONESTORE_CROSS_RUN_OUTPUT").unwrap());
+    assert!(output.is_absolute());
+    fs::create_dir(&output).unwrap();
+    let mut manifest = Vec::new();
+    for (name, fixture, range, replacement, retype) in [
+        ("partial", "native-paragraph", 2..16, "中🦀", false),
+        ("table", "native-cell", 0..24, "Across 🐈 ", false),
+        ("clear", "native-paragraph", 0..u32::MAX, "", false),
+        (
+            "replace",
+            "native-paragraph",
+            0..u32::MAX,
+            "Replacement e\u{301}🦀",
+            false,
+        ),
+        ("retype", "native-paragraph", 0..u32::MAX, "", true),
+        ("boundary", "native-paragraph", 4..8, "Middle", false),
+    ] {
+        let input = format!("../../corpus/formatted-insertion/{fixture}/candidate/synthetic.one");
+        let source = fs::read(&input).unwrap();
+        let store = Store::parse(&source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let (sid, oid, length) = document
+            .spaces
+            .iter()
+            .find_map(|(sid, space)| {
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                view.nodes.iter().find_map(|(oid, node)| {
+                    let Kind::RichText { text, .. } = &node.kind else {
+                        return None;
+                    };
+                    text.starts_with("Bold ")
+                        .then(|| (*sid, *oid, text.encode_utf16().count() as u32))
+                })
+            })
+            .unwrap();
+        let range = range.start..range.end.min(length);
+        let mut edited =
+            onestore::replace_text(&source, sid, oid, range.clone(), replacement).unwrap();
+        if retype {
+            edited = onestore::replace_text(&edited, sid, oid, 0..0, "Retyped 🦀").unwrap();
+        }
+        let candidate = output.join(name).join("candidate");
+        fs::create_dir_all(&candidate).unwrap();
+        fs::write(candidate.join("synthetic.one"), &edited).unwrap();
+        manifest.push(serde_json::json!({"name":name,"source":input,"space":sid,"object":oid,"range":range,"replacement":replacement,"retype":retype}));
+    }
+    fs::write(
+        output.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -701,14 +875,14 @@ fn interrupted_text_commits_never_publish_mismatched_run_boundaries() {
         };
         let before = text_runs(source, sid, oid);
         let mut success = make_disk(None, 1);
-        onestore::commit_text(&mut success, source, sid, oid, 0..10, "🐈 mixed edit").unwrap();
+        onestore::commit_text(&mut success, source, sid, oid, 0..23, "🐈 mixed edit").unwrap();
         let after = text_runs(&success.durable, sid, oid);
         assert_ne!(before, after);
         for at in source.len().div_ceil(193)..=success.operation {
             for seed in [1, 42] {
                 let mut disk = make_disk(Some(at), seed);
                 let error =
-                    onestore::commit_text(&mut disk, source, sid, oid, 0..10, "🐈 mixed edit")
+                    onestore::commit_text(&mut disk, source, sid, oid, 0..23, "🐈 mixed edit")
                         .unwrap_err();
                 let observed = text_runs(&disk.durable, sid, oid);
                 match error.state {

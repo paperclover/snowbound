@@ -32,7 +32,7 @@ def verify(output, max_gap=120):
         edits = {event['id']: event for event in events if event['event'] in ('local_commit', 'local_document_commit')}
         receipts = {event['id']: event for event in events if event['event'] in ('remote_receipt', 'document_receipt')}
         attempts = {event['revision']: event for event in events if event['event'] == 'remote_attempt'}
-        publication_starts = {id: documents[edit['object']][edit['kind']]['started_us'] if edit['event'] == 'local_document_commit'
+        publication_starts = {id: documents[edit['object']]['states'][edit['kind']]['attempt']['started_us'] if edit['event'] == 'local_document_commit'
                               else attempts[receipts[id]['revision']]['started_us'] for id, edit in edits.items()}
         queues[actor] = max(sum(edit['finished_us'] <= at < publication_starts[id] for id, edit in edits.items()) for at in [edit['finished_us'] for edit in edits.values()])
         assert queues[actor] >= 2, 'Writer did not establish a durable local queue before publication'
@@ -57,7 +57,7 @@ def verify(output, max_gap=120):
         assert times == sorted(times)
         progress[f'n{i}'] = max((b-a for a, b in zip(times, times[1:])), default=0) / 10_000_000
     assert all(gap <= max_gap for gap in progress.values()), f'Client progress exceeded {max_gap}s: {progress}'
-    return {'remote_publications': len(commits), 'document_publications': len(documents)*2, 'remote_text_sha256': hashlib.sha256(text.encode()).hexdigest(), 'maximum_progress_gap_seconds': progress,
+    return {'remote_publications': len(commits), 'document_publications': sum(len(document['states']) for document in documents.values()), 'remote_text_sha256': hashlib.sha256(text.encode()).hexdigest(), 'maximum_progress_gap_seconds': progress,
             'queued_before_publication_lower_bound': queues, 'reviewed_placements': sum(event['event'] == 'reviewed_append' for events in logs.values() for event in events), 'caches': caches}
 
 

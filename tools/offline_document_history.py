@@ -15,14 +15,21 @@ def characters(observed):
     return actual
 
 
+def operation_kinds(events):
+    kinds = tuple(events[0].get('document_kinds', ('insert', 'format')))
+    assert kinds in (('insert', 'format'), ('insert', 'format', 'text')), 'Unknown document workload'
+    return kinds
+
+
 def document_history(logs, operations):
     documents = {}
     for actor, events in logs.items():
         if not actor.startswith('w'): continue
         assert events[0].get('document_operations') is True, 'Writer omitted document operations'
+        kinds = operation_kinds(events)
         edits = [row for row in events if row['event'] == 'local_document_commit']
         assert [(row['operation'], row['kind']) for row in edits] == [
-            (i, kind) for i in range(operations) for kind in ('insert', 'format')], 'Missing or duplicate document intent'
+            (i, kind) for i in range(operations) for kind in kinds], 'Missing or duplicate document intent'
         ids = [row['id'] for row in edits]
         assert ids == sorted(set(ids)), 'Document intent IDs are duplicated or unordered'
         assert not set(ids) & {row['id'] for row in events if row['event'] == 'local_commit'}, 'Text and document intents share an ID'
@@ -64,7 +71,8 @@ def document_history(logs, operations):
             else:
                 assert receipt['revision'] == attempt['revision']
             linked[intent['id']] = {**attempt, 'acknowledged_us': receipt['at_us'], 'receipt_revision': receipt['revision']}
-        for inserted, formatted in zip(edits[::2], edits[1::2], strict=True):
+        for at in range(0, len(edits), len(kinds)):
+            inserted, formatted, *replaced = edits[at:at + len(kinds)]
             number = inserted['operation']
             text = f'Document {actor}:{number} 🦀'
             insertion = inserted['insertion']
@@ -76,7 +84,7 @@ def document_history(logs, operations):
                 assert insertion['placement'] == {'Outline': {'x': 144 + int(actor[1:]) * 240, 'y': 144 + number * 72}}, 'Outline placement differs from intent'
             else:
                 assert insertion['placement'] == {'Paragraph': {'before': None}}
-                assert insertion['parent'] == identity(edits[(number-1)*2]['insertion'], 1), 'Paragraph lost its outline parent'
+                assert insertion['parent'] == identity(edits[(number-1)*len(kinds)]['insertion'], 1), 'Paragraph lost its outline parent'
             assert formatted['range'] == [1, len(text.encode('utf-16-le')) // 2 - 2]
             assert formatted['attributes'] == [{'Bold': True}, {'FontSize': 18 + number % 9}, {'Color': [18, 52, 86]}]
             old = [(char, False, 11, 0xff000000) for char in text]
@@ -91,8 +99,20 @@ def document_history(logs, operations):
             assert created['finished_us'] <= changed['started_us'], 'Formatting preceded its insertion'
             assert characters(created['documents'][target]) == old, 'Insertion publication differs from its local intent'
             assert characters(changed['documents'][target]) == new, 'Formatting publication differs from its local intent'
-            documents[target] = {'text': text, 'insertion': insertion, 'space': inserted['space'],
-                                 'old': old, 'new': new, 'insert': created, 'format': changed}
+            states = {'insert': {'characters': old, 'attempt': created},
+                      'format': {'characters': new, 'attempt': changed}}
+            if replaced:
+                replacement, = replaced
+                end = len(text.encode('utf-16-le')) // 2
+                assert replacement['object'] == target and replacement['space'] == inserted['space'], 'Text edit addresses another object'
+                assert replacement['text'] == text and replacement['range'] == [end-3, end], 'Cross-run text range differs from workload'
+                assert replacement['replacement'] == ' e\u0301🐈', 'Cross-run replacement differs from workload'
+                final = new[:-2] + [(char, *new[-2][1:]) for char in replacement['replacement']]
+                attempt = linked[replacement['id']]
+                assert changed['finished_us'] <= attempt['started_us'], 'Text replacement preceded its formatting'
+                assert characters(attempt['documents'][target]) == final, 'Text publication differs from its local intent'
+                states['text'] = {'characters': final, 'attempt': attempt}
+            documents[target] = {'insertion': insertion, 'space': inserted['space'], 'states': states}
     assert documents, 'No document operations were recorded'
     for actor, events in logs.items():
         previous = {}
@@ -103,19 +123,20 @@ def document_history(logs, operations):
             observed = read['documents']
             assert set(previous) <= set(observed) <= set(documents), 'Reader lost an object or observed an unrecorded insertion'
             for target, document in documents.items():
-                if read['started_us'] > document['insert']['acknowledged_us']:
+                states = list(document['states'].values())
+                if read['started_us'] > states[0]['attempt']['acknowledged_us']:
                     assert target in observed, 'Reader missed an acknowledged insertion'
                 if target not in observed: continue
-                assert read['finished_us'] >= document['insert']['started_us'], 'Reader observed a future insertion'
                 actual = characters(observed[target])
-                assert actual in (document['old'], document['new']), 'Reader observed partial or invented formatting'
-                formatted = actual == document['new']
-                assert not previous.get(target, False) or formatted, 'Reader reverted acknowledged formatting'
-                if read['started_us'] > document['format']['acknowledged_us']:
-                    assert formatted, 'Reader missed acknowledged formatting'
-                if formatted:
-                    assert read['finished_us'] >= document['format']['started_us'], 'Reader observed future formatting'
-                previous[target] = formatted
+                matches = [i for i, state in enumerate(states) if actual == state['characters']]
+                assert len(matches) == 1, 'Reader observed partial or invented document content'
+                current, = matches
+                assert current >= previous.get(target, 0), 'Reader reverted document content'
+                assert read['finished_us'] >= states[current]['attempt']['started_us'], 'Reader observed future document content'
+                for i, state in enumerate(states):
+                    if read['started_us'] > state['attempt']['acknowledged_us']:
+                        assert current >= i, 'Reader missed acknowledged document content'
+                previous[target] = current
     return documents
 
 
@@ -138,7 +159,8 @@ def verify_model(model, documents):
             found.add(target)
             expected = documents[target]
             insertion = expected['insertion']
-            assert sid == expected['space'] and node['kind']['text'] == expected['text']
+            final = list(expected['states'].values())[-1]['characters']
+            assert sid == expected['space'] and node['kind']['text'] == ''.join(char for char, *_ in final)
             object_id = identity(insertion, 1)
             assert object_id in nodes[insertion['parent']]['children'], 'Insertion lost its parent'
             paragraph = identity(insertion, 3) if 'Outline' in insertion['placement'] else object_id
@@ -150,13 +172,13 @@ def verify_model(model, documents):
     assert found == set(documents), 'Final model omitted an inserted object'
 
 
-def verify_native(paragraphs, documents):
+def verify_native(paragraphs, expected):
     from PIL import ImageColor
     by_text = {''.join(char for char, _ in paragraph): paragraph for paragraph in paragraphs}
     checks = 0
-    for document in documents.values():
-        actual = by_text[document['text']]
-        for (char, style), (wanted, bold, size, color) in zip(actual, document['new'], strict=True):
+    for final in expected:
+        actual = by_text[''.join(char for char, *_ in final)]
+        for (char, style), (wanted, bold, size, color) in zip(actual, final, strict=True):
             assert char == wanted and bool(style.get('bold')) == bold, 'Native text or bold differs from intent'
             assert style.get('font_size', 11) == size, 'Native font size differs from intent'
             native_color = style.get('color', 'automatic')
