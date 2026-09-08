@@ -138,8 +138,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     font_size = Some(*value);
                     *value as u64 - 6
                 }
-                onestore_offline::Operation::Split(_) | onestore_offline::Operation::Join(_) => {
-                    panic!("This fixture does not generate paragraph boundary edits")
+                onestore_offline::Operation::Split(_)
+                | onestore_offline::Operation::Join(_)
+                | onestore_offline::Operation::Outline(_) => {
+                    panic!("Unexpected operation for this fixture")
                 }
             };
             assert!(operations.last().is_none_or(|last| *last < operation));

@@ -30,8 +30,8 @@ intent identities. `Insertion::with_formatting` queues text and
 its styles as one intent and one publication. Keep that value across retries; its `text_object()` identifies
 the new text for subsequent offline edits. Pending entries expose
 `Operation::Text(TextEdit)`, `Operation::Insert(Insertion)`,
-`Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)` and
-`Operation::Join(JoinEdit)` through their
+`Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)`,
+`Operation::Join(JoinEdit)` and `Operation::Outline(OutlineEdit)` through their
 `operation` field. Synchronization applies these in queue order, so an inserted
 outline can precede its paragraphs and their later edits. Missing anchors or
 existing insertion identities preserve a conflict and the complete local image.
@@ -88,8 +88,18 @@ requested value is accepted. Enabling superscript or subscript also checks the
 opposite attribute that the operation clears. If the remote image already satisfies
 the whole operation, guarded confirmation still precedes a durable receipt.
 
-Recognized earlier caches migrate transactionally to version six, which adds
-paragraph split/join intents and structural conflicts. The migration retains
+`outline` accepts a target object and the core `onestore::OutlineEdit`: outline
+position/width or a paragraph's saved collapse default. It retains the target's
+ancestry and the properties the operation changes. Independent content, formatting
+and layout properties merge; competing selected values produce `LayoutChanged`,
+and changed ancestry produces `StructureChanged`. Width changes also check the
+reserved wrapping width that they clear. Missing targets preserve the local branch.
+`rebase_layout_conflict(id, local, remote)` explicitly reviews the original change
+against both current images, preserving dependent intents. An uncertain layout
+attempt requires its original revision; converged values cannot establish its receipt.
+
+Recognized earlier caches migrate transactionally to version seven, which adds
+layout intents and layout conflicts. The migration retains
 images, local IDs, publication attempts, conflicts,
 receipts and the autoincrement sequence; it does not reuse acknowledged IDs when
 the pending queue is empty.
@@ -258,5 +268,4 @@ identity return `AssetChanged` and preserve the previous download.
 
 Downloads do not change pending edits, publication attempts or receipts. Recovery
 archives include cached media and expose the same bounded `cached_asset` lookup.
-Opening older live caches migrates them transactionally to schema 5; original
-schema-4 archives remain readable without migration and contain no media cache.
+Schema-4 archives remain readable without migration and contain no media cache.

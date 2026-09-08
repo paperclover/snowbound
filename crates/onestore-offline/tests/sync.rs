@@ -5,6 +5,9 @@ use onestore::{
 use onestore_offline::{ConflictKind, EditStatus, Error, Remote, Replica};
 use std::io;
 
+#[path = "sync/outline.rs"]
+mod outline;
+
 mod paragraph {
     use super::*;
     use onestore::{Insertion, ParagraphJoin, ParagraphSplit, TextAttribute};
@@ -1657,6 +1660,9 @@ fn version_one_cache_migration_preserves_images_intents_and_local_ids() {
     let pending = cache.pending().unwrap();
     drop(cache);
     let db = rusqlite::Connection::open(&path).unwrap();
+    let current_version: u32 = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
     db.execute_batch(
         "DROP TABLE attempt; DROP TABLE conflicts; DROP TABLE receipts; DROP TABLE edits; DROP TABLE assets;
          CREATE TABLE edits (
@@ -1683,7 +1689,7 @@ fn version_one_cache_migration_preserves_images_intents_and_local_ids() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap(),
-        6
+        current_version
     );
 }
 

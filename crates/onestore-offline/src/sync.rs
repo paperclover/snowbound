@@ -19,6 +19,7 @@ pub enum ConflictKind {
     UnsupportedEdit = 2,
     FormattingChanged = 3,
     StructureChanged = 4,
+    LayoutChanged = 5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +135,7 @@ impl Replica {
             Operation::Format(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Split(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Join(edit) => edit.prepare(&snapshot, intent.space)?,
+            Operation::Outline(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Insert(insertion) => {
                 PreparedEdit::insert(&snapshot, intent.space, insertion)
                     .map_err(|_| ConflictKind::UnsupportedEdit)
@@ -297,6 +299,13 @@ impl Replica {
                     )
                     .into());
                 }
+                Operation::Outline(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Review layout changes using rebase_layout_conflict",
+                    )
+                    .into());
+                }
                 Operation::Insert(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -369,6 +378,23 @@ impl Replica {
             let insertion = insertion.reposition_outline(page, x, y)?;
             PreparedEdit::insert(remote, intent.space, &insertion)?;
             Ok(Operation::Insert(insertion))
+        })
+    }
+
+    /// Reviews the original layout intent against both current cache images.
+    /// Competing property values are replaced only after this explicit review.
+    pub fn rebase_layout_conflict(&self, id: u64, local: &[u8], remote: &[u8]) -> Result<()> {
+        self.resolve_conflict(id, local, remote, |intent| {
+            let Operation::Outline(edit) = intent.operation else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Select an outline layout conflict",
+                )
+                .into());
+            };
+            Ok(Operation::Outline(
+                OutlineEdit::capture(remote, intent.space, edit.object, edit.change)?.0,
+            ))
         })
     }
 
@@ -492,6 +518,7 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
             2 => ConflictKind::UnsupportedEdit,
             3 => ConflictKind::FormattingChanged,
             4 => ConflictKind::StructureChanged,
+            5 => ConflictKind::LayoutChanged,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

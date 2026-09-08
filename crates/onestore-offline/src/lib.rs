@@ -10,11 +10,13 @@ use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Durati
 
 mod assets;
 mod formatting;
+mod outline;
 mod paragraph;
 mod rebase;
 mod recovery;
 mod schema;
 pub use formatting::FormatEdit;
+pub use outline::OutlineEdit;
 pub use paragraph::{JoinEdit, SplitEdit};
 pub use recovery::{Recovery, RecoverySummary};
 mod sync;
@@ -47,7 +49,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 /// Text and its observed precondition, retained across cache reopen and rebasing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -67,6 +69,7 @@ pub enum Operation {
     Format(FormatEdit),
     Split(SplitEdit),
     Join(JoinEdit),
+    Outline(OutlineEdit),
 }
 
 /// A locally acknowledged intent; its ID remains stable across cache reopen.
@@ -277,6 +280,53 @@ impl Replica {
             worker.wake();
         }
     }
+}
+
+fn active_paths(
+    view: &onestore::document::Revision<'_>,
+    pages: &[ExGuid],
+    objects: &[ExGuid],
+) -> Option<Vec<Vec<ExGuid>>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut pending = pages.to_vec();
+    let mut seen = BTreeSet::new();
+    let mut parents = BTreeMap::<_, Vec<_>>::new();
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let node = view.nodes.get(&id)?;
+        for child in node
+            .children
+            .iter()
+            .chain(&node.content)
+            .chain(&node.structure)
+        {
+            parents.entry(*child).or_default().push(id);
+            pending.push(*child);
+        }
+    }
+    objects
+        .iter()
+        .map(|object| {
+            if !seen.contains(object) {
+                return None;
+            }
+            let mut path = Vec::new();
+            let mut at = *object;
+            while !pages.contains(&at) {
+                let [parent] = parents.get(&at)?.as_slice() else {
+                    return None;
+                };
+                if path.len() >= view.nodes.len() {
+                    return None;
+                }
+                path.push(*parent);
+                at = *parent;
+            }
+            Some(path)
+        })
+        .collect()
 }
 
 fn paragraph(source: &[u8], space: ExGuid, object: ExGuid) -> Result<Option<String>> {

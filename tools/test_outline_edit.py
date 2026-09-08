@@ -37,7 +37,7 @@ class OutlineEditTest(unittest.TestCase):
             self.assertEqual(page, saved_page)
             for oid, node in walk(old, page):
                 actual = new['nodes'][oid]
-                for key in ('children', 'content', 'structure', 'child_level'):
+                for key in ('children', 'content', 'structure', 'child_level', 'layout'):
                     self.assertEqual(actual[key], node[key], (name, oid, key))
                 self.assertEqual(actual['kind'].get('collapse_state'), node['kind'].get('collapse_state'))
                 if node['kind']['type'] == 'RichText':
@@ -85,6 +85,49 @@ class OutlineEditTest(unittest.TestCase):
         size = native.find('one:Size', ns)
         self.assertEqual(size.get('isSetByUser'), 'true')
         self.assertAlmostEqual(float(size.get('width')), 144, places=3)
+
+    def test_offline_native_reconciliation_preserves_graph_and_dependent_edits(self):
+        models, _ = self.cold_layout(FIXTURE / 'offline')
+        records = json.loads((FIXTURE / 'offline/cases.json').read_text())
+        self.assertEqual(len(records), 14)
+        self.assertEqual(sum(row['retained'] for row in records), 4)
+        records = {row['name']: row for row in records}
+        with TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            subprocess.run([EXPORTER, FIXTURE / 'after/notebook/synthetic.one', folder / 'model'], check=True)
+            model = json.loads((folder / 'model/document.json').read_text())
+            remote = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                      for _, _, r, page in ordered_pages(model)}
+        changed = texts = 0
+        for name, (candidate, page) in models['candidate'].items():
+            original, remote_page = remote[name]
+            self.assertEqual(page, remote_page)
+            record = records.get(name)
+            for oid, node in walk(candidate, page):
+                before = original['nodes'][oid]
+                for key in ('children', 'content', 'structure', 'child_level'):
+                    self.assertEqual(node[key], before[key], (name, oid, key))
+                layout = dict(before['layout'])
+                if record and not record['retained'] and oid == record['object']:
+                    change = record['change']
+                    if 'Position' in change:
+                        layout.update(change['Position'])
+                    elif 'Width' in change:
+                        layout['max_width'] = change['Width']['points']
+                        layout['width_set_by_user'] = change['Width']['user_set']
+                    else:
+                        self.assertEqual(node['kind']['collapse_state'], int(change['Collapsed']))
+                    changed += 1
+                else:
+                    self.assertEqual(node['kind'].get('collapse_state'), before['kind'].get('collapse_state'))
+                self.assertEqual(node['layout'], layout)
+                if node['kind']['type'] == 'RichText':
+                    expected = before['kind']['text']
+                    if record and not record['retained'] and oid == record['dependent_text']:
+                        expected = 'Local ' + expected
+                        texts += 1
+                    self.assertEqual(node['kind']['text'], expected)
+        self.assertEqual((changed, texts), (10, 10))
 
     def preserved_node(self, old, new):
         expected = dict(old)

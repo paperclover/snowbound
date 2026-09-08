@@ -710,7 +710,7 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
 
 #[test]
 fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
-    for operation in ["Text", "Insert", "Format", "Split", "Join"] {
+    for operation in ["Text", "Insert", "Format", "Split", "Join", "Outline"] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unknown.sqlite");
         let mut source = onestore::create_section("unknown.one", "Original", "Author").unwrap();
@@ -731,6 +731,26 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
             let insertion =
                 onestore::Insertion::outline(page, 144.0, 144.0, "Inserted", "Author").unwrap();
             cache.insert(&source, sid, &insertion).unwrap();
+        } else if operation == "Outline" {
+            let store = Store::parse(&source).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let doc = Document::parse(&index).unwrap();
+            let space = &doc.spaces[&sid];
+            let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let paragraph = *view
+                .nodes
+                .iter()
+                .find(|(_, node)| node.content == [oid])
+                .unwrap()
+                .0;
+            cache
+                .outline(
+                    &source,
+                    sid,
+                    paragraph,
+                    onestore::OutlineEdit::Collapsed(true),
+                )
+                .unwrap();
         } else if operation == "Text" {
             cache.edit_text(&source, sid, oid, 0..0, "New ").unwrap();
         } else if operation == "Split" {
@@ -776,99 +796,120 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
 }
 
 #[test]
-fn version_five_migration_retains_queue_evidence_and_enables_structural_conflicts() {
-    use onestore_offline::{ConflictKind, EditStatus, Recovery};
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("version-five.sqlite");
-    let source = onestore::create_section("migration.one", "Original", "Author").unwrap();
-    let (sid, oid, _) = target(&source);
-    let cache = Replica::create(&path, &source).unwrap();
-    let first = cache
-        .edit_text(&source, sid, oid, 0..0, "New ")
-        .unwrap()
-        .unwrap();
-    let second = cache
-        .format(
-            &cache.snapshot().unwrap(),
-            sid,
-            oid,
-            0..3,
-            &[onestore::TextAttribute::Bold(true)],
+fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_layout_conflicts() {
+    for (version, ceiling) in [(5, 3), (6, 4)] {
+        use onestore_offline::{ConflictKind, EditStatus, Recovery};
+        use sha2::{Digest, Sha256};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("previous.sqlite");
+        let source = onestore::create_section("migration.one", "Original", "Author").unwrap();
+        let (sid, oid, _) = target(&source);
+        let cache = Replica::create(&path, &source).unwrap();
+        let first = cache
+            .edit_text(&source, sid, oid, 0..0, "New ")
+            .unwrap()
+            .unwrap();
+        let second = cache
+            .format(
+                &cache.snapshot().unwrap(),
+                sid,
+                oid,
+                0..3,
+                &[onestore::TextAttribute::Bold(true)],
+            )
+            .unwrap()
+            .unwrap();
+        let queue = cache.pending().unwrap();
+        let local = cache.snapshot().unwrap();
+        let store = Store::parse(&local).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let revision = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
+        drop(cache);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let current_version: u32 = db
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let asset = "00112233-4455-6677-8899-aabbccddeeff.onebin";
+        let data = b"retained media";
+        db.execute(
+            "INSERT INTO assets VALUES (?1,?2,?3)",
+            rusqlite::params![asset, data.as_slice(), Sha256::digest(data).as_slice()],
         )
-        .unwrap()
         .unwrap();
-    let queue = cache.pending().unwrap();
-    let local = cache.snapshot().unwrap();
-    let store = Store::parse(&local).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let revision = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
-    drop(cache);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch(
-        "DROP TABLE conflicts; CREATE TABLE conflicts (
-        edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE,
-        kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3)) STRICT;
-        PRAGMA user_version=5;
-        UPDATE sqlite_sequence SET seq=1000 WHERE name='edits';",
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO conflicts VALUES (?1,3)",
-        [i64::try_from(second).unwrap()],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO attempt VALUES (1,?1,?2)",
-        rusqlite::params![i64::try_from(first).unwrap(), revision.to_string()],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO receipts VALUES (999,?1)",
-        [revision.to_string()],
-    )
-    .unwrap();
-    drop(db);
-    let cache = Replica::open(&path).unwrap();
-    assert_eq!(cache.pending().unwrap(), queue);
-    assert!(cache.snapshot().unwrap() == local);
-    assert!(cache.remote_snapshot().unwrap() == source);
-    assert_eq!(
-        cache.status(first).unwrap(),
-        Some(EditStatus::AwaitingConfirmation { revision })
-    );
-    assert_eq!(
-        cache.status(second).unwrap(),
-        Some(EditStatus::Conflict(ConflictKind::FormattingChanged))
-    );
-    assert_eq!(
-        cache.status(999).unwrap(),
-        Some(EditStatus::Published { revision })
-    );
-    let split = onestore::ParagraphSplit::new(oid, 3, "Author").unwrap();
-    assert_eq!(cache.split(&local, sid, &split).unwrap(), Some(1001));
-    let pending = cache.pending().unwrap();
-    let archive = directory.path().join("recovery.sqlite");
-    cache.export_recovery(&archive).unwrap();
-    let recovery = Recovery::open(&archive).unwrap();
-    assert_eq!(recovery.pending().unwrap(), pending);
-    assert_eq!(
-        recovery.status(first).unwrap(),
-        cache.status(first).unwrap()
-    );
-    assert_eq!(recovery.receipts().unwrap().get(&999), Some(&revision));
-    drop(cache);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    assert_eq!(
-        db.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-            .unwrap(),
-        6
-    );
-    db.execute("INSERT INTO conflicts VALUES (1001,4)", [])
+        db.execute_batch(&format!(
+            "DROP TABLE conflicts; CREATE TABLE conflicts (
+            edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE,
+            kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND {ceiling})) STRICT;
+            PRAGMA user_version={version};
+            UPDATE sqlite_sequence SET seq=1000 WHERE name='edits';"
+        ))
         .unwrap();
-    drop(db);
-    let cache = Replica::open(&path).unwrap();
-    assert_eq!(
-        cache.status(1001).unwrap(),
-        Some(EditStatus::Conflict(ConflictKind::StructureChanged))
-    );
+        db.execute(
+            "INSERT INTO conflicts VALUES (?1,3)",
+            [i64::try_from(second).unwrap()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO attempt VALUES (1,?1,?2)",
+            rusqlite::params![i64::try_from(first).unwrap(), revision.to_string()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO receipts VALUES (999,?1)",
+            [revision.to_string()],
+        )
+        .unwrap();
+        drop(db);
+        let cache = Replica::open(&path).unwrap();
+        assert_eq!(cache.pending().unwrap(), queue);
+        assert_eq!(
+            cache.cached_asset(asset, 1024).unwrap(),
+            Some(data.to_vec())
+        );
+        assert!(cache.snapshot().unwrap() == local);
+        assert!(cache.remote_snapshot().unwrap() == source);
+        assert_eq!(
+            cache.status(first).unwrap(),
+            Some(EditStatus::AwaitingConfirmation { revision })
+        );
+        assert_eq!(
+            cache.status(second).unwrap(),
+            Some(EditStatus::Conflict(ConflictKind::FormattingChanged))
+        );
+        assert_eq!(
+            cache.status(999).unwrap(),
+            Some(EditStatus::Published { revision })
+        );
+        let split = onestore::ParagraphSplit::new(oid, 3, "Author").unwrap();
+        assert_eq!(cache.split(&local, sid, &split).unwrap(), Some(1001));
+        let pending = cache.pending().unwrap();
+        let archive = directory.path().join("recovery.sqlite");
+        cache.export_recovery(&archive).unwrap();
+        let recovery = Recovery::open(&archive).unwrap();
+        assert_eq!(recovery.pending().unwrap(), pending);
+        assert_eq!(
+            recovery.cached_asset(asset, 1024).unwrap(),
+            Some(data.to_vec())
+        );
+        assert_eq!(
+            recovery.status(first).unwrap(),
+            cache.status(first).unwrap()
+        );
+        assert_eq!(recovery.receipts().unwrap().get(&999), Some(&revision));
+        drop(cache);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            current_version
+        );
+        db.execute("INSERT INTO conflicts VALUES (1001,5)", [])
+            .unwrap();
+        drop(db);
+        let cache = Replica::open(&path).unwrap();
+        assert_eq!(
+            cache.status(1001).unwrap(),
+            Some(EditStatus::Conflict(ConflictKind::LayoutChanged))
+        );
+    }
 }

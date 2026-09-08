@@ -60,3 +60,19 @@ all 304 active graph objects, ten tags and 8,457 explicit formatting comparisons
 To regenerate, run `resizing_a_native_reserved_width_preserves_content` with
 `ONESTORE_RESERVED_WIDTH_OUTPUT` set to a new absolute directory, then cold-open
 it with the same runner arguments.
+
+`offline` reconciles local layout/default intents and later text edits against all
+fourteen native changes. Five merge automatically, five require explicit review,
+and four deleted targets retain their local branches and dependent queues. The ten
+successful cases produce eighteen publications and twenty durable receipts; the
+already-converged collapse defaults require confirmation without another append.
+The final cold capture preserves all 304 active graph objects, ten tags, and 8,937
+explicit formatting comparisons. The `cases.json` records stable targets and the
+retained/dependent outcomes used by the public test.
+
+Regenerate by running the offline sync test
+`native_moves_deletions_and_layout_changes_merge_or_retain_explicit_conflicts`
+with `ONESTORE_OFFLINE_OUTLINE_OUTPUT` set to a new absolute directory, then use
+the same cold runner arguments. The test also retains a JSON record next to that
+directory. Cache migration, uncertain revision retention, stale review, and twelve
+offline writers are exercised in `crates/onestore-offline/tests`.

@@ -1,10 +1,11 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    CommitError, ExGuid, ParagraphJoin, ParagraphSplit, PreparedEdit, RevisionIndex, Store,
+    CommitError, ExGuid, OutlineEdit, ParagraphJoin, ParagraphSplit, PreparedEdit, RevisionIndex,
+    Store,
     document::{Document, Kind},
 };
-use onestore_offline::{EditStatus, Remote, Replica};
+use onestore_offline::{EditStatus, Operation, Remote, Replica};
 use std::{io, sync::LazyLock};
 
 #[path = "../../crates/onestore/tests/support/disk.rs"]
@@ -94,7 +95,7 @@ fuzz_target!(|input: &[u8]| {
         let snapshot = cache.snapshot().unwrap();
         let pending = cache.pending().unwrap();
         let rows = paragraphs(&snapshot, *sid, *outline);
-        match step[1] % 5 {
+        match step[1] % 8 {
             0 => {
                 let (text, content) = &rows[usize::from(step[2]) % rows.len()];
                 let offsets: Vec<u32> = std::iter::once(0)
@@ -147,7 +148,76 @@ fuzz_target!(|input: &[u8]| {
                 }
                 server.0.visible.clone_from(&server.0.durable);
             }
+            5..=7 => {
+                let store = Store::parse(&snapshot).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                let document = Document::parse(&index).unwrap();
+                let space = &document.spaces[sid];
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let (object, change) = match step[1] % 8 {
+                    5 => (
+                        *outline,
+                        OutlineEdit::Position {
+                            x: f32::from(step[2]) * 18.0,
+                            y: f32::from(step[3]) * 18.0,
+                        },
+                    ),
+                    6 => (
+                        *outline,
+                        OutlineEdit::Width {
+                            points: (2.0 + f32::from(step[2])) * 18.0,
+                            user_set: step[3] & 1 != 0,
+                        },
+                    ),
+                    _ => (
+                        view.nodes[outline].children[usize::from(step[2]) % rows.len()],
+                        OutlineEdit::Collapsed(step[3] & 1 != 0),
+                    ),
+                };
+                let mut expected = serde_json::to_value(&view.nodes[&object]).unwrap();
+                match change {
+                    OutlineEdit::Position { x, y } => {
+                        expected["layout"]["x"] = x.into();
+                        expected["layout"]["y"] = y.into();
+                    }
+                    OutlineEdit::Width { points, user_set } => {
+                        expected["layout"]["max_width"] = points.into();
+                        expected["layout"]["width_set_by_user"] = user_set.into();
+                    }
+                    OutlineEdit::Collapsed(value) => {
+                        expected["kind"]["collapse_state"] = u8::from(value).into()
+                    }
+                }
+                let id = cache.outline(&snapshot, *sid, object, change).unwrap();
+                let next = cache.pending().unwrap();
+                assert_eq!(next[..pending.len()], pending);
+                assert_eq!(next.len(), pending.len() + usize::from(id.is_some()));
+                if let Some(id) = id {
+                    assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
+                }
+                let bytes = cache.snapshot().unwrap();
+                let store = Store::parse(&bytes).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                let document = Document::parse(&index).unwrap();
+                let space = &document.spaces[sid];
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let actual = serde_json::to_value(&view.nodes[&object]).unwrap();
+                for key in ["kind", "layout", "children", "content"] {
+                    assert_eq!(actual[key], expected[key]);
+                }
+            }
             _ => {
+                if let Some(edit) = pending.first()
+                    && matches!(edit.operation, Operation::Outline(_))
+                    && matches!(
+                        cache.status(edit.id).unwrap(),
+                        Some(EditStatus::Conflict(_))
+                    )
+                {
+                    let remote = cache.remote_snapshot().unwrap();
+                    let _ = cache.rebase_layout_conflict(edit.id, &snapshot, &remote);
+                }
+                let pending = cache.pending().unwrap();
                 drop(replicas[actor].take());
                 let reopened = Replica::open(&path).unwrap();
                 assert!(reopened.snapshot().unwrap() == snapshot);

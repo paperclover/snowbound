@@ -1,0 +1,154 @@
+[
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{033CC036-70D6-02D3-2869-6264552F7B9E},64",
+    "name": "Move leaf down",
+    "object": "{033CC036-70D6-02D3-2869-6264552F7B9E},45",
+    "retained": false,
+    "space": "{B7267338-BF83-0893-27A7-37F606DD20C8},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{E79A0442-BFCF-04C6-1E04-364B68877B88},75",
+    "name": "Move subtree down",
+    "object": "{E79A0442-BFCF-04C6-1E04-364B68877B88},45",
+    "retained": false,
+    "space": "{9B80D7CA-18B4-02B0-1E85-6E8AA0DAD827},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{3F47069A-F0C5-053E-1DEC-13B552EEE2A0},75",
+    "name": "Move subtree up",
+    "object": "{3F47069A-F0C5-053E-1DEC-13B552EEE2A0},45",
+    "retained": false,
+    "space": "{7538095C-389B-07D8-2991-B2BC46EBD52A},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{5A89330E-0803-08CF-2BF5-26621F998039},75",
+    "name": "Indent subtree",
+    "object": "{5A89330E-0803-08CF-2BF5-26621F998039},45",
+    "retained": false,
+    "space": "{651463E3-C768-0C93-363D-FCE642B07408},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{1A8D8A0B-E96E-01B0-3DA2-EF182AA19042},75",
+    "name": "Outdent subtree",
+    "object": "{1A8D8A0B-E96E-01B0-3DA2-EF182AA19042},45",
+    "retained": false,
+    "space": "{8384083C-60ED-0F7C-2F15-8B20B878B3EB},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{7375C8D1-28F0-0B05-00E5-093957D7F5F1},75",
+    "name": "Collapse subtree",
+    "object": "{7375C8D1-28F0-0B05-00E5-093957D7F5F1},45",
+    "retained": false,
+    "space": "{FF88B513-029C-00E2-0082-9E3DCE1D7796},1"
+  },
+  {
+    "change": {
+      "Collapsed": false
+    },
+    "dependent_text": "{B11DD73E-4234-04EF-0F4D-1F67E8F92C22},75",
+    "name": "Expand subtree",
+    "object": "{B11DD73E-4234-04EF-0F4D-1F67E8F92C22},45",
+    "retained": false,
+    "space": "{850B34E4-D62A-042B-138A-B2A905CEE28E},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{DC976FEC-CD30-0C41-20AD-BB462A203464},64",
+    "name": "Delete leaf",
+    "object": "{DC976FEC-CD30-0C41-20AD-BB462A203464},45",
+    "retained": true,
+    "space": "{363FE055-44E1-0B27-14A8-46278FD681FF},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{73987DA5-C014-0EEA-00F8-5C1E149736E4},75",
+    "name": "Delete subtree",
+    "object": "{73987DA5-C014-0EEA-00F8-5C1E149736E4},45",
+    "retained": true,
+    "space": "{8BBAD88F-D248-0959-00B3-2438A7065330},1"
+  },
+  {
+    "change": {
+      "Collapsed": true
+    },
+    "dependent_text": "{C868DD34-6E8C-07E9-116E-4C68D2C45DFC},54",
+    "name": "Delete only paragraph",
+    "object": "{C868DD34-6E8C-07E9-116E-4C68D2C45DFC},40",
+    "retained": true,
+    "space": "{A4CB3BA2-767F-0AE8-0916-AF142D995822},1"
+  },
+  {
+    "change": {
+      "Width": {
+        "points": 252.0,
+        "user_set": true
+      }
+    },
+    "dependent_text": "{78796D8B-FB39-02D8-2502-22530F00073C},75",
+    "name": "Delete outline",
+    "object": "{78796D8B-FB39-02D8-2502-22530F00073C},39",
+    "retained": true,
+    "space": "{80E80543-87A1-0C3A-0816-22B190BDFC87},1"
+  },
+  {
+    "change": {
+      "Position": {
+        "x": 252.0,
+        "y": 288.0
+      }
+    },
+    "dependent_text": "{462B969B-FCFA-0201-073A-0B4C3C23ABF5},75",
+    "name": "Move outline",
+    "object": "{462B969B-FCFA-0201-073A-0B4C3C23ABF5},39",
+    "retained": false,
+    "space": "{16207F40-69C9-0CA1-09B5-DC5712DB2BBE},1"
+  },
+  {
+    "change": {
+      "Width": {
+        "points": 252.0,
+        "user_set": true
+      }
+    },
+    "dependent_text": "{048364F9-D353-05E3-319E-2633D33434CE},75",
+    "name": "Resize outline",
+    "object": "{048364F9-D353-05E3-319E-2633D33434CE},39",
+    "retained": false,
+    "space": "{CD420421-73F7-0F11-02EC-35FCA348998C},1"
+  },
+  {
+    "change": {
+      "Width": {
+        "points": 252.0,
+        "user_set": true
+      }
+    },
+    "dependent_text": "{CE365E1B-9B76-067E-2EC7-220FB6AC76E9},75",
+    "name": "Automatic outline size",
+    "object": "{CE365E1B-9B76-067E-2EC7-220FB6AC76E9},39",
+    "retained": false,
+    "space": "{F383096F-2121-0225-1E62-AB37C9B15B33},1"
+  }
+]

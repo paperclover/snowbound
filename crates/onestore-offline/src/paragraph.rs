@@ -2,7 +2,6 @@ use super::*;
 use onestore::{ParagraphJoin, ParagraphSplit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,49 +40,20 @@ fn observe(source: &[u8], space: ExGuid, texts: &[ExGuid]) -> Result<Option<Vec<
     else {
         return Ok(None);
     };
-    let mut pending: Vec<_> = document
+    let pages: Vec<_> = document
         .pages()?
         .into_iter()
         .filter_map(|(sid, page)| (sid == space).then_some(page))
         .collect();
-    let pages = pending.clone();
-    let mut seen = BTreeSet::new();
-    let mut parents = BTreeMap::<_, Vec<_>>::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let node = &view.nodes[&id];
-        for child in node
-            .children
-            .iter()
-            .chain(&node.content)
-            .chain(&node.structure)
-        {
-            parents.entry(*child).or_default().push(id);
-            pending.push(*child);
-        }
-    }
+    let Some(paths) = active_paths(view, &pages, texts) else {
+        return Ok(None);
+    };
     let mut observed = Vec::new();
-    for text in texts {
-        let Some(node) = view.nodes.get(text).filter(|_| seen.contains(text)) else {
-            return Ok(None);
-        };
+    for (text, path) in texts.iter().zip(paths) {
+        let node = &view.nodes[text];
         let Kind::RichText { text: content, .. } = &node.kind else {
             return Ok(None);
         };
-        let mut path = Vec::new();
-        let mut at = *text;
-        while !pages.contains(&at) {
-            let Some([parent]) = parents.get(&at).map(Vec::as_slice) else {
-                return Ok(None);
-            };
-            if path.len() >= view.nodes.len() {
-                return Ok(None);
-            }
-            path.push(*parent);
-            at = *parent;
-        }
         let Some(paragraph) = path.first().and_then(|id| view.nodes.get(id)) else {
             return Ok(None);
         };
