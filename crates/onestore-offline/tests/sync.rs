@@ -26,6 +26,234 @@ mod paragraph {
         (source, sid, left, parent)
     }
 
+    fn native_reconciliation(keyboard: bool) -> (Vec<u8>, Vec<serde_json::Value>) {
+        let source = include_bytes!(
+            "../../../corpus/paragraph-edit/reconciliation/before/notebook/synthetic.one"
+        );
+        let native: &[u8] = if keyboard {
+            include_bytes!(
+                "../../../corpus/paragraph-edit/reconciliation/keyboard/notebook/synthetic.one"
+            )
+        } else {
+            include_bytes!(
+                "../../../corpus/paragraph-edit/reconciliation/remote/notebook/synthetic.one"
+            )
+        };
+        let store = Store::parse(source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let mut server = Server::new(native);
+        let mut recorded = Vec::new();
+        let mut counts = [0; 3];
+        for (sid, page) in document.pages().unwrap() {
+            let space = &document.spaces[&sid];
+            let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let Kind::Metadata {
+                title: Some(name), ..
+            } = &view.nodes[&view.roots[&2]].kind
+            else {
+                continue;
+            };
+            if !name.starts_with("Split ") && !name.starts_with("Join ") {
+                continue;
+            }
+            let outline = view.nodes[&page]
+                .children
+                .iter()
+                .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
+                .unwrap();
+            let children = &view.nodes[outline].children;
+            let left = view.nodes[&children[0]].content[0];
+            let split = name.starts_with("Split ");
+            let adoption = name == "Join empty adoption";
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("native-reconciliation.sqlite");
+            let mut cache = Replica::create(&path, source).unwrap();
+            let (id, target, intent) = if split {
+                let intent = ParagraphSplit::new(left, 2, "Offline author").unwrap();
+                (
+                    cache.split(source, sid, &intent).unwrap().unwrap(),
+                    intent.text_object(),
+                    serde_json::to_value(intent).unwrap(),
+                )
+            } else {
+                let right = view.nodes[&children[1]].content[0];
+                let intent = ParagraphJoin::new(left, right, "Offline author").unwrap();
+                (
+                    cache.join(source, sid, &intent).unwrap().unwrap(),
+                    if adoption { right } else { left },
+                    serde_json::to_value(intent).unwrap(),
+                )
+            };
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            let at = if split {
+                2
+            } else if adoption {
+                1
+            } else {
+                4
+            };
+            let dependent = cache
+                .edit_text(
+                    &cache.snapshot().unwrap(),
+                    sid,
+                    target,
+                    at..at + 1,
+                    if adoption { "I" } else { "C" },
+                )
+                .unwrap()
+                .unwrap();
+            let local = cache.snapshot().unwrap();
+            let pending = cache.pending().unwrap();
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            assert_eq!(cache.snapshot().unwrap(), local);
+            assert_eq!(cache.pending().unwrap(), pending);
+            let previous = server.publications;
+            let remote = server.visible.clone();
+            let (actual, status) = cache.sync_once(&mut server).unwrap().unwrap();
+            assert_eq!(actual, id);
+            assert_eq!(cache.snapshot().unwrap(), local);
+            if !keyboard {
+                counts[2] += 1;
+                assert_eq!(
+                    status,
+                    EditStatus::Conflict(ConflictKind::TargetUnavailable),
+                    "{name}"
+                );
+                assert_eq!(server.publications, previous);
+                assert_eq!(server.visible, remote);
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+                assert_eq!(cache.status(id).unwrap(), Some(status));
+                assert_eq!(cache.snapshot().unwrap(), local);
+                assert_eq!(cache.pending().unwrap(), pending);
+                continue;
+            }
+            let automatic = ["prefix", "format", "sibling"]
+                .iter()
+                .any(|suffix| name.ends_with(suffix));
+            if automatic {
+                counts[0] += 1;
+                assert!(
+                    matches!(status, EditStatus::Published { .. }),
+                    "{name}: {status:?}"
+                );
+            } else {
+                let expected = if name.ends_with("boundary") || adoption {
+                    ConflictKind::TextChanged
+                } else {
+                    ConflictKind::StructureChanged
+                };
+                assert_eq!(status, EditStatus::Conflict(expected), "{name}");
+                assert_eq!(server.publications, previous);
+                assert_eq!(server.visible, remote);
+                assert_eq!(cache.pending().unwrap(), pending);
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+                assert_eq!(cache.status(id).unwrap(), Some(status));
+                assert_eq!(cache.snapshot().unwrap(), local);
+                assert_eq!(cache.pending().unwrap(), pending);
+                if adoption || name == "Join remote list" {
+                    counts[2] += 1;
+                    assert!(cache.rebase_join_conflict(id, &local, &remote).is_err());
+                    assert_eq!(cache.pending().unwrap(), pending);
+                    assert_eq!(cache.snapshot().unwrap(), local);
+                    assert_eq!(cache.status(id).unwrap(), Some(status));
+                    recorded.push(serde_json::json!({"case": name, "space": sid, "intent": intent, "outcome": "retained_conflict"}));
+                    continue;
+                }
+                counts[1] += 1;
+                if split {
+                    let offset = if name.ends_with("boundary") { 3 } else { 2 };
+                    cache
+                        .rebase_conflict(id, &local, &remote, offset..offset)
+                        .unwrap();
+                    let onestore_offline::Operation::Split(edit) =
+                        &cache.pending().unwrap()[0].operation
+                    else {
+                        panic!()
+                    };
+                    assert_eq!(
+                        edit.intent,
+                        serde_json::from_value::<ParagraphSplit>(intent.clone())
+                            .unwrap()
+                            .reposition(offset)
+                    );
+                } else {
+                    cache.rebase_join_conflict(id, &local, &remote).unwrap();
+                }
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+                let (actual, status) = cache.sync_once(&mut server).unwrap().unwrap();
+                assert_eq!(actual, id);
+                assert!(
+                    matches!(status, EditStatus::Published { .. }),
+                    "{name}: {status:?}"
+                );
+            }
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            let first_receipt = cache.status(id).unwrap().unwrap();
+            let (actual, status) = cache.sync_once(&mut server).unwrap().unwrap();
+            assert_eq!(actual, dependent);
+            assert!(
+                matches!(status, EditStatus::Published { .. }),
+                "{name} dependent: {status:?}"
+            );
+            assert_eq!(server.publications, previous + 2);
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            assert_eq!(cache.status(id).unwrap(), Some(first_receipt));
+            assert_eq!(cache.status(dependent).unwrap(), Some(status));
+            assert!(cache.pending().unwrap().is_empty());
+            assert_eq!(cache.snapshot().unwrap(), server.durable);
+            let EditStatus::Published { revision } = first_receipt else {
+                panic!()
+            };
+            let EditStatus::Published {
+                revision: dependent_revision,
+            } = status
+            else {
+                panic!()
+            };
+            recorded.push(serde_json::json!({"case": name, "space": sid, "intent": intent,
+                "outcome": if automatic { "automatic" } else { "reviewed" }, "receipt": revision, "dependent_receipt": dependent_revision}));
+        }
+        assert_eq!(counts, if keyboard { [6, 8, 2] } else { [0, 0, 16] });
+        assert_eq!(server.publications, if keyboard { 28 } else { 0 });
+        (server.durable, recorded)
+    }
+
+    #[test]
+    fn native_com_replacement_preserves_every_local_paragraph_branch() {
+        native_reconciliation(false);
+    }
+
+    #[test]
+    fn native_changes_commute_or_retain_reviewable_paragraph_dependencies() {
+        native_reconciliation(true);
+    }
+
+    #[test]
+    #[ignore = "exports native-controlled reconciliation for cold OneNote validation"]
+    fn export_native_reconciliation() {
+        let output = std::path::PathBuf::from(
+            std::env::var_os("ONESTORE_NATIVE_RECONCILIATION_OUTPUT").unwrap(),
+        );
+        assert!(output.is_absolute());
+        std::fs::create_dir(&output).unwrap();
+        let (bytes, cases) = native_reconciliation(true);
+        std::fs::create_dir(output.join("candidate")).unwrap();
+        std::fs::write(output.join("candidate/synthetic.one"), bytes).unwrap();
+        std::fs::write(
+            output.join("manifest.json"),
+            serde_json::to_vec_pretty(&cases).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn native_splits_retain_independent_local_identities_and_changed_boundaries() {
         let source = include_bytes!("../../../corpus/paragraph-edit/before/notebook/synthetic.one");

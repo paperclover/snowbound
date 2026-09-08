@@ -1,0 +1,1 @@
+../../../keyboard/scripts/read.ps1

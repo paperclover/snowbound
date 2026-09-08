@@ -1,0 +1,5 @@
+{
+  "sha256": "a7e23f927eaa9b7205aca31a37ac3eea3f27766c3661ac631cd07eb2d65f4ef4",
+  "source": "tools/native/paragraph-reconciliation.ps1",
+  "change": "Resume only cases 4 through 15 after observed first four applied updates; TagDef moved before PageSettings per published XSD"
+}

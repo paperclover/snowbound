@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from document_model import EXPORTER, ordered_pages, walk
 from native_format import compare_formats, native_characters
 from native_xml import ns
+from offline_document_history import identity
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / 'corpus/paragraph-edit'
@@ -17,6 +18,156 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class ParagraphEditTest(unittest.TestCase):
+    def test_reconciled_native_edits_keep_remote_content_and_exact_graphs(self):
+        fixture = FIXTURE / 'reconciliation'
+        result = fixture / 'reconciled'
+        self.assert_cold_graph(result)
+        manifest = json.loads((result / 'manifest.json').read_text())
+        self.assertEqual(len(manifest), 16)
+        self.assertEqual({case['case'] for case in manifest if case['outcome'] == 'retained_conflict'},
+                         {'Join remote list', 'Join empty adoption'})
+        receipts = [case[key] for case in manifest for key in ('receipt', 'dependent_receipt') if key in case]
+        self.assertEqual(len(set(receipts)), 28)
+        models, captures = {}, {}
+        with TemporaryDirectory() as temporary:
+            for phase, notebook, read in [('remote', fixture / 'keyboard/notebook', fixture / 'keyboard/read'),
+                                           ('reconciled', result / 'candidate', result / 'native/read')]:
+                folder = Path(temporary) / phase
+                subprocess.run([EXPORTER, notebook / 'synthetic.one', folder], check=True)
+                model = json.loads((folder / 'document.json').read_text())
+                models[phase] = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                                 for _, _, r, page in ordered_pages(model)}
+                captures[phase] = {page.get('name'): native_characters(page, page.findall('one:Outline', ns))
+                                   for path in read.glob('page-*.xml') for page in [ET.parse(path).getroot()]}
+        for case in manifest:
+            name, intent = case['case'], case['intent']
+            old, page = models['remote'][name]
+            new, new_page = models['reconciled'][name]
+            self.assertEqual(new_page, page)
+            outline, = [oid for oid in old['nodes'][page]['children'] if old['nodes'][oid]['kind']['type'] == 'Outline']
+            graph = {oid: [list(node['children']), list(node['content']), node['child_level']]
+                     for oid, node in walk(old, outline)}
+            characters = [list(paragraph) for paragraph in captures['remote'][name]]
+            if case['outcome'] != 'retained_conflict':
+                if name.startswith('Split '):
+                    text = intent['text']
+                    paragraph, = [oid for oid, (_, content, _) in graph.items() if content == [text]]
+                    parent, = [oid for oid, (children, _, _) in graph.items() if paragraph in children]
+                    offset = 3 if name.endswith(('prefix', 'boundary')) else 2
+                    characters[:1] = [characters[0][:offset], characters[0][offset:]]
+                    characters[1] = [('C' if char == 'c' else char, style) for char, style in characters[1]]
+                    right, right_text = identity(intent, 1), identity(intent, 2)
+                    self.assertNotIn(right, graph)
+                    self.assertNotIn(right_text, graph)
+                    graph[parent][0].insert(graph[parent][0].index(paragraph) + 1, right)
+                    graph[right] = [graph[paragraph][0], [right_text], graph[paragraph][2]]
+                    graph[right_text] = [[], [], None]
+                    graph[paragraph][0] = []
+                    self.assertEqual(new['nodes'][right_text]['tags'], [])
+                else:
+                    left, right = intent['left'], intent['right']
+                    a, = [oid for oid, (_, content, _) in graph.items() if content == [left]]
+                    b, = [oid for oid, (_, content, _) in graph.items() if content == [right]]
+                    parent, = [oid for oid, (children, _, _) in graph.items() if a in children]
+                    graph[parent][0].remove(b)
+                    graph[a][0] += graph[b][0]
+                    del graph[b], graph[right]
+                    characters[:2] = [characters[0] + characters[1]]
+                    characters[0] = [('C' if char == 'c' else char, style) for char, style in characters[0]]
+                    self.assertEqual(new['nodes'][left]['tags'], old['nodes'][left]['tags'])
+            with self.subTest(case=name):
+                self.assertEqual({oid: [node['children'], node['content'], node['child_level']]
+                                  for oid, node in walk(new, outline)}, graph)
+                for expected, actual in zip(characters, captures['reconciled'][name], strict=True):
+                    for (a, before), (b, after) in zip(expected, actual, strict=True):
+                        self.assertEqual(a, b)
+                        for key in before.keys() | after.keys():
+                            default = 'automatic' if key in ('color', 'highlight') else False
+                            self.assertEqual(before.get(key, default), after.get(key, default))
+
+    def test_native_reconciliation_controls_preserve_the_intended_edit_scope(self):
+        fixture = FIXTURE / 'reconciliation'
+        cases = json.loads((fixture / 'cases.json').read_text(encoding='utf-8-sig'))
+        self.assertEqual(len(cases), 16)
+        models, captures = {}, {}
+        with TemporaryDirectory() as temporary:
+            for phase in ('before', 'remote', 'keyboard'):
+                folder = Path(temporary) / phase
+                shutil.copytree(fixture / phase / 'read', folder / 'read')
+                compare(fixture / phase / 'notebook', folder / 'read')
+                subprocess.run([EXPORTER, fixture / phase / 'notebook/synthetic.one', folder / 'model'], check=True)
+                model = json.loads((folder / 'model/document.json').read_text())
+                models[phase] = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                                 for _, _, r, page in ordered_pages(model)}
+                captures[phase] = {page.get('name'): native_characters(page, page.findall('one:Outline', ns))
+                                   for path in (folder / 'read').glob('page-*.xml') for page in [ET.parse(path).getroot()]}
+                self.assertEqual(len(models[phase]), 17)
+        for case in cases:
+            name, change = case['name'], case['change']
+            join = case['operation'] == 'join'
+            old, page = models['before'][name]
+            outline, = [oid for oid in old['nodes'][page]['children'] if old['nodes'][oid]['kind']['type'] == 'Outline']
+            paragraphs = old['nodes'][outline]['children']
+            target = paragraphs[1 if join and change in ('child', 'list', 'tag', 'format', 'right-boundary') else 0]
+            expected = ['' if change == 'adoption' else 'ab🦀cd'] + (['Right'] if join else []) + ['Preserved sibling']
+            self.assertEqual([old['nodes'][old['nodes'][oid]['content'][0]]['kind']['text'] for oid in paragraphs], expected)
+            if change == 'prefix':
+                expected[0] = 'X' + expected[0]
+                if join: expected[1] += 'Y'
+            elif change == 'boundary':
+                expected[0] = expected[0] + 'X' if join else 'abX🦀cd'
+            elif change == 'right-boundary': expected[1] = 'XRight'
+            elif change == 'sibling': expected[-1] = 'Native sibling'
+            elif change == 'adoption': expected[0] = 'X'
+            for phase in ('remote', 'keyboard'):
+                with self.subTest(case=name, phase=phase):
+                    current, current_page = models[phase][name]
+                    if change == 'format':
+                        for char, style in captures['before'][name][int(join)]:
+                            self.assertTrue(style['bold'])
+                            self.assertFalse(style.get('italic', False))
+                        for char, style in captures[phase][name][int(join)]:
+                            self.assertTrue(style['italic'])
+                            self.assertEqual(style.get('bold', False), phase == 'keyboard')
+                    self.assertEqual(current_page, page)
+                    active = [oid for oid, node in walk(current, outline) if node['kind']['type'] == 'Paragraph']
+                    expected_ids = list(paragraphs)
+                    if phase == 'keyboard' and change == 'sibling':
+                        self.assertNotEqual(active[-1], paragraphs[-1])
+                        expected_ids[-1] = active[-1]
+                    if change == 'child':
+                        child, = current['nodes'][target]['children']
+                        expected_ids.insert(expected_ids.index(target) + 1, child)
+                    self.assertEqual(active, expected_ids)
+                    actual_texts = [current['nodes'][current['nodes'][oid]['content'][0]]['kind']['text'] for oid in active]
+                    expected_texts = list(expected)
+                    if change == 'child': expected_texts.insert(2 if join else 1, 'Native child')
+                    self.assertEqual(actual_texts, expected_texts)
+                    top = list(paragraphs)
+                    if phase == 'keyboard' and change == 'sibling': top[-1] = active[-1]
+                    if phase == 'keyboard' and change == 'list':
+                        if join:
+                            top.remove(target)
+                            self.assertEqual(current['nodes'][paragraphs[0]]['children'], [target])
+                        else:
+                            group = current['nodes'][outline]['children'][0]
+                            self.assertEqual(current['nodes'][group]['kind']['type'], 'OutlineGroup')
+                            self.assertEqual(current['nodes'][group]['children'], [target])
+                            self.assertEqual(current['nodes'][group]['content'], [])
+                            top[0] = group
+                    self.assertEqual(current['nodes'][outline]['children'], top)
+                    for oid in active:
+                        node = current['nodes'][oid]
+                        text, = node['content']
+                        if oid in paragraphs:
+                            if phase == 'keyboard': self.assertEqual(node['content'], old['nodes'][oid]['content'])
+                            else: self.assertNotEqual(node['content'], old['nodes'][oid]['content'])
+                        child_count = int(oid == target and change == 'child')
+                        if phase == 'keyboard' and join and change == 'list' and oid == paragraphs[0]: child_count = 1
+                        self.assertEqual(len(node['children']), child_count)
+                        self.assertEqual(len(node['kind']['lists']), int(oid == target and change == 'list'))
+                        self.assertEqual(len(current['nodes'][text]['tags']), int(oid == target and change == 'tag'))
+
     def assert_cold_graph(self, fixture):
         with TemporaryDirectory() as temporary:
             models = []

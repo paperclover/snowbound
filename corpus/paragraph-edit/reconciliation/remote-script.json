@@ -1,0 +1,5 @@
+{
+  "sha256": "c9da4ad1ca8af8203f1ceed49d34f6bd37cfb0b383082e4c808f22c34b5424b9",
+  "source": "tools/native/paragraph-reconciliation.ps1",
+  "switch": "Remote"
+}

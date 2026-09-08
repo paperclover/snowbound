@@ -1,0 +1,82 @@
+﻿[
+    {
+        "operation":  "split",
+        "change":  "prefix",
+        "name":  "Split remote prefix"
+    },
+    {
+        "operation":  "split",
+        "change":  "boundary",
+        "name":  "Split remote boundary"
+    },
+    {
+        "operation":  "split",
+        "change":  "child",
+        "name":  "Split remote child"
+    },
+    {
+        "operation":  "split",
+        "change":  "list",
+        "name":  "Split remote list"
+    },
+    {
+        "operation":  "split",
+        "change":  "tag",
+        "name":  "Split remote tag"
+    },
+    {
+        "operation":  "split",
+        "change":  "format",
+        "name":  "Split remote format"
+    },
+    {
+        "operation":  "split",
+        "change":  "sibling",
+        "name":  "Split remote sibling"
+    },
+    {
+        "operation":  "join",
+        "change":  "prefix",
+        "name":  "Join remote prefix"
+    },
+    {
+        "operation":  "join",
+        "change":  "boundary",
+        "name":  "Join left boundary"
+    },
+    {
+        "operation":  "join",
+        "change":  "right-boundary",
+        "name":  "Join right boundary"
+    },
+    {
+        "operation":  "join",
+        "change":  "child",
+        "name":  "Join remote child"
+    },
+    {
+        "operation":  "join",
+        "change":  "list",
+        "name":  "Join remote list"
+    },
+    {
+        "operation":  "join",
+        "change":  "tag",
+        "name":  "Join remote tag"
+    },
+    {
+        "operation":  "join",
+        "change":  "format",
+        "name":  "Join remote format"
+    },
+    {
+        "operation":  "join",
+        "change":  "sibling",
+        "name":  "Join remote sibling"
+    },
+    {
+        "operation":  "join",
+        "change":  "adoption",
+        "name":  "Join empty adoption"
+    }
+]

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2010/onenote" ID="{49FB6CA5-222E-45CA-A519-4ED7D7C5C3AA}{1}{B0}" name="Join left boundary" dateTime="2026-09-08T17:05:12.000Z" lastModifiedTime="2026-09-08T17:18:17.000Z" pageLevel="1" lang="en-US">
+  <one:QuickStyleDef index="0" name="p" fontColor="automatic" highlightColor="automatic" font="Calibri" fontSize="11.0" spaceBefore="0.0" spaceAfter="0.0" />
+  <one:PageSettings RTL="false" color="automatic">
+    <one:PageSize>
+      <one:Automatic />
+    </one:PageSize>
+    <one:RuleLines visible="false" />
+  </one:PageSettings>
+  <one:Title lang="en-US">
+    <one:OE author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" creationTime="2026-09-08T17:05:12.000Z" lastModifiedTime="2026-09-08T17:05:12.000Z" objectID="{2BE57657-10B4-478B-9688-662EC6A42126}{33}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:17.0pt">
+      <one:T><![CDATA[Join left boundary]]></one:T>
+    </one:OE>
+  </one:Title>
+  <one:Outline author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" lastModifiedTime="2026-09-08T17:05:13.000Z" objectID="{2BE57657-10B4-478B-9688-662EC6A42126}{39}{B0}">
+    <one:Position x="72.0" y="108.0" z="0" />
+    <one:Size width="115.6704635620117" height="40.28315734863281" />
+    <one:OEChildren>
+      <one:OE creationTime="2026-09-08T17:05:12.000Z" lastModifiedTime="2026-09-08T17:05:12.000Z" objectID="{2BE57657-10B4-478B-9688-662EC6A42126}{40}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt">
+        <one:T>&lt;span
+style='font-weight:bold'&gt;ab&amp;#129408;cd&lt;/span&gt;X</one:T>
+      </one:OE>
+      <one:OE creationTime="2026-09-08T17:05:12.000Z" lastModifiedTime="2026-09-08T17:05:12.000Z" objectID="{2BE57657-10B4-478B-9688-662EC6A42126}{46}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:11.0pt">
+        <one:T><![CDATA[<span
+style='font-weight:bold'>Right</span>]]></one:T>
+      </one:OE>
+      <one:OE creationTime="2026-09-08T17:05:12.000Z" lastModifiedTime="2026-09-08T17:05:12.000Z" objectID="{2BE57657-10B4-478B-9688-662EC6A42126}{51}{B0}" alignment="left" quickStyleIndex="0">
+        <one:T><![CDATA[Preserved sibling]]></one:T>
+      </one:OE>
+    </one:OEChildren>
+  </one:Outline>
+</one:Page>
