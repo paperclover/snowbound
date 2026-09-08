@@ -1,0 +1,80 @@
+[
+  {
+    "name": "Split middle",
+    "page": "{D2B90D6D-D72E-4720-9D2D-17121D2F2774}{1}{B0}",
+    "object": "{27380AFB-64A9-4D62-B4A6-00F074A62D13}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split style boundary",
+    "page": "{F24FC20B-6F88-420C-9835-8735D0222E13}{1}{B0}",
+    "object": "{298089D0-38DF-481A-9CB7-1313598683FC}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split start",
+    "page": "{5582A13D-6A30-45C6-870C-2C00289B5532}{1}{B0}",
+    "object": "{9EABED1E-F611-49F9-8BD1-F2BFDC42FB24}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split end",
+    "page": "{BEE46007-7505-4670-A7EE-EEB0FA357A71}{1}{B0}",
+    "object": "{4C86E604-486A-4936-A02F-91FE50086290}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split empty",
+    "page": "{C8438CC2-32B2-41CC-A696-4BAE6568F396}{1}{B0}",
+    "object": "{C6500222-467D-4F01-938E-E60ED395BE17}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split parent",
+    "page": "{56AD7542-11FB-4FA0-9969-68E0862AB40C}{1}{B0}",
+    "object": "{E4D7EDD5-0391-4A85-AFC9-58F66BFF3BA5}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split child",
+    "page": "{10598CD2-0723-42D7-BF23-B94ACAD9FE98}{1}{B0}",
+    "object": "{F0BF446D-9EB7-4779-9AA5-2B26CE785A50}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split bullet",
+    "page": "{B8B5BDEA-9DE8-4AFA-B38A-FA3F252F7AEF}{1}{B0}",
+    "object": "{0468BDE2-84BE-47D4-BCA5-692CB4F18A0D}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split number",
+    "page": "{883508F1-BFB9-451D-B80E-99CE85E616C3}{1}{B0}",
+    "object": "{F1A4E8E9-779F-44DA-8B2F-7649DB21C69A}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split tag",
+    "page": "{5F06FB85-2000-4F62-B60A-C044F19B9B6A}{1}{B0}",
+    "object": "{381B0A74-8BD4-41F2-9451-884502ABF22A}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split cell",
+    "page": "{68A9ABE2-3C66-4F1A-B150-67B46DC1D6BE}{1}{B0}",
+    "object": "{32AE7C99-3E1F-4147-AC54-809B85578108}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split soft break",
+    "page": "{F47A1E7D-C667-4C0A-B942-F9716F98224B}{1}{B0}",
+    "object": "{EDCDC68C-6206-4475-9442-4426E2A05C6A}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "name": "Split before hyperlink",
+    "page": "{5E5A198A-FAB0-4244-B63D-08CAE25D99F5}{1}{B0}",
+    "object": "{022941A3-2EC7-492C-B428-FE0881641F72}{11}{B0}",
+    "keys": "{Left}{Backspace}"
+  }
+]

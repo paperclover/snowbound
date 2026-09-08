@@ -1,0 +1,80 @@
+[
+  {
+    "name": "Split middle",
+    "page": "{E2D69849-42AD-4FA3-BBEA-AA04A24E2B85}{1}{B0}",
+    "object": "{C31D8DC5-9C51-42C6-929C-4874E27551A1}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split style boundary",
+    "page": "{C220572F-FA0B-4A8F-BEF2-3A236F4322E2}{1}{B0}",
+    "object": "{434059C8-E984-4700-AF16-141A2D60EDE1}{40}{B0}",
+    "keys": "{Left}{Right 4}{Enter}"
+  },
+  {
+    "name": "Split start",
+    "page": "{65ED3419-FFB3-4D45-A1CB-911697FA59C3}{1}{B0}",
+    "object": "{1DDA0461-B409-4A07-86CF-82CBF1871DAA}{40}{B0}",
+    "keys": "{Left}{Enter}"
+  },
+  {
+    "name": "Split end",
+    "page": "{8E8BF523-E086-4EF3-8129-53A645547680}{1}{B0}",
+    "object": "{C603FE89-3519-4A05-9834-076122BDA637}{40}{B0}",
+    "keys": "{Right}{Enter}"
+  },
+  {
+    "name": "Split empty",
+    "page": "{F82C19E6-A731-494F-8051-F6B8DA09FF67}{1}{B0}",
+    "object": "{17B2A21B-253D-4550-BF6B-95FBA12E402C}{40}{B0}",
+    "keys": "{Left}{Enter}"
+  },
+  {
+    "name": "Split parent",
+    "page": "{66C2E066-8478-4723-BFAE-D5F6394BB8FD}{1}{B0}",
+    "object": "{24943739-23FE-4805-8349-FC9665476B82}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split child",
+    "page": "{203619F6-92A0-4A54-99E4-045C75B8F269}{1}{B0}",
+    "object": "{A97316EC-FC76-47BE-A069-D2B0A01ED1C2}{45}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split bullet",
+    "page": "{88DA28CE-086B-4279-954D-47299A4E761E}{1}{B0}",
+    "object": "{9091390D-B0C6-4F70-AE98-1C10F1AC003E}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split number",
+    "page": "{B85A9DD5-2A3A-4D9E-9EC9-24D83A871A32}{1}{B0}",
+    "object": "{C85F6365-D6DF-4CBF-A900-9FE3ED49C6A0}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split tag",
+    "page": "{6F696EA1-B583-47E1-90CD-7D524EFA979B}{1}{B0}",
+    "object": "{2B5E855D-DE3A-4FBA-A000-B81E9D3B78F9}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split cell",
+    "page": "{58C63EC6-A9E5-4799-9797-DAA2D2A0DA4F}{1}{B0}",
+    "object": "{EC77F6E3-E2C2-470B-BE30-AA34559FFE1B}{46}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split soft break",
+    "page": "{C4158B59-53E4-4489-9F85-4467D0F92EBA}{1}{B0}",
+    "object": "{94EC468B-D8A3-4F1F-B372-93B82288F0E0}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  },
+  {
+    "name": "Split before hyperlink",
+    "page": "{6E358CAE-6F33-4AC7-90FA-B5DC5D3C9504}{1}{B0}",
+    "object": "{48C7C4CD-AD7D-47E9-A675-0AE7BA91D125}{40}{B0}",
+    "keys": "{Left}{Right 2}{Enter}"
+  }
+]

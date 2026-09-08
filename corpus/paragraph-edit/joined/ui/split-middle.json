@@ -1,0 +1,13 @@
+{
+  "exit": 0,
+  "stdout": "",
+  "stderr": "",
+  "w": 1280,
+  "h": 720,
+  "error": null,
+  "win": {
+    "title": "Split middle - Microsoft OneNote",
+    "class": "Framework::CFrame",
+    "dialog": false
+  }
+}
