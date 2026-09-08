@@ -43,6 +43,7 @@ harness also accepts `--client-profile release`.
 | `PropertySets`, `Object::references` | Decode properties and ID streams while retaining raw values |
 | `Object::file_reference`, `Store::file_data` | Identify internal/external payloads and read internal payload bytes |
 | `document::Document`, `Revision::text_runs` | Interpret document objects and inherited text formatting while retaining unknown properties and revision identities |
+| `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
@@ -63,8 +64,11 @@ protected objects and split surrogate pairs are
 rejected before writing. Appended snapshots cap revision dependency depth at 512
 while retaining historical revisions. TOC snapshots can remap encoded CompactIDs
 without changing their resolved references. Password-protected
-sections retain their encrypted structure and payloads; the library does not
-derive password keys or decrypt their pages.
+sections retain their encrypted structure and payloads. With the optional
+`protected` feature, `protected::UnlockedSection` opens native OneNote 2010
+AES-128/CBC, SHA-1 password wrappers into a borrowed document view. Incorrect
+passwords, unsupported protection profiles and work-limit failures remain distinct.
+The source stays encrypted; protected writes are rejected.
 Insertions update child references, reference counts, modification times and automatic
 titles atomically. Paragraphs can be nested or inserted into table cells; outline
 coordinates use points. Retain the `Insertion` value for rebasing: creating another
@@ -241,3 +245,36 @@ exact changes as well as retained image, ink, table, and attachment content.
 a dedicated loopback test session; its control JSON selects the successful response
 and occurrence to withhold. The captured trace and result files are the regression
 oracle; replaying the native experiments requires the supplied Windows/share setup.
+
+## Protected inspection
+
+```rust,no_run
+# #[cfg(feature = "protected")]
+# fn example() {
+use onestore::{RevisionIndex, Store, protected::{Limits, UnlockedSection}};
+# fn inspect(bytes: &[u8], password: &str) -> Result<(), Box<dyn std::error::Error>> {
+let store = Store::parse(bytes)?;
+let index = RevisionIndex::parse(&store)?;
+let unlocked = UnlockedSection::open(&index, password, Limits::default())?;
+let document = unlocked.document()?;
+assert!(!document.pages()?.is_empty());
+drop(document);
+drop(unlocked);
+# Ok(()) }
+# }
+```
+
+This example requires `features = ["protected"]`. The owner retains no password or
+key after opening. Its source-buffer views cannot outlive it; copies of parsed
+strings, serialized models and exports have their own lifetimes. These copies are
+plaintext, and dropping the unlock owner does not clear them. CBC has no general
+ciphertext-authentication guarantee; native read-only hashes and model validation
+check the corresponding structure. Internal payloads are decoded; external payload
+references remain references, and their protected decoding is not implemented.
+
+For a deliberate plaintext diagnostic export, build the notebook exporter with
+`--features protected` and pass `--password-file PATH` after the source and optional
+new output directory. The file contains exact UTF-8 password bytes; no newline is
+removed or Unicode normalization applied. The exporter creates protected exports
+under an owner-only directory on Unix and reports protected external payloads as
+unsupported. It never rewrites the encrypted source.

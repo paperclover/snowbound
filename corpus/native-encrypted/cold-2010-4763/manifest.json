@@ -1,0 +1,18 @@
+{
+  "source": "../encrypted-01/notebook/synthetic.one",
+  "source_sha256": "7a6e519cc0ef8de10357ffd52a32bd94c33ea09d8e420ff2d0b216ed141ff695",
+  "native_build": "14.0.4763.1000",
+  "cold_open": {
+    "pages": 1,
+    "hostname": "ONE-M6-31D693B8",
+    "cold": true
+  },
+  "driver": {
+    "exitCode": 0,
+    "exited": true
+  },
+  "teardown": {
+    "absent": true
+  },
+  "observation": "Independent cold unlock of the unchanged encrypted image. The earlier selection-split empty T element is absent. Native auto-fits the first unlocked table column from stored 38.61 points to 39.146141 points without changing the source bytes."
+}

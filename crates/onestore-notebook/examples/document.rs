@@ -23,16 +23,67 @@ fn write_json(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args_os().skip(1);
     let path = args.next().ok_or("Provide a .one or .onetoc2 file.")?;
-    let destination = args.next().map(PathBuf::from);
-    if args.next().is_some() {
-        return Err("Provide a source file and an optional new export directory.".into());
-    }
+    let next = args.next();
+    let (destination, option) = if next.as_deref() == Some(std::ffi::OsStr::new("--password-file"))
+    {
+        (None, next)
+    } else {
+        (next.map(PathBuf::from), args.next())
+    };
+    let password_file = match (option, args.next(), args.next()) {
+        (None, None, None) => None,
+        (Some(flag), Some(path), None) if flag == "--password-file" => Some(PathBuf::from(path)),
+        _ => return Err("Provide a source file, an optional new export directory, and optionally --password-file PATH.".into()),
+    };
     let source_path = PathBuf::from(path);
     let bytes = onestore::read_file(&source_path)?;
     let store = Store::parse(&bytes)?;
     let index = RevisionIndex::parse(&store)?;
+    #[cfg(feature = "protected")]
+    let unlocked = if let Some(path) = &password_file {
+        use std::io::Read;
+        let mut password = zeroize::Zeroizing::new(String::new());
+        fs::File::open(path)?
+            .take(65537)
+            .read_to_string(&mut password)?;
+        if password.len() > 65536 {
+            return Err("The password file exceeds 64 KiB.".into());
+        }
+        Some(onestore::protected::UnlockedSection::open(
+            &index,
+            &password,
+            Default::default(),
+        )?)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "protected"))]
+    if password_file.is_some() {
+        return Err(
+            "Build this exporter with the protected feature to open a password-protected section."
+                .into(),
+        );
+    }
+    #[cfg(feature = "protected")]
+    let document = match &unlocked {
+        Some(section) => section.document()?,
+        None => Document::parse(&index)?,
+    };
+    #[cfg(not(feature = "protected"))]
     let document = Document::parse(&index)?;
     if let Some(destination) = destination {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new()
+                .mode(if password_file.is_some() {
+                    0o700
+                } else {
+                    0o777
+                })
+                .create(&destination)?;
+        }
+        #[cfg(not(unix))]
         fs::create_dir(&destination)?;
         fs::create_dir(destination.join("assets"))?;
         let parent = source_path
@@ -62,6 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Cow::Borrowed(payload.ok_or("Missing embedded file data")?)
                     }
                     FileDataReference::External(filename) => {
+                        if password_file.is_some() {
+                            assets.push(serde_json::json!({"reference":reference,"path":null,"error":{"kind":"Unsupported","message":"Protected external payload export is not supported"}}));
+                            continue;
+                        }
                         match onestore_notebook::read_external_asset(
                             &mut source,
                             section,

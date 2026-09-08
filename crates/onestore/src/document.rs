@@ -298,6 +298,7 @@ pub enum Kind<'a> {
     Table {
         rows: Option<u32>,
         columns: Option<u32>,
+        /// Stored widths in points; unlocked columns may fit their content in native layout.
         widths: Vec<f32>,
         locked: Vec<bool>,
         borders: Option<bool>,
@@ -606,6 +607,18 @@ impl<'a> Document<'a> {
 
     /// Rejects checksum damage and follows referenced contexts, retaining encrypted payloads opaquely.
     pub fn parse(index: &RevisionIndex<'a>) -> Result<Self> {
+        Self::parse_with(
+            index,
+            |space, revision| index.resolve(space, revision),
+            |id| index.store.file_data(id),
+        )
+    }
+
+    pub(crate) fn parse_with(
+        index: &RevisionIndex<'a>,
+        mut resolve: impl FnMut(ExGuid, ExGuid) -> Result<crate::ResolvedRevision<'a>>,
+        mut file_data: impl FnMut([u8; 16]) -> Result<&'a [u8]>,
+    ) -> Result<Self> {
         if !index.store.checksum_mismatches.is_empty() {
             return Err(invalid("Document transaction checksum mismatch"));
         }
@@ -628,7 +641,7 @@ impl<'a> Document<'a> {
             if space.revisions.contains_key(&rid) {
                 continue;
             }
-            let revision = index.resolve(id, rid)?;
+            let revision = resolve(id, rid)?;
             let mut reachable = BTreeSet::new();
             let mut objects: Vec<_> = revision.roots.values().copied().collect();
             let mut encrypted = false;
@@ -661,7 +674,10 @@ impl<'a> Document<'a> {
                     );
                     pending.extend(refs.contexts.into_iter().map(|context| (id, context)));
                 }
-                nodes.insert(oid, Element::parse(object, index.store)?);
+                nodes.insert(
+                    oid,
+                    Element::parse_with(object, index.store, &mut file_data)?,
+                );
             }
             for node in nodes.values() {
                 if let Kind::RichText {
@@ -748,6 +764,14 @@ impl<'a> Document<'a> {
 
 impl<'a> Element<'a> {
     pub(crate) fn parse(object: &Object<'a>, store: &Store<'a>) -> Result<Self> {
+        Self::parse_with(object, store, &mut |id| store.file_data(id))
+    }
+
+    fn parse_with(
+        object: &Object<'a>,
+        store: &Store<'a>,
+        file_data: &mut impl FnMut([u8; 16]) -> Result<&'a [u8]>,
+    ) -> Result<Self> {
         let empty = |kind| Self {
             jcid: object.jcid,
             children: vec![],
@@ -775,7 +799,7 @@ impl<'a> Element<'a> {
                 .file_reference()?
                 .ok_or_else(|| invalid("File object has no reference"))?;
             let payload = if let FileDataReference::Internal(guid) = &reference {
-                Some(store.file_data(*guid)?)
+                Some(file_data(*guid)?)
             } else {
                 None
             };

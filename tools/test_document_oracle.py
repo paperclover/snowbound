@@ -12,6 +12,21 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class DocumentOracleTest(unittest.TestCase):
+    def test_locked_table_width_requires_the_native_value(self):
+        fixture = ROOT / 'corpus/m6/native-structure-01'
+        with TemporaryDirectory() as temporary:
+            native = Path(temporary) / 'read'
+            shutil.copytree(fixture / 'read', native)
+            compare(fixture / 'notebook', native)
+            path = native / 'page-001.xml'
+            xml = ET.parse(path)
+            column = next(n for n in xml.getroot().iter()
+                          if n.tag.endswith('}Column') and n.get('isLocked') == 'true')
+            column.set('width', str(float(column.get('width')) + 1))
+            xml.write(path, encoding='utf-8')
+            with self.assertRaisesRegex(AssertionError, 'Locked table column width differs'):
+                compare(fixture / 'notebook', native)
+
     def test_native_2010_does_not_render_the_documented_cell_shading_control(self):
         import pdfplumber
         fixture = ROOT / 'corpus/m6/cell-shading-control-01/read/page-001'

@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from PIL import Image
 from datetime import datetime, timezone
 import json
+import math
 from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
 import subprocess
@@ -82,7 +83,7 @@ def visible_text(node, space):
     return "" if text == "\u00a0" else project_text(text.removesuffix('\r'))
 
 
-def compare_objects(space, roots, page, native_roots, assets, native_payloads):
+def compare_objects(space, roots, page, native_roots, assets, native_payloads, autofit):
     types = {'T': 'RichText', 'Image': 'Image', 'InsertedFile': 'Attachment', 'MediaFile': 'Attachment', 'Table': 'Table'}
     actual = [n for root in roots for _, n in walk(space, root)
               if n['kind']['type'] in types.values() and not n['kind'].get('boilerplate')]
@@ -132,9 +133,15 @@ def compare_objects(space, roots, page, native_roots, assets, native_payloads):
             rows = native.findall('one:Row', ns)
             columns = native.findall('one:Columns/one:Column', ns)
             assert len(rows) == kind['rows'] and len(columns) == kind['columns'], 'Table dimensions differ'
-            for column, width in zip(columns, kind['widths'], strict=True):
-                assert abs(float(column.get('width')) - width) < .002, 'Table column width differs'
             assert (kind['locked'] or [False] * len(columns)) == [c.get('isLocked') == 'true' for c in columns], 'Table column lock state differs'
+            for column, width in zip(columns, kind['widths'], strict=True):
+                measured = float(column.get('width'))
+                assert math.isfinite(measured) and measured >= 0, 'Invalid native table column width'
+                if abs(measured - width) >= .002:
+                    if column.get('isLocked') == 'true':
+                        raise AssertionError('Locked table column width differs')
+                    autofit.append({'page': page.get('ID'), 'table': parents[native].get('objectID'),
+                                    'column': column.get('index'), 'stored': width, 'native': measured})
             assert len(node['children']) == len(rows), 'Table row count differs'
             for oid, row in zip(node['children'], rows, strict=True):
                 assert len(space['nodes'][oid]['children']) == len(row.findall('one:Cell', ns)), 'Table cell count differs'
@@ -186,7 +193,7 @@ def compare_objects(space, roots, page, native_roots, assets, native_payloads):
     return count
 
 
-def compare(notebook, native, versions=None):
+def compare(notebook, native, versions=None, password_file=None):
     notebook = notebook.resolve(strict=True)
     native = native.resolve(strict=True)
     sections = sorted(notebook.rglob('*.one'))
@@ -199,13 +206,17 @@ def compare(notebook, native, versions=None):
     discrepancies = []
     pdf_checks = []
     geometry = []
+    autofit = []
     for path in sections:
         relative = path.relative_to(notebook)
         if versions is not None and relative.as_posix() != versions['section']:
             continue
         with TemporaryDirectory() as temporary:
             exported = Path(temporary) / 'document'
-            subprocess.run([EXPORTER, path, exported], check=True)
+            command = [EXPORTER, path, exported]
+            if password_file is not None:
+                command.extend(['--password-file', password_file])
+            subprocess.run(command, check=True)
             document = json.loads((exported / 'document.json').read_text())
             resolved_text = json.loads((exported / 'text.json').read_text())
             assets = {json.dumps(a['reference'], sort_keys=True): (exported / a['path']).read_bytes()
@@ -308,7 +319,7 @@ def compare(notebook, native, versions=None):
                 raise AssertionError(f'{relative}: page {ordinal}: ordered text differs; inspect {destination}')
             native_roots = [n for n in native_children if n.tag == '{' + ns['one'] + '}Title'] + content
             try:
-                tags += compare_objects(space, roots, page, native_roots, assets, native_payloads)
+                tags += compare_objects(space, roots, page, native_roots, assets, native_payloads, autofit)
                 native_runs = native_characters(page, native_roots)
                 text_ids = [oid for root in roots for oid, n in walk(space, root)
                             if n['kind']['type'] == 'RichText' and not n['kind']['boilerplate']]
@@ -339,6 +350,7 @@ def compare(notebook, native, versions=None):
     if versions is not None:
         assert compared == len(versions['pages']) > 0, 'No historical source section was compared'
     (native.parent / 'geometry-differences.json').write_text(json.dumps(geometry, indent=2))
+    (native.parent / 'table-autofit.json').write_text(json.dumps(autofit, indent=2))
     (native.parent / 'pdf-format-checks.json').write_text(json.dumps(pdf_checks, indent=2))
     destination = native.parent / 'format-differences.json'
     destination.write_text(json.dumps(discrepancies, indent=2))
@@ -358,5 +370,6 @@ if __name__ == '__main__':
     parser.add_argument('notebook', type=Path)
     parser.add_argument('native', type=Path)
     parser.add_argument('--versions', type=Path, help='Native history UI date and copied-page associations.')
+    parser.add_argument('--password-file', type=Path, help='Exact UTF-8 password bytes; requires the protected exporter feature.')
     args = parser.parse_args()
-    compare(args.notebook.resolve(), args.native.resolve(), json.loads(args.versions.read_text()) if args.versions else None)
+    compare(args.notebook.resolve(), args.native.resolve(), json.loads(args.versions.read_text()) if args.versions else None, args.password_file)

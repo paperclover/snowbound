@@ -12,6 +12,8 @@ mod formatting;
 mod insertion;
 mod objects;
 mod properties;
+#[cfg(feature = "protected")]
+pub mod protected;
 mod revisions;
 mod snapshot;
 mod store;

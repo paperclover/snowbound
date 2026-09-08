@@ -41,38 +41,7 @@ enum Work<'a> {
 impl<'a> PropertySets<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
         let mut c = Cursor { bytes, offset: 0 };
-        let mut streams = std::array::from_fn::<_, 3, _>(|_| Cursor {
-            bytes: &[],
-            offset: 0,
-        });
-        let mut extended = false;
-        for (index, stream) in streams.iter_mut().enumerate() {
-            let header = u32::from_le_bytes(c.read()?);
-            let count = usize::try_from(header & 0xffffff).unwrap();
-            if (index > 0 && header & 0x80000000 != 0)
-                || (index == 0 && header & 0xc0000000 == 0xc0000000)
-                || (index == 1 && (header & 0x40000000 != 0) != extended)
-                || (index == 2 && header & 0x40000000 != 0)
-            {
-                return Err(Error {
-                    offset: c.offset - 4,
-                    message: "Inconsistent property reference-stream flags",
-                });
-            }
-            let offset = c.offset;
-            *stream = Cursor {
-                bytes: c.take(count * 4)?,
-                offset,
-            };
-            if index == 0 {
-                extended = header & 0x40000000 != 0;
-                if header & 0x80000000 != 0 {
-                    break;
-                }
-            } else if index == 1 && !extended {
-                break;
-            }
-        }
+        let mut streams = reference_streams(&mut c)?;
         let mut sets = vec![Vec::new()];
         let mut root_ids = &bytes[..0];
         let mut work = vec![Work::Set(0)];
@@ -195,4 +164,40 @@ impl<'a> PropertySets<'a> {
             root_ids,
         })
     }
+}
+
+pub(crate) fn reference_streams<'a>(c: &mut Cursor<'a>) -> Result<[Cursor<'a>; 3], Error> {
+    let mut streams = std::array::from_fn::<_, 3, _>(|_| Cursor {
+        bytes: &[],
+        offset: 0,
+    });
+    let mut extended = false;
+    for (index, stream) in streams.iter_mut().enumerate() {
+        let header = u32::from_le_bytes(c.read()?);
+        let count = usize::try_from(header & 0xffffff).unwrap();
+        if (index > 0 && header & 0x80000000 != 0)
+            || (index == 0 && header & 0xc0000000 == 0xc0000000)
+            || (index == 1 && (header & 0x40000000 != 0) != extended)
+            || (index == 2 && header & 0x40000000 != 0)
+        {
+            return Err(Error {
+                offset: c.offset - 4,
+                message: "Inconsistent property reference-stream flags",
+            });
+        }
+        let offset = c.offset;
+        *stream = Cursor {
+            bytes: c.take(count * 4)?,
+            offset,
+        };
+        if index == 0 {
+            extended = header & 0x40000000 != 0;
+            if header & 0x80000000 != 0 {
+                break;
+            }
+        } else if index == 1 && !extended {
+            break;
+        }
+    }
+    Ok(streams)
 }
