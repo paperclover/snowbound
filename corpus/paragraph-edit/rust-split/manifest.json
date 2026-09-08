@@ -1,0 +1,352 @@
+{
+  "cases": [
+    {
+      "case": "Split middle",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          228,
+          60,
+          65,
+          246,
+          194,
+          244,
+          184,
+          76,
+          170,
+          5,
+          19,
+          130,
+          32,
+          122,
+          148,
+          241
+        ],
+        "offset": 2,
+        "text": "{DFE950EF-6BEB-0F5B-2403-7B74F1AE5002},44"
+      },
+      "new_paragraph": "{F6413CE4-F4C2-4CB8-AA05-1382207A94F1},1",
+      "new_text": "{F6413CE4-F4C2-4CB8-AA05-1382207A94F1},2"
+    },
+    {
+      "case": "Split style boundary",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          163,
+          91,
+          197,
+          73,
+          195,
+          225,
+          53,
+          68,
+          140,
+          152,
+          83,
+          168,
+          172,
+          124,
+          226,
+          213
+        ],
+        "offset": 4,
+        "text": "{5FB484E2-1E3E-0A9D-1989-271A3EBBEC42},44"
+      },
+      "new_paragraph": "{49C55BA3-E1C3-4435-8C98-53A8AC7CE2D5},1",
+      "new_text": "{49C55BA3-E1C3-4435-8C98-53A8AC7CE2D5},2"
+    },
+    {
+      "case": "Split start",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          135,
+          16,
+          214,
+          248,
+          73,
+          35,
+          2,
+          69,
+          148,
+          213,
+          125,
+          28,
+          43,
+          124,
+          81,
+          35
+        ],
+        "offset": 0,
+        "text": "{012ED94B-43B3-079A-3050-B1CBE25C1C09},44"
+      },
+      "new_paragraph": "{F8D61087-2349-4502-94D5-7D1C2B7C5123},1",
+      "new_text": "{F8D61087-2349-4502-94D5-7D1C2B7C5123},2"
+    },
+    {
+      "case": "Split end",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          37,
+          220,
+          149,
+          138,
+          85,
+          3,
+          106,
+          69,
+          168,
+          172,
+          49,
+          82,
+          247,
+          99,
+          160,
+          139
+        ],
+        "offset": 22,
+        "text": "{DAF723A3-C2A3-0798-2EAB-34613166A794},44"
+      },
+      "new_paragraph": "{8A95DC25-0355-456A-A8AC-3152F763A08B},1",
+      "new_text": "{8A95DC25-0355-456A-A8AC-3152F763A08B},2"
+    },
+    {
+      "case": "Split empty",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          232,
+          204,
+          91,
+          132,
+          180,
+          27,
+          239,
+          79,
+          158,
+          115,
+          213,
+          165,
+          40,
+          35,
+          189,
+          93
+        ],
+        "offset": 0,
+        "text": "{0B467F31-D287-08CD-09F4-A6FBB2F5418F},45"
+      },
+      "new_paragraph": "{845BCCE8-1BB4-4FEF-9E73-D5A52823BD5D},1",
+      "new_text": "{845BCCE8-1BB4-4FEF-9E73-D5A52823BD5D},2"
+    },
+    {
+      "case": "Split parent",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          54,
+          186,
+          114,
+          171,
+          44,
+          189,
+          95,
+          71,
+          135,
+          190,
+          71,
+          95,
+          23,
+          246,
+          37,
+          157
+        ],
+        "offset": 2,
+        "text": "{3860EA13-D444-0598-35D6-CF96769C6A21},44"
+      },
+      "new_paragraph": "{AB72BA36-BD2C-475F-87BE-475F17F6259D},1",
+      "new_text": "{AB72BA36-BD2C-475F-87BE-475F17F6259D},2"
+    },
+    {
+      "case": "Split child",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          160,
+          247,
+          235,
+          152,
+          30,
+          98,
+          166,
+          77,
+          157,
+          204,
+          141,
+          45,
+          114,
+          151,
+          225,
+          195
+        ],
+        "offset": 2,
+        "text": "{B587CBC6-0BCC-0A23-16F6-E1B0B3C5D061},49"
+      },
+      "new_paragraph": "{98EBF7A0-621E-4DA6-9DCC-8D2D7297E1C3},1",
+      "new_text": "{98EBF7A0-621E-4DA6-9DCC-8D2D7297E1C3},2"
+    },
+    {
+      "case": "Split bullet",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324660,
+        "guid": [
+          53,
+          245,
+          214,
+          76,
+          159,
+          56,
+          134,
+          76,
+          178,
+          90,
+          131,
+          182,
+          74,
+          114,
+          31,
+          24
+        ],
+        "offset": 2,
+        "text": "{8C65E427-477C-02ED-1807-2F10E277019D},44"
+      },
+      "new_paragraph": "{4CD6F535-389F-4C86-B25A-83B64A721F18},1",
+      "new_text": "{4CD6F535-389F-4C86-B25A-83B64A721F18},2"
+    },
+    {
+      "case": "Split number",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324661,
+        "guid": [
+          196,
+          133,
+          251,
+          251,
+          193,
+          175,
+          8,
+          65,
+          175,
+          180,
+          126,
+          16,
+          31,
+          185,
+          237,
+          66
+        ],
+        "offset": 2,
+        "text": "{D4ABBE4F-2165-0122-1F9F-ACE3FE92C703},44"
+      },
+      "new_paragraph": "{FBFB85C4-AFC1-4108-AFB4-7E101FB9ED42},1",
+      "new_text": "{FBFB85C4-AFC1-4108-AFB4-7E101FB9ED42},2"
+    },
+    {
+      "case": "Split tag",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324661,
+        "guid": [
+          40,
+          122,
+          110,
+          77,
+          185,
+          255,
+          122,
+          69,
+          128,
+          15,
+          14,
+          166,
+          54,
+          156,
+          154,
+          91
+        ],
+        "offset": 2,
+        "text": "{37AA5877-2980-0227-169F-8B1E8EE0795A},44"
+      },
+      "new_paragraph": "{4D6E7A28-FFB9-457A-800F-0EA6369C9A5B},1",
+      "new_text": "{4D6E7A28-FFB9-457A-800F-0EA6369C9A5B},2"
+    },
+    {
+      "case": "Split cell",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324661,
+        "guid": [
+          150,
+          222,
+          89,
+          134,
+          80,
+          167,
+          167,
+          67,
+          179,
+          23,
+          93,
+          176,
+          27,
+          184,
+          119,
+          185
+        ],
+        "offset": 2,
+        "text": "{F0832BC9-1578-0A96-08AF-99344644FFB8},50"
+      },
+      "new_paragraph": "{8659DE96-A750-43A7-B317-5DB01BB877B9},1",
+      "new_text": "{8659DE96-A750-43A7-B317-5DB01BB877B9},2"
+    },
+    {
+      "case": "Split soft break",
+      "intent": {
+        "author": "Rust split author",
+        "created": 1473324661,
+        "guid": [
+          199,
+          62,
+          94,
+          81,
+          29,
+          157,
+          236,
+          77,
+          159,
+          34,
+          22,
+          137,
+          163,
+          57,
+          215,
+          79
+        ],
+        "offset": 2,
+        "text": "{88189BA1-2F19-0282-05ED-A0B83153F143},44"
+      },
+      "new_paragraph": "{515E3EC7-9D1D-4DEC-9F22-1689A339D74F},1",
+      "new_text": "{515E3EC7-9D1D-4DEC-9F22-1689A339D74F},2"
+    }
+  ]
+}

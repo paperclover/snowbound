@@ -46,6 +46,8 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
             .iter()
             .find_map(|(id, object)| (object.jcid == 0x6000e).then_some(*id))
             .unwrap();
+        let split = crate::ParagraphSplit::new(text, 1, "Author").unwrap();
+        assert!(PreparedEdit::split(&protected, sid, &split).is_err());
         assert!(
             PreparedEdit::format(
                 &protected,
@@ -531,6 +533,45 @@ fn nested_fields_and_other_reference_streams_remain_byte_exact() {
     );
     assert_eq!(&changed[20..36], &original[16..32]);
     assert_eq!(parsed.sets[0][3].value, Value::Bytes(&[96, 97, 98, 99]));
+
+    for removed in 0..16 {
+        let ids: Vec<_> = previous.sets[0]
+            .iter()
+            .enumerate()
+            .filter_map(|(i, property)| (removed & (1 << i) != 0).then_some(property.id))
+            .collect();
+        let mut object = super::PropertyObject {
+            jcid: 0x6000e,
+            bytes: original.clone(),
+            global_ids: Default::default(),
+        };
+        object.remove(&ids).unwrap();
+        let parsed = PropertySets::parse(&object.bytes).unwrap();
+        assert!(
+            parsed.sets[0]
+                .iter()
+                .eq(previous.sets[0].iter().filter(|p| !ids.contains(&p.id)))
+        );
+        if removed & 2 == 0 {
+            assert_eq!(parsed.sets[1], previous.sets[1]);
+            assert_eq!(
+                object
+                    .bytes
+                    .windows(nested.len())
+                    .filter(|bytes| *bytes == nested)
+                    .count(),
+                1
+            );
+        } else {
+            assert_eq!(parsed.sets.len(), 1);
+        }
+        if removed == 0 {
+            assert_eq!(object.bytes, original);
+        }
+        let before = object.bytes.clone();
+        object.remove(&ids).unwrap();
+        assert_eq!(object.bytes, before);
+    }
 }
 
 #[test]
@@ -549,6 +590,19 @@ fn deep_property_splices_do_not_use_the_call_stack() {
         &changed[14..changed.len() - parsed.padding.len()],
         &bytes[10..]
     );
+    let mut object = super::PropertyObject {
+        jcid: 0x6000e,
+        bytes: changed,
+        global_ids: Default::default(),
+    };
+    object.remove(&[0x08000002]).unwrap();
+    let parsed = PropertySets::parse(&object.bytes).unwrap();
+    assert_eq!(parsed.sets.len(), 100_001);
+    assert_eq!(&object.bytes[..bytes.len()], &bytes);
+    object.remove(&[0x44000001]).unwrap();
+    let parsed = PropertySets::parse(&object.bytes).unwrap();
+    assert_eq!(parsed.sets.len(), 1);
+    assert!(parsed.sets[0].is_empty());
 }
 
 #[test]

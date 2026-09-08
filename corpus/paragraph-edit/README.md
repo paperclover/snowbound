@@ -26,6 +26,14 @@ notebook before completing inspection. Cold-open the split notebook for the join
 pass. Captured COM IDs belong to their originating sessions; discover fresh IDs
 when regenerating the corpus.
 
-`tools/test_paragraph_edit.py` verifies these native controls without a VM. They
-establish application behavior; they do not advertise a library split/join API.
+`rust-split` retains twelve `ParagraphSplit` outputs, their cold native captures,
+and a second native session typing into four empty boundary paragraphs. The
+hyperlink case stays unchanged because this operation rejects fields. The Rust
+test `export_native_paragraph_splits` generates candidate notebooks; its output
+directory comes from `ONESTORE_PARAGRAPH_OUTPUT`. Native character/style comparisons
+use both the keyboard-generated controls and the Rust-written notebooks. Empty
+typing checks extend the preexisting empty run in an independent expected model.
+
+`tools/test_paragraph_edit.py` verifies these controls without a VM. The native
+join captures establish behavior for subsequent join implementation.
 Identical captured files link to one canonical copy within this corpus.

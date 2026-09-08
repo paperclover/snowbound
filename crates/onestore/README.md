@@ -49,6 +49,7 @@ harness also accepts `--client-profile release`.
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
 | `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |
+| `ParagraphSplit`, `PreparedEdit::split` | Split ordinary text at a UTF-16 scalar boundary, retaining the original left identities and moving children to the right |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |
@@ -77,6 +78,13 @@ accepts one `0..0` span for subsequent typing. Retain the `Insertion` value for 
 value creates different object identities. Duplicate insertion identities require
 reconciliation. Formatting accepts explicit attributes, preserves inherited values,
 and gives retired immutable styles zero current references while retaining history.
+Paragraph splits preserve character formatting, retain tags on the left, and clone
+mutable list objects without restarting numbering. The new right paragraph/text
+identities belong to the retained `ParagraphSplit` intent. Its publication includes
+the complete child graph and title metadata; repeating an existing identity requires
+reconciliation. Title containers, generated fields, recording-linked text and
+associated run metadata are rejected before I/O. Native split controls and subsequent
+typing checks reside in [the paragraph corpus](../../corpus/paragraph-edit/README.md).
 Generated fields, protected targets and unsupported run-data boundary changes are
 rejected before publication. Local caches expose text, insertion and formatting edits;
 the [document-writer acceptance](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance)
@@ -215,6 +223,7 @@ subsets of unflushed bytes and is shared with the stateful commit fuzzer.
 ```sh
 cargo +nightly fuzz run revisions -- -max_total_time=120 -max_len=262144 -rss_limit_mb=2048
 cargo +nightly fuzz run commit -- -max_total_time=300 -max_len=4096 -rss_limit_mb=2048
+cargo +nightly fuzz run paragraph -- -max_total_time=120 -max_len=160 -rss_limit_mb=2048
 ```
 
 Fuzz targets cover storage, properties, revisions, scalar edits, creation, and

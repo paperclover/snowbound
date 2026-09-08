@@ -1,0 +1,30 @@
+[
+  {
+    "case": "Split start",
+    "index": 0,
+    "page": "{058E24C9-6521-4913-9088-94646869E7EC}{1}{B0}",
+    "object": "{7DB914B1-2E9B-4E51-B78C-87B90E14A385}{40}{B0}",
+    "text": "Typed "
+  },
+  {
+    "case": "Split end",
+    "index": 1,
+    "page": "{EEE8E5F3-7A14-4AA5-B06A-56D4BAC7C8AF}{1}{B0}",
+    "object": "{F60211DF-6E7D-0CA1-2F70-07201B2B1F07}{1}{B0}",
+    "text": "Typed "
+  },
+  {
+    "case": "Split empty",
+    "index": 0,
+    "page": "{984F0936-3DA3-4D19-B112-F3CA259A4148}{1}{B0}",
+    "object": "{77D1B2CB-BFAF-4106-8E28-90895EBDFE03}{40}{B0}",
+    "text": "Typed "
+  },
+  {
+    "case": "Split empty",
+    "index": 1,
+    "page": "{984F0936-3DA3-4D19-B112-F3CA259A4148}{1}{B0}",
+    "object": "{F8CC0112-769C-0624-19AF-E3D7C46B02D1}{1}{B0}",
+    "text": "Typed "
+  }
+]

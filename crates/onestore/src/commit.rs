@@ -183,6 +183,19 @@ pub struct PreparedEdit<'a> {
 }
 
 impl<'a> PreparedEdit<'a> {
+    /// Splits a paragraph and updates its children, lists, tags and title metadata atomically.
+    /// Fields and associated run metadata are rejected before I/O.
+    pub fn split(
+        source: &'a [u8],
+        space: ExGuid,
+        split: &crate::ParagraphSplit,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: split.apply(source, space)?,
+        })
+    }
+
     /// Prepares an insertion and its dependent metadata in one revision, without I/O.
     pub fn insert(
         source: &'a [u8],

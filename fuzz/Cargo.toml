@@ -84,3 +84,10 @@ path = "fuzz_targets/insert.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "paragraph"
+path = "fuzz_targets/paragraph.rs"
+test = false
+doc = false
+bench = false

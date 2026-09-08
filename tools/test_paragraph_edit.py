@@ -8,7 +8,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from document_model import EXPORTER, ordered_pages, walk
-from native_format import native_characters
+from native_format import compare_formats, native_characters
 from native_xml import ns
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -17,6 +17,65 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class ParagraphEditTest(unittest.TestCase):
+    def test_rust_splits_match_native_controls_and_preserve_empty_typing_styles(self):
+        fixture = FIXTURE / 'rust-split'
+        manifest = json.loads((fixture / 'manifest.json').read_text())
+        with TemporaryDirectory() as temporary:
+            for source, capture in [('candidate', 'native'), ('native/notebook', 'native'),
+                                    ('typed/notebook', 'typed')]:
+                native = Path(temporary) / source.replace('/', '-') / 'read'
+                shutil.copytree(fixture / capture / 'read', native)
+                compare(fixture / source, native)
+            subprocess.run([EXPORTER, fixture / 'candidate/synthetic.one', Path(temporary) / 'model'], check=True)
+            model = json.loads((Path(temporary) / 'model/document.json').read_text())
+            subprocess.run([EXPORTER, fixture / 'native/notebook/synthetic.one', Path(temporary) / 'saved'], check=True)
+            saved = json.loads((Path(temporary) / 'saved/document.json').read_text())
+        views = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                 for _, _, r, page in ordered_pages(model)}
+        saved_views = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                       for _, _, r, page in ordered_pages(saved)}
+        text_nodes = {}
+        for name, (revision, page) in views.items():
+            current, current_page = saved_views[name]
+            self.assertEqual(page, current_page)
+            text_nodes[name] = []
+            for outline in revision['nodes'][page]['children']:
+                if revision['nodes'][outline]['kind']['type'] != 'Outline': continue
+                for oid, node in walk(revision, outline):
+                    self.assertEqual(current['nodes'][oid]['children'], node['children'])
+                    self.assertEqual(current['nodes'][oid]['content'], node['content'])
+                    if node['kind']['type'] == 'RichText': text_nodes[name].append(node)
+        captures = {}
+        for phase, folder in [('native', fixture / 'native/read'), ('typed', fixture / 'typed/read'),
+                              ('control', FIXTURE / 'cold-split/read')]:
+            captures[phase] = {}
+            for path in folder.glob('page-*.xml'):
+                page = ET.parse(path).getroot()
+                captures[phase][page.get('name')] = native_characters(page, page.findall('one:Outline', ns))
+            self.assertEqual(len(captures[phase]), 14)
+        cases = [c for c in manifest['cases'] if 'intent' in c]
+        self.assertEqual(len(cases), 12)
+        for case in cases:
+            name = case['case']
+            with self.subTest(case=name):
+                for a, b in zip(captures['native'][name], captures['control'][name], strict=True):
+                    for (c, left), (d, right) in zip(a, b, strict=True):
+                        self.assertEqual(c, d)
+                        for key in left.keys() | right.keys():
+                            default = 'automatic' if key in ('color', 'highlight') else False
+                            self.assertEqual(left.get(key, default), right.get(key, default))
+        selections = json.loads((fixture / 'typed/ui/selections.json').read_text())
+        self.assertEqual(len(selections), 4)
+        for selection in selections:
+            node = text_nodes[selection['case']][selection['index']]
+            self.assertEqual(node['kind']['text'], '')
+            self.assertEqual(len(node['kind']['runs']), 1)
+            node['kind']['text'] = selection['text']
+            node['kind']['runs'][0]['end'] = len(selection['text'].encode('utf-16-le')) // 2
+        for name, (revision, page) in views.items():
+            _, differences = compare_formats(revision, text_nodes[name], captures['typed'][name])
+            self.assertEqual(differences, [], name)
+
     def test_native_split_join_graphs_styles_and_identity_boundaries(self):
         manifest = json.loads((FIXTURE / 'manifest.json').read_text())
         models, native = {}, {}

@@ -120,6 +120,15 @@ fn field_length(property: &crate::Property<'_>, set_lengths: &[usize]) -> usize 
     }
 }
 
+fn property_set_lengths(properties: &PropertySets<'_>) -> Vec<usize> {
+    let mut lengths = vec![0; properties.sets.len()];
+    for (i, set) in properties.sets.iter().enumerate().rev() {
+        lengths[i] =
+            2 + set.len() * 4 + set.iter().map(|p| field_length(p, &lengths)).sum::<usize>();
+    }
+    lengths
+}
+
 fn patch_properties(
     blob: &[u8],
     updates: &[(u32, &[u8])],
@@ -130,15 +139,7 @@ fn patch_properties(
     let ids = properties.root_ids.as_ptr().addr() - blob.as_ptr().addr();
     let ids_end = ids + properties.root_ids.len();
     let body_end = blob.len() - properties.padding.len();
-    let mut set_lengths = vec![0; properties.sets.len()];
-    for (i, set) in properties.sets.iter().enumerate().rev() {
-        set_lengths[i] = 2
-            + set.len() * 4
-            + set
-                .iter()
-                .map(|p| field_length(p, &set_lengths))
-                .sum::<usize>();
-    }
+    let set_lengths = property_set_lengths(&properties);
     let mut offsets = Vec::with_capacity(root.len());
     let mut offset = ids_end;
     for property in root {
@@ -376,6 +377,79 @@ impl PropertyObject {
                 .any(|p| p.id & 0x7fffffff == id & 0x7fffffff)
         });
         self.bytes = patch_properties(&self.bytes, &updates, &inserts)?;
+        Ok(())
+    }
+
+    pub fn remove(&mut self, ids: &[u32]) -> Result<()> {
+        let properties = PropertySets::parse(&self.bytes)?;
+        let removed = |id: u32| {
+            ids.iter()
+                .any(|wanted| id & 0x7fffffff == wanted & 0x7fffffff)
+        };
+        if !properties.sets[0].iter().any(|p| removed(p.id)) {
+            return Ok(());
+        }
+        let lengths = property_set_lengths(&properties);
+        let mut offset = properties.root_ids.as_ptr().addr() - self.bytes.as_ptr().addr()
+            + properties.root_ids.len();
+        let mut retained_ids = Vec::new();
+        let mut fields = Vec::new();
+        let mut references: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+        for property in &properties.sets[0] {
+            let end = offset + field_length(property, &lengths);
+            if !removed(property.id) {
+                retained_ids.extend_from_slice(&property.id.to_le_bytes());
+                fields.extend_from_slice(&self.bytes[offset..end]);
+                let mut pending = vec![property];
+                while let Some(field) = pending.pop() {
+                    match &field.value {
+                        Value::References {
+                            stream,
+                            compact_ids,
+                        } => {
+                            let index = match stream {
+                                crate::IdStream::Objects => 0,
+                                crate::IdStream::ObjectSpaces => 1,
+                                crate::IdStream::Contexts => 2,
+                            };
+                            references[index].extend_from_slice(compact_ids);
+                        }
+                        Value::Sets(children) => {
+                            for child in children.clone().rev() {
+                                pending.extend(properties.sets[child].iter().rev());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            offset = end;
+        }
+        let mut cursor = crate::bytes::Cursor {
+            bytes: &self.bytes,
+            offset: 0,
+        };
+        let streams = crate::properties::reference_streams(&mut cursor)?;
+        let mut bytes = Vec::new();
+        for (stream, retained) in streams.iter().zip(&references) {
+            if stream.offset == 0 {
+                continue;
+            }
+            let header = u32::from_le_bytes(
+                self.bytes[stream.offset - 4..stream.offset]
+                    .try_into()
+                    .unwrap(),
+            );
+            let count = u32::try_from(retained.len() / 4).unwrap();
+            bytes.extend_from_slice(&((header & 0xff000000) | count).to_le_bytes());
+            bytes.extend_from_slice(retained);
+        }
+        bytes.extend_from_slice(&u16::try_from(retained_ids.len() / 4).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&retained_ids);
+        bytes.extend_from_slice(&fields);
+        bytes.resize(bytes.len().next_multiple_of(8), 0);
+        PropertySets::parse(&bytes)?;
+        self.bytes = bytes;
         Ok(())
     }
 
