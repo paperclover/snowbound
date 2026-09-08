@@ -2,8 +2,8 @@
 mod concurrent;
 
 use onestore::{
-    CommitError, CommitState, ExGuid, Insertion, PreparedEdit, RevisionIndex, Store, TextAttribute,
-    document::Document,
+    CommitError, CommitState, ExGuid, Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit,
+    RevisionIndex, Store, TextAttribute, document::Document,
 };
 use onestore_offline::{EditStatus, Error, Remote, Replica, SmbRemote};
 use onestore_smb::{Client, Credentials};
@@ -41,7 +41,7 @@ impl DocumentView {
     }
 }
 
-const DOCUMENT_OPERATIONS: [&str; 3] = ["insert", "format", "text"];
+const DOCUMENT_OPERATIONS: [&str; 6] = ["insert", "format", "text", "split", "right_text", "join"];
 
 fn now() -> u128 {
     SystemTime::now()
@@ -56,14 +56,14 @@ enum Pause {
     FormatReply(PathBuf),
 }
 
-struct Traced {
-    remote: SmbRemote,
+struct Traced<R> {
+    remote: R,
     before: Option<(String, Option<DocumentView>)>,
     pause: Option<Pause>,
     documents: bool,
 }
 
-impl Remote for Traced {
+impl<R: Remote> Remote for Traced<R> {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         let started = now();
         let bytes = self.remote.read()?;
@@ -329,7 +329,13 @@ fn queue_document(
     } else {
         parent.unwrap()
     };
-    let range = 1..u32::try_from(text.encode_utf16().count())? - 2;
+    let end = u32::try_from(text.encode_utf16().count())?;
+    let split = ParagraphSplit::new(insertion.text_object(), end - 2, "Offline document writer")?;
+    let join = ParagraphJoin::new(
+        insertion.text_object(),
+        split.text_object(),
+        "Offline document writer",
+    )?;
     let attributes = [
         TextAttribute::Bold(true),
         TextAttribute::FontSize(18.0 + (operation % 9) as f32),
@@ -338,11 +344,21 @@ fn queue_document(
     let mut ids = [0; DOCUMENT_OPERATIONS.len()];
     for (step, id) in ids.iter_mut().enumerate() {
         let kind = DOCUMENT_OPERATIONS[step];
-        let range = if step == 2 {
-            let end = u32::try_from(text.encode_utf16().count())?;
-            end - 3..end
+        let range = match kind {
+            "text" => end - 3..end,
+            "split" => end - 2..end - 2,
+            "right_text" => 0..2,
+            _ => 1..end - 2,
+        };
+        let target = if kind == "right_text" {
+            split.text_object()
         } else {
-            range.clone()
+            insertion.text_object()
+        };
+        let replacement = match kind {
+            "text" => Some(" e\u{301}🐈"),
+            "right_text" => Some("B🦋"),
+            _ => None,
         };
         loop {
             if Instant::now() >= deadline {
@@ -350,31 +366,28 @@ fn queue_document(
             }
             let source = cache.snapshot()?;
             let started = now();
-            let result = if step == 0 {
-                cache.insert(&source, space, &insertion)
-            } else if step == 1 {
-                cache.format(
-                    &source,
-                    space,
-                    insertion.text_object(),
-                    range.clone(),
-                    &attributes,
-                )
-            } else {
-                cache.edit_text(
-                    &source,
-                    space,
-                    insertion.text_object(),
-                    range.clone(),
-                    " e\u{301}🐈",
-                )
+            let result = match kind {
+                "insert" => cache.insert(&source, space, &insertion),
+                "format" => cache.format(&source, space, target, range.clone(), &attributes),
+                "text" | "right_text" => {
+                    cache.edit_text(&source, space, target, range.clone(), replacement.unwrap())
+                }
+                "split" => cache.split(&source, space, &split),
+                "join" => cache.join(&source, space, &join),
+                _ => unreachable!(),
             };
             match result {
                 Ok(Some(acknowledged)) => {
                     *id = acknowledged;
                     println!(
                         "{}",
-                        json!({"event":"local_document_commit","id":acknowledged,"operation":operation,"kind":kind,"space":space.to_string(),"object":insertion.text_object().to_string(),"text":text,"insertion":if step==0 {Some(&insertion)} else {None},"range":[range.start,range.end],"attributes":attributes,"replacement":if step==2 {Some(" e\u{301}🐈")} else {None},"started_us":started,"finished_us":now()})
+                        json!({"event":"local_document_commit","id":acknowledged,"operation":operation,"kind":kind,
+                        "space":space.to_string(),"object":target.to_string(),"document":insertion.text_object().to_string(),
+                        "text":text,"insertion":if kind=="insert" {Some(&insertion)} else {None},
+                        "split":if kind=="split" {Some(&split)} else {None},
+                        "joined":if kind=="join" {Some(join.texts().map(|id| id.to_string()))} else {None},
+                        "range":[range.start,range.end],"attributes":attributes,"replacement":replacement,
+                        "started_us":started,"finished_us":now()})
                     );
                     break;
                 }
@@ -630,8 +643,125 @@ fn append_review_requires_a_unique_ordered_history_and_an_absent_new_token() {
 }
 
 #[cfg(test)]
+#[path = "../../onestore/tests/support/disk.rs"]
+mod disk;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_workload_retains_dependencies_and_receipts_across_reopen() {
+        struct Server {
+            disk: disk::Disk,
+            lost_reply: bool,
+        }
+        impl Remote for Server {
+            fn read(&mut self) -> io::Result<Vec<u8>> {
+                Ok(self.disk.visible.clone())
+            }
+            fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+                edit.commit(&mut self.disk)?;
+                if std::mem::take(&mut self.lost_reply) {
+                    Err(CommitError {
+                        state: CommitState::Unknown,
+                        error: io::Error::from(io::ErrorKind::ConnectionAborted),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+            fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
+                onestore::confirm_snapshot(&mut self.disk, snapshot)
+            }
+        }
+        let source =
+            onestore::create_section("workload.one", "Concurrent edits:", "Author").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite");
+        let mut cache = Replica::create(&path, &source).unwrap();
+        let mut remote = Traced {
+            remote: Server {
+                disk: disk::Disk {
+                    visible: source.clone(),
+                    durable: source.clone(),
+                    operation: 0,
+                    fail_at: None,
+                    write_limit: 97,
+                    random: 1,
+                },
+                lost_reply: false,
+            },
+            before: None,
+            pause: None,
+            documents: true,
+        };
+        println!(
+            "{}",
+            json!({"event":"ready", "actor":"w0", "offline":true,
+            "document_operations":true, "document_graph":true, "document_kinds":DOCUMENT_OPERATIONS})
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut parent = None;
+        let mut ids = Vec::new();
+        for operation in 0..2 {
+            let (outline, added) =
+                queue_document(&cache, "w0", operation, parent, deadline).unwrap();
+            parent = Some(outline);
+            ids.extend(added);
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+        }
+        let local = cache.snapshot().unwrap();
+        assert_eq!(cache.pending().unwrap().len(), 12);
+        for (step, id) in ids.iter().enumerate() {
+            remote.remote.lost_reply = matches!(step % 6, 3 | 5);
+            let result = cache.sync_once(&mut remote);
+            let state = if result.is_err() {
+                assert!(matches!(
+                    result,
+                    Err(Error::Remote(CommitError {
+                        state: CommitState::Unknown,
+                        ..
+                    }))
+                ));
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+                cache.sync_once(&mut remote).unwrap().unwrap()
+            } else {
+                result.unwrap().unwrap()
+            };
+            assert_eq!(state.0, *id);
+            let EditStatus::Published { revision } = state.1 else {
+                panic!("{state:?}")
+            };
+            println!(
+                "{}",
+                json!({"event":"document_receipt", "id":id, "revision":revision.to_string(), "at_us":now()})
+            );
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            assert_eq!(
+                cache.status(*id).unwrap(),
+                Some(EditStatus::Published { revision })
+            );
+            if step + 1 < ids.len() {
+                assert_eq!(cache.snapshot().unwrap(), local);
+            }
+        }
+        assert!(cache.pending().unwrap().is_empty());
+        for id in ids {
+            let Some(EditStatus::Published { revision }) = cache.status(id).unwrap() else {
+                panic!()
+            };
+            println!(
+                "{}",
+                json!({"event":"reopened_document_receipt", "id":id, "revision":revision.to_string()})
+            );
+        }
+        remote.read().unwrap();
+        println!("{}", json!({"event":"done"}));
+    }
 
     #[test]
     fn publication_differences_retain_removed_text_and_graph_identities() {

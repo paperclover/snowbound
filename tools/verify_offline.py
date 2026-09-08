@@ -32,7 +32,7 @@ def verify(output, max_gap=120):
         edits = {event['id']: event for event in events if event['event'] in ('local_commit', 'local_document_commit')}
         receipts = {event['id']: event for event in events if event['event'] in ('remote_receipt', 'document_receipt')}
         attempts = {event['revision']: event for event in events if event['event'] == 'remote_attempt'}
-        publication_starts = {id: documents[edit['object']]['states'][edit['kind']]['attempt']['started_us'] if edit['event'] == 'local_document_commit'
+        publication_starts = {id: documents[edit.get('document', edit['object'])]['states'][edit['kind']]['attempt']['started_us'] if edit['event'] == 'local_document_commit'
                               else attempts[receipts[id]['revision']]['started_us'] for id, edit in edits.items()}
         queues[actor] = max(sum(edit['finished_us'] <= at < publication_starts[id] for id, edit in edits.items()) for at in [edit['finished_us'] for edit in edits.values()])
         assert queues[actor] >= 2, 'Writer did not establish a durable local queue before publication'

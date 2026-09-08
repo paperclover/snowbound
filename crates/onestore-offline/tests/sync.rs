@@ -27,6 +27,200 @@ mod paragraph {
     }
 
     #[test]
+    fn native_splits_retain_independent_local_identities_and_changed_boundaries() {
+        let source = include_bytes!("../../../corpus/paragraph-edit/before/notebook/synthetic.one");
+        let native = include_bytes!("../../../corpus/paragraph-edit/split/notebook/synthetic.one");
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../corpus/paragraph-edit/manifest.json"))
+                .unwrap();
+        let store = Store::parse(source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let mut accepted = 0;
+        let mut conflicts = 0;
+        for case in manifest["cases"].as_array().unwrap() {
+            if case["case"] == "Split before hyperlink" {
+                continue;
+            }
+            let left: ExGuid = serde_json::from_value(case["original_text"].clone()).unwrap();
+            let native_right: ExGuid = serde_json::from_value(case["new_text"].clone()).unwrap();
+            let (sid, _) = document
+                .pages()
+                .unwrap()
+                .into_iter()
+                .find(|(sid, _)| {
+                    let space = &document.spaces[sid];
+                    space.revisions[&space.contexts[&ExGuid::default()]]
+                        .nodes
+                        .contains_key(&left)
+                })
+                .unwrap();
+            let split = ParagraphSplit::new(
+                left,
+                u32::try_from(case["offset_utf16"].as_u64().unwrap()).unwrap(),
+                "Offline author",
+            )
+            .unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("native-split.sqlite");
+            let mut cache = Replica::create(&path, source).unwrap();
+            let id = cache.split(source, sid, &split).unwrap().unwrap();
+            let current = cache.snapshot().unwrap();
+            let dependent = cache
+                .edit_text(
+                    &current,
+                    sid,
+                    split.text_object(),
+                    0..0,
+                    "Local dependent edit: ",
+                )
+                .unwrap()
+                .unwrap();
+            let local = cache.snapshot().unwrap();
+            let pending = cache.pending().unwrap();
+            let mut server = Server::new(native);
+            let (published, status) = cache.sync_once(&mut server).unwrap().unwrap();
+            assert_eq!(published, id);
+            assert_eq!(cache.snapshot().unwrap(), local);
+            if matches!(case["case"].as_str().unwrap(), "Split end" | "Split empty") {
+                accepted += 1;
+                assert!(
+                    matches!(status, EditStatus::Published { .. }),
+                    "{}: {status:?}",
+                    case["case"]
+                );
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+                assert_eq!(cache.sync_once(&mut server).unwrap().unwrap().0, dependent);
+                assert_eq!(server.publications, 2);
+                let store = Store::parse(&server.visible).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                let document = Document::parse(&index).unwrap();
+                let space = &document.spaces[&sid];
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let original: ExGuid =
+                    serde_json::from_value(case["original_paragraph"].clone()).unwrap();
+                let native_paragraph: ExGuid =
+                    serde_json::from_value(case["new_paragraph"].clone()).unwrap();
+                let parent = view
+                    .nodes
+                    .values()
+                    .find(|node| node.children.contains(&original))
+                    .unwrap();
+                let position = parent
+                    .children
+                    .iter()
+                    .position(|id| *id == original)
+                    .unwrap();
+                assert_eq!(
+                    &parent.children[position..position + 3],
+                    &[original, split.object(), native_paragraph]
+                );
+                assert!(
+                    matches!(&view.nodes[&native_right].kind, Kind::RichText {text,..} if text.is_empty())
+                );
+                assert!(
+                    matches!(&view.nodes[&split.text_object()].kind, Kind::RichText {text,..} if text == "Local dependent edit: ")
+                );
+            } else {
+                conflicts += 1;
+                assert!(
+                    matches!(
+                        status,
+                        EditStatus::Conflict(
+                            ConflictKind::TextChanged | ConflictKind::StructureChanged
+                        )
+                    ),
+                    "{}: {status:?}",
+                    case["case"]
+                );
+                assert_eq!(server.publications, 0);
+                assert_eq!(cache.pending().unwrap(), pending);
+                drop(cache);
+                cache = Replica::open(&path).unwrap();
+                assert_eq!(cache.snapshot().unwrap(), local);
+                assert_eq!(cache.pending().unwrap(), pending);
+                assert_eq!(cache.status(id).unwrap(), Some(status));
+            }
+        }
+        assert_eq!((accepted, conflicts), (2, 10));
+    }
+
+    #[test]
+    fn native_joins_do_not_acknowledge_or_discard_an_independent_local_branch() {
+        let source = include_bytes!(
+            "../../../corpus/paragraph-edit/join-tags/before/notebook/synthetic.one"
+        );
+        let native = include_bytes!(
+            "../../../corpus/paragraph-edit/join-tags/joined/notebook/synthetic.one"
+        );
+        let store = Store::parse(source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let mut cases = 0;
+        for (sid, page) in document.pages().unwrap() {
+            let space = &document.spaces[&sid];
+            let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let Kind::Metadata {
+                title: Some(name), ..
+            } = &view.nodes[&view.roots[&2]].kind
+            else {
+                continue;
+            };
+            if !name.starts_with("Join ") {
+                continue;
+            }
+            cases += 1;
+            let outline = view.nodes[&page]
+                .children
+                .iter()
+                .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
+                .unwrap();
+            let children = &view.nodes[outline].children;
+            let left = view.nodes[&children[0]].content[0];
+            let right = view.nodes[&children[1]].content[0];
+            let Kind::RichText {
+                text: left_text, ..
+            } = &view.nodes[&left].kind
+            else {
+                panic!()
+            };
+            let survivor = if left_text.is_empty() { right } else { left };
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("native-join.sqlite");
+            let mut cache = Replica::create(&path, source).unwrap();
+            let join = ParagraphJoin::new(left, right, "Offline author").unwrap();
+            let id = cache.join(source, sid, &join).unwrap().unwrap();
+            let current = cache.snapshot().unwrap();
+            cache
+                .edit_text(&current, sid, survivor, 0..0, "Local dependent edit: ")
+                .unwrap()
+                .unwrap();
+            let local = cache.snapshot().unwrap();
+            let pending = cache.pending().unwrap();
+            let mut server = Server::new(native);
+            let (conflicted, status) = cache.sync_once(&mut server).unwrap().unwrap();
+            assert_eq!(conflicted, id);
+            assert!(
+                matches!(
+                    status,
+                    EditStatus::Conflict(ConflictKind::TargetUnavailable)
+                ),
+                "{name}: {status:?}"
+            );
+            assert_eq!(server.publications, 0);
+            assert_eq!(cache.snapshot().unwrap(), local);
+            assert_eq!(cache.pending().unwrap(), pending);
+            drop(cache);
+            cache = Replica::open(&path).unwrap();
+            assert_eq!(cache.snapshot().unwrap(), local);
+            assert_eq!(cache.pending().unwrap(), pending);
+            assert_eq!(cache.status(id).unwrap(), Some(status));
+        }
+        assert_eq!(cases, 3);
+    }
+
+    #[test]
     fn split_join_dependencies_reopen_and_rebase_with_remote_text_and_styles() {
         let (source, sid, left, parent) = fixture();
         let directory = tempfile::tempdir().unwrap();

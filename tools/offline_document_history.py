@@ -17,7 +17,8 @@ def characters(observed):
 
 def operation_kinds(events):
     kinds = tuple(events[0].get('document_kinds', ('insert', 'format')))
-    assert kinds in (('insert', 'format'), ('insert', 'format', 'text')), 'Unknown document workload'
+    assert kinds in (('insert', 'format'), ('insert', 'format', 'text'),
+                     ('insert', 'format', 'text', 'split', 'right_text', 'join')), 'Unknown document workload'
     return kinds
 
 
@@ -39,15 +40,18 @@ def document_history(logs, operations):
         assert [(r['id'], r['revision']) for r in reopened] == [(r['id'], r['revision']) for r in receipts], 'Document receipts changed across reopen'
         linked = {}
         for intent, receipt in zip(edits, receipts, strict=True):
+            changed_targets = {intent['object']}
+            if intent['kind'] == 'split': changed_targets.add(identity(intent['split'], 2))
+            if intent['kind'] == 'join': changed_targets = set(intent['joined'])
             attempts = [row for row in events if row['event'] == 'remote_attempt' and row['revision'] == receipt['revision']
-                        and set(row.get('document_changes') or {}) == {intent['object']}]
+                        and set(row.get('document_changes') or {}) == changed_targets]
             if not attempts and intent['kind'] == 'format':
                 attempts = [row for row in events if row['event'] == 'remote_attempt' and row['state'] == 'Unknown'
-                            and set(row.get('document_changes') or {}) == {intent['object']}]
+                            and set(row.get('document_changes') or {}) == changed_targets]
             assert len(attempts) == 1, 'Document receipt lacks one publication attempt'
             attempt, = attempts
             assert attempt['state'] in ('Committed', 'Unknown'), 'Receipt identifies an unpublished document operation'
-            assert intent['object'] in attempt['documents'] and attempt['document_changes'] == {intent['object']: attempt['documents'][intent['object']]}, 'Document publication changed another target'
+            assert intent['object'] in attempt['documents'] and attempt['document_changes'] == {target: attempt['documents'].get(target) for target in changed_targets}, 'Document publication changed another target'
             successful = [row for row in events if row['event'] == 'remote_attempt'
                           and row['state'] in ('Committed', 'Unknown')
                           and row.get('document_changes') == attempt['document_changes']]
@@ -71,6 +75,11 @@ def document_history(logs, operations):
             else:
                 assert receipt['revision'] == attempt['revision']
             linked[intent['id']] = {**attempt, 'acknowledged_us': receipt['at_us'], 'receipt_revision': receipt['revision']}
+        assert {(row['revision'], row['started_us']) for row in events
+                if row['event'] == 'remote_attempt' and row['state'] in ('Committed', 'Unknown')
+                and row.get('document_changes')} == {
+                    (attempt['revision'], attempt['started_us']) for attempt in linked.values()
+                }, 'A document publication lacks its recorded intent and receipt'
         for at in range(0, len(edits), len(kinds)):
             inserted, formatted, *replaced = edits[at:at + len(kinds)]
             number = inserted['operation']
@@ -102,7 +111,7 @@ def document_history(logs, operations):
             states = {'insert': {'characters': old, 'attempt': created},
                       'format': {'characters': new, 'attempt': changed}}
             if replaced:
-                replacement, = replaced
+                replacement, *boundaries = replaced
                 end = len(text.encode('utf-16-le')) // 2
                 assert replacement['object'] == target and replacement['space'] == inserted['space'], 'Text edit addresses another object'
                 assert replacement['text'] == text and replacement['range'] == [end-3, end], 'Cross-run text range differs from workload'
@@ -112,65 +121,102 @@ def document_history(logs, operations):
                 assert changed['finished_us'] <= attempt['started_us'], 'Text replacement preceded its formatting'
                 assert characters(attempt['documents'][target]) == final, 'Text publication differs from its local intent'
                 states['text'] = {'characters': final, 'attempt': attempt}
+            paragraph = identity(insertion, 3 if 'Outline' in insertion['placement'] else 1)
+            for state in states.values():
+                state['parts'] = [(paragraph, target, 0, len(state['characters']))]
+            if replaced and boundaries:
+                split, right_edit, join = boundaries
+                assert events[0].get('document_graph') is True, 'Boundary workload requires structural observations'
+                assert all(row.get('document') == target and row['space'] == inserted['space']
+                           for row in edits[at:at + len(kinds)]), 'Boundary operation lost its owning document'
+                intent = split['split']
+                right, right_paragraph = identity(intent, 2), identity(intent, 1)
+                assert split['object'] == intent['text'] == target and intent['author'] == insertion['author'], 'Split addresses another text or author'
+                assert intent['offset'] == end-2 and split['range'] == [end-2, end-2], 'Split boundary differs from workload'
+                boundary = len(text)-1
+                assert right_edit['object'] == right and right_edit['range'] == [0, 2] and right_edit['replacement'] == 'B🦋', 'Dependent right edit differs from workload'
+                assert join['object'] == target and join['joined'] == [target, right], 'Join does not retain its original targets'
+                updated = final[:boundary] + [(char, *final[boundary][1:]) for char in 'B🦋'] + final[boundary+2:]
+                for row, value, parts in [
+                    (split, final, [(paragraph, target, 0, boundary), (right_paragraph, right, boundary, len(final))]),
+                    (right_edit, updated, [(paragraph, target, 0, boundary), (right_paragraph, right, boundary, len(updated))]),
+                    (join, updated, [(paragraph, target, 0, len(updated))]),
+                ]:
+                    attempt = linked[row['id']]
+                    assert list(states.values())[-1]['attempt']['finished_us'] <= attempt['started_us'], 'Boundary publication preceded its dependency'
+                    assert set(attempt['documents']) & {target, right} == {oid for _, oid, _, _ in parts}, 'Boundary publication omitted or resurrected a text object'
+                    for _, oid, start, stop in parts:
+                        assert characters(attempt['documents'][oid]) == value[start:stop], 'Boundary publication differs from its local intent'
+                    states[row['kind']] = {'characters': value, 'parts': parts, 'attempt': attempt}
+            allocated = {oid for state in states.values() for paragraph, text, _, _ in state['parts'] for oid in (paragraph, text)}
+            existing = {oid for document in documents.values() for state in document['states'].values()
+                        for paragraph, text, _, _ in state['parts'] for oid in (paragraph, text)}
+            assert not allocated & existing, 'Two document operations share allocated identities'
             documents[target] = {'insertion': insertion, 'space': inserted['space'], 'states': states}
     assert documents, 'No document operations were recorded'
-    if any(events[0].get('document_graph') for events in logs.values()):
-        for events in logs.values():
+    structural = any(events[0].get('document_graph') for events in logs.values())
+    allowed_texts = {oid for document in documents.values() for state in document['states'].values()
+                     for _, oid, _, _ in state['parts']}
+    for actor, events in logs.items():
+        if structural:
             assert events[0].get('document_graph') is True, 'Client omitted structural observations'
-            before = None
-            for row in events:
-                if row['event'] not in ('read', 'document_read', 'remote_attempt'): continue
-                observed = row.get('documents')
-                assert isinstance(observed, dict), 'Snapshot omitted document text'
-                graph = row.get('document_graph')
-                assert isinstance(graph, dict), 'Snapshot omitted document graph'
-                expected = {}
-                for target, document in documents.items():
-                    if target not in observed: continue
+        before, previous = None, {}
+        reads = [row for row in events if row['event'] in ('read', 'document_read') and row.get('documents') is not None]
+        assert reads, f'{actor} did not observe document snapshots'
+        assert any(row['documents'] for row in reads), f'{actor} never observed a created document object'
+        for row in events:
+            if row['event'] not in ('read', 'document_read', 'remote_attempt'): continue
+            is_read = row['event'] != 'remote_attempt'
+            observed = row.get('documents')
+            assert isinstance(observed, dict), 'Snapshot omitted document text'
+            assert set(previous) <= set(observed) <= allowed_texts, 'Reader lost an object or observed an unrecorded insertion'
+            graph = row.get('document_graph')
+            if structural: assert isinstance(graph, dict), 'Snapshot omitted document graph'
+            expected_graph = {}
+            for target, document in documents.items():
+                states = list(document['states'].values())
+                known_texts = {oid for state in states for _, oid, _, _ in state['parts']}
+                known_paragraphs = {oid for state in states for oid, _, _, _ in state['parts']}
+                if is_read and row['started_us'] > states[0]['attempt']['acknowledged_us']:
+                    assert target in observed, 'Reader missed an acknowledged insertion'
+                if target not in observed:
+                    assert not known_texts & observed.keys(), 'Snapshot omitted the original paragraph text'
+                    continue
+                actual = {oid: characters(observed[oid]) for oid in known_texts & observed.keys()}
+                matches = [i for i, state in enumerate(states)
+                           if actual == {oid: state['characters'][start:stop] for _, oid, start, stop in state['parts']}
+                           and (not structural or known_paragraphs & graph.keys() == {oid for oid, _, _, _ in state['parts']})]
+                assert matches, 'Reader observed partial or invented document content'
+                if is_read:
+                    matches = [i for i in matches if i >= previous.get(target, 0)]
+                    assert matches, 'Reader reverted document content'
+                    matches = [i for i in matches if row['finished_us'] >= states[i]['attempt']['started_us']]
+                    assert matches, 'Reader observed future document content'
+                    acknowledged = max((i for i, state in enumerate(states) if row['started_us'] > state['attempt']['acknowledged_us']), default=0)
+                    matches = [i for i in matches if i >= acknowledged]
+                    assert matches, 'Reader missed acknowledged document content'
+                    previous[target] = min(matches)
+                if structural:
                     insertion = document['insertion']
                     outline = insertion['parent']
-                    paragraph = identity(insertion, 1)
                     if 'Outline' in insertion['placement']:
-                        outline = paragraph
-                        paragraph = identity(insertion, 3)
-                        expected[outline] = {'parent': insertion['parent'], 'children': [], 'content': [],
-                                             'child_level': 1, 'position': insertion['placement']['Outline']}
-                    assert outline in expected, 'Snapshot omitted the inserted outline'
-                    expected[outline]['children'].append(paragraph)
-                    expected[paragraph] = {'parent': outline, 'children': [], 'content': [target],
-                                            'child_level': 1, 'position': None}
-                assert graph == expected, 'Snapshot contains partial, reordered or invented paragraph structure'
-                if row['event'] == 'remote_attempt':
+                        outline = identity(insertion, 1)
+                        expected_graph[outline] = {'parent': insertion['parent'], 'children': [], 'content': [],
+                                                   'child_level': 1, 'position': insertion['placement']['Outline']}
+                    assert outline in expected_graph, 'Snapshot omitted the inserted outline'
+                    for paragraph, oid, _, _ in states[min(matches)]['parts']:
+                        expected_graph[outline]['children'].append(paragraph)
+                        expected_graph[paragraph] = {'parent': outline, 'children': [], 'content': [oid],
+                                                     'child_level': 1, 'position': None}
+            if structural:
+                assert graph == expected_graph, 'Snapshot contains partial, reordered or invented paragraph structure'
+                if not is_read:
                     assert before is not None, 'Publication omitted its observed source'
                     for image, delta in [('documents', 'document_changes'), ('document_graph', 'document_graph_changes')]:
                         expected_delta = {key: row[image].get(key) for key in before[image].keys() | row[image].keys()
                                           if before[image].get(key) != row[image].get(key)}
                         assert row.get(delta) == expected_delta, 'Publication diff omitted or invented a changed object'
-                else:
-                    before = row
-    for actor, events in logs.items():
-        previous = {}
-        reads = [row for row in events if row['event'] in ('read', 'document_read') and row.get('documents') is not None]
-        assert reads, f'{actor} did not observe document snapshots'
-        assert any(row['documents'] for row in reads), f'{actor} never observed a created document object'
-        for read in reads:
-            observed = read['documents']
-            assert set(previous) <= set(observed) <= set(documents), 'Reader lost an object or observed an unrecorded insertion'
-            for target, document in documents.items():
-                states = list(document['states'].values())
-                if read['started_us'] > states[0]['attempt']['acknowledged_us']:
-                    assert target in observed, 'Reader missed an acknowledged insertion'
-                if target not in observed: continue
-                actual = characters(observed[target])
-                matches = [i for i, state in enumerate(states) if actual == state['characters']]
-                assert len(matches) == 1, 'Reader observed partial or invented document content'
-                current, = matches
-                assert current >= previous.get(target, 0), 'Reader reverted document content'
-                assert read['finished_us'] >= states[current]['attempt']['started_us'], 'Reader observed future document content'
-                for i, state in enumerate(states):
-                    if read['started_us'] > state['attempt']['acknowledged_us']:
-                        assert current >= i, 'Reader missed acknowledged document content'
-                previous[target] = current
+            if is_read: before = row
     return documents
 
 
@@ -184,10 +230,15 @@ def verify_model(model, documents):
         insertion = document['insertion']
         if 'Paragraph' in insertion['placement']:
             children[insertion['parent']].append(identity(insertion, 1))
+    retired = {oid for document in documents.values() for state in document['states'].values()
+               for paragraph, text, _, _ in state['parts'] for oid in (paragraph, text)} - {
+                   oid for document in documents.values() for paragraph, text, _, _ in list(document['states'].values())[-1]['parts']
+                   for oid in (paragraph, text)}
     found = set()
     for sid, _, revision, page in ordered_pages(model):
         nodes = revision['nodes']
         for target, node in walk(revision, page):
+            assert target not in retired, 'Final model resurrected a retired paragraph or text'
             if target not in documents: continue
             assert target not in found, 'Inserted text is reachable twice'
             found.add(target)
@@ -198,6 +249,7 @@ def verify_model(model, documents):
             object_id = identity(insertion, 1)
             assert object_id in nodes[insertion['parent']]['children'], 'Insertion lost its parent'
             paragraph = identity(insertion, 3) if 'Outline' in insertion['placement'] else object_id
+            assert not nodes[paragraph]['children'], 'Final paragraph gained an unrecorded child'
             assert nodes[paragraph]['content'] == [target], 'Inserted paragraph content changed'
             if 'Outline' in insertion['placement']:
                 position = insertion['placement']['Outline']

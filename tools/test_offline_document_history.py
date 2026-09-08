@@ -1,4 +1,7 @@
 import copy
+import json
+from pathlib import Path
+import subprocess
 import unittest
 import uuid
 from unittest.mock import patch
@@ -6,8 +9,11 @@ from unittest.mock import patch
 from offline_document_history import document_history, identity, verify_model, verify_native
 
 
-def history(text_edits=False, graph=False):
+def history(text_edits=False, graph=False, boundaries=False):
+    if boundaries: text_edits, graph = True, True
     logs = {'w0': [{'event': 'ready', 'document_operations': True, 'document_kinds': ['insert', 'format', 'text'] if text_edits else ['insert', 'format']}]}
+    if boundaries: logs['w0'][0]['document_kinds'] += ['split', 'right_text', 'join']
+    kinds = logs['w0'][0]['document_kinds']
     events = logs['w0']
     if graph: events[0]['document_graph'] = True
     structure = {}
@@ -19,9 +25,13 @@ def history(text_edits=False, graph=False):
                      'placement': {'Outline': {'x': 144, 'y': 144}} if operation == 0 else {'Paragraph': {'before': None}}}
         previous = insertion
         target = identity(insertion, 2)
-        for step, kind in enumerate(('insert', 'format', 'text') if text_edits else ('insert', 'format')):
-            timestamp = 10 + operation*30 + step*10
-            local_id = operation*3 + step + 2
+        end = len(insertion['text'].encode('utf-16-le'))//2
+        split = {'guid': list(uuid.UUID(int=100+operation).bytes_le), 'text': target,
+                 'offset': end-2, 'author': insertion['author'], 'created': 1}
+        right, right_paragraph = identity(split, 2), identity(split, 1)
+        for step, kind in enumerate(kinds):
+            timestamp = 10 + operation*max(3, len(kinds))*10 + step*10
+            local_id = operation*max(3, len(kinds)) + step + 2
             event = {'event': 'local_document_commit', 'id': local_id, 'operation': operation, 'kind': kind,
                      'space': 'space', 'object': target, 'text': insertion['text'], 'insertion': insertion if step == 0 else None,
                      'range': [1, len(insertion['text'].encode('utf-16-le'))//2-2],
@@ -30,7 +40,12 @@ def history(text_edits=False, graph=False):
             if kind == 'text':
                 end = len(insertion['text'].encode('utf-16-le'))//2
                 event.update(range=[end-3, end], replacement=' e\u0301🐈')
+            if boundaries: event['document'] = target
+            if kind == 'split': event.update(split=split, range=[end-2, end-2])
+            if kind == 'right_text': event.update(object=right, range=[0, 2], replacement='B🦋')
+            if kind == 'join': event['joined'] = [target, right]
             events.append(event)
+            prior_observed = copy.deepcopy(observed)
             prior_structure = copy.deepcopy(structure)
             if graph:
                 events.append({'event': 'read', 'started_us': timestamp-1, 'finished_us': timestamp,
@@ -44,26 +59,45 @@ def history(text_edits=False, graph=False):
                     structure[parent]['children'].append(paragraph)
                     structure[paragraph] = {'parent': parent, 'children': [], 'content': [target],
                                              'child_level': 1, 'position': None}
-            value = insertion['text'].replace(' 🦀', ' e\u0301🐈') if kind == 'text' else insertion['text']
-            runs = []
-            for index, char in enumerate(value):
-                selected = index > 0 and (kind == 'text' or (kind == 'format' and index < len(value)-1))
-                runs.append({'text': char, 'bold': selected, 'size': 18+operation if selected else 11,
-                             'color': 0x563412 if selected else 0xff000000})
-            observed[target] = {'text': value, 'runs': runs}
+            if kind == 'split':
+                boundary = len(insertion['text'])-1
+                old = observed[target]
+                left_runs, right_runs = old['runs'][:boundary], old['runs'][boundary:]
+                observed[target] = {'text': old['text'][:boundary], 'runs': left_runs}
+                observed[right] = {'text': old['text'][boundary:], 'runs': right_runs}
+                structure[parent]['children'].insert(structure[parent]['children'].index(paragraph)+1, right_paragraph)
+                structure[right_paragraph] = {**copy.deepcopy(structure[paragraph]), 'content': [right]}
+            elif kind == 'right_text':
+                runs = [{**observed[right]['runs'][0], 'text': c} for c in 'B🦋'] + observed[right]['runs'][2:]
+                observed[right] = {'text': 'B🦋🐈', 'runs': runs}
+            elif kind == 'join':
+                observed[target]['text'] += observed[right]['text']
+                observed[target]['runs'] += observed[right]['runs']
+                del observed[right]
+                structure[parent]['children'].remove(right_paragraph)
+                del structure[right_paragraph]
+            else:
+                value = insertion['text'].replace(' 🦀', ' e\u0301🐈') if kind == 'text' else insertion['text']
+                runs = []
+                for index, char in enumerate(value):
+                    selected = index > 0 and (kind == 'text' or (kind == 'format' and index < len(value)-1))
+                    runs.append({'text': char, 'bold': selected, 'size': 18+operation if selected else 11,
+                                 'color': 0x563412 if selected else 0xff000000})
+                observed[target] = {'text': value, 'runs': runs}
             revision = f'revision-{local_id}'
             events.append({'event': 'remote_attempt', 'revision': revision, 'state': 'Committed',
-                           'document_changes': {target: copy.deepcopy(observed[target])},
+                           'document_changes': {key: copy.deepcopy(observed.get(key)) for key in observed.keys() | prior_observed.keys()
+                                                if observed.get(key) != prior_observed.get(key)},
                            'documents': copy.deepcopy(observed), 'started_us': timestamp, 'finished_us': timestamp+1})
             if graph:
                 events[-1].update(document_graph=copy.deepcopy(structure), document_graph_changes={
-                    key: copy.deepcopy(value) for key, value in structure.items() if prior_structure.get(key) != value})
+                    key: copy.deepcopy(structure.get(key)) for key in structure.keys() | prior_structure.keys() if prior_structure.get(key) != structure.get(key)})
             events.append({'event': 'document_receipt', 'id': local_id, 'revision': revision, 'at_us': timestamp+2})
             if text_edits:
                 events.append({'event': 'read', 'started_us': timestamp+3, 'finished_us': timestamp+4, 'documents': copy.deepcopy(observed), **({'document_graph': copy.deepcopy(structure)} if graph else {})})
     events.extend({'event': 'reopened_document_receipt', 'id': row['id'], 'revision': row['revision']}
                   for row in list(events) if row['event'] == 'document_receipt')
-    read = {'event': 'read', 'started_us': 100, 'finished_us': 101, 'documents': observed, **({'document_graph': structure} if graph else {})}
+    read = {'event': 'read', 'started_us': max(100, 20*len(kinds)+10), 'finished_us': max(101, 20*len(kinds)+11), 'documents': observed, **({'document_graph': structure} if graph else {})}
     events.extend([read, {'event': 'done'}])
     logs['r0'] = [{'event': 'ready', **({'document_graph': True} if graph else {})}, copy.deepcopy(read), {'event': 'done'}]
     return logs
@@ -104,6 +138,94 @@ class DocumentHistoryTests(unittest.TestCase):
             else:
                 next(row for row in logs['w0'] if row['event'] == 'remote_attempt')['document_graph_changes'] = {}
             with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                document_history(logs, 2)
+
+    def test_production_cache_workload_matches_the_independent_history_model(self):
+        result = subprocess.run(['cargo', 'test', '--locked', '-p', 'onestore-offline', '--features', 'smb',
+                                 '--example', 'smb_offline_client',
+                                 'tests::document_workload_retains_dependencies_and_receipts_across_reopen',
+                                 '--', '--exact', '--nocapture'],
+                                cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+        documents = document_history({'w0': events}, 2)
+        self.assertEqual(sum(len(document['states']) for document in documents.values()), 12)
+        self.assertEqual(sum(row['event'] == 'remote_attempt' and row['state'] == 'Unknown' for row in events), 4)
+        self.assertEqual(sum(row['event'] == 'remote_confirm' and row['state'] == 'Committed' for row in events), 4)
+
+    def test_boundary_histories_retain_every_intermediate_graph_and_retired_identity(self):
+        baseline = history(boundaries=True)
+        documents = document_history(baseline, 2)
+        for document in documents.values():
+            self.assertEqual(list(document['states']), ['insert', 'format', 'text', 'split', 'right_text', 'join'])
+            self.assertEqual(''.join(c for c, *_ in document['states']['join']['characters']),
+                             document['insertion']['text'].replace('🦀', 'B🦋🐈'))
+        for mutation in ('missing-suffix', 'half-join', 'resurrected', 'reorder', 'missing-removal',
+                         'wrong-split', 'wrong-dependent-target', 'wrong-join', 'stale', 'future', 'duplicate-attempt'):
+            logs = copy.deepcopy(baseline)
+            split = next(row for row in logs['w0'] if row.get('kind') == 'split')
+            right, right_paragraph = identity(split['split'], 2), identity(split['split'], 1)
+            split_read = next(row for row in logs['w0'] if row['event'] == 'read' and row['started_us'] == 43)
+            joined_read = next(row for row in logs['w0'] if row['event'] == 'read' and row['started_us'] == 63)
+            if mutation == 'missing-suffix': del split_read['documents'][right]
+            elif mutation == 'half-join':
+                joined_read['documents'][right] = copy.deepcopy(split_read['documents'][right])
+            elif mutation == 'resurrected':
+                joined_read['document_graph'][right_paragraph] = copy.deepcopy(split_read['document_graph'][right_paragraph])
+            elif mutation == 'reorder':
+                next(node for node in split_read['document_graph'].values() if node['position'])['children'].reverse()
+            elif mutation == 'missing-removal':
+                join_attempt = next(row for row in logs['w0'] if row['event'] == 'remote_attempt' and row['started_us'] == 60)
+                del join_attempt['document_changes'][right]
+            elif mutation == 'wrong-split': split['split']['offset'] -= 1
+            elif mutation == 'wrong-dependent-target':
+                next(row for row in logs['w0'] if row.get('kind') == 'right_text')['object'] = split['object']
+            elif mutation == 'wrong-join':
+                next(row for row in logs['w0'] if row.get('kind') == 'join')['joined'].reverse()
+            elif mutation == 'stale':
+                joined_read.update(documents=copy.deepcopy(split_read['documents']), document_graph=copy.deepcopy(split_read['document_graph']))
+            elif mutation == 'future': split_read.update(started_us=0, finished_us=1)
+            else:
+                attempt = copy.deepcopy(next(row for row in logs['w0'] if row['event'] == 'remote_attempt' and row['started_us'] == 40))
+                attempt.update(state='Unknown', revision='duplicate')
+                logs['w0'].insert(1, attempt)
+            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                document_history(logs, 2)
+
+    def test_no_reader_phase_can_omit_an_acknowledged_text_or_paragraph(self):
+        baseline = history(boundaries=True)
+        for index, row in enumerate(baseline['w0']):
+            if row['event'] != 'read': continue
+            for field in ('documents', 'document_graph'):
+                for target in row[field]:
+                    changed = copy.deepcopy(baseline)
+                    del changed['w0'][index][field][target]
+                    with self.subTest(read=index, field=field, target=target), self.assertRaises(AssertionError):
+                        document_history(changed, 2)
+        extra = copy.deepcopy(next(row for row in baseline['w0'] if row['event'] == 'remote_attempt'))
+        extra.update(revision='unreceipted', started_us=1000, finished_us=1001,
+                     document_changes={'unrecorded': {'text': 'extra'}})
+        baseline['w0'].insert(-1, extra)
+        with self.assertRaisesRegex(AssertionError, 'lacks its recorded intent and receipt'):
+            document_history(baseline, 2)
+
+    def test_unknown_boundary_receipts_require_the_original_revision(self):
+        for kind in ('split', 'join'):
+            logs = history(boundaries=True)
+            events = logs['w0']
+            intent = next(row for row in events if row.get('kind') == kind)
+            receipt = next(row for row in events if row['event'] == 'document_receipt' and row['id'] == intent['id'])
+            attempt = next(row for row in events if row['event'] == 'remote_attempt' and row['revision'] == receipt['revision'])
+            attempt['state'] = 'Unknown'
+            confirmation = {'event': 'remote_confirm', 'state': 'Committed',
+                            'started_us': attempt['finished_us'], 'finished_us': receipt['at_us'],
+                            'revisions': {'space': [receipt['revision']]}}
+            events.insert(events.index(receipt), confirmation)
+            document_history(logs, 2)
+            confirmation['revisions']['space'] = ['later-revision']
+            receipt['revision'] = 'later-revision'
+            next(row for row in events if row['event'] == 'reopened_document_receipt' and row['id'] == intent['id'])['revision'] = 'later-revision'
+            with self.subTest(kind=kind), self.assertRaises(AssertionError):
                 document_history(logs, 2)
 
     def test_cross_run_text_requires_complete_ordered_states_and_exact_receipts(self):
