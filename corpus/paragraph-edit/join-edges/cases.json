@@ -1,0 +1,27 @@
+﻿[
+    {
+        "body":  "\u003cone:OE quickStyleIndex=\"0\"\u003e\u003cone:T\u003eLeft \u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE quickStyleIndex=\"1\"\u003e\u003cone:T\u003e\u003c![CDATA[Right \u003ci\u003eitalic\u003c/i\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join inherited styles",
+        "page":  "{E046973C-CAEF-4B56-BEA4-93E05E43212A}{1}{B0}"
+    },
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:Tag index=\"0\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join empty left tag",
+        "page":  "{C06F80E1-9B07-4035-B55C-3144C1873BD1}{1}{B0}"
+    },
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:T\u003eLeft \u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:Tag index=\"0\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join right tag",
+        "page":  "{3266A6F4-4313-4C8D-8103-7D8EC811E889}{1}{B0}"
+    },
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:Tag index=\"0\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003eLeft \u003c/one:T\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:Tag index=\"0\" completed=\"true\" disabled=\"false\" creationDate=\"2020-01-02T03:04:05.000Z\" completionDate=\"2020-01-02T04:05:06.000Z\"/\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003c/one:OE\u003e",
+        "name":  "Join both tags",
+        "page":  "{55922D45-C0E9-41E5-BCE7-ECBE10331C71}{1}{B0}"
+    },
+    {
+        "body":  "\u003cone:OE\u003e\u003cone:T\u003eLeft \u003c/one:T\u003e\u003cone:OEChildren\u003e\u003cone:OE\u003e\u003cone:T\u003eLeft child\u003c/one:T\u003e\u003c/one:OE\u003e\u003c/one:OEChildren\u003e\u003c/one:OE\u003e\u003cone:OE\u003e\u003cone:T\u003e\u003c![CDATA[\u003cb\u003eBold\u003c/b\u003e \u003ci\u003eitalic\u003c/i\u003e 🦀 é \u003cspan style=\"color:#123456\"\u003etail\u003c/span\u003e]]\u003e\u003c/one:T\u003e\u003cone:OEChildren\u003e\u003cone:OE\u003e\u003cone:T\u003eRight child\u003c/one:T\u003e\u003c/one:OE\u003e\u003c/one:OEChildren\u003e\u003c/one:OE\u003e",
+        "name":  "Join both children",
+        "page":  "{E151A4C0-B88B-4EFD-8F87-D3269DE420CD}{1}{B0}"
+    }
+]

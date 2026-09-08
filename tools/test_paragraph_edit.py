@@ -17,6 +17,61 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class ParagraphEditTest(unittest.TestCase):
+    def test_native_joins_preserve_inherited_styles_and_follow_tag_and_child_rules(self):
+        fixture = FIXTURE / 'join-edges'
+        models, captures = {}, {}
+        with TemporaryDirectory() as temporary:
+            for phase in ('before', 'joined'):
+                folder = Path(temporary) / phase
+                shutil.copytree(fixture / phase / 'read', folder / 'read')
+                compare(fixture / phase / 'notebook', folder / 'read')
+                subprocess.run([EXPORTER, fixture / phase / 'notebook/synthetic.one', folder / 'model'], check=True)
+                model = json.loads((folder / 'model/document.json').read_text())
+                models[phase] = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                                 for _, _, r, page in ordered_pages(model)}
+                captures[phase] = {}
+                for path in (folder / 'read').glob('page-*.xml'):
+                    page = ET.parse(path).getroot()
+                    captures[phase][page.get('name')] = native_characters(page, page.findall('one:Outline', ns))
+                self.assertEqual(len(models[phase]), 6)
+        cases = json.loads((fixture / 'cases.json').read_text(encoding='utf-8-sig'))
+        self.assertEqual(len(cases), 5)
+        for case in cases:
+            name = case['name']
+            with self.subTest(case=name):
+                old, page = models['before'][name]
+                new, new_page = models['joined'][name]
+                self.assertEqual(page, new_page)
+                outline, = [oid for oid in old['nodes'][page]['children'] if old['nodes'][oid]['kind']['type'] == 'Outline']
+                left, right, sibling = old['nodes'][outline]['children']
+                self.assertEqual(new['nodes'][outline]['children'], [left, sibling])
+                target = old['nodes'][left]['children'][-1] if name == 'Join both children' else left
+                a, = old['nodes'][target]['content']
+                b, = old['nodes'][right]['content']
+                empty = old['nodes'][a]['kind']['text'] == ''
+                survivor = b if empty else a
+                self.assertEqual(new['nodes'][target]['content'], [survivor])
+                self.assertEqual(new['nodes'][survivor]['kind']['text'], old['nodes'][a]['kind']['text'] + old['nodes'][b]['kind']['text'])
+                self.assertEqual(new['nodes'][survivor]['tags'], old['nodes'][a]['tags'])
+                children = old['nodes'][left]['children'] + old['nodes'][right]['children']
+                self.assertEqual(new['nodes'][left]['children'], children)
+                self.assertEqual(new['nodes'][sibling], old['nodes'][sibling])
+                if name == 'Join both children':
+                    parent_text, = old['nodes'][left]['content']
+                    original = old['nodes'][parent_text]
+                    current = new['nodes'][parent_text]
+                    self.assertGreater(current['modified'], original['modified'])
+                    expected = {**original, 'modified': current['modified'],
+                                'extra': [original['extra'][0] + [{'id': 0x880034dd, 'value': 'NoData'}]]}
+                    self.assertEqual(current, expected)
+                before = [v for paragraph in captures['before'][name] for v in paragraph]
+                after = [v for paragraph in captures['joined'][name] for v in paragraph]
+                for (a, old_style), (b, new_style) in zip(before, after, strict=True):
+                    self.assertEqual(a, b)
+                    for key in old_style.keys() | new_style.keys():
+                        default = 'automatic' if key in ('color', 'highlight') else False
+                        self.assertEqual(old_style.get(key, default), new_style.get(key, default))
+
     def test_rust_splits_match_native_controls_and_preserve_empty_typing_styles(self):
         fixture = FIXTURE / 'rust-split'
         manifest = json.loads((fixture / 'manifest.json').read_text())

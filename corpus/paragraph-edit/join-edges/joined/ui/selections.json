@@ -1,0 +1,32 @@
+[
+  {
+    "case": "Join inherited styles",
+    "page": "{37EE141E-FB2A-431D-A9A3-63CC93249D1D}{1}{B0}",
+    "object": "{F1B58AF6-82D4-4DC3-8AA6-D7E96816F6B8}{46}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "case": "Join empty left tag",
+    "page": "{17C703C3-AAC2-487E-A25B-C1680CE087E6}{1}{B0}",
+    "object": "{6A8F6379-AECA-4275-B007-DDA813F1CDA8}{47}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "case": "Join right tag",
+    "page": "{E5CE25D6-72D6-44C6-9604-8DA2057654BE}{1}{B0}",
+    "object": "{CFBA859A-3493-4F22-86CF-0EEDA377AB77}{45}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "case": "Join both tags",
+    "page": "{823AAE67-F12C-49AE-ABE0-1C92DD54A046}{1}{B0}",
+    "object": "{9B7130D0-DD0F-4C6F-963D-61C5A203C4F9}{46}{B0}",
+    "keys": "{Left}{Backspace}"
+  },
+  {
+    "case": "Join both children",
+    "page": "{36F927E2-894E-46B6-9880-230A50839CFA}{1}{B0}",
+    "object": "{E2A450C5-7596-4142-BBC7-E4EDC8853D7E}{50}{B0}",
+    "keys": "{Left}{Backspace}"
+  }
+]

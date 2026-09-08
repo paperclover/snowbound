@@ -37,3 +37,14 @@ typing checks extend the preexisting empty run in an independent expected model.
 `tools/test_paragraph_edit.py` verifies these controls without a VM. The native
 join captures establish behavior for subsequent join implementation.
 Identical captured files link to one canonical copy within this corpus.
+
+`join-edges`, authored with `tools/native/paragraph-joins.ps1`, adds five native
+Backspace cases for differing inherited styles, tags on either side and children
+on both sides. A nonempty left paragraph keeps its own tags; right-only tags
+disappear from the active result. An empty tagged left paragraph transfers its
+tags onto the adopted right text. A left paragraph with children joins through
+its last descendant, and the right children become that descendant's peers.
+The untouched parent's text gains a timestamp and `0x880034dd`, as in the earlier
+native controls; its content and other properties stay unchanged. The test fixes
+these observed graph, identity and metadata effects alongside independent native
+character-style comparisons.
