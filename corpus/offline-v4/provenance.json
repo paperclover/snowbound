@@ -1,0 +1,20 @@
+{
+  "producer_revision": "2244711b",
+  "producer": "corpus/offline-v4/producer.rs",
+  "source_sha256": {
+    "crates/onestore-offline/src/lib.rs": "f4b6bdc9b8269e43cc8c1d69f5becb3140905f520438da53fb96ce1663352f22",
+    "crates/onestore-offline/src/schema.rs": "b20d6c127b32dc378c54ef8179583782d37b79496c4056899d053881034b9963",
+    "crates/onestore-offline/src/sync.rs": "3967d304c42550350c7fe2659317d665b8c4d7cdfd42f3eb013180ca91177442",
+    "crates/onestore-offline/src/recovery.rs": "1301b649085670e847b4593bc308f9a1e25713a99b5333d4fd217014720d29c3"
+  },
+  "files": {
+    "recovery.sqlite": "2946f7b2f2636b4dc80b2d3fd930dfe1d5bdf3cafd591d5c33d50be209685a76",
+    "live.sqlite": "ff0b2ad1141398c10913d3f573ba909aa7cc6e7b3fb809ecd3d9869b689ff970"
+  },
+  "queued_ids": [
+    1,
+    2
+  ],
+  "uncertain_id": 1,
+  "archive_version": 4
+}

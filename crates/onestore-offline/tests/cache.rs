@@ -734,7 +734,7 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
         db.execute("UPDATE edits SET operation=?1", [value.to_string()])
             .unwrap();
         if operation != "Format" {
-            db.execute_batch("DROP TABLE conflicts; CREATE TABLE conflicts (edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE, kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2)) STRICT; PRAGMA user_version=3;").unwrap();
+            db.execute_batch("DROP TABLE assets; DROP TABLE conflicts; CREATE TABLE conflicts (edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE, kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2)) STRICT; PRAGMA user_version=3;").unwrap();
         }
         drop(db);
         let before = fs::read(&path).unwrap();

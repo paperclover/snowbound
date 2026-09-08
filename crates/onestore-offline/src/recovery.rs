@@ -13,6 +13,8 @@ pub struct RecoverySummary {
     pub published_receipts: u64,
     pub working_bytes: u64,
     pub remote_bytes: u64,
+    pub cached_assets: u64,
+    pub cached_asset_bytes: u64,
 }
 
 /// Read-only recovery evidence; it cannot publish or acknowledge an edit.
@@ -29,7 +31,7 @@ impl Recovery {
         let application: u32 =
             connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if application != RECOVERY_ID || version != SCHEMA_VERSION {
+        if application != RECOVERY_ID || !(4..=SCHEMA_VERSION).contains(&version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Unrecognized recovery archive or unsupported schema version",
@@ -72,6 +74,11 @@ impl Recovery {
 
     pub fn receipts(&self) -> Result<BTreeMap<u64, ExGuid>> {
         receipts(&self.connection)
+    }
+
+    /// Reads a previously downloaded external payload without accessing its former server.
+    pub fn cached_asset(&self, filename: &str, limit: usize) -> Result<Option<Vec<u8>>> {
+        assets::cached(&self.connection, &assets::key(filename)?, limit)
     }
 }
 
@@ -131,6 +138,16 @@ impl Replica {
 }
 
 fn summary(connection: &Connection) -> Result<RecoverySummary> {
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let (cached_assets, cached_asset_bytes) = if version < 5 {
+        (0, 0)
+    } else {
+        connection.query_row(
+            "SELECT count(*),coalesce(sum(length(data)),0) FROM assets",
+            [],
+            |row| Ok((unsigned(row, 0)?, unsigned(row, 1)?)),
+        )?
+    };
     Ok(connection.query_row(
         "SELECT (SELECT count(*) FROM edits), (SELECT count(*) FROM conflicts),
                 (SELECT count(*) FROM attempt), (SELECT count(*) FROM receipts),
@@ -144,6 +161,8 @@ fn summary(connection: &Connection) -> Result<RecoverySummary> {
                 published_receipts: unsigned(row, 3)?,
                 working_bytes: unsigned(row, 4)?,
                 remote_bytes: unsigned(row, 5)?,
+                cached_assets,
+                cached_asset_bytes,
             })
         },
     )?)

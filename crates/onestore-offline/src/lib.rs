@@ -8,6 +8,7 @@ use onestore::{
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Duration};
 
+mod assets;
 mod formatting;
 mod rebase;
 mod recovery;
@@ -35,12 +36,16 @@ pub enum Error {
     Remote(#[from] onestore::CommitError),
     #[error(transparent)]
     RemoteIo(io::Error),
+    #[error(transparent)]
+    Notebook(#[from] onestore_notebook::Error),
+    #[error("External payload identity now refers to different bytes")]
+    AssetChanged,
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Text and its observed precondition, retained across cache reopen and rebasing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

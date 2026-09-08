@@ -6,6 +6,12 @@ const CONFLICTS: &str = "CREATE TABLE conflicts (
     kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3)
 ) STRICT;";
 
+const ASSETS: &str = "CREATE TABLE assets (
+    name TEXT PRIMARY KEY NOT NULL,
+    data BLOB NOT NULL,
+    sha256 BLOB NOT NULL CHECK(length(sha256)=32)
+) STRICT;";
+
 pub(crate) fn create(transaction: &Transaction<'_>) -> Result<()> {
     transaction.execute_batch(
         "CREATE TABLE edits (
@@ -24,16 +30,22 @@ pub(crate) fn create(transaction: &Transaction<'_>) -> Result<()> {
         ) STRICT;",
     )?;
     transaction.execute_batch(CONFLICTS)?;
+    transaction.execute_batch(ASSETS)?;
     Ok(())
 }
 
 pub(crate) fn migrate(transaction: &Transaction<'_>, version: u32) -> Result<()> {
+    if version == 4 {
+        transaction.execute_batch(ASSETS)?;
+        return Ok(());
+    }
     if version == 3 {
         transaction.execute_batch("ALTER TABLE conflicts RENAME TO old_conflicts;")?;
         transaction.execute_batch(CONFLICTS)?;
         transaction.execute_batch(
             "INSERT INTO conflicts SELECT * FROM old_conflicts; DROP TABLE old_conflicts;",
         )?;
+        transaction.execute_batch(ASSETS)?;
         return Ok(());
     }
 

@@ -193,7 +193,7 @@ the library continues to preserve conflicts requiring an explicit decision.
 ## Recovery archives
 
 `export_recovery(new_path)` captures both complete notebook images, the typed
-queue, uncertain attempts, conflicts, receipts and the edit-ID sequence in one
+queue, uncertain attempts, conflicts, receipts, downloaded media and the edit-ID sequence in one
 SQLite snapshot. It refuses existing destinations and leaves the live queue
 unchanged. Export to a local directory from a background thread: copying holds
 the cache mutex while capturing the database. Failure after the final rename can
@@ -221,3 +221,25 @@ let receipts = review.receipts()?;
 counts and byte sizes without notebook text, paths, authors or credentials.
 Opening an archive validates its schema and images without migration. A recovery
 archive is evidence for a reviewed recovery decision, not a second active queue.
+
+## Downloaded media
+
+`fetch_asset(source, section, filename, limit)` resolves a declared external
+payload through `onestore-notebook::Source` and durably caches its exact bytes.
+The section path is relative to the source root; the filename comes from a
+`FileDataReference::External` in the retained working or remote image. Local and
+SMB sources use the same API. Downloads release the cache mutex during network
+I/O and recheck the reference before committing; edits can continue meanwhile.
+
+`cached_asset(filename, limit)` reads previously downloaded bytes without network
+access. `None` means never downloaded; `Some(Vec::new())` is a downloaded empty
+payload. Each read checks the stored SHA-256 and enforces the byte limit before
+loading the payload. Cache contents describe the prior download, not current
+server reachability or presence. A failed fetch returns its error without
+silently substituting cached bytes. Different bytes for an already cached file
+identity return `AssetChanged` and preserve the previous download.
+
+Downloads do not change pending edits, publication attempts or receipts. Recovery
+archives include cached media and expose the same bounded `cached_asset` lookup.
+Opening older live caches migrates them transactionally to schema 5; original
+schema-4 archives remain readable without migration and contain no media cache.

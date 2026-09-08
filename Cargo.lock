@@ -537,10 +537,12 @@ name = "onestore-offline"
 version = "0.1.0"
 dependencies = [
  "onestore",
+ "onestore-notebook",
  "onestore-smb",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
 ]

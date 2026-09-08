@@ -5,16 +5,18 @@ edition = "2024"
 publish = false
 
 [features]
-smb = ["dep:onestore-smb"]
+smb = ["dep:onestore-smb", "onestore-notebook/smb"]
 
 [dependencies]
 onestore = { path = "../onestore" }
+onestore-notebook = { path = "../onestore-notebook" }
 onestore-smb = { path = "../onestore-smb", optional = true }
 rusqlite = { version = "=0.40.2", features = ["bundled", "backup"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+sha2 = "0.11"
 
 [[example]]
 name = "smb_offline_client"

@@ -197,6 +197,8 @@ fn recovery_archive_preserves_typed_queue_uncertainty_and_receipts_without_becom
         published_receipts: 1,
         working_bytes: working.len() as u64,
         remote_bytes: remote.len() as u64,
+        cached_assets: 0,
+        cached_asset_bytes: 0,
     };
     assert_eq!(cache.recovery_summary().unwrap(), summary);
     cache.export_recovery(&archive_path).unwrap();
@@ -712,7 +714,7 @@ fn version_one_cache_migration_preserves_images_intents_and_local_ids() {
     drop(cache);
     let db = rusqlite::Connection::open(&path).unwrap();
     db.execute_batch(
-        "DROP TABLE attempt; DROP TABLE conflicts; DROP TABLE receipts; DROP TABLE edits;
+        "DROP TABLE attempt; DROP TABLE conflicts; DROP TABLE receipts; DROP TABLE edits; DROP TABLE assets;
          CREATE TABLE edits (
             id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id>0), space TEXT NOT NULL,
             object TEXT NOT NULL, before_text TEXT NOT NULL,
@@ -737,7 +739,7 @@ fn version_one_cache_migration_preserves_images_intents_and_local_ids() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
             .unwrap(),
-        4
+        5
     );
 }
 
