@@ -6,9 +6,11 @@ from unittest.mock import patch
 from offline_document_history import document_history, identity, verify_model, verify_native
 
 
-def history(text_edits=False):
+def history(text_edits=False, graph=False):
     logs = {'w0': [{'event': 'ready', 'document_operations': True, 'document_kinds': ['insert', 'format', 'text'] if text_edits else ['insert', 'format']}]}
     events = logs['w0']
+    if graph: events[0]['document_graph'] = True
+    structure = {}
     observed = {}
     previous = None
     for operation in range(2):
@@ -29,6 +31,19 @@ def history(text_edits=False):
                 end = len(insertion['text'].encode('utf-16-le'))//2
                 event.update(range=[end-3, end], replacement=' e\u0301🐈')
             events.append(event)
+            prior_structure = copy.deepcopy(structure)
+            if graph:
+                events.append({'event': 'read', 'started_us': timestamp-1, 'finished_us': timestamp,
+                               'documents': copy.deepcopy(observed), 'document_graph': prior_structure})
+                if step == 0:
+                    parent, paragraph = insertion['parent'], identity(insertion, 1)
+                    if operation == 0:
+                        parent, paragraph = paragraph, identity(insertion, 3)
+                        structure[parent] = {'parent': insertion['parent'], 'children': [], 'content': [],
+                                             'child_level': 1, 'position': {'x': 144, 'y': 144}}
+                    structure[parent]['children'].append(paragraph)
+                    structure[paragraph] = {'parent': parent, 'children': [], 'content': [target],
+                                             'child_level': 1, 'position': None}
             value = insertion['text'].replace(' 🦀', ' e\u0301🐈') if kind == 'text' else insertion['text']
             runs = []
             for index, char in enumerate(value):
@@ -40,14 +55,17 @@ def history(text_edits=False):
             events.append({'event': 'remote_attempt', 'revision': revision, 'state': 'Committed',
                            'document_changes': {target: copy.deepcopy(observed[target])},
                            'documents': copy.deepcopy(observed), 'started_us': timestamp, 'finished_us': timestamp+1})
+            if graph:
+                events[-1].update(document_graph=copy.deepcopy(structure), document_graph_changes={
+                    key: copy.deepcopy(value) for key, value in structure.items() if prior_structure.get(key) != value})
             events.append({'event': 'document_receipt', 'id': local_id, 'revision': revision, 'at_us': timestamp+2})
             if text_edits:
-                events.append({'event': 'read', 'started_us': timestamp+3, 'finished_us': timestamp+4, 'documents': copy.deepcopy(observed)})
+                events.append({'event': 'read', 'started_us': timestamp+3, 'finished_us': timestamp+4, 'documents': copy.deepcopy(observed), **({'document_graph': copy.deepcopy(structure)} if graph else {})})
     events.extend({'event': 'reopened_document_receipt', 'id': row['id'], 'revision': row['revision']}
                   for row in list(events) if row['event'] == 'document_receipt')
-    read = {'event': 'read', 'started_us': 100, 'finished_us': 101, 'documents': observed}
+    read = {'event': 'read', 'started_us': 100, 'finished_us': 101, 'documents': observed, **({'document_graph': structure} if graph else {})}
     events.extend([read, {'event': 'done'}])
-    logs['r0'] = [{'event': 'ready'}, copy.deepcopy(read), {'event': 'done'}]
+    logs['r0'] = [{'event': 'ready', **({'document_graph': True} if graph else {})}, copy.deepcopy(read), {'event': 'done'}]
     return logs
 
 
@@ -64,6 +82,29 @@ class DocumentHistoryTests(unittest.TestCase):
         self.assertEqual(verify_native(paragraphs, expected), sum(len(row)*3 for row in expected))
         paragraphs[0][1][1]['font_size'] = 19
         with self.assertRaisesRegex(AssertionError, 'font size'): verify_native(paragraphs, expected)
+
+    def test_structural_snapshots_and_publication_differences_are_complete(self):
+        baseline = history(text_edits=True, graph=True)
+        self.assertEqual(len(document_history(baseline, 2)), 2)
+        for mutation in ('missing-graph', 'missing-client', 'reorder', 'duplicate', 'reparent',
+                         'missing-content', 'invented', 'level', 'position', 'delta'):
+            logs = copy.deepcopy(baseline)
+            row = logs['r0'][1]
+            outline, first, second = list(row['document_graph'])
+            graph = row['document_graph']
+            if mutation == 'missing-graph': del row['document_graph']
+            elif mutation == 'missing-client': del logs['r0'][0]['document_graph']
+            elif mutation == 'reorder': graph[outline]['children'].reverse()
+            elif mutation == 'duplicate': graph[outline]['children'].append(first)
+            elif mutation == 'reparent': graph[second]['parent'] = first
+            elif mutation == 'missing-content': graph[first]['content'] = []
+            elif mutation == 'invented': graph['unrecorded'] = copy.deepcopy(graph[first])
+            elif mutation == 'level': graph[first]['child_level'] = 2
+            elif mutation == 'position': graph[outline]['position']['x'] = 145
+            else:
+                next(row for row in logs['w0'] if row['event'] == 'remote_attempt')['document_graph_changes'] = {}
+            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                document_history(logs, 2)
 
     def test_cross_run_text_requires_complete_ordered_states_and_exact_receipts(self):
         logs = history(True)

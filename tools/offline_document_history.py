@@ -114,6 +114,40 @@ def document_history(logs, operations):
                 states['text'] = {'characters': final, 'attempt': attempt}
             documents[target] = {'insertion': insertion, 'space': inserted['space'], 'states': states}
     assert documents, 'No document operations were recorded'
+    if any(events[0].get('document_graph') for events in logs.values()):
+        for events in logs.values():
+            assert events[0].get('document_graph') is True, 'Client omitted structural observations'
+            before = None
+            for row in events:
+                if row['event'] not in ('read', 'document_read', 'remote_attempt'): continue
+                observed = row.get('documents')
+                assert isinstance(observed, dict), 'Snapshot omitted document text'
+                graph = row.get('document_graph')
+                assert isinstance(graph, dict), 'Snapshot omitted document graph'
+                expected = {}
+                for target, document in documents.items():
+                    if target not in observed: continue
+                    insertion = document['insertion']
+                    outline = insertion['parent']
+                    paragraph = identity(insertion, 1)
+                    if 'Outline' in insertion['placement']:
+                        outline = paragraph
+                        paragraph = identity(insertion, 3)
+                        expected[outline] = {'parent': insertion['parent'], 'children': [], 'content': [],
+                                             'child_level': 1, 'position': insertion['placement']['Outline']}
+                    assert outline in expected, 'Snapshot omitted the inserted outline'
+                    expected[outline]['children'].append(paragraph)
+                    expected[paragraph] = {'parent': outline, 'children': [], 'content': [target],
+                                            'child_level': 1, 'position': None}
+                assert graph == expected, 'Snapshot contains partial, reordered or invented paragraph structure'
+                if row['event'] == 'remote_attempt':
+                    assert before is not None, 'Publication omitted its observed source'
+                    for image, delta in [('documents', 'document_changes'), ('document_graph', 'document_graph_changes')]:
+                        expected_delta = {key: row[image].get(key) for key in before[image].keys() | row[image].keys()
+                                          if before[image].get(key) != row[image].get(key)}
+                        assert row.get(delta) == expected_delta, 'Publication diff omitted or invented a changed object'
+                else:
+                    before = row
     for actor, events in logs.items():
         previous = {}
         reads = [row for row in events if row['event'] in ('read', 'document_read') and row.get('documents') is not None]

@@ -11,25 +11,76 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub fn document_view(bytes: &[u8]) -> Result<serde_json::Value, onestore::Error> {
+#[derive(Debug, Default, PartialEq)]
+pub struct DocumentView {
+    pub texts: serde_json::Map<String, serde_json::Value>,
+    pub graph: serde_json::Map<String, serde_json::Value>,
+}
+
+pub fn document_view(bytes: &[u8]) -> Result<DocumentView, onestore::Error> {
     let store = Store::parse(bytes)?;
     let index = RevisionIndex::parse(&store)?;
     index.validate_current()?;
     let document = Document::parse(&index)?;
-    let mut texts = serde_json::Map::new();
-    for (sid, _) in document.pages()? {
+    let mut observed = DocumentView::default();
+    for (sid, page) in document.pages()? {
         let space = &document.spaces[&sid];
         let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
-        for (id, node) in &revision.nodes {
-            if let Kind::RichText { text, .. } = &node.kind
-                && text.starts_with("Document w")
-            {
-                let runs=revision.text_runs(*id)?.into_iter().map(|run|json!({"text":run.text,"bold":run.format.bold.unwrap_or(false),"size":run.format.font_size,"color":run.format.color.unwrap_or(0xff000000)})).collect::<Vec<_>>();
-                texts.insert(id.to_string(), json!({"text":text,"runs":runs}));
+        for outline in &revision.nodes[&page].children {
+            if !matches!(revision.nodes[outline].kind, Kind::Outline { .. }) {
+                continue;
+            }
+            let mut pending = vec![(*outline, page)];
+            let mut parents = std::collections::BTreeMap::new();
+            while let Some((id, parent)) = pending.pop() {
+                if parents.insert(id, parent).is_some() {
+                    return Err(onestore::Error {
+                        offset: 0,
+                        message: "Document observation contains a repeated object",
+                    });
+                }
+                let node = &revision.nodes[&id];
+                pending.extend(
+                    node.children
+                        .iter()
+                        .chain(&node.content)
+                        .map(|child| (*child, id)),
+                );
+            }
+            // The workload keeps its marker in the left paragraph through boundary edits.
+            if !parents.keys().any(|id| {
+                matches!(&revision.nodes[id].kind,
+                Kind::RichText { text, .. } if text.starts_with("Document w"))
+            }) {
+                continue;
+            }
+            for (id, parent) in parents {
+                let key = id.to_string();
+                if observed.texts.contains_key(&key) || observed.graph.contains_key(&key) {
+                    return Err(onestore::Error {
+                        offset: 0,
+                        message: "Document observation contains a repeated object",
+                    });
+                }
+                let node = &revision.nodes[&id];
+                if let Kind::RichText { text, .. } = &node.kind {
+                    let runs = revision.text_runs(id)?.into_iter().map(|run| json!({
+                        "text": run.text, "bold": run.format.bold.unwrap_or(false),
+                        "size": run.format.font_size, "color": run.format.color.unwrap_or(0xff000000)
+                    })).collect::<Vec<_>>();
+                    observed.texts.insert(key, json!({"text":text,"runs":runs}));
+                } else {
+                    observed.graph.insert(key, json!({
+                        "parent": parent.to_string(), "children": node.children.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        "content": node.content.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        "child_level": node.child_level,
+                        "position": if id == *outline { Some(json!({"x":node.layout.x,"y":node.layout.y})) } else { None }
+                    }));
+                }
             }
         }
     }
-    Ok(texts.into())
+    Ok(observed)
 }
 
 pub fn run(
@@ -70,14 +121,16 @@ pub fn run(
         writeln!(output, "{event}")?;
         output.flush()
     };
-    log(json!({"event": "ready", "pid": std::process::id(), "actor": args[2]}))?;
+    let documents = std::env::var_os("ONESTORE_OFFLINE_DOCUMENTS").is_some();
+    log(
+        json!({"event": "ready", "pid": std::process::id(), "actor": args[2], "document_graph": documents}),
+    )?;
     while !Path::new(&args[4]).exists() {
         if Instant::now() > deadline {
             return Err("Start barrier timed out.".into());
         }
         thread::sleep(Duration::from_millis(5));
     }
-    let documents = std::env::var_os("ONESTORE_OFFLINE_DOCUMENTS").is_some();
     let maintenance = std::env::var_os("ONESTORE_MAINTENANCE_DIR").map(std::path::PathBuf::from);
     let mut completed = 0;
     let mut attempts = 0;
@@ -187,10 +240,15 @@ pub fn run(
             })
             .into());
         };
+        let observed = if documents {
+            Some(document_view(&source).map_err(preserve)?)
+        } else {
+            None
+        };
         let read_finished = SystemTime::now().duration_since(UNIX_EPOCH)?.as_micros();
         log(
             json!({"event": "read", "attempt": attempts, "started_us": started, "finished_us": read_finished,
-            "transaction": store.header.transaction_count, "text": text, "documents":if documents {Some(document_view(&source).map_err(preserve)?)}else{None}}),
+            "transaction": store.header.transaction_count, "text": text, "documents":observed.as_ref().map(|view| &view.texts), "document_graph":observed.as_ref().map(|view| &view.graph)}),
         )?;
         if args[0] == "read" {
             completed += 1;
@@ -255,4 +313,94 @@ pub fn run(
     }
     log(json!({"event": "done", "completed": completed, "attempts": attempts}))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onestore::{Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit, TextAttribute};
+
+    #[test]
+    fn observation_follows_split_suffixes_and_moved_children_through_active_ancestry() {
+        let source = onestore::create_section("observation.one", "Original", "Author").unwrap();
+        assert_eq!(document_view(&source).unwrap(), DocumentView::default());
+        let store = Store::parse(&source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let (space, page) = document.pages().unwrap()[0];
+        let insertion = Insertion::outline(page, 144.0, 216.0, "Document w0:0 🦀", "Author")
+            .unwrap()
+            .with_formatting(0..16, &[TextAttribute::Bold(true)])
+            .unwrap();
+        let inserted = PreparedEdit::insert(&source, space, &insertion).unwrap();
+        let before = document_view(inserted.as_bytes()).unwrap();
+        assert_eq!(before.texts.len(), 1);
+        assert_eq!(before.graph.len(), 2);
+        let outline = insertion.object().to_string();
+        let paragraph = before.graph[&outline]["children"][0]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let child =
+            Insertion::paragraph(paragraph.parse().unwrap(), None, "Unmarked child", "Author")
+                .unwrap();
+        let with_child = PreparedEdit::insert(inserted.as_bytes(), space, &child).unwrap();
+        let before = document_view(with_child.as_bytes()).unwrap();
+        assert_eq!(before.texts.len(), 2);
+        assert_eq!(before.graph.len(), 3);
+        assert_eq!(
+            before.graph[&outline],
+            json!({"parent":page.to_string(), "children":[paragraph], "content":[], "child_level":1, "position":{"x":144.0,"y":216.0}})
+        );
+        for offset in [14, 16] {
+            let split = ParagraphSplit::new(insertion.text_object(), offset, "Author").unwrap();
+            let split_edit = PreparedEdit::split(with_child.as_bytes(), space, &split).unwrap();
+            let observed = document_view(split_edit.as_bytes()).unwrap();
+            assert_eq!(observed.texts.len(), 3);
+            assert_eq!(observed.graph.len(), 4);
+            assert_eq!(
+                observed.texts[&split.text_object().to_string()]["text"],
+                if offset == 14 { "🦀" } else { "" }
+            );
+            assert_eq!(
+                observed.graph[&outline]["children"],
+                json!([paragraph, split.object().to_string()])
+            );
+            assert_eq!(observed.graph[&paragraph]["children"], json!([]));
+            assert_eq!(
+                observed.graph[&split.object().to_string()]["children"],
+                json!([child.object().to_string()])
+            );
+            assert_eq!(
+                observed.graph[&child.object().to_string()]["parent"],
+                split.object().to_string()
+            );
+            let join =
+                ParagraphJoin::new(insertion.text_object(), split.text_object(), "Author").unwrap();
+            let joined = PreparedEdit::join(split_edit.as_bytes(), space, &join).unwrap();
+            let joined = document_view(joined.as_bytes()).unwrap();
+            assert_eq!(joined.graph, before.graph);
+            let characters = |view: &DocumentView| {
+                view.texts
+                    .iter()
+                    .map(|(id, text)| {
+                        let runs = text["runs"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .flat_map(|run| {
+                                run["text"]
+                                    .as_str()
+                                    .unwrap()
+                                    .chars()
+                                    .map(|c| json!([c, run["bold"], run["size"], run["color"]]))
+                            })
+                            .collect::<Vec<_>>();
+                        (id.clone(), (text["text"].clone(), runs))
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            };
+            assert_eq!(characters(&joined), characters(&before));
+        }
+    }
 }

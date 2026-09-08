@@ -20,8 +20,26 @@ use std::{
 mod support {
     pub mod view;
 }
-use concurrent::document_view;
+use concurrent::{DocumentView, document_view};
 use support::view::view;
+
+impl DocumentView {
+    fn changes(&self, before: &Self) -> Self {
+        let difference =
+            |old: &serde_json::Map<String, serde_json::Value>,
+             new: &serde_json::Map<String, serde_json::Value>| {
+                old.keys()
+                    .chain(new.keys())
+                    .filter(|id| old.get(*id) != new.get(*id))
+                    .map(|id| (id.clone(), new.get(id).cloned().unwrap_or_default()))
+                    .collect()
+            };
+        Self {
+            texts: difference(&before.texts, &self.texts),
+            graph: difference(&before.graph, &self.graph),
+        }
+    }
+}
 
 const DOCUMENT_OPERATIONS: [&str; 3] = ["insert", "format", "text"];
 
@@ -40,7 +58,7 @@ enum Pause {
 
 struct Traced {
     remote: SmbRemote,
-    before: Option<(String, Option<serde_json::Value>)>,
+    before: Option<(String, Option<DocumentView>)>,
     pause: Option<Pause>,
     documents: bool,
 }
@@ -57,7 +75,7 @@ impl Remote for Traced {
         };
         println!(
             "{}",
-            json!({"event":"read", "started_us":started, "finished_us":now(), "text":observed.text, "documents":documents})
+            json!({"event":"read", "started_us":started, "finished_us":now(), "text":observed.text, "documents":documents.as_ref().map(|view| &view.texts), "document_graph":documents.as_ref().map(|view| &view.graph)})
         );
         self.before = Some((observed.text, documents));
         Ok(bytes)
@@ -84,15 +102,7 @@ impl Remote for Traced {
                     state: CommitState::NotCommitted,
                     error: io::Error::other("Document publication has no observed source"),
                 })?;
-            Some(
-                after
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .filter(|(id, value)| before.get(*id) != Some(*value))
-                    .map(|(id, value)| (id.clone(), value.clone()))
-                    .collect::<serde_json::Map<_, _>>(),
-            )
+            Some(after.changes(before))
         } else {
             None
         };
@@ -104,12 +114,14 @@ impl Remote for Traced {
             )),
             Some(Pause::FormatReply(marker))
                 if changes.as_ref().is_some_and(|changes| {
-                    changes.len() == 1
+                    changes.texts.len() == 1
                         && self
                             .before
                             .as_ref()
                             .and_then(|(_, before)| before.as_ref())
-                            .is_some_and(|before| changes.keys().all(|id| before.get(id).is_some()))
+                            .is_some_and(|before| {
+                                changes.texts.keys().all(|id| before.texts.contains_key(id))
+                            })
                 }) =>
             {
                 Some((marker, marker.with_extension("resume"), "format"))
@@ -149,7 +161,8 @@ impl Remote for Traced {
             json!({"event":"remote_attempt", "started_us":started, "finished_us":finished,
             "revision":after.revision.to_string(), "space":after.space.to_string(), "object":after.object.to_string(), "before":self.before.as_ref().map(|(text,_)|text), "after":after.text,
             "state":format!("{:?}", result.as_ref().map_or_else(|error| error.state, |_| CommitState::Committed)),
-            "documents":documents, "document_changes":changes})
+            "documents":documents.as_ref().map(|view| &view.texts), "document_graph":documents.as_ref().map(|view| &view.graph),
+            "document_changes":changes.as_ref().map(|view| &view.texts), "document_graph_changes":changes.as_ref().map(|view| &view.graph)})
         );
         if result
             .as_ref()
@@ -417,7 +430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(Replica::create(&cache_path, &source)?);
     println!(
         "{}",
-        json!({"event":"ready", "pid":std::process::id(), "actor":args[2], "offline":true, "document_operations":documents,"document_kinds":if documents {DOCUMENT_OPERATIONS.as_slice()} else {&[]}})
+        json!({"event":"ready", "pid":std::process::id(), "actor":args[2], "offline":true, "document_operations":documents,"document_graph":documents,"document_kinds":if documents {DOCUMENT_OPERATIONS.as_slice()} else {&[]}})
     );
     while !Path::new(&args[4]).exists() {
         if Instant::now() >= deadline {
@@ -614,4 +627,44 @@ fn append_review_requires_a_unique_ordered_history_and_an_absent_new_token() {
         ),
         None
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn publication_differences_retain_removed_text_and_graph_identities() {
+        let before = DocumentView {
+            texts: serde_json::from_value(json!({"left":{"text":"ab"}, "right":{"text":"cd"}, "untouched":{"text":"ef"}})).unwrap(),
+            graph: serde_json::from_value(json!({"outline":{"children":["a","b"]}, "a":{"content":["left"]}, "b":{"content":["right"]}})).unwrap(),
+        };
+        let after = DocumentView {
+            texts: serde_json::from_value(
+                json!({"left":{"text":"abcd"}, "untouched":{"text":"ef"}}),
+            )
+            .unwrap(),
+            graph: serde_json::from_value(
+                json!({"outline":{"children":["a"]}, "a":{"content":["left"]}}),
+            )
+            .unwrap(),
+        };
+        let changes = after.changes(&before);
+        assert_eq!(
+            changes.texts,
+            serde_json::from_value::<serde_json::Map<_, _>>(
+                json!({"left":{"text":"abcd"}, "right":null})
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            changes.graph,
+            serde_json::from_value::<serde_json::Map<_, _>>(
+                json!({"outline":{"children":["a"]}, "b":null})
+            )
+            .unwrap()
+        );
+        assert_eq!(before.changes(&after).texts["right"], before.texts["right"]);
+        assert_eq!(before.changes(&before), DocumentView::default());
+    }
 }
