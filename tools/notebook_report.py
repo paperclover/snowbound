@@ -16,7 +16,7 @@ import subprocess
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from document_model import DEFAULT_CONTEXT, EXPORTER, ordered_pages, version_pages, view, walk
+from document_model import BRIDGE, DEFAULT_CONTEXT, EXPORTER, ordered_pages, version_pages, view, walk
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -274,11 +274,27 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc, e
     (destination / 'model').mkdir(); (destination / 'assets').mkdir()
     cached = {row['path']: (row['sha256'], previous / 'model' / str(index))
               for index, row in enumerate(json.loads((previous / 'source.json').read_text()))} if previous else {}
-    sections = []; tocs = {}; manifest = []
-    for index, path in enumerate(sorted(p for p in source.rglob('*') if p.suffix.lower() in ('.one', '.onetoc2'))):
-        relative = path.relative_to(source)
+    result = json.loads(subprocess.check_output([BRIDGE, 'catalog', source], timeout=120))
+    if not result['ok']: raise ValueError(result['error'])
+    catalog = result['catalog']
+    (destination / 'catalog.json').write_text(json.dumps(catalog, indent=2, ensure_ascii=False))
+    files = []; catalog_sections = {}
+    def collect(folder):
+        if folder['toc'] is not None: files.append(Path(folder['path']) / folder['toc']['filename'])
+        for section in folder['sections']:
+            relative = Path(section['path'])
+            files.append(relative); catalog_sections[relative] = section
+        for group in folder['groups']: collect(group)
+    collect(catalog)
+    sections = []; unavailable = []; manifest = []
+    for index, relative in enumerate(sorted(files)):
+        path = source / relative
         before = path.read_bytes()
         manifest.append({'path': relative.as_posix(), 'sha256': hashlib.sha256(before).hexdigest(), 'bytes': len(before)})
+        state = catalog_sections.get(relative, {}).get('state', {})
+        if isinstance(state, dict) and 'Unreadable' in state:
+            unavailable.append((relative, state['Unreadable']))
+            continue
         exported = destination / 'model' / str(index)
         reusable = cached.get(relative.as_posix())
         reused = reusable is not None and reusable[0] == manifest[-1]['sha256']
@@ -291,9 +307,6 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc, e
         document = json.loads((exported / 'document.json').read_text())
         if path.read_bytes() != before:
             raise ValueError('A source file changed during export.')
-        if path.suffix.lower() == '.onetoc2':
-            _, root = view(document, document['root'])
-            tocs[relative.parent] = [root['nodes'][oid]['kind'] for oid in root['nodes'][root['roots']['1']]['kind']['entries']]
         assets = {}
         previews = {}
         image_references = {
@@ -339,20 +352,13 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc, e
         if path.suffix.lower() == '.one':
             sections.append({'path': relative, 'export': exported.relative_to(destination), 'document': document,
                              'text': json.loads((exported / 'text.json').read_text()), 'assets': assets, 'previews': previews})
-    def order(section):
-        path = section['path']; entries = tocs.get(path.parent, [])
-        entry = next((entry for entry in entries if entry['identity'] == section['document']['file_id']), None)
-        result = []; parent = Path('.')
-        for part in path.parts[:-1]:
-            group = next((item for item in tocs.get(parent, []) if item['filename'] == part), None)
-            result.append((group['order'] if group and group['order'] is not None else 0xffffffff, part))
-            parent /= part
-        result.append((entry['order'] if entry and entry['order'] is not None else 0xffffffff, path.name))
-        return result
-    sections.sort(key=order)
+    order = {path: index for index, path in enumerate(catalog_sections)}
+    sections.sort(key=lambda section: order[section['path']])
     pages = []; locked_sections = []; histories = {}; nav = '<a href="index.html">Notebook review</a>'
     for section in sections:
-        name = section['path'].stem
+        state = catalog_sections[section['path']]['state']
+        name = state.get('Readable', {}).get('name') if isinstance(state, dict) else None
+        if name is None: name = section['path'].stem
         nav += '<h2>' + esc(str(section['path'].parent) + ' / ' + name) + '</h2>'
         _, root_space = view(section['document'], section['document']['root'])
         if root_space['nodes'][root_space['roots']['1']]['kind']['type'] == 'Encrypted':
@@ -472,9 +478,11 @@ def generate(source, destination, native=None, versions=(), zone=timezone.utc, e
         accounting.append({'section': str(section['path']), 'ordinal': ordinal, 'space': sid, 'revision': rid, 'object': oid, 'title': title, 'report': filename, 'category': category, 'context': context, 'version_modified': version['modified'] if version else None, 'source_report': source_page, 'native_reference': reference.as_posix() if reference else None, 'rendered': dict(page.counts)})
     (destination / 'source.json').write_text(json.dumps(manifest, indent=2))
     (destination / 'pages.json').write_text(json.dumps(accounting, indent=2, ensure_ascii=False))
-    intro = '<h1>Notebook review</h1><p>' + str(len(sections)) + ' sections · ' + str(len(pages)) + ' stored pages</p><p>Readable content follows the stored object order. Outline positions are shown in points. The document structure retains properties and identities that the readable view does not interpret.</p><p><a href="source.json">Source hashes</a> · <a href="pages.json">Page inventory</a></p>'
+    intro = '<h1>Notebook review</h1><p>' + str(len(sections) + len(unavailable)) + ' sections · ' + str(len(pages)) + ' stored pages</p><p>Readable content follows the stored object order. Outline positions are shown in points. The document structure retains properties and identities that the readable view does not interpret.</p><p><a href="source.json">Source hashes</a> · <a href="pages.json">Page inventory</a> · <a href="catalog.json">Notebook catalog</a></p>'
     if locked_sections:
         intro += '<p>Page counts are unavailable for locked sections: ' + esc(', '.join(locked_sections)) + '.</p>'
+    for path, error in unavailable:
+        intro += '<p>Cannot read ' + esc(str(path)) + ': ' + esc(error['message']) + ' (offset ' + str(error['offset']) + ').</p>'
     (destination / 'index.html').write_text(html_page('Notebook review', nav, intro, editable))
 
 

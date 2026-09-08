@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 EXPORTER = Path(os.environ.get('ONESTORE_DOCUMENT', Path(__file__).resolve().parent.parent / 'target/debug/examples/document'))
+BRIDGE = Path(__file__).resolve().parent.parent / 'target/debug/onestore-diagnostic'
 
 DEFAULT_CONTEXT = '{00000000-0000-0000-0000-000000000000},0'
 

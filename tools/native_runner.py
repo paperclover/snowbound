@@ -116,7 +116,7 @@ def clone(output):
         (output / 'teardown.json').write_text(json.dumps({'absent': not vm.instance_path(name).exists()}) + '\n')
 
 
-def capture(notebook, output, expected_pages=-1, author=None, screenshots=False, pdf=False, author_timeout=600, inspect=False):
+def capture(notebook, output, expected_pages=-1, author=None, screenshots=False, pdf=False, author_timeout=600, inspect=False, collect_notebook=False):
     notebook = notebook.resolve(strict=True)
     if not notebook.is_dir():
         raise ValueError('Choose a notebook directory.')
@@ -133,6 +133,7 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
         'notebook': str(notebook), 'expected_pages': expected_pages, 'author': str(author) if author else None,
         'author_timeout_seconds': author_timeout,
         'inspect': inspect,
+        'collect_notebook': collect_notebook,
         'base': json.loads(vm.BASE_MANIFEST.read_text()),
         'scripts': {name: hashlib.sha256((scripts / name).read_bytes()).hexdigest()
                     for name in sorted(p.name for p in scripts.iterdir())},
@@ -165,7 +166,7 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
                     raise RuntimeError(result['error'])
                 command(name, 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\author.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-%s' % name.upper(), output, author_timeout * 1000)
             command(name, 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\read-current.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-%s -ExpectedPages %d%s' % (name.upper(), expected_pages, (' -UseCurrentCache' if author else '') + (' -Pdf' if pdf else '') + (' -KeepOpen' if screenshots or inspect else '')), output, 600000)
-            collect_artifacts(name, output, '*' if author else 'read')
+            collect_artifacts(name, output, '*' if author or collect_notebook else 'read')
             if screenshots:
                 for page in sorted((output / 'read').glob('page-*.xml')):
                     page_id = ET.parse(page).getroot().attrib['ID']
@@ -208,6 +209,7 @@ if __name__ == '__main__':
     parser.add_argument('--pdf', action='store_true')
     parser.add_argument('--screenshots', action='store_true')
     parser.add_argument('--inspect', action='store_true', help='Keep the clone open for inspection until an output/finish file appears, up to 30 minutes.')
+    parser.add_argument('--collect-notebook', action='store_true', help='Retain the VM notebook alongside its native read capture.')
     parser.add_argument('--author', type=Path, help='Run a fixture-authoring PowerShell script in the clone before capture.')
     parser.add_argument('--author-timeout', type=int, default=600, help='Authoring deadline in seconds.')
     args = parser.parse_args()
@@ -216,5 +218,5 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, interrupted)
     if args.author_timeout <= 0:
         parser.error('The authoring deadline must be positive.')
-    capture(args.notebook, args.output, args.expected_pages, args.author, args.screenshots, args.pdf, args.author_timeout, args.inspect)
+    capture(args.notebook, args.output, args.expected_pages, args.author, args.screenshots, args.pdf, args.author_timeout, args.inspect, args.collect_notebook)
     print('Captured native evidence in', args.output)

@@ -222,3 +222,40 @@ fn check_crashes(source: &[u8], osid: ExGuid, oid: ExGuid, property: u32, value:
         }
     }
 }
+#[test]
+#[cfg(any(unix, windows))]
+fn bounded_file_reads_reject_partial_images_and_release_the_owner() {
+    use std::io::Write;
+    let path = std::env::temp_dir().join(format!(
+        "onestore-bounded-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut file = fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    assert!(onestore::read_file_limited(&path, 0).unwrap().is_empty());
+    let bytes: Vec<_> = (0..10_000).map(|i| (i % 251) as u8).collect();
+    file.write_all(&bytes).unwrap();
+    drop(file);
+    for limit in [0, 1, 100, bytes.len() - 1] {
+        assert_eq!(
+            onestore::read_file_limited(&path, limit)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::FileTooLarge
+        );
+        assert_eq!(
+            onestore::read_file_limited(&path, bytes.len()).unwrap(),
+            bytes
+        );
+    }
+    assert_eq!(onestore::read_file(&path).unwrap(), bytes);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    fs::remove_file(path).unwrap();
+}

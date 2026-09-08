@@ -149,8 +149,9 @@ fn text(bytes: &[u8]) -> (ExGuid, ExGuid, String) {
         .unwrap()
 }
 #[test]
-#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
+#[ignore = "requires disposable Samba and an existing ONESTORE_SMB_EVIDENCE directory"]
 fn live_coordination() {
+    let output = std::env::var("ONESTORE_SMB_EVIDENCE").unwrap();
     let writer = client();
     let path = format!(
         "adapter-{}.one",
@@ -330,7 +331,6 @@ fn live_coordination() {
         .block_on(async {
             drop(spare);
         });
-    let output = std::env::var("ONESTORE_SMB_EVIDENCE").unwrap();
     fs::write(std::path::Path::new(&output).join("source.one"), &source).unwrap();
     fs::write(std::path::Path::new(&output).join("committed.one"), &after).unwrap();
     fs::write(
@@ -342,6 +342,43 @@ fn live_coordination() {
         "{}",
         serde_json::json!({"path":path,"readers":12,"committed_while_readers_held":true,"fresh_reads":12,"stale_snapshot_rejected":true,"replaced_handle_rejected":true,"retirement_releases_locks":true,"unpublished_tail_recovered":true,"drop_inside_runtime":true})
     );
+}
+
+#[test]
+#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
+fn live_storage_inspection() {
+    let reader = client();
+    for (index, fixture) in [
+        "native-encrypted/encrypted-01/notebook/synthetic.one",
+        "native-encrypted/cold-encrypted-02/notebook/Open Notebook.one",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = fs::read(format!("../../corpus/{fixture}")).unwrap();
+        let path = format!(
+            "inspection-{index}-{}.one",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        create(&reader, &path, &source);
+        assert_eq!(reader.read_storage(&path, source.len()).unwrap(), source);
+        assert_eq!(
+            reader.read(&path, source.len()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let maintenance = client();
+        let guard = maintenance.open(&path, false).unwrap();
+        guard.lock(0xfffffffb, 0x12).unwrap();
+        assert_eq!(
+            reader.read_storage(&path, source.len()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        guard.close().unwrap();
+        assert_eq!(reader.read_storage(&path, source.len()).unwrap(), source);
+    }
 }
 
 #[test]

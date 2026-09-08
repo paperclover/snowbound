@@ -15,6 +15,67 @@ use onestore::{
 use std::{fs, io};
 use trace::{Event, Trace};
 
+#[test]
+fn storage_inspection_preserves_opaque_images_without_claiming_edit_readiness() {
+    for path in [
+        "native-encrypted/encrypted-01/notebook/synthetic.one",
+        "native-encrypted/cold-encrypted-02/notebook/Open Notebook.one",
+        "malformed/native-inflight.one",
+    ] {
+        let source = fs::read(format!("../../corpus/{path}")).unwrap();
+        for block in [1, 17, 65536] {
+            let mut read = |offset: u64, output: &mut [u8]| {
+                let offset = usize::try_from(offset).unwrap();
+                let count = output
+                    .len()
+                    .min(block)
+                    .min(source.len().saturating_sub(offset));
+                output[..count].copy_from_slice(&source[offset..offset + count]);
+                Ok(count)
+            };
+            assert_eq!(
+                onestore::read_storage_snapshot(&mut read, source.len()).unwrap(),
+                Some(source.clone())
+            );
+            assert!(read_snapshot(&mut read, source.len()).unwrap().is_none());
+        }
+        let mut headers = 0;
+        let changed = onestore::read_storage_snapshot(
+            |offset, output| {
+                let offset = usize::try_from(offset).unwrap();
+                let count = output.len().min(source.len().saturating_sub(offset));
+                output[..count].copy_from_slice(&source[offset..offset + count]);
+                if offset == 0 {
+                    headers += 1;
+                    if headers == 2 {
+                        output[0] ^= 1;
+                    }
+                }
+                Ok(count)
+            },
+            source.len(),
+        )
+        .unwrap();
+        assert!(changed.is_none());
+        let mut broken = source.clone();
+        let offset = usize::try_from(Store::parse(&source).unwrap().header.root.offset).unwrap();
+        broken[offset] ^= 1;
+        assert!(
+            onestore::read_storage_snapshot(
+                |offset, output| {
+                    let offset = usize::try_from(offset).unwrap();
+                    let count = output.len().min(broken.len().saturating_sub(offset));
+                    output[..count].copy_from_slice(&broken[offset..offset + count]);
+                    Ok(count)
+                },
+                broken.len()
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
+
 fn target(bytes: &[u8]) -> (ExGuid, ExGuid, u32) {
     let store = Store::parse(bytes).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();

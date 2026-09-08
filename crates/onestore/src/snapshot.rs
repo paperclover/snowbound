@@ -24,8 +24,28 @@ fn read_exact(
 /// Reads a bounded snapshot; the caller must provide fresh I/O and exclude in-place maintenance.
 /// Includes unpublished trailing bytes so subsequent commits can validate the physical file.
 pub fn read_snapshot(
+    read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
+    limit: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    snapshot(read, limit, |store| {
+        RevisionIndex::parse(store)?.validate_current()
+    })
+}
+
+/// Reads stable storage and checksums without requiring traversable property references.
+/// Used to inspect encrypted or incomplete documents; this does not establish edit readiness.
+/// The caller must provide fresh I/O and exclude in-place maintenance, as for `read_snapshot`.
+pub fn read_storage_snapshot(
+    read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
+    limit: usize,
+) -> io::Result<Option<Vec<u8>>> {
+    snapshot(read, limit, |_| Ok(()))
+}
+
+fn snapshot(
     mut read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
     limit: usize,
+    validate: impl FnOnce(&Store<'_>) -> Result<(), crate::Error>,
 ) -> io::Result<Option<Vec<u8>>> {
     let mut header = [0; 1024];
     read_exact(&mut read, 0, &mut header)?;
@@ -69,7 +89,7 @@ pub fn read_snapshot(
         if !store.checksum_mismatches.is_empty() {
             return Ok(false);
         }
-        RevisionIndex::parse(&store)?.validate_current()?;
+        validate(&store)?;
         Ok(true)
     });
     Ok(matches!(parsed, Ok(true)).then_some(bytes))

@@ -200,8 +200,26 @@ impl Client {
 
     /// Reads one bounded, consistent snapshot; contention returns WouldBlock.
     pub fn read(&self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        self.read_with(path, |file| {
+            onestore::read_snapshot(|offset, output| file.read_at(offset, output), limit)
+        })
+    }
+
+    /// Reads consistent storage, including encrypted or incomplete document graphs.
+    /// Storage validation alone does not establish edit readiness.
+    pub fn read_storage(&self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        self.read_with(path, |file| {
+            onestore::read_storage_snapshot(|offset, output| file.read_at(offset, output), limit)
+        })
+    }
+
+    fn read_with(
+        &self,
+        path: &str,
+        snapshot: impl FnOnce(&mut File<'_>) -> io::Result<Option<Vec<u8>>>,
+    ) -> io::Result<Vec<u8>> {
         let mut file = self.open(path, false)?.coordinate(path, false)?;
-        let result = onestore::read_snapshot(|offset, output| file.read_at(offset, output), limit)
+        let result = snapshot(&mut file)
             .and_then(|snapshot| snapshot.ok_or_else(|| io::ErrorKind::WouldBlock.into()));
         let closed = file.close();
         let snapshot = result?;

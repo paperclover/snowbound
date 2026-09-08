@@ -15,11 +15,10 @@ import time
 from urllib.parse import parse_qs, urlsplit
 import uuid
 
-from document_model import walk
+from document_model import BRIDGE, walk
 from notebook_report import generate
 
 ROOT = Path(__file__).resolve().parent.parent
-BRIDGE = ROOT / 'target/debug/onestore-diagnostic'
 
 
 def bridge(mode, source, destination, edit=None):

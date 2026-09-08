@@ -75,12 +75,25 @@ impl Drop for FileIo {
 /// Native writers can expose incomplete graphs to unlocked filesystem reads.
 #[cfg(any(unix, windows))]
 pub fn read_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    read_file_limited(path, usize::MAX)
+}
+
+/// Reads under whole-file exclusion, rejecting a snapshot larger than the byte limit.
+/// A size failure returns `FileTooLarge` without a partial snapshot.
+#[cfg(any(unix, windows))]
+pub fn read_file_limited(path: impl AsRef<Path>, limit: usize) -> io::Result<Vec<u8>> {
+    let count = u64::try_from(limit)
+        .map_err(|_| ErrorKind::InvalidInput)?
+        .saturating_add(1);
     let mut io = FileIo::open(path, false)?;
     let mut bytes = Vec::new();
-    let result = io.file.read_to_end(&mut bytes);
+    let result = (&mut io.file).take(count).read_to_end(&mut bytes);
     let released = io.release();
     result?;
     released?;
+    if bytes.len() > limit {
+        return Err(ErrorKind::FileTooLarge.into());
+    }
     Ok(bytes)
 }
 

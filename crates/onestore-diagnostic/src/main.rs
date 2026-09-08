@@ -40,14 +40,26 @@ enum Action {
     },
 }
 
-fn run() -> Result<Value, Box<dyn std::error::Error>> {
-    let args: Vec<_> = env::args_os().skip(1).collect();
+fn run(args: &[std::ffi::OsString]) -> Result<Value, Box<dyn std::error::Error>> {
+    if let [mode, root] = args
+        && mode == "catalog"
+    {
+        let catalog = onestore_notebook::discover(
+            &mut onestore_notebook::Local::open(root)?,
+            onestore_notebook::Limits {
+                entries: 100_000,
+                bytes_per_file: 256 * 1024 * 1024,
+                depth: 64,
+            },
+        )?;
+        return Ok(json!({"ok": true, "catalog": catalog}));
+    }
     if args.len() != 3
         || !["snapshot", "check", "commit"]
             .iter()
             .any(|mode| args[0] == *mode)
     {
-        return Err("Usage: onestore-diagnostic snapshot FILE NEW_SNAPSHOT | check SNAPSHOT - | commit FILE SNAPSHOT; edits arrive as JSON on stdin".into());
+        return Err("Usage: onestore-diagnostic catalog ROOT | snapshot FILE NEW_SNAPSHOT | check SNAPSHOT - | commit FILE SNAPSHOT; edits arrive as JSON on stdin".into());
     }
     if args[0] == "snapshot" {
         let bytes = onestore::read_file(&args[1])?;
@@ -102,6 +114,13 @@ fn run() -> Result<Value, Box<dyn std::error::Error>> {
 }
 
 fn main() {
-    let result = run().unwrap_or_else(|error| json!({"ok": false, "state": "NotCommitted", "kind": "Input", "error": error.to_string()}));
+    let args: Vec<_> = env::args_os().skip(1).collect();
+    let result = run(&args).unwrap_or_else(|error| {
+        let mut result = json!({"ok": false, "kind": "Input", "error": error.to_string()});
+        if args.first().is_some_and(|mode| mode == "commit") {
+            result["state"] = json!("NotCommitted");
+        }
+        result
+    });
     println!("{result}");
 }

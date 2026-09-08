@@ -515,8 +515,21 @@ name = "onestore-diagnostic"
 version = "0.1.0"
 dependencies = [
  "onestore",
+ "onestore-notebook",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "onestore-notebook"
+version = "0.1.0"
+dependencies = [
+ "onestore",
+ "onestore-smb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

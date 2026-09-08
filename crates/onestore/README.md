@@ -89,6 +89,7 @@ cargo run --example create_notebook -- /tmp/one-demo 'Hello from Rust.' 'Example
 cargo run --example inventory -- /tmp/one-demo/synthetic.one
 cargo run --example inspect -- /tmp/one-demo/synthetic.one
 cargo run --example document -- /tmp/one-demo/synthetic.one /tmp/one-model
+cargo build -p onestore-diagnostic
 python3 tools/notebook_report.py /tmp/one-demo /tmp/one-report --timezone America/Los_Angeles
 ```
 
