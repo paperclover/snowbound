@@ -38,6 +38,18 @@ pub struct TreeEdit {
 }
 
 impl TreeEdit {
+    pub fn object(&self) -> ExGuid {
+        self.object
+    }
+
+    /// Move destination and direct sibling anchor; deletion has no destination.
+    pub fn destination(&self) -> Option<(ExGuid, Option<ExGuid>)> {
+        match self.placement {
+            Placement::Delete => None,
+            Placement::Move { parent, before } => Some((parent, before)),
+        }
+    }
+
     /// Removes a paragraph or ordinary outline and its descendants from the active tree.
     /// Historical objects remain available; an emptied table cell receives an empty paragraph.
     pub fn delete(object: ExGuid, author: &str) -> Result<Self, Error> {

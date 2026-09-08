@@ -20,6 +20,7 @@ pub enum ConflictKind {
     FormattingChanged = 3,
     StructureChanged = 4,
     LayoutChanged = 5,
+    ContentChanged = 6,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +137,7 @@ impl Replica {
             Operation::Split(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Join(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Outline(edit) => edit.prepare(&snapshot, intent.space)?,
+            Operation::Tree(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Insert(insertion) => {
                 PreparedEdit::insert(&snapshot, intent.space, insertion)
                     .map_err(|_| ConflictKind::UnsupportedEdit)
@@ -306,6 +308,13 @@ impl Replica {
                     )
                     .into());
                 }
+                Operation::Tree(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Review the subtree edit using rebase_tree_conflict",
+                    )
+                    .into());
+                }
                 Operation::Insert(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -395,6 +404,21 @@ impl Replica {
             Ok(Operation::Outline(
                 OutlineEdit::capture(remote, intent.space, edit.object, edit.change)?.0,
             ))
+        })
+    }
+
+    /// Reviews the original subtree intent against both current cache images.
+    /// Replacement paragraph identities must remain unchanged for dependent edits.
+    pub fn rebase_tree_conflict(&self, id: u64, local: &[u8], remote: &[u8]) -> Result<()> {
+        self.resolve_conflict(id, local, remote, |intent| {
+            let Operation::Tree(edit) = intent.operation else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Select a subtree move or deletion conflict",
+                )
+                .into());
+            };
+            Ok(Operation::Tree(edit.review(remote, intent.space)?))
         })
     }
 
@@ -519,6 +543,7 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
             3 => ConflictKind::FormattingChanged,
             4 => ConflictKind::StructureChanged,
             5 => ConflictKind::LayoutChanged,
+            6 => ConflictKind::ContentChanged,
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

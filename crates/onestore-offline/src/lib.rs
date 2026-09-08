@@ -15,10 +15,12 @@ mod paragraph;
 mod rebase;
 mod recovery;
 mod schema;
+mod tree;
 pub use formatting::FormatEdit;
 pub use outline::OutlineEdit;
 pub use paragraph::{JoinEdit, SplitEdit};
 pub use recovery::{Recovery, RecoverySummary};
+pub use tree::TreeEdit;
 mod sync;
 pub use sync::{ConflictKind, EditStatus, Remote};
 mod worker;
@@ -49,7 +51,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 
 /// Text and its observed precondition, retained across cache reopen and rebasing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -70,6 +72,7 @@ pub enum Operation {
     Split(SplitEdit),
     Join(JoinEdit),
     Outline(OutlineEdit),
+    Tree(TreeEdit),
 }
 
 /// A locally acknowledged intent; its ID remains stable across cache reopen.

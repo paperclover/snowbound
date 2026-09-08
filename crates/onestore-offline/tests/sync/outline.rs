@@ -1,7 +1,7 @@
 use super::*;
 use onestore::OutlineEdit as Change;
 
-fn fixture() -> (Vec<u8>, ExGuid, ExGuid, ExGuid, ExGuid) {
+pub(super) fn fixture() -> (Vec<u8>, ExGuid, ExGuid, ExGuid, ExGuid) {
     let source = onestore::create_section("layout.one", "Original 🦀 é", "Author").unwrap();
     let (sid, text, _) = text(&source);
     let store = Store::parse(&source).unwrap();
@@ -24,7 +24,7 @@ fn fixture() -> (Vec<u8>, ExGuid, ExGuid, ExGuid, ExGuid) {
     (source, sid, outline, paragraph, text)
 }
 
-fn node(source: &[u8], sid: ExGuid, object: ExGuid) -> serde_json::Value {
+pub(super) fn node(source: &[u8], sid: ExGuid, object: ExGuid) -> serde_json::Value {
     let store = Store::parse(source).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     index.validate_current().unwrap();

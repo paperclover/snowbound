@@ -128,3 +128,21 @@ plus the `tree::tests::group_normalization_preserves_unequal_indentation_and_ove
 unit test. Cold-open the resulting `ordinary`, `groups-cells`, `cross-container`
 and `unequal-groups` notebooks with expected page counts 15, 12, 12 and 1,
 respectively, using `tools/native_runner.py --collect-notebook`.
+
+`offline-tree` reconciles moves/deletions and dependent text edits against the
+fourteen ordinary native controls. Three already-converged moves confirm without
+publication, seven competing structure/content changes require explicit review,
+and four deleted targets retain the complete local branch. The cold capture
+preserves all 247 active graph objects across fifteen pages, three tags, and
+6,497 explicit character-format comparisons per image. Its `cases.json` records
+the native input cases and outcomes. Regenerate with the offline sync test
+`native_tree_and_layout_changes_reconcile_without_discarding_unreviewed_content`,
+setting `ONESTORE_OFFLINE_TREE_OUTPUT` to a new absolute directory, then cold-open
+its `candidate` with `--expected-pages 15 --collect-notebook`.
+
+Its `cell-delete` and `cell-move` captures additionally verify local edits to an
+emptied cell's replacement paragraph while preserving remote text in the other
+cell. They retain 272 and 274 active objects, respectively, with 8,201 and 8,377
+explicit format comparisons per image. Regenerate with the offline sync test
+`emptied_cell_replacement_is_durable_and_cannot_be_silently_omitted_on_replay`,
+using the same output variable; cold-open each candidate with twelve expected pages.

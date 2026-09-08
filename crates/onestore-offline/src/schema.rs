@@ -3,7 +3,7 @@ use rusqlite::{OptionalExtension, Transaction};
 
 const CONFLICTS: &str = "CREATE TABLE conflicts (
     edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE,
-    kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 5)
+    kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 6)
 ) STRICT;";
 
 const ASSETS: &str = "CREATE TABLE assets (

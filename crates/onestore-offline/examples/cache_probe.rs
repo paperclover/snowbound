@@ -140,7 +140,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 onestore_offline::Operation::Split(_)
                 | onestore_offline::Operation::Join(_)
-                | onestore_offline::Operation::Outline(_) => {
+                | onestore_offline::Operation::Outline(_)
+                | onestore_offline::Operation::Tree(_) => {
                     panic!("Unexpected operation for this fixture")
                 }
             };

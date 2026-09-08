@@ -1,0 +1,72 @@
+[
+  {
+    "page": "Move leaf down",
+    "result": "converged",
+    "space": "{B7267338-BF83-0893-27A7-37F606DD20C8},1"
+  },
+  {
+    "page": "Move subtree down",
+    "result": "converged",
+    "space": "{9B80D7CA-18B4-02B0-1E85-6E8AA0DAD827},1"
+  },
+  {
+    "page": "Move subtree up",
+    "result": "converged",
+    "space": "{7538095C-389B-07D8-2991-B2BC46EBD52A},1"
+  },
+  {
+    "page": "Indent subtree",
+    "result": "reviewed",
+    "space": "{651463E3-C768-0C93-363D-FCE642B07408},1"
+  },
+  {
+    "page": "Outdent subtree",
+    "result": "reviewed",
+    "space": "{8384083C-60ED-0F7C-2F15-8B20B878B3EB},1"
+  },
+  {
+    "page": "Collapse subtree",
+    "result": "reviewed",
+    "space": "{FF88B513-029C-00E2-0082-9E3DCE1D7796},1"
+  },
+  {
+    "page": "Expand subtree",
+    "result": "reviewed",
+    "space": "{850B34E4-D62A-042B-138A-B2A905CEE28E},1"
+  },
+  {
+    "page": "Delete leaf",
+    "result": "retained",
+    "space": "{363FE055-44E1-0B27-14A8-46278FD681FF},1"
+  },
+  {
+    "page": "Delete subtree",
+    "result": "retained",
+    "space": "{8BBAD88F-D248-0959-00B3-2438A7065330},1"
+  },
+  {
+    "page": "Delete only paragraph",
+    "result": "retained",
+    "space": "{A4CB3BA2-767F-0AE8-0916-AF142D995822},1"
+  },
+  {
+    "page": "Delete outline",
+    "result": "retained",
+    "space": "{80E80543-87A1-0C3A-0816-22B190BDFC87},1"
+  },
+  {
+    "page": "Move outline",
+    "result": "reviewed",
+    "space": "{16207F40-69C9-0CA1-09B5-DC5712DB2BBE},1"
+  },
+  {
+    "page": "Resize outline",
+    "result": "reviewed",
+    "space": "{CD420421-73F7-0F11-02EC-35FCA348998C},1"
+  },
+  {
+    "page": "Automatic outline size",
+    "result": "reviewed",
+    "space": "{F383096F-2121-0225-1E62-AB37C9B15B33},1"
+  }
+]

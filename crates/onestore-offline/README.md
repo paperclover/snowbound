@@ -31,7 +31,8 @@ its styles as one intent and one publication. Keep that value across retries; it
 the new text for subsequent offline edits. Pending entries expose
 `Operation::Text(TextEdit)`, `Operation::Insert(Insertion)`,
 `Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)`,
-`Operation::Join(JoinEdit)` and `Operation::Outline(OutlineEdit)` through their
+`Operation::Join(JoinEdit)`, `Operation::Outline(OutlineEdit)` and
+`Operation::Tree(TreeEdit)` through their
 `operation` field. Synchronization applies these in queue order, so an inserted
 outline can precede its paragraphs and their later edits. Missing anchors or
 existing insertion identities preserve a conflict and the complete local image.
@@ -98,8 +99,23 @@ reserved wrapping width that they clear. Missing targets preserve the local bran
 against both current images, preserving dependent intents. An uncertain layout
 attempt requires its original revision; converged values cannot establish its receipt.
 
-Recognized earlier caches migrate transactionally to version seven, which adds
-layout intents and layout conflicts. The migration retains
+`tree` accepts the core `onestore::TreeEdit`. Moves preserve independent remote
+text, formatting and descendants. A competing ancestor, indentation or sibling
+crossing produces `StructureChanged`; unrelated sibling insertions/deletions can
+merge. An anchor must remain a direct child of the requested destination. An
+already satisfied move still requires guarded confirmation before acknowledgement.
+Deletion compares the selected raw property graph, including referenced styles,
+tags, unknown fields and internal attachments. Changed content produces
+`ContentChanged`; property order, CompactID numbering and modification timestamps
+do not affect that comparison. Missing targets retain `TargetUnavailable`.
+`rebase_tree_conflict(id, local, remote)` reviews the original move/deletion against
+both current images. An emptied cell's replacement paragraph/text identities must
+remain the same before replay or review; later queued edits keep their targets.
+Uncertain tree attempts require their original revision for confirmation, even
+when an independent move or deletion has the same visible effect.
+
+Recognized earlier caches migrate transactionally to version eight, which adds
+tree intents and content conflicts. The migration retains
 images, local IDs, publication attempts, conflicts,
 receipts and the autoincrement sequence; it does not reuse acknowledged IDs when
 the pending queue is empty.

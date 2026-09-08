@@ -107,3 +107,10 @@ path = "fuzz_targets/tree.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "offline_tree"
+path = "fuzz_targets/offline_tree.rs"
+test = false
+doc = false
+bench = false

@@ -34,6 +34,7 @@ pub struct ResolvedRevision<'a> {
 }
 
 /// Occurrences retain multiplicity for native reference counts.
+/// Each stream follows property arena order, including nested sets.
 #[derive(Debug, Default)]
 pub struct ObjectReferences {
     pub objects: Vec<ExGuid>,

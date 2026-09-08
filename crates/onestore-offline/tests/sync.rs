@@ -5,8 +5,14 @@ use onestore::{
 use onestore_offline::{ConflictKind, EditStatus, Error, Remote, Replica};
 use std::io;
 
+#[path = "../../onestore/tests/support/disk.rs"]
+mod disk;
 #[path = "sync/outline.rs"]
 mod outline;
+#[path = "sync/tree.rs"]
+mod tree;
+#[path = "support/tree_schedule.rs"]
+mod tree_schedule;
 
 mod paragraph {
     use super::*;

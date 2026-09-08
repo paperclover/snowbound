@@ -796,8 +796,8 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
 }
 
 #[test]
-fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_layout_conflicts() {
-    for (version, ceiling) in [(5, 3), (6, 4)] {
+fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_content_conflicts() {
+    for (version, ceiling) in [(5, 3), (6, 4), (7, 5)] {
         use onestore_offline::{ConflictKind, EditStatus, Recovery};
         use sha2::{Digest, Sha256};
         let directory = tempfile::tempdir().unwrap();
@@ -903,13 +903,13 @@ fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_layout_confli
                 .unwrap(),
             current_version
         );
-        db.execute("INSERT INTO conflicts VALUES (1001,5)", [])
+        db.execute("INSERT INTO conflicts VALUES (1001,6)", [])
             .unwrap();
         drop(db);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(
             cache.status(1001).unwrap(),
-            Some(EditStatus::Conflict(ConflictKind::LayoutChanged))
+            Some(EditStatus::Conflict(ConflictKind::ContentChanged))
         );
     }
 }

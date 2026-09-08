@@ -20,8 +20,12 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 class OutlineEditTest(unittest.TestCase):
     def test_rust_subtree_moves_and_deletions_survive_cold_native_reopen(self):
-        for name, pages in [('ordinary', 15), ('groups-cells', 12), ('cross-container', 12), ('unequal-groups', 1)]:
-            fixture = FIXTURE / 'rust-tree' / name
+        for name, pages in [
+            ('rust-tree/ordinary', 15), ('rust-tree/groups-cells', 12),
+            ('rust-tree/cross-container', 12), ('rust-tree/unequal-groups', 1),
+            ('offline-tree', 15), ('offline-tree/cell-delete', 12), ('offline-tree/cell-move', 12),
+        ]:
+            fixture = FIXTURE / name
             with self.subTest(case=name), TemporaryDirectory() as temporary:
                 models = {}
                 for phase, notebook in [('candidate', fixture / 'candidate'), ('cold', fixture / 'cold/notebook')]:
@@ -42,7 +46,7 @@ class OutlineEditTest(unittest.TestCase):
                     for _, node in walk(old, page):
                         for oid in node['kind'].get('lists', []):
                             self.assertEqual(old['nodes'][oid], saved['nodes'][oid])
-                if name == 'unequal-groups':
+                if name == 'rust-tree/unequal-groups':
                     capture, = (fixture / 'cold/read').glob('page-*.xml')
                     root = ET.parse(capture).getroot()
                     self.assertEqual([(group.get('indent'), ''.join(Text(group.find('one:OE/one:T', ns).text or '').parts))
