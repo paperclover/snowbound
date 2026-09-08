@@ -107,16 +107,19 @@ already satisfied move still requires guarded confirmation before acknowledgemen
 Deletion compares the selected raw property graph, including referenced styles,
 tags, unknown fields and internal attachments. Changed content produces
 `ContentChanged`; property order, CompactID numbering and modification timestamps
-do not affect that comparison. Missing targets retain `TargetUnavailable`.
+do not affect that comparison. Immutable records compare by content, and empty
+child lists compare equally to absent child lists. Mutable object identities
+remain significant. Missing targets retain `TargetUnavailable`.
 `rebase_tree_conflict(id, local, remote)` reviews the original move/deletion against
 both current images. An emptied cell's replacement paragraph/text identities must
 remain the same before replay or review; later queued edits keep their targets.
 Uncertain tree attempts require their original revision for confirmation, even
 when an independent move or deletion has the same visible effect.
 
-Recognized earlier caches migrate transactionally to version eight, which adds
-tree intents and content conflicts. The migration retains
-images, local IDs, publication attempts, conflicts,
+Recognized earlier caches migrate transactionally to version nine. Version-eight
+deletion observations retain their original identity-sensitive preconditions;
+explicit conflict review upgrades them to the immutable-content comparison.
+The migration retains images, local IDs, publication attempts, conflicts,
 receipts and the autoincrement sequence; it does not reuse acknowledged IDs when
 the pending queue is empty.
 

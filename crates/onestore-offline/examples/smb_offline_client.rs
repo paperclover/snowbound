@@ -3,7 +3,7 @@ mod concurrent;
 
 use onestore::{
     CommitError, CommitState, ExGuid, Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit,
-    RevisionIndex, Store, TextAttribute, document::Document,
+    RevisionIndex, Store, TextAttribute, TreeEdit, document::Document,
 };
 use onestore_offline::{EditStatus, Error, Remote, Replica, SmbRemote};
 use onestore_smb::{Client, Credentials};
@@ -41,7 +41,18 @@ impl DocumentView {
     }
 }
 
-const DOCUMENT_OPERATIONS: [&str; 6] = ["insert", "format", "text", "split", "right_text", "join"];
+const DOCUMENT_OPERATIONS: [&str; 10] = [
+    "insert",
+    "format",
+    "text",
+    "split",
+    "right_text",
+    "nest",
+    "unnest",
+    "join",
+    "tail_split",
+    "delete",
+];
 
 fn now() -> u128 {
     SystemTime::now()
@@ -331,6 +342,8 @@ fn queue_document(
     };
     let end = u32::try_from(text.encode_utf16().count())?;
     let split = ParagraphSplit::new(insertion.text_object(), end - 2, "Offline document writer")?;
+    let tail_split =
+        ParagraphSplit::new(insertion.text_object(), end + 1, "Offline document writer")?;
     let join = ParagraphJoin::new(
         insertion.text_object(),
         split.text_object(),
@@ -344,14 +357,50 @@ fn queue_document(
     let mut ids = [0; DOCUMENT_OPERATIONS.len()];
     for (step, id) in ids.iter_mut().enumerate() {
         let kind = DOCUMENT_OPERATIONS[step];
+        let tree = match kind {
+            "nest" => {
+                let source = cache.snapshot()?;
+                let store = Store::parse(&source)?;
+                let index = RevisionIndex::parse(&store)?;
+                let document = Document::parse(&index)?;
+                let section = &document.spaces[&space];
+                let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+                let paragraph = view
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.content == [insertion.text_object()])
+                    .map(|(id, _)| *id)
+                    .ok_or("Missing inserted paragraph")?;
+                Some(TreeEdit::move_to(
+                    split.object(),
+                    paragraph,
+                    None,
+                    "Offline document writer",
+                )?)
+            }
+            "unnest" => Some(TreeEdit::move_to(
+                split.object(),
+                parent,
+                None,
+                "Offline document writer",
+            )?),
+            "delete" => Some(TreeEdit::delete(
+                tail_split.object(),
+                "Offline document writer",
+            )?),
+            _ => None,
+        };
         let range = match kind {
             "text" => end - 3..end,
             "split" => end - 2..end - 2,
+            "tail_split" => end + 1..end + 1,
             "right_text" => 0..2,
             _ => 1..end - 2,
         };
         let target = if kind == "right_text" {
             split.text_object()
+        } else if kind == "delete" {
+            tail_split.text_object()
         } else {
             insertion.text_object()
         };
@@ -373,7 +422,9 @@ fn queue_document(
                     cache.edit_text(&source, space, target, range.clone(), replacement.unwrap())
                 }
                 "split" => cache.split(&source, space, &split),
+                "tail_split" => cache.split(&source, space, &tail_split),
                 "join" => cache.join(&source, space, &join),
+                "nest" | "unnest" | "delete" => cache.tree(&source, space, tree.as_ref().unwrap()),
                 _ => unreachable!(),
             };
             match result {
@@ -384,7 +435,8 @@ fn queue_document(
                         json!({"event":"local_document_commit","id":acknowledged,"operation":operation,"kind":kind,
                         "space":space.to_string(),"object":target.to_string(),"document":insertion.text_object().to_string(),
                         "text":text,"insertion":if kind=="insert" {Some(&insertion)} else {None},
-                        "split":if kind=="split" {Some(&split)} else {None},
+                        "split":match kind { "split" => Some(&split), "tail_split" => Some(&tail_split), _ => None },
+                        "tree":tree,
                         "joined":if kind=="join" {Some(join.texts().map(|id| id.to_string()))} else {None},
                         "range":[range.start,range.end],"attributes":attributes,"replacement":replacement,
                         "started_us":started,"finished_us":now()})
@@ -555,7 +607,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let remote = cache.remote_snapshot()?;
                 let current = view(&remote)?;
                 let onestore_offline::Operation::Text(edit) = &intent.operation else {
-                    return Err("Expected text probe intents".into());
+                    return Err(format!(
+                        "Document intent {} requires review: {:?}",
+                        intent.id,
+                        cache.status(intent.id)?
+                    )
+                    .into());
                 };
                 let at = append_position(&edit.before, &current.text, &edit.replacement)
                     .ok_or("Append model disagrees with retained history")?;
@@ -713,9 +770,15 @@ mod tests {
             cache = Replica::open(&path).unwrap();
         }
         let local = cache.snapshot().unwrap();
-        assert_eq!(cache.pending().unwrap().len(), 12);
+        assert_eq!(
+            cache.pending().unwrap().len(),
+            2 * DOCUMENT_OPERATIONS.len()
+        );
         for (step, id) in ids.iter().enumerate() {
-            remote.remote.lost_reply = matches!(step % 6, 3 | 5);
+            remote.remote.lost_reply = matches!(
+                DOCUMENT_OPERATIONS[step % DOCUMENT_OPERATIONS.len()],
+                "split" | "nest" | "unnest" | "join" | "tail_split" | "delete"
+            );
             let result = cache.sync_once(&mut remote);
             let state = if result.is_err() {
                 assert!(matches!(

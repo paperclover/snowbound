@@ -1,5 +1,12 @@
 # Native outline editing controls
 
+`empty-children` retains a mixed-client deletion regression: `before.one` exposes
+transaction 22 of the retained local image; `remote.one` was observed after native
+OneNote removed an empty child-list property and coalesced equivalent immutable
+styles. The retained intent addresses the same subtree in both files. The offline
+test requires deletion and its dependent edit to publish after reopening the
+cache, while an actual remote text change retains a content conflict.
+
 OneNote 2010 authored fourteen cases plus an unchanged source page. `before`,
 `after`, and `cold` retain notebook bytes and independent native XML. The final
 phase uses a fresh application cache. Cases preserve Unicode, hyperlinks, tags,

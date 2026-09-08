@@ -105,6 +105,20 @@ impl Remote for Session<'_> {
                     .unwrap();
                 text.replace_range(0..1, &edit.replacement);
             }
+            Operation::Format(format) => {
+                let [onestore::TextAttribute::FontSize(size)] = format.attributes.as_slice() else {
+                    panic!()
+                };
+                let store = Store::parse(edit.as_bytes()).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                let document = Document::parse(&index).unwrap();
+                let space = &document.spaces[&SOURCE.1];
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                assert_eq!(
+                    view.text_runs(format.object).unwrap()[0].format.font_size,
+                    Some(*size)
+                );
+            }
             _ => panic!(),
         }
         assert_eq!(rows(edit.as_bytes()), expected);
@@ -163,13 +177,24 @@ pub fn run(input: &[u8]) {
                             &TreeEdit::delete(local[target].0, "Offline").unwrap(),
                         )
                         .unwrap(),
-                    _ => cache
+                    _ if step[3] & 1 == 0 => cache
                         .edit_text(
                             &snapshot,
                             *sid,
                             local[target].1,
                             0..1,
                             &char::from(b'A' + step[3] % 26).to_string(),
+                        )
+                        .unwrap(),
+                    _ => cache
+                        .format(
+                            &snapshot,
+                            *sid,
+                            local[target].1,
+                            0..1,
+                            &[onestore::TextAttribute::FontSize(
+                                12.0 + f32::from(step[3] % 20),
+                            )],
                         )
                         .unwrap(),
                 };

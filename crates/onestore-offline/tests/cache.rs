@@ -797,7 +797,7 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
 
 #[test]
 fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_content_conflicts() {
-    for (version, ceiling) in [(5, 3), (6, 4), (7, 5)] {
+    for (version, ceiling) in [(5, 3), (6, 4), (7, 5), (8, 6)] {
         use onestore_offline::{ConflictKind, EditStatus, Recovery};
         use sha2::{Digest, Sha256};
         let directory = tempfile::tempdir().unwrap();

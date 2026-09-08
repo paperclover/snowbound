@@ -18,7 +18,8 @@ def characters(observed):
 def operation_kinds(events):
     kinds = tuple(events[0].get('document_kinds', ('insert', 'format')))
     assert kinds in (('insert', 'format'), ('insert', 'format', 'text'),
-                     ('insert', 'format', 'text', 'split', 'right_text', 'join')), 'Unknown document workload'
+                     ('insert', 'format', 'text', 'split', 'right_text', 'join'),
+                     ('insert', 'format', 'text', 'split', 'right_text', 'nest', 'unnest', 'join', 'tail_split', 'delete')), 'Unknown document workload'
     return kinds
 
 
@@ -41,8 +42,9 @@ def document_history(logs, operations):
         linked = {}
         for intent, receipt in zip(edits, receipts, strict=True):
             changed_targets = {intent['object']}
-            if intent['kind'] == 'split': changed_targets.add(identity(intent['split'], 2))
+            if intent['kind'] in ('split', 'tail_split'): changed_targets.add(identity(intent['split'], 2))
             if intent['kind'] == 'join': changed_targets = set(intent['joined'])
+            if intent['kind'] in ('nest', 'unnest'): changed_targets = set()
             attempts = [row for row in events if row['event'] == 'remote_attempt' and row['revision'] == receipt['revision']
                         and set(row.get('document_changes') or {}) == changed_targets]
             if not attempts and intent['kind'] == 'format':
@@ -51,10 +53,12 @@ def document_history(logs, operations):
             assert len(attempts) == 1, 'Document receipt lacks one publication attempt'
             attempt, = attempts
             assert attempt['state'] in ('Committed', 'Unknown'), 'Receipt identifies an unpublished document operation'
-            assert intent['object'] in attempt['documents'] and attempt['document_changes'] == {target: attempt['documents'].get(target) for target in changed_targets}, 'Document publication changed another target'
+            assert (intent['object'] in attempt['documents']) == (intent['kind'] != 'delete'), 'Document publication retained or lost its target'
+            assert attempt['document_changes'] == {target: attempt['documents'].get(target) for target in changed_targets}, 'Document publication changed another target'
             successful = [row for row in events if row['event'] == 'remote_attempt'
                           and row['state'] in ('Committed', 'Unknown')
-                          and row.get('document_changes') == attempt['document_changes']]
+                          and row.get('document_changes') == attempt['document_changes']
+                          and row.get('document_graph_changes') == attempt.get('document_graph_changes')]
             assert successful == [attempt], 'Document intent was published or attempted uncertainly more than once'
             assert intent['started_us'] <= attempt['started_us'] <= attempt['finished_us'] <= receipt['at_us'] and intent['started_us'] <= intent['finished_us'] <= receipt['at_us'], 'Document acknowledgement order is invalid'
             if attempt['state'] == 'Unknown':
@@ -77,7 +81,7 @@ def document_history(logs, operations):
             linked[intent['id']] = {**attempt, 'acknowledged_us': receipt['at_us'], 'receipt_revision': receipt['revision']}
         assert {(row['revision'], row['started_us']) for row in events
                 if row['event'] == 'remote_attempt' and row['state'] in ('Committed', 'Unknown')
-                and row.get('document_changes')} == {
+                and (row.get('document_changes') or row.get('document_graph_changes'))} == {
                     (attempt['revision'], attempt['started_us']) for attempt in linked.values()
                 }, 'A document publication lacks its recorded intent and receipt'
         for at in range(0, len(edits), len(kinds)):
@@ -125,7 +129,8 @@ def document_history(logs, operations):
             for state in states.values():
                 state['parts'] = [(paragraph, target, 0, len(state['characters']))]
             if replaced and boundaries:
-                split, right_edit, join = boundaries
+                split, right_edit, *following = boundaries
+                join = next(row for row in following if row['kind'] == 'join')
                 assert events[0].get('document_graph') is True, 'Boundary workload requires structural observations'
                 assert all(row.get('document') == target and row['space'] == inserted['space']
                            for row in edits[at:at + len(kinds)]), 'Boundary operation lost its owning document'
@@ -137,17 +142,37 @@ def document_history(logs, operations):
                 assert right_edit['object'] == right and right_edit['range'] == [0, 2] and right_edit['replacement'] == 'B🦋', 'Dependent right edit differs from workload'
                 assert join['object'] == target and join['joined'] == [target, right], 'Join does not retain its original targets'
                 updated = final[:boundary] + [(char, *final[boundary][1:]) for char in 'B🦋'] + final[boundary+2:]
-                for row, value, parts in [
-                    (split, final, [(paragraph, target, 0, boundary), (right_paragraph, right, boundary, len(final))]),
-                    (right_edit, updated, [(paragraph, target, 0, boundary), (right_paragraph, right, boundary, len(updated))]),
-                    (join, updated, [(paragraph, target, 0, len(updated))]),
-                ]:
+                split_parts = [(paragraph, target, 0, boundary), (right_paragraph, right, boundary, len(final))]
+                edited_parts = [(paragraph, target, 0, boundary), (right_paragraph, right, boundary, len(updated))]
+                stages = [(split, final, split_parts, {}), (right_edit, updated, edited_parts, {})]
+                if len(following) > 1:
+                    nest, unnest, _, tail_split, deleted = following
+                    outline = identity(insertion, 1) if 'Outline' in insertion['placement'] else insertion['parent']
+                    for row, parent in [(nest, paragraph), (unnest, outline)]:
+                        tree = row['tree']
+                        assert row['object'] == target and tree['object'] == right_paragraph and tree['author'] == insertion['author'], 'Tree move addresses another subtree or author'
+                        assert tree['placement'] == {'Move': {'parent': parent, 'before': None}}, 'Tree destination differs from workload'
+                    stages += [(nest, updated, edited_parts, {right_paragraph: paragraph}),
+                               (unnest, updated, edited_parts, {})]
+                stages.append((join, updated, [(paragraph, target, 0, len(updated))], {}))
+                if len(following) > 1:
+                    tail = tail_split['split']
+                    tail_text, tail_paragraph = identity(tail, 2), identity(tail, 1)
+                    assert tail_split['object'] == tail['text'] == target and tail['author'] == insertion['author'], 'Tail split addresses another text or author'
+                    assert tail['offset'] == end+1 and tail_split['range'] == [end+1, end+1], 'Tail split boundary differs from workload'
+                    tree = deleted['tree']
+                    assert deleted['object'] == tail_text and tree['object'] == tail_paragraph and tree['author'] == insertion['author'], 'Deletion addresses another subtree or author'
+                    assert tree['placement'] == 'Delete', 'Deletion became a move'
+                    stages += [(tail_split, updated, [(paragraph, target, 0, len(updated)-1), (tail_paragraph, tail_text, len(updated)-1, len(updated))], {}),
+                               (deleted, updated[:-1], [(paragraph, target, 0, len(updated)-1)], {})]
+                known_texts = {oid for _, _, pieces, _ in stages for _, oid, _, _ in pieces}
+                for row, value, parts, parents in stages:
                     attempt = linked[row['id']]
                     assert list(states.values())[-1]['attempt']['finished_us'] <= attempt['started_us'], 'Boundary publication preceded its dependency'
-                    assert set(attempt['documents']) & {target, right} == {oid for _, oid, _, _ in parts}, 'Boundary publication omitted or resurrected a text object'
+                    assert set(attempt['documents']) & known_texts == {oid for _, oid, _, _ in parts}, 'Boundary publication omitted or resurrected a text object'
                     for _, oid, start, stop in parts:
                         assert characters(attempt['documents'][oid]) == value[start:stop], 'Boundary publication differs from its local intent'
-                    states[row['kind']] = {'characters': value, 'parts': parts, 'attempt': attempt}
+                    states[row['kind']] = {'characters': value, 'parts': parts, 'parents': parents, 'attempt': attempt}
             allocated = {oid for state in states.values() for paragraph, text, _, _ in state['parts'] for oid in (paragraph, text)}
             existing = {oid for document in documents.values() for state in document['states'].values()
                         for paragraph, text, _, _ in state['parts'] for oid in (paragraph, text)}
@@ -177,6 +202,8 @@ def document_history(logs, operations):
                 states = list(document['states'].values())
                 known_texts = {oid for state in states for _, oid, _, _ in state['parts']}
                 known_paragraphs = {oid for state in states for oid, _, _, _ in state['parts']}
+                insertion = document['insertion']
+                outline = identity(insertion, 1) if 'Outline' in insertion['placement'] else insertion['parent']
                 if is_read and row['started_us'] > states[0]['attempt']['acknowledged_us']:
                     assert target in observed, 'Reader missed an acknowledged insertion'
                 if target not in observed:
@@ -185,7 +212,9 @@ def document_history(logs, operations):
                 actual = {oid: characters(observed[oid]) for oid in known_texts & observed.keys()}
                 matches = [i for i, state in enumerate(states)
                            if actual == {oid: state['characters'][start:stop] for _, oid, start, stop in state['parts']}
-                           and (not structural or known_paragraphs & graph.keys() == {oid for oid, _, _, _ in state['parts']})]
+                           and (not structural or (known_paragraphs & graph.keys() == {oid for oid, _, _, _ in state['parts']}
+                                and all(graph[p]['parent'] == state.get('parents', {}).get(p, outline)
+                                        for p, _, _, _ in state['parts'])))]
                 assert matches, 'Reader observed partial or invented document content'
                 if is_read:
                     matches = [i for i in matches if i >= previous.get(target, 0)]
@@ -197,16 +226,14 @@ def document_history(logs, operations):
                     assert matches, 'Reader missed acknowledged document content'
                     previous[target] = min(matches)
                 if structural:
-                    insertion = document['insertion']
-                    outline = insertion['parent']
                     if 'Outline' in insertion['placement']:
-                        outline = identity(insertion, 1)
                         expected_graph[outline] = {'parent': insertion['parent'], 'children': [], 'content': [],
                                                    'child_level': 1, 'position': insertion['placement']['Outline']}
                     assert outline in expected_graph, 'Snapshot omitted the inserted outline'
                     for paragraph, oid, _, _ in states[min(matches)]['parts']:
-                        expected_graph[outline]['children'].append(paragraph)
-                        expected_graph[paragraph] = {'parent': outline, 'children': [], 'content': [oid],
+                        parent = states[min(matches)].get('parents', {}).get(paragraph, outline)
+                        expected_graph[parent]['children'].append(paragraph)
+                        expected_graph[paragraph] = {'parent': parent, 'children': [], 'content': [oid],
                                                      'child_level': 1, 'position': None}
             if structural:
                 assert graph == expected_graph, 'Snapshot contains partial, reordered or invented paragraph structure'

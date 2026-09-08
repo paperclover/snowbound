@@ -101,6 +101,111 @@ fn move_preserves_remote_content_and_dependent_edits_through_reopen() {
 }
 
 #[test]
+fn queued_format_split_and_delete_reconcile_equivalent_immutable_style_identities() {
+    let (source, sid, _, _, texts) = fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let cache = Replica::create(&path, &source).unwrap();
+    cache
+        .format(
+            &source,
+            sid,
+            texts[0],
+            0..8,
+            &[onestore::TextAttribute::Bold(true)],
+        )
+        .unwrap();
+    let split = onestore::ParagraphSplit::new(texts[0], 4, "Author").unwrap();
+    cache
+        .split(&cache.snapshot().unwrap(), sid, &split)
+        .unwrap();
+    cache
+        .tree(
+            &cache.snapshot().unwrap(),
+            sid,
+            &TreeEdit::delete(split.object(), "Author").unwrap(),
+        )
+        .unwrap();
+    cache
+        .edit_text(&cache.snapshot().unwrap(), sid, texts[0], 0..0, "Local ")
+        .unwrap();
+    let queue = cache.pending().unwrap();
+    drop(cache);
+    let mut server = Server::new(&source);
+    for intent in queue {
+        let cache = Replica::open(&path).unwrap();
+        assert!(
+            matches!(cache.sync_once(&mut server).unwrap(), Some((id, EditStatus::Published { .. })) if id == intent.id)
+        );
+    }
+    assert_eq!(
+        super::outline::node(&server.durable, sid, texts[0])["kind"]["text"],
+        "Local Orig"
+    );
+}
+
+#[test]
+fn native_empty_child_list_normalization_preserves_deletion_and_its_dependents() {
+    let source = include_bytes!("../../../../corpus/outline-edit/empty-children/before.one");
+    let remote = include_bytes!("../../../../corpus/outline-edit/empty-children/remote.one");
+    let (sid, intent): (ExGuid, TreeEdit) = serde_json::from_str(include_str!(
+        "../../../../corpus/outline-edit/empty-children/intent.json"
+    ))
+    .unwrap();
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let space = &document.spaces[&sid];
+    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+    let tail = view.nodes[&intent.object()].content[0];
+    let (outline_id, outline) = view
+        .nodes
+        .iter()
+        .find(|(_, node)| node.children.contains(&intent.object()))
+        .unwrap();
+    let left = view.nodes[&outline.children[0]].content[0];
+    for changed in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite");
+        let cache = Replica::create(&path, source).unwrap();
+        let deletion = cache.tree(source, sid, &intent).unwrap().unwrap();
+        let dependent = cache
+            .edit_text(&cache.snapshot().unwrap(), sid, left, 0..0, "Local ")
+            .unwrap()
+            .unwrap();
+        let local = cache.snapshot().unwrap();
+        drop(cache);
+        let cache = Replica::open(&path).unwrap();
+        let mut server = if changed {
+            let edited = PreparedEdit::text(remote, sid, tail, 0..2, "Changed").unwrap();
+            Server::new(edited.as_bytes())
+        } else {
+            Server::new(remote)
+        };
+        if changed {
+            assert_eq!(
+                cache.sync_once(&mut server).unwrap(),
+                Some((deletion, EditStatus::Conflict(ConflictKind::ContentChanged)))
+            );
+            assert_eq!(cache.snapshot().unwrap(), local);
+            assert_eq!(cache.pending().unwrap().len(), 2);
+            assert_eq!(server.publications, 0);
+        } else {
+            for expected in [deletion, dependent] {
+                assert!(
+                    matches!(cache.sync_once(&mut server).unwrap(), Some((id, EditStatus::Published { .. })) if id == expected)
+                );
+            }
+            assert!(cache.pending().unwrap().is_empty());
+            assert_eq!(server.publications, 2);
+            assert!(!children(&server.durable, sid, *outline_id).contains(&intent.object()));
+            let node = super::outline::node(&server.durable, sid, left);
+            assert!(node["kind"]["text"].as_str().unwrap().starts_with("Local "));
+        }
+    }
+}
+
+#[test]
 fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
     let (source, sid, outline, paragraphs, texts) = fixture();
     let child = Insertion::paragraph(paragraphs[0], None, "Descendant", "Author").unwrap();
