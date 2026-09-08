@@ -176,8 +176,10 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
                         'OnError((exception, mode) => (FileAppend(exception.Message, "**"), ExitApp(1)))\n'
                         'DetectHiddenWindows false\napp := ComObject("OneNote.Application")\n'
                         f'app.NavigateTo("{page_id}", "", false)\n'
-                        'hwnd := WinWait("ahk_exe ONENOTE.EXE",, 10)\n'
-                        'WinMaximize(hwnd)\nWinActivate(hwnd)\nWinWaitActive(hwnd,, 10)\n',
+                        'hwnd := WinWait("ahk_class Framework::CFrame ahk_exe ONENOTE.EXE",, 10)\n'
+                        'if !hwnd\n    throw Error("OneNote window did not appear")\n'
+                        'WinMaximize(hwnd)\nWinActivate(hwnd)\n'
+                        'if !WinWaitActive(hwnd,, 10)\n    throw Error("OneNote window did not become active")\n',
                         target=name, shot_delay_ms=1500)
                     page.with_suffix('.navigation.json').write_text(json.dumps({k: v for k, v in result.items() if k != 'png_b64'}, indent=2))
                     if result.get('png_b64'):
