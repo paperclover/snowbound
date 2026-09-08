@@ -11,6 +11,7 @@ mod flush;
 mod formatting;
 mod insertion;
 mod objects;
+mod outline;
 mod paragraph;
 mod properties;
 #[cfg(feature = "protected")]
@@ -32,6 +33,7 @@ pub use files::FileDataReference;
 pub use formatting::TextAttribute;
 pub use insertion::Insertion;
 pub use objects::{Object, ObjectData, ObjectReferences, ResolvedRevision};
+pub use outline::OutlineEdit;
 pub use paragraph::{ParagraphJoin, ParagraphSplit};
 pub use properties::{IdStream, Property, PropertySets, Value};
 pub use revisions::{ExGuid, ObjectSpace, Revision, RevisionIndex};

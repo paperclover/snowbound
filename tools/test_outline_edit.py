@@ -17,6 +17,75 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class OutlineEditTest(unittest.TestCase):
+    def cold_layout(self, fixture):
+        models = {}
+        with TemporaryDirectory() as temporary:
+            for phase, notebook in [('candidate', fixture / 'candidate'), ('cold', fixture / 'cold/notebook')]:
+                folder = Path(temporary) / phase
+                shutil.copytree(fixture / 'cold/read', folder / 'read')
+                compare(notebook, folder / 'read')
+                subprocess.run([EXPORTER, notebook / 'synthetic.one', folder / 'model'], check=True)
+                model = json.loads((folder / 'model/document.json').read_text())
+                models[phase] = {r['nodes'][r['roots']['2']]['kind']['title']: (r, page)
+                                 for _, _, r, page in ordered_pages(model)}
+        captures = {page.get('name'): page for path in (fixture / 'cold/read').glob('page-*.xml')
+                    for page in [ET.parse(path).getroot()]}
+        self.assertEqual(len(models['candidate']), 15)
+        self.assertEqual(models['candidate'].keys(), models['cold'].keys())
+        for name, (old, page) in models['candidate'].items():
+            new, saved_page = models['cold'][name]
+            self.assertEqual(page, saved_page)
+            for oid, node in walk(old, page):
+                actual = new['nodes'][oid]
+                for key in ('children', 'content', 'structure', 'child_level'):
+                    self.assertEqual(actual[key], node[key], (name, oid, key))
+                self.assertEqual(actual['kind'].get('collapse_state'), node['kind'].get('collapse_state'))
+                if node['kind']['type'] == 'RichText':
+                    self.assertEqual(actual['kind'], node['kind'])
+        return models, captures
+
+    def test_rust_layout_and_saved_expansion_survive_cold_native_reopen(self):
+        models, captures = self.cold_layout(FIXTURE / 'layout')
+        cases = json.loads((FIXTURE / 'cases.json').read_text(encoding='utf-8-sig'))
+        selected = [case for case in cases if any(key in case for key in ('position', 'size', 'collapse'))]
+        self.assertEqual(len(selected), 5)
+        for case in selected:
+            name = case['name']
+            old, page = models['candidate'][name]
+            saved, _ = models['cold'][name]
+            oid = next(oid for oid in old['nodes'][page]['children'] if old['nodes'][oid]['kind']['type'] == 'Outline')
+            node = saved['nodes'][oid]
+            z = old['nodes'][page]['children'].index(oid)
+            native = next(outline for outline in captures[name].findall('one:Outline', ns)
+                          if int(outline.find('one:Position', ns).get('z')) == z)
+            for key, value in case.get('position', {}).items():
+                self.assertEqual(node['layout'][key], value)
+            if 'size' in case:
+                size = native.find('one:Size', ns)
+                self.assertEqual(node['layout']['max_width'], case['size']['width'])
+                self.assertEqual(size.get('isSetByUser') in ('true', '1'), case['size']['isSetByUser'])
+                if case['size']['isSetByUser']:
+                    self.assertAlmostEqual(float(size.get('width')), case['size']['width'], places=3)
+            if 'collapse' in case:
+                target, = [p for p in native.findall('.//one:OE', ns) if p.find('one:T', ns) is not None
+                           and ''.join(Text(p.find('one:T', ns).text or '').parts).startswith('Target ')]
+                self.assertEqual(target.get('collapsed') in ('true', '1'), case['collapse'])
+
+    def test_rust_width_replaces_native_reserved_wrap_width(self):
+        models, captures = self.cold_layout(FIXTURE / 'reserved-width')
+        saved, page = models['cold']['Move outline']
+        oid = next(oid for oid in saved['nodes'][page]['children'] if saved['nodes'][oid]['kind']['type'] == 'Outline')
+        node = saved['nodes'][oid]
+        self.assertEqual(node['layout']['max_width'], 144)
+        self.assertTrue(node['layout']['width_set_by_user'])
+        self.assertFalse(any(field['id'] == 0x14001cdb for field in node['extra'][0]))
+        z = saved['nodes'][page]['children'].index(oid)
+        native = next(outline for outline in captures['Move outline'].findall('one:Outline', ns)
+                      if int(outline.find('one:Position', ns).get('z')) == z)
+        size = native.find('one:Size', ns)
+        self.assertEqual(size.get('isSetByUser'), 'true')
+        self.assertAlmostEqual(float(size.get('width')), 144, places=3)
+
     def preserved_node(self, old, new):
         expected = dict(old)
         if old['modified'] != new['modified']:
@@ -101,8 +170,7 @@ class OutlineEditTest(unittest.TestCase):
                             self.assertEqual(geometry[key], value)
                         if 'size' in case:
                             self.assertEqual(geometry['max_width'], case['size']['width'])
-                            fields = {field['id'] for field in new['nodes'][outline]['extra'][0]}
-                            self.assertEqual(0x88001cbd in fields, case['size']['isSetByUser'])
+                            self.assertEqual(geometry['width_set_by_user'], case['size']['isSetByUser'])
                         if 'collapse' in case:
                             self.assertEqual(bool(new['nodes'][target]['kind']['collapse_state']), case['collapse'])
                             node, = [node for node in captures[phase][name].findall('one:Outline//one:OE', ns)

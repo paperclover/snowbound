@@ -66,6 +66,8 @@ pub struct Layout {
     pub x: Option<f32>,
     pub y: Option<f32>,
     pub max_width: Option<f32>,
+    /// An explicit user width when true; false or absent leaves an automatic layout hint.
+    pub width_set_by_user: Option<bool>,
     pub max_height: Option<f32>,
 }
 
@@ -822,6 +824,7 @@ impl<'a> Element<'a> {
             x: f.float(0x14001c14, 36.0)?,
             y: f.float(0x14001c15, 36.0)?,
             max_width: f.float(0x14001c1b, 36.0)?,
+            width_set_by_user: f.boolean(0x08001cbd)?,
             max_height: f.float(0x14001c1c, 36.0)?,
         };
         let format = Format {

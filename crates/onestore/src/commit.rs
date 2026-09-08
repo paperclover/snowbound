@@ -183,6 +183,19 @@ pub struct PreparedEdit<'a> {
 }
 
 impl<'a> PreparedEdit<'a> {
+    /// Changes outline geometry or a paragraph's saved expansion state, preserving content.
+    pub fn outline(
+        source: &'a [u8],
+        space: ExGuid,
+        object: ExGuid,
+        edit: crate::OutlineEdit,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: edit.apply(source, space, object)?,
+        })
+    }
+
     /// Joins adjacent ordinary paragraphs with native left-tag and text-identity semantics.
     pub fn join(
         source: &'a [u8],

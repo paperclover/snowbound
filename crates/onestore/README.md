@@ -52,6 +52,7 @@ harness also accepts `--client-profile release`.
 | `ParagraphSplit`, `PreparedEdit::split` | Split ordinary text at a UTF-16 scalar boundary, retaining the original left identities and moving children to the right |
 | `ParagraphJoin`, `PreparedEdit::join` | Join adjacent ordinary text while preserving inherited character styles and native text-identity rules |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
+| `OutlineEdit`, `PreparedEdit::outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |
 | `read_snapshot` | Read a validated snapshot through fresh positioned I/O while the caller excludes maintenance |
@@ -79,6 +80,11 @@ accepts one `0..0` span for subsequent typing. Retain the `Insertion` value for 
 value creates different object identities. Duplicate insertion identities require
 reconciliation. Formatting accepts explicit attributes, preserves inherited values,
 and gives retired immutable styles zero current references while retaining history.
+Outline layout edits use points. Width is at least 36 points; an explicit user width
+and an automatic maximum-width hint remain distinct. Native layout generates the
+rendered height. Saved paragraph collapse defaults can be overridden by the native
+client's cached view. [Native layout captures](../../corpus/outline-edit/README.md)
+verify these edits through a fresh OneNote cache, including fields and nested content.
 Paragraph splits preserve character formatting, retain tags on the left, and clone
 mutable list objects without restarting numbering. The new right paragraph/text
 identities belong to the retained `ParagraphSplit` intent. Its publication includes

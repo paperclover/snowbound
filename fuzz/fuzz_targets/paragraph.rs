@@ -1,8 +1,8 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    CommitState, ExGuid, Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit, RevisionIndex,
-    Store, TextAttribute as A,
+    CommitState, ExGuid, Insertion, OutlineEdit, ParagraphJoin, ParagraphSplit, PreparedEdit,
+    RevisionIndex, Store, TextAttribute as A,
     document::{Document, Kind},
 };
 use std::sync::LazyLock;
@@ -38,6 +38,11 @@ static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid)> = LazyLock::new(|| {
 
 fuzz_target!(|input: &[u8]| {
     let (source, sid, outline) = &*SOURCE;
+    if let Ok(operation) = serde_json::from_slice::<OutlineEdit>(input)
+        && let Ok(edit) = PreparedEdit::outline(source, *sid, *outline, operation)
+    {
+        current::current(edit.as_bytes());
+    }
     if let Ok(intent) = serde_json::from_slice::<ParagraphSplit>(input)
         && let Ok(edit) = PreparedEdit::split(source, *sid, &intent)
     {
@@ -94,7 +99,41 @@ fuzz_target!(|input: &[u8]| {
             .collect();
         let mut expected_text = Vec::new();
         let mut expected_graph = Vec::new();
-        let edit = if step[1] & 8 != 0 && !pairs.is_empty() {
+        let mut expected_layout = None;
+        let mut expected_collapse = None;
+        let edit = if step[1] & 16 != 0 {
+            let mut layout = serde_json::to_value(&view.nodes[outline].layout).unwrap();
+            let (object, operation) = match (step[1] >> 5) % 3 {
+                0 => {
+                    let x = (f32::from(step[2]) - 64.0) * 18.0;
+                    let y = f32::from(step[3]) * 18.0;
+                    layout["x"] = x.into();
+                    layout["y"] = y.into();
+                    (*outline, OutlineEdit::Position { x, y })
+                }
+                1 => {
+                    let points = (2.0 + f32::from(step[2])) * 18.0;
+                    let user_set = step[3] & 1 != 0;
+                    layout["max_width"] = points.into();
+                    layout["width_set_by_user"] = user_set.into();
+                    (*outline, OutlineEdit::Width { points, user_set })
+                }
+                _ => {
+                    let paragraph = paragraphs[usize::from(step[2]) % paragraphs.len()];
+                    let collapsed = step[3] & 1 != 0;
+                    expected_collapse = Some((paragraph, collapsed));
+                    (paragraph, OutlineEdit::Collapsed(collapsed))
+                }
+            };
+            expected_layout = Some(layout);
+            for (id, node) in &view.nodes {
+                expected_graph.push((*id, node.children.clone(), node.content.clone()));
+                if matches!(node.kind, Kind::RichText { .. }) {
+                    expected_text.push((*id, characters(view, *id)));
+                }
+            }
+            PreparedEdit::outline(source, *sid, object, operation).unwrap()
+        } else if step[1] & 8 != 0 && !pairs.is_empty() {
             let (parent, left, right) = pairs[usize::from(step[2]) % pairs.len()];
             let a = view.nodes[&left].content[0];
             let b = view.nodes[&right].content[0];
@@ -148,6 +187,18 @@ fuzz_target!(|input: &[u8]| {
         let after_document = Document::parse(&after_index).unwrap();
         let space = &after_document.spaces[sid];
         let after_view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        if let Some(expected) = expected_layout {
+            assert_eq!(
+                serde_json::to_value(&after_view.nodes[outline].layout).unwrap(),
+                expected
+            );
+        }
+        if let Some((id, expected)) = expected_collapse {
+            let Kind::Paragraph { collapse_state, .. } = after_view.nodes[&id].kind else {
+                panic!()
+            };
+            assert_eq!(collapse_state, Some(u8::from(expected)));
+        }
         for (id, expected) in expected_text {
             assert_eq!(characters(after_view, id), expected);
         }
