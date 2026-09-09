@@ -1,0 +1,41 @@
+{
+  "generator": "crates/onestore/src/page.rs::tests::page_movement_restores_an_optional_metadata_cache_from_history",
+  "captures": {
+    "source": {
+      "capture": "evidence/m10/page-edit-optional-source-cold-02",
+      "machine": {
+        "name": "m6-41fb00f9",
+        "hostname": "ONE-M6-41FB00F9"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 54872,
+          "sha256": "d4d0955b95844a3bf578c39b68c9039334f730876617f36b655b96c5b59289cd",
+          "mtime_ns": 1788938613040603712
+        }
+      ]
+    },
+    "restored": {
+      "capture": "evidence/m10/page-edit-optional-cold-02",
+      "machine": {
+        "name": "m6-96df7be7",
+        "hostname": "ONE-M6-96DF7BE7"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 57624,
+          "sha256": "c7b59e53945bd28c9ac2542890f43c7098568b50a1d14301c6ded79e9c7b5cf8",
+          "mtime_ns": 1788938613040899005
+        }
+      ]
+    }
+  }
+}

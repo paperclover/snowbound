@@ -1,0 +1,169 @@
+{
+  "generator": "crates/onestore/tests/page_movement.rs::explicit_page_edits_match_native_selection_and_indentation",
+  "source": "corpus/page-lifecycle/04-nested/notebook/Lifecycle.one",
+  "candidate": "evidence/m10/page-edit-candidate-02",
+  "cold": {
+    "01-demoted-parent": {
+      "capture": "evidence/m10/page-edit-cold-01-demoted-parent",
+      "machine": {
+        "name": "m6-ce1d1d57",
+        "hostname": "ONE-M6-CE1D1D57"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 56056,
+          "sha256": "2629b43d4b6c2630522862e3a854ec58279b7fe803f30242c0d834ea34b664da",
+          "mtime_ns": 1788935349739312911
+        }
+      ]
+    },
+    "02-promoted-parent": {
+      "capture": "evidence/m10/page-edit-cold-02-promoted-parent",
+      "machine": {
+        "name": "m6-c1201e9e",
+        "hostname": "ONE-M6-C1201E9E"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 58960,
+          "sha256": "eb8e60206218524e11c126d40ad87531691ad74118566d24057aa98be3d494d8",
+          "mtime_ns": 1788935349797487705
+        }
+      ]
+    },
+    "03-selected-group-move": {
+      "capture": "evidence/m10/page-edit-cold-03-selected-group-move",
+      "machine": {
+        "name": "m6-20062e97",
+        "hostname": "ONE-M6-20062E97"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 59688,
+          "sha256": "6048ce8cc2ca5b24da2c594c079e4c98aee8b8ee742f667e2e6beedd0917c12a",
+          "mtime_ns": 1788935349855149794
+        }
+      ]
+    },
+    "04-subpage-move": {
+      "capture": "evidence/m10/page-edit-cold-04-subpage-move",
+      "machine": {
+        "name": "m6-6019e29d",
+        "hostname": "ONE-M6-6019E29D"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 62168,
+          "sha256": "e902c74b456d177fd4effbcecd73550f5abaaf1dd51d6f844db03c591a8a7707",
+          "mtime_ns": 1788935349914573000
+        }
+      ]
+    },
+    "05-insert-before-subpage": {
+      "capture": "evidence/m10/page-edit-cold-05-insert-before-subpage",
+      "machine": {
+        "name": "m6-53ae91c1",
+        "hostname": "ONE-M6-53AE91C1"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 64576,
+          "sha256": "8ad33d7aef415d0c2a1f8755a43ad62a5a803c2b1b4655c9d1d1aa615f7f353e",
+          "mtime_ns": 1788935349976521109
+        }
+      ]
+    },
+    "06-promoted-level-two": {
+      "capture": "evidence/m10/page-edit-cold-06-promoted-level-two",
+      "machine": {
+        "name": "m6-ecbaddc7",
+        "hostname": "ONE-M6-ECBADDC7"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 65664,
+          "sha256": "5c23f179e53441d81e2d6d84badaa3a19121276f341eb32dc214c8148107bab3",
+          "mtime_ns": 1788935350039848211
+        }
+      ]
+    },
+    "07-promoted-root": {
+      "capture": "evidence/m10/page-edit-cold-07-promoted-root",
+      "machine": {
+        "name": "m6-c8a7a5ff",
+        "hostname": "ONE-M6-C8A7A5FF"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 68216,
+          "sha256": "375d815d58a5775261f54c4c23134c863b6dbe69ed48ba7636d3218008544ef8",
+          "mtime_ns": 1788935350105745801
+        }
+      ]
+    },
+    "08-collapsed-group-move": {
+      "capture": "evidence/m10/page-edit-cold-08-collapsed-group-move",
+      "machine": {
+        "name": "m6-2c91bdca",
+        "hostname": "ONE-M6-2C91BDCA"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 69000,
+          "sha256": "fb2b01ee423c89cdeff62b32e1ff7edd225a0d90da27ec8d749dd3870105449c",
+          "mtime_ns": 1788935350173118884
+        }
+      ]
+    },
+    "single-page": {
+      "capture": "evidence/m10/page-edit-cold-single-page",
+      "machine": {
+        "name": "m6-8a614337",
+        "hostname": "ONE-M6-8A614337"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 55040,
+          "sha256": "1a1a4adb6e5032fd7b966bce629d454e38682eb3290c16ee9c23a8eda043f8cd",
+          "mtime_ns": 1788935350218567200
+        }
+      ]
+    }
+  }
+}

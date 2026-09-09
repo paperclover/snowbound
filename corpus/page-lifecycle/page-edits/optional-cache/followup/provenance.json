@@ -1,0 +1,19 @@
+{
+  "generator": "crates/onestore/tests/page_movement.rs::metadata_copy_order_does_not_change_page_identity",
+  "capture": "evidence/m10/page-edit-metadata-order-cold-01",
+  "machine": {
+    "name": "m6-76a08f71",
+    "hostname": "ONE-M6-76A08F71"
+  },
+  "teardown": {
+    "absent": true
+  },
+  "source": [
+    {
+      "path": "Lifecycle.one",
+      "bytes": 59848,
+      "sha256": "c44936c8f45de1b5f136050a1c41a51a237634e154d39bafb5abbda5773b3caf",
+      "mtime_ns": 1788939065374445295
+    }
+  ]
+}

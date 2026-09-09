@@ -720,12 +720,6 @@ pub(crate) fn write_revisions(
         };
         for (id, replacement) in &replacements {
             if let Some(object) = revision.objects.get(id) {
-                if !reachable.contains(id) {
-                    return Err(Error {
-                        offset: 0,
-                        message: "Object is not reachable in the active revision",
-                    });
-                }
                 if object.jcid & 0x100000 != 0 {
                     return Err(Error {
                         offset: 0,
@@ -813,10 +807,12 @@ pub(crate) fn write_revisions(
             }
         }
         replacements.retain(|id, replacement| {
-            !revision.objects.get(id).is_some_and(|object| {
-                object.data == ObjectData::Properties(&replacement.bytes)
-                    && object.global_ids == replacement.global_ids
-            })
+            // Detached objects must pass the final reachability check even when unchanged.
+            !reachable.contains(id)
+                || !revision.objects.get(id).is_some_and(|object| {
+                    object.data == ObjectData::Properties(&replacement.bytes)
+                        && object.global_ids == replacement.global_ids
+                })
         });
         if replacements.is_empty() {
             continue;

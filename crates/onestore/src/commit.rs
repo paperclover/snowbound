@@ -183,6 +183,15 @@ pub struct PreparedEdit<'a> {
 }
 
 impl<'a> PreparedEdit<'a> {
+    /// Applies page moves in slice order and publishes final order and indentation atomically.
+    /// Each page occurs once; all pages to move must be explicit, including selected subpages.
+    pub fn pages(source: &'a [u8], edits: &[crate::PageEdit]) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: crate::PageEdit::apply(source, edits)?,
+        })
+    }
+
     /// Creates a page and its section entry in one transaction, retaining the intent's identities.
     pub fn create_page(source: &'a [u8], page: &crate::PageCreation) -> Result<Self, crate::Error> {
         Ok(Self {

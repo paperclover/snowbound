@@ -32,6 +32,13 @@ def compare(source, capture, *, refresh_metadata_levels=False):
             models.append(json.loads((output / 'document.json').read_text()))
         before, after = models
         pages = list(ordered_pages(before))
+        metadata = {}
+        for page_sid, _, page_view, _ in pages:
+            # Native uses the space GUID when it differs from the page-node GUID.
+            guid = UUID(page_sid.split('}')[0].strip('{')).bytes_le
+            salt = UUID('22a8c031-3600-42ee-b714-d7acda2435e8').bytes_le
+            oid = '{' + str(UUID(bytes_le=bytes(a ^ b for a, b in zip(guid, salt, strict=True)))).upper() + '},1'
+            metadata[oid] = (page_sid, page_view['nodes'][page_view['roots']['2']])
         assert [(sid, page) for sid, _, _, page in pages] == [
             (sid, page) for sid, _, _, page in ordered_pages(after)]
         assert before['root'] == after['root']
@@ -47,27 +54,25 @@ def compare(source, capture, *, refresh_metadata_levels=False):
                     existing = [p for p in series['extra'][0] if p['id'] == 0x24003442]
                     added = [p for p in observed['nodes'][series_id]['extra'][0] if p['id'] == 0x24003442]
                     if existing and refresh_metadata_levels:
-                        for copy, page_sid in zip(existing[0]['value']['Objects'], series['spaces'], strict=True):
-                            (_, _, page_view, _), = [p for p in pages if p[0] == page_sid]
-                            metadata = expected[copy]['kind']
-                            assert metadata['type'] == 'Metadata'
-                            level = page_view['nodes'][page_view['roots']['2']]['kind']['level']
-                            refreshed += metadata['level'] != level
-                            metadata['level'] = level
+                        for copy in existing[0]['value']['Objects']:
+                            cached = expected[copy]['kind']
+                            assert cached['type'] == 'Metadata'
+                            level = metadata[copy][1]['kind']['level']
+                            refreshed += cached['level'] != level
+                            cached['level'] = level
                     if existing or not added:
                         continue
                     copies = []
-                    for page_sid in series['spaces']:
-                        (_, _, page_view, _), = [p for p in pages if p[0] == page_sid]
-                        # Native uses the space GUID when it differs from the page-node GUID.
-                        guid = UUID(page_sid.split('}')[0].strip('{')).bytes_le
-                        salt = UUID('22a8c031-3600-42ee-b714-d7acda2435e8').bytes_le
-                        metadata = '{' + str(UUID(bytes_le=bytes(a ^ b for a, b in zip(guid, salt, strict=True)))).upper() + '},1'
-                        assert metadata not in expected
-                        expected[metadata] = page_view['nodes'][page_view['roots']['2']]
-                        copies.append(metadata)
+                    for oid, (page_sid, node) in metadata.items():
+                        if page_sid not in series['spaces']:
+                            continue
+                        assert oid not in expected
+                        expected[oid] = node
+                        copies.append(oid)
                         filled += 1
-                    series['extra'][0].append({'id': 0x24003442, 'value': {'Objects': copies}})
+                    assert len(added) == 1
+                    assert sorted(copies) == sorted(added[0]['value']['Objects'])
+                    series['extra'][0].append(added[0])
             assert original['roots'] == observed['roots']
             assert expected == observed['nodes'], sid
         print(f'Passed: {len(pages)} ordered pages and preserved active graphs; {filled} missing section metadata copies filled natively; {refreshed} section metadata levels refreshed')

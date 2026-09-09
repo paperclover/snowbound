@@ -1,10 +1,10 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    CommitState, ExGuid, Insertion, PageCreation, PreparedEdit, RevisionIndex, Store,
-    document::{Document, Kind},
+    CommitState, ExGuid, Insertion, PageCreation, PageEdit, PreparedEdit, RevisionIndex, Store,
+    document::{Document, FieldValue, Kind},
 };
-use std::sync::LazyLock;
+use std::{collections::BTreeMap, sync::LazyLock};
 
 #[path = "../../crates/onestore/tests/support/current.rs"]
 mod current;
@@ -16,13 +16,25 @@ static SOURCE: LazyLock<Vec<u8>> = LazyLock::new(|| {
 });
 
 fuzz_target!(|input: &[u8]| {
+    let source = match input.first().copied().unwrap_or(0) % 3 {
+        1 => include_bytes!("../../corpus/page-lifecycle/page-edits/optional-cache/source/Lifecycle.one")
+            .as_slice(),
+        2 => include_bytes!("../../corpus/page-lifecycle/page-edits/optional-cache/source-cold/notebook/Lifecycle.one")
+            .as_slice(),
+        _ => SOURCE.as_slice(),
+    };
     if let Ok(intent) = serde_json::from_slice::<PageCreation>(input)
-        && let Ok(prepared) = PreparedEdit::create_page(&SOURCE, &intent)
+        && let Ok(prepared) = PreparedEdit::create_page(source, &intent)
     {
         current::current(prepared.as_bytes());
     }
-    let mut persisted = SOURCE.clone();
-    let mut caches = std::array::from_fn::<_, 12, _>(|_| SOURCE.clone());
+    if let Ok(edits) = serde_json::from_slice::<Vec<PageEdit>>(input)
+        && let Ok(prepared) = PreparedEdit::pages(source, &edits)
+    {
+        current::current(prepared.as_bytes());
+    }
+    let mut persisted = source.to_vec();
+    let mut caches = std::array::from_fn::<_, 12, _>(|_| source.to_vec());
     for step in input.chunks_exact(8).take(24) {
         let actor = usize::from(step[0]) % caches.len();
         if step[1] % 3 == 0 {
@@ -33,6 +45,17 @@ fuzz_target!(|input: &[u8]| {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let mut pages = document.pages().unwrap();
+        let mut levels: BTreeMap<_, _> = pages
+            .iter()
+            .map(|(sid, _)| {
+                let space = &document.spaces[sid];
+                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let Kind::Metadata { level, .. } = view.nodes[&view.roots[&2]].kind else {
+                    panic!()
+                };
+                (*sid, level.unwrap_or(1))
+            })
+            .collect();
         let (sid, page) = pages[usize::from(step[2]) % pages.len()];
         let space = &document.spaces[&sid];
         let view = &space.revisions[&space.contexts[&ExGuid::default()]];
@@ -52,7 +75,41 @@ fuzz_target!(|input: &[u8]| {
                 .then_some(*id)
             })
             .collect();
-        let (edit, title_update) = if step[1] & 8 != 0 && !titles.is_empty() {
+        let (edit, title_update) = if step[1] & 32 != 0 {
+            let count = 1 + usize::from(step[3] & 128 != 0 && pages.len() > 1);
+            let selected: Vec<_> = (0..count)
+                .map(|i| pages[(usize::from(step[2]) + i) % pages.len()].0)
+                .collect();
+            let before = (step[3] & 4 != 0)
+                .then_some(pages[usize::from(step[7]) % pages.len()].0)
+                .filter(|id| !selected.contains(id));
+            let mut edits = Vec::new();
+            for (ordinal, sid) in selected.iter().enumerate() {
+                let level = u32::from(if ordinal == 0 { step[3] } else { step[6] }) % 3 + 1;
+                levels.insert(*sid, level);
+                let edit = if step[3] & 8 == 0 {
+                    PageEdit::set_level(*sid, level).unwrap()
+                } else {
+                    let at = pages.iter().position(|p| p.0 == *sid).unwrap();
+                    let page = pages.remove(at);
+                    let at = before.map_or(pages.len(), |id| {
+                        pages.iter().position(|p| p.0 == id).unwrap()
+                    });
+                    pages.insert(at, page);
+                    PageEdit::move_to(*sid, before, level).unwrap()
+                };
+                edits.push(edit);
+            }
+            let restored: Vec<PageEdit> =
+                serde_json::from_value(serde_json::to_value(&edits).unwrap()).unwrap();
+            assert_eq!(edits, restored);
+            let prepared = PreparedEdit::pages(source, &restored);
+            if levels[&pages[0].0] != 1 {
+                assert!(prepared.is_err());
+                continue;
+            }
+            (prepared.unwrap(), None)
+        } else if step[1] & 8 != 0 && !titles.is_empty() {
             let object = titles[0];
             let Kind::RichText { text: original, .. } = &view.nodes[&object].kind else {
                 unreachable!()
@@ -75,7 +132,16 @@ fuzz_target!(|input: &[u8]| {
                 Some((sid, intent.text_object(), text)),
             )
         } else {
-            let before = (step[2] & 1 != 0).then_some(sid);
+            let section = &document.spaces[&document.root];
+            let section = &section.revisions[&section.contexts[&ExGuid::default()]];
+            let head = section.nodes[&section.roots[&1]]
+                .children
+                .iter()
+                .map(|id| &section.nodes[id])
+                .find(|series| series.spaces.contains(&sid))
+                .unwrap()
+                .spaces[0];
+            let before = (step[2] & 1 != 0).then_some(head);
             let title = (step[3] & 4 == 0).then_some(text);
             let intent = PageCreation::new(before, title, "Page fuzz").unwrap();
             let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
@@ -85,6 +151,7 @@ fuzz_target!(|input: &[u8]| {
                 pages.iter().position(|p| p.0 == sid).unwrap()
             });
             pages.insert(position, (intent.space(), intent.object()));
+            levels.insert(intent.space(), 1);
             (
                 edit,
                 intent
@@ -96,6 +163,40 @@ fuzz_target!(|input: &[u8]| {
         let after_index = RevisionIndex::parse(&after_store).unwrap();
         let after_document = Document::parse(&after_index).unwrap();
         assert_eq!(after_document.pages().unwrap(), pages);
+        let mut metadata_levels = BTreeMap::new();
+        for (sid, _) in &pages {
+            let space = &after_document.spaces[sid];
+            let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let Kind::Metadata { level, .. } = view.nodes[&view.roots[&2]].kind else {
+                panic!()
+            };
+            assert_eq!(level.unwrap_or(1), levels[sid]);
+            let metadata = &view.nodes[&view.roots[&2]];
+            let FieldValue::Bytes(guid) = metadata.extra[0]
+                .iter()
+                .find(|field| field.id == 0x1c001c30)
+                .unwrap()
+                .value
+            else {
+                panic!()
+            };
+            assert!(metadata_levels.insert(guid, levels[sid]).is_none());
+        }
+        let section = &after_document.spaces[&after_document.root];
+        let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+        for metadata in view.nodes.values() {
+            if let Kind::Metadata { level, .. } = metadata.kind {
+                let FieldValue::Bytes(guid) = metadata.extra[0]
+                    .iter()
+                    .find(|field| field.id == 0x1c001c30)
+                    .unwrap()
+                    .value
+                else {
+                    panic!()
+                };
+                assert_eq!(metadata_levels.get(guid), Some(&level.unwrap_or(1)));
+            }
+        }
         if let Some((sid, object, text)) = title_update {
             let space = &after_document.spaces[&sid];
             let view = &space.revisions[&space.contexts[&ExGuid::default()]];

@@ -46,6 +46,7 @@ harness also accepts `--client-profile release`.
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `PageCreation`, `PreparedEdit::create_page` | Add an empty top-level page and its section entry atomically, retaining page identities across retries |
+| `PageEdit`, `PreparedEdit::pages` | Publish explicitly selected page moves and indentation changes together, preserving page content and historical revisions |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
@@ -81,6 +82,15 @@ Retain the intent to preserve its page, title and space identities; existing
 identities require reconciliation before retry. Body insertion and title edits
 use those identities through the existing APIs. [Native page-creation fixtures](../../corpus/page-lifecycle/creation/README.md)
 cover duplicate Unicode titles, native edits and Rust follow-up edits.
+`PageEdit::set_level` changes one page's indentation in place. `PageEdit::move_to`
+moves before an existing page space, or appends for `None`, and sets its level.
+`PreparedEdit::pages` applies moves in slice order and publishes the final order,
+series membership and metadata levels in one transaction. Each page occurs once;
+levels are 1–3 and the final first page must have level 1. A following deeper-level
+page remains in place unless explicitly selected. To move a group, supply all its
+pages in order. Retain the intents across retries so newly formed series keep
+their identities. [Native page-edit fixtures](../../corpus/page-lifecycle/page-edits/README.md)
+cover individual tabs, selected and collapsed groups, nesting and promotion.
 Insertions update child references, reference counts, modification times and automatic
 titles atomically. Paragraphs can be nested or inserted into table cells; outline
 coordinates use points. `Insertion::with_formatting` includes nonoverlapping UTF-16

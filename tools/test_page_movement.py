@@ -12,6 +12,54 @@ FIXTURE = Path(__file__).resolve().parent.parent / 'corpus/page-lifecycle'
 
 
 class PageMovementTest(unittest.TestCase):
+    def test_optional_metadata_restoration_matches_native(self):
+        fixture = FIXTURE / 'page-edits/optional-cache'
+        for source, cold in [('source', 'source-cold'), ('candidate', 'cold'),
+                             ('followup/candidate', 'followup/cold')]:
+            with self.subTest(source=source):
+                self.assertEqual(compare(fixture / source, fixture / cold), 0)
+                if source != 'source':
+                    self.assertEqual((fixture / source / 'Lifecycle.one').read_bytes()[1024:],
+                                     (fixture / cold / 'notebook/Lifecycle.one').read_bytes()[1024:])
+
+    def test_native_and_rust_edits_preserve_moved_pages(self):
+        fixture = FIXTURE / 'page-edits'
+        with TemporaryDirectory() as temporary:
+            temporary = Path(temporary)
+            subprocess.run([EXPORTER, fixture / '08-collapsed-group-move/candidate/Lifecycle.one', temporary / 'original'], check=True)
+            original = list(ordered_pages(json.loads((temporary / 'original/document.json').read_text())))
+            for ordinal, (source, cold) in enumerate([
+                ('native/notebook', 'native/cold'), ('rust-followup/candidate', 'rust-followup/cold'),
+            ]):
+                self.assertEqual(compare(fixture / source, fixture / cold), 0)
+                output = temporary / str(ordinal)
+                subprocess.run([EXPORTER, fixture / cold / 'notebook/Lifecycle.one', output], check=True)
+                pages = list(ordered_pages(json.loads((output / 'document.json').read_text())))
+                self.assertEqual([(sid, page) for sid, _, _, page in pages],
+                                 [(sid, page) for sid, _, _, page in original])
+                for i, ((_, _, revision, page), (_, _, old, old_page)) in enumerate(zip(pages, original, strict=True)):
+                    expected = [node['kind']['text'] for _, node in walk(old, old_page) if node['kind']['type'] == 'RichText']
+                    if i == 8:
+                        expected[0] = 'Native moved 🦋 é'
+                        expected.append(('Rust + ' if ordinal else '') + 'Native body after a Rust page move.')
+                        self.assertEqual(revision['nodes'][revision['roots']['2']]['kind'],
+                                         {'type': 'Metadata', 'title': expected[0], 'level': ordinal + 1})
+                    self.assertEqual([node['kind']['text'] for _, node in walk(revision, page) if node['kind']['type'] == 'RichText'], expected)
+
+    def test_rust_page_edits_survive_native_reopen_without_repairs(self):
+        for phase in [phase for phase, *_ in PHASES] + ['single-page']:
+            with self.subTest(phase=phase):
+                fixture = FIXTURE / 'page-edits' / phase
+                self.assertEqual((fixture / 'candidate/Lifecycle.one').read_bytes()[1024:],
+                                 (fixture / 'cold/notebook/Lifecycle.one').read_bytes()[1024:])
+                self.assertEqual(compare(fixture / 'candidate', fixture / 'cold'), 0)
+
+    def test_repeated_page_nesting_survives_native_reopen_after_checkpoints(self):
+        fixture = FIXTURE / 'page-edits/stress'
+        self.assertEqual((fixture / 'candidate/movement.one').read_bytes()[1024:],
+                         (fixture / 'cold/notebook/movement.one').read_bytes()[1024:])
+        self.assertEqual(compare(fixture / 'candidate', fixture / 'cold'), 0)
+
     def test_native_selection_indentation_and_order_survive_cold_reopen(self):
         with TemporaryDirectory() as temporary:
             temporary = Path(temporary)

@@ -1,0 +1,19 @@
+{
+  "generator": "crates/onestore/tests/page_movement.rs::native_edits_on_moved_pages_support_more_rust_changes",
+  "capture": "evidence/m10/page-edit-rust-followup-cold-01",
+  "machine": {
+    "name": "m6-7eaa4e8f",
+    "hostname": "ONE-M6-7EAA4E8F"
+  },
+  "teardown": {
+    "absent": true
+  },
+  "source": [
+    {
+      "path": "Lifecycle.one",
+      "bytes": 76784,
+      "sha256": "d777045965f44952fc7aab6e020645d79d959b0a002c0e684f38381106713eb8",
+      "mtime_ns": 1788937158196655008
+    }
+  ]
+}
