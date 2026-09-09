@@ -188,7 +188,20 @@ impl<'a> PreparedEdit<'a> {
     pub fn pages(source: &'a [u8], edits: &[crate::PageEdit]) -> Result<Self, crate::Error> {
         Ok(Self {
             source,
-            written: crate::PageEdit::apply(source, edits)?,
+            written: crate::page::edit_pages(source, edits, &[])?,
+        })
+    }
+
+    /// Permanently removes explicitly selected pages from the section in one transaction.
+    /// Subpages must be selected explicitly; a surviving first subpage becomes top-level.
+    /// Creates no recycle-bin copies. Prior revisions remain stored; this is not secure erasure.
+    pub fn delete_pages_permanently(
+        source: &'a [u8],
+        pages: &[crate::ExGuid],
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: crate::page::edit_pages(source, &[], pages)?,
         })
     }
 

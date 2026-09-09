@@ -47,6 +47,7 @@ harness also accepts `--client-profile release`.
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `PageCreation`, `PreparedEdit::create_page` | Add an empty top-level page and its section entry atomically, retaining page identities across retries |
 | `PageEdit`, `PreparedEdit::pages` | Publish explicitly selected page moves and indentation changes together, preserving page content and historical revisions |
+| `PreparedEdit::delete_pages_permanently` | Remove explicit pages and their section references atomically while retaining stored revisions |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
@@ -92,6 +93,13 @@ pages in order. Retain the intents across retries so newly formed series keep
 their identities; `reposition(PagePosition, level)` revises their placement while
 preserving those identities. [Native page-edit fixtures](../../corpus/page-lifecycle/page-edits/README.md)
 cover individual tabs, selected and collapsed groups, nesting and promotion.
+`PreparedEdit::delete_pages_permanently` removes exactly the supplied page spaces,
+including subpages only when selected explicitly. The first remaining page becomes
+top-level; other page levels and surviving content are retained. The operation
+creates no recycle-bin copies and preserves prior revisions, so it is not secure
+erasure. Duplicate, missing or non-page identities reject the entire batch;
+an empty selection leaves the file unchanged. Commit uses the exact source
+snapshot and rejects a stale prepared removal before writing.
 Insertions update child references, reference counts, modification times and automatic
 titles atomically. Paragraphs can be nested or inserted into table cells; outline
 coordinates use points. `Insertion::with_formatting` includes nonoverlapping UTF-16

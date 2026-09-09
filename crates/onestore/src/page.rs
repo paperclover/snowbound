@@ -127,234 +127,279 @@ impl PageEdit {
         }
         Ok(())
     }
+}
 
-    pub(crate) fn apply(source: &[u8], edits: &[Self]) -> Result<Vec<u8>, Error> {
-        let mut selected = BTreeMap::new();
-        let mut guids = BTreeSet::new();
-        for edit in edits {
-            edit.validate()?;
-            if selected.insert(edit.space, edit).is_some() || !guids.insert(edit.guid) {
+pub(crate) fn edit_pages(
+    source: &[u8],
+    edits: &[PageEdit],
+    removals: &[ExGuid],
+) -> Result<Vec<u8>, Error> {
+    if !edits.is_empty() && !removals.is_empty() {
+        return Err(invalid(
+            "Choose page placement or page removal for one operation",
+        ));
+    }
+    let removed: BTreeSet<_> = removals.iter().copied().collect();
+    if removed.len() != removals.len() || removed.iter().any(|sid| sid.guid == [0; 16]) {
+        return Err(invalid("Choose distinct existing page spaces for removal"));
+    }
+    let mut selected = BTreeMap::new();
+    let mut guids = BTreeSet::new();
+    for edit in edits {
+        edit.validate()?;
+        if selected.insert(edit.space, edit).is_some() || !guids.insert(edit.guid) {
+            return Err(invalid(
+                "Use distinct page and edit identities within a batch",
+            ));
+        }
+    }
+    write_revisions(source, |index| {
+        let document = Document::parse(index)?;
+        let pages = document.pages()?;
+        let section = &document.spaces[&document.root];
+        let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+        let section_id = view.roots[&1];
+        let section_node = &view.nodes[&section_id];
+        if !matches!(section_node.kind, Kind::Section { .. })
+            || section_node.extra[0]
+                .iter()
+                .any(|field| field.id == 0x88001cde)
+        {
+            return Err(invalid("Choose an editable section for page editing"));
+        }
+        let mut order = Vec::new();
+        let mut levels = BTreeMap::new();
+        let mut page_guids = BTreeMap::new();
+        for (sid, _) in &pages {
+            let page = &document.spaces[sid];
+            let page = &page.revisions[&page.contexts[&ExGuid::default()]];
+            let Some(metadata) = page.roots.get(&2).and_then(|id| page.nodes.get(id)) else {
+                return Err(invalid("Page metadata is unavailable"));
+            };
+            let Kind::Metadata { level, .. } = metadata.kind else {
+                return Err(invalid("Choose ordinary pages with page metadata"));
+            };
+            let level = level.unwrap_or(1);
+            if !(1..=3).contains(&level) || levels.insert(*sid, level).is_some() {
                 return Err(invalid(
-                    "Use distinct page and edit identities within a batch",
+                    "Each page space must contain one page with a valid level",
                 ));
+            }
+            if page_guids.insert(metadata_guid(metadata)?, *sid).is_some() {
+                return Err(invalid("Pages must have distinct metadata identifiers"));
+            }
+            order.push(*sid);
+        }
+        let original_order = order.clone();
+        let original_levels = levels.clone();
+        let mut series_by_head = BTreeMap::new();
+        let mut copies = BTreeMap::new();
+        let mut copy_ids = BTreeSet::new();
+        for oid in &section_node.children {
+            let series = &view.nodes[oid];
+            let Some(head) = series.spaces.first() else {
+                return Err(invalid("A page series must contain at least one page"));
+            };
+            if levels.get(head) != Some(&1)
+                || series.spaces[1..]
+                    .iter()
+                    .any(|sid| levels.get(sid).is_none_or(|level| *level == 1))
+            {
+                return Err(invalid(
+                    "A page series must start with its only top-level page",
+                ));
+            }
+            if let Some(retained) = series.spaces.iter().find(|sid| !removed.contains(sid)) {
+                series_by_head.insert(*retained, *oid);
+            }
+            if let Some(field) = series.extra[0].iter().find(|field| field.id == 0x24003442) {
+                let FieldValue::Objects(ids) = &field.value else {
+                    return Err(invalid("Page metadata copies must be object references"));
+                };
+                if ids.len() != series.spaces.len() {
+                    return Err(invalid("Page metadata copies must match their series"));
+                }
+                for id in ids {
+                    if !copy_ids.insert(*id)
+                        || !matches!(
+                            view.nodes.get(id).map(|n| &n.kind),
+                            Some(Kind::Metadata { .. })
+                        )
+                    {
+                        return Err(invalid("Each page needs its own ordinary metadata copy"));
+                    }
+                    let sid = page_guids
+                        .get(&metadata_guid(&view.nodes[id])?)
+                        .filter(|sid| series.spaces.contains(sid))
+                        .ok_or_else(|| {
+                            invalid("Metadata copy must identify a page in its series")
+                        })?;
+                    if copies.insert(*sid, *id).is_some() {
+                        return Err(invalid("Each page needs its own ordinary metadata copy"));
+                    }
+                }
             }
         }
-        write_revisions(source, |index| {
-            let document = Document::parse(index)?;
-            let pages = document.pages()?;
-            let section = &document.spaces[&document.root];
-            let view = &section.revisions[&section.contexts[&ExGuid::default()]];
-            let section_id = view.roots[&1];
-            let section_node = &view.nodes[&section_id];
-            if !matches!(section_node.kind, Kind::Section { .. })
-                || section_node.extra[0]
-                    .iter()
-                    .any(|field| field.id == 0x88001cde)
-            {
-                return Err(invalid("Choose an editable section for page movement"));
+        for sid in &removed {
+            if !levels.contains_key(sid) {
+                return Err(invalid("The selected page is no longer in the section"));
             }
-            let mut order = Vec::new();
-            let mut levels = BTreeMap::new();
-            let mut page_guids = BTreeMap::new();
-            for (sid, _) in &pages {
-                let page = &document.spaces[sid];
-                let page = &page.revisions[&page.contexts[&ExGuid::default()]];
-                let Some(metadata) = page.roots.get(&2).and_then(|id| page.nodes.get(id)) else {
-                    return Err(invalid("Page metadata is unavailable"));
-                };
-                let Kind::Metadata { level, .. } = metadata.kind else {
-                    return Err(invalid("Choose ordinary pages with page metadata"));
-                };
-                let level = level.unwrap_or(1);
-                if !(1..=3).contains(&level) || levels.insert(*sid, level).is_some() {
-                    return Err(invalid(
-                        "Each page space must contain one page with a valid level",
-                    ));
-                }
-                if page_guids.insert(metadata_guid(metadata)?, *sid).is_some() {
-                    return Err(invalid("Pages must have distinct metadata identifiers"));
-                }
-                order.push(*sid);
-            }
-            let original_order = order.clone();
-            let original_levels = levels.clone();
-            let mut series_by_head = BTreeMap::new();
-            let mut copies = BTreeMap::new();
-            let mut copy_ids = BTreeSet::new();
-            for oid in &section_node.children {
-                let series = &view.nodes[oid];
-                let Some(head) = series.spaces.first() else {
-                    return Err(invalid("A page series must contain at least one page"));
-                };
-                if levels.get(head) != Some(&1)
-                    || series.spaces[1..]
-                        .iter()
-                        .any(|sid| levels.get(sid).is_none_or(|level| *level == 1))
-                {
-                    return Err(invalid(
-                        "A page series must start with its only top-level page",
-                    ));
-                }
-                series_by_head.insert(*head, *oid);
-                if let Some(field) = series.extra[0].iter().find(|field| field.id == 0x24003442) {
-                    let FieldValue::Objects(ids) = &field.value else {
-                        return Err(invalid("Page metadata copies must be object references"));
-                    };
-                    if ids.len() != series.spaces.len() {
-                        return Err(invalid("Page metadata copies must match their series"));
+        }
+        order.retain(|sid| !removed.contains(sid));
+        if !removed.is_empty()
+            && let Some(first) = order.first()
+        {
+            levels.insert(*first, 1);
+        }
+        for edit in edits {
+            let Some(at) = order.iter().position(|sid| *sid == edit.space) else {
+                return Err(invalid("The selected page is no longer in the section"));
+            };
+            levels.insert(edit.space, edit.level);
+            if let PagePosition::Before(before) = edit.position {
+                order.remove(at);
+                let position = match before {
+                    None => order.len(),
+                    Some(before) => {
+                        order.iter().position(|sid| *sid == before).ok_or_else(|| {
+                            invalid("The movement anchor is no longer in the section")
+                        })?
                     }
-                    for id in ids {
-                        if !copy_ids.insert(*id)
-                            || !matches!(
-                                view.nodes.get(id).map(|n| &n.kind),
-                                Some(Kind::Metadata { .. })
-                            )
-                        {
-                            return Err(invalid("Each page needs its own ordinary metadata copy"));
-                        }
-                        let sid = page_guids
-                            .get(&metadata_guid(&view.nodes[id])?)
-                            .filter(|sid| series.spaces.contains(sid))
-                            .ok_or_else(|| {
-                                invalid("Metadata copy must identify a page in its series")
-                            })?;
-                        if copies.insert(*sid, *id).is_some() {
-                            return Err(invalid("Each page needs its own ordinary metadata copy"));
-                        }
-                    }
-                }
-            }
-            for edit in edits {
-                let Some(at) = order.iter().position(|sid| *sid == edit.space) else {
-                    return Err(invalid("The selected page is no longer in the section"));
                 };
-                levels.insert(edit.space, edit.level);
-                if let PagePosition::Before(before) = edit.position {
-                    order.remove(at);
-                    let position = match before {
-                        None => order.len(),
-                        Some(before) => {
-                            order.iter().position(|sid| *sid == before).ok_or_else(|| {
-                                invalid("The movement anchor is no longer in the section")
-                            })?
-                        }
-                    };
-                    order.insert(position, edit.space);
-                }
+                order.insert(position, edit.space);
             }
-            if order.first().is_some_and(|sid| levels[sid] != 1) {
-                return Err(invalid(
-                    "The section's first page must have indentation level 1",
-                ));
+        }
+        if order.first().is_some_and(|sid| levels[sid] != 1) {
+            return Err(invalid(
+                "The section's first page must have indentation level 1",
+            ));
+        }
+        if order == original_order && levels == original_levels {
+            return Ok(BTreeMap::new());
+        }
+        let raw = index.resolve(document.root, section.contexts[&ExGuid::default()])?;
+        let mut groups: Vec<Vec<ExGuid>> = Vec::new();
+        for sid in order {
+            if levels[&sid] == 1 {
+                groups.push(Vec::new());
             }
-            if order == original_order && levels == original_levels {
-                return Ok(BTreeMap::new());
+            groups.last_mut().unwrap().push(sid);
+        }
+        let mut changes = BTreeMap::new();
+        for sid in &removed {
+            let page = index.resolve(*sid, index.spaces[sid].labels[&(ExGuid::default(), 1)])?;
+            let manifest_id = page.roots[&1];
+            let mut manifest = PropertyObject::from_object(&page.objects[&manifest_id])?;
+            if manifest.jcid != 0x60037 {
+                return Err(invalid("Choose ordinary pages for removal"));
             }
-            let raw = index.resolve(document.root, section.contexts[&ExGuid::default()])?;
-            let mut groups: Vec<Vec<ExGuid>> = Vec::new();
-            for sid in order {
-                if levels[&sid] == 1 {
-                    groups.push(Vec::new());
-                }
-                groups.last_mut().unwrap().push(sid);
-            }
-            let mut changes = BTreeMap::new();
-            let mut replacements = BTreeMap::new();
-            let mut children = Vec::new();
-            for spaces in groups {
-                let head = spaces[0];
-                let old_id = series_by_head.get(&head).copied();
-                let (id, mut series) = if let Some(id) = old_id {
-                    (id, PropertyObject::from_object(&raw.objects[&id])?)
-                } else {
-                    let edit = selected
-                        .get(&head)
-                        .ok_or_else(|| invalid("A new series must start at an edited page"))?;
-                    let id = ExGuid {
-                        guid: edit.guid,
-                        n: 1,
-                    };
-                    if raw.objects.contains_key(&id) {
-                        return Err(invalid("The new page-series identity already exists"));
-                    }
-                    (
-                        id,
-                        PropertyObject {
-                            jcid: 0x60008,
-                            bytes: properties(&[(0x1c001c30, edit.guid.to_vec())])?,
-                            global_ids: Arc::new(BTreeMap::from([(0, edit.guid)])),
-                        },
-                    )
+            manifest.bytes = properties(&[])?;
+            let metadata_id = page.roots[&2];
+            let mut metadata = PropertyObject::from_object(&page.objects[&metadata_id])?;
+            metadata.set(&[(0x88001de9, &[])])?;
+            changes.insert(
+                *sid,
+                RevisionEdit::Update(BTreeMap::from([
+                    (manifest_id, manifest),
+                    (metadata_id, metadata),
+                ])),
+            );
+        }
+        let mut replacements = BTreeMap::new();
+        let mut children = Vec::new();
+        for spaces in groups {
+            let head = spaces[0];
+            let old_id = series_by_head.get(&head).copied();
+            let (id, mut series) = if let Some(id) = old_id {
+                (id, PropertyObject::from_object(&raw.objects[&id])?)
+            } else {
+                let edit = selected
+                    .get(&head)
+                    .ok_or_else(|| invalid("A new series must start at an edited page"))?;
+                let id = ExGuid {
+                    guid: edit.guid,
+                    n: 1,
                 };
-                children.push(id);
-                let membership_changed = old_id.is_none_or(|old| view.nodes[&old].spaces != spaces);
-                if !membership_changed
-                    && !spaces.iter().any(|sid| {
-                        levels[sid] != original_levels[sid]
-                            || copies.get(sid).is_some_and(|id| {
-                                matches!(view.nodes[id].kind, Kind::Metadata { level, .. }
+                if raw.objects.contains_key(&id) {
+                    return Err(invalid("The new page-series identity already exists"));
+                }
+                (
+                    id,
+                    PropertyObject {
+                        jcid: 0x60008,
+                        bytes: properties(&[(0x1c001c30, edit.guid.to_vec())])?,
+                        global_ids: Arc::new(BTreeMap::from([(0, edit.guid)])),
+                    },
+                )
+            };
+            children.push(id);
+            let membership_changed = old_id.is_none_or(|old| view.nodes[&old].spaces != spaces);
+            if !membership_changed
+                && !spaces.iter().any(|sid| {
+                    levels[sid] != original_levels[sid]
+                        || copies.get(sid).is_some_and(|id| {
+                            matches!(view.nodes[id].kind, Kind::Metadata { level, .. }
                                     if level.unwrap_or(1) != levels[sid])
-                            })
-                    })
-                {
-                    continue;
+                        })
+                })
+            {
+                continue;
+            }
+            let mut metadata_ids = Vec::new();
+            for sid in &spaces {
+                let page =
+                    index.resolve(*sid, index.spaces[sid].labels[&(ExGuid::default(), 1)])?;
+                let page_id = page.roots[&2];
+                let original = PropertyObject::from_object(&page.objects[&page_id])?;
+                if old_id.is_none() && *sid == head {
+                    series.copy_property(&original, 0x18001c65)?;
                 }
-                let mut metadata_ids = Vec::new();
-                for sid in &spaces {
-                    let page =
-                        index.resolve(*sid, index.spaces[sid].labels[&(ExGuid::default(), 1)])?;
-                    let page_id = page.roots[&2];
-                    let original = PropertyObject::from_object(&page.objects[&page_id])?;
-                    if old_id.is_none() && *sid == head {
-                        series.copy_property(&original, 0x18001c65)?;
-                    }
-                    if levels[sid] != original_levels[sid] {
-                        let mut metadata = PropertyObject::from_object(&page.objects[&page_id])?;
-                        metadata.set(&[(0x14001dff, &levels[sid].to_le_bytes())])?;
-                        changes.insert(
-                            *sid,
-                            RevisionEdit::Update(BTreeMap::from([(page_id, metadata)])),
-                        );
-                    }
-                    let copy_id = copies
-                        .get(sid)
-                        .copied()
-                        .unwrap_or_else(|| metadata_id(*sid));
-                    let mut copy = match raw.objects.get(&copy_id) {
-                        Some(object) => {
-                            if object.jcid != 0x20030
-                                || (!copies.contains_key(sid) && copy_ids.contains(&copy_id))
-                            {
-                                return Err(invalid("Page metadata identities overlap"));
-                            }
-                            PropertyObject::from_object(object)?
+                if levels[sid] != original_levels[sid] {
+                    let mut metadata = PropertyObject::from_object(&page.objects[&page_id])?;
+                    metadata.set(&[(0x14001dff, &levels[sid].to_le_bytes())])?;
+                    changes.insert(
+                        *sid,
+                        RevisionEdit::Update(BTreeMap::from([(page_id, metadata)])),
+                    );
+                }
+                let copy_id = copies
+                    .get(sid)
+                    .copied()
+                    .unwrap_or_else(|| metadata_id(*sid));
+                let mut copy = match raw.objects.get(&copy_id) {
+                    Some(object) => {
+                        if object.jcid != 0x20030
+                            || (!copies.contains_key(sid) && copy_ids.contains(&copy_id))
+                        {
+                            return Err(invalid("Page metadata identities overlap"));
                         }
-                        None => original,
-                    };
-                    copy.set(&[(0x14001dff, &levels[sid].to_le_bytes())])?;
-                    copy.reference(copy_id)?;
-                    if replacements.insert(copy_id, copy).is_some() {
-                        return Err(invalid("Page metadata identities overlap"));
+                        PropertyObject::from_object(object)?
                     }
-                    metadata_ids.push(copy_id);
+                    None => original,
+                };
+                copy.set(&[(0x14001dff, &levels[sid].to_le_bytes())])?;
+                copy.reference(copy_id)?;
+                if replacements.insert(copy_id, copy).is_some() {
+                    return Err(invalid("Page metadata identities overlap"));
                 }
-                if membership_changed || spaces.iter().any(|sid| !copies.contains_key(sid)) {
-                    set_references(&mut series, 0x2c001d63, &spaces)?;
-                    set_references(&mut series, 0x24003442, &metadata_ids)?;
-                    if replacements.insert(id, series).is_some() {
-                        return Err(invalid("Page-series and metadata identities overlap"));
-                    }
+                metadata_ids.push(copy_id);
+            }
+            if membership_changed || spaces.iter().any(|sid| !copies.contains_key(sid)) {
+                set_references(&mut series, 0x2c001d63, &spaces)?;
+                set_references(&mut series, 0x24003442, &metadata_ids)?;
+                if replacements.insert(id, series).is_some() {
+                    return Err(invalid("Page-series and metadata identities overlap"));
                 }
             }
-            if children != section_node.children {
-                let mut parent = PropertyObject::from_object(&raw.objects[&section_id])?;
-                set_references(&mut parent, 0x24001c20, &children)?;
-                replacements.insert(section_id, parent);
-            }
-            changes.insert(document.root, RevisionEdit::Update(replacements));
-            Ok(changes)
-        })
-    }
+        }
+        if children != section_node.children {
+            let mut parent = PropertyObject::from_object(&raw.objects[&section_id])?;
+            set_references(&mut parent, 0x24001c20, &children)?;
+            replacements.insert(section_id, parent);
+        }
+        changes.insert(document.root, RevisionEdit::Update(replacements));
+        Ok(changes)
+    })
 }
 
 /// An empty top-level page with stable identities and creation time.
@@ -685,7 +730,7 @@ mod tests {
                 }
             }
             let written =
-                PageEdit::apply(&source, &[PageEdit::set_level(sid, 2).unwrap()]).unwrap();
+                edit_pages(&source, &[PageEdit::set_level(sid, 2).unwrap()], &[]).unwrap();
             let store = Store::parse(&written).unwrap();
             let index = RevisionIndex::parse(&store).unwrap();
             index.validate_current().unwrap();
@@ -761,7 +806,12 @@ mod tests {
             })
             .unwrap();
             assert!(
-                PageEdit::apply(&invalid_source, &[PageEdit::set_level(sid, 2).unwrap()]).is_err()
+                edit_pages(
+                    &invalid_source,
+                    &[PageEdit::set_level(sid, 2).unwrap()],
+                    &[]
+                )
+                .is_err()
             );
         }
     }
@@ -810,7 +860,7 @@ mod tests {
                 .map(|(i, (sid, _))| PageEdit::move_to(*sid, None, i as u32 + 1).unwrap())
                 .collect(),
         ] {
-            let written = PageEdit::apply(&source, &edits).unwrap();
+            let written = edit_pages(&source, &edits, &[]).unwrap();
             let old_store = Store::parse(&source).unwrap();
             let new_store = Store::parse(&written).unwrap();
             let old = RevisionIndex::parse(&old_store).unwrap();
