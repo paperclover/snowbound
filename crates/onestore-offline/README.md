@@ -31,8 +31,9 @@ its styles as one intent and one publication. Keep that value across retries; it
 the new text for subsequent offline edits. Pending entries expose
 `Operation::Text(TextEdit)`, `Operation::Insert(Insertion)`,
 `Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)`,
-`Operation::Join(JoinEdit)`, `Operation::Outline(OutlineEdit)` and
-`Operation::Tree(TreeEdit)` and `Operation::CreatePage(PageCreation)` through their
+`Operation::Join(JoinEdit)`, `Operation::Outline(OutlineEdit)`,
+`Operation::Tree(TreeEdit)`, `Operation::CreatePage(PageCreation)` and
+`Operation::Pages(PageEdits)` through their
 `operation` field. Synchronization applies these in queue order, so an inserted
 outline can precede its paragraphs and their later edits. Missing anchors or
 existing insertion identities preserve a conflict and the complete local image.
@@ -46,6 +47,24 @@ produces `StructureChanged`. `rebase_page_creation_conflict(id, local, remote,
 before)` reviews a replacement anchor against both cache images while retaining
 the new page and dependent object identities. Existing page identities require
 reconciliation; a matching page alone does not establish a receipt.
+
+`pages(snapshot, edits)` queues a slice of core `PageEdit` intents as one atomic
+publication. `PagePosition::Keep` preserves remote movement during indentation-only
+edits. Every requested level remains explicit: a competing remote level produces
+`StructureChanged` unless it already matches the requested level. Moves compare
+the selected page's position relative to surviving observed pages; an unchanged
+or already-satisfied position can proceed, and new remote pages remain present.
+Indistinguishable competing moves retain a conflict and the complete local image.
+
+`rebase_pages_conflict(id, local, remote, edits)` reviews the batch against both
+cache images. Use `PageEdit::reposition(position, level)` on the retained intents
+to revise anchors or indentation; replacing page or allocated series identities
+is rejected. Dependent edits remain queued. Schema 11 adds the durable batch;
+schema 10 migration preserves existing multi-space publication evidence unchanged.
+Attempt evidence includes every changed space plus the receipt space when that
+space is unchanged. An existing section revision alone cannot confirm a page edit.
+The [offline page corpus](../../corpus/page-lifecycle/offline-edits/README.md)
+contains native comparisons, reproduction commands and stateful sanitizer seeds.
 
 `split` and `join` accept the core `ParagraphSplit` and `ParagraphJoin` intents.
 Splits retain allocated identities when the original UTF-16 boundary rebases;

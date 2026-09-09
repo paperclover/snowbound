@@ -1,0 +1,688 @@
+{
+  "cases": {
+    "group-01-demoted-parent": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp25ua0uma",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-b441c6ce",
+        "hostname": "ONE-M6-B441C6CE"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 61168,
+          "sha256": "b824f43c0f789519771dcaabd0d7b84549ccc01629c19a64bd3bba9bb70b75df",
+          "mtime_ns": 1788941881049079637
+        }
+      ]
+    },
+    "group-02-promoted-parent": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpbtvm7zy4",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-a937eee4",
+        "hostname": "ONE-M6-A937EEE4"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 62200,
+          "sha256": "904bf500864584bff80c83dfbdf957de109836964a1dd7e97810df042cee0efa",
+          "mtime_ns": 1788941881329857761
+        }
+      ]
+    },
+    "group-03-selected-group-move": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpqpnmdqos",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-1b35b14a",
+        "hostname": "ONE-M6-1B35B14A"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 62664,
+          "sha256": "5a3d665f5da9a1c8aee3339d368bb1fdcb2e00e7aa0422478758bce84f5646f0",
+          "mtime_ns": 1788941881601421859
+        }
+      ]
+    },
+    "group-04-subpage-move": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp93masgxw",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-390f4ff1",
+        "hostname": "ONE-M6-390F4FF1"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 66464,
+          "sha256": "f758f4f74f21734349275e839e78a39454d00e1c546dd6b29f936ed9adef752a",
+          "mtime_ns": 1788941881947544959
+        }
+      ]
+    },
+    "group-05-insert-before-subpage": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmph61roaik",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-c13e29ae",
+        "hostname": "ONE-M6-C13E29AE"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 68104,
+          "sha256": "fbacddf7e10d230f3ffc4e28a967cfa43d378e598bff5dc5d2a532f8cb64091d",
+          "mtime_ns": 1788941882292841519
+        }
+      ]
+    },
+    "group-06-promoted-level-two": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpyvldz7f2",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-84bacce5",
+        "hostname": "ONE-M6-84BACCE5"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 70512,
+          "sha256": "89163b8a78ef94dc540ef00d3d05fca2014fa9e3b88a7e73e6a574c11e6d39bd",
+          "mtime_ns": 1788941882577853637
+        }
+      ]
+    },
+    "group-07-promoted-root": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpw7p2frw3",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-0e532964",
+        "hostname": "ONE-M6-0E532964"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 73840,
+          "sha256": "7952a0e1d9211af424cb5af2745171d8e745f7583d0e748762d7e34314bdb1c8",
+          "mtime_ns": 1788941882943040331
+        }
+      ]
+    },
+    "group-08-collapsed-group-move": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpopp2ih5l",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-8da7d856",
+        "hostname": "ONE-M6-8DA7D856"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 75656,
+          "sha256": "0be5eaca3172c3455b9b85946e0425e62cff0f61ab8fee75d8d0c4b0f6706248",
+          "mtime_ns": 1788941883308990065
+        }
+      ]
+    },
+    "group-single-page": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpyqtm83w3",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-2e6f3792",
+        "hostname": "ONE-M6-2E6F3792"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 64016,
+          "sha256": "a256c8f761cfe6465ccbe37852794c5760bbd46a6993a821e535ced69c38d510",
+          "mtime_ns": 1788941883672568012
+        }
+      ]
+    },
+    "indent-01-demoted-parent": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpono2kv8d",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-12ecb7c4",
+        "hostname": "ONE-M6-12ECB7C4"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 60192,
+          "sha256": "7d65268efd6ff873d370ff776062c378674b760d6adbeac4a19dc9fd28cb61c1",
+          "mtime_ns": 1788941878214798774
+        }
+      ]
+    },
+    "indent-02-promoted-parent": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpu3zp0wxf",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-8695a32c",
+        "hostname": "ONE-M6-8695A32C"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 62680,
+          "sha256": "bb97693bb9b9ee756b71b46ec9f8236994af5ebcd17b4162b799d25687c03bae",
+          "mtime_ns": 1788941878501070348
+        }
+      ]
+    },
+    "indent-03-selected-group-move": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpkkgri9eo",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-79f79370",
+        "hostname": "ONE-M6-79F79370"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 63752,
+          "sha256": "38e4a1ea6410eb097653c8d3bd74abdc5ac28f4616ebd04eb32e332e9a34179a",
+          "mtime_ns": 1788941878785592590
+        }
+      ]
+    },
+    "indent-04-subpage-move": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpnaob6ged",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-24815dc0",
+        "hostname": "ONE-M6-24815DC0"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 66856,
+          "sha256": "beeb72e90c663376bf6f378c256b44a58f74adcd7efa75b685ab163521cb899c",
+          "mtime_ns": 1788941879132236190
+        }
+      ]
+    },
+    "indent-05-insert-before-subpage": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp4c2gwxhe",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-bf5daf50",
+        "hostname": "ONE-M6-BF5DAF50"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 67160,
+          "sha256": "eebeea1c5b675eb9114dc1ab096ccd71536e6b077a6bb4cfbac6ca8c0b674c71",
+          "mtime_ns": 1788941879409552027
+        }
+      ]
+    },
+    "indent-06-promoted-level-two": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpkdhy5hsi",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-7cb23bfd",
+        "hostname": "ONE-M6-7CB23BFD"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 71448,
+          "sha256": "fe37a1b0a3691daf93b172d42f929905a5c9c9b5caba4e6e3b67e6a59f5f7de5",
+          "mtime_ns": 1788941879701176676
+        }
+      ]
+    },
+    "indent-07-promoted-root": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpi18ckmh6",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-d1a70cb9",
+        "hostname": "ONE-M6-D1A70CB9"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 73840,
+          "sha256": "276195070618d102292a0455590ceb9bbf6d26106b4887cda73252fa149d1b63",
+          "mtime_ns": 1788941880070772321
+        }
+      ]
+    },
+    "indent-08-collapsed-group-move": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpqphw6cgh",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-d141faaf",
+        "hostname": "ONE-M6-D141FAAF"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 74056,
+          "sha256": "250a938806af76fc3ed8b917fcbd6161694000f2d287eb491ad134586b7a2fa2",
+          "mtime_ns": 1788941880425063366
+        }
+      ]
+    },
+    "indent-single-page": {
+      "run": {
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpey9_i1nq",
+        "expected_pages": 9,
+        "author": null,
+        "author_timeout_seconds": 600,
+        "inspect": false,
+        "collect_notebook": true,
+        "base": {
+          "file": "win7-office-base.qcow2",
+          "format": "qcow2",
+          "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+          "virtual_size": 68719476736
+        },
+        "scripts": {
+          "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+          "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+        }
+      },
+      "machine": {
+        "name": "m6-809753e8",
+        "hostname": "ONE-M6-809753E8"
+      },
+      "teardown": {
+        "absent": true
+      },
+      "source": [
+        {
+          "path": "Lifecycle.one",
+          "bytes": 64312,
+          "sha256": "19c5d537b172a6ceeceffb8aa72e370c08584a55f18619aef5bdcbb0c7cca935",
+          "mtime_ns": 1788941880706173615
+        }
+      ]
+    }
+  },
+  "twelve-clients": {
+    "run": {
+      "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpauflzr4r",
+      "expected_pages": 37,
+      "author": null,
+      "author_timeout_seconds": 600,
+      "inspect": false,
+      "collect_notebook": true,
+      "base": {
+        "file": "win7-office-base.qcow2",
+        "format": "qcow2",
+        "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+        "virtual_size": 68719476736
+      },
+      "scripts": {
+        "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+        "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+      }
+    },
+    "machine": {
+      "name": "m6-87535bf3",
+      "hostname": "ONE-M6-87535BF3"
+    },
+    "teardown": {
+      "absent": true
+    },
+    "source": [
+      {
+        "path": "pages.one",
+        "bytes": 149680,
+        "sha256": "c1f90ad7adb5568be651fdf59009c8ccbb11ca772973155d93caa45b14f79665",
+        "mtime_ns": 1788941460936854212
+      }
+    ]
+  },
+  "fuzz": {
+    "seed": 1987,
+    "runs": 163,
+    "seconds": 241,
+    "inputs": {
+      "0177f4ea49713f71cfe986f58f83c8e2c7fc8d7c": "33d23e883c8b3fa484f12d71bb94e7c3e963c0a54fa7c42d5ce6578fcf36dc3b",
+      "11882653c40343d6be9aaa05730083439adadfba": "b344b92852ac487c86d37360f9c58cdac92b7cfb25fb6fee88d65b509c94b3cc",
+      "202ea61c560b7c79b4bf0e3d2893942d4e26a8e4": "ac6a8229fcadf589b86379927e8222c6fc7523658299329d6d2332988bdadf94",
+      "3acf70d9e55944a5c6abf1f1d83e903339e5880c": "28552294fc055e696856e90727cdd5a1447c6c9a37ba3af740a9eb6d8d08ee7f",
+      "476acb5883a4186ffa15607df041c28b402b961d": "ba3ca97145608505fc67c8557b2e41f42709032d0571fadedf92719c2139e96f",
+      "6adda485004874d3453c3a2646ae9aa3d9727680": "286ebc324bcc09fd7e5a2b97894556b5948508dc2c061feffb67093e78f31ce7",
+      "8392a61f3aa12dcd132fb3d80883fbe4de642ae4": "6f2ab500101055b91dec113be7c437e8cd4cc5ca75220af9defcbd3e7bcb4050",
+      "91895109fd9961c798a6ab0fdda8356147da72f0": "9682cd150367c3eb5b2c36969a205cd333e02687ebb92167708075246da7ffae",
+      "a4b973248eb4dbdb491dacc50eb1de89a494e3d1": "8baa3ec279de90799c5f237d9df980b88215b04b5b3a3942644739bc86df69c4",
+      "cdb0f291d1ccc9bc2077cdbeb44d0b5d3abb63c2": "d2ad11a793125438472443ad737d148d6c797137316d81234b5d973f3e46fd07",
+      "e1f2f478704e3516cadd3493dae22588253a6e0e": "5f745bacec59593259119e452de71ac0acb4bf58ba04584485c6479759a957b2",
+      "fc4bce1d89f38a2eb9d6c23aec24ca44df70ab67": "d14c6edd4ae7d2f5a2ba10610206bf98faf8a6d3f7cd2913ecbfdcdeef9f2307"
+    }
+  }
+}

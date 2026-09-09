@@ -1,0 +1,59 @@
+{
+  "confirmations": 1,
+  "conflict": false,
+  "mode": "indent",
+  "original": [
+    {
+      "guid": [
+        16,
+        127,
+        169,
+        184,
+        6,
+        197,
+        46,
+        76,
+        132,
+        6,
+        229,
+        69,
+        101,
+        216,
+        82,
+        122
+      ],
+      "level": 3,
+      "position": "Keep",
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    }
+  ],
+  "page_receipt": "Some(Published { revision: ExGuid { guid: [128, 50, 190, 55, 253, 41, 207, 9, 38, 43, 124, 25, 177, 209, 21, 208], n: 1 } })",
+  "phase": "05-insert-before-subpage",
+  "publications": 1,
+  "reviewed": [
+    {
+      "guid": [
+        16,
+        127,
+        169,
+        184,
+        6,
+        197,
+        46,
+        76,
+        132,
+        6,
+        229,
+        69,
+        101,
+        216,
+        82,
+        122
+      ],
+      "level": 3,
+      "position": "Keep",
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    }
+  ],
+  "text_receipt": "Some(Published { revision: ExGuid { guid: [136, 4, 115, 179, 47, 49, 9, 73, 170, 14, 74, 194, 41, 126, 181, 65], n: 1 } })"
+}

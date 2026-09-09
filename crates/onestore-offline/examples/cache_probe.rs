@@ -140,6 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 onestore_offline::Operation::Split(_)
                 | onestore_offline::Operation::CreatePage(_)
+                | onestore_offline::Operation::Pages(_)
                 | onestore_offline::Operation::Join(_)
                 | onestore_offline::Operation::Outline(_)
                 | onestore_offline::Operation::Tree(_) => {

@@ -11,6 +11,7 @@ use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Durati
 mod assets;
 mod formatting;
 mod outline;
+mod pages;
 mod paragraph;
 mod rebase;
 mod recovery;
@@ -18,6 +19,7 @@ mod schema;
 mod tree;
 pub use formatting::FormatEdit;
 pub use outline::OutlineEdit;
+pub use pages::PageEdits;
 pub use paragraph::{JoinEdit, SplitEdit};
 pub use recovery::{Recovery, RecoverySummary};
 pub use tree::TreeEdit;
@@ -51,7 +53,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 /// Text and its observed precondition, retained across cache reopen and rebasing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -67,6 +69,7 @@ pub struct TextEdit {
 #[serde(deny_unknown_fields)]
 pub enum Operation {
     CreatePage(PageCreation),
+    Pages(PageEdits),
     Text(TextEdit),
     Insert(Insertion),
     Format(FormatEdit),

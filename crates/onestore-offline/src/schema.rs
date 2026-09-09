@@ -35,6 +35,9 @@ pub(crate) fn create(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub(crate) fn migrate(transaction: &Transaction<'_>, version: u32) -> Result<()> {
+    if version >= 10 {
+        return Ok(());
+    }
     if version >= 3 {
         transaction.execute_batch("ALTER TABLE conflicts RENAME TO old_conflicts;")?;
         transaction.execute_batch(CONFLICTS)?;

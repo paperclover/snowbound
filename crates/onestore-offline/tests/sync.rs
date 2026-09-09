@@ -13,6 +13,8 @@ mod outline;
 mod page;
 #[path = "support/page_schedule.rs"]
 mod page_schedule;
+#[path = "sync/pages.rs"]
+mod pages;
 #[path = "sync/tree.rs"]
 mod tree;
 #[path = "support/tree_schedule.rs"]
@@ -2119,7 +2121,17 @@ mod worker {
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(cache.status(id).unwrap(), Some(published));
-        assert_eq!(cache.snapshot().unwrap(), server.durable);
+        let cached = cache.snapshot().unwrap();
+        // Confirmation changes reader-notification fields without changing the committed graph.
+        assert_eq!(cached[..212], server.durable[..212]);
+        assert_eq!(cached[252..], server.durable[252..]);
+        let cached_generation = Store::parse(&cached).unwrap().header.generation;
+        let remote_generation = Store::parse(&server.durable).unwrap().header.generation;
+        if cached_generation == remote_generation {
+            assert_eq!(cached, server.durable);
+        } else {
+            assert_eq!(cached_generation.checked_add(1), Some(remote_generation));
+        }
     }
 
     #[test]

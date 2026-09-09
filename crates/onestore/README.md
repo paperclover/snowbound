@@ -89,7 +89,8 @@ series membership and metadata levels in one transaction. Each page occurs once;
 levels are 1–3 and the final first page must have level 1. A following deeper-level
 page remains in place unless explicitly selected. To move a group, supply all its
 pages in order. Retain the intents across retries so newly formed series keep
-their identities. [Native page-edit fixtures](../../corpus/page-lifecycle/page-edits/README.md)
+their identities; `reposition(PagePosition, level)` revises their placement while
+preserving those identities. [Native page-edit fixtures](../../corpus/page-lifecycle/page-edits/README.md)
 cover individual tabs, selected and collapsed groups, nesting and promotion.
 Insertions update child references, reference counts, modification times and automatic
 titles atomically. Paragraphs can be nested or inserted into table cells; outline

@@ -12,6 +12,42 @@ FIXTURE = Path(__file__).resolve().parent.parent / 'corpus/page-lifecycle'
 
 
 class PageMovementTest(unittest.TestCase):
+    def test_offline_batches_reconcile_native_movements_without_cold_repairs(self):
+        fixture = FIXTURE / 'offline-edits'
+        cases = json.loads((fixture / 'provenance.json').read_text())['cases']
+        self.assertEqual(len(cases), 18)
+        conflicts = 0
+        for case in cases:
+            with self.subTest(case=case):
+                source = fixture / case / 'candidate'
+                cold = fixture / case / 'cold'
+                manifest = json.loads((source / 'manifest.json').read_text())
+                conflicts += manifest['conflict']
+                self.assertEqual(compare(source, cold), 0)
+                self.assertEqual((source / 'Lifecycle.one').read_bytes()[1024:],
+                                 (cold / 'notebook/Lifecycle.one').read_bytes()[1024:])
+        self.assertEqual(conflicts, 9)
+
+    def test_twelve_offline_page_batches_retain_order_levels_and_bodies_natively(self):
+        fixture = FIXTURE / 'offline-edits/twelve-clients'
+        source = fixture / 'candidate'
+        cold = fixture / 'cold'
+        self.assertEqual(compare(source, cold), 0)
+        manifest = json.loads((source / 'manifest.json').read_text())
+        self.assertEqual(manifest['publications'], 24)
+        with TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'document'
+            subprocess.run([EXPORTER, cold / 'notebook/pages.one', output], check=True)
+            document = json.loads((output / 'document.json').read_text())
+            pages = list(ordered_pages(document))
+            self.assertEqual(len(pages), 37)
+            self.assertEqual([[sid, revision['nodes'][revision['roots']['2']]['kind']['level']]
+                              for sid, _, revision, _ in pages], manifest['expected_order'])
+            bodies = [node['kind']['text'] for _, _, revision, page in pages
+                      for _, node in walk(revision, page)
+                      if node['kind']['type'] == 'RichText' and node['kind']['text'].startswith('Actor ')]
+            self.assertEqual(bodies, [f'Actor {i} 🦀 é' for i in range(12)])
+
     def test_optional_metadata_restoration_matches_native(self):
         fixture = FIXTURE / 'page-edits/optional-cache'
         for source, cold in [('source', 'source-cold'), ('candidate', 'cold'),

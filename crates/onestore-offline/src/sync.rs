@@ -29,11 +29,12 @@ pub enum ConflictKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditStatus {
     Pending,
+    /// Retained publication attempt; this revision alone may be insufficient to confirm it.
     AwaitingConfirmation {
         revision: ExGuid,
     },
     Conflict(ConflictKind),
-    /// Revision containing the confirmed effect; it can differ from a retired attempted revision.
+    /// Revision of the intent's space when its complete effect was confirmed.
     Published {
         revision: ExGuid,
     },
@@ -140,6 +141,7 @@ impl Replica {
         let candidate = match &intent.operation {
             Operation::CreatePage(page) => PreparedEdit::create_page(&snapshot, page)
                 .map_err(|_| ConflictKind::StructureChanged),
+            Operation::Pages(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Format(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Split(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Join(edit) => edit.prepare(&snapshot, intent.space)?,
@@ -195,7 +197,7 @@ impl Replica {
         let revision = index.spaces[&intent.space].labels[&(ExGuid::default(), 1)];
         let before_store = Store::parse(&snapshot)?;
         let before = RevisionIndex::parse(&before_store)?;
-        let revisions: BTreeMap<_, _> = index
+        let mut revisions: BTreeMap<_, _> = index
             .spaces
             .iter()
             .filter_map(|(sid, space)| {
@@ -208,6 +210,8 @@ impl Replica {
                 .then_some((*sid, revision))
             })
             .collect();
+        // The receipt's space can be unchanged in a multi-space edit.
+        revisions.insert(intent.space, revision);
         {
             let mut connection = self
                 .connection
@@ -351,6 +355,13 @@ impl Replica {
                     )
                     .into());
                 }
+                Operation::Pages(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Review page edits using rebase_pages_conflict",
+                    )
+                    .into());
+                }
             })
         })
     }
@@ -374,6 +385,30 @@ impl Replica {
             let page = page.reposition(before)?;
             PreparedEdit::create_page(remote, &page)?;
             Ok(Operation::CreatePage(page))
+        })
+    }
+
+    /// Reviews a page batch against both cache images, retaining its page and series identities.
+    pub fn rebase_pages_conflict(
+        &self,
+        id: u64,
+        local: &[u8],
+        remote: &[u8],
+        edits: &[onestore::PageEdit],
+    ) -> Result<()> {
+        self.resolve_conflict(id, local, remote, |intent| {
+            let Operation::Pages(batch) = intent.operation else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Select a page movement or indentation conflict",
+                )
+                .into());
+            };
+            Ok(Operation::Pages(batch.review(
+                remote,
+                intent.space,
+                edits,
+            )?))
         })
     }
 

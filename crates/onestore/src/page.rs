@@ -50,9 +50,10 @@ fn set_references(object: &mut PropertyObject, property: u32, ids: &[ExGuid]) ->
     object.copy_property(&source, property)
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Whether an edit preserves position or moves before a page (None appends).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum Position {
+pub enum PagePosition {
     Keep,
     Before(Option<ExGuid>),
 }
@@ -65,25 +66,44 @@ pub struct PageEdit {
     guid: [u8; 16],
     space: ExGuid,
     level: u32,
-    position: Position,
+    position: PagePosition,
 }
 
 impl PageEdit {
     /// Changes one page's indentation without changing its position.
     pub fn set_level(space: ExGuid, level: u32) -> Result<Self, Error> {
-        Self::new(space, level, Position::Keep)
+        Self::new(space, level, PagePosition::Keep)
     }
 
     /// Moves before an existing page space, or appends when `before` is None.
     pub fn move_to(space: ExGuid, before: Option<ExGuid>, level: u32) -> Result<Self, Error> {
-        Self::new(space, level, Position::Before(before))
+        Self::new(space, level, PagePosition::Before(before))
     }
 
     pub fn space(&self) -> ExGuid {
         self.space
     }
 
-    fn new(space: ExGuid, level: u32, position: Position) -> Result<Self, Error> {
+    pub fn level(&self) -> u32 {
+        self.level
+    }
+
+    pub fn position(&self) -> PagePosition {
+        self.position
+    }
+
+    /// Revises placement while retaining the selected page and allocated series identity.
+    pub fn reposition(&self, position: PagePosition, level: u32) -> Result<Self, Error> {
+        let edit = Self {
+            position,
+            level,
+            ..self.clone()
+        };
+        edit.validate()?;
+        Ok(edit)
+    }
+
+    fn new(space: ExGuid, level: u32, position: PagePosition) -> Result<Self, Error> {
         let edit = Self {
             guid: fresh_guid()?,
             space,
@@ -100,7 +120,7 @@ impl PageEdit {
                 "Choose an existing page space and indentation level 1 through 3",
             ));
         }
-        if let Position::Before(Some(before)) = self.position
+        if let PagePosition::Before(Some(before)) = self.position
             && (before.guid == [0; 16] || before == self.space)
         {
             return Err(invalid("Choose a different page as the movement anchor"));
@@ -209,7 +229,7 @@ impl PageEdit {
                     return Err(invalid("The selected page is no longer in the section"));
                 };
                 levels.insert(edit.space, edit.level);
-                if let Position::Before(before) = edit.position {
+                if let PagePosition::Before(before) = edit.position {
                     order.remove(at);
                     let position = match before {
                         None => order.len(),
@@ -269,7 +289,13 @@ impl PageEdit {
                 children.push(id);
                 let membership_changed = old_id.is_none_or(|old| view.nodes[&old].spaces != spaces);
                 if !membership_changed
-                    && !spaces.iter().any(|sid| levels[sid] != original_levels[sid])
+                    && !spaces.iter().any(|sid| {
+                        levels[sid] != original_levels[sid]
+                            || copies.get(sid).is_some_and(|id| {
+                                matches!(view.nodes[id].kind, Kind::Metadata { level, .. }
+                                    if level.unwrap_or(1) != levels[sid])
+                            })
+                    })
                 {
                     continue;
                 }

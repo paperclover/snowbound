@@ -285,6 +285,51 @@ fn moving_pages_preserves_ink_file_data_and_native_feature_objects() {
 }
 
 #[test]
+fn section_reordering_refreshes_stale_native_metadata_levels() {
+    let source = include_bytes!(
+        "../../../corpus/page-lifecycle/movement/02-promoted-parent/notebook/Lifecycle.one"
+    );
+    let ids = pages(source);
+    let edits: Vec<_> = ids[3..6]
+        .iter()
+        .enumerate()
+        .map(|(i, sid)| PageEdit::move_to(*sid, None, u32::try_from(i + 1).unwrap()).unwrap())
+        .collect();
+    let prepared = PreparedEdit::pages(source, &edits).unwrap();
+    let stores = [source.as_slice(), prepared.as_bytes()].map(|b| Store::parse(b).unwrap());
+    let indexes = stores.each_ref().map(|s| RevisionIndex::parse(s).unwrap());
+    let documents = indexes.each_ref().map(|i| Document::parse(i).unwrap());
+    let levels = documents.each_ref().map(|document| {
+        let section = &document.spaces[&document.root];
+        let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+        let copies: Vec<_> = view
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match &node.kind {
+                Kind::Metadata {
+                    title: Some(title),
+                    level,
+                } if title == "Same title" => Some((*id, *level)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies.len(), 1);
+        copies[0]
+    });
+    assert_eq!(levels[0].0, levels[1].0);
+    assert_eq!(levels[0].1, Some(2));
+    assert_eq!(levels[1].1, Some(1));
+    for (sid, space) in &indexes[0].spaces {
+        for rid in space.revisions.keys() {
+            assert_eq!(
+                format!("{:?}", indexes[0].resolve(*sid, *rid).unwrap()),
+                format!("{:?}", indexes[1].resolve(*sid, *rid).unwrap())
+            );
+        }
+    }
+}
+
+#[test]
 fn metadata_copy_order_does_not_change_page_identity() {
     let source = include_bytes!(
         "../../../corpus/page-lifecycle/page-edits/optional-cache/source-cold/notebook/Lifecycle.one"
