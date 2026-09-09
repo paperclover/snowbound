@@ -19,6 +19,39 @@ compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
 
 
 class OutlineEditTest(unittest.TestCase):
+    def test_automatic_titles_follow_native_and_rust_outline_movement(self):
+        fixture = FIXTURE / 'automatic-title'
+        models = {}
+        with TemporaryDirectory() as temporary:
+            for phase, notebook, capture in [
+                ('before', fixture / 'before/notebook', fixture / 'before/read'),
+                ('native', fixture / 'native/notebook', fixture / 'native/read'),
+                ('native-cold', fixture / 'native/cold/notebook', fixture / 'native/cold/read'),
+                ('rust', fixture / 'candidate', fixture / 'cold/read'),
+                ('rust-cold', fixture / 'cold/notebook', fixture / 'cold/read'),
+            ]:
+                folder = Path(temporary) / phase
+                shutil.copytree(capture, folder / 'read')
+                compare(notebook, folder / 'read')
+                subprocess.run([EXPORTER, notebook / 'TitleControl.one', folder / 'model'], check=True)
+                document = json.loads((folder / 'model/document.json').read_text())
+                models[phase] = list(ordered_pages(document))
+                self.assertEqual(len(models[phase]), 3)
+            for phase, pages in models.items():
+                expected = ['Vertical first', 'Horizontal first', 'Explicit title'] if phase == 'before' else ['Second 🦋 é', 'Second 🦋 é', 'Explicit title']
+                self.assertEqual([r['nodes'][r['roots']['2']]['kind']['title'] for _, _, r, _ in pages], expected)
+            for before, after in [('native', 'native-cold'), ('rust', 'rust-cold')]:
+                for (sid, _, a, page), (saved_sid, _, b, saved_page) in zip(models[before], models[after], strict=True):
+                    self.assertEqual((sid, page), (saved_sid, saved_page))
+                    self.assertEqual(dict(walk(a, page)), dict(walk(b, page)))
+            for (sid, _, a, page), (saved_sid, _, b, saved_page) in zip(models['before'], models['rust'], strict=True):
+                self.assertEqual((sid, page), (saved_sid, saved_page))
+                for oid, node in walk(a, page):
+                    self.assertEqual(node['children'], b['nodes'][oid]['children'])
+                    self.assertEqual(node['content'], b['nodes'][oid]['content'])
+                    if node['kind']['type'] == 'RichText':
+                        self.assertEqual(node, b['nodes'][oid])
+
     def test_rust_subtree_moves_and_deletions_survive_cold_native_reopen(self):
         for name, pages in [
             ('rust-tree/ordinary', 15), ('rust-tree/groups-cells', 12),

@@ -33,6 +33,8 @@ static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid)> = LazyLock::new(|| {
         .with_formatting(4..7, &[A::Italic(true), A::Color(Some([12, 34, 56]))])
         .unwrap();
     let edited = PreparedEdit::insert(&source, sid, &intent).unwrap();
+    let second = Insertion::outline(page, 144.0, 36.0, "Fixed second", "Author").unwrap();
+    let edited = PreparedEdit::insert(edited.as_bytes(), sid, &second).unwrap();
     (edited.as_bytes().to_vec(), sid, outline)
 });
 
@@ -187,6 +189,14 @@ fuzz_target!(|input: &[u8]| {
         let after_document = Document::parse(&after_index).unwrap();
         let space = &after_document.spaces[sid];
         let after_view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let layout = &after_view.nodes[outline].layout;
+        if layout.y.unwrap() > 36.0 || (layout.y == Some(36.0) && layout.x.unwrap() > 144.0) {
+            let (_, page) = after_document.pages().unwrap()[0];
+            assert!(matches!(&after_view.nodes[&after_view.roots[&2]].kind,
+                Kind::Metadata { title: Some(title), .. } if title == "Fixed second"));
+            assert!(matches!(&after_view.nodes[&page].kind,
+                Kind::Page { alternate_title: Some(title), .. } if title == "Fixed second"));
+        }
         if let Some(expected) = expected_layout {
             assert_eq!(
                 serde_json::to_value(&after_view.nodes[outline].layout).unwrap(),

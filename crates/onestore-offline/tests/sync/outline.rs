@@ -109,6 +109,81 @@ fn layout_and_dependent_text_survive_reopen_and_independent_remote_formatting() 
 }
 
 #[test]
+fn rebased_outline_movement_uses_remote_title_text_and_confirms_after_reopen() {
+    let (source, sid, outline, _, text_id) = fixture();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (_, page) = document.pages().unwrap()[0];
+    let space = &document.spaces[&sid];
+    let metadata = space.revisions[&space.contexts[&ExGuid::default()]].roots[&2];
+    let second = onestore::Insertion::outline(page, 144.0, 36.0, "Second", "Author").unwrap();
+    let source = PreparedEdit::insert(&source, sid, &second)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("titles.sqlite");
+    let cache = Replica::create(&path, &source).unwrap();
+    let movement = cache
+        .outline(
+            &source,
+            sid,
+            outline,
+            Change::Position { x: 216.0, y: 72.0 },
+        )
+        .unwrap()
+        .unwrap();
+    let local = cache.snapshot().unwrap();
+    assert_eq!(node(&local, sid, metadata)["kind"]["title"], "Second");
+    let dependent = cache
+        .edit_text(&local, sid, text_id, 0..0, "Local ")
+        .unwrap()
+        .unwrap();
+    drop(cache);
+    let remote =
+        PreparedEdit::text(&source, sid, second.text_object(), 0..6, "Remote second 🐈").unwrap();
+    let mut server = Server::new(remote.as_bytes());
+    server.fault = Fault::UnknownAfter;
+    let cache = Replica::open(&path).unwrap();
+    assert!(cache.sync_once(&mut server).is_err());
+    assert!(matches!(
+        cache.status(movement).unwrap(),
+        Some(EditStatus::AwaitingConfirmation { .. })
+    ));
+    assert_eq!(
+        node(&server.durable, sid, metadata)["kind"]["title"],
+        "Original 🦀 é"
+    );
+    assert_eq!(
+        node(&server.visible, sid, metadata)["kind"]["title"],
+        "Remote second 🐈"
+    );
+    drop(cache);
+    for id in [movement, dependent] {
+        let cache = Replica::open(&path).unwrap();
+        assert!(
+            matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
+        );
+        assert_eq!(
+            node(&server.durable, sid, metadata)["kind"]["title"],
+            "Remote second 🐈"
+        );
+        assert_eq!(
+            node(&server.durable, sid, page)["kind"]["alternate_title"],
+            "Remote second 🐈"
+        );
+    }
+    let cache = Replica::open(&path).unwrap();
+    assert!(cache.pending().unwrap().is_empty());
+    assert_eq!(
+        node(&cache.snapshot().unwrap(), sid, text_id)["kind"]["text"],
+        "Local Original 🦀 é"
+    );
+    assert_eq!(server.publications, 2);
+}
+
+#[test]
 fn competing_layout_requires_current_review_and_preserves_dependent_edits() {
     let (source, sid, outline, _, text_id) = fixture();
     for (local_change, remote_change) in [

@@ -272,6 +272,146 @@ fn resizing_a_native_reserved_width_preserves_content() {
 }
 
 #[test]
+fn outline_movement_updates_both_automatic_title_fields_without_changing_content() {
+    let source = onestore::create_section("titles.one", "First", "Author").unwrap();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (sid, page) = document.pages().unwrap()[0];
+    let insertion =
+        onestore::Insertion::outline(page, 144.0, 144.0, "Second 🦋 é", "Author").unwrap();
+    let source = PreparedEdit::insert(&source, sid, &insertion)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let space = &document.spaces[&sid];
+    let rid = space.contexts[&ExGuid::default()];
+    let before = &space.revisions[&rid];
+    for (x, y, expected) in [
+        (144.0, 0.0, "Second 🦋 é"),
+        (0.0, 36.0, "Second 🦋 é"),
+        (144.0, 36.0, "First"),
+        (0.0, 144.0, "First"),
+    ] {
+        let edit = PreparedEdit::outline(&source, sid, insertion.object(), Edit::Position { x, y })
+            .unwrap();
+        let saved = Store::parse(edit.as_bytes()).unwrap();
+        let saved_index = RevisionIndex::parse(&saved).unwrap();
+        saved_index.validate_current().unwrap();
+        let saved_document = Document::parse(&saved_index).unwrap();
+        let saved_space = &saved_document.spaces[&sid];
+        let after = &saved_space.revisions[&saved_space.contexts[&ExGuid::default()]];
+        let metadata = before.roots[&2];
+        assert!(
+            matches!(&after.nodes[&metadata].kind, Kind::Metadata { title: Some(title), .. } if title == expected)
+        );
+        assert!(
+            matches!(&after.nodes[&page].kind, Kind::Page { alternate_title: Some(title), .. } if title == expected)
+        );
+        assert_eq!(
+            before.nodes.keys().collect::<Vec<_>>(),
+            after.nodes.keys().collect::<Vec<_>>()
+        );
+        for (oid, node) in &before.nodes {
+            if ![page, metadata, insertion.object()].contains(oid) {
+                assert_eq!(
+                    serde_json::to_value(node).unwrap(),
+                    serde_json::to_value(&after.nodes[oid]).unwrap()
+                );
+            }
+        }
+        assert_eq!(
+            format!("{:?}", index.resolve(sid, rid).unwrap()),
+            format!("{:?}", saved_index.resolve(sid, rid).unwrap())
+        );
+        assert_eq!(
+            PreparedEdit::outline(
+                edit.as_bytes(),
+                sid,
+                insertion.object(),
+                Edit::Position { x, y }
+            )
+            .unwrap()
+            .as_bytes(),
+            edit.as_bytes()
+        );
+    }
+}
+
+#[test]
+fn native_automatic_and_explicit_titles_follow_outline_movement() {
+    let source = include_bytes!(
+        "../../../corpus/outline-edit/automatic-title/before/notebook/TitleControl.one"
+    );
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let mut candidate = source.to_vec();
+    let pages = document.pages().unwrap();
+    assert_eq!(pages.len(), 3);
+    for (sid, page) in pages {
+        let space = &document.spaces[&sid];
+        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let Kind::Metadata {
+            title: Some(title), ..
+        } = &view.nodes[&view.roots[&2]].kind
+        else {
+            panic!()
+        };
+        let outline = *view.nodes[&page].children.iter().find(|oid| {
+            view.nodes[oid].children.iter().any(|paragraph| view.nodes[paragraph].content.iter().any(|text| {
+                matches!(&view.nodes[text].kind, Kind::RichText { text, .. } if text.starts_with("Second"))
+            }))
+        }).unwrap();
+        let change = Edit::Position {
+            x: 36.0,
+            y: if title == "Horizontal first" {
+                108.0
+            } else {
+                72.0
+            },
+        };
+        candidate = PreparedEdit::outline(&candidate, sid, outline, change)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let store = Store::parse(&candidate).unwrap();
+        let saved = RevisionIndex::parse(&store).unwrap();
+        saved.validate_current().unwrap();
+        let document = Document::parse(&saved).unwrap();
+        let space = &document.spaces[&sid];
+        let after = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let expected = if title == "Explicit title" {
+            "Explicit title"
+        } else {
+            "Second 🦋 é"
+        };
+        assert!(
+            matches!(&after.nodes[&after.roots[&2]].kind, Kind::Metadata { title: Some(title), .. } if title == expected)
+        );
+        for (oid, node) in &view.nodes {
+            assert_eq!(node.children, after.nodes[oid].children);
+            assert_eq!(node.content, after.nodes[oid].content);
+            if matches!(node.kind, Kind::RichText { .. }) {
+                assert_eq!(
+                    serde_json::to_value(node).unwrap(),
+                    serde_json::to_value(&after.nodes[oid]).unwrap()
+                );
+            }
+        }
+    }
+    if let Some(output) = std::env::var_os("ONESTORE_OUTLINE_TITLE_OUTPUT") {
+        let output = std::path::PathBuf::from(output);
+        assert!(output.is_absolute());
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("TitleControl.one"), candidate).unwrap();
+    }
+}
+
+#[test]
 fn outline_publication_interruptions_reopen_as_complete_old_or_new_layout() {
     let source = onestore::create_section("layout.one", "Before 🦀 after", "Author").unwrap();
     let store = Store::parse(&source).unwrap();
@@ -286,6 +426,11 @@ fn outline_publication_interruptions_reopen_as_complete_old_or_new_layout() {
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
     let paragraph = view.nodes[&outline].children[0];
+    let second = onestore::Insertion::outline(page, 144.0, 36.0, "Second", "Author").unwrap();
+    let source = PreparedEdit::insert(&source, sid, &second)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
     for (object, operation) in [
         (outline, Edit::Position { x: 216.0, y: 72.0 }),
         (
@@ -344,6 +489,11 @@ fn repeated_geometry_changes_and_expansion_match_an_independent_model() {
         .unwrap();
     let paragraph = view.nodes[&outline].children[0];
     let text = view.nodes[&paragraph].content[0];
+    let second = onestore::Insertion::outline(page, 144.0, 36.0, "Second", "Author").unwrap();
+    let original = PreparedEdit::insert(&original, sid, &second)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
     for seed in 1..=16_u64 {
         let mut rng = seed;
         let mut source = original.clone();
@@ -388,6 +538,19 @@ fn repeated_geometry_changes_and_expansion_match_an_independent_model() {
             let document = Document::parse(&index).unwrap();
             let space = &document.spaces[&sid];
             let current = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let x = layout["x"].as_f64().unwrap();
+            let y = layout["y"].as_f64().unwrap();
+            let title = if y < 36.0 || (y == 36.0 && x <= 144.0) {
+                "Before 🦀 é"
+            } else {
+                "Second"
+            };
+            assert!(
+                matches!(&current.nodes[&current.roots[&2]].kind, Kind::Metadata { title: Some(actual), .. } if actual == title)
+            );
+            assert!(
+                matches!(&current.nodes[&page].kind, Kind::Page { alternate_title: Some(actual), .. } if actual == title)
+            );
             assert_eq!(
                 serde_json::to_value(&current.nodes[&outline].layout).unwrap(),
                 layout

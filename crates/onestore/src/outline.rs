@@ -2,7 +2,7 @@ use crate::{
     Error, ExGuid, RevisionIndex, Store,
     create::current_timestamps,
     document::{Document, Kind},
-    edit::editable_parents,
+    edit::{editable_parents, update_title},
     write::{PropertyObject, write_revision},
 };
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(deny_unknown_fields)]
 pub enum OutlineEdit {
     /// Moves an ordinary page outline to coordinates measured in points.
+    /// Refreshes automatic page titles when the leading outline changes.
     Position { x: f32, y: f32 },
     /// Changes an ordinary outline's maximum width in points, at least 36.
     /// `user_set` distinguishes an explicit width from an automatic layout hint.
@@ -56,7 +57,7 @@ impl OutlineEdit {
         let store = Store::parse(source)?;
         let index = RevisionIndex::parse(&store)?;
         index.validate_current()?;
-        let document = Document::parse(&index)?;
+        let mut document = Document::parse(&index)?;
         let pages: Vec<_> = document
             .pages()?
             .into_iter()
@@ -65,9 +66,12 @@ impl OutlineEdit {
         let [page] = pages.as_slice() else {
             return Err(invalid("Outline editing requires a single active page"));
         };
-        let semantic = &document.spaces[&space];
-        let view = &semantic.revisions[&semantic.contexts[&ExGuid::default()]];
-        let parents = editable_parents(view, &pages, object)?;
+        let mut semantic = document.spaces.remove(&space).unwrap();
+        let view = semantic
+            .revisions
+            .remove(&semantic.contexts[&ExGuid::default()])
+            .unwrap();
+        let parents = editable_parents(&view, &pages, object)?;
         let node = &view.nodes[&object];
         match self {
             Self::Collapsed(_) => {
@@ -127,6 +131,9 @@ impl OutlineEdit {
                     ancestor.set(&[(0x14001d7a, &modified)])?;
                     changed.insert(id, ancestor);
                 }
+            }
+            if matches!(self, Self::Position { .. }) {
+                update_title(&store, raw, view, &pages, &mut changed)?;
             }
             Ok(changed)
         })
