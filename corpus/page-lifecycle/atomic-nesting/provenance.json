@@ -1,0 +1,33 @@
+{
+  "source": "../03-renamed/notebook/Lifecycle.one",
+  "native_control": "../04-nested",
+  "generator": "write::tests::multi::nesting_publishes_section_order_and_page_levels_in_one_transaction",
+  "capture": "evidence/m10/page-batch-cold",
+  "run": {
+    "notebook": "/Users/clo/dev/one/evidence/m10/page-batch-candidate",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+      "file": "win7-office-base.qcow2",
+      "format": "qcow2",
+      "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+      "virtual_size": 68719476736
+    },
+    "scripts": {
+      "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+      "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+  },
+  "machine": {
+    "name": "m6-3d4af21a",
+    "hostname": "ONE-M6-3D4AF21A"
+  },
+  "teardown": {
+    "absent": true
+  },
+  "candidate_sha256": "02fc858fb8854dbd14c1d3c58b62fdd653e51216872afc0cd8b8a4b94b651b9d",
+  "cold_sha256": "f7a0c74f1a10d5933b386a7da7fee1ead860190b8794dc0ad3788e36c50f14eb"
+}

@@ -56,6 +56,47 @@ class PageLifecycleTest(unittest.TestCase):
                                    for oid in section['nodes'][section['roots']['1']]['children']])
                 self.assertEqual(groups[0], groups[1])
 
+    def test_atomic_rust_nesting_matches_native_and_survives_cold_reopen(self):
+        fixture = FIXTURE / 'atomic-nesting'
+        self.assertEqual((fixture / 'candidate/Lifecycle.one').read_bytes()[1024:],
+                         (fixture / 'cold/notebook/Lifecycle.one').read_bytes()[1024:])
+        with TemporaryDirectory() as temporary:
+            native_read = Path(temporary) / 'native/read'
+            cold_read = Path(temporary) / 'cold/read'
+            shutil.copytree(FIXTURE / '04-nested/read', native_read)
+            shutil.copytree(fixture / 'cold/read', cold_read)
+            models = []
+            for ordinal, source in enumerate((fixture / 'candidate', fixture / 'cold/notebook')):
+                output = Path(temporary) / str(ordinal)
+                subprocess.run([EXPORTER, source / 'Lifecycle.one', output], check=True)
+                models.append(json.loads((output / 'document.json').read_text()))
+                compare(source, native_read)
+                compare(source, cold_read)
+            pages = [list(ordered_pages(model)) for model in models]
+            expected = list(ordered_pages(self.models['04-nested', '']))
+            original = list(ordered_pages(self.models['03-renamed', '']))
+            self.assertEqual(len(pages[0]), 9)
+            for before, native, candidate, cold in zip(original, expected, *pages, strict=True):
+                sid, _, revision, page = candidate
+                self.assertEqual((sid, page), (before[0], before[3]))
+                self.assertEqual((sid, page), (cold[0], cold[3]))
+                self.assertEqual(dict(walk(revision, page)), dict(walk(before[2], before[3])))
+                self.assertEqual(revision['nodes'], cold[2]['nodes'])
+                self.assertEqual(revision['roots'], cold[2]['roots'])
+                metadata = revision['nodes'][revision['roots']['2']]['kind']
+                self.assertEqual(metadata, native[2]['nodes'][native[2]['roots']['2']]['kind'])
+            groups = []
+            for model in (self.models['04-nested', ''], *models):
+                _, revision = view(model, model['root'])
+                groups.append([revision['nodes'][oid]['spaces']
+                               for oid in revision['nodes'][revision['roots']['1']]['children']])
+            self.assertEqual(groups[0], groups[1])
+            self.assertEqual(groups[1], groups[2])
+            _, candidate = view(models[0], models[0]['root'])
+            _, cold = view(models[1], models[1]['root'])
+            self.assertEqual(candidate['nodes'], cold['nodes'])
+            self.assertEqual(candidate['roots'], cold['roots'])
+
     def test_native_page_styles_titles_order_and_parent_deletion(self):
         phases = {phase: list(ordered_pages(self.models[phase, ''])) for phase in PHASES}
         initial = [sid for sid, _, _, _ in phases['02-authored']]

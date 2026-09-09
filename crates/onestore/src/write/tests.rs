@@ -1,6 +1,74 @@
 use super::patch_properties;
 use crate::{PropertySets, Value, create::properties};
 
+mod multi;
+
+#[test]
+fn copying_reference_arrays_remaps_every_entry_in_each_stream() {
+    use super::PropertyObject;
+    use std::{collections::BTreeMap, sync::Arc};
+    for kind in [9_u32, 11, 13] {
+        for count in [0_u32, 1, 2, 3, 4, 8, 33] {
+            for nested in [false, true] {
+                let property = (kind << 26) | 1;
+                let references: Vec<_> = (0..count)
+                    .flat_map(|i| (((i % 3) << 8) | i).to_le_bytes())
+                    .collect();
+                let mut bytes = properties(&[(property, references)]).unwrap();
+                let selected = if nested {
+                    let parsed = PropertySets::parse(&bytes).unwrap();
+                    let offset = parsed.root_ids.as_ptr().addr() - bytes.as_ptr().addr() - 2;
+                    bytes.truncate(bytes.len() - parsed.padding.len());
+                    bytes.splice(offset..offset, [1, 0, 2, 0, 0, 0x44]);
+                    bytes.resize(bytes.len().next_multiple_of(8), 0);
+                    0x44000002
+                } else {
+                    property
+                };
+                let source = PropertyObject {
+                    jcid: 0x6000e,
+                    bytes,
+                    global_ids: Arc::new(BTreeMap::from([
+                        (0, [1; 16]),
+                        (1, [2; 16]),
+                        (2, [3; 16]),
+                    ])),
+                };
+                let mut target = PropertyObject {
+                    jcid: 0x6000e,
+                    bytes: properties(&[(0x14000003, 47_u32.to_le_bytes().to_vec())]).unwrap(),
+                    global_ids: Arc::new(BTreeMap::from([
+                        (0, [3; 16]),
+                        (1, [9; 16]),
+                        (2, [1; 16]),
+                    ])),
+                };
+                target.copy_property(&source, selected).unwrap();
+                let parsed = PropertySets::parse(&target.bytes).unwrap();
+                assert_eq!(parsed.sets[0][0].value, Value::Bytes(&47_u32.to_le_bytes()));
+                let copied = parsed
+                    .sets
+                    .iter()
+                    .flatten()
+                    .find(|p| p.id == property)
+                    .unwrap();
+                let Value::References { compact_ids, .. } = copied.value else {
+                    panic!()
+                };
+                assert_eq!(compact_ids.len(), count as usize * 4);
+                for (i, compact) in compact_ids.chunks_exact(4).enumerate() {
+                    let compact = u32::from_le_bytes(compact.try_into().unwrap());
+                    assert_eq!(compact & 255, i as u32);
+                    assert_eq!(target.global_ids[&(compact >> 8)], [(i % 3 + 1) as u8; 16]);
+                }
+                let before = target.bytes.clone();
+                target.copy_property(&source, selected).unwrap();
+                assert_eq!(target.bytes, before);
+            }
+        }
+    }
+}
+
 #[test]
 fn document_insertions_and_formatting_respect_readonly_ancestors() {
     use super::{PropertyObject, write_revision};
