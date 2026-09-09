@@ -1,7 +1,7 @@
 use crate::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
-    write::{PropertyObject, write_revisions},
+    write::{PropertyObject, RevisionEdit, write_revisions},
 };
 use std::collections::BTreeMap;
 
@@ -90,7 +90,10 @@ fn nest(source: &[u8]) -> Vec<u8> {
         object.set(&[(0x24001c20, &children)])?;
         replacements.insert(root, object);
         changes.insert(index.root, replacements);
-        Ok(changes)
+        Ok(changes
+            .into_iter()
+            .map(|(sid, objects)| (sid, RevisionEdit::Update(objects)))
+            .collect())
     })
     .unwrap()
 }
@@ -213,7 +216,7 @@ fn empty_batches_and_invalid_spaces_do_not_produce_an_edit() {
     assert!(
         write_revisions(SOURCE, |_| Ok(BTreeMap::from([(
             ExGuid::default(),
-            BTreeMap::new()
+            RevisionEdit::Update(BTreeMap::new())
         )])))
         .is_err()
     );
@@ -247,7 +250,10 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
                 object.set(&[(property, &step.to_le_bytes())])?;
                 changes.insert(*sid, BTreeMap::from([(id, object)]));
             }
-            Ok(changes)
+            Ok(changes
+                .into_iter()
+                .map(|(sid, objects)| (sid, RevisionEdit::Update(objects)))
+                .collect())
         })
         .unwrap();
         let store = Store::parse(&written).unwrap();

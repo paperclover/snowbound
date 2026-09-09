@@ -354,6 +354,14 @@ pub(crate) struct PropertyObject {
     pub global_ids: Arc<BTreeMap<u32, [u8; 16]>>,
 }
 
+pub(crate) enum RevisionEdit {
+    Update(BTreeMap<ExGuid, PropertyObject>),
+    Create {
+        roots: BTreeMap<u32, ExGuid>,
+        objects: BTreeMap<ExGuid, PropertyObject>,
+    },
+}
+
 impl PropertyObject {
     pub fn from_object(object: &crate::Object<'_>) -> Result<Self> {
         let ObjectData::Properties(bytes) = object.data else {
@@ -597,13 +605,49 @@ pub(crate) fn write_revision(
                 message: "Object space has no active default revision",
             })?;
         let revision = index.resolve(space, rid)?;
-        Ok(BTreeMap::from([(space, edit(&revision)?)]))
+        Ok(BTreeMap::from([(
+            space,
+            RevisionEdit::Update(edit(&revision)?),
+        )]))
     })
+}
+
+fn append_fragment(
+    source: &[u8],
+    output: &mut Vec<u8>,
+    list: &crate::NodeList,
+    nodes: &[Vec<u8>],
+) -> Result<(u32, usize)> {
+    let last_fragment = *list.fragments.last().unwrap();
+    let list_start = usize::try_from(last_fragment.offset).unwrap();
+    let list_id = u32::from_le_bytes(source[list_start + 8..list_start + 12].try_into().unwrap());
+    let chunk = append_list(output, list_id, nodes)?;
+    let start = usize::try_from(chunk.offset).unwrap();
+    let sequence = u32::try_from(list.fragments.len()).map_err(|_| Error {
+        offset: list_start,
+        message: "File-node fragment sequences are exhausted",
+    })?;
+    output[start + 12..start + 16].copy_from_slice(&sequence.to_le_bytes());
+    let last_node = list.nodes.last().unwrap();
+    let node_header = u32::from_le_bytes(
+        source[last_node.offset..last_node.offset + 4]
+            .try_into()
+            .unwrap(),
+    );
+    let nodes_end = last_node.offset + usize::try_from((node_header >> 10) & 0x1fff).unwrap();
+    let tail = list_start + usize::try_from(last_fragment.length).unwrap() - 20;
+    if tail - nodes_end >= 4 {
+        output[nodes_end..nodes_end + 4].copy_from_slice(&node(0xff, None, &[])?);
+    }
+    output[tail..tail + 8].copy_from_slice(&chunk.offset.to_le_bytes());
+    output[tail + 8..tail + 12].copy_from_slice(&(chunk.length as u32).to_le_bytes());
+
+    Ok((list_id, list.nodes.len() + nodes.len()))
 }
 
 pub(crate) fn write_revisions(
     source: &[u8],
-    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, BTreeMap<ExGuid, PropertyObject>>>,
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
     let store = Store::parse(source)?;
     let is_section = store.header.file_type == FileType::Section;
@@ -617,25 +661,63 @@ pub(crate) fn write_revisions(
     index.validate_current()?;
     let changes = edit(&index)?;
     let mut output = source.to_vec();
-    let maximum = store
+    let mut maximum = store
         .transaction_fragments
         .iter()
         .flat_map(|fragment| fragment.entries.chunks_exact(8))
         .map(|entry| u32::from_le_bytes(entry[..4].try_into().unwrap()))
         .max()
         .unwrap();
+    let mut allocate_list = || {
+        maximum = maximum.checked_add(1).ok_or(Error {
+            offset: 0,
+            message: "File-node list identities are exhausted",
+        })?;
+        Ok::<_, Error>(maximum)
+    };
     let mut counts = Vec::new();
-    for (space, mut replacements) in changes {
-        let rid = *index
-            .spaces
-            .get(&space)
-            .and_then(|space| space.labels.get(&(ExGuid::default(), 1)))
-            .ok_or(Error {
-                offset: 0,
-                message: "Object space has no active default revision",
-            })?;
-        let mut revision = index.resolve(space, rid)?;
-        let reachable = revision.reachable()?;
+    let mut root_nodes = Vec::new();
+    for (space, change) in changes {
+        let (rid, mut revision, mut replacements) = match change {
+            RevisionEdit::Update(objects) => {
+                let rid = *index
+                    .spaces
+                    .get(&space)
+                    .and_then(|space| space.labels.get(&(ExGuid::default(), 1)))
+                    .ok_or(Error {
+                        offset: 0,
+                        message: "Object space has no active default revision",
+                    })?;
+                (Some(rid), index.resolve(space, rid)?, objects)
+            }
+            RevisionEdit::Create { roots, objects } => {
+                if !is_section || space.guid == [0; 16] || index.spaces.contains_key(&space) {
+                    return Err(Error {
+                        offset: 0,
+                        message: "Choose a new object-space identity in a section file",
+                    });
+                }
+                if roots.is_empty() || objects.is_empty() {
+                    return Err(Error {
+                        offset: 0,
+                        message: "New object space needs roots and objects",
+                    });
+                }
+                (
+                    None,
+                    crate::ResolvedRevision {
+                        roots,
+                        objects: BTreeMap::new(),
+                    },
+                    objects,
+                )
+            }
+        };
+        let reachable = if rid.is_some() {
+            revision.reachable()?
+        } else {
+            BTreeSet::new()
+        };
         for (id, replacement) in &replacements {
             if let Some(object) = revision.objects.get(id) {
                 if !reachable.contains(id) {
@@ -769,11 +851,10 @@ pub(crate) fn write_revisions(
         }
 
         // Native cold-open fails on long dependency chains; cap their depth at 512.
-        let checkpoint = std::iter::successors(Some(rid), |id| {
-            index.spaces[&space].revisions[id].dependency
-        })
-        .nth(511)
-        .is_some();
+        let checkpoint = rid.is_none()
+            || std::iter::successors(rid, |id| index.spaces[&space].revisions[id].dependency)
+                .nth(511)
+                .is_some();
         let selected: Vec<_> = revision
             .objects
             .iter()
@@ -821,13 +902,25 @@ pub(crate) fn write_revisions(
         };
         let mut start = Vec::new();
         new_rid.encode(&mut start);
-        if checkpoint { ExGuid::default() } else { rid }.encode(&mut start);
+        if checkpoint {
+            ExGuid::default()
+        } else {
+            rid.unwrap()
+        }
+        .encode(&mut start);
         if !is_section {
             start.extend_from_slice(&0_u64.to_le_bytes());
         }
         start.extend_from_slice(&1_u32.to_le_bytes());
         start.extend_from_slice(&0_u16.to_le_bytes());
-        let mut manifest = vec![node(if is_section { 0x1e } else { 0x1b }, None, &start)?];
+        let mut manifest = Vec::new();
+        if rid.is_none() {
+            let mut payload = Vec::new();
+            space.encode(&mut payload);
+            payload.extend_from_slice(&0_u32.to_le_bytes());
+            manifest.push(node(0x14, None, &payload)?);
+        }
+        manifest.push(node(if is_section { 0x1e } else { 0x1b }, None, &start)?);
         for (table, objects) in groups {
             let mut payload = Vec::new();
             let mut group = if is_section {
@@ -941,14 +1034,7 @@ pub(crate) fn write_revisions(
             }
             if is_section {
                 group.push(node(0xb8, None, &[])?);
-                let group_id = u32::try_from(counts.len())
-                    .ok()
-                    .and_then(|n| n.checked_add(1))
-                    .and_then(|n| maximum.checked_add(n))
-                    .ok_or(Error {
-                        offset: 0,
-                        message: "File-node list identities are exhausted",
-                    })?;
+                let group_id = allocate_list()?;
                 let chunk = append_list(&mut output, group_id, &group)?;
                 counts.push((group_id, group.len()));
                 manifest.push(node(0xb0, Some(Reference::NodeList(chunk)), &payload)?);
@@ -979,47 +1065,51 @@ pub(crate) fn write_revisions(
             }
         }
         manifest.push(node(0x1c, None, &[])?);
-        let root = store.list(store.header.root)?;
-        let space_node = root
-            .nodes
-            .iter()
-            .find(|node| node.id == 8 && node.fields(&store).exguid() == Ok(space))
-            .ok_or(Error {
-                offset: 0,
-                message: "Object space is absent from the root list",
-            })?;
-        let space_list = space_node.referenced_list(&store)?;
-        let revision_node = space_list.iter().rfind(|node| node.id == 0x10).unwrap();
-        let Some(Reference::NodeList(manifest_reference)) = revision_node.reference else {
-            unreachable!()
-        };
-        let revision_list = store.list(manifest_reference)?;
-        let last_fragment = *revision_list.fragments.last().unwrap();
-        let list_start = usize::try_from(last_fragment.offset).unwrap();
-        let list_id =
-            u32::from_le_bytes(source[list_start + 8..list_start + 12].try_into().unwrap());
-        let manifest_chunk = append_list(&mut output, list_id, &manifest)?;
-        let manifest_start = usize::try_from(manifest_chunk.offset).unwrap();
-        let sequence = u32::try_from(revision_list.fragments.len()).map_err(|_| Error {
-            offset: list_start,
-            message: "File-node fragment sequences are exhausted",
-        })?;
-        output[manifest_start + 12..manifest_start + 16].copy_from_slice(&sequence.to_le_bytes());
-        let last_node = revision_list.nodes.last().unwrap();
-        let node_header = u32::from_le_bytes(
-            source[last_node.offset..last_node.offset + 4]
-                .try_into()
-                .unwrap(),
-        );
-        let nodes_end = last_node.offset + usize::try_from((node_header >> 10) & 0x1fff).unwrap();
-        let tail = list_start + usize::try_from(last_fragment.length).unwrap() - 20;
-        if tail - nodes_end >= 4 {
-            output[nodes_end..nodes_end + 4].copy_from_slice(&node(0xff, None, &[])?);
+        if rid.is_none() {
+            let list_id = allocate_list()?;
+            let chunk = append_list(&mut output, list_id, &manifest)?;
+            counts.push((list_id, manifest.len()));
+            let mut payload = Vec::new();
+            space.encode(&mut payload);
+            let nodes = vec![
+                node(0xc, None, &payload)?,
+                node(0x10, Some(Reference::NodeList(chunk)), &[])?,
+            ];
+            let list_id = allocate_list()?;
+            let chunk = append_list(&mut output, list_id, &nodes)?;
+            counts.push((list_id, nodes.len()));
+            root_nodes.push(node(8, Some(Reference::NodeList(chunk)), &payload)?);
+        } else {
+            let root = store.list(store.header.root)?;
+            let space_node = root
+                .nodes
+                .iter()
+                .find(|node| node.id == 8 && node.fields(&store).exguid() == Ok(space))
+                .ok_or(Error {
+                    offset: 0,
+                    message: "Object space is absent from the root list",
+                })?;
+            let space_list = space_node.referenced_list(&store)?;
+            let revision_node = space_list.iter().rfind(|node| node.id == 0x10).unwrap();
+            let Some(Reference::NodeList(manifest_reference)) = revision_node.reference else {
+                unreachable!()
+            };
+            let revision_list = store.list(manifest_reference)?;
+            counts.push(append_fragment(
+                source,
+                &mut output,
+                revision_list,
+                &manifest,
+            )?);
         }
-        output[tail..tail + 8].copy_from_slice(&manifest_chunk.offset.to_le_bytes());
-        output[tail + 8..tail + 12].copy_from_slice(&(manifest_chunk.length as u32).to_le_bytes());
-
-        counts.push((list_id, revision_list.nodes.len() + manifest.len()));
+    }
+    if !root_nodes.is_empty() {
+        counts.push(append_fragment(
+            source,
+            &mut output,
+            store.list(store.header.root)?,
+            &root_nodes,
+        )?);
     }
     if counts.is_empty() {
         return Ok(source.to_vec());

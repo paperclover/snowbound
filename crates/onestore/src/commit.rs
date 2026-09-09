@@ -183,6 +183,14 @@ pub struct PreparedEdit<'a> {
 }
 
 impl<'a> PreparedEdit<'a> {
+    /// Creates a page and its section entry in one transaction, retaining the intent's identities.
+    pub fn create_page(source: &'a [u8], page: &crate::PageCreation) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: page.apply(source)?,
+        })
+    }
+
     /// Moves or removes a subtree and normalizes its containers in one revision.
     pub fn tree(
         source: &'a [u8],

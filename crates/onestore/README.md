@@ -45,6 +45,7 @@ harness also accepts `--client-profile release`.
 | `document::Document`, `Revision::text_runs` | Interpret document objects and inherited text formatting while retaining unknown properties and revision identities |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
+| `PageCreation`, `PreparedEdit::create_page` | Add an empty top-level page and its section entry atomically, retaining page identities across retries |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
@@ -73,6 +74,13 @@ sections retain their encrypted structure and payloads. With the optional
 AES-128/CBC, SHA-1 password wrappers into a borrowed document view. Incorrect
 passwords, unsupported protection profiles and work-limit failures remain distinct.
 The source stays encrypted; protected writes are rejected.
+`PageCreation::new` appends, or inserts before the first page space of an existing
+series. `Some("")` creates an empty title field; `None` omits the title node.
+The page has no body outlines, generated date/time text or applied template.
+Retain the intent to preserve its page, title and space identities; existing
+identities require reconciliation before retry. Body insertion and title edits
+use those identities through the existing APIs. [Native page-creation fixtures](../../corpus/page-lifecycle/creation/README.md)
+cover duplicate Unicode titles, native edits and Rust follow-up edits.
 Insertions update child references, reference counts, modification times and automatic
 titles atomically. Paragraphs can be nested or inserted into table cells; outline
 coordinates use points. `Insertion::with_formatting` includes nonoverlapping UTF-16
