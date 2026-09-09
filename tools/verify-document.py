@@ -221,7 +221,7 @@ def compare(notebook, native, versions=None, password_file=None):
             resolved_text = json.loads((exported / 'text.json').read_text())
             assets = {json.dumps(a['reference'], sort_keys=True): (exported / a['path']).read_bytes()
                       for a in json.loads((exported / 'assets.json').read_text())}
-        candidates = [n for n in hierarchy.findall('.//one:Section', ns)
+        candidates = [n for n in hierarchy.iter('{' + ns['one'] + '}Section')
                       if PureWindowsPath(n.attrib['path']).parts[-len(relative.parts):] == relative.parts]
         assert len(candidates) == 1, (relative, 'native section identity')
         expected = [captures[n.attrib['ID']][0] for n in candidates[0].findall('one:Page', ns)]

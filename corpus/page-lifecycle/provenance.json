@@ -1,0 +1,78 @@
+{
+  "author": "tools/native/page-lifecycle.ps1",
+  "author_sha256": "fe23b891de981e543cfc737cab2a8f7841a630d38be244901114a72b7a5e96cf",
+  "native_capture": "evidence/m10/page-lifecycle-native-04",
+  "source": [
+    {
+      "path": "synthetic.one",
+      "bytes": 32264,
+      "sha256": "153c53e607a9bc550d3979615248cb0b55411d15b90edfcd6e322f3d0bd0c8a9",
+      "mtime_ns": 1788922549417777349
+    }
+  ],
+  "teardown": {
+    "absent": true
+  },
+  "cold": {
+    "01-blank": {
+      "capture": "evidence/m10/page-lifecycle-cold-01-blank",
+      "machine": {
+        "name": "m6-365578aa",
+        "hostname": "ONE-M6-365578AA"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "02-authored": {
+      "capture": "evidence/m10/page-lifecycle-cold-02-authored",
+      "machine": {
+        "name": "m6-94f69aa7",
+        "hostname": "ONE-M6-94F69AA7"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "03-renamed": {
+      "capture": "evidence/m10/page-lifecycle-cold-03-renamed",
+      "machine": {
+        "name": "m6-9f33bd3b",
+        "hostname": "ONE-M6-9F33BD3B"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "04-nested": {
+      "capture": "evidence/m10/page-lifecycle-cold-04-nested",
+      "machine": {
+        "name": "m6-5c6ba322",
+        "hostname": "ONE-M6-5C6BA322"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "05-reordered": {
+      "capture": "evidence/m10/page-lifecycle-cold-05-reordered",
+      "machine": {
+        "name": "m6-5bc25eb5",
+        "hostname": "ONE-M6-5BC25EB5"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "06-deleted-parent": {
+      "capture": "evidence/m10/page-lifecycle-cold-06-deleted-parent",
+      "machine": {
+        "name": "m6-cc6597cf",
+        "hostname": "ONE-M6-CC6597CF"
+      },
+      "teardown": {
+        "absent": true
+      }
+    }
+  }
+}
