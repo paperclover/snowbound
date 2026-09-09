@@ -1,0 +1,109 @@
+{
+  "source": "corpus/page-lifecycle/04-nested/notebook/Lifecycle.one",
+  "author_capture": "evidence/m10/page-movement-native-05",
+  "author_machine": {
+    "name": "m6-4a2dfcf5",
+    "hostname": "ONE-M6-4A2DFCF5"
+  },
+  "author_teardown": {
+    "absent": true
+  },
+  "scripts": {
+    "controller_sha256": "5630c0252072b92d4a8ac04b7b577106cef550aad93ed41fc50f145eaabf0af7",
+    "helper_sha256": "881fcdcc88eabecf965737085faede5cb39dda6f3f832b3875b0c62345ffbde6"
+  },
+  "single_page_capture": "evidence/m10/page-movement-native-03",
+  "single_page_expectation": "The controller rejected a group-move expectation; the captured single-page outcome was independently cold-validated.",
+  "cold": {
+    "01-demoted-parent": {
+      "capture": "evidence/m10/page-movement-cold-01-demoted-parent",
+      "machine": {
+        "name": "m6-97b05910",
+        "hostname": "ONE-M6-97B05910"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "02-promoted-parent": {
+      "capture": "evidence/m10/page-movement-cold-02-promoted-parent",
+      "machine": {
+        "name": "m6-2aeea4f2",
+        "hostname": "ONE-M6-2AEEA4F2"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "03-selected-group-move": {
+      "capture": "evidence/m10/page-movement-cold-03-selected-group-move",
+      "machine": {
+        "name": "m6-cd0faacb",
+        "hostname": "ONE-M6-CD0FAACB"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "04-subpage-move": {
+      "capture": "evidence/m10/page-movement-cold-04-subpage-move",
+      "machine": {
+        "name": "m6-554a4076",
+        "hostname": "ONE-M6-554A4076"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "05-insert-before-subpage": {
+      "capture": "evidence/m10/page-movement-cold-05-insert-before-subpage",
+      "machine": {
+        "name": "m6-982b068d",
+        "hostname": "ONE-M6-982B068D"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "06-promoted-level-two": {
+      "capture": "evidence/m10/page-movement-cold-06-promoted-level-two",
+      "machine": {
+        "name": "m6-1dc0856b",
+        "hostname": "ONE-M6-1DC0856B"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "07-promoted-root": {
+      "capture": "evidence/m10/page-movement-cold-07-promoted-root",
+      "machine": {
+        "name": "m6-93230663",
+        "hostname": "ONE-M6-93230663"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "08-collapsed-group-move": {
+      "capture": "evidence/m10/page-movement-cold-08-collapsed-group-move",
+      "machine": {
+        "name": "m6-6f5064db",
+        "hostname": "ONE-M6-6F5064DB"
+      },
+      "teardown": {
+        "absent": true
+      }
+    },
+    "single-page": {
+      "capture": "evidence/m10/page-movement-single-cold",
+      "machine": {
+        "name": "m6-d98e3a6d",
+        "hostname": "ONE-M6-D98E3A6D"
+      },
+      "teardown": {
+        "absent": true
+      }
+    }
+  }
+}

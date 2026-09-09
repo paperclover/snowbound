@@ -14,7 +14,7 @@ from document_model import EXPORTER, ordered_pages, view
 compare_document = runpy.run_path(str(Path(__file__).with_name('verify-document.py')))['compare']
 
 
-def compare(source, capture):
+def compare(source, capture, *, refresh_metadata_levels=False):
     files = list(source.glob('*.one'))
     assert len(files) == 1
     with TemporaryDirectory() as temporary:
@@ -36,7 +36,7 @@ def compare(source, capture):
             (sid, page) for sid, _, _, page in ordered_pages(after)]
         assert before['root'] == after['root']
         assert before['spaces'].keys() == after['spaces'].keys()
-        filled = 0
+        filled = refreshed = 0
         for sid in before['spaces']:
             _, original = view(before, sid)
             _, observed = view(after, sid)
@@ -46,6 +46,14 @@ def compare(source, capture):
                     series = expected[series_id]
                     existing = [p for p in series['extra'][0] if p['id'] == 0x24003442]
                     added = [p for p in observed['nodes'][series_id]['extra'][0] if p['id'] == 0x24003442]
+                    if existing and refresh_metadata_levels:
+                        for copy, page_sid in zip(existing[0]['value']['Objects'], series['spaces'], strict=True):
+                            (_, _, page_view, _), = [p for p in pages if p[0] == page_sid]
+                            metadata = expected[copy]['kind']
+                            assert metadata['type'] == 'Metadata'
+                            level = page_view['nodes'][page_view['roots']['2']]['kind']['level']
+                            refreshed += metadata['level'] != level
+                            metadata['level'] = level
                     if existing or not added:
                         continue
                     copies = []
@@ -62,7 +70,8 @@ def compare(source, capture):
                     series['extra'][0].append({'id': 0x24003442, 'value': {'Objects': copies}})
             assert original['roots'] == observed['roots']
             assert expected == observed['nodes'], sid
-        print(f'Passed: {len(pages)} ordered pages and preserved active graphs; {filled} missing section metadata copies filled natively')
+        print(f'Passed: {len(pages)} ordered pages and preserved active graphs; {filled} missing section metadata copies filled natively; {refreshed} section metadata levels refreshed')
+        return refreshed
 
 
 if __name__ == '__main__':

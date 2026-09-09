@@ -131,7 +131,9 @@ def clone(output):
         (output / 'teardown.json').write_text(json.dumps({'absent': not vm.instance_path(name).exists()}) + '\n')
 
 
-def capture(notebook, output, expected_pages=-1, author=None, screenshots=False, pdf=False, author_timeout=600, inspect=False, collect_notebook=False):
+def capture(notebook, output, expected_pages=-1, author=None, screenshots=False, pdf=False, author_timeout=600, inspect=False, collect_notebook=False, interaction=None):
+    if inspect and interaction is not None:
+        raise ValueError('Choose manual inspection or an interaction callback.')
     notebook = notebook.resolve(strict=True)
     if not notebook.is_dir():
         raise ValueError('Choose a notebook directory.')
@@ -180,7 +182,7 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
                 if result.get('error'):
                     raise RuntimeError(result['error'])
                 command(name, 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\author.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-%s' % name.upper(), output, author_timeout * 1000)
-            command(name, 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\read-current.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-%s -ExpectedPages %d%s' % (name.upper(), expected_pages, (' -UseCurrentCache' if author else '') + (' -Pdf' if pdf else '') + (' -KeepOpen' if screenshots or inspect else '')), output, 600000)
+            command(name, 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\read-current.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-%s -ExpectedPages %d%s' % (name.upper(), expected_pages, (' -UseCurrentCache' if author else '') + (' -Pdf' if pdf else '') + (' -KeepOpen' if screenshots or inspect or interaction is not None else '')), output, 600000)
             collect_artifacts(name, output, '*' if author or collect_notebook else 'read')
             if screenshots:
                 for page in sorted((output / 'read').glob('page-*.xml')):
@@ -193,11 +195,14 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
                         page.with_suffix('.png').write_bytes(base64.b64decode(result['png_b64']))
                     if result.get('error') or result.get('exit') != 0 or not result.get('png_b64'):
                         raise RuntimeError('The native page screenshot failed; inspect its navigation record.')
-            if inspect:
-                print(f'Inspection ready: {name}; create {output / "finish"} to capture and close it.', flush=True)
-                deadline = time.monotonic() + 1800
-                while not (output / 'finish').exists() and time.monotonic() < deadline:
-                    time.sleep(.2)
+            if inspect or interaction is not None:
+                if interaction is not None:
+                    interaction(name, output)
+                else:
+                    print(f'Inspection ready: {name}; create {output / "finish"} to capture and close it.', flush=True)
+                    deadline = time.monotonic() + 1800
+                    while not (output / 'finish').exists() and time.monotonic() < deadline:
+                        time.sleep(.2)
                 command(name, 'powershell -NoProfile -Command "Rename-Item C:\\one-tests\\runs\\capture\\read before-read"', output)
                 (output / 'read').rename(output / 'before-read')
                 command(name, 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\read-current.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-%s -UseCurrentCache -ExpectedPages -1%s' % (name.upper(), ' -Pdf' if pdf else ''), output, 600000)

@@ -1,7 +1,16 @@
-param([Parameter(Mandatory=$true)][string]$Root, [Parameter(Mandatory=$true)][string]$CloneHost)
+param([Parameter(Mandatory=$true)][string]$Root, [Parameter(Mandatory=$true)][string]$CloneHost,
+    [string]$CaptureOnly = '')
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-& "$PSScriptRoot\cold-current.ps1" -Root $Root -CloneHost $CloneHost
+if ($CaptureOnly) {
+    if ($CaptureOnly -notmatch '^[a-z0-9-]+$' -or $CloneHost -notmatch '^ONE-[A-Z0-9-]+$' -or
+        [Environment]::MachineName -ne $CloneHost -or
+        [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Root).TrimEnd('\')) -ne 'C:\one-tests\runs') {
+        throw 'Choose a named capture in the owned clone run.'
+    }
+} else {
+    & "$PSScriptRoot\cold-current.ps1" -Root $Root -CloneHost $CloneHost
+}
 $app = New-Object -ComObject OneNote.Application
 $notebook = ''
 $section = ''
@@ -66,7 +75,7 @@ function Save-Phase([string]$Name) {
             }
         }
     }
-    $pages | ConvertTo-Json | Set-Content (Join-Path $destination 'pages.json') -Encoding UTF8
+    if ($pages.Count) { $pages | ConvertTo-Json | Set-Content (Join-Path $destination 'pages.json') -Encoding UTF8 }
     Write-Output $Name
 }
 
@@ -89,6 +98,10 @@ function Set-Order([string[]]$Names, [int[]]$Levels) {
 try {
     $app.OpenHierarchy((Join-Path $Root 'notebook'), '', [ref]$notebook, 0)
     $app.OpenHierarchy('Lifecycle.one', $notebook, [ref]$section, 3)
+    if ($CaptureOnly) {
+        Save-Phase $CaptureOnly
+        return
+    }
     foreach ($style in 0..2) {
         $page = ''
         $app.CreateNewPage($section, [ref]$page, $style)
@@ -118,7 +131,7 @@ try {
     $app.DeleteHierarchy($pages['parent'], [DateTime]::MinValue, $false)
     Save-Phase '06-deleted-parent'
 } finally {
-    if ($notebook) { $app.CloseNotebook($notebook, $false) }
+    if ($notebook -and -not $CaptureOnly) { $app.CloseNotebook($notebook, $false) }
     [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($app)
     [GC]::Collect()
     [GC]::WaitForPendingFinalizers()

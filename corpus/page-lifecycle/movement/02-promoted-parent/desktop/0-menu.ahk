@@ -1,0 +1,1 @@
+../../01-demoted-parent/desktop/0-menu.ahk

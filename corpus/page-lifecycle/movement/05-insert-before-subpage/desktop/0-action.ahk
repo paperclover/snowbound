@@ -1,0 +1,7 @@
+MouseMove(710,186)
+Send("{LButton down}")
+Sleep(250)
+MouseMove(710,286)
+Sleep(500)
+Send("{LButton up}")
+Sleep(700)

@@ -1,0 +1,5 @@
+Click(710,186)
+Send("{Shift down}")
+Click(710,230)
+Send("{Shift up}")
+Sleep(700)
