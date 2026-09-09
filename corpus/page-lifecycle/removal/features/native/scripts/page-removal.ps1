@@ -1,0 +1,1 @@
+../../../all/native/scripts/page-removal.ps1

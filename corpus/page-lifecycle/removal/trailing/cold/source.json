@@ -1,0 +1,26 @@
+[
+  {
+    "path": "Lifecycle.one",
+    "bytes": 54352,
+    "sha256": "4cd851305736afa8ba6bd5c0b40b43dba29598447c41bdf5abc2fd423519ebce",
+    "mtime_ns": 1788944406077084842
+  },
+  {
+    "path": "OneNote_RecycleBin/OneNote_DeletedPages.one",
+    "bytes": 10912,
+    "sha256": "d2b9a9854506cb0439f73ce857c9147f083b75c1e299da3e9e41e87758cbf5ed",
+    "mtime_ns": 1788944406078323091
+  },
+  {
+    "path": "OneNote_RecycleBin/Open Notebook.onetoc2",
+    "bytes": 3776,
+    "sha256": "ee79ec37474942302a30423aed537027e7c365ddfb4bd5797706237de13aa267",
+    "mtime_ns": 1788944406078664215
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 4920,
+    "sha256": "b4a13e6f31a719f770635e4a67096db2fcbb4fb7ec754df7ca0923dbad242351",
+    "mtime_ns": 1788944406077598300
+  }
+]

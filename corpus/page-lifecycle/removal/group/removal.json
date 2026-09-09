@@ -1,0 +1,10 @@
+{
+  "case": "group",
+  "selected": [
+    3,
+    4,
+    5
+  ],
+  "permanent": false,
+  "expected_pages": 9
+}

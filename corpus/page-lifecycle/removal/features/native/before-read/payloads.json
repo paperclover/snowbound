@@ -1,0 +1,18 @@
+﻿[
+    {
+        "sha256":  "4cff0039dbdf53a59f5f4e4592c29a5297ea3b7acce24415c0ae83c36c6bd7c2",
+        "name":  "Fictitious attachment.txt",
+        "object":  "{9EBF6A28-9E77-011E-3E46-70207CCE6F54}{40}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{84A553AC-4694-0FD3-2D5A-E2910729A923}{1}{B0}",
+        "bytes":  27
+    },
+    {
+        "sha256":  "56d4af65701c26df20bd4021eda95b6e830348ce3a746086079fe89285548dc9",
+        "name":  "silence.wav",
+        "object":  "{9EBF6A28-9E77-011E-3E46-70207CCE6F54}{44}{B0}",
+        "kind":  "MediaFile",
+        "page":  "{84A553AC-4694-0FD3-2D5A-E2910729A923}{1}{B0}",
+        "bytes":  16044
+    }
+]
