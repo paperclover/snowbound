@@ -784,7 +784,7 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
         db.execute("UPDATE edits SET operation=?1", [value.to_string()])
             .unwrap();
         if matches!(operation, "Text" | "Insert") {
-            db.execute_batch("DROP TABLE assets; DROP TABLE conflicts; CREATE TABLE conflicts (edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE, kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2)) STRICT; PRAGMA user_version=3;").unwrap();
+            db.execute_batch("ALTER TABLE attempt RENAME COLUMN revisions TO revision; DROP TABLE assets; DROP TABLE conflicts; CREATE TABLE conflicts (edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE, kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 2)) STRICT; PRAGMA user_version=3;").unwrap();
         }
         drop(db);
         let before = fs::read(&path).unwrap();
@@ -797,7 +797,7 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
 
 #[test]
 fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_content_conflicts() {
-    for (version, ceiling) in [(5, 3), (6, 4), (7, 5), (8, 6)] {
+    for (version, ceiling) in [(5, 3), (6, 4), (7, 5), (8, 6), (9, 6)] {
         use onestore_offline::{ConflictKind, EditStatus, Recovery};
         use sha2::{Digest, Sha256};
         let directory = tempfile::tempdir().unwrap();
@@ -837,7 +837,8 @@ fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_content_confl
         )
         .unwrap();
         db.execute_batch(&format!(
-            "DROP TABLE conflicts; CREATE TABLE conflicts (
+            "ALTER TABLE attempt RENAME COLUMN revisions TO revision;
+            DROP TABLE conflicts; CREATE TABLE conflicts (
             edit_id INTEGER PRIMARY KEY REFERENCES edits(id) ON DELETE CASCADE,
             kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND {ceiling})) STRICT;
             PRAGMA user_version={version};
@@ -860,6 +861,22 @@ fn prior_schema_migrations_retain_queue_evidence_assets_and_enable_content_confl
         )
         .unwrap();
         drop(db);
+        let archive = directory.path().join("legacy-recovery.sqlite");
+        std::fs::copy(&path, &archive).unwrap();
+        let archive_db = rusqlite::Connection::open(&archive).unwrap();
+        archive_db
+            .pragma_update(None, "application_id", 0x4f4e4552)
+            .unwrap();
+        drop(archive_db);
+        let original_archive = std::fs::read(&archive).unwrap();
+        let recovery = Recovery::open(&archive).unwrap();
+        assert_eq!(
+            recovery.status(first).unwrap(),
+            Some(EditStatus::AwaitingConfirmation { revision })
+        );
+        assert_eq!(recovery.pending().unwrap(), queue);
+        drop(recovery);
+        assert!(std::fs::read(&archive).unwrap() == original_archive);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(cache.pending().unwrap(), queue);
         assert_eq!(

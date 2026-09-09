@@ -62,6 +62,14 @@ impl PageCreation {
         })
     }
 
+    /// Changes the insertion anchor while retaining all identities and creation metadata.
+    pub fn reposition(&self, before: Option<ExGuid>) -> Result<Self, Error> {
+        let mut page = self.clone();
+        page.before = before;
+        page.validate()?;
+        Ok(page)
+    }
+
     fn validate(&self) -> Result<(), Error> {
         if self.guid == [0; 16]
             || self.series_guid == [0; 16]

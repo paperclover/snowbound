@@ -121,3 +121,10 @@ path = "fuzz_targets/page.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "offline_page"
+path = "fuzz_targets/offline_page.rs"
+test = false
+doc = false
+bench = false

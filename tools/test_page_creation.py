@@ -11,6 +11,10 @@ FIXTURE = Path(__file__).resolve().parent.parent / 'corpus/page-lifecycle/creati
 
 
 class PageCreationTest(unittest.TestCase):
+    def test_offline_created_pages_and_dependent_bodies_survive_native_reopen(self):
+        fixture = FIXTURE.parent / 'offline-creation'
+        compare(fixture / 'candidate', fixture / 'cold')
+
     def test_created_pages_and_both_writers_survive_native_cold_reopens(self):
         for source, capture in [('candidate', 'cold'), ('native/notebook', 'native/cold'), ('followup', 'followup/cold')]:
             with self.subTest(source=source):

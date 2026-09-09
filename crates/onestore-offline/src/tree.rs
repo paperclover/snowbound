@@ -509,6 +509,8 @@ mod tests {
         )
         .unwrap();
         db.pragma_update(None, "user_version", 8).unwrap();
+        db.execute_batch("ALTER TABLE attempt RENAME COLUMN revisions TO revision;")
+            .unwrap();
         drop(db);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(cache.pending().unwrap(), queue);

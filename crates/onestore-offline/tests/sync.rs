@@ -9,6 +9,10 @@ use std::io;
 mod disk;
 #[path = "sync/outline.rs"]
 mod outline;
+#[path = "sync/page.rs"]
+mod page;
+#[path = "support/page_schedule.rs"]
+mod page_schedule;
 #[path = "sync/tree.rs"]
 mod tree;
 #[path = "support/tree_schedule.rs"]

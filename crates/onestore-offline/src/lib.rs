@@ -2,7 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 use onestore::{
-    ExGuid, Insertion, PreparedEdit, RevisionIndex, Store,
+    ExGuid, Insertion, PageCreation, PreparedEdit, RevisionIndex, Store,
     document::{Document, Kind},
 };
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
@@ -51,7 +51,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 
 /// Text and its observed precondition, retained across cache reopen and rebasing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -66,6 +66,7 @@ pub struct TextEdit {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Operation {
+    CreatePage(PageCreation),
     Text(TextEdit),
     Insert(Insertion),
     Format(FormatEdit),
@@ -232,6 +233,17 @@ impl Replica {
         self.record(source, space, Operation::Insert(insertion.clone()), &edit)
     }
 
+    /// Queues a new page and its section entry with stable identities for dependent edits.
+    pub fn create_page(&self, source: &[u8], page: &PageCreation) -> Result<Option<u64>> {
+        let edit = PreparedEdit::create_page(source, page)?;
+        self.record(
+            source,
+            page.space(),
+            Operation::CreatePage(page.clone()),
+            &edit,
+        )
+    }
+
     fn record(
         &self,
         source: &[u8],
@@ -372,12 +384,20 @@ fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {
     let mut rows = query.query([])?;
     let mut edits = Vec::new();
     while let Some(row) = rows.next()? {
-        edits.push(PendingEdit {
+        let edit = PendingEdit {
             id: u64::try_from(row.get::<_, i64>(0)?).map_err(io::Error::other)?,
             space: row.get::<_, String>(1)?.parse()?,
             operation: serde_json::from_str(&row.get::<_, String>(2)?)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-        });
+        };
+        if matches!(&edit.operation, Operation::CreatePage(page) if page.space() != edit.space) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Cached page identity differs from its creation intent",
+            )
+            .into());
+        }
+        edits.push(edit);
     }
     Ok(edits)
 }

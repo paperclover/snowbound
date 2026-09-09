@@ -32,10 +32,20 @@ the new text for subsequent offline edits. Pending entries expose
 `Operation::Text(TextEdit)`, `Operation::Insert(Insertion)`,
 `Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)`,
 `Operation::Join(JoinEdit)`, `Operation::Outline(OutlineEdit)` and
-`Operation::Tree(TreeEdit)` through their
+`Operation::Tree(TreeEdit)` and `Operation::CreatePage(PageCreation)` through their
 `operation` field. Synchronization applies these in queue order, so an inserted
 outline can precede its paragraphs and their later edits. Missing anchors or
 existing insertion identities preserve a conflict and the complete local image.
+
+`create_page` accepts the core `PageCreation` intent and queues its page space
+and section entry as one publication. Subsequent outlines and title edits use
+the intent's stable identities immediately after local acknowledgement.
+Independent page additions rebase against the current section order; duplicate
+titles remain distinct. An unavailable or no-longer-leading insertion anchor
+produces `StructureChanged`. `rebase_page_creation_conflict(id, local, remote,
+before)` reviews a replacement anchor against both cache images while retaining
+the new page and dependent object identities. Existing page identities require
+reconciliation; a matching page alone does not establish a receipt.
 
 `split` and `join` accept the core `ParagraphSplit` and `ParagraphJoin` intents.
 Splits retain allocated identities when the original UTF-16 boundary rebases;
@@ -116,7 +126,10 @@ remain the same before replay or review; later queued edits keep their targets.
 Uncertain tree attempts require their original revision for confirmation, even
 when an independent move or deletion has the same visible effect.
 
-Recognized earlier caches migrate transactionally to version nine. Version-eight
+Recognized earlier caches migrate transactionally to version ten. Publication
+attempts retain every changed space's revision; legacy attempts retain their
+single-space evidence. Earlier recovery archives remain readable without migration.
+Version-eight
 deletion observations retain their original identity-sensitive preconditions;
 explicit conflict review upgrades them to the immutable-content comparison.
 The migration retains images, local IDs, publication attempts, conflicts,
@@ -134,7 +147,8 @@ retrying.
 `sync_once(&mut remote)` processes the oldest pending edit through a `Remote`
 implementation, returning its ID and `EditStatus`. A durable `Published` receipt
 survives reopening. Publication attempts are recorded before network I/O; a retained
-attempted revision requires comparison, flushing and refreshed header version
+attempt requires every recorded revision to remain present, followed by comparison,
+flushing and refreshed header version
 metadata before acknowledgement. If a formatting attempt's revision is missing,
 the complete requested effect can instead be confirmed on a uniquely aligned
 range; its receipt identifies that confirmed current revision. Otherwise the

@@ -22,7 +22,7 @@ pub(crate) fn create(transaction: &Transaction<'_>) -> Result<()> {
         CREATE TABLE attempt (
             id INTEGER PRIMARY KEY CHECK(id=1),
             edit_id INTEGER NOT NULL UNIQUE REFERENCES edits(id) ON DELETE CASCADE,
-            revision TEXT NOT NULL
+            revisions TEXT NOT NULL
         ) STRICT;
         CREATE TABLE receipts (
             edit_id INTEGER PRIMARY KEY CHECK(edit_id>0),
@@ -44,6 +44,8 @@ pub(crate) fn migrate(transaction: &Transaction<'_>, version: u32) -> Result<()>
         if version < 5 {
             transaction.execute_batch(ASSETS)?;
         }
+        transaction.execute_batch("ALTER TABLE attempt RENAME COLUMN revision TO revisions;")?;
+        migrate_attempts(transaction)?;
         return Ok(());
     }
 
@@ -125,5 +127,14 @@ pub(crate) fn migrate(transaction: &Transaction<'_>, version: u32) -> Result<()>
     for (id, revision) in receipts {
         transaction.execute("INSERT INTO receipts VALUES (?1,?2)", params![id, revision])?;
     }
+    migrate_attempts(transaction)?;
+    Ok(())
+}
+
+fn migrate_attempts(transaction: &Transaction<'_>) -> Result<()> {
+    transaction.execute_batch(
+        "UPDATE attempt SET revisions=json_object(
+            (SELECT space FROM edits WHERE edits.id=attempt.edit_id), revisions);",
+    )?;
     Ok(())
 }

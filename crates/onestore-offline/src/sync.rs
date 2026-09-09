@@ -1,7 +1,10 @@
 use super::*;
 use onestore::{CommitError, CommitState};
 use rusqlite::OptionalExtension;
-use std::sync::{MutexGuard, TryLockError};
+use std::{
+    collections::BTreeMap,
+    sync::{MutexGuard, TryLockError},
+};
 
 /// A single remote file with fresh reads and native-compatible guarded publication.
 /// Errors retain publication state; confirmation compares, flushes, and notifies cached readers.
@@ -91,7 +94,7 @@ impl Replica {
             };
             let attempted = transaction
                 .query_row(
-                    "SELECT revision FROM attempt WHERE edit_id=?1",
+                    "SELECT revisions FROM attempt WHERE edit_id=?1",
                     [i64::try_from(intent.id).map_err(io::Error::other)?],
                     |row| row.get::<_, String>(0),
                 )
@@ -100,17 +103,19 @@ impl Replica {
             transaction.commit()?;
             (intent, attempted)
         };
-        if let Some(revision) = attempted {
-            let mut revision = revision.parse::<ExGuid>()?;
+        if let Some(encoded) = attempted {
+            let revisions = attempted_revisions(&encoded, intent.space)?;
+            let mut revision = revisions[&intent.space];
             let store = Store::parse(&snapshot)?;
             let index = RevisionIndex::parse(&store)?;
-            if !index
-                .spaces
-                .get(&intent.space)
-                .is_some_and(|space| space.revisions.contains_key(&revision))
-            {
+            if !revisions.iter().all(|(space, revision)| {
+                index
+                    .spaces
+                    .get(space)
+                    .is_some_and(|space| space.revisions.contains_key(revision))
+            }) {
                 let satisfied = match &intent.operation {
-                    Operation::Format(edit) => edit
+                    Operation::Format(edit) if revisions.len() == 1 => edit
                         .prepare(&snapshot, intent.space)?
                         .is_ok_and(|prepared| prepared.as_bytes() == snapshot),
                     _ => false,
@@ -133,6 +138,8 @@ impl Replica {
             return Ok(Some((intent.id, EditStatus::Published { revision })));
         }
         let candidate = match &intent.operation {
+            Operation::CreatePage(page) => PreparedEdit::create_page(&snapshot, page)
+                .map_err(|_| ConflictKind::StructureChanged),
             Operation::Format(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Split(edit) => edit.prepare(&snapshot, intent.space)?,
             Operation::Join(edit) => edit.prepare(&snapshot, intent.space)?,
@@ -186,6 +193,21 @@ impl Replica {
         let store = Store::parse(prepared.as_bytes())?;
         let index = RevisionIndex::parse(&store)?;
         let revision = index.spaces[&intent.space].labels[&(ExGuid::default(), 1)];
+        let before_store = Store::parse(&snapshot)?;
+        let before = RevisionIndex::parse(&before_store)?;
+        let revisions: BTreeMap<_, _> = index
+            .spaces
+            .iter()
+            .filter_map(|(sid, space)| {
+                let revision = *space.labels.get(&(ExGuid::default(), 1))?;
+                (before
+                    .spaces
+                    .get(sid)
+                    .and_then(|s| s.labels.get(&(ExGuid::default(), 1)))
+                    != Some(&revision))
+                .then_some((*sid, revision))
+            })
+            .collect();
         {
             let mut connection = self
                 .connection
@@ -198,10 +220,10 @@ impl Replica {
                 [i64::try_from(intent.id).map_err(io::Error::other)?],
             )?;
             transaction.execute(
-                "INSERT INTO attempt(id, edit_id, revision) VALUES (1, ?1, ?2)",
+                "INSERT INTO attempt(id, edit_id, revisions) VALUES (1, ?1, ?2)",
                 params![
                     i64::try_from(intent.id).map_err(io::Error::other)?,
-                    revision.to_string()
+                    serde_json::to_string(&revisions).map_err(io::Error::other)?
                 ],
             )?;
             transaction.commit()?;
@@ -322,7 +344,36 @@ impl Replica {
                     )
                     .into());
                 }
+                Operation::CreatePage(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Review page placement using rebase_page_creation_conflict",
+                    )
+                    .into());
+                }
             })
+        })
+    }
+
+    /// Repositions an unattempted page-creation conflict, retaining dependent object identities.
+    pub fn rebase_page_creation_conflict(
+        &self,
+        id: u64,
+        local: &[u8],
+        remote: &[u8],
+        before: Option<ExGuid>,
+    ) -> Result<()> {
+        self.resolve_conflict(id, local, remote, |intent| {
+            let Operation::CreatePage(page) = intent.operation else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Select a page-creation conflict",
+                )
+                .into());
+            };
+            let page = page.reposition(before)?;
+            PreparedEdit::create_page(remote, &page)?;
+            Ok(Operation::CreatePage(page))
         })
     }
 
@@ -529,14 +580,25 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
             revision: revision.parse()?,
         }));
     }
-    let record: Option<(Option<String>, Option<i64>)> = connection.query_row(
-        "SELECT attempt.revision, conflicts.kind FROM edits LEFT JOIN attempt ON attempt.edit_id=edits.id LEFT JOIN conflicts ON conflicts.edit_id=edits.id WHERE edits.id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let column = if version < 10 {
+        "revision"
+    } else {
+        "revisions"
+    };
+    let record: Option<(Option<String>, Option<i64>, String)> = connection.query_row(
+        &format!("SELECT attempt.{column}, conflicts.kind, edits.space FROM edits LEFT JOIN attempt ON attempt.edit_id=edits.id LEFT JOIN conflicts ON conflicts.edit_id=edits.id WHERE edits.id=?1"), [id], |row| Ok((row.get(0)?,row.get(1)?, row.get(2)?))).optional()?;
     Ok(match record {
         None => None,
-        Some((Some(revision), _)) => Some(EditStatus::AwaitingConfirmation {
-            revision: revision.parse()?,
+        Some((Some(revision), _, space)) => Some(EditStatus::AwaitingConfirmation {
+            revision: if version < 10 {
+                revision.parse()?
+            } else {
+                let space = space.parse()?;
+                attempted_revisions(&revision, space)?[&space]
+            },
         }),
-        Some((None, Some(kind))) => Some(EditStatus::Conflict(match kind {
+        Some((None, Some(kind), _)) => Some(EditStatus::Conflict(match kind {
             0 => ConflictKind::TextChanged,
             1 => ConflictKind::TargetUnavailable,
             2 => ConflictKind::UnsupportedEdit,
@@ -552,6 +614,23 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
                 .into());
             }
         })),
-        Some((None, None)) => Some(EditStatus::Pending),
+        Some((None, None, _)) => Some(EditStatus::Pending),
     })
+}
+
+fn attempted_revisions(encoded: &str, space: ExGuid) -> Result<BTreeMap<ExGuid, ExGuid>> {
+    let revisions: BTreeMap<ExGuid, ExGuid> = serde_json::from_str(encoded)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !revisions.contains_key(&space)
+        || revisions
+            .iter()
+            .any(|(sid, rid)| sid.guid == [0; 16] || rid.guid == [0; 16])
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cached publication evidence is incomplete",
+        )
+        .into());
+    }
+    Ok(revisions)
 }
