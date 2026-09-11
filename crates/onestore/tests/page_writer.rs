@@ -627,3 +627,361 @@ fn an_unchanged_model_publishes_nothing() {
     let prepared = PreparedEdit::page(OUTLINES, space, &page, AUTHOR).unwrap();
     assert_eq!(prepared.as_bytes(), OUTLINES);
 }
+
+const JOIN_PAGE: &str = "Bold 🦀 italic e\u{301} color 東京";
+
+fn native_candidate_edits() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "Move leaf down",
+            "Anchor moved last and replaced with Unicode text, bold range on Trailing sibling",
+        ),
+        (
+            "Move subtree down",
+            "Target subtree moved last with a new nested child, italic blue 14 pt range on Anchor",
+        ),
+        (
+            "Delete leaf",
+            "Anchor deleted, paragraph appended, new outline with two paragraphs at (300, 400)",
+        ),
+        ("Delete subtree", "Anchor split in the middle"),
+        (
+            "Collapse subtree",
+            "Target collapsed, outline moved to (90, 250.5) with a fixed 300 pt width",
+        ),
+        (
+            "Move outline",
+            "first body outline moved after the second, first paragraph of each extended",
+        ),
+        (
+            "Delete outline",
+            "second body outline deleted, underline, highlight and Consolas on a range of Anchor",
+        ),
+        (
+            JOIN_PAGE,
+            "the two paragraphs joined, strike and subscript on the first three units",
+        ),
+    ]
+}
+
+fn fresh(template: &onestore::page::PageParagraph, text: &str) -> onestore::page::PageParagraph {
+    let mut paragraph = template.clone();
+    paragraph.id = new_id().unwrap();
+    paragraph.parent = None;
+    paragraph.level = 1;
+    paragraph.lists.clear();
+    paragraph.tags.clear();
+    paragraph.style = None;
+    paragraph.collapsed = false;
+    let format = template.text().unwrap().text.format_at(0).unwrap().clone();
+    paragraph.content = ParagraphContent::Text(onestore::page::TextObject {
+        id: new_id().unwrap(),
+        date_field: None,
+        text: onestore::page::Paragraph::new(text.into(), format),
+        tags: Vec::new(),
+    });
+    paragraph
+}
+
+fn restyle(
+    text: &mut onestore::page::TextObject,
+    range: std::ops::Range<u32>,
+    change: impl Fn(&mut onestore::document::Format),
+) {
+    let slice = text.text.slice(range.clone()).unwrap();
+    let mut runs = Vec::new();
+    let mut from = 0;
+    for span in slice.spans() {
+        let mut format = span.format.clone();
+        change(&mut format);
+        runs.push((slice.text()[from..span.end].to_owned(), format));
+        from = span.end;
+    }
+    text.text
+        .apply(onestore::page::text::Edit {
+            range,
+            replacement: onestore::page::Paragraph::from_runs(runs),
+        })
+        .unwrap();
+}
+
+fn set_text(text: &mut onestore::page::TextObject, replacement: &str) {
+    let end = text.text.utf16_offset(text.text.text().len()).unwrap();
+    let format = text.text.format_at(0).unwrap().clone();
+    text.text
+        .apply(onestore::page::text::Edit {
+            range: 0..end,
+            replacement: onestore::page::Paragraph::new(replacement.into(), format),
+        })
+        .unwrap();
+}
+
+/// Removes a top-level subtree and returns it in order.
+fn take_subtree(
+    outline: &mut onestore::page::Outline,
+    index: usize,
+) -> Vec<onestore::page::PageParagraph> {
+    let mut ids = BTreeSet::from([outline.paragraphs[index].id]);
+    loop {
+        let before = ids.len();
+        let more: Vec<ExGuid> = outline
+            .paragraphs
+            .iter()
+            .filter(|p| p.parent.is_some_and(|q| ids.contains(&q)))
+            .map(|p| p.id)
+            .collect();
+        ids.extend(more);
+        if ids.len() == before {
+            break;
+        }
+    }
+    let (subtree, rest): (Vec<_>, Vec<_>) = outline
+        .paragraphs
+        .drain(..)
+        .partition(|p| ids.contains(&p.id));
+    outline.paragraphs = rest;
+    subtree
+}
+
+fn expectation(page: &Page) -> serde_json::Value {
+    let outlines: Vec<serde_json::Value> = body(page)
+        .iter()
+        .map(|outline| {
+            let index: std::collections::BTreeMap<ExGuid, usize> =
+                outline.paragraphs.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
+            serde_json::json!({
+                "x": outline.layout.x,
+                "y": outline.layout.y,
+                "max_width": outline.layout.max_width,
+                "width_set_by_user": outline.layout.width_set_by_user,
+                "paragraphs": outline.paragraphs.iter().map(|p| serde_json::json!({
+                    "text": p.text().map(|t| t.text.text()),
+                    "parent": p.parent.map(|q| index[&q]),
+                    "collapsed": p.collapsed,
+                    "spans": p.text().map(|t| t.text.spans().iter().map(|s| serde_json::json!({
+                        "end": t.text.utf16_offset(s.end).unwrap(),
+                        "bold": s.format.bold, "italic": s.format.italic, "underline": s.format.underline,
+                        "strike": s.format.strike, "subscript": s.format.subscript,
+                        "font": s.format.font, "font_size": s.format.font_size,
+                        "color": s.format.color, "highlight": s.format.highlight,
+                    })).collect::<Vec<_>>()),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "title": page.title, "outlines": outlines })
+}
+
+#[test]
+#[ignore = "exports a page-model candidate notebook for cold native validation"]
+fn export_native_page_model_candidates() {
+    let output = std::path::PathBuf::from(std::env::var_os("ONESTORE_PAGE_MODEL_OUTPUT").unwrap());
+    assert!(output.is_absolute());
+    std::fs::create_dir_all(output.join("candidate/notebook")).unwrap();
+    let mut bytes = OUTLINES.to_vec();
+    let mut cases = Vec::new();
+    for (title, description) in native_candidate_edits() {
+        let (space, _) = page_by_title(&bytes, title);
+        let mut after = page_in(&bytes, space);
+        let outlines: Vec<usize> = after
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| matches!(o, PageObject::Outline(_)))
+            .map(|(i, _)| i)
+            .collect();
+        fn body_outline(page: &mut Page, i: usize) -> &mut onestore::page::Outline {
+            match &mut page.objects[i] {
+                PageObject::Outline(outline) => outline,
+                _ => unreachable!(),
+            }
+        }
+        match title {
+            "Move leaf down" => {
+                let outline = body_outline(&mut after, outlines[0]);
+                let subtree = take_subtree(outline, 0);
+                outline.paragraphs.extend(subtree);
+                let last = outline.paragraphs.len() - 1;
+                set_text(
+                    outline.paragraphs[last].text_mut().unwrap(),
+                    "Rust 🦀 é 東京 שלום",
+                );
+                let trailing = outline
+                    .paragraphs
+                    .iter()
+                    .position(|p| {
+                        p.text()
+                            .is_some_and(|t| t.text.text() == "Trailing sibling")
+                    })
+                    .unwrap();
+                restyle(
+                    outline.paragraphs[trailing].text_mut().unwrap(),
+                    0..4,
+                    |f| f.bold = Some(true),
+                );
+            }
+            "Move subtree down" => {
+                let outline = body_outline(&mut after, outlines[0]);
+                let parent_index = outline
+                    .paragraphs
+                    .iter()
+                    .position(|p| outline.paragraphs.iter().any(|q| q.parent == Some(p.id)))
+                    .unwrap();
+                let parent_id = outline.paragraphs[parent_index].id;
+                let subtree = take_subtree(outline, parent_index);
+                outline.paragraphs.extend(subtree);
+                let mut child = fresh(&outline.paragraphs[0], "Nested by Rust");
+                child.parent = Some(parent_id);
+                child.level = 2;
+                outline.paragraphs.push(child);
+                restyle(outline.paragraphs[0].text_mut().unwrap(), 0..6, |f| {
+                    f.italic = Some(true);
+                    f.color = Some(0xff0000);
+                    f.font_size = Some(14.0);
+                });
+            }
+            "Delete leaf" => {
+                let template = body(&after)[0].paragraphs[0].clone();
+                let outline = body_outline(&mut after, outlines[0]);
+                take_subtree(outline, 0);
+                outline
+                    .paragraphs
+                    .push(fresh(&template, "Appended by Rust"));
+                let new_outline = onestore::page::Outline {
+                    id: new_id().unwrap(),
+                    title: false,
+                    min_width: None,
+                    layout: onestore::document::Layout {
+                        x: Some(300.0),
+                        y: Some(400.0),
+                        ..Default::default()
+                    },
+                    indents: Vec::new(),
+                    paragraphs: vec![
+                        fresh(&template, "Rust outline one"),
+                        fresh(&template, "Rust outline two"),
+                    ],
+                    unsupported: Vec::new(),
+                };
+                let at = after
+                    .objects
+                    .iter()
+                    .position(|o| matches!(o, PageObject::Title(_)))
+                    .unwrap_or(after.objects.len());
+                after.objects.insert(at, PageObject::Outline(new_outline));
+            }
+            "Delete subtree" => {
+                let outline = body_outline(&mut after, outlines[0]);
+                let first = outline.paragraphs[0].clone();
+                let text = first.text().unwrap();
+                let end = text.text.utf16_offset(text.text.text().len()).unwrap();
+                let offset = (end / 2..end)
+                    .find(|at| text.text.byte_offset(*at).is_ok())
+                    .unwrap();
+                let tail = text.text.slice(offset..end).unwrap();
+                let mut right = fresh(&first, "");
+                right.style = first.style;
+                right.text_mut().unwrap().text = tail;
+                let left = outline.paragraphs[0].text_mut().unwrap();
+                left.text = left.text.slice(0..offset).unwrap();
+                outline.paragraphs.insert(1, right);
+            }
+            "Collapse subtree" => {
+                let outline = body_outline(&mut after, outlines[0]);
+                let parent = outline
+                    .paragraphs
+                    .iter()
+                    .position(|p| outline.paragraphs.iter().any(|q| q.parent == Some(p.id)))
+                    .unwrap();
+                outline.paragraphs[parent].collapsed = true;
+                outline.layout.x = Some(90.0);
+                outline.layout.y = Some(250.5);
+                outline.layout.max_width = Some(300.0);
+                outline.layout.width_set_by_user = Some(true);
+            }
+            "Move outline" => {
+                assert!(outlines.len() >= 2);
+                let first = after.objects.remove(outlines[0]);
+                after.objects.insert(outlines[1], first);
+                for i in [outlines[0], outlines[1]] {
+                    let outline = body_outline(&mut after, i);
+                    let text = outline.paragraphs[0].text_mut().unwrap();
+                    let end = text.text.utf16_offset(text.text.text().len()).unwrap();
+                    let format = text.text.format_at(end).unwrap().clone();
+                    text.text
+                        .apply(onestore::page::text::Edit {
+                            range: end..end,
+                            replacement: onestore::page::Paragraph::new(" (Rust)".into(), format),
+                        })
+                        .unwrap();
+                }
+            }
+            "Delete outline" => {
+                assert!(outlines.len() >= 2);
+                after.objects.remove(outlines[1]);
+                let outline = body_outline(&mut after, outlines[0]);
+                restyle(outline.paragraphs[0].text_mut().unwrap(), 1..5, |f| {
+                    f.underline = Some(true);
+                    f.highlight = Some(0x00ffff);
+                    f.font = Some("Consolas".into());
+                });
+            }
+            _ => {
+                let outline = body_outline(&mut after, outlines[0]);
+                assert_eq!(outline.paragraphs.len(), 2);
+                let right = outline.paragraphs.remove(1);
+                outline.paragraphs[0]
+                    .text_mut()
+                    .unwrap()
+                    .text
+                    .append(right.text().unwrap().text.clone())
+                    .unwrap();
+                restyle(outline.paragraphs[0].text_mut().unwrap(), 0..3, |f| {
+                    f.strike = Some(true);
+                    f.subscript = Some(true);
+                });
+            }
+        }
+        let edit = PreparedEdit::page(&bytes, space, &after, "Rust page writer").unwrap();
+        bytes = edit.as_bytes().to_vec();
+        let stored = page_in(&bytes, space);
+        let index = {
+            let store = Store::parse(&bytes).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let document = Document::parse(&index).unwrap();
+            document
+                .pages()
+                .unwrap()
+                .iter()
+                .position(|(sid, _)| *sid == space)
+                .unwrap()
+        };
+        cases.push(serde_json::json!({
+            "title": title,
+            "index": index,
+            "description": description,
+            "space": space.to_string(),
+            "expected": expectation(&stored),
+        }));
+    }
+    std::fs::write(output.join("candidate/notebook/synthetic.one"), &bytes).unwrap();
+    std::fs::copy(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../corpus/outline-edit/before/notebook/Open Notebook.onetoc2"
+        ),
+        output.join("candidate/notebook/Open Notebook.onetoc2"),
+    )
+    .unwrap();
+    std::fs::write(
+        output.join("candidate/manifest.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "source": "corpus/outline-edit/before/notebook/synthetic.one",
+            "author": "Rust page writer",
+            "transactions_added": cases.len(),
+            "cases": cases,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}

@@ -1,0 +1,1505 @@
+{
+  "author": "Rust page writer",
+  "cases": [
+    {
+      "description": "Anchor moved last and replaced with Unicode text, bold range on Trailing sibling",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 4,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 17,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Rust 🦀 é 東京 שלום"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 72.0,
+            "y": 108.0
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Other outline"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 480.0,
+            "y": 108.0
+          }
+        ],
+        "title": "Move leaf down"
+      },
+      "index": 1,
+      "space": "{B7267338-BF83-0893-27A7-37F606DD20C8},1",
+      "title": "Move leaf down"
+    },
+    {
+      "description": "Target subtree moved last with a new nested child, italic blue 14 pt range on Anchor",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 16711680,
+                    "end": 6,
+                    "font": "Calibri",
+                    "font_size": 14.0,
+                    "highlight": 4278190080,
+                    "italic": true,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Anchor"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": 2,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 5,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": true,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Child"
+              },
+              {
+                "collapsed": false,
+                "parent": 3,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 10,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Grandchild"
+              },
+              {
+                "collapsed": false,
+                "parent": 2,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 14,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Nested by Rust"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 72.0,
+            "y": 108.0
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Other outline"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 480.0,
+            "y": 108.0
+          }
+        ],
+        "title": "Move subtree down"
+      },
+      "index": 2,
+      "space": "{9B80D7CA-18B4-02B0-1E85-6E8AA0DAD827},1",
+      "title": "Move subtree down"
+    },
+    {
+      "description": "Anchor deleted, paragraph appended, new outline with two paragraphs at (300, 400)",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Appended by Rust"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 72.0,
+            "y": 108.0
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Other outline"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 480.0,
+            "y": 108.0
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Rust outline one"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Rust outline two"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 300.0,
+            "y": 400.0
+          }
+        ],
+        "title": "Delete leaf"
+      },
+      "index": 8,
+      "space": "{363FE055-44E1-0B27-14A8-46278FD681FF},1",
+      "title": "Delete leaf"
+    },
+    {
+      "description": "Anchor split in the middle",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 3,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Anc"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 3,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "hor"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": 2,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 5,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": true,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Child"
+              },
+              {
+                "collapsed": false,
+                "parent": 3,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 10,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Grandchild"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 72.0,
+            "y": 108.0
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Other outline"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 480.0,
+            "y": 108.0
+          }
+        ],
+        "title": "Delete subtree"
+      },
+      "index": 9,
+      "space": "{8BBAD88F-D248-0959-00B3-2438A7065330},1",
+      "title": "Delete subtree"
+    },
+    {
+      "description": "Target collapsed, outline moved to (90, 250.5) with a fixed 300 pt width",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 300.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 6,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Anchor"
+              },
+              {
+                "collapsed": true,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": 1,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 5,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": true,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Child"
+              },
+              {
+                "collapsed": false,
+                "parent": 2,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 10,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Grandchild"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              }
+            ],
+            "width_set_by_user": true,
+            "x": 90.0,
+            "y": 250.5
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Other outline"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 480.0,
+            "y": 108.0
+          }
+        ],
+        "title": "Collapse subtree"
+      },
+      "index": 6,
+      "space": "{FF88B513-029C-00E2-0082-9E3DCE1D7796},1",
+      "title": "Collapse subtree"
+    },
+    {
+      "description": "first body outline moved after the second, first paragraph of each extended",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 20,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Other outline (Rust)"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 480.0,
+            "y": 108.0
+          },
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Anchor (Rust)"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": 1,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 5,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": true,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Child"
+              },
+              {
+                "collapsed": false,
+                "parent": 2,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 10,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Grandchild"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 72.0,
+            "y": 108.0
+          }
+        ],
+        "title": "Move outline"
+      },
+      "index": 12,
+      "space": "{16207F40-69C9-0CA1-09B5-DC5712DB2BBE},1",
+      "title": "Move outline"
+    },
+    {
+      "description": "second body outline deleted, underline, highlight and Consolas on a range of Anchor",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 468.0,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 1,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 5,
+                    "font": "Consolas",
+                    "font_size": 11.0,
+                    "highlight": 65535,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": true
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 6,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Anchor"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": 4278190080,
+                    "end": 12,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 13,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 57,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 67,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Target 🦀 é ﷟HYPERLINK \"https://example.invalid/outline\"Link label"
+              },
+              {
+                "collapsed": false,
+                "parent": 1,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 5,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": true,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Child"
+              },
+              {
+                "collapsed": false,
+                "parent": 2,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 10,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Grandchild"
+              },
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 16,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Trailing sibling"
+              }
+            ],
+            "width_set_by_user": null,
+            "x": 72.0,
+            "y": 108.0
+          }
+        ],
+        "title": "Delete outline"
+      },
+      "index": 11,
+      "space": "{80E80543-87A1-0C3A-0816-22B190BDFC87},1",
+      "title": "Delete outline"
+    },
+    {
+      "description": "the two paragraphs joined, strike and subscript on the first three units",
+      "expected": {
+        "outlines": [
+          {
+            "max_width": 127.5136947631836,
+            "paragraphs": [
+              {
+                "collapsed": false,
+                "parent": null,
+                "spans": [
+                  {
+                    "bold": true,
+                    "color": null,
+                    "end": 3,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": true,
+                    "subscript": true,
+                    "underline": true
+                  },
+                  {
+                    "bold": true,
+                    "color": null,
+                    "end": 4,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": true
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 5,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 7,
+                    "font": "Arial",
+                    "font_size": 13.5,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 8,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 14,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": true,
+                    "strike": true,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 15,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 17,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": false,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 18,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": 3678732,
+                    "end": 23,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 65535,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 24,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 26,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": true,
+                    "underline": null
+                  },
+                  {
+                    "bold": null,
+                    "color": null,
+                    "end": 27,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": null,
+                    "italic": null,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": false,
+                    "color": 4278190080,
+                    "end": 30,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": null,
+                    "subscript": null,
+                    "underline": null
+                  },
+                  {
+                    "bold": true,
+                    "color": 7949855,
+                    "end": 48,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": true,
+                    "color": 7949855,
+                    "end": 50,
+                    "font": "SimSun",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": true,
+                    "color": 7949855,
+                    "end": 52,
+                    "font": "Calibri",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  },
+                  {
+                    "bold": true,
+                    "color": 7949855,
+                    "end": 57,
+                    "font": "Arial",
+                    "font_size": 11.0,
+                    "highlight": 4278190080,
+                    "italic": false,
+                    "strike": false,
+                    "subscript": false,
+                    "underline": false
+                  }
+                ],
+                "text": "Bold 🦀 italic é color 東京\rEndFictitious: café, 東京, مرحبا"
+              }
+            ],
+            "width_set_by_user": false,
+            "x": 36.0,
+            "y": 14.40000057220459
+          }
+        ],
+        "title": "Bold 🦀 italic é color 東京"
+      },
+      "index": 0,
+      "space": "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1",
+      "title": "Bold 🦀 italic é color 東京"
+    }
+  ],
+  "source": "corpus/outline-edit/before/notebook/synthetic.one",
+  "transactions_added": 8
+}

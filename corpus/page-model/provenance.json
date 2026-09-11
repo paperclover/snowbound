@@ -1,0 +1,37 @@
+{
+  "source": {
+    "path": "corpus/outline-edit/before/notebook/synthetic.one",
+    "sha256": "924389ae0f4e9fc583fb6de17c0859257994847cbf674bc75b821b3513ca18e2"
+  },
+  "candidate": {
+    "sha256": "a5ca37027575ea012fce7fd4131ffb7c184b65bc32836a3f33556ee5162cdbc3",
+    "generator": "cargo test -p onestore --test page_writer export_native_page_model_candidates -- --ignored",
+    "cases": 8
+  },
+  "captures": {
+    "cold": {
+      "clone": "m6-a298124b",
+      "teardown_absent": true,
+      "notebook_sha256": "cb246a4fb88a30dd1dad710ebde9b209a150175fd5dfd3d4e3e36d5d4a505cff",
+      "pages": 15
+    },
+    "followup": {
+      "clone": "m6-a302d412",
+      "teardown_absent": true,
+      "notebook_sha256": "d3f67a59581e9314cc476ea6f9cdef12bfcbce131335da591c68ae35886cace2",
+      "pages": 15
+    },
+    "followup-cold": {
+      "clone": "m6-3caf6d8e",
+      "teardown_absent": true,
+      "notebook_sha256": "d3f67a59581e9314cc476ea6f9cdef12bfcbce131335da591c68ae35886cace2",
+      "pages": 15
+    }
+  },
+  "author_script": "tools/native/page-model-followup.ps1",
+  "rejected_attempts": [
+    "m6-7b68c992: author script matched no paragraph because native CDATA wraps text in <span>; matcher widened",
+    "m6-4c165dd4: native edit saved, script failed waiting 10 s for OneNote to exit; wait made tolerant"
+  ],
+  "verifier": "PYTHONPATH=tools python3 -m unittest test_page_model"
+}

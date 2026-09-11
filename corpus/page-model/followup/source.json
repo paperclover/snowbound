@@ -1,0 +1,14 @@
+[
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 4800,
+    "sha256": "341894b32b0433a1e8b647431f71e372d344c74e0f87699e45c9235964082551",
+    "mtime_ns": 1789108125813547146
+  },
+  {
+    "path": "synthetic.one",
+    "bytes": 123872,
+    "sha256": "cb246a4fb88a30dd1dad710ebde9b209a150175fd5dfd3d4e3e36d5d4a505cff",
+    "mtime_ns": 1789108125813805311
+  }
+]
