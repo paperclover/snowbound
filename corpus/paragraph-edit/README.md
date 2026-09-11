@@ -62,9 +62,13 @@ the native-rendered result to the corresponding keyboard-generated control.
 by `ONESTORE_PARAGRAPH_JOIN_OUTPUT`.
 
 `offline` retains reconciled split/join candidates and cold native captures.
-The cache queues edits before observing independent remote `☂` prefixes, reopens
-between acknowledgements, and confirms modeled lost replies without replaying
-operations. Tests compare native text/styles to the original keyboard controls,
-account for the remote prefixes, and retain exact graph identities after reopening.
+The cache queues each recorded split or join as a page-model save before
+observing an independent remote `☂` prefix, reopens between acknowledgements,
+and confirms modeled lost replies without replaying a publication. The
+`inheritance` group has four cases: `Join inherited styles` joins runs whose
+language or spacing differ, which the page model cannot express, and is
+recorded as refused. Tests compare native text/styles to the original keyboard
+controls, account for the remote prefixes, and retain exact graph identities
+after reopening.
 The ignored offline test `export_native_offline_paragraphs` regenerates candidates
 in a new directory specified by `ONESTORE_OFFLINE_PARAGRAPH_OUTPUT`.

@@ -13,22 +13,24 @@ changes. Bullets alter ancestry: the first paragraph gains an outline group,
 and a later bullet becomes a child of its preceding paragraph. Replacing a whole
 selected sibling creates a new paragraph; the split/join targets retain identity.
 
-`reconciled` retains Rust output and a fresh OneNote cold-open. Six cases publish
-automatically; eight publish after explicit review. Each includes a dependent
-text edit, with SQLite reopen between local acknowledgements and publications.
-The changed empty-left survivor and nonadjacent bulleted join retain conflicts.
-Public tests check all 28 receipts, exact active graph/child levels, native
-characters/styles, and the saved graph's identities. COM replacement controls
-also retain all sixteen local branches across reopen without publishing.
+`reconciled` retains Rust output and a fresh OneNote cold-open. Each local
+split or join is a page-model save with a dependent text edit, with SQLite
+reopen between local acknowledgements and publications. Six cases merge
+automatically against the keyboard changes; ten publish after the conflicting
+page is reviewed against the remote page. Public tests check all 32 receipts,
+exact active graph/child levels, native characters/styles, and the saved
+graph's identities. COM replacement controls retain all sixteen local branches
+across reopen without publishing.
 
 Regenerate keyboard controls with `tools/native_runner.py` on `before/notebook`,
 using `--expected-pages 17 --inspect --collect-notebook`. Once inspection is
 ready, run `tools/native_paragraph_reconciliation.py OUTPUT`; it records actions
 and requests final capture. The runner removes its owned clone. The ignored
-Rust test `paragraph::export_native_reconciliation` generates reconciled output
+Rust test `export_native_reconciliation` in `crates/notebook/tests/sync_paragraph.rs`
+generates reconciled output
 at a new absolute `ONESTORE_NATIVE_RECONCILIATION_OUTPUT` directory. Cold-open its
 `candidate` with the same runner, without inspection. Verification lives in
-`tools/test_paragraph_edit.py` and the offline crate's `tests/sync.rs`.
+`tools/test_paragraph_edit.py` and `crates/notebook/tests/sync_paragraph.rs`.
 
 The original COM pass stopped at its fifth case because its tag definition
 followed page settings. The recorded continuation fixes the schema order and

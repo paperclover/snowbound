@@ -496,8 +496,13 @@ fn offline_paragraphs(output: Option<&Path>) {
                         assert_eq!(actual, id);
                         server.fault = Fault::None;
                         reviewed.push(case.clone());
+                        // The reviewed split sits after the remote's one-unit prefix.
+                        let mut placed = intent.clone();
+                        if split && entry["remote_prefix"] == true {
+                            placed["offset"] = (intent["offset"].as_u64().unwrap() + 1).into();
+                        }
                         review_page(&cache, id, origin(&intent, split), |page| {
-                            replay(page, &intent, split)
+                            replay(page, &placed, split)
                         });
                     }
                     other => panic!("{name} {}: {other:?}", entry["case"]),

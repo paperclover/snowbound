@@ -1,4 +1,5 @@
 import copy
+import collections
 import json
 from pathlib import Path
 import runpy
@@ -272,7 +273,7 @@ class OutlineEditTest(unittest.TestCase):
         models, _ = self.cold_layout(FIXTURE / 'offline')
         records = json.loads((FIXTURE / 'offline/cases.json').read_text())
         self.assertEqual(len(records), 14)
-        self.assertEqual(sum(row['retained'] for row in records), 4)
+        self.assertEqual(collections.Counter(row['outcome'] for row in records), {'merged': 7, 'reviewed': 7})
         records = {row['name']: row for row in records}
         with TemporaryDirectory() as temporary:
             folder = Path(temporary)
@@ -290,7 +291,7 @@ class OutlineEditTest(unittest.TestCase):
                 for key in ('children', 'content', 'structure', 'child_level'):
                     self.assertEqual(node[key], before[key], (name, oid, key))
                 layout = dict(before['layout'])
-                if record and not record['retained'] and oid == record['object']:
+                if record and oid == record['object']:
                     change = record['change']
                     if 'Position' in change:
                         layout.update(change['Position'])
@@ -305,11 +306,11 @@ class OutlineEditTest(unittest.TestCase):
                 self.assertEqual(node['layout'], layout)
                 if node['kind']['type'] == 'RichText':
                     expected = before['kind']['text']
-                    if record and not record['retained'] and oid == record['dependent_text']:
+                    if record and oid == record['dependent_text']:
                         expected = 'Local ' + expected
                         texts += 1
                     self.assertEqual(node['kind']['text'], expected)
-        self.assertEqual((changed, texts), (10, 10))
+        self.assertEqual((changed, texts), (10, 14))
 
     def preserved_node(self, old, new):
         expected = dict(old)

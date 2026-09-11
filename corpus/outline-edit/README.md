@@ -68,21 +68,20 @@ To regenerate, run `resizing_a_native_reserved_width_preserves_content` with
 `ONESTORE_RESERVED_WIDTH_OUTPUT` set to a new absolute directory, then cold-open
 it with the same runner arguments.
 
-`offline` reconciles local layout/default intents and later text edits against all
-fourteen native changes. Five merge automatically, five require explicit review,
-and four deleted targets retain their local branches and dependent queues. The ten
-successful cases produce eighteen publications and twenty durable receipts; the
-already-converged collapse defaults require confirmation without another append.
-The final cold capture preserves all 304 active graph objects, ten tags, and 8,937
-explicit formatting comparisons. The `cases.json` records stable targets and the
-retained/dependent outcomes used by the public test.
+`offline` reconciles one page-model save per page, carrying a layout or collapse
+change and a dependent text edit, against all fourteen native changes. Seven
+merge automatically; seven are reviewed against the remote page and then
+publish, including the four whose target the native side deleted, where the
+review keeps only the dependent text. The `cases.json` records each page's
+outcome, the changed object, the change and the dependent text object used by
+the public test.
 
-Regenerate by running the offline sync test
-`native_moves_deletions_and_layout_changes_merge_or_retain_explicit_conflicts`
-with `ONESTORE_OFFLINE_OUTLINE_OUTPUT` set to a new absolute directory, then use
-the same cold runner arguments. The test also retains a JSON record next to that
-directory. Cache migration, uncertain revision retention, stale review, and twelve
-offline writers are exercised in `crates/onestore-offline/tests`.
+Regenerate by running the sync test
+`native_moves_deletions_and_layout_changes_merge_or_require_review` in
+`crates/notebook/tests/sync_outline.rs` with `ONESTORE_OFFLINE_OUTLINE_OUTPUT`
+set to a new absolute directory, then cold-open its `candidate` with
+`--expected-pages 15 --collect-notebook`. Uncertain revision retention, stale
+review and twelve offline writers are exercised in the same file.
 
 `tree` extends the native controls with eleven cases involving outline groups,
 indentation gaps, numbered/bulleted subtrees, and table cells. The stored graphs,
@@ -136,20 +135,18 @@ unit test. Cold-open the resulting `ordinary`, `groups-cells`, `cross-container`
 and `unequal-groups` notebooks with expected page counts 15, 12, 12 and 1,
 respectively, using `tools/native_runner.py --collect-notebook`.
 
-`offline-tree` reconciles moves/deletions and dependent text edits against the
-fourteen ordinary native controls. Three already-converged moves confirm without
-publication, seven competing structure/content changes require explicit review,
-and four deleted targets retain the complete local branch. The cold capture
-preserves all 247 active graph objects across fifteen pages, three tags, and
-6,497 explicit character-format comparisons per image. Its `cases.json` records
-the native input cases and outcomes. Regenerate with the offline sync test
-`native_tree_and_layout_changes_reconcile_without_discarding_unreviewed_content`,
-setting `ONESTORE_OFFLINE_TREE_OUTPUT` to a new absolute directory, then cold-open
-its `candidate` with `--expected-pages 15 --collect-notebook`.
+`offline-tree` reconciles page-model saves carrying a move or deletion and a
+dependent text edit against the fourteen ordinary native controls. Seven merge
+automatically and seven are reviewed against the remote page before publishing.
+Its `cases.json` records the native input cases and outcomes. Regenerate with
+the sync test
+`native_tree_and_layout_changes_reconcile_without_discarding_unreviewed_content`
+in `crates/notebook/tests/sync/tree.rs`, setting `ONESTORE_OFFLINE_TREE_OUTPUT`
+to a new absolute directory, then cold-open its `candidate` with
+`--expected-pages 15 --collect-notebook`.
 
 Its `cell-delete` and `cell-move` captures additionally verify local edits to an
 emptied cell's replacement paragraph while preserving remote text in the other
-cell. They retain 272 and 274 active objects, respectively, with 8,201 and 8,377
-explicit format comparisons per image. Regenerate with the offline sync test
+cell. Regenerate with the sync test
 `emptied_cell_replacement_is_durable_and_cannot_be_silently_omitted_on_replay`,
 using the same output variable; cold-open each candidate with twelve expected pages.

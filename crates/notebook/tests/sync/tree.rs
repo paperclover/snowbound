@@ -613,7 +613,7 @@ fn native_tree_and_layout_changes_reconcile_without_discarding_unreviewed_conten
         std::fs::create_dir_all(output.join("candidate")).unwrap();
         std::fs::write(output.join("candidate/synthetic.one"), &server.durable).unwrap();
         std::fs::write(
-            output.join("manifest.json"),
+            output.join("cases.json"),
             serde_json::to_vec_pretty(&records).unwrap(),
         )
         .unwrap();

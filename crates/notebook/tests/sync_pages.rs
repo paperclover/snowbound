@@ -577,7 +577,7 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
             PageEdit::set_level(group[2].space(), 2).unwrap(),
         ];
         cache.pages(&source, &edits).unwrap().unwrap();
-        let body = format!("Actor {actor} 🦀 é");
+        let body = format!("Actor {actor} 🦀 e\u{301}");
         let local = cache.snapshot().unwrap();
         let mut model = model_ops::page_of(&local, group[1].space());
         let text = body_outline(&mut model, &body);

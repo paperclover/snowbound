@@ -1,3 +1,4 @@
+import collections
 import json
 from pathlib import Path
 import runpy
@@ -24,10 +25,10 @@ class ParagraphEditTest(unittest.TestCase):
         self.assert_cold_graph(result)
         manifest = json.loads((result / 'manifest.json').read_text())
         self.assertEqual(len(manifest), 16)
-        self.assertEqual({case['case'] for case in manifest if case['outcome'] == 'retained_conflict'},
-                         {'Join remote list', 'Join empty adoption'})
+        self.assertEqual(collections.Counter(case['outcome'] for case in manifest),
+                         {'automatic': 6, 'reviewed': 10})
         receipts = [case[key] for case in manifest for key in ('receipt', 'dependent_receipt') if key in case]
-        self.assertEqual(len(set(receipts)), 28)
+        self.assertEqual(len(set(receipts)), 32)
         models, captures = {}, {}
         with TemporaryDirectory() as temporary:
             for phase, notebook, read in [('remote', fixture / 'keyboard/notebook', fixture / 'keyboard/read'),
@@ -68,12 +69,15 @@ class ParagraphEditTest(unittest.TestCase):
                     left, right = intent['left'], intent['right']
                     a, = [oid for oid, (_, content, _) in graph.items() if content == [left]]
                     b, = [oid for oid, (_, content, _) in graph.items() if content == [right]]
-                    parent, = [oid for oid, (children, _, _) in graph.items() if a in children]
+                    parent, = [oid for oid, (children, _, _) in graph.items() if b in children]
                     graph[parent][0].remove(b)
                     graph[a][0] += graph[b][0]
                     del graph[b], graph[right]
                     characters[:2] = [characters[0] + characters[1]]
-                    characters[0] = [('C' if char == 'c' else char, style) for char, style in characters[0]]
+                    if any(char == 'c' for char, _ in characters[0]):
+                        characters[0] = [('C' if char == 'c' else char, style) for char, style in characters[0]]
+                    else:
+                        characters[0][1] = ('I', characters[0][1][1])
                     self.assertEqual(new['nodes'][left]['tags'], old['nodes'][left]['tags'])
             with self.subTest(case=name):
                 self.assertEqual({oid: [node['children'], node['content'], node['child_level']]
@@ -191,7 +195,7 @@ class ParagraphEditTest(unittest.TestCase):
 
     def test_offline_boundaries_retain_remote_edits_and_match_native_controls(self):
         groups = [('splits', 'cold-split/read', 12), ('joins', 'joined/read', 12),
-                  ('inheritance', 'join-edges/joined/read', 5), ('tags', 'join-tags/joined/read', 3)]
+                  ('inheritance', 'join-edges/joined/read', 4), ('tags', 'join-tags/joined/read', 3)]
         for name, control, count in groups:
             fixture = FIXTURE / 'offline' / name
             manifest = json.loads((fixture / 'manifest.json').read_text())

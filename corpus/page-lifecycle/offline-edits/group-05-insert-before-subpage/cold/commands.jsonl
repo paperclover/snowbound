@@ -1,0 +1,3 @@
+{"command": "powershell -NoProfile -Command \"Expand-Archive -LiteralPath C:\\one-tests\\transfer.zip -DestinationPath C:\\one-tests\\runs\\capture\\notebook\"", "exit": 0, "stdout": "", "stderr": "", "error": null}
+{"command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\one-tests\\read-current.ps1 -Root C:\\one-tests\\runs\\capture -CloneHost ONE-M6-797C5E28 -ExpectedPages 9", "exit": 0, "stdout": "Read 1 sections and 9 pages.\r\n", "stderr": "", "error": null}
+{"command": "powershell -NoProfile -Command \"Compress-Archive -Force -Path C:\\one-tests\\runs\\capture\\* -DestinationPath C:\\one-tests\\captured.zip\"", "exit": 0, "stdout": "", "stderr": "", "error": null}

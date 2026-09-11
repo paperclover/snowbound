@@ -2,7 +2,7 @@
   "cases": {
     "group-01-demoted-parent": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp25ua0uma",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpbu44alfu",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -20,8 +20,8 @@
         }
       },
       "machine": {
-        "name": "m6-b441c6ce",
-        "hostname": "ONE-M6-B441C6CE"
+        "name": "m6-e8220f62",
+        "hostname": "ONE-M6-E8220F62"
       },
       "teardown": {
         "absent": true
@@ -30,14 +30,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 61168,
-          "sha256": "b824f43c0f789519771dcaabd0d7b84549ccc01629c19a64bd3bba9bb70b75df",
-          "mtime_ns": 1788941881049079637
+          "sha256": "b0fd7dc60d8bb7d26310e363f8ec9269651bf1c6bccce6465b292978e6c932ce",
+          "mtime_ns": 1789121644250856649
         }
       ]
     },
     "group-02-promoted-parent": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpbtvm7zy4",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpzv4zdwuu",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -55,8 +55,8 @@
         }
       },
       "machine": {
-        "name": "m6-a937eee4",
-        "hostname": "ONE-M6-A937EEE4"
+        "name": "m6-529c1cbc",
+        "hostname": "ONE-M6-529C1CBC"
       },
       "teardown": {
         "absent": true
@@ -65,14 +65,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 62200,
-          "sha256": "904bf500864584bff80c83dfbdf957de109836964a1dd7e97810df042cee0efa",
-          "mtime_ns": 1788941881329857761
+          "sha256": "1799f81b54d3d38ff66e420e83d4a242711cae40e52c8c3a2fb8d7886c43fd6b",
+          "mtime_ns": 1789121644594396710
         }
       ]
     },
     "group-03-selected-group-move": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpqpnmdqos",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpukazpfqa",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -90,8 +90,8 @@
         }
       },
       "machine": {
-        "name": "m6-1b35b14a",
-        "hostname": "ONE-M6-1B35B14A"
+        "name": "m6-757551a0",
+        "hostname": "ONE-M6-757551A0"
       },
       "teardown": {
         "absent": true
@@ -100,14 +100,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 62664,
-          "sha256": "5a3d665f5da9a1c8aee3339d368bb1fdcb2e00e7aa0422478758bce84f5646f0",
-          "mtime_ns": 1788941881601421859
+          "sha256": "7f9d34875babd03e06d9c1c19e308651a32f60128a82fc3ebe4ceb7c26b4ff8d",
+          "mtime_ns": 1789121644927702132
         }
       ]
     },
     "group-04-subpage-move": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp93masgxw",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmphwmxgpck",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -125,8 +125,8 @@
         }
       },
       "machine": {
-        "name": "m6-390f4ff1",
-        "hostname": "ONE-M6-390F4FF1"
+        "name": "m6-7b82f5fd",
+        "hostname": "ONE-M6-7B82F5FD"
       },
       "teardown": {
         "absent": true
@@ -135,14 +135,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 66464,
-          "sha256": "f758f4f74f21734349275e839e78a39454d00e1c546dd6b29f936ed9adef752a",
-          "mtime_ns": 1788941881947544959
+          "sha256": "698e65aec54d2096cb78fe19daf07002cd4cff49139cbe2a8ae515cb8a07f75d",
+          "mtime_ns": 1789121645336160751
         }
       ]
     },
     "group-05-insert-before-subpage": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmph61roaik",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpq5zb96wg",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -160,8 +160,8 @@
         }
       },
       "machine": {
-        "name": "m6-c13e29ae",
-        "hostname": "ONE-M6-C13E29AE"
+        "name": "m6-797c5e28",
+        "hostname": "ONE-M6-797C5E28"
       },
       "teardown": {
         "absent": true
@@ -170,14 +170,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 68104,
-          "sha256": "fbacddf7e10d230f3ffc4e28a967cfa43d378e598bff5dc5d2a532f8cb64091d",
-          "mtime_ns": 1788941882292841519
+          "sha256": "6d156380c9a4fe2be62662f6cb18fb2dad0423c4baf6c7ff7cc74a0fb6f39ec7",
+          "mtime_ns": 1789121645747767832
         }
       ]
     },
     "group-06-promoted-level-two": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpyvldz7f2",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp8h8axamn",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -195,8 +195,8 @@
         }
       },
       "machine": {
-        "name": "m6-84bacce5",
-        "hostname": "ONE-M6-84BACCE5"
+        "name": "m6-5f2ea96f",
+        "hostname": "ONE-M6-5F2EA96F"
       },
       "teardown": {
         "absent": true
@@ -205,14 +205,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 70512,
-          "sha256": "89163b8a78ef94dc540ef00d3d05fca2014fa9e3b88a7e73e6a574c11e6d39bd",
-          "mtime_ns": 1788941882577853637
+          "sha256": "f44639cf506727cfce4607d83a7ec231ee7daa04d918fdb9ff198094bf0c11a4",
+          "mtime_ns": 1789121646097525529
         }
       ]
     },
     "group-07-promoted-root": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpw7p2frw3",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpmryvpdbi",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -230,8 +230,8 @@
         }
       },
       "machine": {
-        "name": "m6-0e532964",
-        "hostname": "ONE-M6-0E532964"
+        "name": "m6-d8ac8bbf",
+        "hostname": "ONE-M6-D8AC8BBF"
       },
       "teardown": {
         "absent": true
@@ -240,14 +240,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 73840,
-          "sha256": "7952a0e1d9211af424cb5af2745171d8e745f7583d0e748762d7e34314bdb1c8",
-          "mtime_ns": 1788941882943040331
+          "sha256": "aade5170cde10160d9f3840a8d0bad944c5bbd285b6efb79831ebd17a4cb5b72",
+          "mtime_ns": 1789121646529054140
         }
       ]
     },
     "group-08-collapsed-group-move": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpopp2ih5l",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp89aydbgy",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -265,8 +265,8 @@
         }
       },
       "machine": {
-        "name": "m6-8da7d856",
-        "hostname": "ONE-M6-8DA7D856"
+        "name": "m6-89b4b25f",
+        "hostname": "ONE-M6-89B4B25F"
       },
       "teardown": {
         "absent": true
@@ -275,14 +275,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 75656,
-          "sha256": "0be5eaca3172c3455b9b85946e0425e62cff0f61ab8fee75d8d0c4b0f6706248",
-          "mtime_ns": 1788941883308990065
+          "sha256": "69eab3043565feb74c1242cd4b2407e83990feeec43c959c5aea61c9ea156337",
+          "mtime_ns": 1789121646959281959
         }
       ]
     },
     "group-single-page": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpyqtm83w3",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp2iu0f00f",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -300,8 +300,8 @@
         }
       },
       "machine": {
-        "name": "m6-2e6f3792",
-        "hostname": "ONE-M6-2E6F3792"
+        "name": "m6-133773f4",
+        "hostname": "ONE-M6-133773F4"
       },
       "teardown": {
         "absent": true
@@ -310,14 +310,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 64016,
-          "sha256": "a256c8f761cfe6465ccbe37852794c5760bbd46a6993a821e535ced69c38d510",
-          "mtime_ns": 1788941883672568012
+          "sha256": "8f1d397cf23969ee336661f188879f1d418741878b506f6682a6f86d238c5c33",
+          "mtime_ns": 1789121647383619936
         }
       ]
     },
     "indent-01-demoted-parent": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpono2kv8d",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpzu_h46n7",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -335,8 +335,8 @@
         }
       },
       "machine": {
-        "name": "m6-12ecb7c4",
-        "hostname": "ONE-M6-12ECB7C4"
+        "name": "m6-b88a1aec",
+        "hostname": "ONE-M6-B88A1AEC"
       },
       "teardown": {
         "absent": true
@@ -345,14 +345,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 60192,
-          "sha256": "7d65268efd6ff873d370ff776062c378674b760d6adbeac4a19dc9fd28cb61c1",
-          "mtime_ns": 1788941878214798774
+          "sha256": "edfc61dcb2e55d6bf3afccc72e523a1fa9d253fa5c5b947f36cbb152b9446fdf",
+          "mtime_ns": 1789121640873938491
         }
       ]
     },
     "indent-02-promoted-parent": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpu3zp0wxf",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp5vi4lp1k",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -370,8 +370,8 @@
         }
       },
       "machine": {
-        "name": "m6-8695a32c",
-        "hostname": "ONE-M6-8695A32C"
+        "name": "m6-6e03355e",
+        "hostname": "ONE-M6-6E03355E"
       },
       "teardown": {
         "absent": true
@@ -380,14 +380,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 62680,
-          "sha256": "bb97693bb9b9ee756b71b46ec9f8236994af5ebcd17b4162b799d25687c03bae",
-          "mtime_ns": 1788941878501070348
+          "sha256": "fc93aa64ff966e2f5557bac1e38c0768df378ee5865c0e527d672c6f31c76761",
+          "mtime_ns": 1789121641216798594
         }
       ]
     },
     "indent-03-selected-group-move": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpkkgri9eo",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp41s5b9uu",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -405,8 +405,8 @@
         }
       },
       "machine": {
-        "name": "m6-79f79370",
-        "hostname": "ONE-M6-79F79370"
+        "name": "m6-a3820ebf",
+        "hostname": "ONE-M6-A3820EBF"
       },
       "teardown": {
         "absent": true
@@ -415,14 +415,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 63752,
-          "sha256": "38e4a1ea6410eb097653c8d3bd74abdc5ac28f4616ebd04eb32e332e9a34179a",
-          "mtime_ns": 1788941878785592590
+          "sha256": "93548ad527574f6a19f2288b751746754bf78037b8229e5408aa1af8d5e4f94b",
+          "mtime_ns": 1789121641556517733
         }
       ]
     },
     "indent-04-subpage-move": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpnaob6ged",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpz1pbk0ta",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -440,8 +440,8 @@
         }
       },
       "machine": {
-        "name": "m6-24815dc0",
-        "hostname": "ONE-M6-24815DC0"
+        "name": "m6-32450ad0",
+        "hostname": "ONE-M6-32450AD0"
       },
       "teardown": {
         "absent": true
@@ -450,14 +450,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 66856,
-          "sha256": "beeb72e90c663376bf6f378c256b44a58f74adcd7efa75b685ab163521cb899c",
-          "mtime_ns": 1788941879132236190
+          "sha256": "d566d07a037d5d3552ddd2d64f42f793c5823e4209dd340758c1847a21a5dc93",
+          "mtime_ns": 1789121641964058226
         }
       ]
     },
     "indent-05-insert-before-subpage": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp4c2gwxhe",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpf5e2rlwx",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -475,8 +475,8 @@
         }
       },
       "machine": {
-        "name": "m6-bf5daf50",
-        "hostname": "ONE-M6-BF5DAF50"
+        "name": "m6-1b265f06",
+        "hostname": "ONE-M6-1B265F06"
       },
       "teardown": {
         "absent": true
@@ -485,14 +485,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 67160,
-          "sha256": "eebeea1c5b675eb9114dc1ab096ccd71536e6b077a6bb4cfbac6ca8c0b674c71",
-          "mtime_ns": 1788941879409552027
+          "sha256": "03715fdc38a5e3a369e49e5abe8e55fa82da4ffb90c304987ca5f66edf545f7b",
+          "mtime_ns": 1789121642301975530
         }
       ]
     },
     "indent-06-promoted-level-two": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpkdhy5hsi",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmplg_djgsc",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -510,8 +510,8 @@
         }
       },
       "machine": {
-        "name": "m6-7cb23bfd",
-        "hostname": "ONE-M6-7CB23BFD"
+        "name": "m6-e0ac64b2",
+        "hostname": "ONE-M6-E0AC64B2"
       },
       "teardown": {
         "absent": true
@@ -520,14 +520,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 71448,
-          "sha256": "fe37a1b0a3691daf93b172d42f929905a5c9c9b5caba4e6e3b67e6a59f5f7de5",
-          "mtime_ns": 1788941879701176676
+          "sha256": "f66bd60a8834f9770060ae457a30aff734bf1777b0b21a6de9d8d19570777b3e",
+          "mtime_ns": 1789121642659393696
         }
       ]
     },
     "indent-07-promoted-root": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpi18ckmh6",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpksr_pqio",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -545,8 +545,8 @@
         }
       },
       "machine": {
-        "name": "m6-d1a70cb9",
-        "hostname": "ONE-M6-D1A70CB9"
+        "name": "m6-167fb3cd",
+        "hostname": "ONE-M6-167FB3CD"
       },
       "teardown": {
         "absent": true
@@ -555,14 +555,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 73840,
-          "sha256": "276195070618d102292a0455590ceb9bbf6d26106b4887cda73252fa149d1b63",
-          "mtime_ns": 1788941880070772321
+          "sha256": "0d48cefd731266249f136cf48bf70e1899942e390a3c40bec04b058c8b20c738",
+          "mtime_ns": 1789121643082641295
         }
       ]
     },
     "indent-08-collapsed-group-move": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpqphw6cgh",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp9pe3v7df",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -580,8 +580,8 @@
         }
       },
       "machine": {
-        "name": "m6-d141faaf",
-        "hostname": "ONE-M6-D141FAAF"
+        "name": "m6-9d58611a",
+        "hostname": "ONE-M6-9D58611A"
       },
       "teardown": {
         "absent": true
@@ -590,14 +590,14 @@
         {
           "path": "Lifecycle.one",
           "bytes": 74056,
-          "sha256": "250a938806af76fc3ed8b917fcbd6161694000f2d287eb491ad134586b7a2fa2",
-          "mtime_ns": 1788941880425063366
+          "sha256": "c4ff8e01f64f3ad05e44ae4ff1dd65286985d7b3ffee478d42e7e0ea41d55024",
+          "mtime_ns": 1789121643503140348
         }
       ]
     },
     "indent-single-page": {
       "run": {
-        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpey9_i1nq",
+        "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp9_ggdkk6",
         "expected_pages": 9,
         "author": null,
         "author_timeout_seconds": 600,
@@ -615,8 +615,8 @@
         }
       },
       "machine": {
-        "name": "m6-809753e8",
-        "hostname": "ONE-M6-809753E8"
+        "name": "m6-060e8528",
+        "hostname": "ONE-M6-060E8528"
       },
       "teardown": {
         "absent": true
@@ -625,15 +625,15 @@
         {
           "path": "Lifecycle.one",
           "bytes": 64312,
-          "sha256": "19c5d537b172a6ceeceffb8aa72e370c08584a55f18619aef5bdcbb0c7cca935",
-          "mtime_ns": 1788941880706173615
+          "sha256": "3dadcab935fa149e6d732f3c8fc29e44006197a76572212eafbcd7f5b09cda59",
+          "mtime_ns": 1789121643843763906
         }
       ]
     }
   },
   "twelve-clients": {
     "run": {
-      "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpauflzr4r",
+      "notebook": "/private/tmp/m33/page-clients2/candidate",
       "expected_pages": 37,
       "author": null,
       "author_timeout_seconds": 600,
@@ -651,8 +651,8 @@
       }
     },
     "machine": {
-      "name": "m6-87535bf3",
-      "hostname": "ONE-M6-87535BF3"
+      "name": "m6-16c2e4d4",
+      "hostname": "ONE-M6-16C2E4D4"
     },
     "teardown": {
       "absent": true
@@ -660,9 +660,9 @@
     "source": [
       {
         "path": "pages.one",
-        "bytes": 149680,
-        "sha256": "c1f90ad7adb5568be651fdf59009c8ccbb11ca772973155d93caa45b14f79665",
-        "mtime_ns": 1788941460936854212
+        "bytes": 155344,
+        "sha256": "623ade8b5ee6fc837ae63d5293791039ecd17da9cb8bc5e243ea20cadf37958c",
+        "mtime_ns": 1789124063040528117
       }
     ]
   },

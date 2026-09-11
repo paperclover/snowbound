@@ -75,10 +75,17 @@ fn text_mut(page: &mut Page, text: ExGuid) -> &mut TextObject {
         .expect("text object is on the page")
 }
 
-/// Replaces a UTF-16 range of a text object in the model, inheriting the format at its start.
+/// Replaces a UTF-16 range of a text object in the model; the replacement takes the format
+/// of the first replaced character, or of the character before an insertion point.
 pub fn replace_text(page: &mut Page, text: ExGuid, range: Range<u32>, replacement: &str) {
     let target = text_mut(page, text);
-    let format = target.text.format_at(range.start).unwrap().clone();
+    let format = if range.is_empty() {
+        target.text.format_at(range.start).unwrap().clone()
+    } else {
+        target.text.slice(range.clone()).unwrap().spans()[0]
+            .format
+            .clone()
+    };
     target
         .text
         .apply(Edit {

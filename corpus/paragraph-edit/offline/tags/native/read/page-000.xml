@@ -1,20 +1,5 @@
 ﻿<?xml version="1.0"?>
-<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2010/onenote" ID="{70A87C38-ECF6-491F-A87F-4874835F62B3}{1}{B0}" name="Bold 🦀 italic é color 東京" dateTime="2026-09-05T05:06:54.000Z" lastModifiedTime="2026-09-08T10:28:24.000Z" pageLevel="1" lang="en-US"><one:QuickStyleDef index="0" name="p" fontColor="automatic" highlightColor="automatic" font="Calibri" fontSize="11.0" spaceBefore="0.0" spaceAfter="0.0"/><one:PageSettings RTL="false" color="automatic"><one:PageSize><one:Automatic/></one:PageSize><one:RuleLines visible="false"/></one:PageSettings><one:Outline author="Rich author" lastModifiedBy="Rich author" lastModifiedTime="2026-09-08T04:47:24.000Z" objectID="{1764D484-A783-4AA9-A78D-C4AF7CC387D2}{10}{B0}"><one:Position x="36.0" y="14.40000057220459" z="0"/><one:Size width="127.5136947631836" height="42.90299224853515"/><one:OEChildren><one:OE creationTime="2026-09-08T04:47:24.000Z" lastModifiedTime="2026-09-08T04:47:24.000Z" objectID="{10017C73-54FE-01A3-17D9-07A5B7A8F524}{1}{B0}" alignment="left"><one:T><![CDATA[<span style='font-weight:bold;
-text-decoration:underline;font-family:Calibri;font-size:11.0pt'>Bold</span><span
-style='font-family:Calibri;font-size:11.0pt'> </span><span style='font-family:
-Arial;font-size:13.5pt'>&#129408;</span><span style='font-family:Calibri;
-font-size:11.0pt'> </span><span style='font-style:italic;text-decoration:line-through;
-font-family:Calibri;font-size:11.0pt'>italic</span><span style='font-family:
-Calibri;font-size:11.0pt'> </span><span style='vertical-align:super;font-family:
-Calibri;font-size:11.0pt'>é</span><span style='font-family:Calibri;font-size:
-11.0pt'> </span><span style='font-family:Calibri;font-size:11.0pt;color:#0C2238;
-background:yellow;mso-highlight:yellow'>color</span><span style='font-family:
-Calibri;font-size:11.0pt'> </span><span style='vertical-align:sub;font-family:
-Calibri;font-size:11.0pt'>東京</span><span style='font-family:Calibri;font-size:
-11.0pt'><br>
-End</span>]]></one:T></one:OE><one:OE author="snow" authorInitials="S" lastModifiedBy="snow" lastModifiedByInitials="S" creationTime="2026-09-05T05:06:55.000Z" lastModifiedTime="2026-09-05T05:06:56.000Z" objectID="{1764D484-A783-4AA9-A78D-C4AF7CC387D2}{11}{B0}" alignment="left" quickStyleIndex="0" style="font-size:11.0pt;color:#1F4E79"><one:T><![CDATA[<span
-style='font-weight:bold;font-family:Calibri' lang=en-US>Fictitious: café, </span><span
-style='font-weight:bold;font-family:SimSun' lang=en-US>東京</span><span
-style='font-weight:bold;font-family:Calibri' lang=en-US>, </span><span
-style='font-weight:bold;font-family:Arial;direction:rtl;unicode-bidi:embed'
-lang=ar-SA>مرحبا</span>]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>
+<one:Page xmlns:one="http://schemas.microsoft.com/office/onenote/2010/onenote" ID="{0C641A41-360E-44CE-B714-3EFED8084F06}{1}{B0}" name="Join empty left right tag" dateTime="2026-09-08T09:33:01.000Z" lastModifiedTime="2026-09-11T10:24:22.000Z" pageLevel="1" lang="en-US"><one:QuickStyleDef index="0" name="p" fontColor="automatic" highlightColor="automatic" font="Calibri" fontSize="11.0" spaceBefore="0.0" spaceAfter="0.0"/><one:PageSettings RTL="false" color="automatic"><one:PageSize><one:Automatic/></one:PageSize><one:RuleLines visible="false"/></one:PageSettings><one:Title lang="en-US"><one:OE author="virtual" authorInitials="V" lastModifiedBy="virtual" lastModifiedByInitials="V" creationTime="2026-09-08T09:33:03.000Z" lastModifiedTime="2026-09-08T09:33:03.000Z" objectID="{FD11D165-00FD-4EED-B1EE-F486EC525BF5}{33}{B0}" alignment="left" quickStyleIndex="0" style="font-family:Calibri;font-size:17.0pt"><one:T><![CDATA[Join empty left right tag]]></one:T></one:OE></one:Title><one:Outline author="virtual" authorInitials="V" lastModifiedBy="Offline author" lastModifiedTime="2026-09-11T10:13:41.000Z" objectID="{FD11D165-00FD-4EED-B1EE-F486EC525BF5}{39}{B0}"><one:Position x="72.0" y="108.0" z="0"/><one:Size width="116.921875" height="26.85543441772461"/><one:OEChildren><one:OE creationTime="2026-09-08T09:33:03.000Z" lastModifiedTime="2026-09-11T10:13:41.000Z" objectID="{FD11D165-00FD-4EED-B1EE-F486EC525BF5}{40}{B0}" alignment="left" quickStyleIndex="0"><one:T><![CDATA[<span
+style='font-weight:bold' lang=en-US>Bold</span><span lang=en-US> </span><span
+style='font-style:italic' lang=en-US>italic</span><span lang=en-US> &#129408; é </span><span
+style='color:#123456' lang=x-none>tail</span>]]></one:T></one:OE><one:OE lastModifiedBy="virtual" lastModifiedByInitials="V" creationTime="2026-09-08T09:33:03.000Z" lastModifiedTime="2026-09-08T09:33:03.000Z" objectID="{FD11D165-00FD-4EED-B1EE-F486EC525BF5}{55}{B0}" alignment="left" quickStyleIndex="0"><one:T><![CDATA[Preserved sibling]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>

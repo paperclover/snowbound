@@ -24,9 +24,9 @@ captures, source hashes, scripts, base image and clone removal.
 Reproduce candidates with new absolute output directories:
 
 ```sh
-ONESTORE_OFFLINE_PAGE_EDIT_OUTPUT=/tmp/one-page-edits cargo test -p onestore-offline --all-features --test sync pages::native_page_changes_reconcile_with_atomic_offline_batches_and_review -- --exact
+ONESTORE_OFFLINE_PAGE_EDIT_OUTPUT=/tmp/one-page-edits cargo test -p notebook --all-features --test sync_pages native_page_changes_reconcile_with_atomic_offline_batches_and_review -- --exact
 python tools/offline_page_edits.py /tmp/one-page-edits /tmp/one-page-edits-cold --workers 4
-ONESTORE_OFFLINE_PAGE_CLIENT_OUTPUT=/tmp/one-page-clients cargo test -p onestore-offline --all-features --test sync pages::twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review -- --exact
+ONESTORE_OFFLINE_PAGE_CLIENT_OUTPUT=/tmp/one-page-clients cargo test -p notebook --all-features --test sync_pages twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review -- --exact
 python tools/native_runner.py /tmp/one-page-clients /tmp/one-page-clients-cold --expected-pages 37 --collect-notebook
 ```
 

@@ -7,6 +7,7 @@ use onestore::{
     document::Document,
     page::{Outline, Page, PageObject, PageParagraph},
 };
+use serde_json::json;
 
 #[path = "support/server.rs"]
 mod server;
@@ -524,17 +525,37 @@ fn native_moves_deletions_and_layout_changes_merge_or_require_review() {
         let mut reapplied = durable.clone();
         change(&mut reapplied);
         assert_eq!(reapplied, durable, "{name} keeps its reconciled change");
-        records.push((name, if merged { "merged" } else { "reviewed" }));
+        let (object, change) = match name.as_str() {
+            "Move outline" => (outline, json!({"Position": {"x": 252.0, "y": 288.0}})),
+            "Resize outline" | "Automatic outline size" | "Delete outline" => (
+                outline,
+                json!({"Width": {"points": 252.0, "user_set": true}}),
+            ),
+            _ => (
+                paragraph_with(&page_of(BEFORE, space), target).unwrap().id,
+                json!({"Collapsed": name != "Expand subtree"}),
+            ),
+        };
+        records.push(json!({
+            "name": name,
+            "outcome": if merged { "merged" } else { "reviewed" },
+            "object": object.to_string(),
+            "change": change,
+            "dependent_text": dependent.to_string(),
+        }));
     }
-    let reviewed = records.iter().filter(|(_, r)| *r == "reviewed").count();
+    let reviewed = records
+        .iter()
+        .filter(|record| record["outcome"] == "reviewed")
+        .count();
     assert_eq!((records.len(), reviewed), (14, 7), "{records:?}");
     if let Some(output) = std::env::var_os("ONESTORE_OFFLINE_OUTLINE_OUTPUT") {
         let output = std::path::PathBuf::from(output);
         assert!(output.is_absolute());
-        std::fs::create_dir(&output).unwrap();
-        std::fs::write(output.join("synthetic.one"), &server.durable).unwrap();
+        std::fs::create_dir_all(output.join("candidate")).unwrap();
+        std::fs::write(output.join("candidate/synthetic.one"), &server.durable).unwrap();
         std::fs::write(
-            output.with_extension("json"),
+            output.join("cases.json"),
             serde_json::to_vec_pretty(&records).unwrap(),
         )
         .unwrap();

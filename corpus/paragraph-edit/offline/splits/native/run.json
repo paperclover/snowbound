@@ -1,5 +1,5 @@
 {
-  "notebook": "/Users/clo/dev/one/evidence/m10/offline-paragraph-native-01/splits/candidate",
+  "notebook": "/private/tmp/m33/offline-paragraph2/splits/candidate",
   "expected_pages": 14,
   "author": null,
   "author_timeout_seconds": 600,
