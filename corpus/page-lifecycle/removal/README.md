@@ -50,3 +50,15 @@ failure. Decode the input hex into a new writable corpus and set
 the platform path separator, then use `cargo +nightly fuzz run document CORPUS --
 -seed=1993 -max_total_time=120 -timeout=30 -runs=20000`. The target also retains its
 built-in synthetic sources. This is bounded reader testing of these inputs.
+
+`rust-followup` takes four Rust `delete_pages_permanently` outputs (`parent`, `all`,
+`features`, `leading-parent`) and lets OneNote 2010 create a titled page with a bold
+body in each section through COM (`tools/native/page-removal-followup.ps1`), then
+reopens the natively saved section through a fresh cache. The Rust test
+`native_pages_created_after_rust_removal_reopen_cold` requires every surviving page
+to keep its exact active revision through both native phases, the new page to carry
+the native title and body, and the cold reopen to change no object space.
+`tools/test_page_removal.py` compares both captures' native XML with the Rust model
+and finds the native title exactly once in each hierarchy. Regenerate the candidates
+with `ONESTORE_PAGE_REMOVAL_OUTPUT` on the removal reference test, then run the
+runner with `--author` into `followup` and cold into `followup-cold`.

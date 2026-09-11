@@ -59,3 +59,22 @@ class PageRemovalTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RustRemovalFollowupTest(unittest.TestCase):
+    """OneNote creates a page in a section after Rust removed pages from it, then reopens cold."""
+
+    CASES = ('parent', 'all', 'features', 'leading-parent')
+
+    def test_native_page_after_rust_removal_matches_its_captures(self):
+        for case in self.CASES:
+            with self.subTest(case=case):
+                root = FIXTURE / 'rust-followup' / case
+                title = (root / 'followup/native-title.txt').read_text(encoding='utf-8-sig')
+                self.assertTrue(title.startswith('Native after Rust removal'))
+                for phase in ('followup', 'followup-cold'):
+                    compare(root / phase / 'notebook', root / phase / 'read')
+                    hierarchy = ET.parse(root / phase / 'read/hierarchy.xml').getroot()
+                    names = [page.get('name') for page in hierarchy.findall('.//one:Page', ns)]
+                    self.assertEqual(names.count(title), 1, names)
+                    self.assertTrue(json.loads((root / phase / 'teardown.json').read_text())['absent'])

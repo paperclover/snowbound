@@ -1,6 +1,6 @@
 use onestore::{
     ExGuid, FileDataReference, ObjectData, PreparedEdit, PropertySets, RevisionIndex, Store,
-    document::Document,
+    document::{Document, Kind},
 };
 use std::collections::BTreeSet;
 
@@ -176,6 +176,82 @@ fn removal_rejects_duplicate_missing_and_non_page_spaces_without_publication() {
 }
 
 use page_schedule::{current, disk};
+
+/// OneNote created a page in each section after Rust permanently removed pages from it;
+/// the surviving pages keep their revisions through the native save and a cold reopen.
+#[test]
+fn native_pages_created_after_rust_removal_reopen_cold() {
+    let root = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../corpus/page-lifecycle/removal/rust-followup"
+    ));
+    for case in ["parent", "all", "features", "leading-parent"] {
+        let read = |phase: &str| {
+            std::fs::read(root.join(case).join(phase).join("notebook/Lifecycle.one")).unwrap()
+        };
+        let (candidate, followup, cold) =
+            (read("candidate"), read("followup"), read("followup-cold"));
+        let title =
+            std::fs::read_to_string(root.join(case).join("followup/native-title.txt")).unwrap();
+        let title = title.trim_start_matches('\u{feff}').trim_end();
+        let stores = [&candidate, &followup, &cold].map(|bytes| Store::parse(bytes).unwrap());
+        let indexes = stores.each_ref().map(|store| {
+            assert!(store.checksum_mismatches.is_empty());
+            let index = RevisionIndex::parse(store).unwrap();
+            index.validate_current().unwrap();
+            index
+        });
+        let documents = indexes
+            .each_ref()
+            .map(|index| Document::parse(index).unwrap());
+        let before = documents[0].pages().unwrap();
+        for (document, index) in documents[1..].iter().zip(&indexes[1..]) {
+            let pages = document.pages().unwrap();
+            assert_eq!(pages.len(), before.len() + 1, "{case}");
+            assert_eq!(
+                &pages[..before.len()],
+                before.as_slice(),
+                "{case}: surviving page order"
+            );
+            for (sid, _) in &before {
+                assert_eq!(
+                    index.active(*sid).unwrap(),
+                    indexes[0].active(*sid).unwrap(),
+                    "{case}: {sid}"
+                );
+            }
+            let (native, page) = pages[before.len()];
+            let revision = document.active(native).unwrap();
+            let metadata = revision
+                .roots
+                .get(&2)
+                .and_then(|id| revision.nodes.get(id))
+                .unwrap();
+            assert!(
+                matches!(&metadata.kind, Kind::Metadata { title: Some(name), .. } if name == title),
+                "{case}"
+            );
+            let body = revision
+                .parents(&[page])
+                .unwrap()
+                .into_keys()
+                .any(|id| matches!(&revision.nodes[&id].kind, Kind::RichText { text, .. } if text == "Native body after Rust removal."));
+            assert!(body, "{case}: native body");
+        }
+        // The section root may gain OneNote's per-series navigation metadata copies on open.
+        for sid in indexes[1]
+            .spaces
+            .keys()
+            .filter(|sid| **sid != indexes[1].root)
+        {
+            assert_eq!(
+                indexes[1].active(*sid).unwrap(),
+                indexes[2].active(*sid).unwrap(),
+                "{case}: cold reopen changed {sid}"
+            );
+        }
+    }
+}
 
 #[test]
 fn tombstones_and_first_page_promotion_survive_each_storage_interruption() {

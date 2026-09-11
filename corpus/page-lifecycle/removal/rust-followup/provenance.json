@@ -1,0 +1,77 @@
+{
+  "generator": "ONESTORE_PAGE_REMOVAL_OUTPUT on removal_matches_all_native_cases_and_retains_every_old_revision",
+  "author_script": "tools/native/page-removal-followup.ps1",
+  "cases": {
+    "parent": {
+      "candidate_sha256": "f7b163e466afb5c13530beefd2bb7b3303f08ed42f5a6f817a805abf7005d65b",
+      "captures": {
+        "followup": {
+          "clone": "m6-e0700600",
+          "teardown_absent": true,
+          "notebook_sha256": "e1c9e25eb5bb28c90ecd2f9bd627497489382e485c47efbc38e719880e7c0f3d",
+          "pages": 9
+        },
+        "followup-cold": {
+          "clone": "m6-e51ea1b2",
+          "teardown_absent": true,
+          "notebook_sha256": "253fde4f872bb302632de20eb977180114ab1776d6032cc4e9e46905ff3e6366",
+          "pages": 9
+        }
+      }
+    },
+    "all": {
+      "candidate_sha256": "645169c4f76dedd0deb0c928a08339479763ae607c21b7f604c21d823eee53eb",
+      "captures": {
+        "followup": {
+          "clone": "m6-4c5ff100",
+          "teardown_absent": true,
+          "notebook_sha256": "36a33c1d7f8a13d93f6bcb0ea9431d5524a1f43aa8a8e121dc2c735e076cc029",
+          "pages": 1
+        },
+        "followup-cold": {
+          "clone": "m6-9d41f146",
+          "teardown_absent": true,
+          "notebook_sha256": "36a33c1d7f8a13d93f6bcb0ea9431d5524a1f43aa8a8e121dc2c735e076cc029",
+          "pages": 1
+        }
+      }
+    },
+    "features": {
+      "candidate_sha256": "266aaf86a29b942255349dc84ec8a8d9691c965aeafd16122326a97b3acb10ee",
+      "captures": {
+        "followup": {
+          "clone": "m6-49b2cf78",
+          "teardown_absent": true,
+          "notebook_sha256": "4c51e1d89b121d74fc15945b3d4e83698956d274bfa092f21a12a817f3acd95a",
+          "pages": 7
+        },
+        "followup-cold": {
+          "clone": "m6-53651ab4",
+          "teardown_absent": true,
+          "notebook_sha256": "5d7d209a9320bcd932879da30bd0b6d54e87b7ee85766037bf69954d3f2d66b0",
+          "pages": 7
+        }
+      }
+    },
+    "leading-parent": {
+      "candidate_sha256": "4aabf26fa4960cf6d99d76c1f76906ef1023f04bf01b65ea07464ac87449ca3e",
+      "captures": {
+        "followup": {
+          "clone": "m6-9a847cab",
+          "teardown_absent": true,
+          "notebook_sha256": "07d44900cbb3e03c7ccb27fb256afee1601fb2473cfa927b1c3e20aa662c3dd4",
+          "pages": 9
+        },
+        "followup-cold": {
+          "clone": "m6-063c5792",
+          "teardown_absent": true,
+          "notebook_sha256": "07d44900cbb3e03c7ccb27fb256afee1601fb2473cfa927b1c3e20aa662c3dd4",
+          "pages": 9
+        }
+      }
+    }
+  },
+  "rejected_attempts": [
+    "features followup-cold and leading-parent followup first ran while the lab configuration was moving to .env and failed before booting a clone; both were rerun"
+  ]
+}

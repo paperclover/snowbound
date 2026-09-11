@@ -2,7 +2,6 @@
 /corpus/private/
 /corpus/recovered/
 /evidence/
-/.DS_Store
 __pycache__/
 /fuzz/target/
 /fuzz/corpus/
