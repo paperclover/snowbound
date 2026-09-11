@@ -21,9 +21,10 @@ import uuid
 from lab_network import ensure_hub
 
 
-VM_HOME = Path(os.environ.get(
-    "ONE_VM_HOME", "/Volumes/Documents/OneNote VMs"
-)).expanduser()
+from env import ROOT, setting
+
+
+VM_HOME = Path(setting("ONE_VM_HOME") or ROOT / "lab-unset").expanduser()
 LINUX_HOME = VM_HOME / "linux"
 IMAGES = LINUX_HOME / "images"
 INSTANCES = LINUX_HOME / "instances"

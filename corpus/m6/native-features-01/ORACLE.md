@@ -4,7 +4,7 @@ OneNote 14.0.4763.1000 authored 19 pages alongside the Rust seed page, then
 exported XML, PDFs and attachment bytes. The frozen input is
 [notebook/fixture.json](notebook/fixture.json); [scripts/author.ps1](scripts/author.ps1)
 contains the executed author. The input generator validates every page against
-the unmodified [2010 COM schema](../../../resources/onenote2010-com/SOURCE.md).
+the unmodified 2010 COM schema (`OneNote2010.xsd`, kept outside the repository).
 
 The fixture covers PNG/JPEG/BMP/TIFF/GIF import, alternative text and image links,
 all four background/printout flag combinations, an attachment, a WAV recording

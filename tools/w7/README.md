@@ -1,42 +1,53 @@
-# w7 — remote computer use on a Windows 7 box
+# w7 — Windows 7 lab VMs on this Mac
 
-Drive `wayback` (Windows 7, Tailscale `100.104.74.68`) from a model by writing
-AutoHotkey v2 scripts. Each call runs a script on the real desktop and comes
-back with its stdout and a screenshot.
+Every native check runs OneNote 2010 inside disposable QEMU clones of a sealed
+Windows 7 base image. A model drives a clone by writing AutoHotkey v2 scripts:
+each call runs on the clone's desktop and comes back with stdout and a
+screenshot.
 
 Two halves:
 
-- `payload/` — copy the folder to the Win7 box and run `run.bat`. It starts an
-  HTTP listener on port 8777 that executes AHK and screenshots. See
-  [payload/README.txt](payload/README.txt).
+- `payload/` — installed into the base image as `C:\win7-agent`. It starts an
+  HTTP listener that executes AHK and screenshots; QEMU forwards it to a host
+  loopback port per clone. See [payload/README.txt](payload/README.txt).
 - `mcp_win7.py` — stays on the Mac. An MCP server (stdio) for desktop control,
   file transfer, commands, detached processes, and VM lifecycle. System python3,
   stdlib only.
 
-## Wire up Codex
+The original physical-box version of the server is kept unchanged in
+[wayback/](wayback/README.md); nothing uses it.
 
-Paste [codex-config-snippet.toml](codex-config-snippet.toml) into
-`~/.codex/config.toml`, then restart Codex. `/mcp` should list `win7` and
-`one-linux`. Their editable implementation and guest payload live in
-`/Users/clo/dev/one/tools/w7`.
+## Settings
+
+Copy `.env.example` at the repository root to `.env` and fill in `ONE_VM_HOME`
+(the directory holding the base image, `targets.json`, clone overlays and the
+Linux appliance) and `ONE_WIN7_ISO` (licensed installation media, used only by
+`vm.py install`). Both stay outside the repository. Environment variables of the
+same names override the file.
+
+## Wire up an MCP client
+
+Paste [codex-config-snippet.toml](codex-config-snippet.toml) into your client's
+MCP configuration with the repository path filled in, then restart it; it should
+list `win7` and `one-linux`.
 
 ## Smoke test
 
 ```sh
-./mcp_win7.py health           # listener version info
-./mcp_win7.py shot             # -> ./screenshot.png
-./mcp_win7.py exec 'Run("notepad.exe")
+./vm.py up alpha --wait
+./mcp_win7.py --target alpha health   # listener version info
+./mcp_win7.py --target alpha shot     # -> ./screenshot.png
+./mcp_win7.py --target alpha exec 'Run("notepad.exe")
 WinWait("Untitled - Notepad",, 10)
-SendText("hello")'             # prints stdout/exit, -> ./screenshot.png
-./mcp_win7.py cmd 'ipconfig'   # plain shell command, no screenshot
-./mcp_win7.py spawn '"C:\tools\capture.exe" /output C:\trace.pml'
+SendText("hello")'                    # prints stdout/exit, -> ./screenshot.png
+./mcp_win7.py --target alpha cmd 'ipconfig'
+./vm.py down alpha
 ```
 
 ## Local QEMU VM
 
-`vm.py` runs the Windows 7 build VM on Apple silicon. VM state stays in
-`/Volumes/Documents/OneNote VMs`; the Windows ISO is opened read-only. Override
-the location with `ONE_VM_HOME` and `WIN7_TARGETS_FILE`.
+`vm.py` runs the Windows 7 build VM on Apple silicon. VM state stays under
+`ONE_VM_HOME`; the Windows ISO is opened read-only.
 
 ```sh
 ./vm.py install       # create the disk and boot the Windows installer
@@ -102,7 +113,7 @@ operation certifies a physical disk's behavior during host power loss.
 
 `linux_vm.py` creates an SSH-only Debian 13 arm64 appliance from Debian's
 official generic-cloud image. The downloaded base is SHA-512 verified and kept
-under `/Volumes/Documents/OneNote VMs/linux`; instances are sparse copy-on-write
+under `ONE_VM_HOME/linux`; instances are sparse copy-on-write
 overlays. Cloud-init installs Samba, dnsmasq, CIFS tools, smbclient, and fio.
 
 ```sh
@@ -140,5 +151,3 @@ a physical or network-reachable Windows machine.
   coordinates no longer match where clicks land.
 - The listener must run in the interactive logged-in session — as a scheduled
   task or service it gets session 0 and sees a black screen.
-- The box is only reachable over Tailscale at `100.104.74.68`; power it on
-  first, `health` failing with "cannot reach" usually just means it is off.

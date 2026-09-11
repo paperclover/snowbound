@@ -1,16 +1,14 @@
-# Paste into ~/.codex/config.toml.
+# Paste into your MCP client's configuration (for Codex: ~/.codex/config.toml),
+# replacing REPO with the absolute path of this repository. Settings come from
+# REPO/.env (see .env.example).
 [mcp_servers.win7]
 command = "python3"
-args = ["/Users/clo/dev/one/tools/w7/mcp_win7.py"]
+args = ["REPO/tools/w7/mcp_win7.py"]
 # Covers a contended multi-VM boot with wait enabled.
 tool_timeout_sec = 915
 
-[mcp_servers.win7.env]
-WIN7 = "http://100.104.74.68:8777"  # wayback over Tailscale
-# WIN7_TOKEN = "..."  # only if the listener was started with a token
-
 [mcp_servers.one-linux]
 command = "python3"
-args = ["/Users/clo/dev/one/tools/w7/mcp_linux.py"]
+args = ["REPO/tools/w7/mcp_linux.py"]
 # A first boot downloads packages through cloud-init.
 tool_timeout_sec = 915

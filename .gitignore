@@ -8,3 +8,5 @@ __pycache__/
 /fuzz/artifacts/
 /fuzz/coverage/
 /tools/w7/payload/vendor/
+/resources/
+/.env

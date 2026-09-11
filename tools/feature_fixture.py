@@ -2,6 +2,7 @@
 """Generate schema-validated inputs for native document feature controls."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shutil
 import wave
@@ -27,7 +28,10 @@ def generate(destination):
         sound.setparams((1, 2, 8000, 8000, 'NONE', 'not compressed'))
         sound.writeframes(b'\0' * 16000)
     fixture = {'sections': ['Features.one', 'Group A/Duplicate.one', 'Group B/Nested/Duplicate.one', 'Empty.one'], 'pages': []}
-    schema = ET.XMLSchema(ET.parse(str(ROOT / 'resources/onenote2010-com/OneNote2010.xsd')))
+    xsd = os.environ.get('ONENOTE_2010_XSD')
+    if not xsd:
+        raise SystemExit('Set ONENOTE_2010_XSD to the OneNote 2010 COM schema (OneNote2010.xsd); it is not distributed with this repository.')
+    schema = ET.XMLSchema(ET.parse(xsd))
 
     def page(title, content, section='Features.one', attributes='', definitions=''):
         xml = f'<one:Page xmlns:one="{NS}" {attributes}>{definitions}<one:Title><one:OE><one:T>{title}</one:T></one:OE></one:Title>{content}</one:Page>'

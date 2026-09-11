@@ -1,0 +1,23 @@
+[
+  {"id":"arial-single", "width":240, "runs":[{"text":"Annotation line", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-wrap", "width":110, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-wrap-narrow", "width":109.5, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-empty", "width":110, "runs":[{"text":"", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-small", "width":110, "runs":[{"text":"Small notes still need consistent spacing.", "font":"Arial", "size":7, "bold":false, "italic":false}]},
+  {"id":"arial-large", "width":110, "runs":[{"text":"Large notes beside small annotations.", "font":"Arial", "size":18, "bold":false, "italic":false}]},
+  {"id":"arial-bold", "width":110, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Arial", "size":11, "bold":true, "italic":false}]},
+  {"id":"arial-italic", "width":110, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Arial", "size":11, "bold":false, "italic":true}]},
+  {"id":"arial-bold-italic", "width":110, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Arial", "size":11, "bold":true, "italic":true}]},
+  {"id":"arial-mixed-size", "width":110, "runs":[{"text":"A small ", "font":"Arial", "size":11, "bold":false, "italic":false},{"text":"LARGE", "font":"Arial", "size":18, "bold":false, "italic":false},{"text":" annotation.", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-mixed-weight", "width":110, "runs":[{"text":"A quiet ", "font":"Arial", "size":11, "bold":false, "italic":false},{"text":"evening under", "font":"Arial", "size":11, "bold":true, "italic":false},{"text":" the trees.", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-spaces", "width":110, "runs":[{"text":"  one  two   three four five  ", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-nbsp", "width":65, "runs":[{"text":"one two three four five", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-long-word", "width":40, "runs":[{"text":"extraordinarilylongword", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-combining", "width":90, "runs":[{"text":"Café café naïve naïve Å Å", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-ligatures", "width":110, "runs":[{"text":"office affine difficult fluff ffi fi fl", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"arial-bidi", "width":110, "runs":[{"text":"notes שלום 123 beside العربية text", "font":"Arial", "size":11, "bold":false, "italic":false}]},
+  {"id":"calibri-wrap", "width":110, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Calibri", "size":11, "bold":false, "italic":false}]},
+  {"id":"calibri-bold", "width":110, "runs":[{"text":"A quiet evening under the trees, with notes beside every line.", "font":"Calibri", "size":11, "bold":true, "italic":false}]},
+  {"id":"calibri-empty", "width":110, "runs":[{"text":"", "font":"Calibri", "size":11, "bold":false, "italic":false}]},
+  {"id":"modern-emoji", "width":110, "runs":[{"text":"Notes 👩🏽‍💻 beside 🌳 and family 👩‍👩‍👧‍👦.", "font":"Arial", "size":11, "bold":false, "italic":false}]}
+]

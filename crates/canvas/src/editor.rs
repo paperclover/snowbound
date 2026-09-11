@@ -5606,7 +5606,7 @@ mod tests {
         use onestore::page::{Page, PageObject};
         use onestore::{RevisionIndex, Store, document::Document};
         let store = Store::parse(include_bytes!(
-            "../../../resources/canvas/baseline-anchors.one"
+            "../../../corpus/canvas/baseline-anchors.one"
         ))
         .unwrap();
         let index = RevisionIndex::parse(&store).unwrap();

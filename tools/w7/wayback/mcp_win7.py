@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """MCP server (stdio, newline-delimited JSON-RPC) and CLI for driving the
-Windows 7 QEMU clones through their AutoHotkey exec listeners."""
+Windows 7 box `wayback` through its AutoHotkey exec listener."""
 
 import base64
 import json
@@ -12,10 +12,12 @@ import sys
 import urllib.error
 import urllib.request
 
-from env import ROOT, setting
-
-DEFAULT_TARGET = os.environ.get("WIN7_TARGET", "local")
-TARGETS_PATH = Path(setting("WIN7_TARGETS_FILE") or Path(setting("ONE_VM_HOME") or ROOT / "lab-unset") / "targets.json").expanduser()
+WAYBACK_BASE = os.environ.get("WIN7", "http://100.104.74.68:8777").rstrip("/")
+WAYBACK_TOKEN = os.environ.get("WIN7_TOKEN")
+DEFAULT_TARGET = os.environ.get("WIN7_TARGET", "wayback")
+TARGETS_PATH = Path(os.environ.get(
+    "WIN7_TARGETS_FILE", "/Volumes/Documents/OneNote VMs/targets.json"
+)).expanduser()
 VM = Path(__file__).with_name("vm.py")
 
 
@@ -24,7 +26,10 @@ class Win7Error(Exception):
 
 
 def resolve_target(name):
-    targets = {"local": {"base": "http://127.0.0.1:18777"}}
+    targets = {
+        "wayback": {"base": WAYBACK_BASE, "token": WAYBACK_TOKEN},
+        "local": {"base": "http://127.0.0.1:18777"},
+    }
     if TARGETS_PATH.exists():
         try:
             configured = json.loads(TARGETS_PATH.read_text())

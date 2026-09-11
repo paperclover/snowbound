@@ -21,13 +21,11 @@ import uuid
 from lab_network import ensure_hub
 
 
-VM_HOME = Path(os.environ.get(
-    "ONE_VM_HOME", "/Volumes/Documents/OneNote VMs"
-)).expanduser()
-ISO = Path(os.environ.get(
-    "ONE_WIN7_ISO",
-    "/Volumes/clover/Documents/Windows7/Windows 7 Professional.ISO",
-))
+from env import ROOT, require, setting
+
+
+VM_HOME = Path(setting("ONE_VM_HOME") or ROOT / "lab-unset").expanduser()
+ISO = Path(setting("ONE_WIN7_ISO") or ROOT / "lab-unset/win7.iso")
 IMAGES = VM_HOME / "images"
 MEDIA = VM_HOME / "media"
 INSTANCES = VM_HOME / "instances"
@@ -50,6 +48,8 @@ def qemu(name):
 
 
 def require_vm_home():
+    if VM_HOME == ROOT / "lab-unset":
+        require("ONE_VM_HOME")
     if len(VM_HOME.parts) > 2 and VM_HOME.parts[1] == "Volumes":
         volume = Path("/Volumes") / VM_HOME.parts[2]
         if not os.path.ismount(volume):
@@ -274,7 +274,7 @@ def update_target(name, port=None, token=None):
 def create_instance(name, hostname=None, cpus=2, memory_mb=4096, port=None):
     require_vm_home()
     validate_name(name)
-    if name in ("local", "wayback", BUILD):
+    if name in ("local", BUILD):
         raise SystemExit("VM name is reserved: %s" % name)
     hostname = (hostname or ("ONE-" + name)).upper()
     if not HOSTNAME.fullmatch(hostname):

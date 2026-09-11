@@ -1,6 +1,6 @@
 # Canvas experiments
 
-The [active goal and design record](../../resources/canvas-research.md#active-implementation-goal) define the implementation scope.
+The design record that scopes this work is kept outside the repository.
 
 ## macOS text canvas
 
@@ -55,7 +55,7 @@ The host and `layout-probe` accept repeated `--substitute-font FONT_FILE` option
 
 ```sh
 "target/Snowbound.app/Contents/MacOS/Snowbound" TEXT_FILE 240 --substitute-font ARIMO_FILE
-cargo run -p canvas --bin layout-probe -- resources/canvas/text-cases.json --substitute-font ARIMO_FILE --substitute-font CARLITO_FILE
+cargo run -p canvas --bin layout-probe -- corpus/canvas/text-cases.json --substitute-font ARIMO_FILE --substitute-font CARLITO_FILE
 ```
 
 Arimo's horizontal-header ascent/descent match the measured Arial Windows extents; its larger OS/2 Windows extents do not. The substitute uses those horizontal-header extents without line gap, scoped to the registered font data. Carlito uses its OS/2 Windows extents. Other text fallbacks retain their own metrics. Color emoji use the paragraph’s text baseline and scale within its line box; an explicit font-size change still changes line height. The comparator reports actual `canvas_height` and `canvas_height_residual` separately from the raw Windows-table hypothesis.
@@ -164,14 +164,14 @@ This comparison renderer draws body text, title text, date/time fields, bullet g
 
 ## Text and native-reference probes
 
-`resources/canvas/text-cases.json` is the input shared by the Rust/Parley probe, the Swift/Core Text probe and the synthetic native-page generator. Probe coordinates are logical points, without pixel quantization. Both probes accept additional font-file paths after the JSON path and register those fonts only within the process.
+`corpus/canvas/text-cases.json` is the input shared by the Rust/Parley probe, the Swift/Core Text probe and the synthetic native-page generator. Probe coordinates are logical points, without pixel quantization. Both probes accept additional font-file paths after the JSON path and register those fonts only within the process.
 
 ```sh
-cargo run -p canvas --bin layout-probe -- resources/canvas/text-cases.json > PARLEY_JSON
-swift tools/canvas/core_text_probe.swift resources/canvas/text-cases.json > CORE_TEXT_JSON
-python3 tools/canvas/native_fixture.py resources/canvas/text-cases.json NEW_NOTEBOOK_DIRECTORY
+cargo run -p canvas --bin layout-probe -- corpus/canvas/text-cases.json > PARLEY_JSON
+swift tools/canvas/core_text_probe.swift corpus/canvas/text-cases.json > CORE_TEXT_JSON
+python3 tools/canvas/native_fixture.py corpus/canvas/text-cases.json NEW_NOTEBOOK_DIRECTORY
 python3 tools/native_runner.py NEW_NOTEBOOK_DIRECTORY NEW_CAPTURE_DIRECTORY --author tools/native/pages.ps1 --pdf --screenshots
-python3 tools/canvas/compare.py resources/canvas/text-cases.json PARLEY_JSON CORE_TEXT_JSON NEW_CAPTURE_DIRECTORY/read > COMPARISON_JSON
+python3 tools/canvas/compare.py corpus/canvas/text-cases.json PARLEY_JSON CORE_TEXT_JSON NEW_CAPTURE_DIRECTORY/read > COMPARISON_JSON
 python3 -m unittest discover -s tools/canvas -p 'test_*.py'
 python3 tools/canvas/range_stress.py NEW_STRESS_DIRECTORY target/debug/layout-probe
 python3 tools/canvas/range_stress.py NEW_CORE_TEXT_STRESS_DIRECTORY swift tools/canvas/core_text_probe.swift
@@ -191,7 +191,7 @@ python3 tools/canvas/compare_scroll.py NATIVE_TOP.png NATIVE_SCROLLED.png --crop
 
 Use the measured offset to render the corresponding viewport with `render_page` by subtracting it from the page's top-view translation. Keep top-view registration separate: the Video and Lore comparisons establish their translations from image regions, independently of text layout. Pixel-color bounds alone cannot establish a text baseline when caret, outline-border or background pixels overlap the text region.
 
-The [native baseline fixture](../../resources/canvas/baseline-anchors.md) adds three opaque image anchors and paragraph-spacing controls. `compare_baselines.py PROBE_JSON NATIVE_XML NATIVE_PDF` matches decoded image pixels, rejects ambiguous or masked images, and reports baseline residuals under independently measured image translations. It preserves wrap mismatches and unregistered pages; no passing tolerance is inferred from the canvas output.
+The [native baseline fixture](../../corpus/canvas/baseline-anchors.md) adds three opaque image anchors and paragraph-spacing controls. `compare_baselines.py PROBE_JSON NATIVE_XML NATIVE_PDF` matches decoded image pixels, rejects ambiguous or masked images, and reports baseline residuals under independently measured image translations. It preserves wrap mismatches and unregistered pages; no passing tolerance is inferred from the canvas output.
 
 The initial native experiment establishes three useful controls:
 
