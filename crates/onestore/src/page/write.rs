@@ -671,6 +671,7 @@ impl Lowering<'_> {
             if stored.text.text() != text.text.text() {
                 return Err(invalid("Text edits did not converge on the model"));
             }
+            let fresh = self.alias.contains_key(&text.id);
             let mut boundaries = BTreeSet::new();
             for paragraph in [&stored.text, &text.text] {
                 for span in paragraph.spans() {
@@ -689,6 +690,7 @@ impl Lowering<'_> {
                 let attributes = attributes(
                     format_in(&stored.text, start)?,
                     format_in(&text.text, start)?,
+                    fresh,
                 )?;
                 match &mut pending {
                     Some((range, previous)) if *previous == attributes && range.end == start => {
@@ -704,8 +706,11 @@ impl Lowering<'_> {
             }
             edits.extend(pending);
             if text.text.text().is_empty() {
-                let attributes =
-                    attributes(format_in(&stored.text, 0)?, format_in(&text.text, 0)?)?;
+                let attributes = attributes(
+                    format_in(&stored.text, 0)?,
+                    format_in(&text.text, 0)?,
+                    fresh,
+                )?;
                 if !attributes.is_empty() {
                     edits.push((0..0, attributes));
                 }
@@ -900,17 +905,19 @@ fn text_edit(before: &str, after: &str) -> Result<(Range<u32>, String), Error> {
 }
 
 /// Explicit attributes turning `current` into `target`; unsupported differences are errors.
+/// A `fresh` text object was inserted by this edit, so an unspecified target value keeps
+/// the insertion's default instead of demanding an inherited value the image cannot restore.
 /// Language tags are retained as stored because the model has no way to author them.
-fn attributes(current: &Format, target: &Format) -> Result<Vec<TextAttribute>, Error> {
+fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<TextAttribute>, Error> {
     let mut out = Vec::new();
+    let inherited = || invalid("Inherited character formatting cannot be restored");
     macro_rules! boolean {
         ($field:ident, $variant:ident) => {
             if current.$field != target.$field {
                 match target.$field {
                     Some(value) => out.push(TextAttribute::$variant(value)),
-                    None => {
-                        return Err(invalid("Inherited character formatting cannot be restored"));
-                    }
+                    None if fresh => {}
+                    None => return Err(inherited()),
                 }
             }
         };
@@ -924,13 +931,15 @@ fn attributes(current: &Format, target: &Format) -> Result<Vec<TextAttribute>, E
     if current.font != target.font {
         match &target.font {
             Some(font) => out.push(TextAttribute::Font(font.clone())),
-            None => return Err(invalid("Inherited character formatting cannot be restored")),
+            None if fresh => {}
+            None => return Err(inherited()),
         }
     }
     if current.font_size != target.font_size {
         match target.font_size {
             Some(size) => out.push(TextAttribute::FontSize(size)),
-            None => return Err(invalid("Inherited character formatting cannot be restored")),
+            None if fresh => {}
+            None => return Err(inherited()),
         }
     }
     let color =
@@ -938,13 +947,15 @@ fn attributes(current: &Format, target: &Format) -> Result<Vec<TextAttribute>, E
     if current.color != target.color {
         match target.color {
             Some(value) => out.push(TextAttribute::Color(color(value))),
-            None => return Err(invalid("Inherited character formatting cannot be restored")),
+            None if fresh => {}
+            None => return Err(inherited()),
         }
     }
     if current.highlight != target.highlight {
         match target.highlight {
             Some(value) => out.push(TextAttribute::Highlight(color(value))),
-            None => return Err(invalid("Inherited character formatting cannot be restored")),
+            None if fresh => {}
+            None => return Err(inherited()),
         }
     }
     // An absent value and its stored default are the same formatting.

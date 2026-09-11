@@ -622,6 +622,56 @@ fn unsupported_model_edits_are_rejected_before_writing() {
 }
 
 #[test]
+fn a_new_paragraph_with_unspecified_formatting_takes_the_insertion_default() {
+    let (space, mut page) = page_by_title(OUTLINES, "Move leaf down");
+    let text = onestore::page::TextObject {
+        id: new_id().unwrap(),
+        date_field: None,
+        text: onestore::page::Paragraph::new("Plain 東京".into(), Default::default()),
+        tags: Vec::new(),
+    };
+    let mut paragraph = body(&page)[0].paragraphs[0].clone();
+    paragraph.id = new_id().unwrap();
+    paragraph.parent = None;
+    paragraph.level = 1;
+    paragraph.lists.clear();
+    paragraph.tags.clear();
+    paragraph.style = None;
+    paragraph.collapsed = false;
+    paragraph.content = onestore::page::ParagraphContent::Text(text.clone());
+    let outline = onestore::page::Outline {
+        id: new_id().unwrap(),
+        title: false,
+        min_width: None,
+        layout: onestore::document::Layout {
+            x: Some(300.0),
+            y: Some(500.0),
+            ..Default::default()
+        },
+        indents: Vec::new(),
+        paragraphs: vec![paragraph],
+        unsupported: Vec::new(),
+    };
+    page.objects.insert(0, PageObject::Outline(outline));
+    let written = PreparedEdit::page(OUTLINES, space, &page, AUTHOR).unwrap();
+    let stored = page_in(written.as_bytes(), space);
+    let read_back = body(&stored)
+        .iter()
+        .flat_map(|outline| outline.paragraphs.iter())
+        .find_map(|p| p.text().filter(|t| t.id == text.id))
+        .unwrap();
+    assert_eq!(read_back.text.text(), "Plain 東京");
+    let format = read_back.text.format_at(0).unwrap();
+    assert!(format.font.is_some() && format.font_size.is_some());
+    assert_eq!(
+        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+            .unwrap()
+            .as_bytes(),
+        written.as_bytes()
+    );
+}
+
+#[test]
 fn an_unchanged_model_publishes_nothing() {
     let (space, page) = page_by_title(OUTLINES, "Resize outline");
     let prepared = PreparedEdit::page(OUTLINES, space, &page, AUTHOR).unwrap();
