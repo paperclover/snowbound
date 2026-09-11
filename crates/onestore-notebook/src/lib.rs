@@ -2,7 +2,7 @@
 #![doc = include_str!("../README.md")]
 
 use onestore::{
-    ExGuid, FileType, RevisionIndex, Store,
+    FileType, RevisionIndex, Store,
     document::{Document, Kind},
 };
 use serde::Serialize;
@@ -251,19 +251,7 @@ fn scan(
         let parsed = (|| {
             let index = RevisionIndex::parse(&store)?;
             let document = Document::parse(&index)?;
-            let revision = document
-                .spaces
-                .get(&document.root)
-                .and_then(|space| {
-                    space
-                        .contexts
-                        .get(&ExGuid::default())
-                        .and_then(|id| space.revisions.get(id))
-                })
-                .ok_or(onestore::Error {
-                    offset: 0,
-                    message: "Missing active notebook root revision",
-                })?;
+            let revision = document.active(document.root)?;
             if expected == FileType::Section {
                 if revision
                     .roots

@@ -396,3 +396,21 @@ impl<'a> RevisionIndex<'a> {
         })
     }
 }
+
+impl<'a> RevisionIndex<'a> {
+    /// The revision labelled current in the default context of one object space.
+    pub fn active(&self, space: ExGuid) -> Result<ExGuid> {
+        self.spaces
+            .get(&space)
+            .and_then(|space| space.labels.get(&(ExGuid::default(), 1)))
+            .copied()
+            .ok_or(Error {
+                offset: 0,
+                message: "Object space has no active default revision",
+            })
+    }
+
+    pub fn resolve_active(&self, space: ExGuid) -> Result<crate::ResolvedRevision<'a>> {
+        self.resolve(space, self.active(space)?)
+    }
+}

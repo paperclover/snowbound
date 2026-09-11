@@ -305,29 +305,11 @@ fn active_paths(
     pages: &[ExGuid],
     objects: &[ExGuid],
 ) -> Option<Vec<Vec<ExGuid>>> {
-    use std::collections::{BTreeMap, BTreeSet};
-    let mut pending = pages.to_vec();
-    let mut seen = BTreeSet::new();
-    let mut parents = BTreeMap::<_, Vec<_>>::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let node = view.nodes.get(&id)?;
-        for child in node
-            .children
-            .iter()
-            .chain(&node.content)
-            .chain(&node.structure)
-        {
-            parents.entry(*child).or_default().push(id);
-            pending.push(*child);
-        }
-    }
+    let parents = view.parents(pages).ok()?;
     objects
         .iter()
         .map(|object| {
-            if !seen.contains(object) {
+            if !parents.contains_key(object) && !pages.contains(object) {
                 return None;
             }
             let mut path = Vec::new();
@@ -352,14 +334,8 @@ fn paragraph(source: &[u8], space: ExGuid, object: ExGuid) -> Result<Option<Stri
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
     let node = document
-        .spaces
-        .get(&space)
-        .and_then(|space| {
-            space
-                .contexts
-                .get(&ExGuid::default())
-                .and_then(|revision| space.revisions.get(revision))
-        })
+        .active(space)
+        .ok()
         .and_then(|revision| revision.nodes.get(&object));
     Ok(match node.map(|node| &node.kind) {
         Some(Kind::RichText { text, .. }) => Some(text.clone()),

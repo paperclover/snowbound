@@ -68,8 +68,7 @@ fn observe(
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
-    let space = &document.spaces[&space];
-    let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
+    let revision = document.active(space)?;
     let mut spans: Vec<Span> = Vec::new();
     let mut start = 0;
     for run in revision.text_runs(object)? {

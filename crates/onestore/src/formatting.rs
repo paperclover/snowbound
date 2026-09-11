@@ -96,17 +96,8 @@ pub(crate) fn format_text(
     let index = RevisionIndex::parse(&store)?;
     index.validate_current()?;
     let document = Document::parse(&index)?;
-    let semantic = document
-        .spaces
-        .get(&space)
-        .ok_or_else(|| invalid("The active page is unavailable"))?;
-    let rid = semantic.contexts[&ExGuid::default()];
-    let view = &semantic.revisions[&rid];
-    let pages: Vec<_> = document
-        .pages()?
-        .into_iter()
-        .filter_map(|(sid, page)| (sid == space).then_some(page))
-        .collect();
+    let view = document.active(space)?;
+    let pages = document.pages_in(space)?;
     let parents = editable_parents(view, &pages, object)?;
     let node = &view.nodes[&object];
     let Kind::RichText {

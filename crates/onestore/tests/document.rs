@@ -17,7 +17,7 @@ fn documented_cell_shading_survives_native_2010_ignoring_its_display() {
         .flat_map(|s| s.revisions.values())
         .flat_map(|r| r.nodes.values())
         .filter_map(|n| match n.kind {
-            Kind::Cell { shading } => shading,
+            Kind::Cell { shading, .. } => shading,
             _ => None,
         })
         .collect();

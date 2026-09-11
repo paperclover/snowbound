@@ -195,24 +195,15 @@ impl Insertion {
         let index = RevisionIndex::parse(&store)?;
         index.validate_current()?;
         let mut document = Document::parse(&index)?;
-        let pages: Vec<_> = document
-            .pages()?
-            .into_iter()
-            .filter_map(|(sid, id)| (sid == space).then_some(id))
-            .collect();
+        let pages = document.pages_in(space)?;
         let [page] = pages.as_slice() else {
             return Err(invalid("Insertion requires a single active page"));
         };
-        let semantic_space = document
+        let mut view = document
             .spaces
             .remove(&space)
+            .and_then(crate::document::Space::into_active)
             .ok_or_else(|| invalid("The active page is unavailable"))?;
-        let rid = semantic_space.contexts[&ExGuid::default()];
-        let mut view = semantic_space
-            .revisions
-            .into_iter()
-            .find_map(|(id, revision)| (id == rid).then_some(revision))
-            .unwrap();
         let parents = editable_parents(&view, &pages, self.parent)?;
         let parent = &view.nodes[&self.parent];
         let position = match self.placement {
@@ -372,7 +363,7 @@ impl Insertion {
                 },
             );
         }
-        let raw = index.resolve(space, rid)?;
+        let raw = index.resolve_active(space)?;
         if new.keys().any(|id| raw.objects.contains_key(id)) {
             return Err(invalid(
                 "An insertion identity is already present; reconcile the existing edit",

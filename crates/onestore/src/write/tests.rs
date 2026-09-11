@@ -144,7 +144,7 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
     .unwrap();
     let document = crate::document::Document::parse(&index).unwrap();
     let space = &document.spaces[&sid];
-    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+    let view = space.active().unwrap();
     let text = view.nodes[&paragraph].content[0];
     let join = crate::ParagraphJoin::new(text, right.text_object(), "Author").unwrap();
     assert!(PreparedEdit::join(&protected, sid, &join).is_err());
@@ -861,7 +861,7 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
                 let index = RevisionIndex::parse(&store).unwrap();
                 let document = Document::parse(&index).unwrap();
                 let space = &document.spaces[&sid];
-                let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                let view = space.active().unwrap();
                 let Kind::RichText { runs, .. } = &view.nodes[&text].kind else {
                     panic!()
                 };
@@ -888,7 +888,7 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
         let index = RevisionIndex::parse(&store).unwrap();
         let doc = Document::parse(&index).unwrap();
         let s = &doc.spaces[&sid];
-        let view = &s.revisions[&s.contexts[&ExGuid::default()]];
+        let view = s.active().unwrap();
         let runs = view.text_runs(text).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].format.font.as_deref(), Some("Georgia"));
@@ -909,7 +909,7 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
             let previous = RevisionIndex::parse(&previous).unwrap();
             let previous_doc = Document::parse(&previous).unwrap();
             let s = &previous_doc.spaces[&sid];
-            let previous_view = &s.revisions[&s.contexts[&ExGuid::default()]];
+            let previous_view = s.active().unwrap();
             assert_eq!(
                 format!("{:?}", view.nodes[&text].extra),
                 format!("{:?}", previous_view.nodes[&text].extra)

@@ -84,24 +84,15 @@ impl ParagraphSplit {
         let index = RevisionIndex::parse(&store)?;
         index.validate_current()?;
         let mut document = Document::parse(&index)?;
-        let pages: Vec<_> = document
-            .pages()?
-            .into_iter()
-            .filter_map(|(sid, page)| (sid == space).then_some(page))
-            .collect();
+        let pages = document.pages_in(space)?;
         let [_] = pages.as_slice() else {
             return Err(invalid("Splitting requires a single active page"));
         };
-        let semantic = document
+        let view = document
             .spaces
             .remove(&space)
+            .and_then(crate::document::Space::into_active)
             .ok_or_else(|| invalid("The active page is unavailable"))?;
-        let rid = semantic.contexts[&ExGuid::default()];
-        let view = semantic
-            .revisions
-            .into_iter()
-            .find_map(|(id, view)| (id == rid).then_some(view))
-            .unwrap();
         let parents = editable_parents(&view, &pages, self.text)?;
         let [paragraph] = parents
             .get(&self.text)
@@ -147,7 +138,7 @@ impl ParagraphSplit {
             }
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
-        let raw = index.resolve(space, rid)?;
+        let raw = index.resolve_active(space)?;
         let (text, runs) = ordinary_text(&view, &raw, self.text)?;
         let node = &view.nodes[&self.text];
         let length = u32::try_from(text.encode_utf16().count())
@@ -419,24 +410,15 @@ impl ParagraphJoin {
         let index = RevisionIndex::parse(&store)?;
         index.validate_current()?;
         let mut document = Document::parse(&index)?;
-        let pages: Vec<_> = document
-            .pages()?
-            .into_iter()
-            .filter_map(|(sid, page)| (sid == space).then_some(page))
-            .collect();
+        let pages = document.pages_in(space)?;
         if pages.len() != 1 {
             return Err(invalid("Joining requires a single active page"));
         }
-        let semantic = document
+        let view = document
             .spaces
             .remove(&space)
+            .and_then(crate::document::Space::into_active)
             .ok_or_else(|| invalid("The active page is unavailable"))?;
-        let rid = semantic.contexts[&ExGuid::default()];
-        let view = semantic
-            .revisions
-            .into_iter()
-            .find_map(|(id, view)| (id == rid).then_some(view))
-            .unwrap();
         let parents = editable_parents(&view, &pages, self.left)?;
         editable_parents(&view, &pages, self.right)?;
         let parent = |id| -> Result<ExGuid, Error> {
@@ -500,7 +482,7 @@ impl ParagraphJoin {
                 "Joining these child indentation levels requires a hierarchy edit",
             ));
         }
-        let raw = index.resolve(space, rid)?;
+        let raw = index.resolve_active(space)?;
         let (a, a_runs) = ordinary_text(&view, &raw, self.left)?;
         let (b, b_runs) = ordinary_text(&view, &raw, self.right)?;
         let length = u32::try_from(a.encode_utf16().count())

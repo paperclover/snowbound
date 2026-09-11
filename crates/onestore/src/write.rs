@@ -596,14 +596,7 @@ pub(crate) fn write_revision(
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
     write_revisions(source, |index| {
-        let rid = *index
-            .spaces
-            .get(&space)
-            .and_then(|space| space.labels.get(&(ExGuid::default(), 1)))
-            .ok_or(Error {
-                offset: 0,
-                message: "Object space has no active default revision",
-            })?;
+        let rid = index.active(space)?;
         let revision = index.resolve(space, rid)?;
         Ok(BTreeMap::from([(
             space,
@@ -680,14 +673,7 @@ pub(crate) fn write_revisions(
     for (space, change) in changes {
         let (rid, mut revision, mut replacements) = match change {
             RevisionEdit::Update(objects) => {
-                let rid = *index
-                    .spaces
-                    .get(&space)
-                    .and_then(|space| space.labels.get(&(ExGuid::default(), 1)))
-                    .ok_or(Error {
-                        offset: 0,
-                        message: "Object space has no active default revision",
-                    })?;
+                let rid = index.active(space)?;
                 (Some(rid), index.resolve(space, rid)?, objects)
             }
             RevisionEdit::Create { roots, objects } => {

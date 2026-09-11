@@ -168,18 +168,10 @@ fn observe(
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
-    let Some(section) = document.spaces.get(&space) else {
+    let Ok(view) = document.active(space) else {
         return Ok(None);
     };
-    let Some(rid) = section.contexts.get(&ExGuid::default()) else {
-        return Ok(None);
-    };
-    let view = &section.revisions[rid];
-    let pages: Vec<_> = document
-        .pages()?
-        .into_iter()
-        .filter_map(|(sid, page)| (sid == space).then_some(page))
-        .collect();
+    let pages = document.pages_in(space)?;
     if pages.len() != 1 {
         return Ok(None);
     }
@@ -217,7 +209,7 @@ fn observe(
             .collect(),
         destination,
         content: if intent.destination().is_none() {
-            let sha256 = fingerprint(&store, &index.resolve(space, *rid)?, object, legacy)?;
+            let sha256 = fingerprint(&store, &index.resolve_active(space)?, object, legacy)?;
             Some(if legacy {
                 Content::Legacy(sha256)
             } else {
@@ -232,7 +224,7 @@ fn observe(
 fn mutable_objects(source: &[u8], space: ExGuid) -> Result<BTreeSet<ExGuid>> {
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
-    let raw = index.resolve(space, index.spaces[&space].labels[&(ExGuid::default(), 1)])?;
+    let raw = index.resolve_active(space)?;
     Ok(raw
         .reachable()?
         .into_iter()
@@ -468,8 +460,7 @@ mod tests {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let (sid, _) = document.pages().unwrap()[0];
-        let space = &document.spaces[&sid];
-        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let view = document.active(sid).unwrap();
         let text = *view.nodes.iter().find(|(_, node)| matches!(&node.kind, Kind::RichText { text, .. } if text == "AlphaOmega")).unwrap().0;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("legacy.sqlite");

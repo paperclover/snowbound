@@ -127,7 +127,7 @@ impl Replica {
                         EditStatus::AwaitingConfirmation { revision },
                     )));
                 }
-                revision = index.spaces[&intent.space].labels[&(ExGuid::default(), 1)];
+                revision = index.active(intent.space)?;
             }
             if let Err(error) = remote.confirm(&snapshot) {
                 if error.state == CommitState::Committed {
@@ -182,7 +182,7 @@ impl Replica {
         if prepared.as_bytes() == snapshot {
             let store = Store::parse(&snapshot)?;
             let index = RevisionIndex::parse(&store)?;
-            let revision = index.spaces[&intent.space].labels[&(ExGuid::default(), 1)];
+            let revision = index.active(intent.space)?;
             if let Err(error) = remote.confirm(&snapshot) {
                 if error.state == CommitState::Committed {
                     self.acknowledge(intent.id, revision, &snapshot)?;
@@ -194,7 +194,7 @@ impl Replica {
         }
         let store = Store::parse(prepared.as_bytes())?;
         let index = RevisionIndex::parse(&store)?;
-        let revision = index.spaces[&intent.space].labels[&(ExGuid::default(), 1)];
+        let revision = index.active(intent.space)?;
         let before_store = Store::parse(&snapshot)?;
         let before = RevisionIndex::parse(&before_store)?;
         let mut revisions: BTreeMap<_, _> = index

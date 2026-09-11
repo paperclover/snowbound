@@ -30,21 +30,10 @@ fn observe(source: &[u8], space: ExGuid, texts: &[ExGuid]) -> Result<Option<Vec<
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
-    let Some(section) = document.spaces.get(&space) else {
+    let Ok(view) = document.active(space) else {
         return Ok(None);
     };
-    let Some(view) = section
-        .contexts
-        .get(&ExGuid::default())
-        .and_then(|id| section.revisions.get(id))
-    else {
-        return Ok(None);
-    };
-    let pages: Vec<_> = document
-        .pages()?
-        .into_iter()
-        .filter_map(|(sid, page)| (sid == space).then_some(page))
-        .collect();
+    let pages = document.pages_in(space)?;
     let Some(paths) = active_paths(view, &pages, texts) else {
         return Ok(None);
     };

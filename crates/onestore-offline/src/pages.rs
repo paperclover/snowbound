@@ -19,8 +19,7 @@ fn observe(source: &[u8]) -> Result<Option<(ExGuid, PageOrder)>> {
     let document = Document::parse(&index)?;
     let mut pages = Vec::new();
     for (sid, _) in document.pages()? {
-        let space = &document.spaces[&sid];
-        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let view = document.active(sid)?;
         let Some(metadata) = view.roots.get(&2).and_then(|id| view.nodes.get(id)) else {
             return Ok(None);
         };

@@ -58,18 +58,14 @@ impl OutlineEdit {
         let index = RevisionIndex::parse(&store)?;
         index.validate_current()?;
         let mut document = Document::parse(&index)?;
-        let pages: Vec<_> = document
-            .pages()?
-            .into_iter()
-            .filter_map(|(sid, page)| (sid == space).then_some(page))
-            .collect();
+        let pages = document.pages_in(space)?;
         let [page] = pages.as_slice() else {
             return Err(invalid("Outline editing requires a single active page"));
         };
-        let mut semantic = document.spaces.remove(&space).unwrap();
-        let view = semantic
-            .revisions
-            .remove(&semantic.contexts[&ExGuid::default()])
+        let view = document
+            .spaces
+            .remove(&space)
+            .and_then(crate::document::Space::into_active)
             .unwrap();
         let parents = editable_parents(&view, &pages, object)?;
         let node = &view.nodes[&object];
@@ -151,8 +147,7 @@ mod tests {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let (sid, page) = document.pages().unwrap()[0];
-        let space = &document.spaces[&sid];
-        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        let view = document.active(sid).unwrap();
         let outline = *view.nodes[&page]
             .children
             .iter()

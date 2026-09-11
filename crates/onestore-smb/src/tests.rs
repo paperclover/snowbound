@@ -137,7 +137,7 @@ fn text(bytes: &[u8]) -> (ExGuid, ExGuid, String) {
     doc.spaces
         .iter()
         .find_map(|(sid, space)| {
-            let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
+            let revision = space.active().unwrap();
             revision
                 .nodes
                 .iter()

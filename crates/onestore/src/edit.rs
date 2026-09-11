@@ -44,11 +44,7 @@ pub fn replace_text(
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     index.validate_current()?;
-    let rid = *index
-        .spaces
-        .get(&space)
-        .and_then(|s| s.labels.get(&(ExGuid::default(), 1)))
-        .ok_or_else(|| invalid("Object space has no active default revision"))?;
+    let rid = index.active(space)?;
     let raw = index.resolve(space, rid)?;
     if !raw.reachable()?.contains(&object) {
         return Err(invalid("Object is not reachable in the active revision"));
@@ -59,11 +55,7 @@ pub fn replace_text(
         .get(&space)
         .and_then(|s| s.revisions.get(&rid))
         .ok_or_else(|| invalid("The active document revision is unavailable"))?;
-    let pages: Vec<_> = document
-        .pages()?
-        .into_iter()
-        .filter_map(|(sid, page)| (sid == space).then_some(page))
-        .collect();
+    let pages = document.pages_in(space)?;
     let parents = editable_parents(revision, &pages, object)?;
     let node = revision
         .nodes
@@ -317,37 +309,23 @@ pub(crate) fn editable_parents(
     object: ExGuid,
 ) -> Result<std::collections::BTreeMap<ExGuid, Vec<ExGuid>>, Error> {
     let invalid = |message| Error { offset: 0, message };
-    let mut pending: Vec<_> = pages.iter().map(|page| (*page, false)).collect();
+    let parents = revision.parents(pages)?;
+    if !parents.contains_key(&object) && !pages.contains(&object) {
+        return Err(invalid("Select content on an active editable page"));
+    }
+    let mut pending = vec![object];
     let mut seen = std::collections::BTreeSet::new();
-    let mut parents = std::collections::BTreeMap::<_, Vec<_>>::new();
-    let mut editable = false;
-    while let Some((id, read_only)) = pending.pop() {
-        if !seen.insert((id, read_only)) {
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
             continue;
         }
-        let element = revision
-            .nodes
-            .get(&id)
-            .ok_or_else(|| invalid("Page content is unavailable"))?;
-        let read_only = read_only || element.extra[0].iter().any(|field| field.id == 0x88001cde);
-        if id == object {
-            if read_only {
-                return Err(invalid("This page or its content is read-only"));
-            }
-            editable = true;
-        }
-        for child in element
-            .children
+        if revision.nodes[&id].extra[0]
             .iter()
-            .chain(&element.content)
-            .chain(&element.structure)
+            .any(|field| field.id == 0x88001cde)
         {
-            parents.entry(*child).or_default().push(id);
-            pending.push((*child, read_only));
+            return Err(invalid("This page or its content is read-only"));
         }
-    }
-    if !editable {
-        return Err(invalid("Select content on an active editable page"));
+        pending.extend(parents.get(&id).into_iter().flatten().copied());
     }
     Ok(parents)
 }
@@ -358,21 +336,8 @@ pub(crate) fn page_title(
     text_update: Option<(ExGuid, &str)>,
 ) -> Result<Option<(ExGuid, bool, String)>, Error> {
     let invalid = |message| Error { offset: 0, message };
-    let mut pending = pages.to_vec();
-    let mut seen = std::collections::BTreeSet::new();
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let node = &revision.nodes[&id];
-        pending.extend(
-            node.children
-                .iter()
-                .chain(&node.content)
-                .chain(&node.structure)
-                .copied(),
-        );
-    }
+    let parents = revision.parents(pages)?;
+    let seen: std::collections::BTreeSet<_> = parents.keys().chain(pages).copied().collect();
     let titles: Vec<_> = revision
         .nodes
         .iter()

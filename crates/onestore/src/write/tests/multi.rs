@@ -28,7 +28,7 @@ fn nest(source: &[u8]) -> Vec<u8> {
             index.spaces[&index.root].labels[&(ExGuid::default(), 1)],
         )?;
         let view = &document.spaces[&index.root];
-        let view = &view.revisions[&view.contexts[&ExGuid::default()]];
+        let view = view.active().unwrap();
         let root = section.roots[&1];
         let parent = *view.nodes[&root]
             .children
@@ -126,7 +126,7 @@ fn nesting_publishes_section_order_and_page_levels_in_one_transaction() {
     assert_eq!(changed_spaces, 3);
     for (ordinal, (sid, _)) in pages.iter().enumerate() {
         let view = &document.spaces[sid];
-        let view = &view.revisions[&view.contexts[&ExGuid::default()]];
+        let view = view.active().unwrap();
         let Kind::Metadata { level, .. } = view.nodes[&view.roots[&2]].kind else {
             panic!()
         };
@@ -151,7 +151,7 @@ fn nesting_publishes_section_order_and_page_levels_in_one_transaction() {
         }
     }
     let root = &document.spaces[&document.root];
-    let root = &root.revisions[&root.contexts[&ExGuid::default()]];
+    let root = root.active().unwrap();
     assert_eq!(
         root.nodes[&root.roots[&1]]
             .children

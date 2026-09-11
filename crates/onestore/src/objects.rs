@@ -200,15 +200,8 @@ impl<'a> RevisionIndex<'a> {
                                 message: "Object references its own object space",
                             });
                         }
-                        let rid = self
-                            .spaces
-                            .get(&target)
-                            .and_then(|space| space.labels.get(&(ExGuid::default(), 1)))
-                            .ok_or(Error {
-                                offset: 0,
-                                message: "Object-space reference has no default revision",
-                            })?;
-                        targets.insert((target, *rid));
+                        let rid = self.active(target)?;
+                        targets.insert((target, rid));
                     }
                     for context in references.contexts {
                         if !space.labels.contains_key(&(context, 1)) {

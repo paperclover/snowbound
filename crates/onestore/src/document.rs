@@ -30,6 +30,18 @@ pub struct Space<'a> {
     pub revisions: BTreeMap<ExGuid, Revision<'a>>,
 }
 
+impl<'a> Space<'a> {
+    /// The revision of the default context, which is the current content of the space.
+    pub fn active(&self) -> Option<&Revision<'a>> {
+        self.revisions.get(self.contexts.get(&ExGuid::default())?)
+    }
+
+    pub fn into_active(mut self) -> Option<Revision<'a>> {
+        self.revisions
+            .remove(self.contexts.get(&ExGuid::default())?)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Revision<'a> {
     pub roots: BTreeMap<u32, ExGuid>,
@@ -61,7 +73,7 @@ pub struct Element<'a> {
     pub extra: Vec<Vec<Field<'a>>>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct Layout {
     pub x: Option<f32>,
     pub y: Option<f32>,
@@ -73,7 +85,7 @@ pub struct Layout {
 
 macro_rules! format_fields {
     ($($field:ident: $value:ty),* $(,)?) => {
-        #[derive(Debug, Default, Serialize)]
+        #[derive(Debug, Default, Clone, PartialEq, Serialize)]
         pub struct Format { $(pub $field: Option<$value>),* }
 
         impl Format {
@@ -208,7 +220,36 @@ impl Revision<'_> {
     }
 }
 
-#[derive(Debug, Serialize)]
+impl Revision<'_> {
+    /// Maps every element reachable from `roots` through children, content and structure
+    /// references to its referencing parents, in visiting order.
+    pub fn parents(&self, roots: &[ExGuid]) -> Result<BTreeMap<ExGuid, Vec<ExGuid>>> {
+        let mut pending: Vec<_> = roots.to_vec();
+        let mut seen = BTreeSet::new();
+        let mut parents = BTreeMap::<_, Vec<_>>::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let element = self
+                .nodes
+                .get(&id)
+                .ok_or_else(|| invalid("Page content is unavailable"))?;
+            for child in element
+                .children
+                .iter()
+                .chain(&element.content)
+                .chain(&element.structure)
+            {
+                parents.entry(*child).or_default().push(id);
+                pending.push(*child);
+            }
+        }
+        Ok(parents)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
 /// Tag dates count seconds since 1980-01-01 UTC; status retains the ActionItemStatus bits.
 pub struct Tag {
     pub definition: Option<ExGuid>,
@@ -308,6 +349,7 @@ pub enum Kind<'a> {
     Row,
     Cell {
         shading: Option<u32>,
+        indents: Vec<f32>,
     },
     Image {
         container: Option<ExGuid>,
@@ -547,17 +589,25 @@ fn measurements(bytes: Option<&[u8]>, header: usize) -> Result<Vec<f32>> {
 impl<'a> Document<'a> {
     /// Active (object space, page) identities in section order, excluding history and conflicts.
     /// Encrypted sections return no visible pages; table-of-contents files return an error.
+    /// The active revision of one object space.
+    pub fn active(&self, space: ExGuid) -> Result<&Revision<'a>> {
+        self.spaces
+            .get(&space)
+            .and_then(Space::active)
+            .ok_or_else(|| invalid("Object space has no active revision"))
+    }
+
+    /// Active page objects declared in one page space, in section order.
+    pub fn pages_in(&self, space: ExGuid) -> Result<Vec<ExGuid>> {
+        Ok(self
+            .pages()?
+            .into_iter()
+            .filter_map(|(sid, page)| (sid == space).then_some(page))
+            .collect())
+    }
+
     pub fn pages(&self) -> Result<Vec<(ExGuid, ExGuid)>> {
-        let active = |sid| {
-            self.spaces
-                .get(&sid)
-                .and_then(|s| {
-                    s.contexts
-                        .get(&ExGuid::default())
-                        .and_then(|rid| s.revisions.get(rid))
-                })
-                .ok_or_else(|| invalid("Section page has no active revision"))
-        };
+        let active = |sid| self.active(sid);
         let root = active(self.root)?;
         let section = root
             .roots
@@ -1084,6 +1134,7 @@ impl<'a> Element<'a> {
             0x60023 => Kind::Row,
             0x60024 => Kind::Cell {
                 shading: f.u32(0x14001e26)?,
+                indents: measurements(f.bytes(0x1c001c12)?, 4)?,
             },
             0x60011 => Kind::Image {
                 container: f.one(0x20001c3f)?,
