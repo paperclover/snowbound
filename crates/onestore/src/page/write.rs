@@ -206,6 +206,7 @@ impl Lowering<'_> {
         self.place(&old, &new, &placed, &page_order)?;
         self.delete(&old, &new, &consumed)?;
         self.edit_text(&new)?;
+        self.edit_paragraph_formatting(&new)?;
         self.edit_formatting(&new)?;
         self.edit_layout(&old, &new)?;
         Ok(())
@@ -654,6 +655,120 @@ impl Lowering<'_> {
             let (range, replacement) = text_edit(stored.text.text(), text.text.text())?;
             let (space, object) = (self.space, stored.id);
             self.apply(|image| crate::replace_text(image, space, object, range, &replacement))?;
+        }
+        Ok(())
+    }
+
+    fn edit_paragraph_formatting(&mut self, new: &View<'_>) -> Result<(), Error> {
+        let current = self.current()?;
+        let current = View::new(&current)?;
+        for (id, paragraph) in &new.paragraphs {
+            let Some(text) = paragraph.text() else {
+                continue;
+            };
+            let stored = current
+                .text(self.id(*id))
+                .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
+            let mut values: Vec<(u32, Vec<u8>)> = Vec::new();
+            macro_rules! field {
+                ($field:ident, $value:ident, $encode:block) => {
+                    let $value = format_in(&text.text, 0)?.$field.unwrap_or_default();
+                    if text
+                        .text
+                        .spans()
+                        .iter()
+                        .all(|span| span.format.$field.unwrap_or_default() == $value)
+                        && stored
+                            .text
+                            .spans()
+                            .iter()
+                            .any(|span| span.format.$field.unwrap_or_default() != $value)
+                    {
+                        values.push($encode);
+                    }
+                };
+            }
+            field!(alignment, value, {
+                if value > 2 {
+                    return Err(invalid("Paragraph alignment must be left, center or right"));
+                }
+                (0x0c003477, vec![value])
+            });
+            field!(rtl, value, {
+                (0x08003476 | (u32::from(value) << 31), Vec::new())
+            });
+            macro_rules! spacing {
+                ($field:ident, $property:expr) => {
+                    field!($field, value, {
+                        let stored = value / 36.0;
+                        if !stored.is_finite() || !(0.0..=27777.777).contains(&stored) {
+                            return Err(invalid("Paragraph spacing is outside the document range"));
+                        }
+                        ($property, stored.to_le_bytes().to_vec())
+                    });
+                };
+            }
+            spacing!(space_before, 0x1400342e);
+            spacing!(space_after, 0x1400342f);
+            spacing!(line_spacing, 0x14003430);
+            if values.is_empty() {
+                continue;
+            }
+            if text.date_field.is_some() {
+                return Err(invalid(
+                    "Generated title fields cannot be formatted as ordinary text",
+                ));
+            }
+            let (space, object) = (self.space, stored.id);
+            self.apply(|image| {
+                let store = Store::parse(image)?;
+                let index = RevisionIndex::parse(&store)?;
+                let document = Document::parse(&index)?;
+                let parents = crate::edit::editable_parents(
+                    document.active(space)?,
+                    &document.pages_in(space)?,
+                    object,
+                )?;
+                let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+                crate::write::write_revision(image, space, |raw| {
+                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                    target.set(
+                        &values
+                            .iter()
+                            .map(|(id, bytes)| (*id, bytes.as_slice()))
+                            .collect::<Vec<_>>(),
+                    )?;
+                    if let Some((_, alignment)) = values.iter().find(|(id, _)| *id == 0x0c003477) {
+                        for property in [0x14001c3e, 0x14001c84] {
+                            let fields = PropertySets::parse(&target.bytes)?;
+                            let previous = fields.sets[0]
+                                .iter()
+                                .find(|field| field.id == property)
+                                .map(|field| match field.value {
+                                    Value::Bytes(bytes) => bytes
+                                        .try_into()
+                                        .map(u32::from_le_bytes)
+                                        .map_err(|_| invalid("Invalid paragraph layout alignment")),
+                                    _ => Err(invalid("Invalid paragraph layout alignment")),
+                                })
+                                .transpose()?
+                                .unwrap_or(0);
+                            let value = (previous & !7) | (u32::from(alignment[0]) + 1);
+                            target.set(&[(property, &value.to_le_bytes())])?;
+                        }
+                    }
+                    target.set(&[(0x14001d7a, &modified)])?;
+                    let mut changed = BTreeMap::from([(object, target)]);
+                    crate::formatting::touch_ancestors(
+                        raw,
+                        &parents,
+                        object,
+                        &modified,
+                        &mut changed,
+                    )?;
+                    Ok(changed)
+                })
+            })?;
         }
         Ok(())
     }

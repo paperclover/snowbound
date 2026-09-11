@@ -244,19 +244,30 @@ pub(crate) fn format_text(
             (0x14001d7a, &modified),
         ])?;
         changed.insert(object, target);
-        let mut pending = parents.get(&object).cloned().unwrap_or_default();
-        let mut ancestors = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if !ancestors.insert(id) {
-                continue;
-            }
-            let mut ancestor = PropertyObject::from_object(&raw.objects[&id])?;
-            ancestor.set(&[(0x14001d7a, &modified)])?;
-            changed.insert(id, ancestor);
-            pending.extend(parents.get(&id).into_iter().flatten().copied());
-        }
+        touch_ancestors(raw, &parents, object, &modified, &mut changed)?;
         Ok(changed)
     })
+}
+
+pub(crate) fn touch_ancestors(
+    raw: &crate::ResolvedRevision<'_>,
+    parents: &BTreeMap<ExGuid, Vec<ExGuid>>,
+    object: ExGuid,
+    modified: &[u8; 4],
+    changed: &mut BTreeMap<ExGuid, PropertyObject>,
+) -> Result<(), Error> {
+    let mut pending = parents.get(&object).cloned().unwrap_or_default();
+    let mut ancestors = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !ancestors.insert(id) {
+            continue;
+        }
+        let mut ancestor = PropertyObject::from_object(&raw.objects[&id])?;
+        ancestor.set(&[(0x14001d7a, modified)])?;
+        changed.insert(id, ancestor);
+        pending.extend(parents.get(&id).into_iter().flatten().copied());
+    }
+    Ok(())
 }
 
 pub(crate) fn attribute_values(attributes: &[TextAttribute]) -> Result<Vec<(u32, Vec<u8>)>, Error> {

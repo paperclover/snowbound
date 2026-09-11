@@ -497,3 +497,44 @@ fn a_formatted_save_of_an_unchanged_model_queues_nothing() {
     assert_eq!(cache.save(OUTLINES, space, &page, AUTHOR).unwrap(), None);
     assert!(cache.pending().unwrap().is_empty());
 }
+
+#[test]
+fn paragraph_formatting_survives_reopen_rebase_and_a_lost_publication_reply() {
+    let (space, page) = page_titled(OUTLINES, PAGE);
+    let ids = plain(&page);
+    let attributes: &[fn(&mut Format)] = &[
+        |f| f.alignment = Some(2),
+        |f| f.rtl = Some(true),
+        |f| f.space_before = Some(12.0),
+        |f| f.space_after = Some(6.0),
+        |f| f.line_spacing = Some(18.0),
+    ];
+    for apply in attributes {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(&directory);
+        let id = save(&cache, ids[0], |page| restyle(page, ids[0], 0..6, apply))
+            .unwrap()
+            .unwrap();
+        let expected = formats(&page_of(&cache.snapshot().unwrap(), space), ids[0]);
+        drop(cache);
+        let cache = Replica::open(directory.path().join("cache.sqlite")).unwrap();
+        let mut server = remote_with(space, |page| replace_text(page, ids[3], 0..0, "Remote "));
+        server.fault = Fault::UnknownAfter;
+        assert!(
+            matches!(cache.sync_once(&mut server), Err(notebook::Error::Remote(error)) if error.state == onestore::CommitState::Unknown)
+        );
+        assert!(matches!(
+            cache.status(id).unwrap(),
+            Some(EditStatus::AwaitingConfirmation { .. })
+        ));
+        drop(cache);
+        let cache = Replica::open(directory.path().join("cache.sqlite")).unwrap();
+        assert!(
+            matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
+        );
+        assert_eq!(server.publications, 1);
+        let page = page_of(&server.durable, space);
+        assert_eq!(formats(&page, ids[0]), expected);
+        assert!(text_of(&page, ids[3]).starts_with("Remote "));
+    }
+}
