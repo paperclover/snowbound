@@ -67,9 +67,9 @@ print(json.dumps(dict(path=root.name, entries=entries), ensure_ascii=False))
                     time.sleep(.05)
                 env = dict(os.environ, ONESTORE_SMB_LAB=f'127.0.0.1:{port}',
                            ONESTORE_SMB_DIRECTORY=root, ONESTORE_SMB_DIRECTORY_ORACLE=str(output / 'oracle.json'))
-                test = 'tests::live_directory_interruption' if control else 'tests::live_directory'
+                test = 'tests::live_directory_interruption' if control else 'smb::tests::live_directory'
                 with (output / f'{name}.log').open('w') as result:
-                    subprocess.run(['cargo', 'test', '-p', 'onestore-smb', test, '--', '--ignored', '--exact'],
+                    subprocess.run(['cargo', 'test', '-p', 'notebook', '--features', 'smb', test, '--', '--ignored', '--exact'],
                                    env=env, stdout=result, stderr=result, check=True, timeout=120)
             finally:
                 proxy.terminate()
@@ -84,7 +84,7 @@ print(json.dumps(dict(path=root.name, entries=entries), ensure_ascii=False))
     env = dict(os.environ, ONESTORE_SMB_LAB=f'127.0.0.1:{config["samba_port"]}',
                ONESTORE_SMB_DIRECTORY_ORACLE=str(output / 'oracle.json'))
     with (output / 'reconnected.log').open('w') as result:
-        subprocess.run(['cargo', 'test', '-p', 'onestore-smb', 'tests::live_directory', '--', '--ignored', '--exact'],
+        subprocess.run(['cargo', 'test', '-p', 'notebook', '--features', 'smb', 'smb::tests::live_directory', '--', '--ignored', '--exact'],
                        env=env, stdout=result, stderr=result, check=True, timeout=120)
     print('reconnected: passed', flush=True)
 

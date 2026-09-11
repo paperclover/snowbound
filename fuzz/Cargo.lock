@@ -578,6 +578,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "notebook"
+version = "0.1.0"
+dependencies = [
+ "onestore",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "objc2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -651,33 +664,10 @@ dependencies = [
  "canvas",
  "libfuzzer-sys",
  "md5",
+ "notebook",
  "onestore",
- "onestore-offline",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "onestore-notebook"
-version = "0.1.0"
-dependencies = [
- "onestore",
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "onestore-offline"
-version = "0.1.0"
-dependencies = [
- "onestore",
- "onestore-notebook",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
 ]
 
 [[package]]

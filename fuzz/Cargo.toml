@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 onestore = { path = "../crates/onestore", features = ["protected"] }
-onestore-offline = { path = "../crates/onestore-offline" }
+notebook = { path = "../crates/notebook" }
 canvas = { path = "../crates/canvas" }
 tempfile = "3"
 md5 = "0.8.1"

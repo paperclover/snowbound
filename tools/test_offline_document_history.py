@@ -141,7 +141,7 @@ class DocumentHistoryTests(unittest.TestCase):
                 document_history(logs, 2)
 
     def test_production_cache_workload_matches_the_independent_history_model(self):
-        result = subprocess.run(['cargo', 'test', '--locked', '-p', 'onestore-offline', '--features', 'smb',
+        result = subprocess.run(['cargo', 'test', '--locked', '-p', 'notebook', '--features', 'smb',
                                  '--example', 'smb_offline_client',
                                  'tests::document_workload_retains_dependencies_and_receipts_across_reopen',
                                  '--', '--exact', '--nocapture'],

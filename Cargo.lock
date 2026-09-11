@@ -1562,6 +1562,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "notebook"
+version = "0.1.0"
+dependencies = [
+ "onestore",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "smb2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1921,54 +1937,6 @@ dependencies = [
  "sha1",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "onestore-diagnostic"
-version = "0.1.0"
-dependencies = [
- "onestore",
- "onestore-notebook",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "onestore-notebook"
-version = "0.1.0"
-dependencies = [
- "onestore",
- "onestore-smb",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "zeroize",
-]
-
-[[package]]
-name = "onestore-offline"
-version = "0.1.0"
-dependencies = [
- "onestore",
- "onestore-notebook",
- "onestore-smb",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "onestore-smb"
-version = "0.1.0"
-dependencies = [
- "onestore",
- "serde_json",
- "smb2",
- "tokio",
 ]
 
 [[package]]

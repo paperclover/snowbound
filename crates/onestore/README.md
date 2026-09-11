@@ -23,10 +23,9 @@ OneNote verification of all 3200 editing intents.
 prototypes belong in sibling directories under `crates/` and depend on
 `onestore = { path = "../onestore" }`. The root manifest discovers these crates.
 The consumer boundary and API tradeoffs are recorded in [API-AUDIT.md](../../evidence/API-AUDIT.md).
-`crates/onestore-diagnostic` backs the [HTML diagnostic editor](../../evidence/DIAGNOSTIC.md).
-[`onestore-smb`](../onestore-smb/README.md) provides optional embedded network
-access; [`onestore-offline`](../onestore-offline/README.md) provides local
-SQLite persistence and reconnect reconciliation for text, insertion and formatting.
+`onestore-diagnostic` in the `notebook` crate backs the [HTML diagnostic editor](../../evidence/DIAGNOSTIC.md).
+[`notebook`](../notebook/README.md) provides notebook discovery, optional embedded
+network access (feature `smb`) and local SQLite persistence and reconnect reconciliation for text, insertion and formatting.
 Shared native fixtures, specifications, evidence and Python/VM tools stay at the
 repository root; `fuzz/` remains an independent cargo-fuzz workspace.
 
@@ -143,7 +142,7 @@ Ambiguous ancestry, unsupported indentation transitions and unknown implicit
 font/language inheritance reject before I/O. This is a logical join, so keyboard
 actions that only change list or indentation state remain separate operations.
 Generated fields, protected targets and unsupported run-data boundary changes are
-rejected before publication. The [offline crate](../onestore-offline/README.md)
+rejected before publication. The [notebook crate](../notebook/README.md)
 documents durable local operations and reconciliation. The
 [document-writer acceptance](../../evidence/MILESTONE9.md#document-writer-and-offline-acceptance)
 includes twelve mixed native/Rust clients, outages, lost replies and native revision retirement.
@@ -161,7 +160,7 @@ cargo run --example create_notebook -- /tmp/one-demo 'Hello from Rust.' 'Example
 cargo run --example inventory -- /tmp/one-demo/synthetic.one
 cargo run --example inspect -- /tmp/one-demo/synthetic.one
 cargo run --example document -- /tmp/one-demo/synthetic.one /tmp/one-model
-cargo build -p onestore-diagnostic
+cargo build -p notebook --bin onestore-diagnostic
 python3 tools/notebook_report.py /tmp/one-demo /tmp/one-report --timezone America/Los_Angeles
 ```
 
@@ -249,7 +248,7 @@ The evidence covers transport failures, not physical server power loss or every
 filesystem's lock implementation.
 
 For shared network notebooks, use the optional
-[`onestore-smb`](../onestore-smb/README.md) crate. It uses native share modes,
+[`notebook::smb`](../notebook/README.md) module. It uses native share modes,
 shared reader guards, writer exclusion and fresh pathname identity checks without
 an OS-mounted share. Its [coordination acceptance](../../evidence/MILESTONE9.md) covers native
 maintenance, mixed readers/writers, reconnects and uncertain publication. The

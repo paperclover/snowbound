@@ -20,8 +20,8 @@ def run(output, server):
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     sources = ['tools/smb_faults.py', 'tools/smb-proxy.py', 'Cargo.lock',
-               'crates/onestore-smb/src/lib.rs', 'crates/onestore-smb/src/tests.rs',
-               'crates/onestore-smb/src/tests/faults.rs', 'crates/onestore/src/commit.rs',
+               'crates/notebook/src/smb/mod.rs', 'crates/notebook/src/smb/tests.rs',
+               'crates/notebook/src/smb/tests/faults.rs', 'crates/onestore/src/commit.rs',
                'crates/onestore/src/snapshot.rs']
     for name in sources:
         target = output / 'harness' / name
@@ -37,7 +37,7 @@ def run(output, server):
         config = linux_vm.load_instance(server)
         (output / 'linux.json').write_text(json.dumps(config, indent=2))
         with (output / 'test.log').open('w') as log:
-            process = subprocess.Popen(['cargo', 'test', '-p', 'onestore-smb', 'live_message_loss', '--', '--ignored', '--nocapture'],
+            process = subprocess.Popen(['cargo', 'test', '-p', 'notebook', '--features', 'smb', 'live_message_loss', '--', '--ignored', '--nocapture'],
                 cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                 env={**os.environ, 'ONESTORE_SMB_LAB': f'127.0.0.1:{config["samba_port"]}',
                      'ONESTORE_SMB_EVIDENCE': str(output / 'cases')})

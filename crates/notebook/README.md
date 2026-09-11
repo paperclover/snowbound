@@ -1,0 +1,415 @@
+# notebook
+
+The application-facing crate: notebook discovery, a durable local replica with
+reconnect reconciliation, external-asset caching, recovery export and optional
+embedded SMB access. Durable local editing for a OneNote file: the current
+foundation stores a complete working image and typed editing intents in a local
+SQLite database. `sync_once` provides a reconciliation step and `start_sync` owns
+automatic polling and reconnects. Local success does not
+acknowledge publication to a shared notebook.
+
+```no_run
+use onestore::ExGuid;
+use notebook::Replica;
+# fn example(path: &std::path::Path, source: &[u8], space: ExGuid, text: ExGuid)
+# -> Result<(), Box<dyn std::error::Error>> {
+// `space` and `text` are identities from the supplied section's document model.
+let cache = Replica::create(path, source)?;
+let snapshot = cache.snapshot()?;
+let local_id = cache.edit_text(&snapshot, space, text, 0..0, "Offline edit ")?;
+drop(cache);
+
+let reopened = Replica::open(path)?;
+let current = reopened.snapshot()?;
+let pending = reopened.pending()?;
+assert_eq!(pending.last().map(|edit| edit.id), local_id);
+# Ok(())
+# }
+```
+
+`insert` accepts the core library's `Insertion` value and durably retains its
+intent identities. `Insertion::with_formatting` queues text and
+its styles as one intent and one publication. Keep that value across retries; its `text_object()` identifies
+the new text for subsequent offline edits. Pending entries expose
+`Operation::Text(TextEdit)`, `Operation::Insert(Insertion)`,
+`Operation::Format(FormatEdit)`, `Operation::Split(SplitEdit)`,
+`Operation::Join(JoinEdit)`, `Operation::Outline(OutlineEdit)`,
+`Operation::Tree(TreeEdit)`, `Operation::CreatePage(PageCreation)` and
+`Operation::Pages(PageEdits)` through their
+`operation` field. Synchronization applies these in queue order, so an inserted
+outline can precede its paragraphs and their later edits. Missing anchors or
+existing insertion identities preserve a conflict and the complete local image.
+
+`create_page` accepts the core `PageCreation` intent and queues its page space
+and section entry as one publication. Subsequent outlines and title edits use
+the intent's stable identities immediately after local acknowledgement.
+Independent page additions rebase against the current section order; duplicate
+titles remain distinct. An unavailable or no-longer-leading insertion anchor
+produces `StructureChanged`. `rebase_page_creation_conflict(id, local, remote,
+before)` reviews a replacement anchor against both cache images while retaining
+the new page and dependent object identities. Existing page identities require
+reconciliation; a matching page alone does not establish a receipt.
+
+`pages(snapshot, edits)` queues a slice of core `PageEdit` intents as one atomic
+publication. `PagePosition::Keep` preserves remote movement during indentation-only
+edits. Every requested level remains explicit: a competing remote level produces
+`StructureChanged` unless it already matches the requested level. Moves compare
+the selected page's position relative to surviving observed pages; an unchanged
+or already-satisfied position can proceed, and new remote pages remain present.
+Indistinguishable competing moves retain a conflict and the complete local image.
+
+`rebase_pages_conflict(id, local, remote, edits)` reviews the batch against both
+cache images. Use `PageEdit::reposition(position, level)` on the retained intents
+to revise anchors or indentation; replacing page or allocated series identities
+is rejected. Dependent edits remain queued. Schema 11 adds the durable batch;
+schema 10 migration preserves existing multi-space publication evidence unchanged.
+Attempt evidence includes every changed space plus the receipt space when that
+space is unchanged. An existing section revision alone cannot confirm a page edit.
+The [offline page corpus](../../corpus/page-lifecycle/offline-edits/README.md)
+contains native comparisons, reproduction commands and stateful sanitizer seeds.
+
+`split` and `join` accept the core `ParagraphSplit` and `ParagraphJoin` intents.
+Splits retain allocated identities when the original UTF-16 boundary rebases;
+dependent edits can address `ParagraphSplit::text_object()` immediately after
+local acknowledgement. Both operations retain observed parent paths, children,
+indentation, paragraph/list state and tags. Changed structure produces
+`StructureChanged`. Remote text changes must leave unambiguous boundary mappings;
+current remote character styles are preserved. Reconciliation does not silently
+discard a newly added right tag or move an unobserved child.
+
+`rebase_conflict` accepts a zero-length reviewed range for a split, preserving its
+allocated identities. `rebase_join_conflict(id, local, remote)` reviews the original
+join against current images. It rejects a change in which text identity survives,
+because dependent edits still address that identity. As with other conflict
+reviews, stale images, pending operations and uncertain attempts cannot be rebased.
+An uncertain structural operation requires its original attempted revision for
+confirmation; matching text or structure does not establish a receipt.
+
+`rebase_paragraph_conflict(id, local, remote, parent, before)` and
+`rebase_outline_conflict(id, local, remote, page, x, y)` accept reviewed replacement
+placements for the oldest insertion conflict. They preserve creation time, text,
+author and object identities, keeping later edits attached to their original targets.
+The images must still match the cache; the new placement must be valid in the remote
+image. Paragraph intents cannot become outlines or vice versa. Pending edits and
+uncertain publication attempts cannot be repositioned through conflict review.
+
+```no_run
+use onestore::{ExGuid, Insertion, TextAttribute};
+use notebook::{EditStatus, Replica};
+# fn add_outline(cache: &Replica, space: ExGuid, page: ExGuid)
+# -> Result<(), Box<dyn std::error::Error>> {
+let outline = Insertion::outline(page, 144.0, 216.0, "Offline outline", "Author")?
+    .with_formatting(0..7, &[TextAttribute::Bold(true)])?;
+let id = cache.insert(&cache.snapshot()?, space, &outline)?;
+if let Some(id) = id {
+    // A running worker may already have advanced this state.
+    match cache.status(id)? {
+        Some(EditStatus::Published { revision }) => println!("{revision}"),
+        state => println!("{state:?}"),
+    }
+}
+# Ok(())
+# }
+```
+
+`format` accepts the core `TextAttribute` slice and a UTF-16 range. Its durable intent
+retains the observed text and selected attribute values. Remote text changes must
+leave an unambiguous range; independent remote attributes merge, while competing
+values preserve `FormattingChanged`. A remote value that already matches the
+requested value is accepted. Enabling superscript or subscript also checks the
+opposite attribute that the operation clears. If the remote image already satisfies
+the whole operation, guarded confirmation still precedes a durable receipt.
+
+`outline` accepts a target object and the core `onestore::OutlineEdit`: outline
+position/width or a paragraph's saved collapse default. It retains the target's
+ancestry and the properties the operation changes. Independent content, formatting
+and layout properties merge; competing selected values produce `LayoutChanged`,
+and changed ancestry produces `StructureChanged`. Width changes also check the
+reserved wrapping width that they clear. Missing targets preserve the local branch.
+`rebase_layout_conflict(id, local, remote)` explicitly reviews the original change
+against both current images, preserving dependent intents. An uncertain layout
+attempt requires its original revision; converged values cannot establish its receipt.
+
+`tree` accepts the core `onestore::TreeEdit`. Moves preserve independent remote
+text, formatting and descendants. A competing ancestor, indentation or sibling
+crossing produces `StructureChanged`; unrelated sibling insertions/deletions can
+merge. An anchor must remain a direct child of the requested destination. An
+already satisfied move still requires guarded confirmation before acknowledgement.
+Deletion compares the selected raw property graph, including referenced styles,
+tags, unknown fields and internal attachments. Changed content produces
+`ContentChanged`; property order, CompactID numbering and modification timestamps
+do not affect that comparison. Immutable records compare by content, and empty
+child lists compare equally to absent child lists. Mutable object identities
+remain significant. Missing targets retain `TargetUnavailable`.
+`rebase_tree_conflict(id, local, remote)` reviews the original move/deletion against
+both current images. An emptied cell's replacement paragraph/text identities must
+remain the same before replay or review; later queued edits keep their targets.
+Uncertain tree attempts require their original revision for confirmation, even
+when an independent move or deletion has the same visible effect.
+
+Recognized earlier caches migrate transactionally to version ten. Publication
+attempts retain every changed space's revision; legacy attempts retain their
+single-space evidence. Earlier recovery archives remain readable without migration.
+Version-eight
+deletion observations retain their original identity-sensitive preconditions;
+explicit conflict review upgrades them to the immutable-content comparison.
+The migration retains images, local IDs, publication attempts, conflicts,
+receipts and the autoincrement sequence; it does not reuse acknowledged IDs when
+the pending queue is empty.
+
+Share one `Replica` between application threads. Each edit compares its supplied
+snapshot under the cache transaction; stale snapshots return `Io(ResourceBusy)`.
+The intent and its resulting image commit together. No-op edits return `None`.
+Keep the cache on a local filesystem: the connection holds exclusive ownership
+between transactions, and a second open fails busy. No network wait occurs in a
+local edit. After a database error, reopen and inspect the durable state before
+retrying.
+
+`sync_once(&mut remote)` processes the oldest pending edit through a `Remote`
+implementation, returning its ID and `EditStatus`. A durable `Published` receipt
+survives reopening. Publication attempts are recorded before network I/O; a retained
+attempt requires every recorded revision to remain present, followed by comparison,
+flushing and refreshed header version
+metadata before acknowledgement. If a formatting attempt's revision is missing,
+the complete requested effect can instead be confirmed on a uniquely aligned
+range; its receipt identifies that confirmed current revision. Otherwise the
+missing attempt remains `AwaitingConfirmation`. Neither path replays an uncertain
+publication. Overlapping or ambiguous edits retain `Conflict` status, their complete
+local image and the last observed remote image returned by `remote_snapshot`.
+Transport errors return `Error::Remote` or `Error::RemoteIo`; inspect `status(id)`
+after the error to distinguish a retained attempt from a pending edit or receipt.
+The error return does not roll back a locally acknowledged intent.
+
+Rebasing accepts only character mappings shared by every minimum insertion/deletion
+alignment. UTF-16 ranges must preserve Unicode scalar boundaries. A bounded
+alignment search also leaves a conflict when it cannot establish a unique mapping.
+The current operation processes one queue head; while edits remain, `snapshot`
+preserves the complete local working image. An empty queue can refresh from the
+remote image. Synchronization holds a separate owner lock, so local edits can
+continue during network waits; competing synchronization calls return `WouldBlock`.
+
+`rebase_conflict(id, local, remote, range)` lets a caller explicitly place the
+oldest conflicting text or formatting intent at a reviewed UTF-16 range in the remote image.
+The supplied images must still match `snapshot()` and `remote_snapshot()`.
+It preserves the original replacement or requested attributes, intent ID, complete local working image
+and every later intent; the selected range and remote paragraph become the
+intent's new comparison base in one local transaction. Formatting also captures
+the reviewed attribute values as its new precondition. This operation performs
+no network I/O, clears the conflict to `Pending`, and wakes the worker.
+Publication still reads the latest remote image and uses exact guarded comparison;
+another overlapping remote edit can produce a new conflict. An uncertain attempt
+cannot be rebased, and selecting text that already equals the replacement does
+not create a publication acknowledgement.
+
+With the optional `smb` feature, `SmbRemote::new(client, path, limit)` binds an
+`notebook::smb::Client` to one share-relative file and snapshot limit. Remote identity uses the logical root
+object space, which survives the tested native compaction that replaces the file ID.
+
+An `Arc<Replica>` can own one background worker. Supply a connection factory, poll
+interval and observer; successful publications drain immediately, durable local
+edits wake the worker, and `wake()` requests an immediate reachability retry.
+Transport failures discard the old connection and retry through the factory;
+Read contention and `NotCommitted` operations with `WouldBlock` or `ResourceBusy`
+reuse the connection. Contended `NotCommitted` operations use randomized backoff,
+capped at one second, to separate competing retry cycles. Cancellation interrupts this delay; local wake notifications
+remain coalesced until its end.
+`RemoteIo` distinguishes connection/read failures from
+local `Io` errors. Cache/document errors stop the worker. Observers receive every
+attempt's result on the worker thread, including unchanged conflict/uncertain
+statuses; durable edit state remains available through `status`.
+
+```no_run
+# #[cfg(feature = "smb")]
+# fn example(cache: std::sync::Arc<notebook::Replica>, username: String, password: String)
+# -> Result<(), Box<dyn std::error::Error>> {
+use notebook::SmbRemote;
+use notebook::smb::{Client, Credentials};
+use std::time::Duration;
+
+let worker = cache.start_sync(
+    Duration::from_secs(2),
+    move || {
+        Client::connect(
+            "server:445", "notes",
+            Credentials { username: &username, password: &password, domain: "" },
+            Duration::from_secs(5),
+        ).map(|client| SmbRemote::new(client, "Personal/Video.one", 64 * 1024 * 1024))
+    },
+    |result| {
+        if let Err(error) = result { eprintln!("{error}"); }
+    },
+)?;
+// Retain `worker` while synchronization should run; local edits wake it automatically.
+worker.stop()?;
+# Ok(())
+# }
+```
+
+`stop()` cancels future steps and joins the worker, returning a fatal cache error
+or worker panic. Dropping it requests cancellation without waiting. An in-flight
+step completes before releasing ownership; a replacement worker cannot start
+while the old one still owns the replica. Remote operations and callbacks must
+have bounded execution times if shutdown latency matters. A dropped worker can
+briefly retain the cache; use `stop()` before requiring an immediate reopen.
+Cancellation and application restart retain pending edits and publication attempts.
+Credentials belong to the factory, not the cache database.
+
+Creation refuses existing paths. Opening recognizes the application identity and
+schema version, validates database integrity and both notebook images, and rejects
+unsupported journal modes without converting them. Failed initialization preserves
+the file for inspection. SQLite uses DELETE journaling, EXTRA synchronization and
+fullfsync; each required setting is queried back.
+
+The cache and its pending intents contain notebook content. The core `onestore`
+crate stays independent of SQLite and network runtimes. Device and simulator
+examples compile and link for iOS; recorded process-interruption tests do not
+establish physical power-loss durability. Evidence is tracked in [Milestone 9](../../evidence/MILESTONE9.md).
+
+The SMB-enabled `smb_offline_client` example is an owned-lab workload for
+`tools/native_collaboration.py --offline --embedded-smb`. It separates local
+acknowledgements, remote publication attempts, persisted receipts and cache reopen
+checks. Its append-specific conflict review policy lives in the test client;
+the library continues to preserve conflicts requiring an explicit decision.
+
+## Recovery archives
+
+`export_recovery(new_path)` captures both complete notebook images, the typed
+queue, uncertain attempts, conflicts, receipts, downloaded media and the edit-ID sequence in one
+SQLite snapshot. It refuses existing destinations and leaves the live queue
+unchanged. Export to a local directory from a background thread: copying holds
+the cache mutex while capturing the database. Failure after the final rename can
+leave a complete archive at the requested path; it never acknowledges a remote
+edit. Archives contain notebook content and use a separate database identity, so
+`Replica::open` rejects them as writable caches.
+
+```no_run
+use notebook::{Recovery, Replica};
+# fn example(cache: &Replica) -> Result<(), Box<dyn std::error::Error>> {
+cache.export_recovery("review.sqlite")?;
+let review = Recovery::open("review.sqlite")?;
+let counts = review.summary()?;
+let local = review.snapshot()?;
+let remote = review.remote_snapshot()?;
+let pending = review.pending()?;
+let receipts = review.receipts()?;
+# Ok(())
+# }
+```
+
+`Recovery` provides read-only inspection and no synchronization or restore method.
+`status(id)` preserves the same state interpretation as the live replica.
+`recovery_summary()` on the live replica and `summary()` on an archive return
+counts and byte sizes without notebook text, paths, authors or credentials.
+Opening an archive validates its schema and images without migration. A recovery
+archive is evidence for a reviewed recovery decision, not a second active queue.
+
+## Downloaded media
+
+`fetch_asset(source, section, filename, limit)` resolves a declared external
+payload through `notebook::discover::Source` and durably caches its exact bytes.
+The section path is relative to the source root; the filename comes from a
+`FileDataReference::External` in the retained working or remote image. Local and
+SMB sources use the same API. Downloads release the cache mutex during network
+I/O and recheck the reference before committing; edits can continue meanwhile.
+
+`cached_asset(filename, limit)` reads previously downloaded bytes without network
+access. `None` means never downloaded; `Some(Vec::new())` is a downloaded empty
+payload. Each read checks the stored SHA-256 and enforces the byte limit before
+loading the payload. Cache contents describe the prior download, not current
+server reachability or presence. A failed fetch returns its error without
+silently substituting cached bytes. Different bytes for an already cached file
+identity return `AssetChanged` and preserve the previous download.
+
+Downloads do not change pending edits, publication attempts or receipts. Recovery
+archives include cached media and expose the same bounded `cached_asset` lookup.
+Schema-4 archives remain readable without migration and contain no media cache.
+
+## Discovery
+
+`notebook::discover` provides read-only notebook discovery over a caller-supplied
+root, keeping directory traversal out of the single-file storage parser.
+
+Discovery returns ordered sections and nested groups with file identities and
+share-relative paths. Section display-name overrides remain distinct from file
+names. TOC references whose identities are absent from the directory remain
+inspectable; a cached filename never substitutes for an identity match.
+Reserved `_onefiles` directories are excluded from section-group traversal.
+Encrypted sections and valid storage with an unreadable document graph retain
+their identity as `Locked` or `Unreadable`, without being presented as empty pages.
+Malformed storage, failed reads and ambiguous identities reject the discovery.
+
+Each file read must be a consistent, bounded snapshot. The result is an
+observation across multiple files, not an atomic notebook transaction or
+authorization to publish an edit. Refresh rejects observed topology changes and
+duplicate physical files with the same logical identity. Retain the last accepted
+catalog if discovery fails; a connection failure does not mean files were deleted.
+
+`read_external_asset` resolves a validated UUID `.onebin` filename beneath the
+selected section's sibling `_onefiles` folder and returns exact bounded bytes.
+Missing files, permissions and size failures retain their I/O error kinds; an
+empty payload is a successful empty buffer. Embedded payloads remain available
+directly from the core document model.
+
+## SMB (feature `smb`)
+
+`notebook::smb` provides blocking SMB access for OneNote sections and
+table-of-contents files. The core `onestore` crate remains independent of network runtimes. This is an
+experimental Rust API with native interoperability evidence in the repository's
+[Milestone 9](../../evidence/MILESTONE9.md).
+
+```no_run
+use notebook::smb::{Client, Credentials};
+use std::time::Duration;
+
+let client = Client::connect(
+    "server:445",
+    "notes",
+    Credentials { username: "user", password: "password", domain: "" },
+    Duration::from_secs(5),
+)?;
+let snapshot = client.read("Personal/Video.one", 64 * 1024 * 1024)?;
+let store = onestore::Store::parse(&snapshot)?;
+let revisions = onestore::RevisionIndex::parse(&store)?;
+let document = onestore::document::Document::parse(&revisions)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Paths are relative to the share. The read limit bounds the complete physical
+snapshot. Call from a background thread outside a Tokio runtime. Use identities
+from the document and the same snapshot with `Client::commit_text` or
+`Client::commit_property_bytes`; their errors retain `onestore::CommitState`.
+`PreparedEdit::{text,insert,format}` separate preparation from I/O: inspect the immutable image
+and persist the intended revision identity before `Client::commit_prepared`.
+`Client::confirm_snapshot` compares and flushes an observed image, then refreshes
+its header version metadata without adding a revision. The caller must first
+establish which intents that image contains and reread before another commit.
+
+Readers use shared native guards while writers publish under native write-open
+and byte-lock exclusion. Maintenance is excluded during each operation; pathname
+identity is checked after acquiring the guards. Connection loss retires the
+client. Reconnect for subsequent operations, and reconcile an `Unknown` edit
+before retrying it. The transport does not automatically replay requests.
+
+`Client::read_dir(path, entry_limit)` enumerates a directory, including the share
+root with an empty path. It follows every response page and returns no partial
+list on interruption, entry-limit overflow or close failure. Entries retain exact
+Unicode names, observed sizes and MS-FSCC attributes, including directory/reparse
+flags. Concurrent directory changes are not an atomic snapshot; repeated names
+are rejected with `ResourceBusy`. Notebook identities come from the files, not
+directory names or sizes. Missing paths, denied access and non-directory paths
+have distinct I/O error kinds.
+
+`Client::read_asset(path, byte_limit)` reads an external payload under a read-only
+share handle that excludes writes and deletion. Empty files succeed; limits,
+interrupted reads and failed close never return partial bytes. This payload read
+does not parse a OneStore header or acquire its reader-coordination bytes.
+
+`python3 tools/test_smb_directory.py VM OUTPUT` checks a caller-owned disposable
+Linux lab VM against its filesystem listing and interrupts directory requests,
+responses and close. It creates synthetic files in that VM; the caller retains
+responsibility for VM teardown. The parser also has bounded-record/truncation
+tests independent of the server.
+
+Device and simulator builds link for iOS. Native acceptance uses disposable
+OneNote 2010 clients and Samba; it does not establish on-device execution or
+physical power-loss durability.

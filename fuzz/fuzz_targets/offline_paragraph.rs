@@ -5,7 +5,7 @@ use onestore::{
     Store,
     document::{Document, Kind},
 };
-use onestore_offline::{EditStatus, Operation, Remote, Replica};
+use notebook::{EditStatus, Operation, Remote, Replica};
 use std::{io, sync::LazyLock};
 
 #[path = "../../crates/onestore/tests/support/disk.rs"]
