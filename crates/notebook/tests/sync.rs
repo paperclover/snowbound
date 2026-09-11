@@ -825,3 +825,95 @@ fn remote_changes_after_review_cannot_be_overwritten_by_the_reviewed_page() {
         );
     }
 }
+
+#[test]
+fn remote_restore_retains_historical_receipts_without_replaying_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let source = onestore::create_section("restore.one", "Original", "Fixture").unwrap();
+    let (_, object, _) = text(&source);
+    let cache = Replica::create(&path, &source).unwrap();
+    let mut server = Server::new(&source);
+    let published = save(&cache, object, 0..0, "Published ").unwrap();
+    let (_, receipt) = cache.sync_once(&mut server).unwrap().unwrap();
+    assert!(matches!(receipt, EditStatus::Published { .. }));
+    let published_image = cache.snapshot().unwrap();
+    cache
+        .export_recovery(directory.path().join("published.sqlite"))
+        .unwrap();
+    drop(cache);
+
+    server.visible.clone_from(&source);
+    server.durable.clone_from(&source);
+    let cache = Replica::open(&path).unwrap();
+    assert_eq!(cache.sync_once(&mut server).unwrap(), None);
+    assert_eq!(cache.snapshot().unwrap(), source);
+    assert_eq!(cache.remote_snapshot().unwrap(), source);
+    assert_eq!(cache.status(published).unwrap(), Some(receipt));
+    assert_eq!(server.publications, 1);
+    assert!(cache.pending().unwrap().is_empty());
+    let archive = notebook::Recovery::open(directory.path().join("published.sqlite")).unwrap();
+    assert_eq!(archive.snapshot().unwrap(), published_image);
+    assert_eq!(archive.status(published).unwrap(), Some(receipt));
+    assert_eq!(text(&archive.snapshot().unwrap()).2, "Published Original");
+    drop(cache);
+    let cache = Replica::open(path).unwrap();
+    assert_eq!(text(&cache.snapshot().unwrap()).2, "Original");
+    assert_eq!(cache.status(published).unwrap(), Some(receipt));
+}
+
+#[test]
+fn remote_restore_rebases_unsent_work_but_never_replays_an_uncertain_attempt() {
+    for fault in [Fault::None, Fault::UnknownBefore, Fault::UnknownAfter] {
+        let uncertain = !matches!(fault, Fault::None);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite");
+        let source = onestore::create_section("restore.one", "Original", "Fixture").unwrap();
+        let (_, object, _) = text(&source);
+        let cache = Replica::create(&path, &source).unwrap();
+        let mut server = Server::new(&source);
+        let published = save(&cache, object, 0..0, "Published ").unwrap();
+        let (_, receipt) = cache.sync_once(&mut server).unwrap().unwrap();
+        let end = u32::try_from(text(&cache.snapshot().unwrap()).2.encode_utf16().count()).unwrap();
+        let queued = save(&cache, object, end..end, " Local").unwrap();
+        if uncertain {
+            server.fault = fault;
+            assert!(cache.sync_once(&mut server).is_err());
+        }
+        let prior_status = cache.status(queued).unwrap();
+        let local = cache.snapshot().unwrap();
+        let pending = cache.pending().unwrap();
+        cache
+            .export_recovery(directory.path().join("before-restore.sqlite"))
+            .unwrap();
+        drop(cache);
+        server.visible.clone_from(&source);
+        server.durable.clone_from(&source);
+        let attempts = server.publications;
+        let cache = Replica::open(&path).unwrap();
+        let (_, status) = cache.sync_once(&mut server).unwrap().unwrap();
+        assert_eq!(cache.status(published).unwrap(), Some(receipt));
+        if uncertain {
+            assert!(matches!(status, EditStatus::AwaitingConfirmation { .. }));
+            assert_eq!(Some(status), prior_status);
+            assert_eq!(server.publications, attempts);
+            assert_eq!(server.visible, source);
+            assert_eq!(cache.snapshot().unwrap(), local);
+            assert_eq!(cache.pending().unwrap(), pending);
+        } else {
+            assert!(matches!(status, EditStatus::Published { .. }));
+            assert_eq!(server.publications, attempts + 1);
+            assert_eq!(text(&server.visible).2, "Original Local");
+            assert!(cache.pending().unwrap().is_empty());
+        }
+        let archive =
+            notebook::Recovery::open(directory.path().join("before-restore.sqlite")).unwrap();
+        assert_eq!(archive.snapshot().unwrap(), local);
+        assert_eq!(archive.pending().unwrap(), pending);
+        assert_eq!(archive.status(queued).unwrap(), prior_status);
+        drop(cache);
+        let cache = Replica::open(&path).unwrap();
+        assert_eq!(cache.status(queued).unwrap(), Some(status));
+        assert_eq!(cache.status(published).unwrap(), Some(receipt));
+    }
+}

@@ -35,7 +35,7 @@ pub enum EditStatus {
         revision: ExGuid,
     },
     Conflict(ConflictKind),
-    /// Revision of the intent's space when its complete effect was confirmed.
+    /// Historical confirmation; later remote edits or restores may remove the effect.
     Published {
         revision: ExGuid,
     },
