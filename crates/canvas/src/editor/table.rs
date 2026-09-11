@@ -1,6 +1,6 @@
 use super::*;
-use crate::page::{ParagraphContent, TableCell, TableColumn, TableRow};
-use crate::text::new_id;
+use onestore::page::text::new_id;
+use onestore::page::{ParagraphContent, TableCell, TableColumn, TableRow};
 
 struct CellLocation<'a> {
     container: Option<ExGuid>,
@@ -125,7 +125,7 @@ impl CanvasEditor {
                 lists: Vec::new(),
                 tags: Vec::new(),
                 collapsed: false,
-                content: ParagraphContent::Table(crate::page::Table {
+                content: ParagraphContent::Table(onestore::page::Table {
                     id: new_id()?,
                     columns: vec![
                         TableColumn {

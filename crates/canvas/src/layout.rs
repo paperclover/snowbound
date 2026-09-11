@@ -1,4 +1,4 @@
-use crate::text::Paragraph;
+use onestore::page::text::Paragraph;
 use parley::{
     Affinity, Alignment, AlignmentOptions, BoundingBox, FontContext, FontFamily, FontStyle,
     FontWeight, Layout, LayoutContext, OverflowWrap, PositionedLayoutItem, StyleProperty,

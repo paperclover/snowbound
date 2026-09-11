@@ -1,9 +1,9 @@
 use canvas::{
     document::TextDocument,
     layout::TextEngine,
-    outline::OutlineLayout,
-    page::{Outline, Page, PageObject},
+    outline::{Arrange, OutlineLayout},
 };
+use onestore::page::{Outline, Page, PageObject};
 use onestore::{RevisionIndex, Store, document::Document};
 use serde_json::json;
 use std::{env, fs, io, sync::Arc, time::Instant};

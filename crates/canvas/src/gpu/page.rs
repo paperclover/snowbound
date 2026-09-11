@@ -5,8 +5,8 @@ use crate::{
     date::DateField,
     editor::{CanvasEditor, EditorError},
     layout::{LayoutError, TextEngine},
-    page::Page,
 };
+use onestore::page::Page;
 use std::fmt;
 
 /// Retained drawing data in the source page's coordinate system.
@@ -519,17 +519,16 @@ impl crate::outline::OutlineLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        editor::TextOutline,
-        page::{Image, PageObject},
-        text::Paragraph,
-    };
+    use crate::editor::TextOutline;
+    use onestore::page::text::Paragraph;
+    use onestore::page::{Image, PageObject};
     use onestore::{ExGuid, document::Layout};
     use std::{collections::BTreeMap, sync::Arc};
 
     #[test]
     fn title_editing_keeps_identity_and_date_geometry_through_composition_and_undo() {
-        use crate::{document::TextDocument, page::Title};
+        use crate::document::TextDocument;
+        use onestore::page::Title;
         let mut engine = TextEngine::default();
         let mut fields = ["Header", "September 8, 2026"].map(|text| {
             let document =
@@ -740,7 +739,7 @@ mod tests {
                 vec![outline],
                 BTreeMap::from([(
                     style,
-                    crate::page::Definition {
+                    onestore::page::Definition {
                         kind: onestore::document::Kind::Style {
                             name: Some("p".into()),
                         },
@@ -797,7 +796,8 @@ mod tests {
     #[test]
     #[ignore = "requires the native baseline section and Carlito via CANVAS_TEST_SECTION/CANVAS_TEST_SUBSTITUTE"]
     fn native_title_flow() {
-        use crate::{document::TextDocument, page::Image};
+        use crate::document::TextDocument;
+        use onestore::page::Image;
         let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
         let store = onestore::Store::parse(&bytes).unwrap();
         let index = onestore::RevisionIndex::parse(&store).unwrap();
@@ -906,7 +906,7 @@ mod tests {
                 (120.0, 60.0, false),
             ] {
                 page.objects.push(PageObject::Image(Image {
-                    id: crate::text::new_id().unwrap(),
+                    id: onestore::page::text::new_id().unwrap(),
                     bytes: Some(image_bytes.clone()),
                     layout: Layout {
                         x: Some(x),
@@ -961,7 +961,8 @@ mod tests {
 
     #[test]
     fn title_exit_places_an_uncommitted_body_caret_below_the_date() {
-        use crate::{document::TextDocument, page::Title};
+        use crate::document::TextDocument;
+        use onestore::page::Title;
         let mut engine = TextEngine::default();
         let fields =
             [("Header", 20.751953), ("Date\u{000b}Time", 12.207031)].map(|(text, line_spacing)| {
@@ -1040,7 +1041,7 @@ mod tests {
         let objects = [0.0, 20.0]
             .into_iter()
             .map(|position| {
-                PageObject::Unsupported(crate::page::Unsupported {
+                PageObject::Unsupported(onestore::page::Unsupported {
                     id: ExGuid {
                         guid: [position as u8; 16],
                         n: 1,
@@ -1080,11 +1081,9 @@ mod tests {
 
     #[test]
     fn unsupported_tags_and_titles_leave_supported_outlines_editable() {
-        use crate::{
-            document::TextDocument,
-            page::{Definition, Outline, Title},
-        };
+        use crate::document::TextDocument;
         use onestore::document::{Kind, Tag};
+        use onestore::page::{Definition, Outline, Title};
         for title in [false, true] {
             let definition = ExGuid {
                 guid: [9; 16],
@@ -1190,10 +1189,8 @@ mod tests {
 
     #[test]
     fn unsupported_sources_stay_owned_and_read_only_across_edit_and_undo() {
-        use crate::{
-            document::TextDocument,
-            page::{Outline, Unsupported},
-        };
+        use crate::document::TextDocument;
+        use onestore::page::{Outline, Unsupported};
         let document = TextDocument::new(vec![Paragraph::new(
             "preserved text".into(),
             Default::default(),
@@ -1347,7 +1344,9 @@ mod tests {
 
     #[test]
     fn editable_outlines_keep_paint_order_and_images_across_edit_and_undo() {
-        use crate::{document::TextDocument, page::Outline, text::Paragraph};
+        use crate::document::TextDocument;
+        use onestore::page::Outline;
+        use onestore::page::text::Paragraph;
         let outline = |x, text: &str| {
             let document =
                 TextDocument::new(vec![Paragraph::new(text.into(), Default::default())]).unwrap();

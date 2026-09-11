@@ -1,9 +1,9 @@
 use crate::{
     document::{DocumentEdit, edited_nodes},
     layout::{LayoutError, TextEngine, TextLayout},
-    page::{Definition, Outline, PageParagraph, ParagraphContent, Table, Title},
-    text::{Paragraph, TextProjection},
 };
+use onestore::page::text::{Paragraph, TextProjection};
+use onestore::page::{Definition, Outline, PageParagraph, ParagraphContent, Table, Title};
 use onestore::{
     ExGuid,
     document::{Format, Kind},
@@ -498,8 +498,20 @@ impl OutlineLayout {
     }
 }
 
-impl Outline {
-    pub fn layout(
+/// Shapes a page object into positioned paragraph layouts.
+pub trait Arrange {
+    type Output;
+    fn layout(
+        &self,
+        engine: &mut TextEngine,
+        definitions: &BTreeMap<ExGuid, Definition>,
+    ) -> Result<Self::Output, LayoutError>;
+}
+
+impl Arrange for Outline {
+    type Output = OutlineLayout;
+
+    fn layout(
         &self,
         engine: &mut TextEngine,
         definitions: &BTreeMap<ExGuid, Definition>,
@@ -509,51 +521,53 @@ impl Outline {
             .reserved_width
             .or(self.layout.max_width)
             .ok_or(LayoutError::InvalidWidth)?;
-        self.layout_with_width(engine, definitions, width)
-    }
-
-    pub(crate) fn layout_with_width(
-        &self,
-        engine: &mut TextEngine,
-        definitions: &BTreeMap<ExGuid, Definition>,
-        width: f32,
-    ) -> Result<OutlineLayout, LayoutError> {
-        if self.indents.len() < 2 || self.indents.iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err(LayoutError::InvalidIndentation);
-        }
-        if !self.unsupported.is_empty() {
-            return Err(LayoutError::UnsupportedContent);
-        }
-        if self
-            .paragraphs
-            .iter()
-            .any(|node| matches!(node.content, ParagraphContent::Table(_)))
-        {
-            return OutlineLayout::flow(
-                self.paragraphs.iter(),
-                &self.indents,
-                width,
-                self.layout.width_set_by_user == Some(true),
-                0,
-                None,
-                &mut |node, width, indents| {
-                    ParagraphLayout::shape(engine, node, width, indents, definitions)
-                },
-            );
-        }
-        let paragraphs = visible_paragraphs(self.paragraphs.iter())
-            .map(|p| ParagraphLayout::shape(engine, p, width, &self.indents, definitions))
-            .collect::<Result<_, _>>()?;
-        OutlineLayout::new(
-            paragraphs,
-            width,
-            self.layout.width_set_by_user == Some(true),
-        )
+        outline_layout(self, engine, definitions, width)
     }
 }
 
-impl Title {
-    pub fn layout(
+pub(crate) fn outline_layout(
+    outline: &Outline,
+    engine: &mut TextEngine,
+    definitions: &BTreeMap<ExGuid, Definition>,
+    width: f32,
+) -> Result<OutlineLayout, LayoutError> {
+    if outline.indents.len() < 2 || outline.indents.iter().any(|v| !v.is_finite() || *v < 0.0) {
+        return Err(LayoutError::InvalidIndentation);
+    }
+    if !outline.unsupported.is_empty() {
+        return Err(LayoutError::UnsupportedContent);
+    }
+    if outline
+        .paragraphs
+        .iter()
+        .any(|node| matches!(node.content, ParagraphContent::Table(_)))
+    {
+        return OutlineLayout::flow(
+            outline.paragraphs.iter(),
+            &outline.indents,
+            width,
+            outline.layout.width_set_by_user == Some(true),
+            0,
+            None,
+            &mut |node, width, indents| {
+                ParagraphLayout::shape(engine, node, width, indents, definitions)
+            },
+        );
+    }
+    let paragraphs = visible_paragraphs(outline.paragraphs.iter())
+        .map(|p| ParagraphLayout::shape(engine, p, width, &outline.indents, definitions))
+        .collect::<Result<_, _>>()?;
+    OutlineLayout::new(
+        paragraphs,
+        width,
+        outline.layout.width_set_by_user == Some(true),
+    )
+}
+
+impl Arrange for Title {
+    type Output = Vec<([f32; 2], OutlineLayout)>;
+
+    fn layout(
         &self,
         engine: &mut TextEngine,
         definitions: &BTreeMap<ExGuid, Definition>,
@@ -573,7 +587,7 @@ impl Title {
                 .reserved_width
                 .or(outline.layout.max_width)
                 .unwrap_or(TITLE_WIDTH);
-            let layout = outline.layout_with_width(engine, definitions, width)?;
+            let layout = outline_layout(outline, engine, definitions, width)?;
             let origin = [
                 outline.layout.x.unwrap_or(0.0),
                 bottom + outline.layout.y.unwrap_or(0.0),
@@ -595,8 +609,8 @@ impl Title {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::{PageParagraph, TextObject};
     use onestore::document::Layout;
+    use onestore::page::{PageParagraph, TextObject};
 
     fn paragraph(n: u32, text: &str, level: u32, parent: Option<u32>) -> PageParagraph {
         PageParagraph {
@@ -610,7 +624,7 @@ mod tests {
             }),
             level,
             format: Format::default(),
-            content: crate::page::ParagraphContent::Text(TextObject {
+            content: onestore::page::ParagraphContent::Text(TextObject {
                 date_field: None,
                 id: ExGuid {
                     n: n + 100,
@@ -627,7 +641,7 @@ mod tests {
     }
 
     fn table(rows: &[&[&str]], widths: &[f32], mut n: u32) -> PageParagraph {
-        use crate::page::{TableCell, TableColumn, TableRow};
+        use onestore::page::{TableCell, TableColumn, TableRow};
         let mut id = || {
             n += 1;
             ExGuid {
@@ -816,7 +830,7 @@ mod tests {
     #[test]
     #[ignore = "requires CANVAS_TEST_SECTION native Tab capture and CANVAS_TEST_SUBSTITUTE Carlito font"]
     fn native_table_layout() {
-        use crate::page::{Page, PageObject};
+        use onestore::page::{Page, PageObject};
         use onestore::{RevisionIndex, Store, document::Document};
         let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
         let store = Store::parse(&bytes).unwrap();

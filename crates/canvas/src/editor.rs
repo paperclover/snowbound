@@ -2,11 +2,14 @@ use crate::{
     date::PageDate,
     document::{DocumentEdit, TextDocument, TextPosition, edited_nodes, leaves},
     layout::{LayoutError, TextEngine},
-    outline::{OutlineLayout, ParagraphLayout, arrange, indentation, visible_paragraphs},
-    page::{Definition, Outline, PageParagraph},
-    text::{EditError, Paragraph},
+    outline::{
+        Arrange, OutlineLayout, ParagraphLayout, arrange, indentation, outline_layout,
+        visible_paragraphs,
+    },
 };
 use onestore::ExGuid;
+use onestore::page::text::{EditError, Paragraph};
+use onestore::page::{Definition, Outline, PageParagraph};
 use parley::{
     Affinity, BoundingBox,
     editing::{Cursor, Selection as ParagraphSelection},
@@ -180,7 +183,7 @@ impl TextOutline {
             },
         )?;
         Ok(Self {
-            id: crate::text::new_id()?,
+            id: onestore::page::text::new_id()?,
             title: false,
             min_width: None,
             layout: onestore::document::Layout {
@@ -227,7 +230,8 @@ impl TextOutline {
             {
                 return Err(LayoutError::InvalidSpacing.into());
             }
-            outline.layout_with_width(
+            outline_layout(
+                outline,
                 engine,
                 definitions,
                 outline
@@ -399,14 +403,14 @@ impl TextOutline {
                 continue;
             };
             match &node.content {
-                crate::page::ParagraphContent::Text(_) => {
+                onestore::page::ParagraphContent::Text(_) => {
                     result.push(
                         *paragraphs
                             .get(&node.id)
                             .ok_or(EditError::InvalidStructure)?,
                     );
                 }
-                crate::page::ParagraphContent::Table(table) => {
+                onestore::page::ParagraphContent::Table(table) => {
                     let layout = tables.get(&table.id).ok_or(EditError::InvalidStructure)?;
                     let cells = layout
                         .cells
@@ -441,7 +445,7 @@ impl TextOutline {
                         pending.push(visible_paragraphs(cell.paragraphs.iter()));
                     }
                 }
-                crate::page::ParagraphContent::Unsupported(_) => {
+                onestore::page::ParagraphContent::Unsupported(_) => {
                     return Err(EditError::UnsupportedContent);
                 }
             }
@@ -475,14 +479,14 @@ impl TextOutline {
             let mut target = None;
             for node in visible_paragraphs(nodes.iter()) {
                 let top = match &node.content {
-                    crate::page::ParagraphContent::Text(_) => {
+                    onestore::page::ParagraphContent::Text(_) => {
                         paragraphs
                             .get(&node.id)
                             .ok_or(EditError::InvalidStructure)?
                             .1
                             .origin[1]
                     }
-                    crate::page::ParagraphContent::Table(table) => {
+                    onestore::page::ParagraphContent::Table(table) => {
                         tables
                             .get(&table.id)
                             .and_then(|layout| layout.cells.first())
@@ -490,7 +494,7 @@ impl TextOutline {
                             .rect[1]
                             - 1.86
                     }
-                    crate::page::ParagraphContent::Unsupported(_) => {
+                    onestore::page::ParagraphContent::Unsupported(_) => {
                         return Err(EditError::UnsupportedContent);
                     }
                 };
@@ -502,7 +506,7 @@ impl TextOutline {
                 }
             }
             let target = target.ok_or(EditError::InvalidStructure)?;
-            let crate::page::ParagraphContent::Table(table) = &target.content else {
+            let onestore::page::ParagraphContent::Table(table) = &target.content else {
                 return paragraphs
                     .get(&target.id)
                     .map(|(index, _)| *index)
@@ -648,7 +652,7 @@ impl CanvasEditor {
     }
 
     pub fn from_page(
-        mut page: crate::page::Page,
+        mut page: onestore::page::Page,
         engine: &mut TextEngine,
     ) -> Result<Self, EditorError> {
         let (objects, mut outlines, date) = page::build(&mut page, engine, true)?;
@@ -818,7 +822,7 @@ impl CanvasEditor {
                         ))
                     }
                     page::Content::ReadOnly(object)
-                        if !matches!(object.source, crate::page::PageObject::Title(_)) =>
+                        if !matches!(object.source, onestore::page::PageObject::Title(_)) =>
                     {
                         Some((object.source.id(), object.source.layout(), object.rect()))
                     }
@@ -1329,7 +1333,7 @@ impl CanvasEditor {
                 paragraph: self.active_outline().source_index(index),
                 offset: paragraph
                     .projection
-                    .source_offset(visible, cursor.affinity())?,
+                    .source_offset(visible, crate::affinity(cursor.affinity()))?,
             };
             selection.affinities[slot] = cursor.affinity();
         }
@@ -1579,7 +1583,7 @@ impl CanvasEditor {
                 } else if outline.origin()[0] >= 180.0 && trailing >= 2 {
                     let node = &outline.document.nodes()[last.saturating_sub(trailing)];
                     let bottom = match &node.content {
-                        crate::page::ParagraphContent::Text(_) => {
+                        onestore::page::ParagraphContent::Text(_) => {
                             let paragraph = outline
                                 .shaped
                                 .paragraphs
@@ -1588,7 +1592,7 @@ impl CanvasEditor {
                                 .ok_or(EditError::InvalidStructure)?;
                             f64::from(paragraph.origin[1]) + f64::from(paragraph.text.height())
                         }
-                        crate::page::ParagraphContent::Table(table) => {
+                        onestore::page::ParagraphContent::Table(table) => {
                             let cell = outline
                                 .shaped
                                 .tables
@@ -1598,7 +1602,7 @@ impl CanvasEditor {
                                 .ok_or(EditError::InvalidStructure)?;
                             f64::from(cell.rect[3]) + 1.68
                         }
-                        crate::page::ParagraphContent::Unsupported(_) => {
+                        onestore::page::ParagraphContent::Unsupported(_) => {
                             return Err(EditError::UnsupportedContent.into());
                         }
                     } + f64::from(outline.origin()[1]);
@@ -1773,7 +1777,7 @@ impl CanvasEditor {
             paragraph: self.active_outline().source_index(index),
             offset: paragraph
                 .projection
-                .source_offset(visible, next.affinity())?,
+                .source_offset(visible, crate::affinity(next.affinity()))?,
         };
         if !extend {
             self.active_outline_mut().selection.positions[0] = position;
@@ -1984,12 +1988,14 @@ impl CanvasEditor {
             {
                 let visible = paragraph.projection.text();
                 let bytes = cluster.text_range();
-                range.start.offset = paragraph
-                    .projection
-                    .source_offset(visible.utf16_offset(bytes.start)?, Affinity::Downstream)?;
-                range.end.offset = paragraph
-                    .projection
-                    .source_offset(visible.utf16_offset(bytes.end)?, Affinity::Upstream)?;
+                range.start.offset = paragraph.projection.source_offset(
+                    visible.utf16_offset(bytes.start)?,
+                    onestore::page::text::Affinity::Downstream,
+                )?;
+                range.end.offset = paragraph.projection.source_offset(
+                    visible.utf16_offset(bytes.end)?,
+                    onestore::page::text::Affinity::Upstream,
+                )?;
             } else {
                 let document = &self.active_outline().document;
                 let Some(neighbor) = (if backward {
@@ -2690,7 +2696,7 @@ impl CanvasEditor {
             .nodes()
             .iter()
             .chain(&edit.replacement)
-            .any(|node| matches!(node.content, crate::page::ParagraphContent::Table(_)))
+            .any(|node| matches!(node.content, onestore::page::ParagraphContent::Table(_)))
         {
             let sources = outline
                 .document
@@ -2891,10 +2897,8 @@ mod tests {
     use onestore::document::Format;
 
     fn table_editor(engine: &mut TextEngine) -> CanvasEditor {
-        use crate::{
-            page::{ParagraphContent, Table, TableCell, TableColumn, TableRow},
-            text::new_id,
-        };
+        use onestore::page::text::new_id;
+        use onestore::page::{ParagraphContent, Table, TableCell, TableColumn, TableRow};
         let mut editor = CanvasEditor::new(
             engine,
             TextDocument::new(vec![Paragraph::new("Left".into(), Format::default())]).unwrap(),
@@ -2975,7 +2979,8 @@ mod tests {
     fn structured_construction_and_resize_preserve_cells_and_enclose_locked_columns() {
         let mut engine = TextEngine::default();
         let mut source = table_editor(&mut engine).active_outline().snapshot();
-        let crate::page::ParagraphContent::Table(table) = &mut source.paragraphs[0].content else {
+        let onestore::page::ParagraphContent::Table(table) = &mut source.paragraphs[0].content
+        else {
             panic!()
         };
         table.rows[0].cells[0].paragraphs[0]
@@ -3064,7 +3069,7 @@ mod tests {
 
     #[test]
     fn nested_table_extents_remain_reachable_beyond_the_parent_columns() {
-        use crate::page::ParagraphContent;
+        use onestore::page::ParagraphContent;
         let mut engine = TextEngine::default();
         let mut source = table_editor(&mut engine).active_outline().snapshot();
         let mut nested = table_editor(&mut engine).active_outline().document.nodes()[0].clone();
@@ -3215,7 +3220,8 @@ mod tests {
 
     #[test]
     fn nested_table_mouse_targets_resolve_the_source_cell() {
-        use crate::{page::ParagraphContent, text::new_id};
+        use onestore::page::ParagraphContent;
+        use onestore::page::text::new_id;
         let mut engine = TextEngine::default();
         let nested = table_editor(&mut engine).active_outline().document.nodes()[0].clone();
         let mut editor = table_editor(&mut engine);
@@ -3403,7 +3409,7 @@ mod tests {
 
     #[test]
     fn overflowing_cell_caret_moves_to_the_next_rows_visual_column() {
-        use crate::page::ParagraphContent;
+        use onestore::page::ParagraphContent;
         let mut engine = TextEngine::default();
         let mut source = table_editor(&mut engine).active_outline().snapshot();
         let ParagraphContent::Table(table) = &mut source.paragraphs[0].content else {
@@ -3804,7 +3810,7 @@ mod tests {
 
     #[test]
     fn column_width_edits_reflow_and_restore_structured_drafts() {
-        use crate::page::ParagraphContent;
+        use onestore::page::ParagraphContent;
         let mut engine = TextEngine::default();
         for draft in [false, true] {
             let mut editor = table_editor(&mut engine);
@@ -4193,7 +4199,7 @@ mod tests {
 
     #[test]
     fn cross_outline_validation_includes_table_row_and_cell_ids() {
-        use crate::page::ParagraphContent;
+        use onestore::page::ParagraphContent;
         let mut engine = TextEngine::default();
         let first = table_editor(&mut engine).active_outline().clone();
         let second = table_editor(&mut engine).active_outline().clone();
@@ -4225,7 +4231,7 @@ mod tests {
 
     #[test]
     fn title_flow_moves_page_objects_atomically_and_cancels_composition() {
-        use crate::page::{Image, Page, PageObject, Title};
+        use onestore::page::{Image, Page, PageObject, Title};
         let mut engine = TextEngine::default();
         let mut title = TextOutline::new(
             &mut engine,
@@ -4254,7 +4260,7 @@ mod tests {
             (120.0, 80.0, true),
         ]
         .map(|(x, y, background)| Image {
-            id: crate::text::new_id().unwrap(),
+            id: onestore::page::text::new_id().unwrap(),
             layout: onestore::document::Layout {
                 x: Some(x),
                 y: Some(y),
@@ -4272,7 +4278,7 @@ mod tests {
             .map(|image| image.bytes.as_ref().unwrap().clone());
         let mut objects = vec![
             PageObject::Title(Title {
-                id: crate::text::new_id().unwrap(),
+                id: onestore::page::text::new_id().unwrap(),
                 date: None,
                 layout: Default::default(),
                 outlines: vec![title],
@@ -5597,7 +5603,7 @@ mod tests {
 
     #[test]
     fn native_outline_omits_outer_paragraph_spacing_through_split_and_undo() {
-        use crate::page::{Page, PageObject};
+        use onestore::page::{Page, PageObject};
         use onestore::{RevisionIndex, Store, document::Document};
         let store = Store::parse(include_bytes!(
             "../../../resources/canvas/baseline-anchors.one"
@@ -5740,7 +5746,7 @@ mod tests {
         let outline = Outline {
             title: false,
             min_width: None,
-            id: crate::text::new_id().unwrap(),
+            id: onestore::page::text::new_id().unwrap(),
             layout: onestore::document::Layout {
                 max_width: Some(220.0),
                 reserved_width: Some(180.0),
@@ -5812,7 +5818,7 @@ mod tests {
         nodes[2].collapsed = true;
         nodes[3].parent = Some(nodes[2].id);
         nodes[3].level = 3;
-        let marker = crate::text::new_id().unwrap();
+        let marker = onestore::page::text::new_id().unwrap();
         nodes[1].lists.push(marker);
         let definitions = BTreeMap::from([(
             marker,
@@ -5832,7 +5838,7 @@ mod tests {
         let outline = Outline {
             title: false,
             min_width: None,
-            id: crate::text::new_id().unwrap(),
+            id: onestore::page::text::new_id().unwrap(),
             layout: onestore::document::Layout {
                 x: Some(30.0),
                 y: Some(45.0),
@@ -5963,7 +5969,7 @@ mod tests {
     #[test]
     #[ignore = "requires CANVAS_TEST_SECTION and CANVAS_TEST_PAGE private fixture inputs"]
     fn imported_editor_reflows_and_restores_native_outline_geometry() {
-        use crate::page::{Page, PageObject};
+        use onestore::page::{Page, PageObject};
         use onestore::{RevisionIndex, Store, document::Document};
         let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
         let page = {

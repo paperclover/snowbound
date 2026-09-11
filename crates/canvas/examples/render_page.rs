@@ -1,5 +1,6 @@
 use canvas::gpu::{Renderer, Viewport, page::PageScene};
-use canvas::{layout::TextEngine, page::Page};
+use canvas::layout::TextEngine;
+use onestore::page::Page;
 use onestore::{RevisionIndex, Store, document::Document};
 use std::{env, fs, sync::Arc, time::Duration};
 

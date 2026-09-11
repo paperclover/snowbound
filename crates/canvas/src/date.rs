@@ -2,18 +2,14 @@ use crate::{
     document::TextDocument,
     editor::EditorError,
     layout::TextEngine,
-    outline::{OutlineLayout, TITLE_WIDTH},
-    page::{Definition, Outline, PageParagraph},
-    text::EditError,
+    outline::{OutlineLayout, TITLE_WIDTH, outline_layout},
 };
 use onestore::ExGuid;
+use onestore::page::text::EditError;
+use onestore::page::{Definition, Outline, PageParagraph};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DateField {
-    Date = 0,
-    Time = 1,
-}
+pub use onestore::page::DateField;
 
 #[derive(Clone)]
 pub struct PageDate {
@@ -85,7 +81,7 @@ impl PageDate {
         {
             return Err(EditError::UnsupportedContent.into());
         }
-        let layout = source.layout_with_width(engine, definitions, TITLE_WIDTH)?;
+        let layout = outline_layout(&source, engine, definitions, TITLE_WIDTH)?;
         let date = Self {
             timestamp,
             source,
@@ -104,10 +100,8 @@ impl PageDate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        editor::{CanvasEditor, TextOutline},
-        text::Paragraph,
-    };
+    use crate::editor::{CanvasEditor, TextOutline};
+    use onestore::page::text::Paragraph;
 
     #[test]
     fn date_and_text_edits_share_history_without_changing_identities_or_selection() {

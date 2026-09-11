@@ -1,5 +1,6 @@
-use canvas::{layout::TextEngine, text::Paragraph};
+use canvas::layout::TextEngine;
 use onestore::document::Format;
+use onestore::page::text::Paragraph;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use skrifa::{FontRef, MetadataProvider, raw::TableProvider, string::StringId};

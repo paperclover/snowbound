@@ -1,7 +1,5 @@
-use crate::{
-    page::{PageParagraph, ParagraphContent, TextObject},
-    text::{EditError, Paragraph, new_id},
-};
+use onestore::page::text::{EditError, Paragraph, new_id};
+use onestore::page::{PageParagraph, ParagraphContent, TextObject};
 use onestore::{ExGuid, document::Format};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,7 +34,7 @@ pub(crate) fn node(text: Paragraph, format: Format) -> Result<PageParagraph, Edi
         parent: None,
         level: 1,
         format,
-        content: crate::page::ParagraphContent::Text(TextObject {
+        content: onestore::page::ParagraphContent::Text(TextObject {
             date_field: None,
             id: new_id()?,
             text,
@@ -435,8 +433,8 @@ impl TextDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::{Table, TableCell, TableColumn, TableRow};
     use onestore::document::Format;
+    use onestore::page::{Table, TableCell, TableColumn, TableRow};
 
     fn position(paragraph: usize, offset: u32) -> TextPosition {
         TextPosition { paragraph, offset }
@@ -781,7 +779,7 @@ mod tests {
     #[test]
     #[ignore = "requires CANVAS_TEST_SECTION and CANVAS_TEST_PAGE private fixture inputs"]
     fn imported_nodes_preserve_identity_through_edit_and_undo() {
-        use crate::page::{Page, PageObject};
+        use onestore::page::{Page, PageObject};
         use onestore::{RevisionIndex, Store, document::Document};
         let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
         let page = {
@@ -939,7 +937,7 @@ mod tests {
         assert_eq!(document.apply(duplicate), Err(EditError::InvalidStructure));
         let mut unsupported = original.nodes().to_vec();
         unsupported[0].content =
-            crate::page::ParagraphContent::Unsupported(crate::page::Unsupported {
+            onestore::page::ParagraphContent::Unsupported(onestore::page::Unsupported {
                 id: new_id().unwrap(),
                 jcid: 0x60012,
                 layout: Default::default(),
@@ -1269,5 +1267,87 @@ mod tests {
             assert_eq!(document, original);
         }
         assert!(TextDocument::new(Vec::new()).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires CANVAS_TEST_SECTION pointing to the native Tab table capture"]
+    fn native_table_import() {
+        use onestore::{
+            RevisionIndex, Store,
+            document::Document,
+            page::{Page, PageObject, ParagraphContent},
+        };
+        let page = {
+            let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
+            let store = Store::parse(&bytes).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let document = Document::parse(&index).unwrap();
+            for (space, page) in document.pages().unwrap() {
+                let space = &document.spaces[&space];
+                let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
+                Page::from_revision(revision, page).unwrap();
+            }
+            Page::from_document(&document, "rows").unwrap()
+        };
+        let table = page
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) => {
+                    outline.paragraphs.iter().find_map(|p| match &p.content {
+                        ParagraphContent::Table(table) => Some(table),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(table.rows.len(), 3);
+        assert_eq!(table.columns.len(), 2);
+        assert!(table.columns.iter().all(|c| !c.locked));
+        let cells: Vec<_> = table.rows.iter().flat_map(|row| &row.cells).collect();
+        let text: Vec<_> = cells
+            .iter()
+            .map(|cell| cell.paragraphs[0].text().unwrap().text.text())
+            .collect();
+        assert_eq!(text, ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", ""]);
+        assert!(cells.iter().all(|c| c.indents == [18.0, 0.0, 27.0, 27.0]));
+        let outline = page
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                PageObject::Outline(outline)
+                    if outline
+                        .paragraphs
+                        .iter()
+                        .any(|p| matches!(p.content, ParagraphContent::Table(_))) =>
+                {
+                    Some(outline)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut document = TextDocument::from_nodes(outline.paragraphs.clone()).unwrap();
+        let original = document.clone();
+        for (index, cell) in cells.iter().enumerate() {
+            let position = TextPosition {
+                paragraph: index,
+                offset: 0,
+            };
+            let edit = document
+                .replace(
+                    position..position,
+                    vec![
+                        Paragraph::new("🧊".into(), Format::default()),
+                        Paragraph::new("text".into(), Format::default()),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(edit.container, Some(cell.id));
+            let undo = document.apply(edit).unwrap();
+            assert_eq!(document.paragraphs().nth(index).unwrap().text(), "🧊");
+            document.apply(undo).unwrap();
+            assert_eq!(document, original);
+        }
     }
 }

@@ -1019,8 +1019,9 @@ pub fn colorref(color: u32) -> [f32; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{layout::TextEngine, text::Paragraph};
+    use crate::layout::TextEngine;
     use onestore::document::Format as TextFormat;
+    use onestore::page::text::Paragraph;
     use std::time::Duration;
 
     #[test]

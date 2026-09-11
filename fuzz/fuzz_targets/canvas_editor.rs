@@ -1,11 +1,6 @@
 #![no_main]
-use canvas::{
-    date::PageDate,
-    document::{TextDocument, TextPosition},
-    editor::{CanvasEditor, Movement, SelectionUnit, TextOutline},
-    layout::TextEngine,
-    text::Paragraph,
-};
+use canvas::{date::PageDate, document::{TextDocument, TextPosition}, editor::{CanvasEditor, Movement, SelectionUnit, TextOutline}, layout::TextEngine};
+use onestore::page::text::{Paragraph};
 use libfuzzer_sys::fuzz_target;
 use onestore::document::Format;
 use std::{cell::RefCell, collections::BTreeMap};
@@ -85,7 +80,7 @@ fuzz_target!(|input: &[u8]| {
                             assert!(!matches!(
                                 error,
                                 canvas::editor::EditorError::Edit(
-                                    canvas::text::EditError::InvalidStructure
+                                    onestore::page::text::EditError::InvalidStructure
                                 )
                             ));
                         }),
@@ -199,7 +194,7 @@ fuzz_target!(|input: &[u8]| {
             if let Some(date) = &date {
                 fields.push(date.source().clone());
             }
-            let mut objects = vec![canvas::page::PageObject::Title(canvas::page::Title {
+            let mut objects = vec![onestore::page::PageObject::Title(onestore::page::Title {
                 id: onestore::ExGuid::default(),
                 layout: Default::default(),
                 date: date_id,
@@ -213,7 +208,7 @@ fuzz_target!(|input: &[u8]| {
             .into_iter()
             .enumerate()
             {
-                objects.push(canvas::page::PageObject::Image(canvas::page::Image {
+                objects.push(onestore::page::PageObject::Image(onestore::page::Image {
                     id: onestore::ExGuid {
                         n: index.try_into().unwrap(),
                         ..Default::default()
@@ -231,7 +226,7 @@ fuzz_target!(|input: &[u8]| {
                 }));
             }
             CanvasEditor::from_page(
-                canvas::page::Page {
+                onestore::page::Page {
                     title: String::new(),
                     created: date.map(|date| date.timestamp()),
                     margin_origin: [0.0; 2],

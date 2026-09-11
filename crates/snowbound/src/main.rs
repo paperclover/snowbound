@@ -12,10 +12,10 @@ use canvas::{
         CanvasEditor, DEFAULT_OUTLINE_WIDTH, Movement, Selection, SelectionUnit, TextOutline,
     },
     layout::TextEngine,
-    page::Page,
-    text::Paragraph,
 };
 use onestore::document::Format;
+use onestore::page::Page;
+use onestore::page::text::Paragraph;
 use std::{
     error::Error,
     path::PathBuf,
@@ -1920,7 +1920,7 @@ mod tests {
             created: Some(1),
             margin_origin: [36.0, 14.4],
             definitions: Default::default(),
-            objects: vec![canvas::page::PageObject::Title(canvas::page::Title {
+            objects: vec![onestore::page::PageObject::Title(onestore::page::Title {
                 id: onestore::ExGuid::default(),
                 date: Some(fields[1].id),
                 layout: Default::default(),
@@ -2018,12 +2018,12 @@ mod tests {
                 None
             );
         }
-        let page = canvas::page::Page {
+        let page = onestore::page::Page {
             title: String::new(),
             created: None,
             margin_origin: [0.0; 2],
             definitions: Default::default(),
-            objects: vec![canvas::page::PageObject::Outline(source)],
+            objects: vec![onestore::page::PageObject::Outline(source)],
         };
         let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
         let offset = [50.0, 300.0];
@@ -2713,7 +2713,7 @@ mod tests {
 
     #[test]
     fn overlapping_objects_follow_paint_order_through_creation_movement_and_undo() {
-        use canvas::page::{Outline, PageObject, Unsupported};
+        use onestore::page::{Outline, PageObject, Unsupported};
         for readonly_on_top in [false, true] {
             let mut engine = TextEngine::default();
             let document = TextDocument::new(vec![Paragraph::new(
@@ -2924,7 +2924,7 @@ mod tests {
 
     #[test]
     fn read_only_focus_retires_text_overlays_and_draws_a_scaled_focus_border() {
-        use canvas::page::{PageObject, Unsupported};
+        use onestore::page::{PageObject, Unsupported};
         let mut engine = TextEngine::default();
         let mut editor = CanvasEditor::new(
             &mut engine,

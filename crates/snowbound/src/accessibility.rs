@@ -7,8 +7,8 @@ use canvas::{
     date::DateField,
     document::TextPosition,
     editor::{CanvasEditor, Selection, TextOutline},
-    text::EditError,
 };
+use onestore::page::text::EditError;
 use parley::Affinity;
 use std::{collections::HashMap, ops::Range};
 
@@ -519,7 +519,7 @@ impl Accessibility {
         );
         position.offset = projection.source_offset(
             projection.text().utf16_offset(cursor.index())?,
-            Affinity::Downstream,
+            onestore::page::text::Affinity::Downstream,
         )?;
         let caret = layout.caret(cursor, 0.0);
         let mut positions = self
@@ -584,12 +584,13 @@ impl Accessibility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canvas::{document::TextDocument, layout::TextEngine, text::Paragraph};
+    use canvas::{document::TextDocument, layout::TextEngine};
     use onestore::document::Format;
+    use onestore::page::text::Paragraph;
 
     #[test]
     fn title_flow_updates_read_only_hit_and_accessibility_bounds() {
-        use canvas::page::{Page, PageObject, Title, Unsupported};
+        use onestore::page::{Page, PageObject, Title, Unsupported};
         let mut engine = TextEngine::default();
         let mut title = TextOutline::new(
             &mut engine,
@@ -697,7 +698,7 @@ mod tests {
     #[test]
     fn read_only_objects_keep_accessibility_identity_through_edits_and_view_changes() {
         use canvas::gpu::page::PageScene;
-        use canvas::page::{Page, PageObject, Unsupported};
+        use onestore::page::{Page, PageObject, Unsupported};
         let page = Page {
             created: None,
             title: String::new(),
@@ -780,7 +781,7 @@ mod tests {
 
     #[test]
     fn tag_descriptions_preserve_plain_text_and_survive_edit_undo_and_cache_reuse() {
-        use canvas::page::{Definition, Outline};
+        use onestore::page::{Definition, Outline};
         use onestore::{
             ExGuid,
             document::{Kind, Layout, Tag},

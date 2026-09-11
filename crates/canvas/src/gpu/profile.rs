@@ -1,5 +1,7 @@
 use super::*;
-use crate::{layout::TextEngine, page::Page, text::Paragraph};
+use crate::layout::TextEngine;
+use onestore::page::Page;
+use onestore::page::text::Paragraph;
 use std::{
     sync::Arc,
     time::{Duration, Instant},

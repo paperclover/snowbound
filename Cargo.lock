@@ -394,7 +394,6 @@ name = "canvas"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "getrandom 0.4.3",
  "image",
  "onestore",
  "parley",

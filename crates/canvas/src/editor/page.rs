@@ -2,10 +2,10 @@ use super::{EditorError, TextOutline};
 use crate::{
     date::PageDate,
     layout::{LayoutError, TextEngine, TextLayout},
-    outline::OutlineLayout,
-    page::{Image, Outline, Page, PageObject},
-    text::Paragraph,
+    outline::{Arrange, OutlineLayout},
 };
+use onestore::page::text::Paragraph;
+use onestore::page::{Image, Outline, Page, PageObject};
 
 pub(crate) enum Content {
     Date {
@@ -246,7 +246,7 @@ pub(crate) fn build(
                                     continue;
                                 }
                                 Err(EditorError::Edit(
-                                    crate::text::EditError::UnsupportedContent,
+                                    onestore::page::text::EditError::UnsupportedContent,
                                 )) => {}
                                 Err(error) => return Err(error),
                             }
