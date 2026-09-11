@@ -51,6 +51,44 @@ filesystem: the connection holds exclusive ownership between transactions, and a
 second open fails busy. No network wait occurs in a local save. After a database
 error, reopen and inspect the durable state before retrying.
 
+## Sessions
+
+`session::Notebook::open(root, cache_dir)` discovers a notebook directory and
+`session::Section::open(file, cache_dir, notify)` opens one section file through
+a replica stored under the cache directory, named by the section's document
+identity so the same file reopens the same queue after a relaunch. A section
+publishes in the background to the file itself under OneNote-compatible
+exclusion. `pages()` lists page spaces and titles from the local image,
+`page(space)` returns the model to edit, and `save(space, before, after,
+author)` queues the edited model: `Save::Queued(id)` is durable locally,
+`Save::Unchanged` means the model equals the stored page, and `Save::Stale`
+means the stored page no longer matches `before` because the section changed
+underneath the editor, so the page must be reloaded before saving again.
+`events()` drains what the synchronization thread reported since the last
+poll: refreshes, attempt outcomes and unreachable files; `notify` runs on that
+thread whenever an event is available so the application can wake its event
+loop. `close()` stops publication.
+
+`Event::Unreachable` retains an `io::Error`: callers can distinguish permission
+denial, missing targets, timeouts, and connection failures through `kind()` without
+parsing display text. Document/cache failures are reported as `Event::Failed` and
+stop the worker. Durable publication outcomes remain available through `status`.
+
+`Section::resume(file, replica, notify)` starts a session from an owned
+`Replica::open(cache_file)` without consulting the remote file. The caller retains
+the cache location and publication path for offline relaunch. Local pages and
+saves remain available while the target is absent; synchronization verifies the
+document identity before adopting or publishing remote content. A different
+document stops the worker and retains the pending local edits. `Section::open`
+remains the online convenience constructor that discovers the identity from the
+file and creates or reopens its cache.
+
+With the `smb` feature, `Section::resume_smb(path, replica, limit, connect,
+notify)` binds the same session operations to a share-relative path. `connect`
+returns a new SMB client on the synchronization worker and is called again after
+transport failure. The caller supplies credentials there, outside the replica
+schema; construction and local saving do not wait for a network connection.
+
 ## Pages of a section
 
 `create_page` accepts the core `PageCreation` intent and queues its page space

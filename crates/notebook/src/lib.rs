@@ -25,6 +25,7 @@ mod pages;
 mod rebase;
 mod recovery;
 mod schema;
+pub mod session;
 pub use pages::PageEdits;
 pub use recovery::{Recovery, RecoverySummary};
 mod sync;

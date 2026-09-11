@@ -345,6 +345,17 @@ impl<'a> PreparedEdit<'a> {
     }
 }
 
+/// `confirm_snapshot` under the same whole-file exclusion `commit_file` uses.
+#[cfg(any(unix, windows))]
+pub fn confirm_file_snapshot(path: impl AsRef<Path>, source: &[u8]) -> Result<(), CommitError> {
+    let mut io = FileIo::open(path, true).map_err(|error| CommitError {
+        state: CommitState::NotCommitted,
+        error,
+    })?;
+    let result = confirm_snapshot(&mut io, source);
+    io.finish(result)
+}
+
 /// Compares and flushes a snapshot, then refreshes its header version metadata.
 /// No revision is added; reread before using the snapshot for another physical commit.
 /// The caller must hold OneNote-compatible exclusion and independently establish which

@@ -29,7 +29,9 @@ pub use commit::{
     confirm_snapshot,
 };
 #[cfg(any(unix, windows))]
-pub use commit::{commit_file_property, commit_file_text, read_file, read_file_limited};
+pub use commit::{
+    commit_file_property, commit_file_text, confirm_file_snapshot, read_file, read_file_limited,
+};
 pub use create::{create_section, create_table_of_contents};
 pub use edit::replace_text;
 pub use files::FileDataReference;
