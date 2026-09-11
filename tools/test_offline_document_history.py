@@ -1,7 +1,5 @@
 import copy
 import json
-from pathlib import Path
-import subprocess
 import unittest
 import uuid
 from unittest.mock import patch
@@ -139,58 +137,6 @@ class DocumentHistoryTests(unittest.TestCase):
                 next(row for row in logs['w0'] if row['event'] == 'remote_attempt')['document_graph_changes'] = {}
             with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
                 document_history(logs, 2)
-
-    def test_production_cache_workload_matches_the_independent_history_model(self):
-        result = subprocess.run(['cargo', 'test', '--locked', '-p', 'notebook', '--features', 'smb',
-                                 '--example', 'smb_offline_client',
-                                 'tests::document_workload_retains_dependencies_and_receipts_across_reopen',
-                                 '--', '--exact', '--nocapture'],
-                                cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True, timeout=120)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
-        documents = document_history({'w0': events}, 2)
-        self.assertEqual(sum(len(document['states']) for document in documents.values()), 20)
-        self.assertEqual(sum(row['event'] == 'remote_attempt' and row['state'] == 'Unknown' for row in events), 12)
-        self.assertEqual(sum(row['event'] == 'remote_confirm' and row['state'] == 'Committed' for row in events), 12)
-        document = next(iter(documents.values()))
-        states = document['states']
-        for phase, next_phase, stale in [('nest', 'unnest', 'right_text'), ('delete', None, 'tail_split')]:
-            read = copy.deepcopy(states[stale]['attempt'])
-            started = states[phase]['attempt']['acknowledged_us'] + 1
-            if next_phase:
-                self.assertLess(started + 1, states[next_phase]['attempt']['started_us'])
-            read.update(event='read', started_us=started, finished_us=started + 1)
-            logs = {'w0': events, 'r0': [{'event': 'ready', 'document_graph': True}, read, {'event': 'done'}]}
-            with self.subTest(phase=phase), self.assertRaisesRegex(AssertionError, 'missed acknowledged'):
-                document_history(logs, 2)
-        for mutation in ('nest-intent', 'unnest-intent', 'delete-intent', 'tail-boundary',
-                         'nest-children', 'delete-resurrection', 'graph-delta', 'extra-attempt'):
-            changed = copy.deepcopy(events)
-            intents = {row['kind']: row for row in changed if row['event'] == 'local_document_commit' and row['operation'] == 0}
-            attempts = {kind: next(row for row in changed if row['event'] == 'remote_attempt' and row['revision'] == state['attempt']['revision'])
-                        for kind, state in states.items()}
-            if mutation == 'nest-intent':
-                intents['nest']['tree']['placement']['Move']['parent'] = intents['unnest']['tree']['placement']['Move']['parent']
-            elif mutation == 'unnest-intent':
-                intents['unnest']['tree']['placement']['Move']['before'] = intents['unnest']['tree']['object']
-            elif mutation == 'delete-intent':
-                intents['delete']['tree']['object'] = intents['nest']['tree']['object']
-            elif mutation == 'tail-boundary':
-                intents['tail_split']['split']['offset'] += 1
-            elif mutation == 'nest-children':
-                parent = intents['nest']['tree']['placement']['Move']['parent']
-                attempts['nest']['document_graph'][parent]['children'] = []
-            elif mutation == 'delete-resurrection':
-                tail = intents['delete']['object']
-                attempts['delete']['documents'][tail] = attempts['tail_split']['documents'][tail]
-            elif mutation == 'graph-delta':
-                attempts['nest']['document_graph_changes'] = {}
-            else:
-                extra = copy.deepcopy(attempts['nest'])
-                extra.update(revision='unrecorded-tree-revision', state='Committed')
-                changed.append(extra)
-            with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
-                document_history({'w0': changed}, 2)
 
     def test_boundary_histories_retain_every_intermediate_graph_and_retired_identity(self):
         baseline = history(boundaries=True)

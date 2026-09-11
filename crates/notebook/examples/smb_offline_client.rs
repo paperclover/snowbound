@@ -4,8 +4,7 @@ mod concurrent;
 use notebook::smb::{Client, Credentials};
 use notebook::{EditStatus, Error, Remote, Replica, SmbRemote};
 use onestore::{
-    CommitError, CommitState, ExGuid, Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit,
-    RevisionIndex, Store, TextAttribute, TreeEdit, document::Document,
+    CommitError, CommitState, ExGuid, PreparedEdit, RevisionIndex, Store, page::Paragraph,
 };
 use serde_json::json;
 use std::{
@@ -40,19 +39,6 @@ impl DocumentView {
         }
     }
 }
-
-const DOCUMENT_OPERATIONS: [&str; 10] = [
-    "insert",
-    "format",
-    "text",
-    "split",
-    "right_text",
-    "nest",
-    "unnest",
-    "join",
-    "tail_split",
-    "delete",
-];
 
 fn now() -> u128 {
     SystemTime::now()
@@ -282,6 +268,56 @@ fn tokens(text: &str) -> Option<Vec<&str>> {
 }
 
 // This owned workload explicitly resolves append conflicts after all retained tokens.
+fn page_with(
+    bytes: &[u8],
+    space: ExGuid,
+    text: ExGuid,
+) -> Result<onestore::page::Page, Box<dyn std::error::Error>> {
+    let store = Store::parse(bytes)?;
+    let index = RevisionIndex::parse(&store)?;
+    let document = onestore::document::Document::parse(&index)?;
+    let page = onestore::page::Page::from_space(&document, space)?;
+    if paragraph_mut(&mut page.clone(), text).is_none() {
+        return Err("The target text is not on its page".into());
+    }
+    Ok(page)
+}
+
+fn paragraph_mut(
+    page: &mut onestore::page::Page,
+    text: ExGuid,
+) -> Option<&mut onestore::page::TextObject> {
+    for object in &mut page.objects {
+        let outlines: Vec<&mut onestore::page::Outline> = match object {
+            onestore::page::PageObject::Outline(outline) => vec![outline],
+            onestore::page::PageObject::Title(title) => title.outlines.iter_mut().collect(),
+            _ => Vec::new(),
+        };
+        for outline in outlines {
+            if let Some(paragraph) = outline
+                .paragraphs
+                .iter_mut()
+                .find(|p| p.text().is_some_and(|t| t.id == text))
+            {
+                return paragraph.text_mut();
+            }
+        }
+    }
+    None
+}
+
+fn append_to(page: &mut onestore::page::Page, text: ExGuid, at: u32, token: &str) {
+    let target = paragraph_mut(page, text).expect("target text is on its page");
+    let format = target.text.format_at(at).unwrap().clone();
+    target
+        .text
+        .apply(onestore::page::text::Edit {
+            range: at..at,
+            replacement: Paragraph::new(token.into(), format),
+        })
+        .unwrap();
+}
+
 fn append_position(before: &str, current: &str, token: &str) -> Option<u32> {
     let original = tokens(before)?;
     let present = tokens(current)?;
@@ -293,162 +329,6 @@ fn append_position(before: &str, current: &str, token: &str) -> Option<u32> {
         return None;
     }
     u32::try_from(current.encode_utf16().count()).ok()
-}
-
-fn queue_document(
-    cache: &Replica,
-    actor: &str,
-    operation: usize,
-    parent: Option<ExGuid>,
-    deadline: Instant,
-) -> Result<(ExGuid, [u64; DOCUMENT_OPERATIONS.len()]), Box<dyn std::error::Error>> {
-    let source = cache.snapshot()?;
-    let store = Store::parse(&source)?;
-    let index = RevisionIndex::parse(&store)?;
-    let document = Document::parse(&index)?;
-    let (space, page) = document.pages()?[0];
-    let text = format!("Document {actor}:{operation} 🦀");
-    let insertion = if operation.is_multiple_of(2) {
-        let column: u32 = actor
-            .strip_prefix('w')
-            .ok_or("Missing writer number")?
-            .parse()?;
-        Insertion::outline(
-            page,
-            144.0 + column as f32 * 240.0,
-            144.0 + operation as f32 * 72.0,
-            &text,
-            "Offline document writer",
-        )?
-    } else {
-        Insertion::paragraph(
-            parent.ok_or("Missing prior outline")?,
-            None,
-            &text,
-            "Offline document writer",
-        )?
-    }
-    .with_formatting(
-        0..u32::try_from(text.encode_utf16().count())?,
-        &[
-            TextAttribute::FontSize(13.5),
-            TextAttribute::Color(Some([0x44, 0x55, 0x66])),
-        ],
-    )?;
-    let parent = if operation.is_multiple_of(2) {
-        insertion.object()
-    } else {
-        parent.unwrap()
-    };
-    let end = u32::try_from(text.encode_utf16().count())?;
-    let split = ParagraphSplit::new(insertion.text_object(), end - 2, "Offline document writer")?;
-    let tail_split =
-        ParagraphSplit::new(insertion.text_object(), end + 1, "Offline document writer")?;
-    let join = ParagraphJoin::new(
-        insertion.text_object(),
-        split.text_object(),
-        "Offline document writer",
-    )?;
-    let attributes = [
-        TextAttribute::Bold(true),
-        TextAttribute::FontSize(18.0 + (operation % 9) as f32),
-        TextAttribute::Color(Some([0x12, 0x34, 0x56])),
-    ];
-    let mut ids = [0; DOCUMENT_OPERATIONS.len()];
-    for (step, id) in ids.iter_mut().enumerate() {
-        let kind = DOCUMENT_OPERATIONS[step];
-        let tree = match kind {
-            "nest" => {
-                let source = cache.snapshot()?;
-                let store = Store::parse(&source)?;
-                let index = RevisionIndex::parse(&store)?;
-                let document = Document::parse(&index)?;
-                let section = &document.spaces[&space];
-                let view = &section.revisions[&section.contexts[&ExGuid::default()]];
-                let paragraph = view
-                    .nodes
-                    .iter()
-                    .find(|(_, node)| node.content == [insertion.text_object()])
-                    .map(|(id, _)| *id)
-                    .ok_or("Missing inserted paragraph")?;
-                Some(TreeEdit::move_to(
-                    split.object(),
-                    paragraph,
-                    None,
-                    "Offline document writer",
-                )?)
-            }
-            "unnest" => Some(TreeEdit::move_to(
-                split.object(),
-                parent,
-                None,
-                "Offline document writer",
-            )?),
-            "delete" => Some(TreeEdit::delete(
-                tail_split.object(),
-                "Offline document writer",
-            )?),
-            _ => None,
-        };
-        let range = match kind {
-            "text" => end - 3..end,
-            "split" => end - 2..end - 2,
-            "tail_split" => end + 1..end + 1,
-            "right_text" => 0..2,
-            _ => 1..end - 2,
-        };
-        let target = if kind == "right_text" {
-            split.text_object()
-        } else if kind == "delete" {
-            tail_split.text_object()
-        } else {
-            insertion.text_object()
-        };
-        let replacement = match kind {
-            "text" => Some(" e\u{301}🐈"),
-            "right_text" => Some("B🦋"),
-            _ => None,
-        };
-        loop {
-            if Instant::now() >= deadline {
-                return Err("Document queue timed out; cache retained".into());
-            }
-            let source = cache.snapshot()?;
-            let started = now();
-            let result = match kind {
-                "insert" => cache.insert(&source, space, &insertion),
-                "format" => cache.format(&source, space, target, range.clone(), &attributes),
-                "text" | "right_text" => {
-                    cache.edit_text(&source, space, target, range.clone(), replacement.unwrap())
-                }
-                "split" => cache.split(&source, space, &split),
-                "tail_split" => cache.split(&source, space, &tail_split),
-                "join" => cache.join(&source, space, &join),
-                "nest" | "unnest" | "delete" => cache.tree(&source, space, tree.as_ref().unwrap()),
-                _ => unreachable!(),
-            };
-            match result {
-                Ok(Some(acknowledged)) => {
-                    *id = acknowledged;
-                    println!(
-                        "{}",
-                        json!({"event":"local_document_commit","id":acknowledged,"operation":operation,"kind":kind,
-                        "space":space.to_string(),"object":target.to_string(),"document":insertion.text_object().to_string(),
-                        "text":text,"insertion":if kind=="insert" {Some(&insertion)} else {None},
-                        "split":match kind { "split" => Some(&split), "tail_split" => Some(&tail_split), _ => None },
-                        "tree":tree,
-                        "joined":if kind=="join" {Some(join.texts().map(|id| id.to_string()))} else {None},
-                        "range":[range.start,range.end],"attributes":attributes,"replacement":replacement,
-                        "started_us":started,"finished_us":now()})
-                    );
-                    break;
-                }
-                Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => {}
-                other => return Err(format!("Unexpected document queue result: {other:?}").into()),
-            }
-        }
-    }
-    Ok((parent, ids))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -495,7 +375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache = Arc::new(Replica::create(&cache_path, &source)?);
     println!(
         "{}",
-        json!({"event":"ready", "pid":std::process::id(), "actor":args[2], "offline":true, "document_operations":documents,"document_graph":documents,"document_kinds":if documents {DOCUMENT_OPERATIONS.as_slice()} else {&[]}})
+        json!({"event":"ready", "pid":std::process::id(), "actor":args[2], "offline":true, "document_operations":false,"document_graph":documents,"document_kinds":[]})
     );
     while !Path::new(&args[4]).exists() {
         if Instant::now() >= deadline {
@@ -529,8 +409,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
     let mut ids = Vec::new();
-    let mut document_ids = std::collections::BTreeSet::new();
-    let mut document_parent = None;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut generated = 0;
         let mut received = 0;
@@ -547,7 +425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(EditStatus::Published { revision }) => {
                         println!(
                             "{}",
-                            json!({"event":if document_ids.contains(&ids[received]) {"document_receipt"} else {"remote_receipt"}, "id":ids[received], "revision":revision.to_string(), "at_us":now()})
+                            json!({"event":"remote_receipt", "id":ids[received], "revision":revision.to_string(), "at_us":now()})
                         );
                         received += 1;
                     }
@@ -564,8 +442,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .is_some_and(|directory| !directory.join("offline-outage-down").exists())
             {
                 1
-            } else if documents && outage.is_some() {
-                8 * (1 + DOCUMENT_OPERATIONS.len())
             } else {
                 8
             };
@@ -575,25 +451,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let at = u32::try_from(target.text.encode_utf16().count())?;
                 let token = format!(" [{}:{}]", args[2], generated);
                 let started = now();
-                match cache.edit_text(&source, target.space, target.object, at..at, &token) {
+                let mut page = page_with(&source, target.space, target.object)?;
+                append_to(&mut page, target.object, at, &token);
+                match cache.save(&source, target.space, &page, "Offline document writer") {
                     Ok(Some(id)) => {
                         println!(
                             "{}",
                             json!({"event":"local_commit", "id":id, "operation":generated, "space":target.space.to_string(), "object":target.object.to_string(), "before":target.text, "token":token, "started_us":started, "finished_us":now()})
                         );
                         ids.push(id);
-                        if documents {
-                            let (parent, added) = queue_document(
-                                &cache,
-                                &args[2],
-                                generated,
-                                document_parent,
-                                deadline,
-                            )?;
-                            document_parent = Some(parent);
-                            document_ids.extend(added);
-                            ids.extend(added);
-                        }
                         generated += 1;
                     }
                     Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => {}
@@ -606,20 +472,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let local = cache.snapshot()?;
                 let remote = cache.remote_snapshot()?;
                 let current = view(&remote)?;
-                let notebook::Operation::Text(edit) = &intent.operation else {
+                let notebook::Operation::Page(edit) = &intent.operation else {
                     return Err(format!(
-                        "Document intent {} requires review: {:?}",
+                        "Intent {} requires review: {:?}",
                         intent.id,
                         cache.status(intent.id)?
                     )
                     .into());
                 };
-                let at = append_position(&edit.before, &current.text, &edit.replacement)
+                let (object, before, _, token) = edit
+                    .text_change()
+                    .ok_or("A review expects one appended token")?;
+                let at = append_position(&before, &current.text, &token)
                     .ok_or("Append model disagrees with retained history")?;
-                match cache.rebase_conflict(intent.id, &local, &remote, at..at) {
+                let mut reviewed = page_with(&remote, intent.space, object)?;
+                append_to(&mut reviewed, object, at, &token);
+                match cache.review_page(intent.id, &local, &remote, &reviewed) {
                     Ok(()) => println!(
                         "{}",
-                        json!({"event":"reviewed_append", "id":intent.id, "before":edit.before, "remote":current.text, "token":edit.replacement, "at_us":now()})
+                        json!({"event":"reviewed_append", "id":intent.id, "before":before, "remote":current.text, "token":token, "at_us":now()})
                     ),
                     Err(Error::Io(error))
                         if [
@@ -658,7 +529,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         println!(
             "{}",
-            json!({"event":if document_ids.contains(&id) {"reopened_document_receipt"} else {"reopened_receipt"}, "id":id, "revision":revision.to_string()})
+            json!({"event":"reopened_receipt", "id":id, "revision":revision.to_string()})
         );
     }
     println!(
@@ -700,131 +571,8 @@ fn append_review_requires_a_unique_ordered_history_and_an_absent_new_token() {
 }
 
 #[cfg(test)]
-#[path = "../../onestore/tests/support/disk.rs"]
-mod disk;
-
-#[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn document_workload_retains_dependencies_and_receipts_across_reopen() {
-        struct Server {
-            disk: disk::Disk,
-            lost_reply: bool,
-        }
-        impl Remote for Server {
-            fn read(&mut self) -> io::Result<Vec<u8>> {
-                Ok(self.disk.visible.clone())
-            }
-            fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-                edit.commit(&mut self.disk)?;
-                if std::mem::take(&mut self.lost_reply) {
-                    Err(CommitError {
-                        state: CommitState::Unknown,
-                        error: io::Error::from(io::ErrorKind::ConnectionAborted),
-                    })
-                } else {
-                    Ok(())
-                }
-            }
-            fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-                onestore::confirm_snapshot(&mut self.disk, snapshot)
-            }
-        }
-        let source =
-            onestore::create_section("workload.one", "Concurrent edits:", "Author").unwrap();
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("cache.sqlite");
-        let mut cache = Replica::create(&path, &source).unwrap();
-        let mut remote = Traced {
-            remote: Server {
-                disk: disk::Disk {
-                    visible: source.clone(),
-                    durable: source.clone(),
-                    operation: 0,
-                    fail_at: None,
-                    write_limit: 97,
-                    random: 1,
-                },
-                lost_reply: false,
-            },
-            before: None,
-            pause: None,
-            documents: true,
-        };
-        println!(
-            "{}",
-            json!({"event":"ready", "actor":"w0", "offline":true,
-            "document_operations":true, "document_graph":true, "document_kinds":DOCUMENT_OPERATIONS})
-        );
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let mut parent = None;
-        let mut ids = Vec::new();
-        for operation in 0..2 {
-            let (outline, added) =
-                queue_document(&cache, "w0", operation, parent, deadline).unwrap();
-            parent = Some(outline);
-            ids.extend(added);
-            drop(cache);
-            cache = Replica::open(&path).unwrap();
-        }
-        let local = cache.snapshot().unwrap();
-        assert_eq!(
-            cache.pending().unwrap().len(),
-            2 * DOCUMENT_OPERATIONS.len()
-        );
-        for (step, id) in ids.iter().enumerate() {
-            remote.remote.lost_reply = matches!(
-                DOCUMENT_OPERATIONS[step % DOCUMENT_OPERATIONS.len()],
-                "split" | "nest" | "unnest" | "join" | "tail_split" | "delete"
-            );
-            let result = cache.sync_once(&mut remote);
-            let state = if result.is_err() {
-                assert!(matches!(
-                    result,
-                    Err(Error::Remote(CommitError {
-                        state: CommitState::Unknown,
-                        ..
-                    }))
-                ));
-                drop(cache);
-                cache = Replica::open(&path).unwrap();
-                cache.sync_once(&mut remote).unwrap().unwrap()
-            } else {
-                result.unwrap().unwrap()
-            };
-            assert_eq!(state.0, *id);
-            let EditStatus::Published { revision } = state.1 else {
-                panic!("{state:?}")
-            };
-            println!(
-                "{}",
-                json!({"event":"document_receipt", "id":id, "revision":revision.to_string(), "at_us":now()})
-            );
-            drop(cache);
-            cache = Replica::open(&path).unwrap();
-            assert_eq!(
-                cache.status(*id).unwrap(),
-                Some(EditStatus::Published { revision })
-            );
-            if step + 1 < ids.len() {
-                assert_eq!(cache.snapshot().unwrap(), local);
-            }
-        }
-        assert!(cache.pending().unwrap().is_empty());
-        for id in ids {
-            let Some(EditStatus::Published { revision }) = cache.status(id).unwrap() else {
-                panic!()
-            };
-            println!(
-                "{}",
-                json!({"event":"reopened_document_receipt", "id":id, "revision":revision.to_string()})
-            );
-        }
-        remote.read().unwrap();
-        println!("{}", json!({"event":"done"}));
-    }
 
     #[test]
     fn publication_differences_retain_removed_text_and_graph_identities() {

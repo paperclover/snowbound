@@ -1,0 +1,371 @@
+//! A deterministic multi-actor schedule over page-model saves: several replicas edit one
+//! page offline, publish through a fault-injecting remote, reopen, and review conflicts.
+
+use crate::model_ops::{self, AUTHOR};
+use crate::server::{Fault, Server};
+use notebook::{EditStatus, Operation, Remote, Replica};
+use onestore::{
+    CommitError, ExGuid, PreparedEdit, RevisionIndex, Store,
+    document::Document,
+    page::{Outline, Page, PageObject},
+};
+use std::{io, sync::LazyLock};
+
+static SOURCE: LazyLock<(Vec<u8>, ExGuid)> = LazyLock::new(|| {
+    let source =
+        onestore::create_section("model-schedule.one", "Original 🦀 é 0", "Author").unwrap();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let space = document.pages().unwrap()[0].0;
+    let mut page = Page::from_space(&document, space).unwrap();
+    let mut anchor = body(&page).paragraphs[0].text().unwrap().id;
+    for at in 1..8 {
+        anchor = model_ops::insert_after(&mut page, anchor, &format!("Original 🦀 é {at}")).1;
+    }
+    let source = PreparedEdit::page(&source, space, &page, "Author")
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    (source, space)
+});
+
+fn body(page: &Page) -> &Outline {
+    page.objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) => Some(outline),
+            _ => None,
+        })
+        .expect("the page keeps one body outline")
+}
+
+/// Everything the schedule asserts about a page, free of the identities the writers mint.
+fn shape(page: &Page) -> Vec<String> {
+    let outline = body(page);
+    let mut out = vec![format!("{:?}", outline.layout)];
+    out.extend(outline.paragraphs.iter().map(|paragraph| {
+        format!(
+            "{} {} {} {:?}",
+            paragraph.level,
+            u8::from(paragraph.collapsed),
+            u8::from(paragraph.parent.is_some()),
+            paragraph.text().map(|text| text.text.text()),
+        )
+    }));
+    out
+}
+
+/// Paragraph and text identities of the body outline with their text, in model order.
+fn rows(bytes: &[u8]) -> Vec<(ExGuid, ExGuid, String)> {
+    let page = model_ops::page_of(bytes, SOURCE.1);
+    body(&page)
+        .paragraphs
+        .iter()
+        .filter_map(|paragraph| {
+            let text = paragraph.text()?;
+            Some((paragraph.id, text.id, text.text.text().to_owned()))
+        })
+        .collect()
+}
+
+/// Moves a paragraph and its descendants immediately before `anchor`, or last among
+/// `parent`'s children; `anchor` supplies its own parent and level.
+pub(crate) fn move_subtree(
+    page: &mut Page,
+    paragraph: ExGuid,
+    parent: Option<ExGuid>,
+    anchor: Option<ExGuid>,
+) {
+    for outline in model_ops::outlines_mut(page) {
+        let Some(at) = outline.paragraphs.iter().position(|p| p.id == paragraph) else {
+            continue;
+        };
+        let level = outline.paragraphs[at].level;
+        let mut end = at + 1;
+        while end < outline.paragraphs.len() && outline.paragraphs[end].level > level {
+            end += 1;
+        }
+        if parent
+            .into_iter()
+            .chain(anchor)
+            .any(|id| outline.paragraphs[at..end].iter().any(|p| p.id == id))
+        {
+            return;
+        }
+        let mut subtree: Vec<_> = outline.paragraphs.drain(at..end).collect();
+        let (destination, parent, depth) = match anchor {
+            Some(anchor) => {
+                let Some(at) = outline.paragraphs.iter().position(|p| p.id == anchor) else {
+                    return;
+                };
+                let target = &outline.paragraphs[at];
+                (at, target.parent, target.level)
+            }
+            None => match parent {
+                Some(parent) => {
+                    let Some(at) = outline.paragraphs.iter().position(|p| p.id == parent) else {
+                        return;
+                    };
+                    let level = outline.paragraphs[at].level;
+                    let mut end = at + 1;
+                    while end < outline.paragraphs.len() && outline.paragraphs[end].level > level {
+                        end += 1;
+                    }
+                    (end, Some(parent), level + 1)
+                }
+                None => (outline.paragraphs.len(), None, 1),
+            },
+        };
+        subtree[0].parent = parent;
+        for descendant in &mut subtree {
+            descendant.level = descendant.level + depth - level;
+        }
+        outline.paragraphs.splice(destination..destination, subtree);
+        return;
+    }
+}
+
+/// Asserts the publication invariants that survive the page model, then delegates.
+struct Session<'a> {
+    server: &'a mut Server,
+    intent: Option<(u64, Operation)>,
+    /// The intent was already attempted, so its publication must never be repeated.
+    retired: bool,
+    publications: usize,
+}
+
+impl Remote for Session<'_> {
+    fn read(&mut self) -> io::Result<Vec<u8>> {
+        self.server.read()
+    }
+
+    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+        assert!(!self.retired, "a retired attempt was replayed");
+        self.publications += 1;
+        assert_eq!(self.publications, 1);
+        let Some((_, Operation::Page(intent))) = &self.intent else {
+            panic!("the schedule queues page saves only")
+        };
+        if model_ops::page_of(&self.server.visible, SOURCE.1) == intent.before {
+            assert_eq!(
+                shape(&model_ops::page_of(edit.as_bytes(), SOURCE.1)),
+                shape(&intent.after)
+            );
+        }
+        self.server.publish(edit)
+    }
+
+    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
+        self.server.confirm(snapshot)
+    }
+}
+
+fn statuses(cache: &Replica) -> Vec<(u64, Option<EditStatus>)> {
+    cache
+        .pending()
+        .unwrap()
+        .iter()
+        .map(|edit| (edit.id, cache.status(edit.id).unwrap()))
+        .collect()
+}
+
+/// Fails unless the durable remote holds `revision` in the edited page's space.
+fn durable(server: &Server, revision: ExGuid) {
+    let store = Store::parse(&server.durable).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    assert!(index.spaces[&SOURCE.1].revisions.contains_key(&revision));
+}
+
+pub fn run(input: &[u8]) {
+    let (source, space) = &*SOURCE;
+    let directory = tempfile::tempdir().unwrap();
+    let mut replicas: [Option<Replica>; 12] = std::array::from_fn(|_| None);
+    let mut server = Server::new(source);
+    for step in input.chunks_exact(8).take(48) {
+        let actor = usize::from(step[0]) % replicas.len();
+        let path = directory.path().join(format!("{actor}.sqlite"));
+        let cache = replicas[actor].get_or_insert_with(|| Replica::create(&path, source).unwrap());
+        let snapshot = cache.snapshot().unwrap();
+        let pending = cache.pending().unwrap();
+        let local = rows(&snapshot);
+        match step[1] % 8 {
+            0..=2 => {
+                let row = local[usize::from(step[2]) % local.len()].clone();
+                let other = local[usize::from(step[4]) % local.len()].clone();
+                let change: Box<dyn Fn(&mut Page)> = match step[3] % 6 {
+                    0 if !row.2.is_empty() => Box::new(move |page| {
+                        model_ops::replace_text(
+                            page,
+                            row.1,
+                            0..1,
+                            &char::from(b'A' + step[5] % 26).to_string(),
+                        );
+                    }),
+                    1 => Box::new(move |page| {
+                        model_ops::insert_after(page, row.1, "Inserted 🦋 é");
+                    }),
+                    2 => Box::new(move |page| {
+                        move_subtree(page, row.0, (step[5] & 1 != 0).then_some(other.0), None);
+                    }),
+                    3 => Box::new(move |page| model_ops::delete_paragraph(page, row.1)),
+                    4 => Box::new(move |page| {
+                        let outline = model_ops::outlines_mut(page).swap_remove(0);
+                        if step[5] & 1 == 0 {
+                            outline.layout.x = Some(f32::from(step[5]) + 36.0);
+                            outline.layout.y = Some(f32::from(step[6]) + 36.0);
+                        } else {
+                            outline.layout.max_width = Some(f32::from(step[6]) + 72.0);
+                            outline.layout.width_set_by_user = Some(step[6] & 2 == 0);
+                        }
+                    }),
+                    5 if !row.2.is_empty() => Box::new(move |page| {
+                        model_ops::restyle(page, row.1, 0..1, |format| {
+                            format.font_size = Some(f32::from(step[5] % 20) + 12.0);
+                        });
+                    }),
+                    _ => Box::new(|_| {}),
+                };
+                let mut after = model_ops::page_of(&snapshot, *space);
+                change(&mut after);
+                match cache.save(&snapshot, *space, &after, AUTHOR) {
+                    Ok(id) => {
+                        let next = cache.pending().unwrap();
+                        let ids = |edits: &[notebook::PendingEdit]| -> Vec<u64> {
+                            edits.iter().map(|edit| edit.id).collect()
+                        };
+                        assert_eq!(ids(&next)[..pending.len()], ids(&pending)[..]);
+                        assert!(next.len() <= pending.len() + 1);
+                        assert_eq!(id.is_some(), cache.snapshot().unwrap() != snapshot);
+                        assert_eq!(
+                            shape(&model_ops::page_of(&cache.snapshot().unwrap(), *space)),
+                            shape(&after)
+                        );
+                    }
+                    Err(_) => {
+                        assert_eq!(cache.snapshot().unwrap(), snapshot);
+                        assert_eq!(cache.pending().unwrap(), pending);
+                    }
+                }
+            }
+            3 | 4 => {
+                server.fault = match step[2] % 8 {
+                    0 => Fault::Before,
+                    1 => Fault::UnknownBefore,
+                    2 => Fault::UnknownAfter,
+                    3 => Fault::Committed,
+                    4 => Fault::Confirm,
+                    5 => Fault::ConfirmCommitted,
+                    _ => Fault::None,
+                };
+                let head = pending.first().map(|edit| edit.id);
+                let result = {
+                    let mut session = Session {
+                        retired: head.is_some_and(|id| {
+                            matches!(
+                                cache.status(id).unwrap(),
+                                Some(EditStatus::AwaitingConfirmation { .. })
+                            )
+                        }),
+                        intent: pending
+                            .first()
+                            .map(|edit| (edit.id, edit.operation.clone())),
+                        server: &mut server,
+                        publications: 0,
+                    };
+                    cache.sync_once(&mut session)
+                };
+                server.fault = Fault::None;
+                let next = cache.pending().unwrap();
+                if next.len() == pending.len() {
+                    assert_eq!(next, pending);
+                    if !next.is_empty() {
+                        assert_eq!(cache.snapshot().unwrap(), snapshot);
+                    }
+                } else {
+                    assert_eq!(next, pending[1..]);
+                    let Some(EditStatus::Published { revision }) =
+                        cache.status(head.unwrap()).unwrap()
+                    else {
+                        panic!("an intent leaves the queue only with its receipt")
+                    };
+                    durable(&server, revision);
+                }
+                if next.is_empty() && result.is_ok() {
+                    assert_eq!(cache.snapshot().unwrap(), cache.remote_snapshot().unwrap());
+                }
+            }
+            5 => {
+                let remote = rows(&server.visible);
+                let row = remote[usize::from(step[2]) % remote.len()].clone();
+                if !row.2.is_empty() {
+                    let mut page = model_ops::page_of(&server.visible, *space);
+                    model_ops::replace_text(
+                        &mut page,
+                        row.1,
+                        0..1,
+                        &char::from(b'a' + step[3] % 26).to_string(),
+                    );
+                    let visible = server.visible.clone();
+                    PreparedEdit::page(&visible, *space, &page, "Remote")
+                        .unwrap()
+                        .commit(&mut server)
+                        .unwrap();
+                }
+            }
+            6 => {
+                if let Some(head) = pending.first()
+                    && matches!(
+                        cache.status(head.id).unwrap(),
+                        Some(EditStatus::Conflict(_))
+                    )
+                {
+                    let remote = cache.remote_snapshot().unwrap();
+                    let published = rows(&remote);
+                    let row = published[usize::from(step[2]) % published.len()].clone();
+                    let mut after = model_ops::page_of(&remote, *space);
+                    if !row.2.is_empty() {
+                        model_ops::replace_text(&mut after, row.1, 0..1, "R");
+                    }
+                    if cache
+                        .review_page(head.id, &snapshot, &remote, &after)
+                        .is_ok()
+                    {
+                        assert_eq!(cache.status(head.id).unwrap(), Some(EditStatus::Pending));
+                        let (result, publications) = {
+                            let mut session = Session {
+                                intent: Some((
+                                    head.id,
+                                    cache.pending().unwrap()[0].operation.clone(),
+                                )),
+                                retired: false,
+                                server: &mut server,
+                                publications: 0,
+                            };
+                            (cache.sync_once(&mut session), session.publications)
+                        };
+                        assert!(publications <= 1);
+                        if let Ok(Some((id, EditStatus::Published { revision }))) = result {
+                            assert_eq!(id, head.id);
+                            durable(&server, revision);
+                            assert!(cache.pending().unwrap().iter().all(|e| e.id != id));
+                        }
+                    } else {
+                        assert_eq!(cache.pending().unwrap(), pending);
+                    }
+                }
+            }
+            _ => {
+                let recorded = statuses(cache);
+                replicas[actor] = None;
+                let cache = Replica::open(&path).unwrap();
+                assert_eq!(cache.snapshot().unwrap(), snapshot);
+                assert_eq!(cache.pending().unwrap(), pending);
+                assert_eq!(statuses(&cache), recorded);
+                replicas[actor] = Some(cache);
+            }
+        }
+        rows(&server.durable);
+        rows(&replicas[actor].as_ref().unwrap().snapshot().unwrap());
+    }
+}

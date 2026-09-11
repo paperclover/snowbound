@@ -1,12 +1,20 @@
 //! Page-model saves: one intent per page until it is attempted, reconciliation against the
 //! remote page, reviewed conflicts, and independence between pages.
 
-use super::*;
+use notebook::{ConflictKind, EditStatus, Replica};
+use onestore::{ExGuid, PreparedEdit, RevisionIndex, Store, document::Document};
+
+#[path = "support/server.rs"]
+mod server;
+use server::*;
+#[path = "support/model_ops.rs"]
+mod model_ops;
+
 use notebook::{Operation, PageIntent};
 use onestore::page::{Page, PageObject};
 
 const OUTLINES: &[u8] =
-    include_bytes!("../../../../corpus/outline-edit/before/notebook/synthetic.one");
+    include_bytes!("../../../corpus/outline-edit/before/notebook/synthetic.one");
 
 fn page_of(bytes: &[u8], space: ExGuid) -> Page {
     let store = Store::parse(bytes).unwrap();

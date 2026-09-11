@@ -1,4 +1,9 @@
 use notebook::{EditStatus, Error, Operation, Recovery, Replica};
+use onestore::{
+    ExGuid, RevisionIndex, Store,
+    document::Document,
+    page::{Page, PageObject},
+};
 use std::{
     fs, io,
     path::Path,
@@ -6,14 +11,54 @@ use std::{
     time::Duration,
 };
 
-const FIXTURE: &str = "../../corpus/native-external-assets/notebook";
-const LEGACY: &str = "../../corpus/offline-v4/live.sqlite";
+#[path = "support/model_ops.rs"]
+mod model_ops;
 
-fn copied_cache(root: &Path) -> Replica {
+const FIXTURE: &str = "../../corpus/native-external-assets/notebook";
+
+/// The first body text object of the section referencing the fixture's media.
+fn first_text(bytes: &[u8]) -> ExGuid {
+    let store = Store::parse(bytes).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    document
+        .pages()
+        .unwrap()
+        .into_iter()
+        .find_map(|(space, _)| {
+            Page::from_space(&document, space)
+                .ok()?
+                .objects
+                .iter()
+                .find_map(|object| match object {
+                    PageObject::Outline(outline) => outline
+                        .paragraphs
+                        .iter()
+                        .find_map(|p| p.text().map(|t| t.id)),
+                    _ => None,
+                })
+        })
+        .unwrap()
+}
+
+/// A cache of the media fixture with a queued text save and a queued page creation.
+fn queued_cache(root: &Path) -> Replica {
     let path = root.join("cache.sqlite");
     assert!(!path.exists());
-    fs::copy(LEGACY, &path).unwrap();
-    Replica::open(path).unwrap()
+    let source = fs::read(Path::new(FIXTURE).join("synthetic.one")).unwrap();
+    let cache = Replica::create(path, &source).unwrap();
+    let text = first_text(&source);
+    model_ops::save(&cache, text, |page| {
+        model_ops::replace_text(page, text, 0..0, "Queued ")
+    })
+    .unwrap()
+    .unwrap();
+    let page = onestore::PageCreation::new(None, Some("Queued page"), "Author").unwrap();
+    cache
+        .create_page(&cache.snapshot().unwrap(), &page)
+        .unwrap()
+        .unwrap();
+    cache
 }
 
 fn payload(size: usize) -> (String, Vec<u8>) {
@@ -39,10 +84,9 @@ impl notebook::discover::Source for Payload {
 }
 
 #[test]
-fn downloaded_media_survives_migration_reopen_and_recovery_with_the_queue_intact() {
+fn downloaded_media_survives_reopen_and_recovery_with_the_queue_intact() {
     let directory = tempfile::tempdir().unwrap();
-    let original = fs::read(LEGACY).unwrap();
-    let cache = copied_cache(directory.path());
+    let cache = queued_cache(directory.path());
     let working = cache.snapshot().unwrap();
     let remote = cache.remote_snapshot().unwrap();
     let pending = cache.pending().unwrap();
@@ -51,10 +95,7 @@ fn downloaded_media_survives_migration_reopen_and_recovery_with_the_queue_intact
         [1, 2]
     );
     let uncertain = cache.status(1).unwrap();
-    assert!(matches!(
-        uncertain,
-        Some(EditStatus::AwaitingConfirmation { .. })
-    ));
+    assert_eq!(uncertain, Some(EditStatus::Pending));
     let mut source = notebook::discover::Local::open(FIXTURE).unwrap();
     for size in [0, 1024] {
         let (name, bytes) = payload(size);
@@ -99,30 +140,12 @@ fn downloaded_media_survives_migration_reopen_and_recovery_with_the_queue_intact
         );
         assert_eq!(recovery.cached_asset(&name, size).unwrap(), Some(bytes));
     }
-    assert_eq!(fs::read(LEGACY).unwrap(), original);
-}
-
-#[test]
-fn an_original_version_four_archive_remains_read_only_and_has_no_cached_media() {
-    let path = "../../corpus/offline-v4/recovery.sqlite";
-    let before = fs::read(path).unwrap();
-    let archive = Recovery::open(path).unwrap();
-    assert_eq!(archive.pending().unwrap().len(), 2);
-    assert!(matches!(
-        archive.status(1).unwrap(),
-        Some(EditStatus::AwaitingConfirmation { .. })
-    ));
-    assert_eq!(archive.summary().unwrap().cached_assets, 0);
-    assert_eq!(archive.summary().unwrap().cached_asset_bytes, 0);
-    assert!(archive.cached_asset(&payload(0).0, 0).unwrap().is_none());
-    drop(archive);
-    assert_eq!(fs::read(path).unwrap(), before);
 }
 
 #[test]
 fn unsuccessful_refreshes_and_changed_identity_data_preserve_the_downloaded_payload() {
     let directory = tempfile::tempdir().unwrap();
-    let cache = copied_cache(directory.path());
+    let cache = queued_cache(directory.path());
     let (name, bytes) = payload(1024);
     let mut source = Payload(Some(Ok(bytes.clone())));
     cache
@@ -154,7 +177,7 @@ fn unsuccessful_refreshes_and_changed_identity_data_preserve_the_downloaded_payl
 #[test]
 fn unreferenced_payloads_are_rejected_before_io_or_local_changes() {
     let directory = tempfile::tempdir().unwrap();
-    let cache = copied_cache(directory.path());
+    let cache = queued_cache(directory.path());
     let mut unused = Payload(None);
     assert!(
         matches!(cache.fetch_asset(&mut unused, "synthetic.one", "00000000-0000-0000-0000-000000000001.onebin", 100),
@@ -186,7 +209,7 @@ fn download_network_wait_does_not_block_local_edits() {
         }
     }
     let directory = tempfile::tempdir().unwrap();
-    let cache = copied_cache(directory.path());
+    let cache = queued_cache(directory.path());
     let (name, bytes) = payload(1024);
     let (entered, waiting) = mpsc::channel();
     let (release, released) = mpsc::channel();
@@ -202,30 +225,26 @@ fn download_network_wait_does_not_block_local_edits() {
                 .unwrap()
         });
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-        let pending = cache.pending().unwrap();
-        let Operation::Text(edit) = &pending[0].operation else {
-            panic!()
-        };
-        let id = cache
-            .edit_text(
-                &cache.snapshot().unwrap(),
-                pending[0].space,
-                edit.object,
-                0..0,
-                "during download ",
-            )
-            .unwrap()
-            .unwrap();
+        let text = first_text(&cache.snapshot().unwrap());
+        let id = model_ops::save(&cache, text, |page| {
+            model_ops::replace_text(page, text, 0..0, "during download ")
+        })
+        .unwrap()
+        .unwrap();
         release.send(()).unwrap();
         assert_eq!(download.join().unwrap(), bytes);
         assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
+        let Operation::Page(intent) = &cache.pending().unwrap()[2].operation else {
+            panic!()
+        };
+        assert_eq!(intent.text_change().unwrap().3, "during download ");
     });
 }
 
 #[test]
 fn concurrent_downloads_publish_one_immutable_cache_entry() {
     let directory = tempfile::tempdir().unwrap();
-    let cache = copied_cache(directory.path());
+    let cache = queued_cache(directory.path());
     let (name, bytes) = payload(1024);
     let ready = Barrier::new(8);
     std::thread::scope(|scope| {
@@ -287,7 +306,7 @@ fn a_native_refresh_removing_the_reference_rejects_an_inflight_download() {
 #[test]
 fn local_failure_and_bad_cached_bytes_never_become_successful_downloads() {
     let directory = tempfile::tempdir().unwrap();
-    drop(copied_cache(directory.path()));
+    drop(queued_cache(directory.path()));
     let path = directory.path().join("cache.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TRIGGER fail_asset BEFORE INSERT ON assets BEGIN SELECT RAISE(ABORT,'Test asset failure'); END").unwrap();
@@ -346,7 +365,7 @@ fn abrupt_process_exit_retains_only_completed_downloads_and_archives() {
             }
         }
         let root = std::env::var("ONESTORE_ASSET_EXIT_ROOT").unwrap();
-        let cache = copied_cache(Path::new(&root));
+        let cache = queued_cache(Path::new(&root));
         let (name, bytes) = payload(1024);
         if phase == "download" {
             cache
@@ -391,10 +410,7 @@ fn abrupt_process_exit_retains_only_completed_downloads_and_archives() {
         let expected = (phase != "download").then_some(bytes);
         assert_eq!(cache.cached_asset(&name, 1024).unwrap(), expected);
         assert_eq!(cache.pending().unwrap().len(), 2);
-        assert!(matches!(
-            cache.status(1).unwrap(),
-            Some(EditStatus::AwaitingConfirmation { .. })
-        ));
+        assert_eq!(cache.status(1).unwrap(), Some(EditStatus::Pending));
         if phase == "archive" {
             let recovery = Recovery::open(root.path().join("recovery.sqlite")).unwrap();
             assert_eq!(recovery.cached_asset(&name, 1024).unwrap(), expected);
@@ -409,7 +425,7 @@ fn abrupt_process_exit_retains_only_completed_downloads_and_archives() {
 #[ignore = "requires a disposable Samba mirror at ONESTORE_SMB_NOTEBOOK"]
 fn live_smb_downloads_survive_disconnect_and_cache_reopen() {
     let root = tempfile::tempdir().unwrap();
-    let cache = copied_cache(root.path());
+    let cache = queued_cache(root.path());
     let client = notebook::smb::Client::connect(
         &std::env::var("ONESTORE_SMB_LAB").unwrap(),
         "agent",

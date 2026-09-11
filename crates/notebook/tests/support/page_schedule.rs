@@ -1,10 +1,16 @@
 use crate::disk;
 use notebook::{EditStatus, Operation, Remote, Replica};
 use onestore::{
-    CommitError, ExGuid, Insertion, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store,
-    document::{Document, Kind},
+    CommitError, ExGuid, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store,
+    document::{Document, Format, Kind, Layout},
+    page::{
+        Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
+        text::new_id,
+    },
 };
 use std::{io, sync::LazyLock};
+
+const BODY: &str = "Body 🦋 é";
 
 #[path = "../../../onestore/tests/support/current.rs"]
 mod current;
@@ -41,6 +47,73 @@ fn pages(source: &[u8]) -> Vec<(ExGuid, ExGuid, u32)> {
         .collect()
 }
 
+/// Adds a body outline holding one plain paragraph, returning its text identity. A page the
+/// section just created has no body text for `model_ops::insert_outline` to copy formatting from.
+pub fn body_outline(page: &mut Page, text: &str) -> ExGuid {
+    // The writer creates outline text with the store's default style; the model must state it.
+    let format = Format {
+        font: Some("Calibri".to_owned()),
+        font_size: Some(11.0),
+        language: Some(0x409),
+        ..Default::default()
+    };
+    let content = TextObject {
+        id: new_id().unwrap(),
+        date_field: None,
+        text: Paragraph::new(text.into(), format),
+        tags: Vec::new(),
+    };
+    let id = content.id;
+    let outline = Outline {
+        id: new_id().unwrap(),
+        title: false,
+        min_width: None,
+        layout: Layout {
+            x: Some(36.0),
+            y: Some(36.0),
+            ..Default::default()
+        },
+        indents: Vec::new(),
+        paragraphs: vec![PageParagraph {
+            id: new_id().unwrap(),
+            parent: None,
+            level: 1,
+            style: None,
+            format: Default::default(),
+            content: ParagraphContent::Text(content),
+            lists: Vec::new(),
+            tags: Vec::new(),
+            collapsed: false,
+        }],
+        unsupported: Vec::new(),
+    };
+    let at = page
+        .objects
+        .iter()
+        .position(|object| matches!(object, PageObject::Title(_)))
+        .unwrap_or(page.objects.len());
+    page.objects.insert(at, PageObject::Outline(outline));
+    id
+}
+
+/// The text identity of the first body outline's first paragraph.
+fn body_text(page: &Page) -> ExGuid {
+    page.objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) => outline.paragraphs[0].text().map(|text| text.id),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn page_of(source: &[u8], space: ExGuid) -> Page {
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    Page::from_space(&document, space).unwrap()
+}
+
 struct Session<'a> {
     disk: &'a mut disk::Disk,
     operation: Option<&'a Operation>,
@@ -68,7 +141,8 @@ impl Remote for Session<'_> {
                     }
                 }
             }
-            Operation::Insert(insertion) => {
+            Operation::Page(intent) => {
+                let body = body_text(&intent.after);
                 let store = Store::parse(edit.as_bytes()).unwrap();
                 let index = RevisionIndex::parse(&store).unwrap();
                 let document = Document::parse(&index).unwrap();
@@ -77,13 +151,11 @@ impl Remote for Session<'_> {
                     .values()
                     .filter_map(|space| {
                         let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-                        view.nodes.get(&insertion.text_object())
+                        view.nodes.get(&body)
                     })
                     .collect();
                 assert_eq!(matching.len(), 1);
-                assert!(
-                    matches!(&matching[0].kind, Kind::RichText { text, .. } if text == "Body 🦋 é")
-                );
+                assert!(matches!(&matching[0].kind, Kind::RichText { text, .. } if text == BODY));
             }
             _ => panic!(),
         }
@@ -129,11 +201,11 @@ pub fn run(input: &[u8]) {
                 cache.create_page(&snapshot, &page).unwrap().unwrap();
                 owned[actor].push((page.space(), page.object()));
                 if step[1] % 8 == 1 {
-                    let insertion =
-                        Insertion::outline(page.object(), 36.0, 36.0, "Body 🦋 é", "Author")
-                            .unwrap();
+                    let source = cache.snapshot().unwrap();
+                    let mut model = page_of(&source, page.space());
+                    body_outline(&mut model, BODY);
                     cache
-                        .insert(&cache.snapshot().unwrap(), page.space(), &insertion)
+                        .save(&source, page.space(), &model, "Author")
                         .unwrap()
                         .unwrap();
                 }

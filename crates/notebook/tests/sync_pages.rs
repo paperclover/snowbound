@@ -1,10 +1,25 @@
-use super::*;
-use notebook::{Operation, Recovery};
-use onestore::{PageEdit, PagePosition};
+//! Page batch reconciliation: atomic batches with dependent body saves, competing moves and
+//! indentation, uncertain batches, and native page movement fixtures.
+
+use notebook::{ConflictKind, EditStatus, Operation, Recovery, Replica};
+use onestore::{
+    ExGuid, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store,
+    document::{Document, Format, Kind, Layout},
+    page::{
+        Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
+        text::new_id,
+    },
+};
 use std::collections::BTreeMap;
 
+#[path = "support/server.rs"]
+mod server;
+use server::*;
+#[path = "support/model_ops.rs"]
+mod model_ops;
+
 const SOURCE: &[u8] =
-    include_bytes!("../../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
+    include_bytes!("../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
 
 fn order(source: &[u8]) -> Vec<(ExGuid, u32)> {
     let store = Store::parse(source).unwrap();
@@ -42,6 +57,55 @@ fn texts(source: &[u8]) -> BTreeMap<(ExGuid, ExGuid), String> {
     texts
 }
 
+/// Adds a body outline holding one plain paragraph, returning its text identity. A page the
+/// section just created has no body text for `model_ops::insert_outline` to copy formatting from.
+fn body_outline(page: &mut Page, text: &str) -> ExGuid {
+    // The writer creates outline text with the store's default style; the model must state it.
+    let format = Format {
+        font: Some("Calibri".to_owned()),
+        font_size: Some(11.0),
+        language: Some(0x409),
+        ..Default::default()
+    };
+    let content = TextObject {
+        id: new_id().unwrap(),
+        date_field: None,
+        text: Paragraph::new(text.into(), format),
+        tags: Vec::new(),
+    };
+    let id = content.id;
+    let outline = Outline {
+        id: new_id().unwrap(),
+        title: false,
+        min_width: None,
+        layout: Layout {
+            x: Some(36.0),
+            y: Some(36.0),
+            ..Default::default()
+        },
+        indents: Vec::new(),
+        paragraphs: vec![PageParagraph {
+            id: new_id().unwrap(),
+            parent: None,
+            level: 1,
+            style: None,
+            format: Default::default(),
+            content: ParagraphContent::Text(content),
+            lists: Vec::new(),
+            tags: Vec::new(),
+            collapsed: false,
+        }],
+        unsupported: Vec::new(),
+    };
+    let at = page
+        .objects
+        .iter()
+        .position(|object| matches!(object, PageObject::Title(_)))
+        .unwrap_or(page.objects.len());
+    page.objects.insert(at, PageObject::Outline(outline));
+    id
+}
+
 #[test]
 fn atomic_page_batches_survive_reopen_with_dependent_text() {
     let directory = tempfile::tempdir().unwrap();
@@ -61,10 +125,11 @@ fn atomic_page_batches_survive_reopen_with_dependent_text() {
         .unwrap();
     let changed = format!("Offline {original}");
     expected_text.insert((sid, oid), changed);
-    cache
-        .edit_text(&cache.snapshot().unwrap(), sid, oid, 0..0, "Offline ")
-        .unwrap()
-        .unwrap();
+    model_ops::save(&cache, oid, |page| {
+        model_ops::replace_text(page, oid, 0..0, "Offline ")
+    })
+    .unwrap()
+    .unwrap();
     let queue = cache.pending().unwrap();
     assert!(matches!(&queue[0].operation, Operation::Pages(batch) if batch.edits == edits));
     let local = cache.snapshot().unwrap();
@@ -365,51 +430,6 @@ fn convergent_page_indentation_requires_confirmation_without_republishing() {
     assert_eq!(server.publications, 0);
     assert_eq!(server.confirmations, 2);
 }
-
-#[test]
-fn schema_ten_migration_preserves_multi_space_uncertainty() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("pages.sqlite");
-    let cache = Replica::create(&path, SOURCE).unwrap();
-    let page = onestore::PageCreation::new(None, Some("Migration"), "Author").unwrap();
-    let id = cache.create_page(SOURCE, &page).unwrap().unwrap();
-    let mut server = Server::new(SOURCE);
-    server.fault = Fault::UnknownBefore;
-    assert!(cache.sync_once(&mut server).is_err());
-    let local = cache.snapshot().unwrap();
-    let queue = cache.pending().unwrap();
-    let status = cache.status(id).unwrap();
-    drop(cache);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.pragma_update(None, "user_version", 10).unwrap();
-    let proofs: String = db
-        .query_row("SELECT revisions FROM attempt", [], |r| r.get(0))
-        .unwrap();
-    drop(db);
-    let cache = Replica::open(&path).unwrap();
-    assert_eq!(cache.snapshot().unwrap(), local);
-    assert_eq!(cache.pending().unwrap(), queue);
-    assert_eq!(cache.status(id).unwrap(), status);
-    assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
-        Some((id, status.unwrap()))
-    );
-    assert_eq!(server.publications, 1);
-    drop(cache);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    assert_eq!(
-        db.query_row("SELECT revisions FROM attempt", [], |r| r
-            .get::<_, String>(0))
-            .unwrap(),
-        proofs
-    );
-    assert_eq!(
-        db.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
-            .unwrap(),
-        11
-    );
-}
-
 #[test]
 fn native_page_changes_reconcile_with_atomic_offline_batches_and_review() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -441,16 +461,11 @@ fn native_page_changes_reconcile_with_atomic_offline_batches_and_review() {
                     .collect()
             };
             let id = cache.pages(SOURCE, &edits).unwrap().unwrap();
-            let text_id = cache
-                .edit_text(
-                    &cache.snapshot().unwrap(),
-                    text_space,
-                    text_object,
-                    0..0,
-                    "Offline ",
-                )
-                .unwrap()
-                .unwrap();
+            let text_id = model_ops::save(&cache, text_object, |page| {
+                model_ops::replace_text(page, text_object, 0..0, "Offline ")
+            })
+            .unwrap()
+            .unwrap();
             let native = std::fs::read(root.join(phase).join("notebook/Lifecycle.one")).unwrap();
             let mut server = Server::new(&native);
             let local = cache.snapshot().unwrap();
@@ -562,11 +577,12 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
             PageEdit::set_level(group[2].space(), 2).unwrap(),
         ];
         cache.pages(&source, &edits).unwrap().unwrap();
-        let body = format!("Actor {actor} 🦀 é");
-        let insertion =
-            onestore::Insertion::outline(group[1].object(), 36.0, 36.0, &body, "Author").unwrap();
+        let body = format!("Actor {actor} 🦀 é");
+        let local = cache.snapshot().unwrap();
+        let mut model = model_ops::page_of(&local, group[1].space());
+        let text = body_outline(&mut model, &body);
         cache
-            .insert(&cache.snapshot().unwrap(), group[1].space(), &insertion)
+            .save(&local, group[1].space(), &model, "Author")
             .unwrap()
             .unwrap();
         expected.extend([
@@ -574,7 +590,7 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
             (group[0].space(), 1),
             (group[2].space(), 2),
         ]);
-        expected_text.insert((group[1].space(), insertion.text_object()), body);
+        expected_text.insert((group[1].space(), text), body);
         queues.push((path, cache.pending().unwrap()));
     }
     let mut server = Server::new(&source);

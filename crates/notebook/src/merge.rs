@@ -33,12 +33,7 @@ pub(crate) fn merge(base: &Page, ours: &Page, theirs: &Page) -> Option<Page> {
                 (PageObject::Outline(x), PageObject::Outline(y), PageObject::Outline(z)) => {
                     result.push(PageObject::Outline(merge_outline(x, y, z)?));
                 }
-                _ => {
-                    if after != before {
-                        return None;
-                    }
-                    result.push(object.clone());
-                }
+                _ => result.push(pick(before, after, &object)?.clone()),
             },
             (Some(before), None) => {
                 // Removed locally; keep only if the remote left it untouched.
@@ -148,36 +143,42 @@ fn pick<T: PartialEq + Clone>(base: &T, ours: &T, theirs: &T) -> Option<T> {
 }
 
 fn merge_outline(base: &Outline, ours: &Outline, theirs: &Outline) -> Option<Outline> {
-    if ours.title != base.title
-        || ours.min_width != base.min_width
-        || ours.indents != base.indents
-        || ours.unsupported != base.unsupported
-    {
-        return None;
-    }
+    let title = pick(&base.title, &ours.title, &theirs.title)?;
+    let min_width = pick(&base.min_width, &ours.min_width, &theirs.min_width)?;
+    let indents = pick(&base.indents, &ours.indents, &theirs.indents)?;
+    let unsupported = pick(&base.unsupported, &ours.unsupported, &theirs.unsupported)?;
     let mut layout = theirs.layout.clone();
     let (x, y) = pick(
         &(base.layout.x, base.layout.y),
         &(ours.layout.x, ours.layout.y),
         &(theirs.layout.x, theirs.layout.y),
     )?;
-    let (max_width, user_set) = pick(
-        &(base.layout.max_width, base.layout.width_set_by_user),
-        &(ours.layout.max_width, ours.layout.width_set_by_user),
-        &(theirs.layout.max_width, theirs.layout.width_set_by_user),
+    // A user-set width clears the wrap reservation, so the three travel together.
+    let width = |layout: &onestore::document::Layout| {
+        (
+            layout.max_width,
+            layout.width_set_by_user,
+            layout.reserved_width,
+        )
+    };
+    let (max_width, user_set, reserved) = pick(
+        &width(&base.layout),
+        &width(&ours.layout),
+        &width(&theirs.layout),
     )?;
     layout.x = x;
     layout.y = y;
     layout.max_width = max_width;
     layout.width_set_by_user = user_set;
+    layout.reserved_width = reserved;
     Some(Outline {
         id: theirs.id,
-        title: theirs.title,
-        min_width: theirs.min_width,
+        title,
+        min_width,
         layout,
-        indents: theirs.indents.clone(),
+        indents,
         paragraphs: merge_paragraphs(&base.paragraphs, &ours.paragraphs, &theirs.paragraphs)?,
-        unsupported: theirs.unsupported.clone(),
+        unsupported,
     })
 }
 
@@ -236,7 +237,7 @@ fn merge_paragraphs(
         };
         merged.insert(*id, paragraph);
     }
-    // Child order per container: the remote order unless only we reordered it.
+    // Child order per container: the remote order with our repositioned paragraphs re-placed.
     let (bc, oc, tc) = (children(base), children(ours), children(theirs));
     let mut order: BTreeMap<Option<ExGuid>, Vec<ExGuid>> = BTreeMap::new();
     let containers: BTreeSet<Option<ExGuid>> = bc
@@ -255,55 +256,47 @@ fn merge_paragraphs(
             })
             .unwrap_or_default()
         };
-        let (base_list, our_list, their_list) = (
-            live(bc.get(&container)),
-            live(oc.get(&container)),
-            live(tc.get(&container)),
-        );
-        let common = |list: &[ExGuid]| -> Vec<ExGuid> {
-            list.iter()
-                .copied()
-                .filter(|id| {
-                    base_list.contains(id) && our_list.contains(id) && their_list.contains(id)
-                })
-                .collect()
+        let (our_list, their_list) = (live(oc.get(&container)), live(tc.get(&container)));
+        let of_base = |ids: Option<&Vec<ExGuid>>| -> Vec<ExGuid> {
+            ids.map(|ids| {
+                ids.iter()
+                    .copied()
+                    .filter(|id| b.contains_key(id))
+                    .collect()
+            })
+            .unwrap_or_default()
         };
-        let (base_common, our_common, their_common) =
-            (common(&base_list), common(&our_list), common(&their_list));
-        let mut list: Vec<ExGuid> = their_list.clone();
-        if our_common != base_common {
-            if their_common != base_common && their_common != our_common {
-                return None;
-            }
-            let slots: Vec<usize> = list
-                .iter()
-                .enumerate()
-                .filter(|(_, id)| our_common.contains(id))
-                .map(|(i, _)| i)
-                .collect();
-            for (slot, id) in slots.into_iter().zip(&our_common) {
-                list[slot] = *id;
-            }
+        let (base_ids, our_ids, their_ids) = (
+            of_base(bc.get(&container)),
+            of_base(oc.get(&container)),
+            of_base(tc.get(&container)),
+        );
+        let ours_moved = if our_ids == base_ids || our_ids == their_ids {
+            BTreeSet::new()
+        } else {
+            moved(&base_ids, &our_ids)
+        };
+        // A paragraph we repositioned that the remote also moved, reparented or removed
+        // has two destinations; neither side's placement can be assumed.
+        let mut theirs_touched = moved(&base_ids, &their_ids);
+        theirs_touched.extend(base_ids.iter().filter(|id| !their_ids.contains(id)));
+        if ours_moved.iter().any(|id| theirs_touched.contains(id)) {
+            return None;
         }
-        // Paragraphs we added go after the predecessor they follow in our list.
+        let mut list: Vec<ExGuid> = their_list.clone();
+        list.retain(|id| merged[id].parent == container);
+        // Paragraphs we repositioned, added or brought here follow their predecessor in our list.
         for (at, id) in our_list.iter().enumerate() {
-            if list.contains(id) {
+            if merged[id].parent != container || (list.contains(id) && !ours_moved.contains(id)) {
                 continue;
             }
-            if !b.contains_key(id) && merged[id].parent == container {
-                let predecessor = our_list[..at]
-                    .iter()
-                    .rev()
-                    .find(|other| list.contains(other));
-                let position =
-                    predecessor.map_or(0, |p| list.iter().position(|x| x == p).unwrap() + 1);
-                list.insert(position, *id);
-            }
-        }
-        for id in &list {
-            if merged[id].parent != container {
-                return None;
-            }
+            list.retain(|other| other != id);
+            let predecessor = our_list[..at]
+                .iter()
+                .rev()
+                .find(|other| list.contains(other));
+            let position = predecessor.map_or(0, |p| list.iter().position(|x| x == p).unwrap() + 1);
+            list.insert(position, *id);
         }
         order.insert(container, list);
     }
@@ -323,49 +316,84 @@ fn merge_paragraphs(
     Some(out)
 }
 
+/// The members of `list` outside a longest common subsequence with `base`: the paragraphs
+/// a reorder of the shared members had to move.
+fn moved(base: &[ExGuid], list: &[ExGuid]) -> BTreeSet<ExGuid> {
+    let a: Vec<ExGuid> = base
+        .iter()
+        .copied()
+        .filter(|id| list.contains(id))
+        .collect();
+    let b: Vec<ExGuid> = list
+        .iter()
+        .copied()
+        .filter(|id| base.contains(id))
+        .collect();
+    let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            table[i][j] = if a[i] == b[j] {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
+        }
+    }
+    let mut kept = BTreeSet::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            kept.insert(a[i]);
+            i += 1;
+            j += 1;
+        } else if table[i + 1][j] >= table[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    b.into_iter().filter(|id| !kept.contains(id)).collect()
+}
+
 fn merge_paragraph(
     base: &PageParagraph,
     ours: &PageParagraph,
     theirs: &PageParagraph,
 ) -> Option<PageParagraph> {
-    if ours.lists != base.lists
-        || ours.tags != base.tags
-        || ours.style != base.style
-        || ours.format != base.format
-    {
-        return None;
-    }
+    let lists = pick(&base.lists, &ours.lists, &theirs.lists)?;
+    let tags = pick(&base.tags, &ours.tags, &theirs.tags)?;
+    let style = pick(&base.style, &ours.style, &theirs.style)?;
+    let format = pick(&base.format, &ours.format, &theirs.format)?;
     let (parent, level) = pick(
         &(base.parent, base.level),
         &(ours.parent, ours.level),
         &(theirs.parent, theirs.level),
     )?;
     let collapsed = pick(&base.collapsed, &ours.collapsed, &theirs.collapsed)?;
-    let content = match (&base.content, &ours.content, &theirs.content) {
-        (ParagraphContent::Text(x), ParagraphContent::Text(y), ParagraphContent::Text(z)) => {
-            if x.id != y.id || x.id != z.id || y.date_field != x.date_field || y.tags != x.tags {
-                return None;
+    let content = match pick(&base.content, &ours.content, &theirs.content) {
+        Some(picked) => picked,
+        None => match (&base.content, &ours.content, &theirs.content) {
+            (ParagraphContent::Text(x), ParagraphContent::Text(y), ParagraphContent::Text(z))
+                if x.id == y.id && x.id == z.id =>
+            {
+                let mut text = z.clone();
+                text.date_field = pick(&x.date_field, &y.date_field, &z.date_field)?;
+                text.tags = pick(&x.tags, &y.tags, &z.tags)?;
+                text.text = merge_text(&x.text, &y.text, &z.text)?;
+                ParagraphContent::Text(text)
             }
-            let mut text = z.clone();
-            text.text = merge_text(&x.text, &y.text, &z.text)?;
-            ParagraphContent::Text(text)
-        }
-        (x, y, z) => {
-            if y != x {
-                return None;
-            }
-            z.clone()
-        }
+            _ => return None,
+        },
     };
     Some(PageParagraph {
         id: theirs.id,
         parent,
         level,
-        style: theirs.style,
-        format: theirs.format.clone(),
+        style,
+        format,
         content,
-        lists: theirs.lists.clone(),
-        tags: theirs.tags.clone(),
+        lists,
+        tags,
         collapsed,
     })
 }
@@ -379,8 +407,8 @@ fn merge_text(
     if let Some(picked) = pick(base, ours, theirs) {
         return Some(picked);
     }
-    if base.text() == ours.text() || base.text() == theirs.text() {
-        // Formatting-only changes on both sides cannot be attributed to ranges.
+    if base.text() == ours.text() {
+        // A local formatting-only change cannot be attributed to a range of the remote text.
         return None;
     }
     let (b, o) = (base.text(), ours.text());
@@ -402,6 +430,15 @@ fn merge_text(
     let end = base.utf16_offset(b.len() - suffix).ok()?;
     let inserted = ours.utf16_offset(o.len() - suffix).ok()?;
     let replacement = ours.slice(start..inserted).ok()?;
+    let our_end = ours.utf16_offset(o.len()).ok()?;
+    let base_end = base.utf16_offset(b.len()).ok()?;
+    if (start > 0 && ours.slice(0..start).ok()? != base.slice(0..start).ok()?)
+        || (end < base_end
+            && ours.slice(inserted..our_end).ok()? != base.slice(end..base_end).ok()?)
+    {
+        // Formatting changed outside the replaced range; the remote text would hide it.
+        return None;
+    }
     let mapped = crate::rebase::rebase(b, theirs.text(), start..end)?;
     let mut merged = theirs.clone();
     merged
@@ -453,6 +490,30 @@ mod tests {
                 .unwrap()
                 .text(),
             "y"
+        );
+        let bold = onestore::document::Format {
+            bold: Some(true),
+            ..Default::default()
+        };
+        let remote = Paragraph::new("one two three".into(), bold);
+        let merged = merge_text(&base, &text("one two three four"), &remote).unwrap();
+        assert_eq!(merged.text(), "one two three four");
+        assert_eq!(merged.format_at(0).unwrap(), remote.format_at(0).unwrap());
+        assert_eq!(
+            merge_text(&base, &remote, &text("one two three four")),
+            None
+        );
+        assert_eq!(
+            merge_text(&base, &text("one two"), &text("X one two three"))
+                .unwrap()
+                .text(),
+            "X one two"
+        );
+        assert_eq!(
+            merge_text(&base, &text("two three"), &text("one two three!"))
+                .unwrap()
+                .text(),
+            "two three!"
         );
     }
 }

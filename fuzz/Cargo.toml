@@ -96,22 +96,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "offline_paragraph"
-path = "fuzz_targets/offline_paragraph.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "tree"
 path = "fuzz_targets/tree.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "offline_tree"
-path = "fuzz_targets/offline_tree.rs"
 test = false
 doc = false
 bench = false
@@ -126,6 +112,13 @@ bench = false
 [[bin]]
 name = "offline_page"
 path = "fuzz_targets/offline_page.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "offline_model"
+path = "fuzz_targets/offline_model.rs"
 test = false
 doc = false
 bench = false

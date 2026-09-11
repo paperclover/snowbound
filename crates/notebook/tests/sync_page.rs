@@ -1,7 +1,23 @@
-use super::*;
-use notebook::{Operation, Recovery};
-use onestore::{Insertion, PageCreation};
+//! Page creation reconciliation: dependent body saves, uncertain publication, anchor review,
+//! and deterministic multi-actor schedules.
+
+use notebook::{ConflictKind, EditStatus, Operation, Recovery, Replica};
+use onestore::{
+    ExGuid, PageCreation, RevisionIndex, Store,
+    document::{Document, Kind},
+};
 use std::collections::BTreeMap;
+
+#[path = "support/server.rs"]
+mod server;
+use server::*;
+#[path = "../../onestore/tests/support/disk.rs"]
+mod disk;
+#[path = "support/model_ops.rs"]
+mod model_ops;
+#[path = "support/page_schedule.rs"]
+mod page_schedule;
+use page_schedule::body_outline;
 
 #[test]
 fn twelve_replica_page_schedules_retain_acknowledged_pages_through_interruptions() {
@@ -24,80 +40,6 @@ fn twelve_replica_page_schedules_retain_acknowledged_pages_through_interruptions
 }
 
 #[test]
-fn version_two_uncertain_text_migrates_without_replay_or_lost_receipts() {
-    let source = onestore::create_section("pages.one", "Original", "Author").unwrap();
-    let (sid, oid, _) = text(&source);
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("legacy.sqlite");
-    let cache = Replica::create(&path, &source).unwrap();
-    let id = cache
-        .edit_text(&source, sid, oid, 0..0, "Old ")
-        .unwrap()
-        .unwrap();
-    let snapshot = cache.snapshot().unwrap();
-    let pending = cache.pending().unwrap();
-    let store = Store::parse(&snapshot).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let revision = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
-    drop(cache);
-    let db = rusqlite::Connection::open(&path).unwrap();
-    db.execute_batch(
-        "DROP TABLE edits; DROP TABLE assets;
-        CREATE TABLE edits (
-        id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id>0), space TEXT NOT NULL,
-        object TEXT NOT NULL, before_text TEXT NOT NULL,
-        start INTEGER NOT NULL CHECK(start BETWEEN 0 AND 4294967295),
-        end INTEGER NOT NULL CHECK(end BETWEEN start AND 4294967295), replacement TEXT NOT NULL
-        ) STRICT;
-        ALTER TABLE attempt RENAME COLUMN revisions TO revision;
-        PRAGMA user_version=2;",
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO edits VALUES (?1,?2,?3,'Original',0,0,'Old ')",
-        rusqlite::params![i64::try_from(id).unwrap(), sid.to_string(), oid.to_string()],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO attempt VALUES (1,?1,?2)",
-        rusqlite::params![i64::try_from(id).unwrap(), revision.to_string()],
-    )
-    .unwrap();
-    db.execute(
-        "INSERT INTO receipts VALUES (1000,?1)",
-        [revision.to_string()],
-    )
-    .unwrap();
-    db.execute("UPDATE sqlite_sequence SET seq=1000 WHERE name='edits'", [])
-        .unwrap();
-    drop(db);
-    let cache = Replica::open(&path).unwrap();
-    assert_eq!(cache.pending().unwrap(), pending);
-    assert_eq!(
-        cache.status(id).unwrap(),
-        Some(EditStatus::AwaitingConfirmation { revision })
-    );
-    assert_eq!(
-        cache.status(1000).unwrap(),
-        Some(EditStatus::Published { revision })
-    );
-    assert!(cache.snapshot().unwrap() == snapshot);
-    let mut server = Server::new(&snapshot);
-    assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
-        Some((id, EditStatus::Published { revision }))
-    );
-    assert_eq!(server.publications, 0);
-    assert_eq!(server.confirmations, 1);
-    assert_eq!(
-        cache
-            .edit_text(&cache.snapshot().unwrap(), sid, oid, 0..0, "Next ")
-            .unwrap(),
-        Some(1001)
-    );
-}
-
-#[test]
 fn offline_page_creation_rebases_with_dependent_edits_and_duplicate_titles() {
     let source = onestore::create_section("pages.one", "Original", "Author").unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -106,24 +48,32 @@ fn offline_page_creation_rebases_with_dependent_edits_and_duplicate_titles() {
     for actor in 0..12 {
         let path = directory.path().join(format!("{actor}.sqlite"));
         let cache = Replica::create(&path, &source).unwrap();
-        let page = PageCreation::new(None, Some("Same 🦋 é"), "Offline author").unwrap();
+        let page = PageCreation::new(None, Some("Same 🦋 é"), "Offline author").unwrap();
         let id = cache.create_page(&source, &page).unwrap().unwrap();
-        let insertion = Insertion::outline(page.object(), 36.0, 36.0, "Body", "Author").unwrap();
-        cache
-            .insert(&cache.snapshot().unwrap(), page.space(), &insertion)
-            .unwrap()
-            .unwrap();
-        cache
-            .edit_text(
+        let mut created = model_ops::page_of(&cache.snapshot().unwrap(), page.space());
+        let body = body_outline(&mut created, "Body");
+        let save = cache
+            .save(
                 &cache.snapshot().unwrap(),
                 page.space(),
-                insertion.text_object(),
-                4..4,
-                &format!(" {actor}"),
+                &created,
+                model_ops::AUTHOR,
             )
             .unwrap()
             .unwrap();
+        assert_eq!(
+            model_ops::save(&cache, body, |page| model_ops::replace_text(
+                page,
+                body,
+                4..4,
+                &format!(" {actor}")
+            ))
+            .unwrap(),
+            Some(save),
+            "a dependent text edit coalesces into the unattempted body save"
+        );
         let original = cache.pending().unwrap();
+        assert_eq!(original.len(), 2);
         assert!(
             matches!(&original[0].operation, Operation::CreatePage(retained) if retained == &page)
         );
@@ -140,12 +90,7 @@ fn offline_page_creation_rebases_with_dependent_edits_and_duplicate_titles() {
             cache.status(id).unwrap(),
             Some(EditStatus::Published { .. })
         ));
-        expected.push((
-            page.space(),
-            page.object(),
-            insertion.text_object(),
-            format!("Body {actor}"),
-        ));
+        expected.push((page.space(), page.object(), body, format!("Body {actor}")));
     }
     let store = Store::parse(&server.durable).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
@@ -158,7 +103,7 @@ fn offline_page_creation_rebases_with_dependent_edits_and_duplicate_titles() {
         let view = &space.revisions[&space.contexts[&ExGuid::default()]];
         assert!(matches!(&view.nodes[text].kind, Kind::RichText { text, .. } if text == expected));
     }
-    assert_eq!(server.publications, 36);
+    assert_eq!(server.publications, 24);
     if let Some(output) = std::env::var_os("ONESTORE_OFFLINE_PAGE_OUTPUT") {
         std::fs::create_dir(&output).unwrap();
         std::fs::write(
@@ -287,10 +232,8 @@ fn surviving_page_revision_alone_does_not_confirm_section_publication() {
 
 #[test]
 fn changed_page_anchor_requires_review_without_regenerating_dependent_identities() {
-    let source =
-        include_bytes!("../../../../corpus/page-lifecycle/03-renamed/notebook/Lifecycle.one");
-    let remote =
-        include_bytes!("../../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
+    let source = include_bytes!("../../../corpus/page-lifecycle/03-renamed/notebook/Lifecycle.one");
+    let remote = include_bytes!("../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
     let store = Store::parse(source).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let pages = Document::parse(&index).unwrap().pages().unwrap();
@@ -299,10 +242,10 @@ fn changed_page_anchor_requires_review_without_regenerating_dependent_identities
     let cache = Replica::create(&path, source).unwrap();
     let page = PageCreation::new(Some(pages[4].0), Some("Created"), "Author").unwrap();
     let id = cache.create_page(source, &page).unwrap().unwrap();
-    let insertion =
-        Insertion::outline(page.object(), 36.0, 36.0, "Retained body", "Author").unwrap();
+    let mut created = model_ops::page_of(&cache.snapshot().unwrap(), page.space());
+    let body = body_outline(&mut created, "Retained body");
     cache
-        .insert(&cache.snapshot().unwrap(), page.space(), &insertion)
+        .save(&cache.snapshot().unwrap(), page.space(), &created, "Author")
         .unwrap()
         .unwrap();
     let local = cache.snapshot().unwrap();
@@ -345,6 +288,6 @@ fn changed_page_anchor_requires_review_without_regenerating_dependent_identities
     let document = Document::parse(&index).unwrap();
     let space = &document.spaces[&page.space()];
     let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-    assert!(matches!(&view.nodes[&insertion.text_object()].kind,
+    assert!(matches!(&view.nodes[&body].kind,
         Kind::RichText { text, .. } if text == "Retained body"));
 }

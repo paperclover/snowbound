@@ -98,7 +98,10 @@ fn report(cache: &Replica, root: &Path) -> Result<(), Box<dyn std::error::Error>
         json!({"event":"state", "status":status, "revision":revision,
         "local_text":local.text, "remote_text":remote.text, "remote_revision":remote.revision.to_string(),
         "pending":cache.pending()?.iter().map(|pending|match &pending.operation {
-            notebook::Operation::Text(edit) => json!({"id":pending.id,"before":edit.before,"replacement":edit.replacement,"range":[edit.range.start,edit.range.end]}),
+            notebook::Operation::Page(intent) => match intent.text_change() {
+                Some((_, before, range, replacement)) => json!({"id":pending.id,"before":before,"replacement":replacement,"range":[range.start,range.end]}),
+                None => json!({"id":pending.id,"operation":"page"}),
+            },
             operation => json!({"id":pending.id,"operation":operation}),
         }).collect::<Vec<_>>() })
     );
@@ -124,14 +127,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drop(remote);
         let cache = Replica::create(root.join("cache.sqlite"), &source)?;
         let at = u32::try_from(target.text.encode_utf16().count())?;
+        let mut page = {
+            let store = onestore::Store::parse(&source)?;
+            let index = onestore::RevisionIndex::parse(&store)?;
+            let document = onestore::document::Document::parse(&index)?;
+            onestore::page::Page::from_space(&document, target.space)?
+        };
+        let paragraph = page
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                onestore::page::PageObject::Outline(outline) => outline
+                    .paragraphs
+                    .iter_mut()
+                    .find(|p| p.text().is_some_and(|t| t.id == target.object)),
+                _ => None,
+            })
+            .ok_or("Target paragraph is not on its page")?
+            .text_mut()
+            .unwrap();
+        let format = paragraph.text.format_at(at)?.clone();
+        paragraph.text.apply(onestore::page::text::Edit {
+            range: at..at,
+            replacement: onestore::page::Paragraph::new(" [offline-recovery]".into(), format),
+        })?;
         assert_eq!(
-            cache.edit_text(
-                &source,
-                target.space,
-                target.object,
-                at..at,
-                " [offline-recovery]"
-            )?,
+            cache.save(&source, target.space, &page, "Fixture")?,
             Some(1)
         );
         phase("local-after");

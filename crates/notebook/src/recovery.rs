@@ -31,10 +31,17 @@ impl Recovery {
         let application: u32 =
             connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if application != RECOVERY_ID || !(4..=SCHEMA_VERSION).contains(&version) {
+        if application != RECOVERY_ID {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "Not a recovery archive").into(),
+            );
+        }
+        if version != SCHEMA_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Unrecognized recovery archive or unsupported schema version",
+                format!(
+                    "Archive schema version {version} is not the supported version {SCHEMA_VERSION}"
+                ),
             )
             .into());
         }
@@ -138,16 +145,11 @@ impl Replica {
 }
 
 fn summary(connection: &Connection) -> Result<RecoverySummary> {
-    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let (cached_assets, cached_asset_bytes) = if version < 5 {
-        (0, 0)
-    } else {
-        connection.query_row(
-            "SELECT count(*),coalesce(sum(length(data)),0) FROM assets",
-            [],
-            |row| Ok((unsigned(row, 0)?, unsigned(row, 1)?)),
-        )?
-    };
+    let (cached_assets, cached_asset_bytes) = connection.query_row(
+        "SELECT count(*),coalesce(sum(length(data)),0) FROM assets",
+        [],
+        |row| Ok((unsigned(row, 0)?, unsigned(row, 1)?)),
+    )?;
     Ok(connection.query_row(
         "SELECT (SELECT count(*) FROM edits), (SELECT count(*) FROM conflicts),
                 (SELECT count(*) FROM attempt), (SELECT count(*) FROM receipts),

@@ -99,10 +99,6 @@ fn referenced(connection: &Connection, key: &str) -> Result<bool> {
 }
 
 pub(crate) fn cached(connection: &Connection, key: &str, limit: usize) -> Result<Option<Vec<u8>>> {
-    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version < 5 {
-        return Ok(None);
-    }
     let length: Option<i64> = connection
         .query_row(
             "SELECT length(data) FROM assets WHERE name=?1",

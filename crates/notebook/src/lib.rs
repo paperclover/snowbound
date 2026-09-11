@@ -6,29 +6,27 @@ pub mod discover;
 pub mod smb;
 
 use onestore::{
-    ExGuid, Insertion, PageCreation, PreparedEdit, RevisionIndex, Store,
+    ExGuid, PageCreation, PreparedEdit, RevisionIndex, Store,
     document::{Document, Kind},
     page::Page,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Duration};
+use std::{
+    fs::OpenOptions,
+    io,
+    path::Path,
+    sync::{Mutex, atomic::AtomicI64},
+    time::Duration,
+};
 
 mod assets;
-mod formatting;
 mod merge;
-mod outline;
 mod pages;
-mod paragraph;
 mod rebase;
 mod recovery;
 mod schema;
-mod tree;
-pub use formatting::FormatEdit;
-pub use outline::OutlineEdit;
 pub use pages::PageEdits;
-pub use paragraph::{JoinEdit, SplitEdit};
 pub use recovery::{Recovery, RecoverySummary};
-pub use tree::TreeEdit;
 mod sync;
 pub use sync::{ConflictKind, EditStatus, Remote};
 mod worker;
@@ -57,17 +55,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 11;
-
-/// Text and its observed precondition, retained across cache reopen and rebasing.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TextEdit {
-    pub object: ExGuid,
-    pub before: String,
-    pub range: Range<u32>,
-    pub replacement: String,
-}
+const SCHEMA_VERSION: u32 = 12;
 
 /// An edited page model together with the stored model it was edited from.
 /// `before` is the precondition reconciliation checks against the remote page.
@@ -79,19 +67,80 @@ pub struct PageIntent {
     pub author: String,
 }
 
+impl PageIntent {
+    /// Describes the intent as one paragraph's text replacement, when that is all it changes:
+    /// the text object, its text before, the replaced UTF-16 range and the replacement.
+    pub fn text_change(&self) -> Option<(ExGuid, String, std::ops::Range<u32>, String)> {
+        fn texts(page: &Page) -> Vec<(ExGuid, &onestore::page::Paragraph)> {
+            let mut out = Vec::new();
+            for object in &page.objects {
+                let outlines: Vec<&onestore::page::Outline> = match object {
+                    onestore::page::PageObject::Outline(outline) => vec![outline],
+                    onestore::page::PageObject::Title(title) => title.outlines.iter().collect(),
+                    _ => Vec::new(),
+                };
+                for outline in outlines {
+                    for paragraph in &outline.paragraphs {
+                        if let Some(text) = paragraph.text() {
+                            out.push((text.id, &text.text));
+                        }
+                    }
+                }
+            }
+            out
+        }
+        let (before, after) = (texts(&self.before), texts(&self.after));
+        if before.len() != after.len() {
+            return None;
+        }
+        let mut changed = None;
+        for ((id, x), (other, y)) in before.iter().zip(&after) {
+            if id != other {
+                return None;
+            }
+            if x.text() != y.text() {
+                if changed.is_some() {
+                    return None;
+                }
+                changed = Some((*id, *x, *y));
+            }
+        }
+        let (id, x, y) = changed?;
+        let (b, o) = (x.text(), y.text());
+        let prefix = b
+            .char_indices()
+            .zip(o.chars())
+            .take_while(|((_, c), d)| c == d)
+            .map(|((i, c), _)| i + c.len_utf8())
+            .last()
+            .unwrap_or(0);
+        let suffix = b[prefix..]
+            .chars()
+            .rev()
+            .zip(o[prefix..].chars().rev())
+            .take_while(|(c, d)| c == d)
+            .map(|(c, _)| c.len_utf8())
+            .sum::<usize>();
+        let start = x.utf16_offset(prefix).ok()?;
+        let end = x.utf16_offset(b.len() - suffix).ok()?;
+        Some((
+            id,
+            b.to_owned(),
+            start..end,
+            o[prefix..o.len() - suffix].to_owned(),
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Operation {
+    /// An edited page model; body content is edited only through this intent.
     Page(PageIntent),
     CreatePage(PageCreation),
     Pages(PageEdits),
-    Text(TextEdit),
-    Insert(Insertion),
-    Format(FormatEdit),
-    Split(SplitEdit),
-    Join(JoinEdit),
-    Outline(OutlineEdit),
-    Tree(TreeEdit),
+    /// Permanent removal of explicitly selected page spaces from the section.
+    DeletePages(Vec<ExGuid>),
 }
 
 /// A locally acknowledged intent; its ID remains stable across cache reopen.
@@ -107,6 +156,8 @@ pub struct PendingEdit {
 pub struct Replica {
     connection: Mutex<Connection>,
     synchronization: Mutex<()>,
+    /// The intent a synchronization step selected for publication, or zero.
+    in_flight: AtomicI64,
     worker: Mutex<std::sync::Weak<worker::Signal>>,
 }
 
@@ -164,24 +215,28 @@ impl Replica {
             schema::create(&transaction)?;
             transaction.execute("INSERT INTO replica VALUES (1, ?1, ?1)", [source])?;
         } else {
-            if application != APPLICATION_ID || !(1..=SCHEMA_VERSION).contains(&version) {
+            if application != APPLICATION_ID {
+                return Err(
+                    io::Error::new(io::ErrorKind::InvalidData, "Not a notebook cache").into(),
+                );
+            }
+            if version != SCHEMA_VERSION {
+                // Older caches are refused rather than migrated until the application is
+                // usable end to end; the queue must be drained by the build that wrote it.
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "Unrecognized cache or unsupported schema version",
+                    format!("Cache schema version {version} is not the supported version {SCHEMA_VERSION}"),
                 )
                 .into());
             }
             validate_images(&transaction)?;
-            if version < SCHEMA_VERSION {
-                schema::migrate(&transaction, version)?;
-                transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
             pending(&transaction)?;
         }
         transaction.commit()?;
         Ok(Self {
             connection: Mutex::new(connection),
             synchronization: Mutex::new(()),
+            in_flight: AtomicI64::new(0),
             worker: Mutex::new(std::sync::Weak::new()),
         })
     }
@@ -205,50 +260,6 @@ impl Replica {
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
         pending(&connection)
-    }
-
-    /// Atomically records an intent and its resulting local image; returns its durable ID.
-    /// Unchanged text returns `None`. A stale image returns `Io(ResourceBusy)`.
-    /// On synchronization, replacement text inherits the remote style at the rebased start.
-    /// After a database error, reopen and inspect the cache before retrying the edit.
-    pub fn edit_text(
-        &self,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-        range: Range<u32>,
-        replacement: &str,
-    ) -> Result<Option<u64>> {
-        let edit = PreparedEdit::text(source, space, object, range.clone(), replacement)?;
-        let before = paragraph(source, space, object)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Prepared edit has no text target",
-            )
-        })?;
-        self.record(
-            source,
-            space,
-            Operation::Text(TextEdit {
-                object,
-                before,
-                range,
-                replacement: replacement.to_owned(),
-            }),
-            &edit,
-        )
-    }
-
-    /// Durably queues a validated insertion with its stable object identities.
-    /// Uses the same snapshot and local-acknowledgement contract as `edit_text`.
-    pub fn insert(
-        &self,
-        source: &[u8],
-        space: ExGuid,
-        insertion: &Insertion,
-    ) -> Result<Option<u64>> {
-        let edit = PreparedEdit::insert(source, space, insertion)?;
-        self.record(source, space, Operation::Insert(insertion.clone()), &edit)
     }
 
     /// Durably queues an edited page model using the supplied local snapshot.
@@ -297,7 +308,10 @@ impl Replica {
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .optional()?;
+            // The intent a step is publishing has no attempt row yet; rewriting it would lose
+            // this save under the published bytes.
             if let Some((id, sid, operation)) = newest
+                && id != self.in_flight.load(std::sync::atomic::Ordering::Acquire)
                 && sid == space.to_string()
                 && let Ok(Operation::Page(mut head)) = serde_json::from_str::<Operation>(&operation)
             {
@@ -348,6 +362,14 @@ impl Replica {
             Operation::CreatePage(page.clone()),
             &edit,
         )
+    }
+
+    /// Queues the permanent removal of explicitly selected pages; the batch is republished
+    /// only while every selected page still exists remotely.
+    pub fn delete_pages(&self, source: &[u8], pages: &[ExGuid]) -> Result<Option<u64>> {
+        let edit = PreparedEdit::delete_pages_permanently(source, pages)?;
+        let space = validate(source)?;
+        self.record(source, space, Operation::DeletePages(pages.to_vec()), &edit)
     }
 
     fn record(
@@ -403,54 +425,11 @@ impl Replica {
     }
 }
 
-fn active_paths(
-    view: &onestore::document::Revision<'_>,
-    pages: &[ExGuid],
-    objects: &[ExGuid],
-) -> Option<Vec<Vec<ExGuid>>> {
-    let parents = view.parents(pages).ok()?;
-    objects
-        .iter()
-        .map(|object| {
-            if !parents.contains_key(object) && !pages.contains(object) {
-                return None;
-            }
-            let mut path = Vec::new();
-            let mut at = *object;
-            while !pages.contains(&at) {
-                let [parent] = parents.get(&at)?.as_slice() else {
-                    return None;
-                };
-                if path.len() >= view.nodes.len() {
-                    return None;
-                }
-                path.push(*parent);
-                at = *parent;
-            }
-            Some(path)
-        })
-        .collect()
-}
-
 fn page_of(source: &[u8], space: ExGuid) -> Result<Option<Page>> {
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
     Ok(Page::from_space(&document, space).ok())
-}
-
-fn paragraph(source: &[u8], space: ExGuid, object: ExGuid) -> Result<Option<String>> {
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    let document = Document::parse(&index)?;
-    let node = document
-        .active(space)
-        .ok()
-        .and_then(|revision| revision.nodes.get(&object));
-    Ok(match node.map(|node| &node.kind) {
-        Some(Kind::RichText { text, .. }) => Some(text.clone()),
-        _ => None,
-    })
 }
 
 fn validate(source: &[u8]) -> Result<ExGuid> {

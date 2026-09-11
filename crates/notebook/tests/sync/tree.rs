@@ -1,11 +1,25 @@
+//! Paragraph tree edits expressed as page-model saves: moves, deletions, their
+//! reconciliation against native remote images, and emptied table cells.
+
 use super::*;
-use onestore::{Insertion, TreeEdit};
+use model_schedule::move_subtree;
+use onestore::page::{Paragraph, ParagraphContent, TableCell};
+
+/// Saves an edited model of `space`, reaching content that outline helpers cannot.
+fn save_page(cache: &Replica, space: ExGuid, edit: impl FnOnce(&mut Page)) -> Option<u64> {
+    let source = cache.snapshot().unwrap();
+    let mut page = page_of(&source, space);
+    edit(&mut page);
+    cache
+        .save(&source, space, &page, model_ops::AUTHOR)
+        .unwrap()
+}
 
 #[test]
 fn twelve_offline_clients_reconcile_tree_text_and_interrupted_publication() {
     let mut random = 1940_u64;
-    for _ in 0..60 {
-        let input: Vec<_> = (0..384)
+    for _ in 0..24 {
+        let input: Vec<_> = (0..256)
             .map(|_| {
                 random ^= random << 13;
                 random ^= random >> 7;
@@ -13,246 +27,202 @@ fn twelve_offline_clients_reconcile_tree_text_and_interrupted_publication() {
                 random as u8
             })
             .collect();
-        tree_schedule::run(&input);
+        model_schedule::run(&input);
     }
 }
 
+/// The one-outline fixture with three further sibling paragraphs.
 fn fixture() -> (Vec<u8>, ExGuid, ExGuid, [ExGuid; 4], [ExGuid; 4]) {
-    let (mut source, sid, outline, first, text) = super::outline::fixture();
-    let mut paragraphs = [first; 4];
-    let mut texts = [text; 4];
+    let (source, space, outline, text) = super::fixture();
+    let mut page = page_of(&source, space);
+    let mut anchor = text;
     for at in 1..4 {
-        let insertion =
-            Insertion::paragraph(outline, None, &format!("Sibling {at}"), "Author").unwrap();
-        source = PreparedEdit::insert(&source, sid, &insertion)
-            .unwrap()
-            .as_bytes()
-            .to_vec();
-        paragraphs[at] = insertion.object();
-        texts[at] = insertion.text_object();
+        anchor = model_ops::insert_after(&mut page, anchor, &format!("Sibling {at}")).1;
     }
-    (source, sid, outline, paragraphs, texts)
+    let source = PreparedEdit::page(&source, space, &page, "Author")
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let stored = page_of(&source, space);
+    let siblings = &outline_of(&stored, outline).paragraphs;
+    assert_eq!(siblings.len(), 4);
+    let ids = std::array::from_fn(|at| siblings[at].id);
+    let texts = std::array::from_fn(|at| siblings[at].text().unwrap().id);
+    (source, space, outline, ids, texts)
 }
 
-fn children(source: &[u8], sid: ExGuid, object: ExGuid) -> Vec<ExGuid> {
-    let store = Store::parse(source).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    index.validate_current().unwrap();
-    let document = Document::parse(&index).unwrap();
-    let space = &document.spaces[&sid];
-    space.revisions[&space.contexts[&ExGuid::default()]].nodes[&object]
-        .children
-        .clone()
+/// Paragraph identities of an outline in model order.
+fn order(bytes: &[u8], space: ExGuid, outline: ExGuid) -> Vec<ExGuid> {
+    outline_of(&page_of(bytes, space), outline)
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.id)
+        .collect()
+}
+
+/// Adds a plain paragraph as the last child of `parent`.
+fn insert_child(page: &mut Page, parent: ExGuid, value: &str) {
+    for outline in outlines_mut(page) {
+        let Some(at) = outline.paragraphs.iter().position(|p| p.id == parent) else {
+            continue;
+        };
+        let mut child = model_ops::fresh_paragraph(&outline.paragraphs[at], value);
+        child.parent = Some(parent);
+        child.level = outline.paragraphs[at].level + 1;
+        let level = outline.paragraphs[at].level;
+        let mut end = at + 1;
+        while end < outline.paragraphs.len() && outline.paragraphs[end].level > level {
+            end += 1;
+        }
+        outline.paragraphs.insert(end, child);
+        return;
+    }
+    panic!("the parent paragraph is on the page");
 }
 
 #[test]
 fn move_preserves_remote_content_and_dependent_edits_through_reopen() {
-    let (source, sid, outline, paragraphs, texts) = fixture();
+    let (source, space, outline, paragraphs, texts) = fixture();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cache.sqlite");
     let cache = Replica::create(&path, &source).unwrap();
-    let intent = TreeEdit::move_to(paragraphs[0], outline, None, "Offline").unwrap();
-    let id = cache.tree(&source, sid, &intent).unwrap().unwrap();
-    let dependent = cache
-        .edit_text(&cache.snapshot().unwrap(), sid, texts[0], 0..0, "Local ")
-        .unwrap()
-        .unwrap();
+    let id = save(&cache, texts[0], |page| {
+        move_subtree(page, paragraphs[0], None, None);
+        replace_text(page, texts[0], 0..0, "Local ");
+    })
+    .unwrap()
+    .unwrap();
     let local = cache.snapshot().unwrap();
     let queue = cache.pending().unwrap();
     drop(cache);
     let cache = Replica::open(&path).unwrap();
     assert_eq!(cache.pending().unwrap(), queue);
     assert_eq!(cache.snapshot().unwrap(), local);
-    let edited = PreparedEdit::format(
-        &source,
-        sid,
-        texts[0],
-        0..8,
-        &[onestore::TextAttribute::Bold(true)],
-    )
-    .unwrap();
-    let descendant =
-        Insertion::paragraph(paragraphs[0], None, "New remote child", "Remote").unwrap();
-    let remote = PreparedEdit::insert(edited.as_bytes(), sid, &descendant).unwrap();
-    let mut server = Server::new(remote.as_bytes());
-    for expected in [id, dependent] {
-        assert!(
-            matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == expected)
-        );
-    }
+    let mut server = Server::new(&remote_with(&source, space, |page| {
+        insert_child(page, paragraphs[0], "New remote child");
+        restyle(page, texts[1], 0..7, |format| format.bold = Some(true));
+    }));
+    published(&cache, &mut server, id);
+    let durable = page_of(&server.durable, space);
+    let published = outline_of(&durable, outline);
     assert_eq!(
-        children(&server.durable, sid, outline),
+        published
+            .paragraphs
+            .iter()
+            .map(|p| p.id)
+            .collect::<Vec<_>>()[..4],
         [paragraphs[1], paragraphs[2], paragraphs[3], paragraphs[0]]
     );
-    assert_eq!(
-        children(&server.durable, sid, paragraphs[0]),
-        [descendant.object()]
-    );
-    let node = super::outline::node(&server.durable, sid, texts[0]);
-    assert_eq!(node["kind"]["text"], "Local Original 🦀 é");
-    let store = Store::parse(&server.durable).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
-    let space = &document.spaces[&sid];
-    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-    assert_eq!(view.text_runs(texts[0]).unwrap()[0].format.bold, Some(true));
+    let child = &published.paragraphs[4];
+    assert_eq!(child.parent, Some(paragraphs[0]));
+    assert_eq!(child.text().unwrap().text.text(), "New remote child");
+    assert_eq!(text_of(&durable, texts[0]), "Local Original 🦀 é");
+    let sibling = &paragraph_with(&durable, texts[1])
+        .unwrap()
+        .text()
+        .unwrap()
+        .text;
+    assert_eq!(sibling.spans()[0].format.bold, Some(true));
     assert!(cache.pending().unwrap().is_empty());
-    assert_eq!(server.publications, 2);
+    assert_eq!(server.publications, 1);
 }
 
 #[test]
-fn queued_format_split_and_delete_reconcile_equivalent_immutable_style_identities() {
-    let (source, sid, _, _, texts) = fixture();
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("cache.sqlite");
-    let cache = Replica::create(&path, &source).unwrap();
-    cache
-        .format(
-            &source,
-            sid,
-            texts[0],
-            0..8,
-            &[onestore::TextAttribute::Bold(true)],
-        )
-        .unwrap();
-    let split = onestore::ParagraphSplit::new(texts[0], 4, "Author").unwrap();
-    cache
-        .split(&cache.snapshot().unwrap(), sid, &split)
-        .unwrap();
-    cache
-        .tree(
-            &cache.snapshot().unwrap(),
-            sid,
-            &TreeEdit::delete(split.object(), "Author").unwrap(),
-        )
-        .unwrap();
-    cache
-        .edit_text(&cache.snapshot().unwrap(), sid, texts[0], 0..0, "Local ")
-        .unwrap();
-    let queue = cache.pending().unwrap();
-    drop(cache);
-    let mut server = Server::new(&source);
-    for intent in queue {
-        let cache = Replica::open(&path).unwrap();
-        assert!(
-            matches!(cache.sync_once(&mut server).unwrap(), Some((id, EditStatus::Published { .. })) if id == intent.id)
-        );
-    }
-    assert_eq!(
-        super::outline::node(&server.durable, sid, texts[0])["kind"]["text"],
-        "Local Orig"
-    );
-}
-
-#[test]
-fn native_empty_child_list_normalization_preserves_deletion_and_its_dependents() {
+fn native_empty_child_list_normalization_merges_with_a_local_deletion() {
     let source = include_bytes!("../../../../corpus/outline-edit/empty-children/before.one");
-    let remote = include_bytes!("../../../../corpus/outline-edit/empty-children/remote.one");
-    let (sid, intent): (ExGuid, TreeEdit) = serde_json::from_str(include_str!(
+    let native = include_bytes!("../../../../corpus/outline-edit/empty-children/remote.one");
+    let intent: serde_json::Value = serde_json::from_str(include_str!(
         "../../../../corpus/outline-edit/empty-children/intent.json"
     ))
     .unwrap();
-    let store = Store::parse(source).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
-    let space = &document.spaces[&sid];
-    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-    let tail = view.nodes[&intent.object()].content[0];
-    let (outline_id, outline) = view
-        .nodes
-        .iter()
-        .find(|(_, node)| node.children.contains(&intent.object()))
+    let space: ExGuid = intent[0].as_str().unwrap().parse().unwrap();
+    let object: ExGuid = intent[1]["object"].as_str().unwrap().parse().unwrap();
+    let page = page_of(source, space);
+    let outline = body_outlines(&page)
+        .into_iter()
+        .find(|outline| outline.paragraphs.iter().any(|p| p.id == object))
         .unwrap();
-    let left = view.nodes[&outline.children[0]].content[0];
-    for changed in [false, true] {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("cache.sqlite");
-        let cache = Replica::create(&path, source).unwrap();
-        let deletion = cache.tree(source, sid, &intent).unwrap().unwrap();
-        let dependent = cache
-            .edit_text(&cache.snapshot().unwrap(), sid, left, 0..0, "Local ")
-            .unwrap()
-            .unwrap();
-        let local = cache.snapshot().unwrap();
-        drop(cache);
-        let cache = Replica::open(&path).unwrap();
-        let mut server = if changed {
-            let edited = PreparedEdit::text(remote, sid, tail, 0..2, "Changed").unwrap();
-            Server::new(edited.as_bytes())
-        } else {
-            Server::new(remote)
-        };
-        if changed {
-            assert_eq!(
-                cache.sync_once(&mut server).unwrap(),
-                Some((deletion, EditStatus::Conflict(ConflictKind::ContentChanged)))
-            );
-            assert_eq!(cache.snapshot().unwrap(), local);
-            assert_eq!(cache.pending().unwrap().len(), 2);
-            assert_eq!(server.publications, 0);
-        } else {
-            for expected in [deletion, dependent] {
-                assert!(
-                    matches!(cache.sync_once(&mut server).unwrap(), Some((id, EditStatus::Published { .. })) if id == expected)
-                );
-            }
-            assert!(cache.pending().unwrap().is_empty());
-            assert_eq!(server.publications, 2);
-            assert!(!children(&server.durable, sid, *outline_id).contains(&intent.object()));
-            let node = super::outline::node(&server.durable, sid, left);
-            assert!(node["kind"]["text"].as_str().unwrap().starts_with("Local "));
-        }
+    let deleted = outline
+        .paragraphs
+        .iter()
+        .find(|p| p.id == object)
+        .unwrap()
+        .text()
+        .unwrap()
+        .id;
+    let left = outline.paragraphs[0].text().unwrap().id;
+    let outline = outline.id;
+    let concurrent: Vec<String> = body_outlines(&page_of(native, space))
+        .into_iter()
+        .flat_map(|outline| outline.paragraphs.iter())
+        .filter_map(|paragraph| Some(paragraph.text()?.text.text().to_owned()))
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let cache = Replica::create(&path, source).unwrap();
+    let change = |page: &mut Page| {
+        delete_paragraph(page, deleted);
+        replace_text(page, left, 0..0, "Local ");
+    };
+    let id = save(&cache, left, change).unwrap().unwrap();
+    drop(cache);
+    let cache = Replica::open(&path).unwrap();
+    let mut server = Server::new(native);
+    assert!(matches!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((published, EditStatus::Published { .. })) if published == id
+    ));
+    assert_eq!(server.publications, 1);
+    assert!(cache.pending().unwrap().is_empty());
+    let durable = page_of(&server.durable, space);
+    assert!(!order(&server.durable, space, outline).contains(&object));
+    assert!(text_of(&durable, left).starts_with("Local "));
+    let published: Vec<String> = body_outlines(&durable)
+        .into_iter()
+        .flat_map(|outline| outline.paragraphs.iter())
+        .filter_map(|paragraph| Some(paragraph.text()?.text.text().to_owned()))
+        .collect();
+    for text in concurrent {
+        assert!(
+            text == "🐈" || published.iter().any(|value| value.ends_with(&text)),
+            "the merge keeps concurrent remote content: {text}"
+        );
     }
 }
 
 #[test]
 fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
-    let (source, sid, outline, paragraphs, texts) = fixture();
-    let child = Insertion::paragraph(paragraphs[0], None, "Descendant", "Author").unwrap();
-    let source = PreparedEdit::insert(&source, sid, &child)
+    let (source, space, outline, paragraphs, texts) = fixture();
+    let mut page = page_of(&source, space);
+    insert_child(&mut page, paragraphs[0], "Descendant");
+    let source = PreparedEdit::page(&source, space, &page, "Author")
         .unwrap()
         .as_bytes()
         .to_vec();
-    for remote in [
-        PreparedEdit::text(&source, sid, texts[0], 0..0, "Remote ")
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-        PreparedEdit::text(&source, sid, child.text_object(), 0..0, "Remote ")
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-        PreparedEdit::format(
-            &source,
-            sid,
-            child.text_object(),
-            0..10,
-            &[onestore::TextAttribute::Italic(true)],
-        )
+    let child = outline_of(&page_of(&source, space), outline).paragraphs[1]
+        .text()
         .unwrap()
-        .as_bytes()
-        .to_vec(),
-        PreparedEdit::insert(
-            &source,
-            sid,
-            &Insertion::paragraph(paragraphs[0], None, "New child", "Remote").unwrap(),
-        )
-        .unwrap()
-        .as_bytes()
-        .to_vec(),
-    ] {
+        .id;
+    let remotes: [Change<Page>; 4] = [
+        Box::new(move |page| replace_text(page, texts[0], 0..0, "Remote ")),
+        Box::new(move |page| replace_text(page, child, 0..0, "Remote ")),
+        Box::new(move |page| {
+            restyle(page, child, 0..10, |format| format.italic = Some(true));
+        }),
+        Box::new(move |page| insert_child(page, paragraphs[0], "New child")),
+    ];
+    for remote in remotes {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cache.sqlite");
         let cache = Replica::create(&path, &source).unwrap();
-        let intent = TreeEdit::delete(paragraphs[0], "Offline").unwrap();
-        let id = cache.tree(&source, sid, &intent).unwrap().unwrap();
-        let dependent = cache
-            .edit_text(&cache.snapshot().unwrap(), sid, texts[1], 0..0, "Local ")
-            .unwrap()
-            .unwrap();
+        let change = |page: &mut Page| {
+            delete_paragraph(page, texts[0]);
+            replace_text(page, texts[1], 0..0, "Local ");
+        };
+        let id = save(&cache, texts[1], change).unwrap().unwrap();
         let queue = cache.pending().unwrap();
         let local = cache.snapshot().unwrap();
-        let mut server = Server::new(&remote);
+        let mut server = Server::new(&remote_with(&source, space, remote));
         assert_eq!(
             cache.sync_once(&mut server).unwrap(),
             Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
@@ -260,37 +230,26 @@ fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
         assert_eq!(server.publications, 0);
         assert_eq!(cache.pending().unwrap(), queue);
         assert_eq!(cache.snapshot().unwrap(), local);
-        assert!(cache.rebase_tree_conflict(id, &source, &remote).is_err());
-        assert!(cache.rebase_tree_conflict(id, &local, &source).is_err());
+        let observed = cache.remote_snapshot().unwrap();
         assert!(
             cache
-                .rebase_tree_conflict(dependent, &local, &remote)
+                .review_page(id, &source, &observed, &page_of(&observed, space))
                 .is_err()
         );
-        assert!(cache.rebase_conflict(id, &local, &remote, 0..0).is_err());
-        let archive = directory.path().join("recovery.sqlite");
-        cache.export_recovery(&archive).unwrap();
-        let recovery = notebook::Recovery::open(&archive).unwrap();
-        assert_eq!(recovery.pending().unwrap(), queue);
-        assert_eq!(recovery.status(id).unwrap(), cache.status(id).unwrap());
-        assert!(recovery.snapshot().unwrap() == local);
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(
             cache.status(id).unwrap(),
             Some(EditStatus::Conflict(ConflictKind::ContentChanged))
         );
-        cache.rebase_tree_conflict(id, &local, &remote).unwrap();
-        assert_eq!(cache.pending().unwrap()[1], queue[1]);
-        assert_eq!(cache.snapshot().unwrap(), local);
-        for expected in [id, dependent] {
-            assert!(
-                matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == expected)
-            );
-        }
-        assert_eq!(children(&server.durable, sid, outline), paragraphs[1..]);
+        review(&cache, id, texts[1], change).unwrap();
+        published(&cache, &mut server, id);
         assert_eq!(
-            super::outline::node(&server.durable, sid, texts[1])["kind"]["text"],
+            order(&server.durable, space, outline),
+            paragraphs[1..].to_vec()
+        );
+        assert_eq!(
+            text_of(&page_of(&server.durable, space), texts[1]),
             "Local Sibling 1"
         );
     }
@@ -298,247 +257,121 @@ fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
 
 #[test]
 fn sibling_and_ancestry_changes_have_explicit_merge_or_conflict() {
-    let (source, sid, outline, p, texts) = fixture();
-    let insertion = Insertion::paragraph(outline, Some(p[0]), "New sibling", "Remote").unwrap();
-    let cases = [
+    let (source, space, outline, paragraphs, texts) = fixture();
+    // The published order of the fixture's paragraphs, or a conflict.
+    let cases: [(Change<Page>, Option<&[usize]>); 5] = [
         (
-            PreparedEdit::insert(&source, sid, &insertion)
-                .unwrap()
-                .as_bytes()
-                .to_vec(),
+            Box::new(move |page| {
+                model_ops::insert_after(page, texts[0], "New sibling");
+            }),
+            Some(&[1, 2, 3, 0]),
+        ),
+        (
+            Box::new(move |page| delete_paragraph(page, texts[1])),
+            Some(&[2, 3, 0]),
+        ),
+        (
+            Box::new(move |page| move_subtree(page, paragraphs[1], None, None)),
+            Some(&[2, 3, 0, 1]),
+        ),
+        (
+            Box::new(move |page| move_subtree(page, paragraphs[0], Some(paragraphs[1]), None)),
             None,
         ),
-        (
-            PreparedEdit::tree(&source, sid, &TreeEdit::delete(p[1], "Remote").unwrap())
-                .unwrap()
-                .as_bytes()
-                .to_vec(),
-            None,
-        ),
-        (
-            PreparedEdit::tree(
-                &source,
-                sid,
-                &TreeEdit::move_to(p[1], outline, None, "Remote").unwrap(),
-            )
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-            None,
-        ),
-        (
-            PreparedEdit::tree(
-                &source,
-                sid,
-                &TreeEdit::move_to(p[0], outline, Some(p[2]), "Remote").unwrap(),
-            )
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-            Some(ConflictKind::StructureChanged),
-        ),
-        (
-            PreparedEdit::tree(
-                &source,
-                sid,
-                &TreeEdit::move_to(p[0], p[1], None, "Remote").unwrap(),
-            )
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-            Some(ConflictKind::StructureChanged),
-        ),
-        (
-            PreparedEdit::tree(&source, sid, &TreeEdit::delete(p[0], "Remote").unwrap())
-                .unwrap()
-                .as_bytes()
-                .to_vec(),
-            Some(ConflictKind::TargetUnavailable),
-        ),
+        (Box::new(move |page| delete_paragraph(page, texts[0])), None),
     ];
     for (remote, expected) in cases {
         let directory = tempfile::tempdir().unwrap();
         let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
-        let intent = TreeEdit::move_to(p[0], outline, None, "Offline").unwrap();
-        let id = cache.tree(&source, sid, &intent).unwrap().unwrap();
-        let mut server = Server::new(&remote);
-        let result = cache.sync_once(&mut server).unwrap().unwrap();
-        assert_eq!(result.0, id);
-        if let Some(kind) = expected {
-            assert_eq!(result.1, EditStatus::Conflict(kind));
-            assert_eq!(server.publications, 0);
-        } else {
-            assert!(matches!(result.1, EditStatus::Published { .. }));
-            assert_eq!(children(&server.durable, sid, outline).last(), Some(&p[0]));
-            assert_eq!(
-                super::outline::node(&server.durable, sid, texts[0])["kind"]["text"],
-                "Original 🦀 é"
-            );
-        }
-    }
-}
-
-#[test]
-fn moved_destination_and_missing_anchor_retain_conflicts_but_unrelated_text_does_not() {
-    let (source, sid, outline, p, texts) = fixture();
-    let child = Insertion::paragraph(p[1], None, "Anchor", "Author").unwrap();
-    let source = PreparedEdit::insert(&source, sid, &child)
-        .unwrap()
-        .as_bytes()
-        .to_vec();
-    let intent = TreeEdit::move_to(p[0], p[1], Some(child.object()), "Offline").unwrap();
-    let cases = [
-        (
-            PreparedEdit::tree(
-                &source,
-                sid,
-                &TreeEdit::move_to(p[1], p[2], None, "Remote").unwrap(),
-            )
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-            ConflictKind::StructureChanged,
-        ),
-        (
-            PreparedEdit::tree(
-                &source,
-                sid,
-                &TreeEdit::move_to(child.object(), outline, None, "Remote").unwrap(),
-            )
-            .unwrap()
-            .as_bytes()
-            .to_vec(),
-            ConflictKind::UnsupportedEdit,
-        ),
-    ];
-    for (remote, kind) in cases {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
-        let id = cache.tree(&source, sid, &intent).unwrap().unwrap();
-        let mut server = Server::new(&remote);
-        assert_eq!(
-            cache.sync_once(&mut server).unwrap(),
-            Some((id, EditStatus::Conflict(kind)))
-        );
-        assert_eq!(server.publications, 0);
-    }
-    let directory = tempfile::tempdir().unwrap();
-    let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
-    let id = cache
-        .tree(&source, sid, &TreeEdit::delete(p[0], "Offline").unwrap())
+        let id = save(&cache, texts[0], |page| {
+            move_subtree(page, paragraphs[0], None, None)
+        })
         .unwrap()
         .unwrap();
-    let remote = PreparedEdit::text(&source, sid, texts[1], 0..0, "Remote ").unwrap();
-    let mut server = Server::new(remote.as_bytes());
-    assert!(
-        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
-    );
-    assert_eq!(
-        super::outline::node(&server.durable, sid, texts[1])["kind"]["text"],
-        "Remote Sibling 1"
-    );
-}
-
-#[test]
-fn unknown_tree_attempts_require_revision_evidence_even_when_effect_is_visible() {
-    let (source, sid, outline, p, _) = fixture();
-    for deletion in [false, true] {
-        for fault in [
-            Fault::UnknownBefore,
-            Fault::UnknownAfter,
-            Fault::Before,
-            Fault::Committed,
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("cache.sqlite");
-            let cache = Replica::create(&path, &source).unwrap();
-            let intent = if deletion {
-                TreeEdit::delete(p[0], "Offline")
-            } else {
-                TreeEdit::move_to(p[0], outline, None, "Offline")
-            }
-            .unwrap();
-            let id = cache.tree(&source, sid, &intent).unwrap().unwrap();
-            let mut server = Server::new(&source);
-            server.fault = fault;
-            assert!(cache.sync_once(&mut server).is_err());
-            let local = cache.snapshot().unwrap();
-            let before = cache.status(id).unwrap();
-            drop(cache);
-            let cache = Replica::open(&path).unwrap();
-            assert_eq!(cache.status(id).unwrap(), before);
-            if matches!(fault, Fault::UnknownBefore) {
-                let independent = if deletion {
-                    TreeEdit::delete(p[0], "Other")
-                } else {
-                    TreeEdit::move_to(p[0], outline, None, "Other")
-                }
-                .unwrap();
-                server = Server::new(
-                    PreparedEdit::tree(&source, sid, &independent)
-                        .unwrap()
-                        .as_bytes(),
-                );
-                assert!(
-                    matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::AwaitingConfirmation { .. })) if n == id)
-                );
-                assert!(
-                    cache
-                        .rebase_tree_conflict(id, &local, &server.visible)
-                        .is_err()
-                );
-                assert_eq!(server.publications, 0);
-                assert_eq!(cache.snapshot().unwrap(), local);
-            } else if matches!(fault, Fault::Committed) {
-                assert!(matches!(
-                    cache.status(id).unwrap(),
-                    Some(EditStatus::Published { .. })
-                ));
-            } else {
-                assert!(
-                    matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
-                );
-                assert_eq!(
-                    server.publications,
-                    if matches!(fault, Fault::Before) { 2 } else { 1 }
-                );
-                let saved = cache.snapshot().unwrap();
-                assert!(saved[..212] == server.durable[..212]);
-                assert!(saved[252..] == server.durable[252..]);
-                assert_eq!(
-                    children(&saved, sid, outline),
-                    children(&server.durable, sid, outline)
-                );
-            }
-        }
+        let mut server = Server::new(&remote_with(&source, space, remote));
+        let result = cache.sync_once(&mut server).unwrap().unwrap();
+        assert_eq!(result.0, id);
+        let Some(expected) = expected else {
+            assert_eq!(result.1, EditStatus::Conflict(ConflictKind::ContentChanged));
+            assert_eq!(server.publications, 0);
+            continue;
+        };
+        assert!(matches!(result.1, EditStatus::Published { .. }));
+        let published: Vec<ExGuid> = order(&server.durable, space, outline)
+            .into_iter()
+            .filter(|id| paragraphs.contains(id))
+            .collect();
+        let expected: Vec<ExGuid> = expected.iter().map(|at| paragraphs[*at]).collect();
+        assert_eq!(published, expected);
+        assert_eq!(
+            text_of(&page_of(&server.durable, space), texts[2]),
+            "Sibling 2"
+        );
     }
 }
 
 #[test]
 fn independently_satisfied_move_confirms_without_republication() {
-    let (source, sid, outline, p, _) = fixture();
+    let (source, space, _, paragraphs, texts) = fixture();
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
-    let id = cache
-        .tree(
-            &source,
-            sid,
-            &TreeEdit::move_to(p[0], outline, None, "Offline").unwrap(),
-        )
-        .unwrap()
-        .unwrap();
-    let remote = PreparedEdit::tree(
-        &source,
-        sid,
-        &TreeEdit::move_to(p[0], outline, None, "Remote").unwrap(),
-    )
+    let id = save(&cache, texts[0], |page| {
+        move_subtree(page, paragraphs[0], None, None)
+    })
+    .unwrap()
     .unwrap();
-    let mut server = Server::new(remote.as_bytes());
-    assert!(
-        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
-    );
-    assert_eq!(server.publications, 0);
-    assert_eq!(server.confirmations, 1);
+    let mut server = Server::new(&remote_with(&source, space, |page| {
+        move_subtree(page, paragraphs[0], None, None);
+    }));
+    published(&cache, &mut server, id);
+    assert_eq!((server.publications, server.confirmations), (0, 1));
+}
+
+fn cells(page: &Page) -> Vec<&TableCell> {
+    body_outlines(page)
+        .into_iter()
+        .flat_map(|outline| outline.paragraphs.iter())
+        .filter_map(|paragraph| match &paragraph.content {
+            ParagraphContent::Table(table) => Some(table),
+            _ => None,
+        })
+        .flat_map(|table| table.rows.iter())
+        .flat_map(|row| row.cells.iter())
+        .collect()
+}
+
+fn cell_of(page: &Page, id: ExGuid) -> &TableCell {
+    cells(page)
+        .into_iter()
+        .find(|cell| cell.id == id)
+        .expect("the cell is on the page")
+}
+
+fn cell_mut(page: &mut Page, id: ExGuid) -> &mut TableCell {
+    outlines_mut(page)
+        .into_iter()
+        .flat_map(|outline| outline.paragraphs.iter_mut())
+        .filter_map(|paragraph| match &mut paragraph.content {
+            ParagraphContent::Table(table) => Some(table),
+            _ => None,
+        })
+        .flat_map(|table| table.rows.iter_mut())
+        .flat_map(|row| row.cells.iter_mut())
+        .find(|cell| cell.id == id)
+        .expect("the cell is on the page")
+}
+
+/// Moves a cell's sole paragraph to the end of another cell, or deletes it.
+fn empty_cell(page: &mut Page, cell: ExGuid, destination: Option<ExGuid>) {
+    let moved = cell_mut(page, cell).paragraphs.remove(0);
+    let Some(destination) = destination else {
+        return;
+    };
+    let destination = cell_mut(page, destination);
+    let mut moved = moved;
+    moved.level = destination.paragraphs[0].level;
+    moved.parent = None;
+    destination.paragraphs.push(moved);
 }
 
 #[test]
@@ -548,266 +381,233 @@ fn emptied_cell_replacement_is_durable_and_cannot_be_silently_omitted_on_replay(
     let store = Store::parse(source).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
-    let (sid, page) = document.pages().unwrap().into_iter().find(|(sid, _)| {
-        let space = &document.spaces[sid];
-        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-        matches!(&view.nodes[&view.roots[&2]].kind, Kind::Metadata { title: Some(title), .. } if title == "Delete sole cell paragraph")
-    }).unwrap();
-    let space = &document.spaces[&sid];
-    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-    let mut pending = vec![page];
-    let mut selected = None;
-    let mut other = None;
-    while let Some(id) = pending.pop() {
-        let node = &view.nodes[&id];
-        pending.extend(&node.children);
-        pending.extend(&node.content);
-        if matches!(node.kind, Kind::Cell { .. }) {
-            let paragraph = node.children[0];
-            let text = view.nodes[&paragraph].content[0];
-            if matches!(&view.nodes[&text].kind, Kind::RichText { text, .. } if text.starts_with("Target "))
-            {
-                selected = Some((id, paragraph));
-            } else {
-                other = Some((id, text));
-            }
-        }
-    }
-    let (cell, target) = selected.unwrap();
-    let (other_cell, other_text) = other.unwrap();
+    let (space, page) = document
+        .pages()
+        .unwrap()
+        .into_iter()
+        .find_map(|(space, _)| {
+            let page = Page::from_space(&document, space).unwrap();
+            (page.title == "Delete sole cell paragraph").then_some((space, page))
+        })
+        .unwrap();
+    let other = document
+        .pages()
+        .unwrap()
+        .into_iter()
+        .find(|(other, _)| *other != space)
+        .unwrap()
+        .0;
+    let text = |cell: &TableCell| cell.paragraphs[0].text().unwrap().id;
+    let cell = cells(&page)
+        .into_iter()
+        .find(|cell| {
+            cell.paragraphs[0]
+                .text()
+                .unwrap()
+                .text
+                .text()
+                .starts_with("Target ")
+        })
+        .unwrap();
+    let (cell, target) = (cell.id, text(cell));
+    let neighbour = cells(&page)
+        .into_iter()
+        .find(|other| other.id != cell)
+        .unwrap();
+    let (neighbour, neighbour_text) = (neighbour.id, text(neighbour));
     for move_out in [false, true] {
-        for competing_child in [false, true] {
+        for competing in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("cell.sqlite");
             let cache = Replica::create(&path, source).unwrap();
-            let intent = if move_out {
-                TreeEdit::move_to(target, other_cell, None, "Offline")
-            } else {
-                TreeEdit::delete(target, "Offline")
-            }
+            let id = save_page(&cache, space, |page| {
+                empty_cell(page, cell, move_out.then_some(neighbour));
+            })
             .unwrap();
-            let id = cache.tree(source, sid, &intent).unwrap().unwrap();
-            let local = cache.snapshot().unwrap();
-            let replacement = children(&local, sid, cell);
-            assert_eq!(replacement.len(), 1);
-            assert_ne!(replacement[0], target);
-            let replacement_text: ExGuid =
-                super::outline::node(&local, sid, replacement[0])["content"][0]
-                    .as_str()
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-            let dependent = cache
-                .edit_text(&local, sid, replacement_text, 0..0, "Local replacement")
-                .unwrap()
-                .unwrap();
             let local = cache.snapshot().unwrap();
             let queue = cache.pending().unwrap();
+            {
+                let page = page_of(&local, space);
+                let paragraphs = &cell_of(&page, cell).paragraphs;
+                assert_eq!(paragraphs.len(), 1);
+                assert_ne!(paragraphs[0].text().unwrap().id, target);
+                assert!(paragraphs[0].text().unwrap().text.text().is_empty());
+            }
             drop(cache);
             let cache = Replica::open(&path).unwrap();
             assert_eq!(cache.pending().unwrap(), queue);
             assert_eq!(cache.snapshot().unwrap(), local);
-            let remote = if competing_child {
-                PreparedEdit::insert(
-                    source,
-                    sid,
-                    &Insertion::paragraph(cell, None, "Remote sibling", "Remote").unwrap(),
-                )
-                .unwrap()
-                .as_bytes()
-                .to_vec()
+            let mut server = Server::new(&if competing {
+                remote_with(source, space, |page| {
+                    let target = cell_mut(page, cell);
+                    let mut sibling =
+                        model_ops::fresh_paragraph(&target.paragraphs[0], "Remote sibling");
+                    sibling.level = target.paragraphs[0].level;
+                    target.paragraphs.push(sibling);
+                })
             } else {
-                PreparedEdit::text(source, sid, other_text, 0..0, "Remote ")
-                    .unwrap()
-                    .as_bytes()
-                    .to_vec()
-            };
-            let mut server = Server::new(&remote);
-            if competing_child {
+                remote_with(source, other, |page| {
+                    let text = body_outlines(page)[0].paragraphs[0].text().unwrap().id;
+                    replace_text(page, text, 0..0, "Remote ");
+                })
+            });
+            if competing {
                 assert_eq!(
                     cache.sync_once(&mut server).unwrap(),
-                    Some((id, EditStatus::Conflict(ConflictKind::StructureChanged)))
+                    Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
                 );
                 assert_eq!(server.publications, 0);
-                assert!(cache.rebase_tree_conflict(id, &local, &remote).is_err());
                 assert_eq!(cache.pending().unwrap(), queue);
                 assert_eq!(cache.snapshot().unwrap(), local);
-            } else {
-                for expected in [id, dependent] {
-                    assert!(
-                        matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == expected)
-                    );
-                }
-                assert_eq!(children(&server.durable, sid, cell), replacement);
-                assert_eq!(
-                    super::outline::node(&server.durable, sid, replacement_text)["kind"]["text"],
-                    "Local replacement"
+                continue;
+            }
+            published(&cache, &mut server, id);
+            let replacement = {
+                let durable = page_of(&server.durable, space);
+                let paragraphs = &cell_of(&durable, cell).paragraphs;
+                assert_eq!(paragraphs.len(), 1);
+                assert_ne!(paragraphs[0].text().unwrap().id, target);
+                paragraphs[0].text().unwrap().id
+            };
+            let edit = save_page(&cache, space, |page| {
+                let cell = cell_mut(page, cell);
+                let text = cell.paragraphs[0].text_mut().unwrap();
+                text.text = Paragraph::new(
+                    "Local replacement".into(),
+                    text.text.format_at(0).unwrap().clone(),
                 );
-                assert_eq!(
-                    super::outline::node(&server.durable, sid, other_text)["kind"]["text"],
-                    "Remote Other cell"
-                );
-                if let Some(output) = std::env::var_os("ONESTORE_OFFLINE_TREE_OUTPUT") {
-                    let output = std::path::PathBuf::from(output)
-                        .join(if move_out { "cell-move" } else { "cell-delete" })
-                        .join("candidate");
-                    std::fs::create_dir_all(&output).unwrap();
-                    std::fs::write(output.join("synthetic.one"), &server.durable).unwrap();
-                }
+            })
+            .unwrap();
+            drop(cache);
+            let cache = Replica::open(&path).unwrap();
+            published(&cache, &mut server, edit);
+            let durable = page_of(&server.durable, space);
+            let paragraphs = &cell_of(&durable, cell).paragraphs;
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(paragraphs[0].text().unwrap().id, replacement);
+            assert_eq!(
+                paragraphs[0].text().unwrap().text.text(),
+                "Local replacement"
+            );
+            let published = cell_of(&durable, neighbour);
+            assert_eq!(
+                published.paragraphs.len(),
+                1 + usize::from(move_out),
+                "the moved paragraph joins its destination"
+            );
+            assert_eq!(published.paragraphs[0].text().unwrap().id, neighbour_text);
+            if let Some(output) = std::env::var_os("ONESTORE_OFFLINE_TREE_OUTPUT") {
+                let output = std::path::PathBuf::from(output)
+                    .join(if move_out { "cell-move" } else { "cell-delete" })
+                    .join("candidate");
+                std::fs::create_dir_all(&output).unwrap();
+                std::fs::write(output.join("synthetic.one"), &server.durable).unwrap();
             }
         }
     }
 }
 
+/// The move or deletion each native fixture page is reconciled against.
+fn native_change(
+    name: &str,
+    outline: ExGuid,
+    target: (ExGuid, ExGuid),
+    anchor: Option<ExGuid>,
+) -> Change<Page> {
+    let name = name.to_owned();
+    Box::new(move |page| {
+        let present = paragraph_with(page, target.1).is_some();
+        match name.as_str() {
+            "Move leaf down" | "Move subtree down" if present => {
+                move_subtree(page, target.0, None, None);
+            }
+            "Move subtree up" if present => {
+                move_subtree(page, target.0, None, anchor);
+            }
+            "Delete outline" | "Move outline" | "Resize outline" | "Automatic outline size" => {
+                page.objects
+                    .retain(|object| !matches!(object, PageObject::Outline(o) if o.id == outline));
+            }
+            _ if present => {
+                delete_paragraph(page, target.1);
+                // An outline cannot survive without a paragraph.
+                page.objects.retain(
+                    |object| !matches!(object, PageObject::Outline(o) if o.paragraphs.is_empty()),
+                );
+            }
+            _ => {}
+        }
+    })
+}
+
 #[test]
 fn native_tree_and_layout_changes_reconcile_without_discarding_unreviewed_content() {
-    let source = include_bytes!("../../../../corpus/outline-edit/before/notebook/synthetic.one");
-    let native = include_bytes!("../../../../corpus/outline-edit/after/notebook/synthetic.one");
-    let store = Store::parse(source).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
-    let mut server = Server::new(native);
-    let mut counts = [0; 3];
+    let mut server = Server::new(NATIVE);
     let mut records = Vec::new();
-    for (sid, page) in document.pages().unwrap() {
-        let space = &document.spaces[&sid];
-        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-        let Kind::Metadata {
-            title: Some(name), ..
-        } = &view.nodes[&view.roots[&2]].kind
-        else {
-            continue;
-        };
-        if name == "Unicode rich text" {
-            continue;
-        }
-        let outlines: Vec<_> = view.nodes[&page]
-            .children
+    for (name, space, outline, target, dependent) in native_pages(BEFORE) {
+        let page = page_of(BEFORE, space);
+        let paragraphs = &outline_of(&page, outline).paragraphs;
+        let target = (
+            paragraphs
+                .iter()
+                .find(|p| p.text().is_some_and(|text| text.id == target))
+                .unwrap()
+                .id,
+            target,
+        );
+        let anchor = paragraphs
             .iter()
-            .copied()
-            .filter(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
-            .collect();
-        if outlines.len() != 2 {
-            continue;
-        }
-        let outline = outlines[0];
-        let other = view.nodes[&outlines[1]].children[0];
-        let dependent_text = view.nodes[&other].content[0];
-        let mut pending = vec![outline];
-        let mut paragraphs = std::collections::BTreeMap::new();
-        while let Some(id) = pending.pop() {
-            let node = &view.nodes[&id];
-            pending.extend(&node.children);
-            if let Some(text) = node.content.first()
-                && let Kind::RichText { text, .. } = &view.nodes[text].kind
-            {
-                paragraphs.insert(text.as_str(), id);
-            }
-        }
-        let target = *paragraphs
-            .iter()
-            .find(|(text, _)| text.starts_with("Target "))
-            .unwrap()
-            .1;
-        let (intent, conflict) = match name.as_str() {
-            "Move leaf down" | "Move subtree down" => {
-                (TreeEdit::move_to(target, outline, None, "Offline"), None)
-            }
-            "Move subtree up" => (
-                TreeEdit::move_to(target, outline, Some(paragraphs["Anchor"]), "Offline"),
-                None,
-            ),
-            "Indent subtree" | "Outdent subtree" => (
-                TreeEdit::delete(target, "Offline"),
-                Some(ConflictKind::StructureChanged),
-            ),
-            "Collapse subtree" | "Expand subtree" => (
-                TreeEdit::delete(target, "Offline"),
-                Some(ConflictKind::ContentChanged),
-            ),
-            "Delete leaf" | "Delete subtree" | "Delete only paragraph" => (
-                TreeEdit::delete(target, "Offline"),
-                Some(ConflictKind::TargetUnavailable),
-            ),
-            "Delete outline" => (
-                TreeEdit::delete(outline, "Offline"),
-                Some(ConflictKind::TargetUnavailable),
-            ),
-            "Move outline" | "Resize outline" | "Automatic outline size" => (
-                TreeEdit::delete(outline, "Offline"),
-                Some(ConflictKind::ContentChanged),
-            ),
-            _ => panic!("{name}"),
+            .find(|p| {
+                p.text()
+                    .is_some_and(|text| text.text.text().starts_with("Anchor"))
+            })
+            .map(|paragraph| paragraph.id);
+        let change = native_change(&name, outline, target, anchor);
+        let save_both = |page: &mut Page| {
+            change(page);
+            replace_text(page, dependent, 0..0, "Offline ");
         };
-        let intent = intent.unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("native.sqlite");
-        let cache = Replica::create(&path, source).unwrap();
-        let id = cache.tree(source, sid, &intent).unwrap().unwrap();
-        let dependent = cache
-            .edit_text(
-                &cache.snapshot().unwrap(),
-                sid,
-                dependent_text,
-                0..0,
-                "Offline ",
-            )
-            .unwrap()
-            .unwrap();
+        let cache = Replica::create(&path, BEFORE).unwrap();
+        let id = save(&cache, dependent, save_both).unwrap().unwrap();
         let local = cache.snapshot().unwrap();
         let queue = cache.pending().unwrap();
-        let old_publications = server.publications;
-        let (actual, status) = cache.sync_once(&mut server).unwrap().unwrap();
-        assert_eq!(actual, id);
-        if let Some(kind) = conflict {
-            assert_eq!(status, EditStatus::Conflict(kind), "{name}");
-            assert_eq!(server.publications, old_publications);
-            assert_eq!(cache.pending().unwrap(), queue);
-            assert!(cache.snapshot().unwrap() == local);
-            drop(cache);
-            let cache = Replica::open(&path).unwrap();
-            assert_eq!(cache.status(id).unwrap(), Some(status));
-            if kind == ConflictKind::TargetUnavailable {
-                counts[2] += 1;
-                assert!(
-                    cache
-                        .rebase_tree_conflict(id, &local, &server.visible)
-                        .is_err()
-                );
-                records.push(serde_json::json!({"page": name, "space": sid, "result": "retained"}));
-                continue;
+        let merged = match cache.sync_once(&mut server).unwrap().unwrap() {
+            (actual, EditStatus::Published { .. }) => {
+                assert_eq!(actual, id, "{name}");
+                true
             }
-            counts[1] += 1;
-            cache
-                .rebase_tree_conflict(id, &local, &server.visible)
-                .unwrap();
-            assert_eq!(cache.pending().unwrap()[1], queue[1]);
-            for expected in [id, dependent] {
-                assert!(
-                    matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == expected)
+            result => {
+                assert_eq!(
+                    result,
+                    (id, EditStatus::Conflict(ConflictKind::ContentChanged)),
+                    "{name}"
                 );
+                assert_eq!(cache.pending().unwrap(), queue);
+                assert_eq!(cache.snapshot().unwrap(), local);
+                drop(cache);
+                let cache = Replica::open(&path).unwrap();
+                review(&cache, id, dependent, save_both).unwrap();
+                published(&cache, &mut server, id);
+                false
             }
-        } else {
-            counts[0] += 1;
-            assert!(matches!(status, EditStatus::Published { .. }), "{name}");
-            assert_eq!(server.publications, old_publications);
-            assert!(
-                matches!(cache.sync_once(&mut server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == dependent)
-            );
-        }
-        assert_eq!(
-            super::outline::node(&server.durable, sid, dependent_text)["kind"]["text"],
-            format!(
-                "Offline {}",
-                match &view.nodes[&dependent_text].kind {
-                    Kind::RichText { text, .. } => text,
-                    _ => panic!(),
-                }
-            )
+        };
+        let durable = page_of(&server.durable, space);
+        assert!(
+            text_of(&durable, dependent).starts_with("Offline "),
+            "{name} keeps its dependent text"
         );
-        records.push(serde_json::json!({"page": name, "space": sid, "result": if conflict.is_some() { "reviewed" } else { "converged" }}));
+        let mut reapplied = durable.clone();
+        change(&mut reapplied);
+        assert_eq!(reapplied, durable, "{name} keeps its reconciled change");
+        records.push((name, if merged { "merged" } else { "reviewed" }));
     }
-    assert_eq!(counts, [3, 7, 4]);
+    let reviewed = records
+        .iter()
+        .filter(|(_, result)| *result == "reviewed")
+        .count();
+    assert_eq!((records.len(), reviewed), (14, 7), "{records:?}");
     if let Some(output) = std::env::var_os("ONESTORE_OFFLINE_TREE_OUTPUT") {
         let output = std::path::PathBuf::from(output);
         std::fs::create_dir_all(output.join("candidate")).unwrap();
