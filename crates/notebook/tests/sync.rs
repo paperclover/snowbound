@@ -917,3 +917,81 @@ fn remote_restore_rebases_unsent_work_but_never_replays_an_uncertain_attempt() {
         assert_eq!(cache.status(published).unwrap(), Some(receipt));
     }
 }
+
+#[test]
+fn restore_conflicts_keep_dependent_work_and_reject_stale_review() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let source = onestore::create_section("restore.one", "Original", "Fixture").unwrap();
+    let (space, object, _) = text(&source);
+    let cache = Replica::create(&path, &source).unwrap();
+    let mut server = Server::new(&source);
+    let published = save(&cache, object, 0..0, "Published ").unwrap();
+    let (_, receipt) = cache.sync_once(&mut server).unwrap().unwrap();
+    let head = save(&cache, object, 0..9, "Revised").unwrap();
+    server.visible.clone_from(&source);
+    server.durable.clone_from(&source);
+    let conflict = EditStatus::Conflict(ConflictKind::ContentChanged);
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((head, conflict))
+    );
+    let end = u32::try_from(text(&cache.snapshot().unwrap()).2.encode_utf16().count()).unwrap();
+    let dependent = save(&cache, object, end..end, " Later").unwrap();
+    assert_ne!(head, dependent);
+    let local = cache.snapshot().unwrap();
+    let pending = cache.pending().unwrap();
+    assert_eq!(pending.len(), 2);
+    cache
+        .export_recovery(directory.path().join("conflicted.sqlite"))
+        .unwrap();
+    drop(cache);
+    let cache = Replica::open(&path).unwrap();
+    assert_eq!(cache.status(head).unwrap(), Some(conflict));
+    assert_eq!(cache.pending().unwrap(), pending);
+    assert_eq!(cache.snapshot().unwrap(), local);
+    let reviewed = edited(&source, object, 0..0, "Revised ");
+    let changed = onestore::replace_text(&source, space, object, 8..8, " Remote").unwrap();
+    server.visible.clone_from(&changed);
+    server.durable.clone_from(&changed);
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((head, conflict))
+    );
+    assert!(
+        matches!(cache.review_page(head, &local, &source, &reviewed),
+        Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy)
+    );
+    assert_eq!(cache.pending().unwrap(), pending);
+    assert_eq!(server.publications, 1);
+    let reviewed = edited(&changed, object, 0..0, "Revised ");
+    cache
+        .review_page(head, &local, &changed, &reviewed)
+        .unwrap();
+    assert_eq!(cache.pending().unwrap()[1], pending[1]);
+    drop(cache);
+    let cache = Replica::open(&path).unwrap();
+    assert!(matches!(cache.sync_once(&mut server).unwrap(),
+        Some((actual, EditStatus::Published { .. })) if actual == head));
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((dependent, conflict))
+    );
+    assert_eq!(server.publications, 2);
+    let dependent_local = cache.snapshot().unwrap();
+    let current = cache.remote_snapshot().unwrap();
+    let reviewed = edited(&current, object, 16..16, " Later");
+    cache
+        .review_page(dependent, &dependent_local, &current, &reviewed)
+        .unwrap();
+    drop(cache);
+    let cache = Replica::open(&path).unwrap();
+    assert!(matches!(cache.sync_once(&mut server).unwrap(),
+        Some((actual, EditStatus::Published { .. })) if actual == dependent));
+    assert_eq!(text(&server.durable).2, "Revised Original Later Remote");
+    assert_eq!(cache.status(published).unwrap(), Some(receipt));
+    let archive = notebook::Recovery::open(directory.path().join("conflicted.sqlite")).unwrap();
+    assert_eq!(archive.snapshot().unwrap(), local);
+    assert_eq!(archive.pending().unwrap(), pending);
+    assert_eq!(archive.status(head).unwrap(), Some(conflict));
+}
