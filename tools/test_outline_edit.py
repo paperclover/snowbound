@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 import runpy
 import shutil
-import struct
 import subprocess
 from tempfile import TemporaryDirectory
 import unittest
@@ -188,11 +187,9 @@ class OutlineEditTest(unittest.TestCase):
                 else:
                     self.fail(name)
                 if case['shape'] not in ('cell', 'cell-only'):
-                    reservation = actual[outline]['extra'][0][-1]
-                    self.assertEqual(reservation['id'], 0x14001cdb)
-                    width, = struct.unpack('<f', bytes.fromhex(reservation['value']['Bytes']))
-                    self.assertAlmostEqual(width * 36, 423.75, places=3)
-                    expected[outline]['extra'][0].append(reservation)
+                    reservation = actual[outline]['layout']['reserved_width']
+                    self.assertAlmostEqual(reservation, 423.75, places=3)
+                    expected[outline]['layout']['reserved_width'] = reservation
                 self.assertEqual(actual.keys(), expected.keys())
                 for oid, node in expected.items():
                     self.preserved_node(node, actual[oid])
