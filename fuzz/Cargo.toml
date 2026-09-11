@@ -136,3 +136,10 @@ path = "fuzz_targets/canvas_editor.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "page_model"
+path = "fuzz_targets/page_model.rs"
+test = false
+doc = false
+bench = false
