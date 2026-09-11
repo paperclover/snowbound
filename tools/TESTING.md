@@ -40,7 +40,7 @@ the run's commands, inputs, outputs and teardown evidence.
 | Mixed native/Rust/offline writers | `native_collaboration.py --help` | Recorded intents, durable receipts, independent server state and cold native comparison |
 | SMB directory pagination | `test_smb_directory.py --help` | Caller-owned Linux VM, native filesystem oracle, interrupted-page rejection |
 | SMB publication and payload interruptions | Ignored tests in `notebook` (feature `smb`) | Explicit `ONESTORE_SMB_*` lab inputs, retained protocol traces and independent recovery checks |
-| Retained cache migration | Ignored `migrate_retained_cache_copy` test | New destination, unchanged source, images, intent IDs, attempts and receipts |
+| Application session on a share | `session_acceptance.py --help` | Page saves through `notebook::session` on the mounted Samba share, relaunch between launches, cold native reopen of the edited pages, owned VM and clone teardown |
 
 To compare an additional **already captured** notebook hierarchy without running
 OneNote:

@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 canvas = { path = "../canvas", features = ["gpu"] }
 onestore = { path = "../onestore" }
+notebook = { path = "../notebook" }
 pollster = "0.4"
 wgpu.workspace = true
 parley.workspace = true

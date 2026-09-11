@@ -1,6 +1,6 @@
 use notebook::{
-    EditStatus,
-    session::{Event, Notebook, Save, Section},
+    ConflictKind, EditStatus, Recovery,
+    session::{Event, Notebook, QueuedEdit, Save, Section},
 };
 use onestore::{ExGuid, PreparedEdit, page::Page};
 use std::{
@@ -600,4 +600,83 @@ fn dropping_during_connection_keeps_cache_owned_until_the_worker_finishes() {
         &after,
     );
     assert!(connecting.try_recv().is_err());
+}
+
+#[test]
+fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("notes.one");
+    let cache = directory.path().join("cache");
+    std::fs::write(
+        &file,
+        onestore::create_section("notes.one", "Original", "Author").unwrap(),
+    )
+    .unwrap();
+    let (section, _) = open(&file, &cache);
+    let space = section.pages().unwrap()[0].0;
+    let before = section.page(space).unwrap();
+    let text = first_text(&before);
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = std::fs::metadata(&file).unwrap().permissions();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let mut local = before.clone();
+    model_ops::replace_text(&mut local, text, 0..8, "Local");
+    let Save::Queued(id) = section.save(space, &before, &local, "Editor").unwrap() else {
+        panic!()
+    };
+    wait(&section, |event| matches!(event, Event::Unreachable(_)));
+    std::fs::set_permissions(&file, permissions).unwrap();
+    let mut native = before.clone();
+    model_ops::replace_text(&mut native, text, 0..8, "Native");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let bytes = onestore::read_file(&file).unwrap();
+        match PreparedEdit::page(&bytes, space, &native, "Native")
+            .unwrap()
+            .commit_file(&file)
+        {
+            Ok(()) => break,
+            Err(error) if error.error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    section.wake();
+    wait(
+        &section,
+        |event| matches!(event, Event::Attempt { id: n, status: EditStatus::Conflict(ConflictKind::ContentChanged) } if *n == id),
+    );
+    let conflicts = section.conflicts().unwrap();
+    assert_eq!(
+        conflicts,
+        [(
+            QueuedEdit {
+                id,
+                space,
+                status: EditStatus::Conflict(ConflictKind::ContentChanged)
+            },
+            ConflictKind::ContentChanged
+        )]
+    );
+    assert_same(section.page(space).unwrap(), &local);
+    let remote = section.remote_page(space).unwrap();
+    assert_same(remote.clone(), &native);
+    let archive = directory.path().join("review.sqlite");
+    section.export_recovery(&archive).unwrap();
+    let recovery = Recovery::open(&archive).unwrap();
+    assert_eq!(recovery.pending().unwrap().len(), 1);
+    assert_eq!(
+        recovery.status(id).unwrap(),
+        Some(EditStatus::Conflict(ConflictKind::ContentChanged))
+    );
+    let mut reviewed = remote.clone();
+    model_ops::replace_text(&mut reviewed, text, 0..6, "Native and local");
+    section.review(id, &reviewed).unwrap();
+    assert_eq!(section.status(id).unwrap(), Some(EditStatus::Pending));
+    published(&section, id);
+    assert_same(stored_page(&file, space), &reviewed);
+    assert!(section.queue().unwrap().is_empty());
+    section.close().unwrap();
 }

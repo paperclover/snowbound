@@ -6,6 +6,22 @@ use crate::{
 };
 use onestore::page::text::Paragraph;
 use onestore::page::{Image, Outline, Page, PageObject};
+use std::collections::BTreeMap;
+
+/// A title object's own state, plus the child origins `build` replaces with page coordinates.
+pub(crate) struct TitleArea {
+    pub id: onestore::ExGuid,
+    pub date: Option<onestore::ExGuid>,
+    pub layout: onestore::document::Layout,
+    pub origins: BTreeMap<onestore::ExGuid, [Option<f32>; 2]>,
+}
+
+pub(crate) struct Import {
+    pub objects: Vec<Content>,
+    pub outlines: Vec<TextOutline>,
+    pub date: Option<PageDate>,
+    pub areas: Vec<TitleArea>,
+}
 
 pub(crate) enum Content {
     Date {
@@ -25,6 +41,8 @@ pub struct ReadOnlyObject {
     pub source: PageObject,
     pub message: &'static str,
     pub(crate) label: TextLayout,
+    /// Title coordinates are stored relative to the page margin; nothing else is offset.
+    offset: [f32; 2],
 }
 
 impl Content {
@@ -51,7 +69,7 @@ impl Content {
 
 impl ReadOnlyObject {
     fn new(
-        mut source: PageObject,
+        source: PageObject,
         margin: [f32; 2],
         message: &'static str,
         engine: &mut TextEngine,
@@ -61,15 +79,9 @@ impl ReadOnlyObject {
         } else {
             [0.0; 2]
         };
-        let layout = source.layout_mut();
+        let layout = source.layout();
         let x = layout.x.unwrap_or(0.0) + offset[0];
         let y = layout.y.unwrap_or(0.0) + offset[1];
-        if offset[0] != 0.0 {
-            layout.x = Some(x);
-        }
-        if offset[1] != 0.0 {
-            layout.y = Some(y);
-        }
         let width = layout.max_width.unwrap_or(160.0);
         let height = layout.max_height.unwrap_or(42.0);
         if [x, y, width, height].iter().any(|v| !v.is_finite()) || width <= 0.0 || height <= 0.0 {
@@ -97,12 +109,13 @@ impl ReadOnlyObject {
             source,
             message,
             label,
+            offset,
         }))
     }
     pub fn rect(&self) -> [f32; 4] {
         let layout = self.source.layout();
-        let x = layout.x.unwrap_or(0.0);
-        let y = layout.y.unwrap_or(0.0);
+        let x = layout.x.unwrap_or(0.0) + self.offset[0];
+        let y = layout.y.unwrap_or(0.0) + self.offset[1];
         [
             x,
             y,
@@ -115,20 +128,17 @@ impl ReadOnlyObject {
     }
 }
 
-#[expect(
-    clippy::type_complexity,
-    reason = "the three owned parts of an imported page"
-)]
 pub(crate) fn build(
     page: &mut Page,
     engine: &mut TextEngine,
     editable: bool,
-) -> Result<(Vec<Content>, Vec<TextOutline>, Option<PageDate>), EditorError> {
+) -> Result<Import, EditorError> {
     if page.margin_origin.iter().any(|v| !v.is_finite()) {
         return Err(EditorError::InvalidGeometry);
     }
     let mut objects = Vec::new();
     let mut outlines = Vec::new();
+    let mut areas = Vec::new();
     let mut date = None;
     for object in std::mem::take(&mut page.objects) {
         match &object {
@@ -189,6 +199,16 @@ pub(crate) fn build(
                     }
                     Err(error) => return Err(error.into()),
                 };
+                areas.push(TitleArea {
+                    id: title.id,
+                    date: title.date,
+                    layout: title.layout.clone(),
+                    origins: title
+                        .outlines
+                        .iter()
+                        .map(|outline| (outline.id, [outline.layout.x, outline.layout.y]))
+                        .collect(),
+                });
                 let mut anchor = if editable {
                     title
                         .outlines
@@ -309,5 +329,10 @@ pub(crate) fn build(
             )?)),
         }
     }
-    Ok((objects, outlines, date))
+    Ok(Import {
+        objects,
+        outlines,
+        date,
+        areas,
+    })
 }

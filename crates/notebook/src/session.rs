@@ -1,7 +1,9 @@
 //! The application's view of a notebook: sections opened through a local replica that
 //! publishes page saves to the section file in the background.
 
-use crate::{EditStatus, Error, PendingEdit, Remote, Replica, Result, SyncWorker, discover};
+use crate::{
+    ConflictKind, EditStatus, Error, PendingEdit, Remote, Replica, Result, SyncWorker, discover,
+};
 use onestore::{
     CommitError, ExGuid, PreparedEdit, RevisionIndex, Store, document::Document, page::Page,
 };
@@ -85,6 +87,14 @@ pub enum Save {
     Queued(u64),
     /// The stored page no longer matches `before`; reload it before saving again.
     Stale,
+}
+
+/// A queued edit and its durable state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedEdit {
+    pub id: u64,
+    pub space: ExGuid,
+    pub status: EditStatus,
 }
 
 /// A section file with its replica and background publication.
@@ -244,6 +254,57 @@ impl Section {
 
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
         self.replica.pending()
+    }
+
+    /// Every queued edit with its state: pending, awaiting confirmation of a retained
+    /// attempt, or a conflict awaiting review.
+    pub fn queue(&self) -> Result<Vec<QueuedEdit>> {
+        self.replica
+            .pending()?
+            .into_iter()
+            .map(|edit| {
+                Ok(QueuedEdit {
+                    id: edit.id,
+                    space: edit.space,
+                    status: self.replica.status(edit.id)?.unwrap_or(EditStatus::Pending),
+                })
+            })
+            .collect()
+    }
+
+    /// The queued edits whose publication conflicted with a remote change.
+    pub fn conflicts(&self) -> Result<Vec<(QueuedEdit, ConflictKind)>> {
+        Ok(self
+            .queue()?
+            .into_iter()
+            .filter_map(|edit| match edit.status {
+                EditStatus::Conflict(kind) => Some((edit, kind)),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// The page as last observed in the section file, for reviewing a conflict.
+    pub fn remote_page(&self, space: ExGuid) -> Result<Page> {
+        let snapshot = self.replica.remote_snapshot()?;
+        let store = Store::parse(&snapshot)?;
+        let index = RevisionIndex::parse(&store)?;
+        Ok(Page::from_space(&Document::parse(&index)?, space)?)
+    }
+
+    /// Resolves the oldest conflict with a page reviewed against `remote_page`; the
+    /// reviewed model publishes as a whole, keeping the edit's id.
+    pub fn review(&self, id: u64, after: &Page) -> Result<()> {
+        let local = self.replica.snapshot()?;
+        let remote = self.replica.remote_snapshot()?;
+        self.replica.review_page(id, &local, &remote, after)?;
+        self.wake();
+        Ok(())
+    }
+
+    /// Captures both images, the queue and its states in a read-only archive.
+    pub fn export_recovery(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.replica.export_recovery(path)
     }
 
     /// Events since the last poll, oldest first.

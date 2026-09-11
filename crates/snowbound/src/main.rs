@@ -39,6 +39,8 @@ enum UserEvent {
     Quit,
     InsertText(String),
     Accessibility(accesskit_winit::Event),
+    /// The section's synchronization thread reported an event.
+    Sync,
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -75,6 +77,32 @@ enum Input {
         reference: Option<Page>,
     },
     Page(Page),
+    Section {
+        file: PathBuf,
+        title: String,
+        cache: PathBuf,
+    },
+}
+
+/// The opened section and the stored model the editor's page was loaded from.
+struct Session {
+    section: notebook::session::Section,
+    space: onestore::ExGuid,
+    before: Page,
+    title: String,
+    status: &'static str,
+}
+
+impl Session {
+    fn window_title(&self) -> String {
+        let file = self
+            .section
+            .file()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!("{} · {file}{}", self.title, self.status)
+    }
 }
 
 enum Drag {
@@ -112,6 +140,7 @@ struct State {
     renderer: Renderer,
     engine: TextEngine,
     editor: CanvasEditor,
+    session: Option<Session>,
     initial: Vec<(onestore::ExGuid, TextDocument)>,
     initial_layouts: Vec<(onestore::ExGuid, onestore::document::Layout)>,
     initial_date: Option<u64>,
@@ -167,13 +196,14 @@ impl State {
                         Input::Notes {
                             reference: None, ..
                         } => "Untitled · Temporary page".into(),
+                        Input::Section { title, .. } => title.clone(),
                     })
                     .with_inner_size(LogicalSize::new(1000.0, 720.0)),
             )?,
         );
         macos::install_text_input(&window);
         let access_adapter =
-            accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, proxy);
+            accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
         window.set_visible(true);
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
             Box::new(window.clone()),
@@ -199,6 +229,7 @@ impl State {
                 .register_substitute(parley::fontique::Blob::new(Arc::new(std::fs::read(path)?)))?;
             eprintln!("Using {} for {target}", path.display());
         }
+        let mut session = None;
         let (editor, scene) = match input {
             Input::Notes {
                 document,
@@ -217,7 +248,30 @@ impl State {
                 let (scene, editor) = PageScene::from_page(page, &mut engine)?;
                 (editor, Some((scene, [0.0; 2])))
             }
+            Input::Section { file, title, cache } => {
+                let section = notebook::session::Section::open(&file, cache, move || {
+                    let _ = proxy.send_event(UserEvent::Sync);
+                })?;
+                let (space, _) = section
+                    .pages()?
+                    .into_iter()
+                    .find(|(_, candidate)| *candidate == title)
+                    .ok_or_else(|| format!("No page titled {title:?} in {}", file.display()))?;
+                let before = section.page(space)?;
+                let (scene, editor) = PageScene::from_page(before.clone(), &mut engine)?;
+                session = Some(Session {
+                    section,
+                    space,
+                    before,
+                    title,
+                    status: "",
+                });
+                (editor, Some((scene, [0.0; 2])))
+            }
         };
+        if let Some(session) = &session {
+            window.set_title(&session.window_title());
+        }
         let initial_date = editor.date().map(|date| date.timestamp());
         let initial_layouts = editor
             .object_layouts()
@@ -241,6 +295,7 @@ impl State {
             renderer,
             engine,
             editor,
+            session,
             initial,
             initial_date,
             initial_layouts,
@@ -331,7 +386,8 @@ impl State {
             ),
         );
         self.update_accessibility()?;
-        if self.editor.active_outline().title {
+        self.persist()?;
+        if self.session.is_none() && self.editor.active_outline().title {
             let title = self
                 .editor
                 .active_outline()
@@ -354,6 +410,112 @@ impl State {
             }
         }
         self.window.request_redraw();
+        Ok(())
+    }
+
+    /// Saves the edited page to the section's replica; a page changed underneath the
+    /// editor is reloaded in place of the edit.
+    fn persist(&mut self) -> Result<(), Box<dyn Error>> {
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let after = self.editor.page()?;
+        match session
+            .section
+            .save(session.space, &session.before, &after, "snowbound")?
+        {
+            notebook::session::Save::Unchanged => {}
+            notebook::session::Save::Queued(_) => {
+                session.before = session.section.page(session.space)?;
+                session.status = " · saving";
+                self.window.set_title(&session.window_title());
+            }
+            notebook::session::Save::Stale => self.reload()?,
+        }
+        Ok(())
+    }
+
+    /// Replaces the editor with the page currently stored in the section.
+    fn reload(&mut self) -> Result<(), Box<dyn Error>> {
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let page = session.section.page(session.space)?;
+        let (scene, editor) = PageScene::from_page(page.clone(), &mut self.engine)?;
+        session.before = page;
+        self.editor = editor;
+        self.scene = Some((scene, [0.0; 2]));
+        self.drag = None;
+        self.read_only_focus = None;
+        self.window.set_title(&session.window_title());
+        self.update_accessibility()?;
+        self.window.request_redraw();
+        Ok(())
+    }
+
+    /// Reviews the oldest conflict on this page: `keep_mine` publishes the editor's page
+    /// over the remote change, otherwise the remote page replaces the editor's.
+    fn resolve_conflict(&mut self, keep_mine: bool) -> Result<(), Box<dyn Error>> {
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let Some((edit, _)) = session
+            .section
+            .conflicts()?
+            .into_iter()
+            .find(|(edit, _)| edit.space == session.space)
+        else {
+            return Ok(());
+        };
+        let reviewed = if keep_mine {
+            self.editor.page()?
+        } else {
+            session.section.remote_page(session.space)?
+        };
+        session.section.review(edit.id, &reviewed)?;
+        session.status = " · saving";
+        if keep_mine {
+            session.before = session.section.page(session.space)?;
+            self.window.set_title(&session.window_title());
+            Ok(())
+        } else {
+            self.reload()
+        }
+    }
+
+    /// Applies what the synchronization thread reported since the last poll.
+    fn synced(&mut self) -> Result<(), Box<dyn Error>> {
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let mut refreshed = false;
+        for event in session.section.events() {
+            use notebook::session::Event;
+            session.status = match event {
+                Event::Refreshed => {
+                    refreshed = true;
+                    continue;
+                }
+                Event::Attempt {
+                    status: notebook::EditStatus::Published { .. },
+                    ..
+                } => " · saved",
+                Event::Attempt {
+                    status: notebook::EditStatus::Conflict(_),
+                    ..
+                } => " · conflict",
+                Event::Attempt { .. } => " · saving",
+                Event::Unreachable(_) => " · offline",
+                Event::Failed(error) => {
+                    eprintln!("Synchronization stopped: {error}");
+                    " · not saving"
+                }
+            };
+        }
+        self.window.set_title(&session.window_title());
+        if refreshed && session.section.page(session.space)? != session.before {
+            self.reload()?;
+        }
         Ok(())
     }
 
@@ -659,6 +821,17 @@ impl State {
             macos::show_character_palette();
             return Ok(());
         }
+        if command && shift && self.session.is_some() {
+            match key {
+                Key::Character(character) if character.eq_ignore_ascii_case("k") => {
+                    return self.resolve_conflict(true);
+                }
+                Key::Character(character) if character.eq_ignore_ascii_case("t") => {
+                    return self.resolve_conflict(false);
+                }
+                _ => {}
+            }
+        }
         if matches!(self.drag, Some(Drag::Outline { .. } | Drag::Resize { .. })) {
             if matches!(
                 key,
@@ -932,25 +1105,26 @@ impl State {
 impl App {
     fn close(&self, event_loop: &ActiveEventLoop) {
         if self.state.as_ref().is_none_or(|state| {
-            state
-                .editor
-                .caret_outline()
-                .is_none_or(TextOutline::is_empty)
-                && state.initial_date == state.editor.date().map(|date| date.timestamp())
-                && state
-                    .initial_layouts
-                    .iter()
-                    .map(|(id, layout)| (*id, layout))
-                    .eq(state.editor.object_layouts())
-                && state
-                    .initial
-                    .iter()
-                    .map(|(id, document)| (id, document))
-                    .eq(state
-                        .editor
-                        .outlines()
+            state.session.is_some()
+                || state
+                    .editor
+                    .caret_outline()
+                    .is_none_or(TextOutline::is_empty)
+                    && state.initial_date == state.editor.date().map(|date| date.timestamp())
+                    && state
+                        .initial_layouts
                         .iter()
-                        .map(|outline| (&outline.id, outline.document())))
+                        .map(|(id, layout)| (*id, layout))
+                        .eq(state.editor.object_layouts())
+                    && state
+                        .initial
+                        .iter()
+                        .map(|(id, document)| (id, document))
+                        .eq(state
+                            .editor
+                            .outlines()
+                            .iter()
+                            .map(|outline| (&outline.id, outline.document())))
         }) || macos::discard_changes()
         {
             event_loop.exit();
@@ -980,6 +1154,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Quit => {
                 self.close(event_loop);
+                return;
+            }
+            UserEvent::Sync => {
+                if let Some(state) = &mut self.state
+                    && let Err(error) = state.synced()
+                {
+                    eprintln!("{error}");
+                }
                 return;
             }
             UserEvent::Accessibility(event) => event,
@@ -1812,11 +1994,32 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut substitutes = Vec::new();
     let mut reference = None;
     let mut editable = false;
+    let mut section = None;
+    let mut cache = None;
     while let Some(arg) = args.next() {
         if arg == "--substitute-font" {
             substitutes.push(PathBuf::from(
                 args.next()
                     .ok_or("Provide a font file after --substitute-font.")?,
+            ));
+        } else if arg == "--section" {
+            if reference.is_some() || section.is_some() {
+                return Err("Only one page can be opened.".into());
+            }
+            let file = PathBuf::from(
+                args.next()
+                    .ok_or("Provide a section file and page title after --section.")?,
+            );
+            let title = args
+                .next()
+                .ok_or("Provide a page title after the section file.")?
+                .to_str()
+                .ok_or("The page title must be valid Unicode.")?
+                .to_owned();
+            section = Some((file, title));
+        } else if arg == "--cache" {
+            cache = Some(PathBuf::from(
+                args.next().ok_or("Provide a directory after --cache.")?,
             ));
         } else if arg == "--reference" || arg == "--page" {
             if reference.is_some() {
@@ -1842,14 +2045,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             positional.push(arg);
         }
     }
-    if editable && !positional.is_empty() {
+    if (editable || section.is_some()) && !positional.is_empty() {
         return Err(
-            "Use --page with a section file and page title, without a text file or width.".into(),
+            "Use --page or --section with a section file and page title, without a text file or width.".into(),
         );
     }
     if positional.len() > 2 {
         return Err(
-            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE] [--substitute-font FONT_FILE]..."
+            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE [--cache DIR]] [--substitute-font FONT_FILE]..."
                 .into(),
         );
     }
@@ -1867,7 +2070,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             480.0
         });
-    let input = if editable {
+    let input = if let Some((file, title)) = section {
+        let cache = match cache {
+            Some(cache) => cache,
+            None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set.")?)
+                .join("Library/Caches/snowbound"),
+        };
+        Input::Section { file, title, cache }
+    } else if editable {
         Input::Page(reference.unwrap())
     } else {
         Input::Notes {

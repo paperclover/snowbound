@@ -9,7 +9,7 @@ use crate::{
 };
 use onestore::ExGuid;
 use onestore::page::text::{EditError, Paragraph};
-use onestore::page::{Definition, Outline, PageParagraph};
+use onestore::page::{Definition, Outline, Page, PageObject, PageParagraph, Title};
 use parley::{
     Affinity, BoundingBox,
     editing::{Cursor, Selection as ParagraphSelection},
@@ -102,11 +102,21 @@ pub struct CanvasEditor {
     date: Option<PageDate>,
     outlines: Vec<TextOutline>,
     definitions: BTreeMap<ExGuid, Definition>,
+    header: PageHeader,
     active: Focus,
     undo: Vec<History>,
     redo: Vec<History>,
     composition: Option<Composition>,
     preferred_x: Option<f32>,
+}
+
+/// Imported page state the editable content does not carry.
+#[derive(Default)]
+struct PageHeader {
+    title: String,
+    created: Option<u64>,
+    margin_origin: [f32; 2],
+    areas: Vec<page::TitleArea>,
 }
 
 enum Focus {
@@ -643,6 +653,7 @@ impl CanvasEditor {
             definitions: BTreeMap::new(),
             objects: Vec::new(),
             date: None,
+            header: PageHeader::default(),
             active,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -651,11 +662,13 @@ impl CanvasEditor {
         })
     }
 
-    pub fn from_page(
-        mut page: onestore::page::Page,
-        engine: &mut TextEngine,
-    ) -> Result<Self, EditorError> {
-        let (objects, mut outlines, date) = page::build(&mut page, engine, true)?;
+    pub fn from_page(mut page: Page, engine: &mut TextEngine) -> Result<Self, EditorError> {
+        let page::Import {
+            objects,
+            mut outlines,
+            date,
+            areas,
+        } = page::build(&mut page, engine, true)?;
         let needs_caret = outlines.is_empty();
         if needs_caret {
             let x = objects
@@ -680,11 +693,85 @@ impl CanvasEditor {
             };
         }
         editor.objects = objects;
+        editor.header = PageHeader {
+            title: page.title,
+            created: page.created,
+            margin_origin: page.margin_origin,
+            areas,
+        };
         let mut ids = BTreeSet::new();
         if !editor.object_layouts().all(|(id, _)| ids.insert(id)) {
             return Err(EditError::InvalidStructure.into());
         }
         Ok(editor)
+    }
+
+    /// Rebuilds the stored page, restoring the title areas and read-only objects import split up.
+    pub fn page(&self) -> Result<Page, EditorError> {
+        let mut objects: Vec<PageObject> = Vec::new();
+        for content in &self.objects {
+            let mut outline = match content {
+                page::Content::Editable(id) => {
+                    match self.outlines.iter().find(|outline| outline.id == *id) {
+                        Some(outline) => outline.snapshot(),
+                        None => continue,
+                    }
+                }
+                page::Content::Outline { source, .. } => source.clone(),
+                page::Content::Date { .. } => self
+                    .date
+                    .as_ref()
+                    .ok_or(EditError::InvalidStructure)?
+                    .source()
+                    .clone(),
+                page::Content::Image(image) => {
+                    objects.push(PageObject::Image(image.clone()));
+                    continue;
+                }
+                page::Content::ReadOnly(object) => {
+                    objects.push(object.source.clone());
+                    continue;
+                }
+            };
+            let area = self
+                .header
+                .areas
+                .iter()
+                .find_map(|area| Some((area, *area.origins.get(&outline.id)?)));
+            let Some((area, origin)) = area else {
+                objects.push(PageObject::Outline(outline));
+                continue;
+            };
+            [outline.layout.x, outline.layout.y] = origin;
+            match objects.last_mut() {
+                Some(PageObject::Title(title)) if title.id == area.id => {
+                    title.outlines.push(outline)
+                }
+                _ => objects.push(PageObject::Title(Title {
+                    id: area.id,
+                    date: area.date,
+                    layout: area.layout.clone(),
+                    outlines: vec![outline],
+                })),
+            }
+        }
+        objects.extend(
+            self.outlines
+                .iter()
+                .filter(|outline| !self.has_page_outline(outline.id))
+                .map(|outline| PageObject::Outline(outline.snapshot())),
+        );
+        Ok(Page {
+            title: self.header.title.clone(),
+            created: self
+                .date
+                .as_ref()
+                .map(PageDate::timestamp)
+                .or(self.header.created),
+            margin_origin: self.header.margin_origin,
+            objects,
+            definitions: self.definitions.clone(),
+        })
     }
 
     /// Whether this outline occupies a slot in the imported page's paint order.
@@ -896,6 +983,7 @@ impl CanvasEditor {
             definitions,
             objects: Vec::new(),
             date,
+            header: PageHeader::default(),
             active: Focus::Outline(0),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -7107,5 +7195,174 @@ mod tests {
             assert_eq!(&snapshot(&editor), after);
         }
         assert!(!editor.redo(&mut engine).unwrap());
+    }
+
+    const CORPUS: [&[u8]; 3] = [
+        include_bytes!("../../../corpus/canvas/baseline-anchors.one"),
+        include_bytes!("../../../corpus/outline-edit/before/notebook/synthetic.one"),
+        include_bytes!("../../../corpus/paragraph-edit/before/notebook/synthetic.one"),
+    ];
+
+    fn corpus_pages(section: &[u8]) -> Vec<(ExGuid, Page)> {
+        use onestore::{RevisionIndex, Store, document::Document};
+        let store = Store::parse(section).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let mut spaces = document
+            .pages()
+            .unwrap()
+            .into_iter()
+            .map(|(space, _)| space)
+            .collect::<Vec<_>>();
+        spaces.dedup();
+        spaces
+            .into_iter()
+            .map(|space| (space, Page::from_space(&document, space).unwrap()))
+            .collect()
+    }
+
+    fn corpus_page(section: &[u8], title: &str) -> (ExGuid, Page) {
+        corpus_pages(section)
+            .into_iter()
+            .find(|(_, page)| page.title == title)
+            .unwrap()
+    }
+
+    fn body_text(page: &Page, id: ExGuid) -> Option<String> {
+        page.objects.iter().find_map(|object| match object {
+            PageObject::Outline(outline) if outline.id == id => Some(
+                outline
+                    .paragraphs
+                    .iter()
+                    .map(|paragraph| paragraph.text().unwrap().text.text())
+                    .collect(),
+            ),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn an_unedited_page_rebuilds_into_the_model_it_was_imported_from() {
+        let mut pages = 0;
+        for section in CORPUS {
+            for (_, page) in corpus_pages(section) {
+                let mut engine = TextEngine::default();
+                let editor = CanvasEditor::from_page(page.clone(), &mut engine).unwrap();
+                assert_eq!(editor.page().unwrap(), page);
+                pages += 1;
+            }
+        }
+        assert_eq!(pages, 30);
+    }
+
+    #[test]
+    fn typing_moving_resizing_adding_and_deleting_reach_the_rebuilt_page() {
+        let mut engine = TextEngine::default();
+        let (_, source) = corpus_page(CORPUS[0], "Baseline anchors");
+        let mut editor = CanvasEditor::from_page(source.clone(), &mut engine).unwrap();
+        let removed = editor
+            .outlines
+            .iter()
+            .find(|outline| {
+                !outline.title
+                    && outline.document.nodes().len() == 1
+                    && outline.document.validate_flat().is_ok()
+            })
+            .unwrap()
+            .id;
+        let bodies = editor
+            .outlines
+            .iter()
+            .filter(|outline| !outline.title && outline.id != removed)
+            .map(|outline| outline.id)
+            .collect::<Vec<_>>();
+        editor.focus_outline(bodies[0]).unwrap();
+        editor.insert(&mut engine, "typed").unwrap();
+        editor.move_outline(bodies[1], [123.0, 456.0]).unwrap();
+        editor.focus_outline(bodies[2]).unwrap();
+        editor.resize(&mut engine, 200.0).unwrap();
+        editor.focus_outline(removed).unwrap();
+        editor.select_all().unwrap();
+        assert!(editor.delete(&mut engine, false).unwrap());
+        let added = editor
+            .create_outline(&mut engine, [24.0, 600.0], 300.0)
+            .unwrap();
+        editor.insert(&mut engine, "added").unwrap();
+
+        let page = editor.page().unwrap();
+        assert_eq!(page.title, source.title);
+        assert_eq!(page.created, source.created);
+        assert_eq!(page.margin_origin, source.margin_origin);
+        assert!(body_text(&page, bodies[0]).unwrap().starts_with("typed"));
+        let moved = page
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) if outline.id == bodies[1] => Some(&outline.layout),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!([moved.x, moved.y], [Some(123.0), Some(456.0)]);
+        let resized = page
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) if outline.id == bodies[2] => Some(&outline.layout),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(resized.max_width, Some(200.0));
+        assert_eq!(resized.width_set_by_user, Some(true));
+        assert!(body_text(&page, removed).is_none());
+        assert_eq!(body_text(&page, added).as_deref(), Some("added"));
+        assert_eq!(page.objects.last().unwrap().id(), added);
+        assert_eq!(
+            page.objects.iter().map(PageObject::id).collect::<Vec<_>>(),
+            source
+                .objects
+                .iter()
+                .map(PageObject::id)
+                .filter(|id| *id != removed)
+                .chain([added])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            page.objects
+                .iter()
+                .find(|object| matches!(object, PageObject::Title(_))),
+            source
+                .objects
+                .iter()
+                .find(|object| matches!(object, PageObject::Title(_)))
+        );
+
+        let mut engine = TextEngine::default();
+        let reimported = CanvasEditor::from_page(page.clone(), &mut engine).unwrap();
+        assert_eq!(reimported.page().unwrap(), page);
+    }
+
+    #[test]
+    fn an_edited_page_writes_back_through_the_page_writer() {
+        let mut engine = TextEngine::default();
+        let (space, source) = corpus_page(CORPUS[2], "Split middle");
+        let mut editor = CanvasEditor::from_page(source.clone(), &mut engine).unwrap();
+        let body = editor
+            .outlines
+            .iter()
+            .find(|outline| !outline.title)
+            .unwrap()
+            .id;
+        editor.focus_outline(body).unwrap();
+        editor.insert(&mut engine, "Edited ").unwrap();
+        let page = editor.page().unwrap();
+        let written = onestore::PreparedEdit::page(CORPUS[2], space, &page, "Author").unwrap();
+        let reread = corpus_pages(written.as_bytes())
+            .into_iter()
+            .find_map(|(candidate, page)| (candidate == space).then_some(page))
+            .unwrap();
+        let edited = body_text(&page, body).unwrap();
+        assert!(edited.starts_with("Edited "));
+        assert_eq!(body_text(&reread, body).as_deref(), Some(edited.as_str()));
+        assert_ne!(body_text(&source, body).as_deref(), Some(edited.as_str()));
     }
 }

@@ -78,8 +78,9 @@ impl From<EditorError> for SceneError {
 
 impl PageScene {
     pub fn new(mut page: Page, engine: &mut TextEngine) -> Result<Self, SceneError> {
-        let (objects, _, _) =
-            crate::editor::page::build(&mut page, engine, false).map_err(SceneError::from)?;
+        let objects = crate::editor::page::build(&mut page, engine, false)
+            .map_err(SceneError::from)?
+            .objects;
         let images = Self::decode_images(&objects)?;
         Ok(Self {
             reference: Some(objects),

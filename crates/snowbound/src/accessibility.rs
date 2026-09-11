@@ -1324,7 +1324,11 @@ mod tests {
                         .selection(editor.active_outline().id, selection)
                         .unwrap()
                 );
-                let count = editor.outlines().iter().map(|o| o.layouts().count()).sum();
+                let count = editor
+                    .outlines()
+                    .iter()
+                    .map(|o| o.layouts().count())
+                    .sum::<usize>();
                 assert_eq!(cached.paragraphs.len(), count);
             }
         };
