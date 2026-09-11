@@ -373,3 +373,13 @@ tests independent of the server.
 Device and simulator builds link for iOS. Native acceptance uses disposable
 OneNote 2010 clients and Samba; it does not establish on-device execution or
 physical power-loss durability.
+
+## Queue measurement
+
+`cargo run -p notebook --release --example queue_scale -- NEW_DIRECTORY 1000`
+measures alternating-page saves that retain separate queue IDs, cache reopen,
+recovery export and local-file publication. JSON lines record each acknowledgement
+and publication latency plus image/cache sizes. The workload verifies every ID
+and both final page titles, then independently reopens the recovery archive.
+Use an external resource monitor for peak memory; these local-file timings do not
+measure SMB or phone performance.
