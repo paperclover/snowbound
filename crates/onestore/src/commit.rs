@@ -205,6 +205,21 @@ impl<'a> PreparedEdit<'a> {
         })
     }
 
+    /// Publishes an edited page model as one revision per changed space.
+    /// The model must come from this snapshot; new paragraphs and outlines carry the identities
+    /// the model assigned, and content outside the model is untouched.
+    pub fn page(
+        source: &'a [u8],
+        space: ExGuid,
+        page: &crate::page::Page,
+        author: &str,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            source,
+            written: crate::page::write::write_page(source, space, page, author)?,
+        })
+    }
+
     /// Creates a page and its section entry in one transaction, retaining the intent's identities.
     pub fn create_page(source: &'a [u8], page: &crate::PageCreation) -> Result<Self, crate::Error> {
         Ok(Self {

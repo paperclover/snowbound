@@ -11,6 +11,7 @@ use std::{
 };
 
 pub mod text;
+pub(crate) mod write;
 pub use text::Paragraph;
 
 /// The role of a title-outline paragraph that displays the page's creation date or time.
@@ -20,6 +21,7 @@ pub enum DateField {
     Time = 1,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Page {
     pub title: String,
     /// FILETIME ticks from the page's TopologyCreationTimeStamp.
@@ -29,11 +31,13 @@ pub struct Page {
     pub definitions: BTreeMap<ExGuid, Definition>,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Definition {
     pub kind: Kind<'static>,
     pub format: Format,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum PageObject {
     Outline(Outline),
     Title(Title),
@@ -69,6 +73,7 @@ impl PageObject {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Title {
     pub id: ExGuid,
     pub date: Option<ExGuid>,
@@ -76,7 +81,7 @@ pub struct Title {
     pub outlines: Vec<Outline>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Outline {
     pub id: ExGuid,
     pub title: bool,
@@ -147,6 +152,7 @@ pub struct TextObject {
     pub tags: Vec<Tag>,
 }
 
+#[derive(Debug, PartialEq)]
 pub struct Image {
     pub id: ExGuid,
     pub layout: Layout,

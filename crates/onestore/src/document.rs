@@ -123,7 +123,7 @@ format_fields! {
     list_spacing: f32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct TextRun {
     pub start: u32,
     pub end: u32,
@@ -266,7 +266,7 @@ pub struct Tag {
     pub extra_set: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "type")]
 pub enum Kind<'a> {
     Section {
@@ -401,13 +401,13 @@ pub enum Kind<'a> {
     Unknown,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub struct Field<'a> {
     pub id: u32,
     pub value: FieldValue<'a>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum FieldValue<'a> {
     NoData,
     Bytes(#[serde(serialize_with = "hex")] &'a [u8]),

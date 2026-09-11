@@ -132,6 +132,27 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+impl From<EditError> for crate::Error {
+    fn from(error: EditError) -> Self {
+        Self {
+            offset: 0,
+            message: match error {
+                EditError::InvalidRange => {
+                    "Text range is outside the paragraph or splits a surrogate pair"
+                }
+                EditError::TextTooLong => "Text exceeds the UTF-16 offset range",
+                EditError::InvalidStructure => {
+                    "This outline has duplicate objects or broken paragraph links"
+                }
+                EditError::UnsupportedContent => {
+                    "This paragraph contains content the text editor cannot edit"
+                }
+                EditError::Identity => "System random source failed",
+            },
+        }
+    }
+}
+
 /// A fresh random identity for a new paragraph or text object.
 pub fn new_id() -> Result<ExGuid, EditError> {
     Ok(ExGuid {
