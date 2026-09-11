@@ -156,8 +156,7 @@ pub(crate) fn edit_pages(
     write_revisions(source, |index| {
         let document = Document::parse(index)?;
         let pages = document.pages()?;
-        let section = &document.spaces[&document.root];
-        let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+        let view = document.active(document.root)?;
         let section_id = view.roots[&1];
         let section_node = &view.nodes[&section_id];
         if !matches!(section_node.kind, Kind::Section { .. })
@@ -171,8 +170,7 @@ pub(crate) fn edit_pages(
         let mut levels = BTreeMap::new();
         let mut page_guids = BTreeMap::new();
         for (sid, _) in &pages {
-            let page = &document.spaces[sid];
-            let page = &page.revisions[&page.contexts[&ExGuid::default()]];
+            let page = document.active(*sid)?;
             let Some(metadata) = page.roots.get(&2).and_then(|id| page.nodes.get(id)) else {
                 return Err(invalid("Page metadata is unavailable"));
             };
@@ -277,7 +275,7 @@ pub(crate) fn edit_pages(
         if order == original_order && levels == original_levels {
             return Ok(BTreeMap::new());
         }
-        let raw = index.resolve(document.root, section.contexts[&ExGuid::default()])?;
+        let raw = index.resolve_active(document.root)?;
         let mut groups: Vec<Vec<ExGuid>> = Vec::new();
         for sid in order {
             if levels[&sid] == 1 {
@@ -287,7 +285,7 @@ pub(crate) fn edit_pages(
         }
         let mut changes = BTreeMap::new();
         for sid in &removed {
-            let page = index.resolve(*sid, index.spaces[sid].labels[&(ExGuid::default(), 1)])?;
+            let page = index.resolve_active(*sid)?;
             let manifest_id = page.roots[&1];
             let mut manifest = PropertyObject::from_object(&page.objects[&manifest_id])?;
             if manifest.jcid != 0x60037 {
@@ -347,8 +345,7 @@ pub(crate) fn edit_pages(
             }
             let mut metadata_ids = Vec::new();
             for sid in &spaces {
-                let page =
-                    index.resolve(*sid, index.spaces[sid].labels[&(ExGuid::default(), 1)])?;
+                let page = index.resolve_active(*sid)?;
                 let page_id = page.roots[&2];
                 let original = PropertyObject::from_object(&page.objects[&page_id])?;
                 if old_id.is_none() && *sid == head {
@@ -489,8 +486,7 @@ impl PageCreation {
             }
             let document = Document::parse(index)?;
             document.pages()?;
-            let section = &document.spaces[&document.root];
-            let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+            let view = document.active(document.root)?;
             let section_id = view.roots[&1];
             let section_node = &view.nodes[&section_id];
             if !matches!(section_node.kind, Kind::Section { .. })
@@ -510,7 +506,7 @@ impl PageCreation {
                         invalid("Insert before the first page of an existing series, or append")
                     })?,
             };
-            let raw = index.resolve(document.root, section.contexts[&ExGuid::default()])?;
+            let raw = index.resolve_active(document.root)?;
             let id = |n| ExGuid { guid: self.guid, n };
             let reference = |n: u32| n.to_le_bytes().to_vec();
             let timestamp = ((u64::from(self.created) + 315532800 + 11644473600) * 10000000)
@@ -665,17 +661,13 @@ mod tests {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let sid = document.pages().unwrap()[3].0;
-        let section = &document.spaces[&document.root];
-        let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+        let view = document.active(document.root).unwrap();
         let series_id = view.nodes[&view.roots[&1]].children[3];
         let copy_id = metadata_id(sid);
         for unknown in [false, true] {
             let source = if unknown {
                 write_revisions(source, |index| {
-                    let raw = index.resolve(
-                        index.root,
-                        index.spaces[&index.root].labels[&(ExGuid::default(), 1)],
-                    )?;
+                    let raw = index.resolve_active(index.root)?;
                     let mut copy = PropertyObject::from_object(&raw.objects[&copy_id])?;
                     copy.set(&[(0x1400abcd, &77_u32.to_le_bytes())])?;
                     Ok(BTreeMap::from([(
@@ -688,10 +680,7 @@ mod tests {
                 source.to_vec()
             };
             let source = write_revisions(&source, |index| {
-                let raw = index.resolve(
-                    index.root,
-                    index.spaces[&index.root].labels[&(ExGuid::default(), 1)],
-                )?;
+                let raw = index.resolve_active(index.root)?;
                 let mut series = PropertyObject::from_object(&raw.objects[&series_id])?;
                 series.remove(&[0x24003442])?;
                 Ok(BTreeMap::from([(
@@ -703,10 +692,7 @@ mod tests {
             for changed in [false, true] {
                 for unrelated_edit in [false, true] {
                     let result = write_revisions(&source, |index| {
-                        let raw = index.resolve(
-                            index.root,
-                            index.spaces[&index.root].labels[&(ExGuid::default(), 1)],
-                        )?;
+                        let raw = index.resolve_active(index.root)?;
                         assert!(!raw.reachable()?.contains(&copy_id));
                         let mut copy = PropertyObject::from_object(&raw.objects[&copy_id])?;
                         if changed {
@@ -782,13 +768,9 @@ mod tests {
         for empty_series in [false, true] {
             let invalid_source = write_revisions(source, |index| {
                 let target = if empty_series { index.root } else { sid };
-                let raw = index.resolve(
-                    target,
-                    index.spaces[&target].labels[&(ExGuid::default(), 1)],
-                )?;
+                let raw = index.resolve_active(target)?;
                 let id = if empty_series {
-                    let space = &document.spaces[&document.root];
-                    let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+                    let view = document.active(document.root).unwrap();
                     view.nodes[&view.roots[&1]].children[3]
                 } else {
                     raw.roots[&1]
@@ -824,8 +806,7 @@ mod tests {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let pages = document.pages().unwrap();
-        let section = &document.spaces[&document.root];
-        let view = &section.revisions[&section.contexts[&ExGuid::default()]];
+        let view = document.active(document.root).unwrap();
         let series_id = view.nodes[&view.roots[&1]].children[3];
         let field = view.nodes[&series_id].extra[0]
             .iter()
@@ -836,10 +817,7 @@ mod tests {
         };
         let copy_id = copies[0];
         let source = write_revisions(source, |index| {
-            let raw = index.resolve(
-                index.root,
-                index.spaces[&index.root].labels[&(ExGuid::default(), 1)],
-            )?;
+            let raw = index.resolve_active(index.root)?;
             let mut objects = BTreeMap::new();
             for id in [series_id, copy_id] {
                 let mut object = PropertyObject::from_object(&raw.objects[&id])?;

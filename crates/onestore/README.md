@@ -43,6 +43,8 @@ harness also accepts `--client-profile release`.
 | `PropertySets`, `Object::references` | Decode properties and ID streams while retaining raw values |
 | `Object::file_reference`, `Store::file_data` | Identify internal/external payloads and read internal payload bytes |
 | `document::Document`, `Revision::text_runs` | Interpret document objects and inherited text formatting while retaining unknown properties and revision identities |
+| `Document::active`, `Document::pages_in`, `Revision::parents`, `RevisionIndex::active` | Resolve the active revision, the pages of a space and parent links without repeating the lookups |
+| `page::Page`, `page::Paragraph` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images) with stored identities; content outside the model is retained as `Unsupported` |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `PageCreation`, `PreparedEdit::create_page` | Add an empty top-level page and its section entry atomically, retaining page identities across retries |

@@ -188,7 +188,7 @@ impl<'a> PreparedEdit<'a> {
     pub fn pages(source: &'a [u8], edits: &[crate::PageEdit]) -> Result<Self, crate::Error> {
         Ok(Self {
             source,
-            written: crate::page::edit_pages(source, edits, &[])?,
+            written: crate::pages::edit_pages(source, edits, &[])?,
         })
     }
 
@@ -201,7 +201,7 @@ impl<'a> PreparedEdit<'a> {
     ) -> Result<Self, crate::Error> {
         Ok(Self {
             source,
-            written: crate::page::edit_pages(source, &[], pages)?,
+            written: crate::pages::edit_pages(source, &[], pages)?,
         })
     }
 
