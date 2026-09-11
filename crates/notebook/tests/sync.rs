@@ -995,3 +995,38 @@ fn restore_conflicts_keep_dependent_work_and_reject_stale_review() {
     assert_eq!(archive.pending().unwrap(), pending);
     assert_eq!(archive.status(head).unwrap(), Some(conflict));
 }
+
+#[test]
+fn cache_open_validates_the_tail_before_head_only_synchronization() {
+    for damage in [
+        "operation='{}'",
+        "space=(SELECT space FROM edits ORDER BY id LIMIT 1)",
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cache.sqlite");
+        let source = onestore::create_section("tail.one", "Original", "Fixture").unwrap();
+        let (_, object, _) = text(&source);
+        let cache = Replica::create(&path, &source).unwrap();
+        save(&cache, object, 0..0, "Head ").unwrap();
+        let page = onestore::PageCreation::new(None, Some("Tail"), "Fixture").unwrap();
+        let tail = cache
+            .create_page(&cache.snapshot().unwrap(), &page)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache.pending().unwrap().len(), 2);
+        drop(cache);
+        let database = rusqlite::Connection::open(&path).unwrap();
+        database
+            .execute(
+                &format!("UPDATE edits SET {damage} WHERE id=?1"),
+                [i64::try_from(tail).unwrap()],
+            )
+            .unwrap();
+        drop(database);
+        let damaged = std::fs::read(&path).unwrap();
+        assert!(
+            matches!(Replica::open(&path), Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), damaged);
+    }
+}

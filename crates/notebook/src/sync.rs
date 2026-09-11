@@ -93,7 +93,13 @@ impl Replica {
                 )
                 .into());
             }
-            let Some(intent) = pending(&transaction)?.into_iter().next() else {
+            let intent = {
+                let mut query = transaction
+                    .prepare("SELECT id, space, operation FROM edits ORDER BY id LIMIT 1")?;
+                let mut rows = query.query([])?;
+                rows.next()?.map(pending_edit).transpose()?
+            };
+            let Some(intent) = intent else {
                 transaction.execute(
                     "UPDATE replica SET base=?1, working=?1 WHERE id=1",
                     [&snapshot],

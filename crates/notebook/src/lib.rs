@@ -453,22 +453,26 @@ fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {
     let mut rows = query.query([])?;
     let mut edits = Vec::new();
     while let Some(row) = rows.next()? {
-        let edit = PendingEdit {
-            id: u64::try_from(row.get::<_, i64>(0)?).map_err(io::Error::other)?,
-            space: row.get::<_, String>(1)?.parse()?,
-            operation: serde_json::from_str(&row.get::<_, String>(2)?)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-        };
-        if matches!(&edit.operation, Operation::CreatePage(page) if page.space() != edit.space) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Cached page identity differs from its creation intent",
-            )
-            .into());
-        }
-        edits.push(edit);
+        edits.push(pending_edit(row)?);
     }
     Ok(edits)
+}
+
+fn pending_edit(row: &rusqlite::Row<'_>) -> Result<PendingEdit> {
+    let edit = PendingEdit {
+        id: u64::try_from(row.get::<_, i64>(0)?).map_err(io::Error::other)?,
+        space: row.get::<_, String>(1)?.parse()?,
+        operation: serde_json::from_str(&row.get::<_, String>(2)?)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+    };
+    if matches!(&edit.operation, Operation::CreatePage(page) if page.space() != edit.space) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cached page identity differs from its creation intent",
+        )
+        .into());
+    }
+    Ok(edit)
 }
 
 fn cache_connection(path: &Path) -> Result<Connection> {

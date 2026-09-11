@@ -279,14 +279,20 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
         |_| {},
     );
     assert!(matches!(start, Err(error) if error.kind() == io::ErrorKind::WouldBlock));
-    let weak = Arc::downgrade(&cache);
     drop(cache);
+    assert!(matches!(Replica::open(&path), Err(Error::Database(error))
+        if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)));
     resume_tx.send(()).unwrap();
-    while weak.upgrade().is_some() {
+    let cache = Arc::new(loop {
+        match Replica::open(&path) {
+            Ok(cache) => break cache,
+            Err(Error::Database(error))
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
+            Err(error) => panic!("{error}"),
+        }
         assert!(stopped.elapsed() < Duration::from_secs(5));
         std::thread::sleep(Duration::from_millis(1));
-    }
-    let cache = Arc::new(Replica::open(&path).unwrap());
+    });
     assert!(matches!(
         cache.status(id).unwrap(),
         Some(EditStatus::AwaitingConfirmation { .. })
