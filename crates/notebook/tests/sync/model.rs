@@ -266,3 +266,261 @@ fn pending_saves_survive_reopening_the_cache() {
     assert_eq!(reopened.status(id).unwrap(), Some(EditStatus::Pending));
     assert_eq!(page_of(&reopened.snapshot().unwrap(), space), after);
 }
+
+/// Edits paragraph `index` of the first body outline: replaces its text range with `replacement`.
+fn edit_paragraph(page: &mut Page, index: usize, range: std::ops::Range<u32>, replacement: &str) {
+    let outline = page
+        .objects
+        .iter_mut()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) => Some(outline),
+            _ => None,
+        })
+        .unwrap();
+    let text = outline.paragraphs[index].text_mut().unwrap();
+    let format = text.text.format_at(range.start).unwrap().clone();
+    text.text
+        .apply(onestore::page::text::Edit {
+            range,
+            replacement: onestore::page::Paragraph::new(replacement.into(), format),
+        })
+        .unwrap();
+}
+
+fn texts(page: &Page) -> Vec<String> {
+    page.objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) => Some(
+                outline
+                    .paragraphs
+                    .iter()
+                    .filter_map(|p| p.text().map(|t| t.text.text().to_owned()))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn remote_with(space: ExGuid, change: impl FnOnce(&mut Page)) -> Server {
+    let mut page = page_of(OUTLINES, space);
+    change(&mut page);
+    Server::new(
+        PreparedEdit::page(OUTLINES, space, &page, "Native author")
+            .unwrap()
+            .as_bytes(),
+    )
+}
+
+#[test]
+fn concurrent_edits_to_different_paragraphs_merge() {
+    let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
+    edit_paragraph(&mut after, 0, 0..0, "Local ");
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| edit_paragraph(page, 2, 0..0, "Remote "));
+    assert!(
+        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
+    );
+    let published = texts(&page_of(&server.durable, space));
+    assert!(published[0].starts_with("Local Anchor"), "{published:?}");
+    assert!(published[2].starts_with("Remote Trailing"), "{published:?}");
+    assert_eq!(
+        cache
+            .status(id)
+            .unwrap()
+            .map(|s| matches!(s, EditStatus::Published { .. })),
+        Some(true)
+    );
+}
+
+#[test]
+fn concurrent_edits_to_one_paragraph_merge_unless_their_ranges_overlap() {
+    let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
+    append(&mut after, " local");
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| edit_paragraph(page, 0, 0..0, "Remote "));
+    assert!(
+        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
+    );
+    assert_eq!(
+        texts(&page_of(&server.durable, space))[0],
+        "Remote Anchor local"
+    );
+
+    let cache = Replica::create(directory.path().join("overlap.sqlite"), OUTLINES).unwrap();
+    let mut after = page_of(OUTLINES, space);
+    edit_paragraph(&mut after, 0, 0..6, "Local");
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| edit_paragraph(page, 0, 0..6, "Remote"));
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
+    );
+    assert_eq!(server.publications, 0);
+}
+
+#[test]
+fn a_local_insertion_merges_with_a_remote_deletion_elsewhere() {
+    let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
+    let template = texts(&after);
+    assert_eq!(template.len(), 3);
+    {
+        let outline = after
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) => Some(outline),
+                _ => None,
+            })
+            .unwrap();
+        let mut fresh = outline.paragraphs[0].clone();
+        fresh.id = onestore::page::text::new_id().unwrap();
+        fresh.style = None;
+        let text = fresh.text_mut().unwrap();
+        text.id = onestore::page::text::new_id().unwrap();
+        text.text = onestore::page::Paragraph::new(
+            "Inserted locally".into(),
+            text.text.format_at(0).unwrap().clone(),
+        );
+        outline.paragraphs.insert(1, fresh);
+    }
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| {
+        let outline = page
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) => Some(outline),
+                _ => None,
+            })
+            .unwrap();
+        outline.paragraphs.pop();
+    });
+    assert!(
+        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
+    );
+    assert_eq!(
+        texts(&page_of(&server.durable, space)),
+        vec![
+            template[0].clone(),
+            "Inserted locally".to_owned(),
+            template[1].clone()
+        ]
+    );
+}
+
+#[test]
+fn a_remote_deletion_of_the_edited_paragraph_conflicts() {
+    let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
+    edit_paragraph(&mut after, 2, 0..0, "Local ");
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| {
+        let outline = page
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                PageObject::Outline(outline) => Some(outline),
+                _ => None,
+            })
+            .unwrap();
+        outline.paragraphs.pop();
+    });
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
+    );
+}
+
+#[test]
+fn outline_moves_merge_with_remote_text_edits_but_not_with_remote_moves() {
+    let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
+    let outline_id = {
+        let PageObject::Outline(outline) = after
+            .objects
+            .iter_mut()
+            .find(|o| matches!(o, PageObject::Outline(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        outline.layout.x = Some(200.0);
+        outline.layout.y = Some(300.0);
+        outline.id
+    };
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| edit_paragraph(page, 0, 0..0, "Remote "));
+    assert!(
+        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
+    );
+    let published = page_of(&server.durable, space);
+    let PageObject::Outline(outline) = published
+        .objects
+        .iter()
+        .find(|o| o.id() == outline_id)
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (outline.layout.x, outline.layout.y),
+        (Some(200.0), Some(300.0))
+    );
+    assert!(
+        outline.paragraphs[0]
+            .text()
+            .unwrap()
+            .text
+            .text()
+            .starts_with("Remote ")
+    );
+
+    let cache = Replica::create(directory.path().join("moves.sqlite"), OUTLINES).unwrap();
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| {
+        let PageObject::Outline(outline) = page
+            .objects
+            .iter_mut()
+            .find(|o| matches!(o, PageObject::Outline(_)))
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        outline.layout.x = Some(50.0);
+    });
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
+    );
+}

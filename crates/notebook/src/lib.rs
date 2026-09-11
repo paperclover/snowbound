@@ -15,6 +15,7 @@ use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Durati
 
 mod assets;
 mod formatting;
+mod merge;
 mod outline;
 mod pages;
 mod paragraph;

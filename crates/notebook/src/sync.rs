@@ -142,10 +142,13 @@ impl Replica {
             Operation::Page(edit) => page_of(&snapshot, intent.space)?
                 .ok_or(ConflictKind::TargetUnavailable)
                 .and_then(|current| {
-                    if current != edit.before {
-                        return Err(ConflictKind::ContentChanged);
-                    }
-                    PreparedEdit::page(&snapshot, intent.space, &edit.after, &edit.author)
+                    let target = if current == edit.before {
+                        edit.after.clone()
+                    } else {
+                        crate::merge::merge(&edit.before, &edit.after, &current)
+                            .ok_or(ConflictKind::ContentChanged)?
+                    };
+                    PreparedEdit::page(&snapshot, intent.space, &target, &edit.author)
                         .map_err(|_| ConflictKind::UnsupportedEdit)
                 }),
             Operation::CreatePage(page) => PreparedEdit::create_page(&snapshot, page)
