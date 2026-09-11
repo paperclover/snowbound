@@ -15,13 +15,13 @@ pub(crate) mod write;
 pub use text::Paragraph;
 
 /// The role of a title-outline paragraph that displays the page's creation date or time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DateField {
     Date = 0,
     Time = 1,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Page {
     pub title: String,
     /// FILETIME ticks from the page's TopologyCreationTimeStamp.
@@ -31,13 +31,13 @@ pub struct Page {
     pub definitions: BTreeMap<ExGuid, Definition>,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
     pub kind: Kind<'static>,
     pub format: Format,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum PageObject {
     Outline(Outline),
     Title(Title),
@@ -73,7 +73,7 @@ impl PageObject {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Title {
     pub id: ExGuid,
     pub date: Option<ExGuid>,
@@ -81,7 +81,7 @@ pub struct Title {
     pub outlines: Vec<Outline>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Outline {
     pub id: ExGuid,
     pub title: bool,
@@ -92,7 +92,7 @@ pub struct Outline {
     pub unsupported: Vec<Unsupported>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PageParagraph {
     pub id: ExGuid,
     pub parent: Option<ExGuid>,
@@ -105,14 +105,14 @@ pub struct PageParagraph {
     pub collapsed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ParagraphContent {
     Text(TextObject),
     Table(Table),
     Unsupported(Unsupported),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Table {
     pub id: ExGuid,
     pub columns: Vec<TableColumn>,
@@ -122,19 +122,19 @@ pub struct Table {
     pub tags: Vec<Tag>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableColumn {
     pub width: f32,
     pub locked: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableRow {
     pub id: ExGuid,
     pub cells: Vec<TableCell>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TableCell {
     pub id: ExGuid,
     pub layout: Layout,
@@ -144,7 +144,7 @@ pub struct TableCell {
     pub unsupported: Vec<Unsupported>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TextObject {
     pub id: ExGuid,
     pub date_field: Option<DateField>,
@@ -152,16 +152,27 @@ pub struct TextObject {
     pub tags: Vec<Tag>,
 }
 
-#[derive(Debug, PartialEq)]
+/// Payload bytes are identified by `id`, so equality and serialization leave them out.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Image {
     pub id: ExGuid,
     pub layout: Layout,
+    #[serde(skip)]
     pub bytes: Option<Arc<[u8]>>,
     pub alt: Option<String>,
     pub background: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.layout == other.layout
+            && self.alt == other.alt
+            && self.background == other.background
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Unsupported {
     pub id: ExGuid,
     pub jcid: u32,

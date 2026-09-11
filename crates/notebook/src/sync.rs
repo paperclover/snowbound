@@ -139,6 +139,15 @@ impl Replica {
             return Ok(Some((intent.id, EditStatus::Published { revision })));
         }
         let candidate = match &intent.operation {
+            Operation::Page(edit) => page_of(&snapshot, intent.space)?
+                .ok_or(ConflictKind::TargetUnavailable)
+                .and_then(|current| {
+                    if current != edit.before {
+                        return Err(ConflictKind::ContentChanged);
+                    }
+                    PreparedEdit::page(&snapshot, intent.space, &edit.after, &edit.author)
+                        .map_err(|_| ConflictKind::UnsupportedEdit)
+                }),
             Operation::CreatePage(page) => PreparedEdit::create_page(&snapshot, page)
                 .map_err(|_| ConflictKind::StructureChanged),
             Operation::Pages(edit) => edit.prepare(&snapshot, intent.space)?,
@@ -327,6 +336,13 @@ impl Replica {
                     )
                     .into());
                 }
+                Operation::Page(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Review a page model conflict using review_page",
+                    )
+                    .into());
+                }
                 Operation::Outline(_) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -505,6 +521,33 @@ impl Replica {
                 .into());
             };
             Ok(Operation::Tree(edit.review(remote, intent.space)?))
+        })
+    }
+
+    /// Replaces a conflicting page save with a model reviewed against the remote page.
+    /// Both supplied images must match `snapshot` and `remote_snapshot`; the reviewed
+    /// model must publish against the remote image, and its author is retained.
+    pub fn review_page(&self, id: u64, local: &[u8], remote: &[u8], after: &Page) -> Result<()> {
+        self.resolve_conflict(id, local, remote, |intent| {
+            let Operation::Page(edit) = intent.operation else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Select a page save conflict",
+                )
+                .into());
+            };
+            let before = page_of(remote, intent.space)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "The page is no longer in the remote section",
+                )
+            })?;
+            PreparedEdit::page(remote, intent.space, after, &edit.author)?;
+            Ok(Operation::Page(PageIntent {
+                before,
+                after: after.clone(),
+                author: edit.author,
+            }))
         })
     }
 

@@ -1,6 +1,6 @@
 use crate::{Error, Object, ObjectData, Reference, Store, bytes::Cursor};
 
-#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FileDataReference {
     Internal([u8; 16]),
     External(String),

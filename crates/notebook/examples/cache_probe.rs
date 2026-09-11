@@ -139,6 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *value as u64 - 6
                 }
                 notebook::Operation::Split(_)
+                | notebook::Operation::Page(_)
                 | notebook::Operation::CreatePage(_)
                 | notebook::Operation::Pages(_)
                 | notebook::Operation::Join(_)

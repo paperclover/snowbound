@@ -7,10 +7,14 @@ use crate::{
     Error, ExGuid, FileDataReference, IdStream, Object, ObjectData, Property, PropertySets,
     RevisionIndex, Store, Value, bytes::Cursor,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 type Result<T> = std::result::Result<T, Error>;
+
+fn no_ciphertext<'a>() -> &'a [u8] {
+    &[]
+}
 
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
@@ -73,7 +77,7 @@ pub struct Element<'a> {
     pub extra: Vec<Vec<Field<'a>>>,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Layout {
     pub x: Option<f32>,
     pub y: Option<f32>,
@@ -86,7 +90,7 @@ pub struct Layout {
 
 macro_rules! format_fields {
     ($($field:ident: $value:ty),* $(,)?) => {
-        #[derive(Debug, Default, Clone, PartialEq, Serialize)]
+        #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
         pub struct Format { $(pub $field: Option<$value>),* }
 
         impl Format {
@@ -123,7 +127,7 @@ format_fields! {
     list_spacing: f32,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextRun {
     pub start: u32,
     pub end: u32,
@@ -251,7 +255,7 @@ impl Revision<'_> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Tag dates count seconds since 1980-01-01 UTC; status retains the ActionItemStatus bits.
 pub struct Tag {
     pub definition: Option<ExGuid>,
@@ -266,7 +270,7 @@ pub struct Tag {
     pub extra_set: usize,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Kind<'a> {
     Section {
@@ -395,7 +399,7 @@ pub enum Kind<'a> {
         color: Option<u32>,
     },
     Encrypted {
-        #[serde(serialize_with = "hex")]
+        #[serde(serialize_with = "hex", skip_deserializing, default = "no_ciphertext")]
         ciphertext: &'a [u8],
     },
     Unknown,

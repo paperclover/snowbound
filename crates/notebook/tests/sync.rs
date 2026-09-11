@@ -7,6 +7,8 @@ use std::io;
 
 #[path = "../../onestore/tests/support/disk.rs"]
 mod disk;
+#[path = "sync/model.rs"]
+mod model;
 #[path = "sync/outline.rs"]
 mod outline;
 #[path = "sync/page.rs"]

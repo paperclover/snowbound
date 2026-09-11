@@ -1,14 +1,14 @@
 use crate::{ExGuid, document::Format};
 use std::{fmt, ops::Range};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     /// Exclusive UTF-8 boundary; the start is the preceding span's end.
     pub end: usize,
     pub format: Format,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 /// Editable text styles are coalesced independently of serialized run boundaries.
 pub struct Paragraph {
     text: String,

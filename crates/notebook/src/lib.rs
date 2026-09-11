@@ -8,8 +8,9 @@ pub mod smb;
 use onestore::{
     ExGuid, Insertion, PageCreation, PreparedEdit, RevisionIndex, Store,
     document::{Document, Kind},
+    page::Page,
 };
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::{fs::OpenOptions, io, ops::Range, path::Path, sync::Mutex, time::Duration};
 
 mod assets;
@@ -67,9 +68,20 @@ pub struct TextEdit {
     pub replacement: String,
 }
 
+/// An edited page model together with the stored model it was edited from.
+/// `before` is the precondition reconciliation checks against the remote page.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageIntent {
+    pub before: Page,
+    pub after: Page,
+    pub author: String,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Operation {
+    Page(PageIntent),
     CreatePage(PageCreation),
     Pages(PageEdits),
     Text(TextEdit),
@@ -238,6 +250,94 @@ impl Replica {
         self.record(source, space, Operation::Insert(insertion.clone()), &edit)
     }
 
+    /// Durably queues an edited page model using the supplied local snapshot.
+    /// While the newest pending edit is an unattempted save of the same page, a new save
+    /// replaces its result instead of queueing another publication, as OneNote does
+    /// within its own save interval. An unchanged model returns `None`.
+    pub fn save(
+        &self,
+        source: &[u8],
+        space: ExGuid,
+        after: &Page,
+        author: &str,
+    ) -> Result<Option<u64>> {
+        let prepared = PreparedEdit::page(source, space, after, author)?;
+        if prepared.as_bytes() == source {
+            return Ok(None);
+        }
+        let before = page_of(source, space)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "The saved page is not in the local image",
+            )
+        })?;
+        {
+            let mut connection = self
+                .connection
+                .lock()
+                .map_err(|_| io::Error::other("Cache owner panicked"))?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current: Vec<u8> =
+                transaction.query_row("SELECT working FROM replica WHERE id=1", [], |row| {
+                    row.get(0)
+                })?;
+            if current != source {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "The local snapshot changed before this edit",
+                )
+                .into());
+            }
+            let newest: Option<(i64, String, String)> = transaction
+                .query_row(
+                    "SELECT id, space, operation FROM edits WHERE id=(SELECT max(id) FROM edits)",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            if let Some((id, sid, operation)) = newest
+                && sid == space.to_string()
+                && let Ok(Operation::Page(mut head)) = serde_json::from_str::<Operation>(&operation)
+            {
+                let attempted: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM attempt WHERE edit_id=?1) OR EXISTS(SELECT 1 FROM conflicts WHERE edit_id=?1)",
+                    [id],
+                    |row| row.get(0),
+                )?;
+                if !attempted {
+                    head.after = after.clone();
+                    transaction.execute(
+                        "UPDATE edits SET operation=?1 WHERE id=?2",
+                        params![
+                            serde_json::to_string(&Operation::Page(head))
+                                .map_err(io::Error::other)?,
+                            id
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE replica SET working=?1 WHERE id=1",
+                        [prepared.as_bytes()],
+                    )?;
+                    transaction.commit()?;
+                    drop(connection);
+                    self.wake_sync();
+                    return Ok(Some(u64::try_from(id).map_err(io::Error::other)?));
+                }
+            }
+        }
+        self.record(
+            source,
+            space,
+            Operation::Page(PageIntent {
+                before,
+                after: after.clone(),
+                author: author.to_owned(),
+            }),
+            &prepared,
+        )
+    }
+
     /// Queues a new page and its section entry with stable identities for dependent edits.
     pub fn create_page(&self, source: &[u8], page: &PageCreation) -> Result<Option<u64>> {
         let edit = PreparedEdit::create_page(source, page)?;
@@ -329,6 +429,13 @@ fn active_paths(
             Some(path)
         })
         .collect()
+}
+
+fn page_of(source: &[u8], space: ExGuid) -> Result<Option<Page>> {
+    let store = Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    let document = Document::parse(&index)?;
+    Ok(Page::from_space(&document, space).ok())
 }
 
 fn paragraph(source: &[u8], space: ExGuid, object: ExGuid) -> Result<Option<String>> {

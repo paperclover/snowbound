@@ -222,7 +222,10 @@ impl Lowering<'_> {
             page.objects
                 .iter()
                 .filter_map(|object| match object {
-                    PageObject::Image(image) => Some(format!("{image:?}")),
+                    PageObject::Image(image) => Some(format!(
+                        "{:?} {:?} {:?} {:?}",
+                        image.id, image.layout, image.alt, image.background
+                    )),
                     PageObject::Unsupported(unsupported) => Some(format!("{unsupported:?}")),
                     PageObject::Title(title) => Some(format!(
                         "{:?} {:?} {:?} {:?}",
