@@ -143,7 +143,7 @@ impl Insertion {
     fn validate(&self) -> Result<(), Error> {
         if self.guid == [0; 16]
             || self.parent.guid == [0; 16]
-            || self.text.contains(['\0', '\n', '\u{fffc}', '\u{fddf}'])
+            || self.text.contains(['\0', '\n', '\u{fffc}'])
             || self.author.contains('\0')
         {
             return Err(invalid(

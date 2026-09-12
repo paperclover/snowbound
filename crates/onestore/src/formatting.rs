@@ -35,6 +35,12 @@ pub enum TextAttribute {
     Color(Option<[u8; 3]>),
     /// RGB, or None to clear highlighting.
     Highlight(Option<[u8; 3]>),
+    /// Hidden text, such as a hyperlink's field code.
+    Hidden(bool),
+    /// The run belongs to a hyperlink field.
+    Hyperlink(bool),
+    /// The run is a hyperlink's visible label or field code rather than surrounding text.
+    HyperlinkLabel(bool),
 }
 
 impl TextAttribute {
@@ -47,6 +53,9 @@ impl TextAttribute {
             Self::Strike(value) => boolean(0x08001c07, *value),
             Self::Superscript(value) => boolean(0x08001c08, *value),
             Self::Subscript(value) => boolean(0x08001c09, *value),
+            Self::Hidden(value) => boolean(0x08001e16, *value),
+            Self::Hyperlink(value) => boolean(0x08001e14, *value),
+            Self::HyperlinkLabel(value) => boolean(0x08001e19, *value),
             Self::Font(font) => {
                 if font.is_empty() || font.contains('\0') {
                     return Err(invalid("Font names must be nonempty and contain no NUL"));
@@ -141,14 +150,8 @@ pub(crate) fn format_text(
         };
         if selected {
             let format = &resolved[i].format;
-            if [
-                format.hidden,
-                format.hyperlink,
-                format.math,
-                format.embedded_object,
-            ]
-            .contains(&Some(true))
-                || resolved[i].text.contains(['\u{fffc}', '\u{fddf}'])
+            if [format.math, format.embedded_object].contains(&Some(true))
+                || resolved[i].text.contains('\u{fffc}')
             {
                 return Err(invalid(
                     "This format range contains a field or embedded data",

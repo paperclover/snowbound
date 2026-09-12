@@ -57,7 +57,7 @@ harness also accepts `--client-profile release`.
 | `ParagraphJoin`, `PreparedEdit::join` | Join adjacent ordinary text while preserving inherited character styles and native text-identity rules |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `OutlineEdit`, `PreparedEdit::outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
-| `PreparedEdit::page` | Publish an edited `page::Page` as one revision per changed space: text, character and paragraph formatting, bullets and numbering, note tags, paragraph insertion/split/join/move/deletion, outline insertion/deletion/position/width and saved collapse state, lowered onto the typed writers with the model's identities |
+| `PreparedEdit::page` | Publish an edited `page::Page` as one revision per changed space: text, character and paragraph formatting, hyperlinks, bullets and numbering, note tags, paragraph insertion/split/join/move/deletion, outline insertion/deletion/position/width and saved collapse state, lowered onto the typed writers with the model's identities |
 | `TreeEdit`, `PreparedEdit::tree` | Move or delete a subtree on one page, normalize surviving containers, and replace an emptied table cell's paragraph atomically |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |

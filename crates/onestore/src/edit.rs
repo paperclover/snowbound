@@ -36,7 +36,7 @@ pub fn replace_text(
     replacement: &str,
 ) -> Result<Vec<u8>, Error> {
     let invalid = |message| Error { offset: 0, message };
-    if range.start > range.end || replacement.contains(['\0', '\n', '\r', '\u{fffc}', '\u{fddf}']) {
+    if range.start > range.end || replacement.contains(['\0', '\n', '\r', '\u{fffc}']) {
         return Err(invalid(
             "Use a valid text range and ordinary paragraph text",
         ));
@@ -82,15 +82,11 @@ pub fn replace_text(
     let resolved = revision.text_runs(object)?;
     for (i, run) in runs.iter().enumerate() {
         if i == selected || (run.start < range.end && range.start < run.end) {
+            // Hyperlink field codes and their hidden runs are ordinary text with flags;
+            // embedded objects and equations are not.
             let format = &resolved[i].format;
-            if [
-                format.hidden,
-                format.hyperlink,
-                format.math,
-                format.embedded_object,
-            ]
-            .contains(&Some(true))
-                || resolved[i].text.contains(['\u{fffc}', '\u{fddf}'])
+            if [format.math, format.embedded_object].contains(&Some(true))
+                || resolved[i].text.contains('\u{fffc}')
                 || run.extra_set.is_some_and(|set| !node.extra[set].is_empty())
             {
                 return Err(invalid("This text run contains a field or embedded data"));

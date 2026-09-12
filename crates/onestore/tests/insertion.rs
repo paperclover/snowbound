@@ -616,7 +616,7 @@ fn anchors_targets_serialized_identities_and_text_are_validated_before_publicati
     let (sid, page, outline, paragraph, text) = targets(&source);
     assert!(Insertion::outline(page, f32::NAN, 0.0, "Text", "Author").is_err());
     assert!(Insertion::outline(page, 0.0, f32::INFINITY, "Text", "Author").is_err());
-    for content in ["a\0b", "a\nb", "a\u{fffc}b", "a\u{fddf}b"] {
+    for content in ["a\0b", "a\nb", "a\u{fffc}b"] {
         assert!(Insertion::paragraph(outline, None, content, "Author").is_err());
     }
     assert!(Insertion::paragraph(outline, None, "Text", "a\0b").is_err());

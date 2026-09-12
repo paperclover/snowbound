@@ -371,7 +371,6 @@ fn invalid_text_edits_never_touch_storage() {
         (0..0, "\n"),
         (0..0, "\0"),
         (0..0, "\u{fffc}"),
-        (0..0, "\u{fddf}"),
     ] {
         let mut disk = Disk {
             visible: source.clone(),
@@ -387,46 +386,6 @@ fn invalid_text_edits_never_touch_storage() {
         assert_eq!(disk.operation, 0);
         assert_eq!(disk.durable, source);
     }
-}
-
-#[test]
-fn cross_run_edits_reject_native_fields_before_storage_io() {
-    let source = include_bytes!("../../../corpus/m6/native-probes-01/notebook/synthetic.one");
-    let store = Store::parse(source).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
-    let mut fields = 0;
-    for (sid, space) in &document.spaces {
-        let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
-        for (oid, node) in &revision.nodes {
-            let Kind::RichText { text, runs, .. } = &node.kind else {
-                continue;
-            };
-            let resolved = revision.text_runs(*oid).unwrap();
-            for (run, resolved) in runs.iter().zip(resolved) {
-                if resolved.format.hyperlink != Some(true) {
-                    continue;
-                }
-                fields += 1;
-                for range in [0..run.end, run.start..text.encode_utf16().count() as u32] {
-                    let mut disk = Disk {
-                        visible: source.to_vec(),
-                        durable: source.to_vec(),
-                        operation: 0,
-                        fail_at: None,
-                        write_limit: 17,
-                        random: 9,
-                    };
-                    let error = onestore::commit_text(&mut disk, source, *sid, *oid, range, "x")
-                        .unwrap_err();
-                    assert_eq!(error.state, CommitState::NotCommitted);
-                    assert_eq!(disk.operation, 0);
-                    assert_eq!(disk.durable, source);
-                }
-            }
-        }
-    }
-    assert!(fields > 0);
 }
 
 #[test]

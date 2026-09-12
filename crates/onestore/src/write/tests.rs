@@ -884,10 +884,12 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
             );
             continue;
         }
+        // Hidden and hyperlink runs are ordinary text with flags; associated data,
+        // equations and embedded objects are not.
         let text_edit = PreparedEdit::text(&fixture, sid, text, 1..5, "x");
-        assert_eq!(text_edit.is_ok(), variant == 0);
+        assert_eq!(text_edit.is_ok(), matches!(variant, 0 | 1 | 4));
         let edit = PreparedEdit::format(&fixture, sid, text, 0..6, &[TextAttribute::Bold(true)]);
-        if matches!(variant, 1 | 2 | 4 | 5 | 6) {
+        if matches!(variant, 2 | 5 | 6) {
             assert!(edit.is_err());
             continue;
         }

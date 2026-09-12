@@ -1388,14 +1388,11 @@ fn text_edit(before: &str, after: &str) -> Result<(Range<u32>, String), Error> {
 fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<TextAttribute>, Error> {
     let mut out = Vec::new();
     let inherited = || invalid("Inherited character formatting cannot be restored");
+    // An absent flag and an explicit false are the same formatting.
     macro_rules! boolean {
         ($field:ident, $variant:ident) => {
-            if current.$field != target.$field {
-                match target.$field {
-                    Some(value) => out.push(TextAttribute::$variant(value)),
-                    None if fresh => {}
-                    None => return Err(inherited()),
-                }
+            if current.$field.unwrap_or(false) != target.$field.unwrap_or(false) {
+                out.push(TextAttribute::$variant(target.$field.unwrap_or(false)));
             }
         };
     }
@@ -1405,6 +1402,9 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
     boolean!(strike, Strike);
     boolean!(superscript, Superscript);
     boolean!(subscript, Subscript);
+    boolean!(hidden, Hidden);
+    boolean!(hyperlink, Hyperlink);
+    boolean!(hyperlink_label, HyperlinkLabel);
     if current.font != target.font {
         match &target.font {
             Some(font) => out.push(TextAttribute::Font(font.clone())),
@@ -1438,10 +1438,7 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
     // An absent value and its stored default are the same formatting.
     let flag = |a: Option<bool>, b: Option<bool>| a.unwrap_or(false) == b.unwrap_or(false);
     let points = |a: Option<f32>, b: Option<f32>| a.unwrap_or(0.0) == b.unwrap_or(0.0);
-    let same_rest = flag(current.hidden, target.hidden)
-        && flag(current.hyperlink, target.hyperlink)
-        && flag(current.hyperlink_label, target.hyperlink_label)
-        && flag(current.math, target.math)
+    let same_rest = flag(current.math, target.math)
         && flag(current.embedded_object, target.embedded_object)
         && current.alignment.unwrap_or(0) == target.alignment.unwrap_or(0)
         && flag(current.rtl, target.rtl)
@@ -1451,7 +1448,7 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
         && points(current.list_spacing, target.list_spacing);
     if !same_rest {
         return Err(invalid(
-            "Fields, links, language and paragraph spacing cannot be edited through the page model",
+            "Fields, language and paragraph spacing cannot be edited through the page model",
         ));
     }
     Ok(out)
