@@ -438,13 +438,11 @@ impl Lowering<'_> {
                                 .find(|before| before.id == cell.id)
                                 .is_none_or(|before| {
                                     cell.layout == before.layout
-                                        && cell.indents == before.indents
-                                        && cell.shading == before.shading
                                         && cell.unsupported == before.unsupported
                                 })
                         });
                     if !unchanged_cells {
-                        return Err(invalid("Cell layout, indents and shading cannot be edited"));
+                        return Err(invalid("Cell layout cannot be edited"));
                     }
                 }
                 (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
@@ -690,6 +688,7 @@ impl Lowering<'_> {
             });
         self.place_containers(old, new, placed, &existing)?;
         self.edit_table_structure(old, new)?;
+        self.edit_cells(old, new)?;
         self.edit_images(old, new)?;
         self.edit_attachments(old, new)?;
         self.place_containers(old, new, placed, &deferred)?;
@@ -1052,6 +1051,70 @@ impl Lowering<'_> {
     /// order to the model's, and writes the column widths, locks and border flag. Native
     /// rows and cells are plain containers; a cell carries its indent array and the flags
     /// every native cell has.
+    /// Shading (the documented `CellShadingColor`, which OneNote 2010 stores but neither
+    /// renders nor accepts through its COM schema) and indents change in place on a cell.
+    fn edit_cells(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        let stored: BTreeMap<ExGuid, &super::TableCell> = old
+            .paragraphs
+            .values()
+            .filter_map(|paragraph| match &paragraph.content {
+                ParagraphContent::Table(table) => Some(table),
+                _ => None,
+            })
+            .flat_map(|table| table.rows.iter().flat_map(|row| &row.cells))
+            .map(|cell| (cell.id, cell))
+            .collect();
+        for paragraph in new.paragraphs.values() {
+            let ParagraphContent::Table(table) = &paragraph.content else {
+                continue;
+            };
+            for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                let Some(previous) = stored.get(&cell.id) else {
+                    continue;
+                };
+                if (cell.shading, &cell.indents) == (previous.shading, &previous.indents) {
+                    continue;
+                }
+                let mut values: Values = vec![(
+                    0x14001d7a,
+                    crate::create::current_timestamps()?
+                        .0
+                        .to_le_bytes()
+                        .to_vec(),
+                )];
+                let mut removed = Vec::new();
+                if cell.shading != previous.shading {
+                    match cell.shading {
+                        Some(shading) => values.push((0x14001e26, shading.to_le_bytes().to_vec())),
+                        None => removed.push(0x14001e26),
+                    }
+                }
+                if cell.indents != previous.indents {
+                    if cell.indents.is_empty() {
+                        removed.push(0x1c001c12);
+                    } else {
+                        values.push((0x1c001c12, measurement_bytes(&cell.indents, 4)?));
+                    }
+                }
+                let (space, object) = (self.space, self.id(cell.id));
+                self.apply(|current| {
+                    crate::write::write_revision(current, space, |raw| {
+                        let mut object_properties =
+                            PropertyObject::from_object(&raw.objects[&object])?;
+                        object_properties.remove(&removed)?;
+                        let values: Vec<(u32, &[u8])> = values
+                            .iter()
+                            .map(|(id, bytes)| (*id, bytes.as_slice()))
+                            .collect();
+                        object_properties.set(&values)?;
+                        Ok(BTreeMap::from([(object, object_properties)]))
+                    })
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn edit_table_structure(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
         let old_tables: BTreeMap<ExGuid, &Table> = old
             .paragraphs

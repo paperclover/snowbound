@@ -53,6 +53,12 @@ class TableEditTest(unittest.TestCase):
         self.assertEqual(rows[0][2], ['Third column'])
         self.assertEqual(rows[1], [['Second row'], ['Second row, second column'], ['Second row, third column']])
 
+    def test_a_table_nested_in_a_native_cell_renders_natively(self):
+        self.check('nested')
+        outer, inner = tables(FIXTURE / 'nested/cold/read', 'Delete cell subtree')
+        self.assertEqual(inner, ('true', [('72.0', 'true')], [[['Inner one']], [['Inner two']]]))
+        self.assertEqual(outer[2][0][1], ['Other cell', 'Inner one', 'Inner two'])
+
 
 if __name__ == '__main__':
     unittest.main()

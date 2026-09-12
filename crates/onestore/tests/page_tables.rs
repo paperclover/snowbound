@@ -215,6 +215,92 @@ fn column_widths_locks_and_borders_change_in_place() {
 }
 
 #[test]
+fn cell_shading_and_indents_change_in_place() {
+    let (space, before) = page_by_title(TREES, "Delete cell subtree");
+    let mut after = before.clone();
+    let table = table_mut(&mut after);
+    let cell = &mut table.rows[0].cells[0];
+    assert_eq!(cell.shading, None);
+    cell.shading = Some(0x0000ffff);
+    let original_indents = cell.indents.clone();
+    cell.indents = vec![18.0, 0.0, 27.0, 27.0];
+    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
+    let stored = assert_same(written.as_bytes(), space, &after);
+    let mut reset = stored.clone();
+    let cell = &mut table_mut(&mut reset).rows[0].cells[0];
+    cell.shading = None;
+    cell.indents = original_indents;
+    let again = PreparedEdit::page(written.as_bytes(), space, &reset, AUTHOR).unwrap();
+    assert_eq!(assert_same(again.as_bytes(), space, &reset), before);
+}
+
+/// `ONESTORE_NESTED_TABLE_EXPORT` names a new directory receiving the candidate for a cold reopen.
+#[test]
+fn a_table_nests_inside_a_cell_and_is_removed_again() {
+    let (space, before) = page_by_title(TREES, "Delete cell subtree");
+    let mut after = before.clone();
+    let template = table_mut(&mut after).rows[0].cells[0].paragraphs[0].clone();
+    let cell = |text: &str| TableCell {
+        id: new_id().unwrap(),
+        layout: Default::default(),
+        indents: Vec::new(),
+        shading: None,
+        paragraphs: vec![cell_paragraph(&template, text)],
+        unsupported: Vec::new(),
+    };
+    let nested = Table {
+        id: new_id().unwrap(),
+        columns: vec![TableColumn {
+            width: 72.0,
+            locked: true,
+        }],
+        rows: vec![
+            TableRow {
+                id: new_id().unwrap(),
+                cells: vec![cell("Inner one")],
+            },
+            TableRow {
+                id: new_id().unwrap(),
+                cells: vec![cell("Inner two")],
+            },
+        ],
+        borders: Some(true),
+        layout: Default::default(),
+        tags: Vec::new(),
+    };
+    let mut holder = cell_paragraph(&template, "");
+    holder.content = ParagraphContent::Table(nested);
+    holder.format = Format::default();
+    let holder_id = holder.id;
+    table_mut(&mut after).rows[0].cells[1]
+        .paragraphs
+        .push(holder);
+    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
+    let stored = assert_same(written.as_bytes(), space, &after);
+    if let Some(directory) = std::env::var_os("ONESTORE_NESTED_TABLE_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
+        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents(
+                "Open Notebook.onetoc2",
+                &[("synthetic.one", written_store.header.file_id)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let mut removed = stored.clone();
+    table_mut(&mut removed).rows[0].cells[1]
+        .paragraphs
+        .retain(|paragraph| paragraph.id != holder_id);
+    let again = PreparedEdit::page(written.as_bytes(), space, &removed, AUTHOR).unwrap();
+    assert_eq!(assert_same(again.as_bytes(), space, &removed), before);
+}
+
+#[test]
 fn inconsistent_tables_are_refused() {
     let (space, before) = page_by_title(TREES, "Delete cell subtree");
     let mut ragged = before.clone();
