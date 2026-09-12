@@ -611,6 +611,7 @@ mod tests {
         .snapshot();
         title.title = true;
         let page = Page {
+            identity: None,
             title: "Header".into(),
             created: None,
             margin_origin: [36.0, 14.4],
@@ -700,6 +701,7 @@ mod tests {
         use canvas::gpu::page::PageScene;
         use onestore::page::{Page, PageObject, Unsupported};
         let page = Page {
+            identity: None,
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],

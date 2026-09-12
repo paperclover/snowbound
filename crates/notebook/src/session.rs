@@ -209,6 +209,12 @@ impl Section {
         &self.file
     }
 
+    /// The section file identity, which internal links name as `section-id`
+    /// (`onestore::page::link::internal_link`).
+    pub fn identity(&self) -> Result<[u8; 16]> {
+        Ok(Store::parse(&self.replica.snapshot()?)?.header.file_id)
+    }
+
     /// Page spaces and titles in section order, from the local working image.
     pub fn pages(&self) -> Result<Vec<(ExGuid, String)>> {
         let snapshot = self.replica.snapshot()?;

@@ -1,11 +1,18 @@
 use onestore::{
     ExGuid, PreparedEdit, RevisionIndex, Store,
     document::Document,
-    page::{Page, PageObject, PageParagraph, Paragraph, text::Edit},
+    page::{
+        Page, PageObject, PageParagraph, Paragraph,
+        link::{LinkTarget, internal_link},
+        text::Edit,
+    },
 };
 
 const OUTLINES: &[u8] =
     include_bytes!("../../../corpus/outline-edit/before/notebook/synthetic.one");
+const NATIVE_LINKS: &[u8] =
+    include_bytes!("../../../corpus/link-edit/native-links/notebook/links.one");
+const NATIVE_BASE_PATH: &str = r"C:\one-tests\runs\capture\notebook\links.one";
 const AUTHOR: &str = "Link author";
 const CODE: &str = "\u{fddf}HYPERLINK \"https://example.invalid/rust\"";
 
@@ -187,6 +194,147 @@ fn a_link_is_added_to_a_fresh_page_and_reads_back() {
                 &[("links.one", written_store.header.file_id)],
             )
             .unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn field_codes(page: &mut Page) -> Vec<String> {
+    body_paragraphs(page)
+        .iter()
+        .filter_map(|p| p.text())
+        .filter_map(|t| {
+            let text = t.text.text();
+            let start = text.find("\u{fddf}HYPERLINK \"")? + "\u{fddf}HYPERLINK \"".len();
+            let end = start + text[start..].find('"')?;
+            Some(text[start..end].to_owned())
+        })
+        .collect()
+}
+
+/// The URLs OneNote 2010 wrote for links to a page, a paragraph and the section
+/// (`corpus/link-edit/native-links`) are what `internal_link` produces from the stored
+/// identities: the section file identity, the target page's notebook-management identity
+/// and the paragraph's stored identity.
+#[test]
+fn internal_links_match_what_onenote_stores() {
+    let section = Store::parse(NATIVE_LINKS).unwrap().header.file_id;
+    let (_, target) = page_by_title(NATIVE_LINKS, "Link target");
+    let mut target_paragraphs = target.clone();
+    // OneNote rewrote the target outline after linking; the link keeps the paragraph
+    // identity it saw then (n 28), whose page half is the current paragraph's.
+    let paragraph = ExGuid {
+        guid: body_paragraphs(&mut target_paragraphs)[0].id.guid,
+        n: 28,
+    };
+    let (_, mut source) = page_by_title(NATIVE_LINKS, "Read about Rust the Rust site");
+    let stored = field_codes(&mut source);
+    let page = LinkTarget::Page {
+        identity: target.identity.unwrap(),
+        title: &target.title,
+    };
+    let object = LinkTarget::Object {
+        identity: target.identity.unwrap(),
+        title: &target.title,
+        object: paragraph,
+    };
+    assert_eq!(
+        stored,
+        [
+            "https://example.invalid/rust".to_owned(),
+            internal_link(section, NATIVE_BASE_PATH, page),
+            internal_link(section, NATIVE_BASE_PATH, object),
+            internal_link(section, NATIVE_BASE_PATH, LinkTarget::Section),
+        ]
+    );
+    assert_eq!(
+        internal_link(
+            [0; 16],
+            "p",
+            LinkTarget::Page {
+                identity: [0; 16],
+                title: "A b/c"
+            }
+        ),
+        "onenote:#A%20b%2Fc&section-id={00000000-0000-0000-0000-000000000000}&page-id={00000000-0000-0000-0000-000000000000}&end&base-path=p"
+    );
+}
+
+/// `ONESTORE_INTERNAL_LINK_EXPORT` names a new directory receiving the candidate for a cold
+/// reopen: a section whose first page links to its second page and to a paragraph on it.
+#[test]
+fn a_page_links_to_another_page_and_its_paragraph() {
+    let source = onestore::create_section("links.one", "Linking page", "Author").unwrap();
+    let creation = onestore::PageCreation::new(None, Some("Link target"), "Author").unwrap();
+    let with_target = onestore::PreparedEdit::create_page(&source, &creation)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let section = Store::parse(&with_target).unwrap().header.file_id;
+    let (_, target) = page_by_title(&with_target, "Link target");
+    let (space, before) = page_by_title(&with_target, "Linking page");
+    let paragraph = target
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => outline.paragraphs.first(),
+            _ => None,
+        })
+        .map(|p| p.id);
+    let base_path = r"C:\one-tests\runs\capture\notebook\links.one";
+    let page_url = internal_link(
+        section,
+        base_path,
+        LinkTarget::Page {
+            identity: target.identity.unwrap(),
+            title: &target.title,
+        },
+    );
+    let mut after = before.clone();
+    let text = &mut body_paragraphs(&mut after)[0].text_mut().unwrap().text;
+    let end = text.utf16_offset(text.text().len()).unwrap();
+    let base = text.format_at(end).unwrap().clone();
+    let mut code = base.clone();
+    code.hyperlink = Some(true);
+    code.hyperlink_label = Some(true);
+    code.hidden = Some(true);
+    let mut visible = base.clone();
+    visible.hyperlink = Some(true);
+    visible.hyperlink_label = Some(true);
+    let mut runs = vec![
+        (" ".to_owned(), base.clone()),
+        (format!("\u{fddf}HYPERLINK \"{page_url}\""), code.clone()),
+        ("Link target".to_owned(), visible.clone()),
+    ];
+    if let Some(paragraph) = paragraph {
+        let object_url = internal_link(
+            section,
+            base_path,
+            LinkTarget::Object {
+                identity: target.identity.unwrap(),
+                title: &target.title,
+                object: paragraph,
+            },
+        );
+        runs.push((" ".to_owned(), base.clone()));
+        runs.push((format!("\u{fddf}HYPERLINK \"{object_url}\""), code));
+        runs.push(("its paragraph".to_owned(), visible));
+    }
+    text.apply(Edit {
+        range: end..end,
+        replacement: Paragraph::from_runs(runs),
+    })
+    .unwrap();
+    let written = PreparedEdit::page(&with_target, space, &after, AUTHOR).unwrap();
+    assert_same(written.as_bytes(), space, &after);
+    if let Some(directory) = std::env::var_os("ONESTORE_INTERNAL_LINK_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("links.one"), written.as_bytes()).unwrap();
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents("Open Notebook.onetoc2", &[("links.one", section)])
+                .unwrap(),
         )
         .unwrap();
     }

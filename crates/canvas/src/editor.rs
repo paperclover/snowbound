@@ -114,6 +114,7 @@ pub struct CanvasEditor {
 #[derive(Default)]
 struct PageHeader {
     title: String,
+    identity: Option<[u8; 16]>,
     created: Option<u64>,
     margin_origin: [f32; 2],
     areas: Vec<page::TitleArea>,
@@ -699,6 +700,7 @@ impl CanvasEditor {
         editor.objects = objects;
         editor.header = PageHeader {
             title: page.title,
+            identity: page.identity,
             created: page.created,
             margin_origin: page.margin_origin,
             areas,
@@ -767,6 +769,7 @@ impl CanvasEditor {
         );
         Ok(Page {
             title: self.header.title.clone(),
+            identity: self.header.identity,
             created: self
                 .date
                 .as_ref()
@@ -4384,6 +4387,7 @@ mod tests {
         let mut editor = CanvasEditor::from_page(
             Page {
                 title: "Header".into(),
+                identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
                 definitions: BTreeMap::new(),

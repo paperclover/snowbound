@@ -267,10 +267,18 @@ fn new_definitions_and_tags_publish_on_a_fresh_page() {
     let important = new_id().unwrap();
     after.definitions.insert(task, definition("Rust task", 3));
     let mut important_definition = definition("Important", 13);
-    let Kind::TagDefinition { action_type, .. } = &mut important_definition.kind else {
+    let Kind::TagDefinition {
+        action_type,
+        color,
+        highlight,
+        ..
+    } = &mut important_definition.kind
+    else {
         panic!()
     };
     *action_type = Some(1);
+    *color = Some(0x0000_00ff);
+    *highlight = Some(0x0000_ffff);
     after.definitions.insert(important, important_definition);
     body_paragraphs(&mut after)[0]
         .text_mut()

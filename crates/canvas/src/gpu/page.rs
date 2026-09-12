@@ -550,6 +550,7 @@ mod tests {
         let id = fields[0].id;
         let source = fields[0].paragraphs.clone();
         let page = Page {
+            identity: None,
             created: Some(1),
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
@@ -987,6 +988,7 @@ mod tests {
         fields[0].min_width = Some(162.0);
         let title_id = fields[0].id;
         let page = Page {
+            identity: None,
             created: None,
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
@@ -1060,6 +1062,7 @@ mod tests {
             })
             .collect();
         let page = Page {
+            identity: None,
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
@@ -1138,6 +1141,7 @@ mod tests {
                 PageObject::Outline(tagged)
             };
             let page = Page {
+                identity: None,
                 created: None,
                 title: String::new(),
                 margin_origin: [36.0, 14.0],
@@ -1208,6 +1212,7 @@ mod tests {
             layout: Layout::default(),
         };
         let page = Page {
+            identity: None,
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
@@ -1383,6 +1388,7 @@ mod tests {
                 .unwrap();
         }
         let page = || Page {
+            identity: None,
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
@@ -1504,6 +1510,7 @@ mod tests {
                 .unwrap();
         }
         let page = |width| Page {
+            identity: None,
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],

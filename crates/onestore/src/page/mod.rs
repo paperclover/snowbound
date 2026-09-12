@@ -10,6 +10,7 @@ use std::{
     sync::Arc,
 };
 
+pub mod link;
 pub mod text;
 pub(crate) mod write;
 pub use text::Paragraph;
@@ -24,6 +25,8 @@ pub enum DateField {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Page {
     pub title: String,
+    /// The page's notebook-management identity, which internal links name as `page-id`.
+    pub identity: Option<[u8; 16]>,
     /// FILETIME ticks from the page's TopologyCreationTimeStamp.
     pub created: Option<u64>,
     pub margin_origin: [f32; 2],
@@ -343,14 +346,21 @@ impl Page {
         else {
             return Err(invalid("Canvas root is not a page"));
         };
+        let metadata = revision
+            .roots
+            .get(&2)
+            .and_then(|id| revision.nodes.get(id))
+            .filter(|node| matches!(node.kind, Kind::Metadata { .. }))
+            .and_then(|node| node.extra.first());
         let mut page = Self {
             title: page_title(revision, id).unwrap_or_default().to_owned(),
-            created: revision
-                .roots
-                .get(&2)
-                .and_then(|id| revision.nodes.get(id))
-                .filter(|node| matches!(node.kind, Kind::Metadata { .. }))
-                .and_then(|node| node.extra.first())
+            identity: metadata
+                .and_then(|fields| fields.iter().find(|field| field.id == 0x1c001c30))
+                .and_then(|field| match field.value {
+                    FieldValue::Bytes(bytes) => bytes.try_into().ok(),
+                    _ => None,
+                }),
+            created: metadata
                 .and_then(|fields| fields.iter().find(|field| field.id == 0x18001c65))
                 .map(|field| {
                     let FieldValue::Bytes(bytes) = field.value else {
@@ -847,7 +857,7 @@ impl PageParagraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Element, TextRun};
+    use crate::document::{Element, Field, FieldValue, TextRun};
 
     fn id(n: u32) -> ExGuid {
         ExGuid {
@@ -855,6 +865,8 @@ mod tests {
             ..ExGuid::default()
         }
     }
+
+    const IDENTITY: [u8; 16] = [7; 16];
 
     fn element(kind: Kind<'_>) -> Element<'_> {
         Element {
@@ -918,10 +930,14 @@ mod tests {
             name: Some("Body".into()),
         });
         style.format.font_size = Some(12.0);
-        let metadata = element(Kind::Metadata {
+        let mut metadata = element(Kind::Metadata {
             title: Some("Page title".into()),
             level: None,
         });
+        metadata.extra = vec![vec![Field {
+            id: 0x1c001c30,
+            value: FieldValue::Bytes(&IDENTITY),
+        }]];
         Revision {
             roots: BTreeMap::from([(2, id(6))]),
             nodes: BTreeMap::from([
@@ -1183,14 +1199,19 @@ mod tests {
 
     #[test]
     fn creation_time_comes_from_page_metadata_and_date_role_from_the_title_child() {
-        use crate::document::{Field, FieldValue};
         let mut source = revision();
         source.nodes.get_mut(&id(1)).unwrap().created = Some(7);
         let bytes = 134_333_468_649_123_456_u64.to_le_bytes();
-        source.nodes.get_mut(&id(6)).unwrap().extra = vec![vec![Field {
-            id: 0x18001c65,
-            value: FieldValue::Bytes(&bytes),
-        }]];
+        source.nodes.get_mut(&id(6)).unwrap().extra = vec![vec![
+            Field {
+                id: 0x18001c65,
+                value: FieldValue::Bytes(&bytes),
+            },
+            Field {
+                id: 0x1c001c30,
+                value: FieldValue::Bytes(&IDENTITY),
+            },
+        ]];
         source.nodes.get_mut(&id(1)).unwrap().children.clear();
         source.nodes.get_mut(&id(1)).unwrap().structure.push(id(7));
         let mut title = element(Kind::Title);
@@ -1217,12 +1238,12 @@ mod tests {
         source.nodes.get_mut(&id(6)).unwrap().extra[0][0].value = FieldValue::Bytes(&bytes[..7]);
         assert!(Page::from_revision(&source, id(1)).is_err());
         source.nodes.get_mut(&id(6)).unwrap().extra.clear();
-        assert_eq!(Page::from_revision(&source, id(1)).unwrap().created, None);
+        let bare = Page::from_revision(&source, id(1)).unwrap();
+        assert_eq!((bare.created, bare.identity), (None, None));
     }
 
     #[test]
     fn title_role_and_minimum_width_come_from_root_properties() {
-        use crate::document::{Field, FieldValue};
         let mut source = revision();
         source.nodes.get_mut(&id(1)).unwrap().children.clear();
         source.nodes.get_mut(&id(1)).unwrap().structure.push(id(7));

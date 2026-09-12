@@ -15,3 +15,25 @@ embedded objects and runs with associated data stay refused.
 `ONESTORE_LINK_EXPORT` set to a new absolute directory while running the test,
 then cold-open it with `tools/native_runner.py OUTPUT COLD --expected-pages 1
 --collect-notebook`.
+
+## Internal links
+
+`native-links/` is OneNote 2010 adding links to a page, to a paragraph on it
+and to the section on the Rust-authored page above through the COM API
+(`tools/native/page-link.ps1`; `links.json` holds the `onenote:///…` URLs
+`GetHyperlinkToObject` returned, `update.xml` the submitted page). In
+`notebook/`, OneNote stored each as a `HYPERLINK` field code with the
+relative form `onenote:#Link%20target&section-id={section file identity}
+&page-id={page notebook-management identity}&end&base-path=<section path>`;
+a paragraph link ends with `&object-id={paragraph identity}&n` instead of
+`&end`, and a section link has neither title nor page. OneNote rewrote the
+target outline after linking, so its own paragraph link names an identity
+(`n` 28) the current outline no longer holds.
+
+`internal/candidate` is the writer's output for
+`a_page_links_to_another_page_and_its_paragraph` in
+`crates/onestore/tests/page_links.rs`: a section created in Rust with a
+second page, whose first page links to that page and to its first paragraph
+with URLs built by `onestore::page::link::internal_link`. `internal/cold` is
+its cold read with both links. Regenerate with
+`ONESTORE_INTERNAL_LINK_EXPORT` and cold-open with `--expected-pages 2`.

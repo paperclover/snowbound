@@ -14,7 +14,7 @@ diffs the supplied model against the page stored in the supplied local snapshot,
 writes the difference into the working image and queues one
 `Operation::Page(PageIntent { before, after, author })`; `before` is the page the
 edit started from and is the precondition reconciliation checks. Text, styles,
-paragraph formatting, hyperlinks, bullets, numbering, note tags, table rows, columns, cell shading, nested tables, pictures (insertion in paragraphs or on the page, position, size, description) and attachments, paragraph structure,
+paragraph formatting, hyperlinks (external and internal), bullets, numbering, note tags, table rows, columns, cell shading, nested tables, pictures (insertion in paragraphs or on the page, position, size, description) and attachments, paragraph structure,
 outline layout, insertions and deletions are all differences between `before` and
 `after`; the library never sees editor operations.
 
@@ -60,7 +60,8 @@ a replica stored under the cache directory, named by the section's document
 identity so the same file reopens the same queue after a relaunch. A section
 publishes in the background to the file itself under OneNote-compatible
 exclusion. `pages()` lists page spaces and titles from the local image,
-`page(space)` returns the model to edit, and `save(space, before, after,
+`page(space)` returns the model to edit (its `identity` and the section's
+`identity()` feed `onestore::page::link::internal_link`), and `save(space, before, after,
 author)` queues the edited model: `Save::Queued(id)` is durable locally,
 `Save::Unchanged` means the model equals the stored page, and `Save::Stale`
 means the stored page no longer matches `before` because the section changed

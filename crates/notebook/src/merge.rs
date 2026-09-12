@@ -116,6 +116,7 @@ pub(crate) fn merge(base: &Page, ours: &Page, theirs: &Page) -> Option<Page> {
     }
     Some(Page {
         title: theirs.title.clone(),
+        identity: theirs.identity,
         created: theirs.created,
         margin_origin: theirs.margin_origin,
         objects: result,

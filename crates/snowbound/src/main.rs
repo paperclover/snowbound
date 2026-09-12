@@ -2126,6 +2126,7 @@ mod tests {
         });
         fields[0].title = true;
         let page = Page {
+            identity: None,
             title: "Header".into(),
             created: Some(1),
             margin_origin: [36.0, 14.4],
@@ -2229,6 +2230,7 @@ mod tests {
             );
         }
         let page = onestore::page::Page {
+            identity: None,
             title: String::new(),
             created: None,
             margin_origin: [0.0; 2],
@@ -2966,6 +2968,7 @@ mod tests {
                 objects.reverse();
             }
             let page = Page {
+                identity: None,
                 created: None,
                 title: String::new(),
                 margin_origin: [0.0; 2],
@@ -3143,6 +3146,7 @@ mod tests {
         )
         .unwrap();
         let page = Page {
+            identity: None,
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],

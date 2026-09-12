@@ -20,8 +20,9 @@ class TagEditTest(unittest.TestCase):
             shutil.copytree(FIXTURE / 'cold/read', read)
             compare(FIXTURE / 'candidate', read)
         page, = (ET.parse(path).getroot() for path in sorted((FIXTURE / 'cold/read').glob('page-*.xml')))
-        definitions = [(d.get('index'), d.get('type'), d.get('symbol'), d.get('name')) for d in page.findall('one:TagDef', ns)]
-        self.assertEqual(definitions, [('0', '0', '3', 'Rust task'), ('1', '1', '13', 'Important')])
+        definitions = [(d.get('index'), d.get('type'), d.get('symbol'), d.get('name'), d.get('fontColor'), d.get('highlightColor'))
+                       for d in page.findall('one:TagDef', ns)]
+        self.assertEqual(definitions, [('0', '0', '3', 'Rust task', 'automatic', 'none'), ('1', '1', '13', 'Important', '#FF0000', '#FFFF00')])
         tagged = [([(t.get('index'), t.get('completed'), t.get('completionDate') is not None) for t in oe.findall('one:Tag', ns)],
                    re.sub(r'<[^>]*>', '', oe.find('one:T', ns).text or ''))
                   for oe in page.iter('{%s}OE' % ns['one']) if oe.find('one:T', ns) is not None]
