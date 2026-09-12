@@ -153,7 +153,11 @@ pub(crate) fn validate_nodes(
                         return Err(EditError::InvalidStructure);
                     }
                 }
-                ParagraphContent::Unsupported(_) => return Err(EditError::UnsupportedContent),
+                ParagraphContent::Image(_)
+                | ParagraphContent::Attachment(_)
+                | ParagraphContent::Unsupported(_) => {
+                    return Err(EditError::UnsupportedContent);
+                }
                 ParagraphContent::Table(table) => {
                     if !ids.insert(table.id)
                         || table.rows.is_empty()

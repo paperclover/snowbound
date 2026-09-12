@@ -353,6 +353,15 @@ pub(crate) fn replace_objects(
     })
 }
 
+/// The object type OneNote gives embedded picture payload declarations; embedded files
+/// use `EMBEDDED_FILE_JCID` with the same declaration shape.
+pub(crate) const FILE_DATA_JCID: u32 = 0x80039;
+pub(crate) const EMBEDDED_FILE_JCID: u32 = 0x80036;
+
+fn is_file_declaration(jcid: u32) -> bool {
+    jcid == FILE_DATA_JCID || jcid == EMBEDDED_FILE_JCID
+}
+
 pub(crate) struct PropertyObject {
     pub jcid: u32,
     pub bytes: Vec<u8>,
@@ -368,6 +377,51 @@ pub(crate) enum RevisionEdit {
 }
 
 impl PropertyObject {
+    /// A file-data object declaring an embedded payload by its store identity, or an
+    /// external payload by name; `extension` includes its leading dot.
+    pub fn file(id: ExGuid, reference: &str, extension: &str) -> Result<Self> {
+        if reference.is_empty() || reference.contains('\0') || extension.contains('\0') {
+            return Err(Error {
+                offset: 0,
+                message: "File-data references and extensions are nonempty and contain no NUL",
+            });
+        }
+        let mut bytes = Vec::new();
+        for text in [reference, extension] {
+            let encoded: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            bytes.extend_from_slice(&u32::try_from(encoded.len()).unwrap().to_le_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        Ok(Self {
+            jcid: FILE_DATA_JCID,
+            bytes,
+            global_ids: Arc::new(BTreeMap::from([(0, id.guid)])),
+        })
+    }
+
+    /// The reference and extension of a file-data declaration built by `file`.
+    fn file_declaration(&self) -> Result<(&[u8], &[u8])> {
+        let malformed = || Error {
+            offset: 0,
+            message: "Malformed file-data declaration",
+        };
+        let mut rest = self.bytes.as_slice();
+        let mut parts = Vec::new();
+        for _ in 0..2 {
+            let length = usize::try_from(u32::from_le_bytes(
+                rest.get(..4).ok_or_else(malformed)?.try_into().unwrap(),
+            ))
+            .map_err(|_| malformed())?;
+            let bytes = rest.get(4..4 + length).ok_or_else(malformed)?;
+            parts.push(bytes);
+            rest = &rest[4 + length..];
+        }
+        if !rest.is_empty() {
+            return Err(malformed());
+        }
+        Ok((parts[0], parts[1]))
+    }
+
     pub fn from_object(object: &crate::Object<'_>) -> Result<Self> {
         let ObjectData::Properties(bytes) = object.data else {
             return Err(Error {
@@ -649,7 +703,16 @@ pub(crate) fn write_revision(
     space: ExGuid,
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
-    write_revisions(source, |index| {
+    write_revision_with_payloads(source, space, &[], edit)
+}
+
+pub(crate) fn write_revision_with_payloads(
+    source: &[u8],
+    space: ExGuid,
+    payloads: &[([u8; 16], &[u8])],
+    edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
+) -> Result<Vec<u8>> {
+    write_revisions_with_payloads(source, payloads, |index| {
         let rid = index.active(space)?;
         let revision = index.resolve(space, rid)?;
         Ok(BTreeMap::from([(
@@ -694,6 +757,17 @@ fn append_fragment(
 
 pub(crate) fn write_revisions(
     source: &[u8],
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
+) -> Result<Vec<u8>> {
+    write_revisions_with_payloads(source, &[], edit)
+}
+
+/// `write_revisions` that also stores embedded payloads: each becomes a file-data store
+/// object referenced from the root file node list under its identity, as OneNote embeds
+/// pictures and attachments.
+pub(crate) fn write_revisions_with_payloads(
+    source: &[u8],
+    payloads: &[([u8; 16], &[u8])],
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
     let store = Store::parse(source)?;
@@ -780,16 +854,29 @@ pub(crate) fn write_revisions(
                     message: "New objects require a section file",
                 });
             }
-            if replacement.jcid & 0x20000 == 0
-                || replacement.global_ids.keys().any(|i| *i > 0xffffff)
-            {
+            if replacement.global_ids.keys().any(|i| *i > 0xffffff) {
                 return Err(Error {
                     offset: 0,
                     message: "Invalid property object declaration",
                 });
             }
             compact(*id, &replacement.global_ids)?;
-            PropertySets::parse(&replacement.bytes)?;
+            if is_file_declaration(replacement.jcid) {
+                if !is_section {
+                    return Err(Error {
+                        offset: 0,
+                        message: "File-data objects require a section file",
+                    });
+                }
+                replacement.file_declaration()?;
+            } else if replacement.jcid & 0x20000 == 0 {
+                return Err(Error {
+                    offset: 0,
+                    message: "Invalid property object declaration",
+                });
+            } else {
+                PropertySets::parse(&replacement.bytes)?;
+            }
         }
         // Native coalescing of duplicate readonly styles can leave dangling references.
         let mut aliases = BTreeMap::new();
@@ -824,6 +911,9 @@ pub(crate) fn write_revisions(
             replacements.remove(id);
         }
         for object in replacements.values_mut() {
+            if is_file_declaration(object.jcid) {
+                continue;
+            }
             let mut remapped = Vec::new();
             for property in PropertySets::parse(&object.bytes)?.sets.iter().flatten() {
                 if let Value::References {
@@ -859,12 +949,21 @@ pub(crate) fn write_revisions(
         }
         let mut changed: BTreeSet<_> = replacements.keys().copied().collect();
         for (id, replacement) in &replacements {
+            let data = if is_file_declaration(replacement.jcid) {
+                let (reference, extension) = replacement.file_declaration()?;
+                ObjectData::File {
+                    reference,
+                    extension,
+                }
+            } else {
+                ObjectData::Properties(&replacement.bytes)
+            };
             revision.objects.insert(
                 *id,
                 crate::Object {
                     jcid: replacement.jcid,
                     reference_count: 0,
-                    data: ObjectData::Properties(&replacement.bytes),
+                    data,
                     global_ids: Arc::clone(&replacement.global_ids),
                 },
             );
@@ -1137,6 +1236,55 @@ pub(crate) fn write_revisions(
                 revision_list,
                 &manifest,
             )?);
+        }
+    }
+    let mut data_nodes = Vec::new();
+    for (guid, payload) in payloads {
+        if !is_section {
+            return Err(Error {
+                offset: 0,
+                message: "Embedded payloads require a section file",
+            });
+        }
+        let mut blob = vec![
+            0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
+            0x9e, 0xac,
+        ];
+        blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        blob.extend_from_slice(&[0; 12]);
+        blob.extend_from_slice(payload);
+        blob.resize(blob.len().next_multiple_of(8), 0);
+        blob.extend_from_slice(&[
+            0x22, 0xa7, 0xfb, 0x71, 0x79, 0x0f, 0x0b, 0x4a, 0xbb, 0x13, 0x89, 0x92, 0x56, 0x42,
+            0x6b, 0x24,
+        ]);
+        let chunk = append(&mut output, &blob)?;
+        data_nodes.push(node(0x94, Some(Reference::Data(chunk)), guid)?);
+    }
+    if !data_nodes.is_empty() {
+        // Payload declarations live in the file-data store list the root list references.
+        let root = store.list(store.header.root)?;
+        match root.nodes.iter().find(|node| node.id == 0x90) {
+            Some(reference) => {
+                let Some(Reference::NodeList(chunk)) = reference.reference else {
+                    return Err(Error {
+                        offset: reference.offset,
+                        message: "File-data store reference lacks a list",
+                    });
+                };
+                counts.push(append_fragment(
+                    source,
+                    &mut output,
+                    store.list(chunk)?,
+                    &data_nodes,
+                )?);
+            }
+            None => {
+                let list_id = allocate_list()?;
+                let chunk = append_list(&mut output, list_id, &data_nodes)?;
+                counts.push((list_id, data_nodes.len()));
+                root_nodes.push(node(0x90, Some(Reference::NodeList(chunk)), &[])?);
+            }
         }
     }
     if !root_nodes.is_empty() {

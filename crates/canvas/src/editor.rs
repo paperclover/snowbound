@@ -455,7 +455,9 @@ impl TextOutline {
                         pending.push(visible_paragraphs(cell.paragraphs.iter()));
                     }
                 }
-                onestore::page::ParagraphContent::Unsupported(_) => {
+                onestore::page::ParagraphContent::Image(_)
+                | onestore::page::ParagraphContent::Attachment(_)
+                | onestore::page::ParagraphContent::Unsupported(_) => {
                     return Err(EditError::UnsupportedContent);
                 }
             }
@@ -504,7 +506,9 @@ impl TextOutline {
                             .rect[1]
                             - 1.86
                     }
-                    onestore::page::ParagraphContent::Unsupported(_) => {
+                    onestore::page::ParagraphContent::Image(_)
+                    | onestore::page::ParagraphContent::Attachment(_)
+                    | onestore::page::ParagraphContent::Unsupported(_) => {
                         return Err(EditError::UnsupportedContent);
                     }
                 };
@@ -1690,7 +1694,9 @@ impl CanvasEditor {
                                 .ok_or(EditError::InvalidStructure)?;
                             f64::from(cell.rect[3]) + 1.68
                         }
-                        onestore::page::ParagraphContent::Unsupported(_) => {
+                        onestore::page::ParagraphContent::Image(_)
+                        | onestore::page::ParagraphContent::Attachment(_)
+                        | onestore::page::ParagraphContent::Unsupported(_) => {
                             return Err(EditError::UnsupportedContent.into());
                         }
                     } + f64::from(outline.origin()[1]);
@@ -4348,6 +4354,7 @@ mod tests {
             (120.0, 80.0, true),
         ]
         .map(|(x, y, background)| Image {
+            size: None,
             id: onestore::page::text::new_id().unwrap(),
             layout: onestore::document::Layout {
                 x: Some(x),

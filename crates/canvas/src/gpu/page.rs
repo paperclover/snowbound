@@ -907,6 +907,7 @@ mod tests {
                 (120.0, 60.0, false),
             ] {
                 page.objects.push(PageObject::Image(Image {
+                    size: None,
                     id: onestore::page::text::new_id().unwrap(),
                     bytes: Some(image_bytes.clone()),
                     layout: Layout {
@@ -1230,6 +1231,7 @@ mod tests {
                     unsupported: vec![unknown.clone()],
                 }),
                 PageObject::Image(Image {
+                    size: None,
                     id: ExGuid::default(),
                     layout: Layout {
                         y: Some(150.0),
@@ -1388,6 +1390,7 @@ mod tests {
             objects: vec![
                 outline(2.0, "first"),
                 PageObject::Image(Image {
+                    size: None,
                     id: ExGuid::default(),
                     layout: Layout {
                         x: Some(5.0),
@@ -1506,6 +1509,7 @@ mod tests {
             margin_origin: [0.0; 2],
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Image(Image {
+                size: None,
                 id: ExGuid::default(),
                 layout: Layout {
                     x: Some(2.0),

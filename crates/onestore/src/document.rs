@@ -374,6 +374,9 @@ pub enum Kind<'a> {
         source_path: Option<String>,
         recording_id: Option<[u8; 16]>,
         recording_type: Option<u32>,
+        /// Displayed icon width and height in points.
+        icon_width: Option<f32>,
+        icon_height: Option<f32>,
     },
     File {
         reference: FileDataReference,
@@ -1161,6 +1164,8 @@ impl<'a> Element<'a> {
                 source_path: f.text(0x1c001d9d)?,
                 recording_id: f.fixed(0x1c001c97)?,
                 recording_type: f.u32(0x14001d24)?,
+                icon_width: f.float(0x140034cd, 36.0)?,
+                icon_height: f.float(0x140034ce, 36.0)?,
             },
             0x120001 => Kind::Author {
                 name: f.text(0x1c001d75)?,

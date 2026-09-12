@@ -38,6 +38,8 @@ fn identities(page: &Page) -> Vec<onestore::ExGuid> {
                         }
                     }
                 }
+                ParagraphContent::Image(image) => ids.push(image.id),
+                ParagraphContent::Attachment(attachment) => ids.push(attachment.id),
                 ParagraphContent::Unsupported(unsupported) => ids.push(unsupported.id),
             }
         }

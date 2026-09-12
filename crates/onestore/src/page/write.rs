@@ -6,7 +6,7 @@ use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
     document::{Document, Format, Kind, Tag},
-    write::{PropertyObject, RevisionEdit, write_revisions},
+    write::{PropertyObject, RevisionEdit},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,6 +22,12 @@ fn invalid(message: &'static str) -> Error {
 
 /// A native measurement array: a count byte, `header - 1` reserved bytes, then each value
 /// in inches.
+/// The `<ifndf>{GUID}` form a file-data declaration uses to name a payload in the file-data store.
+fn payload_reference(guid: [u8; 16]) -> String {
+    let id = ExGuid { guid, n: 0 }.to_string();
+    format!("<ifndf>{}", id.split(',').next().unwrap())
+}
+
 fn measurement_bytes(values: &[f32], header: usize) -> Result<Vec<u8>, Error> {
     let count = u8::try_from(values.len())
         .map_err(|_| invalid("A measurement array exceeds the document range"))?;
@@ -379,6 +385,16 @@ impl Lowering<'_> {
                     }
                 }
                 (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
+                (ParagraphContent::Image(a), ParagraphContent::Image(b)) => {
+                    if a != b {
+                        return Err(invalid("A stored picture cannot be edited"));
+                    }
+                }
+                (ParagraphContent::Attachment(a), ParagraphContent::Attachment(b)) => {
+                    if a != b {
+                        return Err(invalid("A stored attachment cannot be edited"));
+                    }
+                }
                 _ => return Err(invalid("Paragraph content type cannot change")),
             }
         }
@@ -609,7 +625,202 @@ impl Lowering<'_> {
             });
         self.place_containers(old, new, placed, &existing)?;
         self.edit_table_structure(old, new)?;
+        self.edit_images(old, new)?;
+        self.edit_attachments(old, new)?;
         self.place_containers(old, new, placed, &deferred)?;
+        Ok(())
+    }
+
+    /// Gives each new attachment paragraph what OneNote stores for an inserted file: the
+    /// payload embedded in the file-data store, an embedded-file container declaring it,
+    /// and an attachment object naming the file that the paragraph holds as content.
+    fn edit_attachments(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        for (paragraph_id, paragraph) in &new.paragraphs {
+            let ParagraphContent::Attachment(attachment) = &paragraph.content else {
+                continue;
+            };
+            if let Some(previous) = old.paragraphs.get(paragraph_id) {
+                if previous.content != paragraph.content {
+                    return Err(invalid("A stored attachment cannot be edited"));
+                }
+                continue;
+            }
+            let Some(bytes) = &attachment.bytes else {
+                return Err(invalid("A new attachment needs its payload"));
+            };
+            let name = attachment.filename.as_str();
+            if name.is_empty() || name.contains(['\0', '/', '\\']) {
+                return Err(invalid(
+                    "An attachment needs a file name without path separators",
+                ));
+            }
+            let extension = name
+                .rfind('.')
+                .filter(|dot| *dot > 0)
+                .map(|dot| &name[dot..])
+                .unwrap_or("");
+            let attachment_id = self.allocate(attachment.id)?;
+            let file_id = ExGuid {
+                guid: crate::write::fresh_guid()?,
+                n: 1,
+            };
+            let payload_guid = crate::write::fresh_guid()?;
+            let reference = payload_reference(payload_guid);
+            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+            let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
+            if let Some([width, height]) = attachment.size {
+                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+                    return Err(invalid("Attachment icon size must be positive"));
+                }
+                values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
+                values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
+            }
+            values.push((0x14001c3b, 0x409_u32.to_le_bytes().to_vec()));
+            values.push((0x10001cfe, 0x409_u16.to_le_bytes().to_vec()));
+            values.push((0x1c001dcf, vec![0; 32]));
+            values.push((
+                0x1c001d61,
+                [16u32, 1, 0, 0, 0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ));
+            values.push((0x14001c3e, 1u32.to_le_bytes().to_vec()));
+            values.push((0x14001c84, 1u32.to_le_bytes().to_vec()));
+            values.push((0x1c001c22, crate::create::string(name)));
+            values.push((0x1c001d9c, crate::create::string(name)));
+            if let Some(path) = &attachment.source_path {
+                values.push((0x1c001d9d, crate::create::string(path)));
+            }
+            let holder = self.id(*paragraph_id);
+            let space = self.space;
+            let mut payloads: Vec<([u8; 16], &[u8])> = vec![(payload_guid, bytes)];
+            let mut preview = None;
+            if let Some(icon) = &attachment.preview {
+                if !icon.starts_with(&[0x89, b'P', b'N', b'G']) {
+                    return Err(invalid("An attachment preview is a PNG icon"));
+                }
+                let guid = crate::write::fresh_guid()?;
+                payloads.push((guid, icon));
+                preview = Some((
+                    ExGuid {
+                        guid: crate::write::fresh_guid()?,
+                        n: 1,
+                    },
+                    payload_reference(guid),
+                ));
+            }
+            self.apply(|current| {
+                crate::write::write_revision_with_payloads(current, space, &payloads, |raw| {
+                    let mut changed = BTreeMap::new();
+                    let mut file = PropertyObject::file(file_id, &reference, extension)?;
+                    file.jcid = 0x80036;
+                    changed.insert(file_id, file);
+                    let mut node = PropertyObject {
+                        jcid: 0x60035,
+                        bytes: crate::create::properties(&values)?,
+                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, attachment_id.guid)])),
+                    };
+                    node.reference(attachment_id)?;
+                    let container = node.reference(file_id)?;
+                    node.set(&[(0x20001d9b, &container)])?;
+                    if let Some((icon_id, icon_reference)) = &preview {
+                        changed.insert(
+                            *icon_id,
+                            PropertyObject::file(*icon_id, icon_reference, ".png")?,
+                        );
+                        let icon = node.reference(*icon_id)?;
+                        node.set(&[(0x20001c3f, &icon)])?;
+                    }
+                    changed.insert(attachment_id, node);
+                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                    let content = object.reference(attachment_id)?;
+                    object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                    changed.insert(holder, object);
+                    Ok(changed)
+                })
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Gives each new picture paragraph what OneNote stores for an inserted picture: the
+    /// payload embedded in the section's file-data store, a file-data object declaring it
+    /// by identity and extension, and a picture object the paragraph holds as content.
+    fn edit_images(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        for (paragraph_id, paragraph) in &new.paragraphs {
+            let ParagraphContent::Image(image) = &paragraph.content else {
+                continue;
+            };
+            if let Some(previous) = old.paragraphs.get(paragraph_id) {
+                if previous.content != paragraph.content {
+                    return Err(invalid("A stored picture cannot be edited"));
+                }
+                continue;
+            }
+            let Some(bytes) = &image.bytes else {
+                return Err(invalid("A new picture needs its payload"));
+            };
+            let extension = match bytes.as_ref() {
+                [0x89, b'P', b'N', b'G', ..] => ".png",
+                [0xff, 0xd8, 0xff, ..] => ".jpg",
+                [b'G', b'I', b'F', b'8', ..] => ".gif",
+                [b'B', b'M', ..] => ".bmp",
+                _ => return Err(invalid("Choose a PNG, JPEG, GIF or BMP picture")),
+            };
+            let image_id = self.allocate(image.id)?;
+            let file_id = ExGuid {
+                guid: crate::write::fresh_guid()?,
+                n: 1,
+            };
+            let payload_guid = crate::write::fresh_guid()?;
+            let reference = payload_reference(payload_guid);
+            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+            let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
+            if let Some([width, height]) = image.size {
+                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+                    return Err(invalid("Picture size must be positive"));
+                }
+                values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
+                values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
+            }
+            if let Some(alt) = &image.alt {
+                values.push((0x1c001e58, crate::create::string(alt)));
+            }
+            if image.background {
+                values.push((0x08001d13 | (1 << 31), Vec::new()));
+            }
+            values.push((0x08001d85, Vec::new()));
+            let holder = self.id(*paragraph_id);
+            let space = self.space;
+            let payload: &[u8] = bytes;
+            self.apply(|current| {
+                crate::write::write_revision_with_payloads(
+                    current,
+                    space,
+                    &[(payload_guid, payload)],
+                    |raw| {
+                        let mut changed = BTreeMap::new();
+                        let file = PropertyObject::file(file_id, &reference, extension)?;
+                        changed.insert(file_id, file);
+                        let mut picture = PropertyObject {
+                            jcid: 0x60011,
+                            bytes: crate::create::properties(&values)?,
+                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, image_id.guid)])),
+                        };
+                        picture.reference(image_id)?;
+                        let container = picture.reference(file_id)?;
+                        picture.set(&[(0x20001c3f, &container)])?;
+                        changed.insert(image_id, picture);
+                        let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                        let content = object.reference(image_id)?;
+                        object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                        changed.insert(holder, object);
+                        Ok(changed)
+                    },
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -648,7 +859,9 @@ impl Lowering<'_> {
                         ParagraphContent::Text(text) if text.date_field.is_none() => {
                             (text.text.text(), Some(text.id))
                         }
-                        ParagraphContent::Table(_) => ("", None),
+                        ParagraphContent::Table(_)
+                        | ParagraphContent::Image(_)
+                        | ParagraphContent::Attachment(_) => ("", None),
                         _ => {
                             return Err(invalid(
                                 "New paragraphs contain plain text without fields or styles",
@@ -1737,7 +1950,25 @@ fn squash(
         .collect();
     let applied_store = Store::parse(applied)?;
     let applied_index = RevisionIndex::parse(&applied_store)?;
-    write_revisions(source, |index| {
+    // Payloads the typed edits embedded travel into the squashed transaction as well.
+    let source_store = Store::parse(source)?;
+    let declared = |store: &Store<'_>| -> Vec<[u8; 16]> {
+        store
+            .lists
+            .values()
+            .flat_map(|list| &list.nodes)
+            .filter(|node| node.id == 0x94)
+            .filter_map(|node| node.payload.get(..16).and_then(|g| g.try_into().ok()))
+            .collect()
+    };
+    let existing = declared(&source_store);
+    let mut payloads = Vec::new();
+    for guid in declared(&applied_store) {
+        if !existing.contains(&guid) {
+            payloads.push((guid, applied_store.file_data(guid)?));
+        }
+    }
+    crate::write::write_revisions_with_payloads(source, &payloads, |index| {
         let mut changes = BTreeMap::new();
         for sid in applied_index.spaces.keys() {
             let Some(space) = index.spaces.get(sid) else {
@@ -1766,12 +1997,35 @@ fn squash(
                 }) {
                     continue;
                 }
-                let ObjectData::Properties(_) = object.data else {
-                    return Err(invalid("Page edits only produce property objects"));
-                };
-                let mut replacement = PropertyObject::from_object(object)?;
-                remap(&mut replacement, &rename)?;
                 let id = rename.get(id).copied().unwrap_or(*id);
+                let mut replacement = match object.data {
+                    ObjectData::Properties(_) => {
+                        let mut replacement = PropertyObject::from_object(object)?;
+                        remap(&mut replacement, &rename)?;
+                        replacement
+                    }
+                    ObjectData::File {
+                        reference,
+                        extension,
+                    } => {
+                        let text = |bytes: &[u8]| {
+                            String::from_utf16(
+                                &bytes
+                                    .chunks_exact(2)
+                                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .map_err(|_| invalid("Invalid UTF-16 file-data declaration"))
+                        };
+                        let mut replacement =
+                            PropertyObject::file(id, &text(reference)?, &text(extension)?)?;
+                        replacement.jcid = object.jcid;
+                        replacement
+                    }
+                    ObjectData::Encrypted(_) => {
+                        return Err(invalid("Page edits only produce property objects"));
+                    }
+                };
                 replacement.reference(id)?;
                 if before.objects.contains_key(&id) && rename.values().any(|model| *model == id) {
                     return Err(invalid(

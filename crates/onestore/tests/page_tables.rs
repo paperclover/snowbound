@@ -72,7 +72,9 @@ fn referenced(page: &Page) -> std::collections::BTreeSet<ExGuid> {
                         }
                     }
                 }
-                ParagraphContent::Unsupported(_) => {}
+                ParagraphContent::Image(_)
+                | ParagraphContent::Attachment(_)
+                | ParagraphContent::Unsupported(_) => {}
             }
         }
     }

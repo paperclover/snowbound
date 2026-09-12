@@ -123,6 +123,12 @@ fn projection(page: &Page) -> String {
                         ParagraphContent::Table(table) => {
                             out.push_str(&format!(" table {}", table.id))
                         }
+                        ParagraphContent::Image(image) => {
+                            out.push_str(&format!(" image {}", image.id))
+                        }
+                        ParagraphContent::Attachment(attachment) => {
+                            out.push_str(&format!(" attachment {}", attachment.id))
+                        }
                         ParagraphContent::Unsupported(u) => {
                             out.push_str(&format!(" unsupported {}", u.id))
                         }

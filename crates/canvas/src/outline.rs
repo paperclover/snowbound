@@ -374,7 +374,11 @@ impl OutlineLayout {
                     bottom += f64::from(child.size[1]);
                     result.append(child, [x, y]);
                 }
-                ParagraphContent::Unsupported(_) => return Err(LayoutError::UnsupportedContent),
+                ParagraphContent::Image(_)
+                | ParagraphContent::Attachment(_)
+                | ParagraphContent::Unsupported(_) => {
+                    return Err(LayoutError::UnsupportedContent);
+                }
             }
             if !(bottom as f32).is_finite() || !result.size[0].is_finite() {
                 return Err(LayoutError::InvalidSpacing);

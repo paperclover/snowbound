@@ -109,7 +109,79 @@ pub struct PageParagraph {
 pub enum ParagraphContent {
     Text(TextObject),
     Table(Table),
+    /// A picture inside the paragraph, as OneNote inserts pictures into outlines.
+    Image(Image),
+    /// An embedded file, as OneNote inserts attachments into outlines.
+    Attachment(Attachment),
     Unsupported(Unsupported),
+}
+
+/// Payload bytes are identified by `id`, so equality and serialization leave them out.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Attachment {
+    pub id: ExGuid,
+    /// The name OneNote shows and saves the file under.
+    pub filename: String,
+    /// Where the file was inserted from, when recorded.
+    pub source_path: Option<String>,
+    /// The icon OneNote rendered for the file, when present.
+    pub size: Option<[f32; 2]>,
+    #[serde(skip)]
+    pub bytes: Option<Arc<[u8]>>,
+    #[serde(skip)]
+    pub preview: Option<Arc<[u8]>>,
+}
+
+impl PartialEq for Attachment {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.filename == other.filename
+            && self.source_path == other.source_path
+            && self.size == other.size
+    }
+}
+
+impl Attachment {
+    fn read(
+        revision: &Revision<'_>,
+        id: ExGuid,
+        node: &crate::document::Element<'_>,
+    ) -> Result<Self, Error> {
+        let invalid = |message| Error { offset: 0, message };
+        let Kind::Attachment {
+            container,
+            preview,
+            filename,
+            source_path,
+            icon_width,
+            icon_height,
+            ..
+        } = &node.kind
+        else {
+            unreachable!()
+        };
+        let payload = |target: &Option<ExGuid>| -> Result<Option<Arc<[u8]>>, Error> {
+            let Some(target) = target else {
+                return Ok(None);
+            };
+            let data = revision
+                .nodes
+                .get(target)
+                .ok_or_else(|| invalid("Missing canvas attachment data"))?;
+            match &data.kind {
+                Kind::File { payload, .. } => Ok(payload.map(Arc::from)),
+                _ => Err(invalid("Canvas attachment data has the wrong type")),
+            }
+        };
+        Ok(Self {
+            id,
+            filename: filename.clone().unwrap_or_default(),
+            source_path: source_path.clone(),
+            size: icon_width.zip(*icon_height).map(|(w, h)| [w, h]),
+            bytes: payload(container)?,
+            preview: payload(preview)?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -157,6 +229,8 @@ pub struct TextObject {
 pub struct Image {
     pub id: ExGuid,
     pub layout: Layout,
+    /// Displayed picture width and height in points.
+    pub size: Option<[f32; 2]>,
     #[serde(skip)]
     pub bytes: Option<Arc<[u8]>>,
     pub alt: Option<String>,
@@ -167,8 +241,50 @@ impl PartialEq for Image {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.layout == other.layout
+            && self.size == other.size
             && self.alt == other.alt
             && self.background == other.background
+    }
+}
+
+impl Image {
+    fn read(
+        revision: &Revision<'_>,
+        id: ExGuid,
+        node: &crate::document::Element<'_>,
+    ) -> Result<Self, Error> {
+        let invalid = |message| Error { offset: 0, message };
+        let Kind::Image {
+            container,
+            alt,
+            background,
+            picture_width,
+            picture_height,
+            ..
+        } = &node.kind
+        else {
+            unreachable!()
+        };
+        let bytes = if let Some(container) = container {
+            let data = revision
+                .nodes
+                .get(container)
+                .ok_or_else(|| invalid("Missing canvas image data"))?;
+            match &data.kind {
+                Kind::File { payload, .. } => payload.map(Arc::from),
+                _ => return Err(invalid("Canvas image data has the wrong type")),
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            id,
+            layout: node.layout.clone(),
+            size: picture_width.zip(*picture_height).map(|(w, h)| [w, h]),
+            bytes,
+            alt: alt.clone(),
+            background: background.unwrap_or(false),
+        })
     }
 }
 
@@ -341,31 +457,9 @@ impl Page {
                         page.objects.push(PageObject::Outline(outline));
                     }
                 }
-                Kind::Image {
-                    container,
-                    alt,
-                    background,
-                    ..
-                } => {
-                    let bytes = if let Some(container) = container {
-                        let data = revision
-                            .nodes
-                            .get(container)
-                            .ok_or_else(|| invalid("Missing canvas image data"))?;
-                        match &data.kind {
-                            Kind::File { payload, .. } => payload.map(Arc::from),
-                            _ => return Err(invalid("Canvas image data has the wrong type")),
-                        }
-                    } else {
-                        None
-                    };
-                    page.objects.push(PageObject::Image(Image {
-                        id,
-                        layout: node.layout.clone(),
-                        bytes,
-                        alt: alt.clone(),
-                        background: background.unwrap_or(false),
-                    }));
+                Kind::Image { .. } => {
+                    page.objects
+                        .push(PageObject::Image(Image::read(revision, id, node)?));
                 }
                 _ => page.objects.push(PageObject::Unsupported(Unsupported {
                     id,
@@ -493,6 +587,10 @@ fn read_paragraphs(
                         text: text_content,
                         tags: content.tags.clone(),
                     })
+                } else if matches!(content.kind, Kind::Image { .. }) {
+                    ParagraphContent::Image(Image::read(revision, *content_id, content)?)
+                } else if matches!(content.kind, Kind::Attachment { .. }) {
+                    ParagraphContent::Attachment(Attachment::read(revision, *content_id, content)?)
                 } else if matches!(content.kind, Kind::Table { .. }) {
                     ParagraphContent::Table(read_table(
                         revision,
@@ -515,7 +613,9 @@ fn read_paragraphs(
                         .chain(match &content {
                             ParagraphContent::Text(text) => text.tags.as_slice(),
                             ParagraphContent::Table(table) => table.tags.as_slice(),
-                            ParagraphContent::Unsupported(_) => &[],
+                            ParagraphContent::Image(_)
+                            | ParagraphContent::Attachment(_)
+                            | ParagraphContent::Unsupported(_) => &[],
                         })
                         .filter_map(|tag| tag.definition.as_ref())
                         .map(|id| (id, false)),
