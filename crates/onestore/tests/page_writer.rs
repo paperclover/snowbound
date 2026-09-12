@@ -604,7 +604,7 @@ fn unsupported_model_edits_are_rejected_before_writing() {
             }
         }
     }
-    assert!(PreparedEdit::page(TREES, space, &widened, AUTHOR).is_err());
+    assert!(PreparedEdit::page(TREES, space, &widened, AUTHOR).is_ok());
     let mut relisted = page_in(TREES, space);
     let outline = body(&page)[0];
     for object in &mut relisted.objects {

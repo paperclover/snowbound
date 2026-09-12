@@ -1,7 +1,7 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
 //! the typed writers, then squashing their transactions into one revision per space.
 
-use super::{Outline, Page, PageObject, PageParagraph, ParagraphContent};
+use super::{Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
@@ -18,6 +18,50 @@ type Values = Vec<(u32, Vec<u8>)>;
 
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
+}
+
+/// A native measurement array: a count byte, `header - 1` reserved bytes, then each value
+/// in inches.
+fn measurement_bytes(values: &[f32], header: usize) -> Result<Vec<u8>, Error> {
+    let count = u8::try_from(values.len())
+        .map_err(|_| invalid("A measurement array exceeds the document range"))?;
+    let mut bytes = vec![0u8; header];
+    bytes[0] = count;
+    for value in values {
+        if !value.is_finite() {
+            return Err(invalid("A measurement must be finite"));
+        }
+        bytes.extend_from_slice(&(value / 36.0).to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+/// Every row carries one cell per column and widths are usable.
+fn validate_table(table: &Table) -> Result<(), Error> {
+    if table.rows.is_empty() || table.columns.is_empty() {
+        return Err(invalid("A table needs at least one row and one column"));
+    }
+    if table
+        .columns
+        .iter()
+        .any(|c| !c.width.is_finite() || c.width < 36.0)
+    {
+        return Err(invalid("Table columns are at least 36 points wide"));
+    }
+    for row in &table.rows {
+        if row.cells.len() != table.columns.len() {
+            return Err(invalid("Every table row has one cell per column"));
+        }
+        for cell in &row.cells {
+            // An emptied cell keeps a replacement paragraph, as the tree writer provides.
+            for paragraph in &cell.paragraphs {
+                if let ParagraphContent::Table(nested) = &paragraph.content {
+                    validate_table(nested)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn write_page(
@@ -154,6 +198,16 @@ impl Lowering<'_> {
         self.alias.get(&model).copied().unwrap_or(model)
     }
 
+    /// A writer identity for a new object; squash renames it to the model's.
+    fn allocate(&mut self, model: ExGuid) -> Result<ExGuid, Error> {
+        let written = ExGuid {
+            guid: crate::write::fresh_guid()?,
+            n: 1,
+        };
+        self.alias.insert(model, written);
+        Ok(written)
+    }
+
     fn apply(&mut self, edit: impl FnOnce(&[u8]) -> Result<Vec<u8>, Error>) -> Result<(), Error> {
         self.image = edit(&self.image)?;
         Ok(())
@@ -187,6 +241,11 @@ impl Lowering<'_> {
         }
         let old = View::new(before)?;
         let new = View::new(after)?;
+        for paragraph in new.paragraphs.values() {
+            if let ParagraphContent::Table(table) = &paragraph.content {
+                validate_table(table)?;
+            }
+        }
         self.check_fixed_objects(before, after, &old, &new)?;
         for id in new.outlines.keys().chain(new.paragraphs.keys()) {
             if !old.outlines.contains_key(id)
@@ -295,31 +354,28 @@ impl Lowering<'_> {
                     }
                 }
                 (ParagraphContent::Table(table), ParagraphContent::Table(previous)) => {
-                    let same = table.id == previous.id
-                        && table.columns == previous.columns
-                        && table.borders == previous.borders
-                        && table.layout == previous.layout
-                        && table.tags == previous.tags
-                        && table.rows.len() == previous.rows.len()
-                        && table
-                            .rows
-                            .iter()
-                            .zip(&previous.rows)
-                            .all(|(row, previous)| {
-                                row.id == previous.id
-                                    && row.cells.len() == previous.cells.len()
-                                    && row.cells.iter().zip(&previous.cells).all(
-                                        |(cell, previous)| {
-                                            cell.id == previous.id
-                                                && cell.layout == previous.layout
-                                                && cell.indents == previous.indents
-                                                && cell.shading == previous.shading
-                                                && cell.unsupported == previous.unsupported
-                                        },
-                                    )
-                            });
-                    if !same {
-                        return Err(invalid("Table structure cannot be edited"));
+                    if table.id != previous.id
+                        || table.layout != previous.layout
+                        || table.tags != previous.tags
+                    {
+                        return Err(invalid("Table identity, layout and tags cannot be edited"));
+                    }
+                    let unchanged_cells =
+                        table.rows.iter().flat_map(|row| &row.cells).all(|cell| {
+                            previous
+                                .rows
+                                .iter()
+                                .flat_map(|row| &row.cells)
+                                .find(|before| before.id == cell.id)
+                                .is_none_or(|before| {
+                                    cell.layout == before.layout
+                                        && cell.indents == before.indents
+                                        && cell.shading == before.shading
+                                        && cell.unsupported == before.unsupported
+                                })
+                        });
+                    if !unchanged_cells {
+                        return Err(invalid("Cell layout, indents and shading cannot be edited"));
                     }
                 }
                 (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
@@ -544,10 +600,30 @@ impl Lowering<'_> {
                 collect_containers(&outline.paragraphs, &mut containers);
             }
         }
+        // Cells that do not exist yet receive their paragraphs once the table structure does.
+        let (existing, deferred): (Vec<ExGuid>, Vec<ExGuid>) =
+            containers.into_iter().partition(|container| {
+                old.children.contains_key(container)
+                    || new.paragraphs.contains_key(container)
+                    || new.outlines.contains_key(container)
+            });
+        self.place_containers(old, new, placed, &existing)?;
+        self.edit_table_structure(old, new)?;
+        self.place_containers(old, new, placed, &deferred)?;
+        Ok(())
+    }
+
+    fn place_containers(
+        &mut self,
+        old: &View<'_>,
+        new: &View<'_>,
+        placed: &BTreeMap<ExGuid, Vec<ExGuid>>,
+        containers: &[ExGuid],
+    ) -> Result<(), Error> {
         for container in containers {
-            let after = &new.children[&container];
+            let after = &new.children[container];
             let current: Vec<ExGuid> = placed
-                .get(&container)
+                .get(container)
                 .map(|list| {
                     list.iter()
                         .copied()
@@ -561,31 +637,221 @@ impl Lowering<'_> {
                 let anchor = next.map(|n| self.id(n));
                 if !old.paragraphs.contains_key(id) && !self.alias.contains_key(id) {
                     let paragraph = new.paragraphs[id];
-                    let text = paragraph
-                        .text()
-                        .filter(|text| text.date_field.is_none())
-                        .filter(|_| paragraph.style.is_none())
-                        .ok_or_else(|| {
-                            invalid("New paragraphs contain plain text without fields or styles")
-                        })?;
-                    let insertion = Insertion::paragraph(
-                        self.id(container),
-                        anchor,
-                        text.text.text(),
-                        self.author,
-                    )?;
+                    if paragraph.style.is_some() {
+                        return Err(invalid(
+                            "New paragraphs contain plain text without fields or styles",
+                        ));
+                    }
+                    // A new table starts as an empty text paragraph whose content the
+                    // structure pass replaces with the table.
+                    let (text, text_id) = match &paragraph.content {
+                        ParagraphContent::Text(text) if text.date_field.is_none() => {
+                            (text.text.text(), Some(text.id))
+                        }
+                        ParagraphContent::Table(_) => ("", None),
+                        _ => {
+                            return Err(invalid(
+                                "New paragraphs contain plain text without fields or styles",
+                            ));
+                        }
+                    };
+                    let insertion =
+                        Insertion::paragraph(self.id(*container), anchor, text, self.author)?;
                     let space = self.space;
                     self.apply(|image| insertion.apply(image, space))?;
                     self.alias.insert(*id, insertion.object());
-                    self.alias.insert(text.id, insertion.text_object());
+                    if let Some(text_id) = text_id {
+                        self.alias.insert(text_id, insertion.text_object());
+                    }
                 } else if !kept.contains(id) {
                     let edit =
-                        TreeEdit::move_to(self.id(*id), self.id(container), anchor, self.author)?;
+                        TreeEdit::move_to(self.id(*id), self.id(*container), anchor, self.author)?;
                     let space = self.space;
                     self.apply(|image| edit.apply(image, space))?;
                 }
                 next = Some(*id);
             }
+        }
+        Ok(())
+    }
+
+    /// Creates tables, rows and cells the model added, rebuilds every table's row and cell
+    /// order to the model's, and writes the column widths, locks and border flag. Native
+    /// rows and cells are plain containers; a cell carries its indent array and the flags
+    /// every native cell has.
+    fn edit_table_structure(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        let old_tables: BTreeMap<ExGuid, &Table> = old
+            .paragraphs
+            .values()
+            .filter_map(|p| match &p.content {
+                ParagraphContent::Table(table) => Some((table.id, table)),
+                _ => None,
+            })
+            .collect();
+        for (paragraph_id, paragraph) in &new.paragraphs {
+            let ParagraphContent::Table(table) = &paragraph.content else {
+                continue;
+            };
+            let previous = old_tables.get(&table.id).copied();
+            let unchanged = previous.is_some_and(|previous| {
+                previous.columns == table.columns
+                    && previous.borders == table.borders
+                    && previous.rows.len() == table.rows.len()
+                    && previous.rows.iter().zip(&table.rows).all(|(a, b)| {
+                        a.id == b.id
+                            && a.cells.len() == b.cells.len()
+                            && a.cells.iter().zip(&b.cells).all(|(x, y)| x.id == y.id)
+                    })
+            });
+            if unchanged {
+                continue;
+            }
+            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+            let mut created: Vec<(ExGuid, u32, Values)> = Vec::new();
+            let table_id = if previous.is_some() {
+                self.id(table.id)
+            } else {
+                self.allocate(table.id)?
+            };
+            let existing_rows: BTreeSet<ExGuid> = previous
+                .map(|p| p.rows.iter().map(|r| r.id).collect())
+                .unwrap_or_default();
+            let existing_cells: BTreeSet<ExGuid> = previous
+                .map(|p| {
+                    p.rows
+                        .iter()
+                        .flat_map(|r| r.cells.iter().map(|c| c.id))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let template = previous
+                .and_then(|p| p.rows.first())
+                .and_then(|r| r.cells.first());
+            let mut rows = Vec::new();
+            for row in &table.rows {
+                let row_id = if existing_rows.contains(&row.id) {
+                    self.id(row.id)
+                } else {
+                    self.allocate(row.id)?
+                };
+                let mut cells = Vec::new();
+                for cell in &row.cells {
+                    let cell_id = if existing_cells.contains(&cell.id) {
+                        self.id(cell.id)
+                    } else {
+                        let written = self.allocate(cell.id)?;
+                        let indents = if cell.indents.is_empty() {
+                            template.map(|t| t.indents.clone()).unwrap_or_default()
+                        } else {
+                            cell.indents.clone()
+                        };
+                        let mut values: Values = vec![
+                            (0x14001d7a, modified.to_vec()),
+                            (0x0c001c13, vec![0]),
+                            (0x0c001c03, vec![1]),
+                            (0x88001c91, Vec::new()),
+                        ];
+                        if !indents.is_empty() {
+                            values.push((0x1c001c12, measurement_bytes(&indents, 4)?));
+                        }
+                        if let Some(shading) = cell.shading {
+                            values.push((0x14001e26, shading.to_le_bytes().to_vec()));
+                        }
+                        created.push((written, 0x60024, values));
+                        written
+                    };
+                    cells.push(cell_id);
+                }
+                if !existing_rows.contains(&row.id) {
+                    created.push((row_id, 0x60023, vec![(0x14001d7a, modified.to_vec())]));
+                }
+                rows.push((row_id, cells));
+            }
+            let mut table_values: Values = vec![
+                (0x14001d7a, modified.to_vec()),
+                (0x14001d57, (table.rows.len() as u32).to_le_bytes().to_vec()),
+                (
+                    0x14001d58,
+                    (table.columns.len() as u32).to_le_bytes().to_vec(),
+                ),
+                (
+                    0x1c001d66,
+                    measurement_bytes(
+                        &table.columns.iter().map(|c| c.width).collect::<Vec<_>>(),
+                        1,
+                    )?,
+                ),
+            ];
+            let mut locks = vec![table.columns.len() as u8];
+            locks.extend(vec![0u8; table.columns.len().div_ceil(8)]);
+            for (i, column) in table.columns.iter().enumerate() {
+                if column.locked {
+                    locks[1 + i / 8] |= 1 << (i % 8);
+                }
+            }
+            table_values.push((0x1c001d7d, locks));
+            table_values.push((
+                0x08001d5e | (u32::from(table.borders.unwrap_or(true)) << 31),
+                Vec::new(),
+            ));
+            if previous.is_none() {
+                table_values.push((0x14001c3e, 1u32.to_le_bytes().to_vec()));
+                table_values.push((0x14001c84, 1u32.to_le_bytes().to_vec()));
+                created.push((table_id, 0x60022, Vec::new()));
+            }
+            let holder = self.id(*paragraph_id);
+            let is_new = previous.is_none();
+            let space = self.space;
+            self.apply(|image| {
+                crate::write::write_revision(image, space, |raw| {
+                    let mut changed: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
+                    for (id, jcid, values) in &created {
+                        let mut node = PropertyObject {
+                            jcid: *jcid,
+                            bytes: crate::create::properties(values)?,
+                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
+                        };
+                        node.reference(*id)?;
+                        changed.insert(*id, node);
+                    }
+                    let mut row_refs = Vec::new();
+                    for (row_id, cells) in &rows {
+                        let mut row = match changed.remove(row_id) {
+                            Some(row) => row,
+                            None => PropertyObject::from_object(&raw.objects[row_id])?,
+                        };
+                        let mut cell_refs = Vec::new();
+                        for cell in cells {
+                            cell_refs.extend_from_slice(&row.reference(*cell)?);
+                        }
+                        row.set(&[(0x24001c20, &cell_refs), (0x14001d7a, &modified)])?;
+                        changed.insert(*row_id, row);
+                    }
+                    let mut table_object = match changed.remove(&table_id) {
+                        Some(object) => object,
+                        None => PropertyObject::from_object(&raw.objects[&table_id])?,
+                    };
+                    for (row_id, _) in &rows {
+                        row_refs.extend_from_slice(&table_object.reference(*row_id)?);
+                    }
+                    table_object.remove(&[0x1c001d7d, 0x08001d5e])?;
+                    table_object.set(
+                        &table_values
+                            .iter()
+                            .map(|(id, bytes)| (*id, bytes.as_slice()))
+                            .collect::<Vec<_>>(),
+                    )?;
+                    table_object.set(&[(0x24001c20, &row_refs)])?;
+                    changed.insert(table_id, table_object);
+                    if is_new {
+                        let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                        let reference = object.reference(table_id)?;
+                        object.set(&[(0x24001c1f, &reference), (0x14001d7a, &modified)])?;
+                        changed.insert(holder, object);
+                    }
+                    Ok(changed)
+                })
+            })?;
         }
         Ok(())
     }
@@ -609,6 +875,10 @@ impl Lowering<'_> {
                     || (old.paragraphs.contains_key(&ancestor)
                         && !new.paragraphs.contains_key(&ancestor)
                         && !consumed.contains(&ancestor))
+                    || (old.children.contains_key(&ancestor)
+                        && !old.paragraphs.contains_key(&ancestor)
+                        && !old.outlines.contains_key(&ancestor)
+                        && !new.children.contains_key(&ancestor))
                 {
                     covered = true;
                     break;
