@@ -1,7 +1,7 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
 //! the typed writers, then squashing their transactions into one revision per space.
 
-use super::{Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
+use super::{Image, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
@@ -386,8 +386,15 @@ impl Lowering<'_> {
                 }
                 (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
                 (ParagraphContent::Image(a), ParagraphContent::Image(b)) => {
-                    if a != b {
-                        return Err(invalid("A stored picture cannot be edited"));
+                    if a.id != b.id
+                        || a.bytes != b.bytes
+                        || a.size != b.size
+                        || a.background != b.background
+                        || (a.layout.x, a.layout.y) != (b.layout.x, b.layout.y)
+                    {
+                        return Err(invalid(
+                            "A stored picture keeps its payload, intrinsic size, background state and position",
+                        ));
                     }
                 }
                 (ParagraphContent::Attachment(a), ParagraphContent::Attachment(b)) => {
@@ -753,8 +760,11 @@ impl Lowering<'_> {
                 continue;
             };
             if let Some(previous) = old.paragraphs.get(paragraph_id) {
-                if previous.content != paragraph.content {
-                    return Err(invalid("A stored picture cannot be edited"));
+                let ParagraphContent::Image(stored) = &previous.content else {
+                    return Err(invalid("Paragraph content type cannot change"));
+                };
+                if stored != image {
+                    self.resize_image(stored, image)?;
                 }
                 continue;
             }
@@ -822,6 +832,53 @@ impl Lowering<'_> {
             })?;
         }
         Ok(())
+    }
+
+    /// Writes a displayed size and description the way OneNote stores a resized picture:
+    /// the layout width and height with the user flag, leaving the intrinsic size alone.
+    fn resize_image(&mut self, stored: &Image, image: &Image) -> Result<(), Error> {
+        let mut values: Values = vec![(
+            0x14001d7a,
+            crate::create::current_timestamps()?
+                .0
+                .to_le_bytes()
+                .to_vec(),
+        )];
+        let mut removed = Vec::new();
+        if image.layout != stored.layout {
+            match (image.layout.max_width, image.layout.max_height) {
+                (Some(width), Some(height)) => {
+                    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+                        return Err(invalid("Picture size must be positive"));
+                    }
+                    values.push((0x14001c1b, (width / 36.0).to_le_bytes().to_vec()));
+                    values.push((0x14001c1c, (height / 36.0).to_le_bytes().to_vec()));
+                    let user_set = u32::from(image.layout.width_set_by_user == Some(true));
+                    values.push((0x08001cbd | (user_set << 31), Vec::new()));
+                }
+                (None, None) => removed.extend([0x14001c1b, 0x14001c1c, 0x08001cbd]),
+                _ => return Err(invalid("A picture size needs both dimensions")),
+            }
+        }
+        if image.alt != stored.alt {
+            match &image.alt {
+                Some(alt) => values.push((0x1c001e58, crate::create::string(alt))),
+                None => removed.push(0x1c001e58),
+            }
+        }
+        let (space, object) = (self.space, self.id(image.id));
+        self.apply(|current| {
+            crate::write::write_revision(current, space, |raw| {
+                let mut picture = PropertyObject::from_object(&raw.objects[&object])?;
+                picture.remove(&removed)?;
+                let values: Vec<(u32, &[u8])> = values
+                    .iter()
+                    .map(|(id, bytes)| (*id, bytes.as_slice()))
+                    .collect();
+                picture.set(&values)?;
+                Ok(BTreeMap::from([(object, picture)]))
+            })
+        })
     }
 
     fn place_containers(

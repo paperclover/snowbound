@@ -1,12 +1,14 @@
 use onestore::{
     ExGuid, PreparedEdit, RevisionIndex, Store,
-    document::{Document, Format},
+    document::{Document, Format, Layout},
     page::{Image, Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id},
 };
 use std::sync::Arc;
 
 const NATIVE: &[u8] =
     include_bytes!("../../../corpus/native/cold-05-05-image/notebook/synthetic.one");
+const NATIVE_RESIZE: &[u8] =
+    include_bytes!("../../../corpus/picture-edit/native-resize/notebook/pictures.one");
 const AUTHOR: &str = "Picture author";
 /// A one-pixel PNG.
 const PNG: &[u8] = &[
@@ -153,6 +155,85 @@ fn a_picture_inserted_on_a_fresh_page_reads_back_and_can_be_removed() {
     let stored = page_in(again.as_bytes(), space);
     assert!(pictures(&stored).is_empty());
     assert_eq!(body_paragraphs(&mut stored.clone()).len(), 2);
+}
+
+fn resize(page: &mut Page, layout: Layout, alt: Option<&str>) -> ExGuid {
+    let mut found = None;
+    for object in &mut page.objects {
+        if let PageObject::Outline(outline) = object {
+            for paragraph in &mut outline.paragraphs {
+                if let ParagraphContent::Image(image) = &mut paragraph.content {
+                    image.layout = layout.clone();
+                    image.alt = alt.map(str::to_owned);
+                    assert!(found.replace(image.id).is_none());
+                }
+            }
+        }
+    }
+    found.unwrap()
+}
+
+/// `ONESTORE_IMAGE_RESIZE_EXPORT` names a new directory receiving the candidate for a cold reopen.
+#[test]
+fn a_native_picture_is_resized_and_described_then_reset() {
+    let (space, native) = first_page(NATIVE);
+    let mut resized = native.clone();
+    let layout = Layout {
+        max_width: Some(144.0),
+        width_set_by_user: Some(true),
+        max_height: Some(108.0),
+        ..Default::default()
+    };
+    resize(&mut resized, layout, Some("Resized in Rust"));
+    let written = PreparedEdit::page(NATIVE, space, &resized, AUTHOR).unwrap();
+    let stored = page_in(written.as_bytes(), space);
+    assert_eq!(stored, resized);
+    assert_eq!(
+        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+            .unwrap()
+            .as_bytes(),
+        written.as_bytes()
+    );
+    if let Some(directory) = std::env::var_os("ONESTORE_IMAGE_RESIZE_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
+        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents(
+                "Open Notebook.onetoc2",
+                &[("synthetic.one", written_store.header.file_id)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let mut reset = stored.clone();
+    resize(&mut reset, Layout::default(), None);
+    let again = PreparedEdit::page(written.as_bytes(), space, &reset, AUTHOR).unwrap();
+    assert_eq!(page_in(again.as_bytes(), space), native);
+}
+
+#[test]
+fn a_rust_picture_resized_natively_reads_back_with_its_size_and_description() {
+    let (space, page) = first_page(NATIVE_RESIZE);
+    let found = pictures(&page);
+    let [picture] = found.as_slice() else {
+        panic!("{page:?}");
+    };
+    assert_eq!(picture.bytes.as_deref(), Some(PNG));
+    assert_eq!(picture.size, Some([0.75, 0.75]));
+    assert_eq!(picture.layout.max_width, Some(144.0));
+    assert_eq!(picture.layout.max_height, Some(108.0));
+    assert_eq!(picture.layout.width_set_by_user, Some(true));
+    assert_eq!(picture.alt.as_deref(), Some("Resized by OneNote"));
+    let mut wider = page.clone();
+    let mut layout = picture.layout.clone();
+    layout.max_width = Some(200.0);
+    resize(&mut wider, layout, Some("Wider in Rust"));
+    let written = PreparedEdit::page(NATIVE_RESIZE, space, &wider, AUTHOR).unwrap();
+    assert_eq!(page_in(written.as_bytes(), space), wider);
 }
 
 #[test]
