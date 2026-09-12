@@ -532,3 +532,63 @@ fn outline_moves_merge_with_remote_text_edits_but_not_with_remote_moves() {
         Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
     );
 }
+
+#[test]
+fn a_local_bullet_merges_with_a_remote_text_edit_and_publishes_its_definition() {
+    let (space, before) = page_titled(OUTLINES, "Move leaf down");
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
+    let mut after = before.clone();
+    let bullet = onestore::page::text::new_id().unwrap();
+    after.definitions.insert(
+        bullet,
+        onestore::page::Definition {
+            kind: onestore::document::Kind::List {
+                font: Some("Courier New".into()),
+                format: Some("\u{25cb}".into()),
+                restart: None,
+                bullet: Some(4),
+            },
+            format: onestore::document::Format {
+                font_size: Some(11.0),
+                color: Some(0xff000000),
+                ..Default::default()
+            },
+        },
+    );
+    let outline = after
+        .objects
+        .iter_mut()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => Some(outline),
+            _ => None,
+        })
+        .unwrap();
+    outline.paragraphs[0].lists = vec![bullet];
+    let id = cache
+        .save(OUTLINES, space, &after, "Model author")
+        .unwrap()
+        .unwrap();
+    let mut server = remote_with(space, |page| edit_paragraph(page, 1, 0..0, "Remote "));
+    assert!(
+        matches!(cache.sync_once(&mut server).unwrap(), Some((n, EditStatus::Published { .. })) if n == id)
+    );
+    let published = page_of(&server.durable, space);
+    let outline = published
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => Some(outline),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(outline.paragraphs[0].lists, vec![bullet]);
+    assert!(matches!(
+        published.definitions[&bullet].kind,
+        onestore::document::Kind::List {
+            bullet: Some(4),
+            ..
+        }
+    ));
+    assert!(texts(&published)[1].starts_with("Remote "));
+}

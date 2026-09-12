@@ -91,11 +91,13 @@ fn projection(page: &Page) -> String {
                     match &paragraph.content {
                         ParagraphContent::Text(text) => {
                             out.push_str(&format!(" text {} {:?}", text.id, text.text.text()));
+                            // Runs that differ only in attributes the writer leaves as stored,
+                            // such as the language tag, project as one span.
+                            let mut runs: Vec<(usize, String)> = Vec::new();
                             for span in text.text.spans() {
                                 let f = &span.format;
-                                out.push_str(&format!(
-                                    " [{} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}]",
-                                    span.end,
+                                let attributes = format!(
+                                    "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?}",
                                     f.bold.unwrap_or(false),
                                     f.italic.unwrap_or(false),
                                     f.underline.unwrap_or(false),
@@ -106,7 +108,16 @@ fn projection(page: &Page) -> String {
                                     f.font_size,
                                     f.color,
                                     f.highlight
-                                ));
+                                );
+                                match runs.last_mut() {
+                                    Some((end, previous)) if *previous == attributes => {
+                                        *end = span.end
+                                    }
+                                    _ => runs.push((span.end, attributes)),
+                                }
+                            }
+                            for (end, attributes) in runs {
+                                out.push_str(&format!(" [{end} {attributes}]"));
                             }
                         }
                         ParagraphContent::Table(table) => {
@@ -188,7 +199,44 @@ fn mutate(page: &mut Page, bytes: &mut Bytes<'_>) {
             .filter(|(_, o)| matches!(o, PageObject::Outline(_)))
             .map(|(i, _)| i)
             .collect();
-        match kind % 9 {
+        match kind % 10 {
+            8 => {
+                let Some(outline) = outlines.first().map(|i| match &mut page.objects[*i] {
+                    PageObject::Outline(outline) => outline,
+                    _ => unreachable!(),
+                }) else {
+                    continue;
+                };
+                let at = usize::from(bytes.next().unwrap_or(0)) % outline.paragraphs.len().max(1);
+                let Some(paragraph) = outline.paragraphs.get_mut(at) else {
+                    continue;
+                };
+                if paragraph.text().is_none() {
+                    continue;
+                }
+                if paragraph.lists.is_empty() {
+                    let id = new_id().unwrap();
+                    page.definitions.insert(
+                        id,
+                        onestore::page::Definition {
+                            kind: onestore::document::Kind::List {
+                                font: Some("Courier New".into()),
+                                format: Some("\u{25cb}".into()),
+                                restart: None,
+                                bullet: Some(4),
+                            },
+                            format: onestore::document::Format {
+                                font_size: Some(11.0),
+                                color: Some(0xff000000),
+                                ..Default::default()
+                            },
+                        },
+                    );
+                    paragraph.lists = vec![id];
+                } else {
+                    paragraph.lists.clear();
+                }
+            }
             0 | 1 => {
                 let Some(o) = bytes.pick(outlines.len()) else {
                     continue;

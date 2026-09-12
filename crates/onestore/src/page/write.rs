@@ -5,7 +5,7 @@ use super::{Outline, Page, PageObject, PageParagraph, ParagraphContent};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
-    document::{Document, Format},
+    document::{Document, Format, Kind},
     write::{PropertyObject, RevisionEdit, write_revisions},
 };
 use std::{
@@ -173,8 +173,10 @@ impl Lowering<'_> {
             return Err(invalid("Page creation time and margins cannot be edited"));
         }
         for (id, definition) in &after.definitions {
-            if before.definitions.get(id) != Some(definition) {
-                return Err(invalid("List, tag and style definitions cannot be edited"));
+            if before.definitions.get(id) != Some(definition)
+                && !matches!(definition.kind, Kind::List { .. })
+            {
+                return Err(invalid("Tag and style definitions cannot be edited"));
             }
         }
         let old = View::new(before)?;
@@ -206,6 +208,7 @@ impl Lowering<'_> {
         self.place(&old, &new, &placed, &page_order)?;
         self.delete(&old, &new, &consumed)?;
         self.edit_text(&new)?;
+        self.edit_lists(after, &new)?;
         self.edit_paragraph_formatting(&new)?;
         self.edit_formatting(&new)?;
         self.edit_layout(&old, &new)?;
@@ -272,13 +275,12 @@ impl Lowering<'_> {
             let Some(previous) = old.paragraphs.get(id) else {
                 continue;
             };
-            let same = paragraph.lists == previous.lists
-                && paragraph.tags == previous.tags
+            let same = paragraph.tags == previous.tags
                 && paragraph.style == previous.style
                 && paragraph.format == previous.format;
             if !same {
                 return Err(invalid(
-                    "Paragraph lists, tags, styles and paragraph formatting cannot be edited",
+                    "Paragraph tags, styles and paragraph formatting cannot be edited",
                 ));
             }
             match (&paragraph.content, &previous.content) {
@@ -557,13 +559,11 @@ impl Lowering<'_> {
                     let text = paragraph
                         .text()
                         .filter(|text| text.date_field.is_none() && text.tags.is_empty())
-                        .filter(|_| {
-                            paragraph.lists.is_empty()
-                                && paragraph.tags.is_empty()
-                                && paragraph.style.is_none()
-                        })
+                        .filter(|_| paragraph.tags.is_empty() && paragraph.style.is_none())
                         .ok_or_else(|| {
-                            invalid("New paragraphs contain plain text without lists, tags, fields or styles")
+                            invalid(
+                                "New paragraphs contain plain text without tags, fields or styles",
+                            )
                         })?;
                     let insertion = Insertion::paragraph(
                         self.id(container),
@@ -655,6 +655,185 @@ impl Lowering<'_> {
             let (range, replacement) = text_edit(stored.text.text(), text.text.text())?;
             let (space, object) = (self.space, stored.id);
             self.apply(|image| crate::replace_text(image, space, object, range, &replacement))?;
+        }
+        Ok(())
+    }
+
+    /// Gives each paragraph the list nodes its model references: a definition new to the
+    /// section becomes a list node carrying the model's identity, a changed one is rewritten
+    /// in place, a definition another paragraph already owns is copied because native list
+    /// nodes belong to one paragraph, and a dropped reference leaves the node unreferenced.
+    fn edit_lists(&mut self, after: &Page, new: &View<'_>) -> Result<(), Error> {
+        let current = self.current()?;
+        let stored = View::new(&current)?;
+        let mut owners: BTreeMap<ExGuid, ExGuid> = BTreeMap::new();
+        for (id, paragraph) in &stored.paragraphs {
+            for list in &paragraph.lists {
+                owners.insert(*list, *id);
+            }
+        }
+        for (id, paragraph) in &new.paragraphs {
+            let image_id = self.id(*id);
+            let previous = stored
+                .paragraphs
+                .get(&image_id)
+                .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
+            let same = paragraph.lists.len() == previous.lists.len()
+                && paragraph
+                    .lists
+                    .iter()
+                    .zip(&previous.lists)
+                    .all(|(model, node)| {
+                        after.definitions.get(model) == current.definitions.get(node)
+                    });
+            if same {
+                continue;
+            }
+            let mut nodes = Vec::new();
+            for list in &paragraph.lists {
+                // Writer-allocated identities keep a nonzero sequence number so the node's
+                // compact identity is never the null identity; squash renames them to the
+                // model's. A copy for a second owner keeps its allocated identity.
+                let node_id = match owners.get(list) {
+                    Some(owner) if *owner == image_id => *list,
+                    Some(_) => ExGuid {
+                        guid: crate::write::fresh_guid()?,
+                        n: 1,
+                    },
+                    None => {
+                        let written = ExGuid {
+                            guid: crate::write::fresh_guid()?,
+                            n: 1,
+                        };
+                        self.alias.insert(*list, written);
+                        written
+                    }
+                };
+                let definition = after
+                    .definitions
+                    .get(list)
+                    .ok_or_else(|| invalid("A paragraph references a missing list definition"))?;
+                let Kind::List {
+                    font,
+                    format,
+                    restart,
+                    bullet,
+                } = &definition.kind
+                else {
+                    return Err(invalid("A paragraph list must reference a list definition"));
+                };
+                if bullet.is_some() && (format.is_none() || font.is_none()) {
+                    return Err(invalid("A bullet definition names its glyph and font"));
+                }
+                let mut values: Vec<(u32, Vec<u8>)> = Vec::new();
+                if let Some(format) = format {
+                    let units: Vec<u16> = format.encode_utf16().collect();
+                    let count = u16::try_from(units.len())
+                        .map_err(|_| invalid("List format exceeds the document range"))?;
+                    let mut bytes = count.to_le_bytes().to_vec();
+                    bytes.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
+                    values.push((0x1c001c1a, bytes));
+                }
+                if let Some(font) = font {
+                    values.push((0x1c001c52, crate::create::string(font)));
+                }
+                if let Some(restart) = restart {
+                    values.push((0x14001cb7, restart.to_le_bytes().to_vec()));
+                }
+                if let Some(bullet) = bullet {
+                    values.push((0x10001d0e, bullet.to_le_bytes().to_vec()));
+                    // Every native bullet node carries this cleared flag alongside its index.
+                    values.push((0x0c001cc0, vec![0]));
+                }
+                let style = &definition.format;
+                if let Some(font) = &style.font {
+                    values.push((0x1c001c0a, crate::create::string(font)));
+                }
+                if let Some(size) = style.font_size {
+                    let half = (size * 2.0).round();
+                    if !(0.0..=f32::from(u16::MAX)).contains(&half) {
+                        return Err(invalid("List font size is outside the document range"));
+                    }
+                    values.push((0x10001c0b, (half as u16).to_le_bytes().to_vec()));
+                }
+                if let Some(color) = style.color {
+                    values.push((0x14001c0c, color.to_le_bytes().to_vec()));
+                }
+                if let Some(language) = style.language {
+                    values.push((0x14001c3b, language.to_le_bytes().to_vec()));
+                }
+                for (flag, id) in [(style.bold, 0x08001c04), (style.italic, 0x08001c05)] {
+                    if let Some(flag) = flag {
+                        values.push((id | (u32::from(flag) << 31), Vec::new()));
+                    }
+                }
+                nodes.push((node_id, values));
+            }
+            let (space, object) = (self.space, self.id(*id));
+            self.apply(|image| {
+                let store = Store::parse(image)?;
+                let index = RevisionIndex::parse(&store)?;
+                let document = Document::parse(&index)?;
+                let parents = crate::edit::editable_parents(
+                    document.active(space)?,
+                    &document.pages_in(space)?,
+                    object,
+                )?;
+                let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+                crate::write::write_revision(image, space, |raw| {
+                    let mut changed = BTreeMap::new();
+                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                    let mut references = Vec::new();
+                    for (list, values) in &nodes {
+                        let mut node = match raw.objects.get(list) {
+                            Some(existing) => {
+                                if existing.jcid != 0x60012 {
+                                    return Err(invalid(
+                                        "A list definition identity belongs to another object",
+                                    ));
+                                }
+                                let mut node = PropertyObject::from_object(existing)?;
+                                node.remove(&[
+                                    0x1c001c1a, 0x1c001c52, 0x14001cb7, 0x10001d0e, 0x0c001cc0,
+                                    0x1c001c0a, 0x10001c0b, 0x14001c0c, 0x14001c3b, 0x08001c04,
+                                    0x08001c05,
+                                ])?;
+                                node
+                            }
+                            None => PropertyObject {
+                                jcid: 0x60012,
+                                bytes: crate::create::properties(&[])?,
+                                global_ids: std::sync::Arc::new(BTreeMap::from([(0, list.guid)])),
+                            },
+                        };
+                        node.set(
+                            &values
+                                .iter()
+                                .map(|(id, bytes)| (*id, bytes.as_slice()))
+                                .collect::<Vec<_>>(),
+                        )?;
+                        node.set(&[(0x14001d7a, &modified)])?;
+                        node.reference(*list)?;
+                        references.extend_from_slice(&target.reference(*list)?);
+                        changed.insert(*list, node);
+                    }
+                    if references.is_empty() {
+                        target.remove(&[0x24001c26])?;
+                    } else {
+                        target.set(&[(0x24001c26, &references)])?;
+                    }
+                    target.set(&[(0x14001d7a, &modified)])?;
+                    changed.insert(object, target);
+                    crate::formatting::touch_ancestors(
+                        raw,
+                        &parents,
+                        object,
+                        &modified,
+                        &mut changed,
+                    )?;
+                    Ok(changed)
+                })
+            })?;
         }
         Ok(())
     }

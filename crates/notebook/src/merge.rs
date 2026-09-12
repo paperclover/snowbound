@@ -97,12 +97,29 @@ pub(crate) fn merge(base: &Page, ours: &Page, theirs: &Page) -> Option<Page> {
         }
         result = reorder(result, &our_order);
     }
+    // Definitions we added or changed travel with our paragraphs; theirs win elsewhere.
+    let mut definitions = theirs.definitions.clone();
+    for (id, definition) in &ours.definitions {
+        match (base.definitions.get(id), theirs.definitions.get(id)) {
+            (Some(before), Some(after)) if before != definition => {
+                if after != before && after != definition {
+                    return None;
+                }
+                definitions.insert(*id, definition.clone());
+            }
+            (None, None) => {
+                definitions.insert(*id, definition.clone());
+            }
+            (None, Some(after)) if after != definition => return None,
+            _ => {}
+        }
+    }
     Some(Page {
         title: theirs.title.clone(),
         created: theirs.created,
         margin_origin: theirs.margin_origin,
         objects: result,
-        definitions: theirs.definitions.clone(),
+        definitions,
     })
 }
 
