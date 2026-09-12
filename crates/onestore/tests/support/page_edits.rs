@@ -199,7 +199,63 @@ fn mutate(page: &mut Page, bytes: &mut Bytes<'_>) {
             .filter(|(_, o)| matches!(o, PageObject::Outline(_)))
             .map(|(i, _)| i)
             .collect();
-        match kind % 10 {
+        match kind % 11 {
+            10 => {
+                let Some(outline) = outlines.first().map(|i| match &mut page.objects[*i] {
+                    PageObject::Outline(outline) => outline,
+                    _ => unreachable!(),
+                }) else {
+                    continue;
+                };
+                let at = usize::from(bytes.next().unwrap_or(0)) % outline.paragraphs.len().max(1);
+                let Some(text) = outline.paragraphs.get_mut(at).and_then(|p| p.text_mut()) else {
+                    continue;
+                };
+                if text.tags.is_empty() {
+                    let definition = page
+                        .definitions
+                        .iter()
+                        .find(|(_, d)| {
+                            matches!(&d.kind, onestore::document::Kind::TagDefinition { label: Some(label), .. } if label == "Fuzz task")
+                        })
+                        .map(|(id, _)| *id)
+                        .unwrap_or_else(|| {
+                            let id = new_id().unwrap();
+                            page.definitions.insert(
+                                id,
+                                onestore::page::Definition {
+                                    kind: onestore::document::Kind::TagDefinition {
+                                        label: Some("Fuzz task".into()),
+                                        action_type: Some(0),
+                                        shape: Some(3),
+                                        color: None,
+                                        highlight: None,
+                                    },
+                                    format: Default::default(),
+                                },
+                            );
+                            id
+                        });
+                    let outline = outlines.first().map(|i| match &mut page.objects[*i] {
+                        PageObject::Outline(outline) => outline,
+                        _ => unreachable!(),
+                    });
+                    let text = outline.unwrap().paragraphs[at].text_mut().unwrap();
+                    text.tags.push(onestore::document::Tag {
+                        definition: Some(definition),
+                        action_type: None,
+                        status: u16::from(bytes.next().unwrap_or(0) % 2),
+                        created: Some(1_262_401_445),
+                        completed: None,
+                        start: None,
+                        due: None,
+                        task_id: None,
+                        extra_set: 0,
+                    });
+                } else {
+                    text.tags.clear();
+                }
+            }
             8 => {
                 let Some(outline) = outlines.first().map(|i| match &mut page.objects[*i] {
                     PageObject::Outline(outline) => outline,

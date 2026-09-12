@@ -1,0 +1,18 @@
+{
+  "notebook": "/private/tmp/m4/tags",
+  "expected_pages": 1,
+  "author": null,
+  "author_timeout_seconds": 600,
+  "inspect": false,
+  "collect_notebook": true,
+  "base": {
+    "file": "win7-office-base.qcow2",
+    "format": "qcow2",
+    "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+    "virtual_size": 68719476736
+  },
+  "scripts": {
+    "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+    "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+  }
+}

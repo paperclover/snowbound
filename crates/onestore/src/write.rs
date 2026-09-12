@@ -133,6 +133,7 @@ fn patch_properties(
     blob: &[u8],
     updates: &[(u32, &[u8])],
     inserts: &[(u32, &[u8])],
+    nested_references: &[u8],
 ) -> Result<Vec<u8>> {
     let properties = PropertySets::parse(blob)?;
     let root = &properties.sets[0];
@@ -167,6 +168,8 @@ fn patch_properties(
             7 => value.len() < 0x40000000,
             8 => value.len() == 4,
             9 => value.len().is_multiple_of(4) && value.len() / 4 <= 0xffffff,
+            // An encoded property-set array is inserted whole; its references follow.
+            16 => i >= updates.len() && value.len() >= 4,
             _ => {
                 return Err(Error {
                     offset: 0,
@@ -198,13 +201,13 @@ fn patch_properties(
             9 => encoded.extend_from_slice(&(value.len() as u32 / 4).to_le_bytes()),
             _ => {}
         }
-        if (3..=7).contains(&kind) {
+        if (3..=7).contains(&kind) || kind == 16 {
             encoded.extend_from_slice(value);
         }
         if adding {
             added_ids.extend_from_slice(&property.to_le_bytes());
             added_fields.extend_from_slice(&encoded);
-            if kind >= 8 {
+            if (8..=9).contains(&kind) {
                 object_count += (value.len() / 4) as i64;
                 added_references.extend_from_slice(value);
             }
@@ -232,6 +235,7 @@ fn patch_properties(
             }
         }
     }
+    object_count += (nested_references.len() / 4) as i64;
     if !(0..=0xffffff).contains(&object_count) {
         return Err(Error {
             offset: 0,
@@ -242,6 +246,7 @@ fn patch_properties(
     if header != object_header {
         patches.push((0, 4, 0, header.to_le_bytes().to_vec()));
     }
+    added_references.extend_from_slice(nested_references);
     if !added_references.is_empty() {
         let end = 4 + (object_header as usize & 0xffffff) * 4;
         patches.push((end, end, usize::MAX, added_references));
@@ -339,7 +344,7 @@ pub(crate) fn replace_objects(
                 edit.object,
                 PropertyObject {
                     jcid: object.jcid,
-                    bytes: patch_properties(blob, edit.updates, edit.inserts)?,
+                    bytes: patch_properties(blob, edit.updates, edit.inserts, &[])?,
                     global_ids: Arc::clone(&object.global_ids),
                 },
             );
@@ -384,7 +389,56 @@ impl PropertyObject {
                 .iter()
                 .any(|p| p.id & 0x7fffffff == id & 0x7fffffff)
         });
-        self.bytes = patch_properties(&self.bytes, &updates, &inserts)?;
+        self.bytes = patch_properties(&self.bytes, &updates, &inserts, &[])?;
+        Ok(())
+    }
+
+    /// Replaces a property-set array such as note tags: each set lists scalar values
+    /// inline, while an object reference (a kind-8 identity) is supplied as the compact
+    /// identity `reference` produced and joins the object's reference stream in order.
+    pub fn set_sets(&mut self, id: u32, element: u32, sets: &[Vec<(u32, Vec<u8>)>]) -> Result<()> {
+        if (id >> 26) & 31 != 16 || (element >> 26) & 31 != 17 {
+            return Err(Error {
+                offset: 0,
+                message: "Property-set arrays need array and element identifiers",
+            });
+        }
+        self.remove(&[id])?;
+        if sets.is_empty() {
+            return Ok(());
+        }
+        let mut encoded = (sets.len() as u32).to_le_bytes().to_vec();
+        encoded.extend_from_slice(&element.to_le_bytes());
+        let mut references = Vec::new();
+        for set in sets {
+            encoded.extend_from_slice(&u16::try_from(set.len()).unwrap().to_le_bytes());
+            for (field, _) in set {
+                encoded.extend_from_slice(&field.to_le_bytes());
+            }
+            for (field, value) in set {
+                match (field >> 26) & 31 {
+                    3..=6 => {
+                        assert_eq!(value.len(), 1 << (((field >> 26) & 31) - 3));
+                        encoded.extend_from_slice(value);
+                    }
+                    7 => {
+                        encoded.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                        encoded.extend_from_slice(value);
+                    }
+                    8 => {
+                        assert_eq!(value.len(), 4);
+                        references.extend_from_slice(value);
+                    }
+                    _ => {
+                        return Err(Error {
+                            offset: 0,
+                            message: "Property-set arrays hold scalars and single references",
+                        });
+                    }
+                }
+            }
+        }
+        self.bytes = patch_properties(&self.bytes, &[], &[(id, &encoded)], &references)?;
         Ok(())
     }
 

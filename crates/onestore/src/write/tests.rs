@@ -221,6 +221,7 @@ fn add_paragraph(source: &[u8], number: u32) -> Vec<u8> {
                     blob,
                     &[(0x24001c20, &children), (0x14001d7a, &modified)],
                     &[],
+                    &[],
                 )?,
                 global_ids: Arc::clone(&table),
             },
@@ -302,7 +303,7 @@ fn restyle(source: &[u8]) -> Vec<u8> {
             style,
             PropertyObject {
                 jcid: previous.jcid,
-                bytes: patch_properties(blob, &[], &[(0x88001c04, &[])])?,
+                bytes: patch_properties(blob, &[], &[(0x88001c04, &[])], &[])?,
                 global_ids: Arc::new(table),
             },
         )]);
@@ -316,7 +317,12 @@ fn restyle(source: &[u8]) -> Vec<u8> {
                 *id,
                 PropertyObject {
                     jcid: text.jcid,
-                    bytes: patch_properties(blob, &[(0x24001e13, &compact(style, &table)?)], &[])?,
+                    bytes: patch_properties(
+                        blob,
+                        &[(0x24001e13, &compact(style, &table)?)],
+                        &[],
+                        &[],
+                    )?,
                     global_ids: Arc::new(table),
                 },
             );
@@ -461,7 +467,8 @@ fn changed_graphs_reject_cycles_dangling_and_unreachable_additions() {
                         bytes: patch_properties(
                             blob,
                             &[(0x24001c20, &compact(target, &outline.global_ids)?)],
-                            &[]
+                            &[],
+                            &[],
                         )?,
                         global_ids: Arc::clone(&outline.global_ids),
                     }
@@ -559,7 +566,7 @@ fn property_splices_match_independently_encoded_flat_sets() {
             .map(|(id, value)| (*id, value.as_slice()))
             .collect();
         let original = properties(&original).unwrap();
-        let actual = patch_properties(&original, &updates, &inserts).unwrap();
+        let actual = patch_properties(&original, &updates, &inserts, &[]).unwrap();
         assert_eq!(actual, properties(&expected).unwrap(), "case {case}");
     }
 }
@@ -599,6 +606,7 @@ fn nested_fields_and_other_reference_streams_remain_byte_exact() {
             (0x24000001, &[6, 0, 0, 0, 7, 0, 0, 0]),
         ],
         &[(0x24000005, &[8, 0, 0, 0]), (0x88000006, &[])],
+        &[],
     )
     .unwrap();
     let parsed = PropertySets::parse(&changed).unwrap();
@@ -717,7 +725,7 @@ fn deep_property_splices_do_not_use_the_call_stack() {
         bytes.extend_from_slice(&0x44000001_u32.to_le_bytes());
     }
     bytes.extend_from_slice(&0_u16.to_le_bytes());
-    let changed = patch_properties(&bytes, &[], &[(0x88000002, &[])]).unwrap();
+    let changed = patch_properties(&bytes, &[], &[(0x88000002, &[])], &[]).unwrap();
     let parsed = PropertySets::parse(&changed).unwrap();
     assert_eq!(parsed.sets.len(), 100_001);
     assert_eq!(parsed.sets[0].len(), 2);
@@ -758,7 +766,7 @@ fn invalid_property_splices_are_rejected() {
         (vec![], vec![(0x88000001, &[][..])]),
         (vec![], vec![(0x20000003, &[][..])]),
     ] {
-        assert!(patch_properties(&bytes, &updates, &inserts).is_err());
+        assert!(patch_properties(&bytes, &updates, &inserts, &[]).is_err());
     }
 }
 

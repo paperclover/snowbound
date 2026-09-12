@@ -5,13 +5,16 @@ use super::{Outline, Page, PageObject, PageParagraph, ParagraphContent};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
-    document::{Document, Format, Kind},
+    document::{Document, Format, Kind, Tag},
     write::{PropertyObject, RevisionEdit, write_revisions},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
 };
+
+/// Property identifiers with their encoded values.
+type Values = Vec<(u32, Vec<u8>)>;
 
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
@@ -174,9 +177,12 @@ impl Lowering<'_> {
         }
         for (id, definition) in &after.definitions {
             if before.definitions.get(id) != Some(definition)
-                && !matches!(definition.kind, Kind::List { .. })
+                && !matches!(
+                    definition.kind,
+                    Kind::List { .. } | Kind::TagDefinition { .. }
+                )
             {
-                return Err(invalid("Tag and style definitions cannot be edited"));
+                return Err(invalid("Style definitions cannot be edited"));
             }
         }
         let old = View::new(before)?;
@@ -209,6 +215,7 @@ impl Lowering<'_> {
         self.delete(&old, &new, &consumed)?;
         self.edit_text(&new)?;
         self.edit_lists(after, &new)?;
+        self.edit_tags(after, &new)?;
         self.edit_paragraph_formatting(&new)?;
         self.edit_formatting(&new)?;
         self.edit_layout(&old, &new)?;
@@ -275,18 +282,16 @@ impl Lowering<'_> {
             let Some(previous) = old.paragraphs.get(id) else {
                 continue;
             };
-            let same = paragraph.tags == previous.tags
-                && paragraph.style == previous.style
-                && paragraph.format == previous.format;
+            let same = paragraph.style == previous.style && paragraph.format == previous.format;
             if !same {
                 return Err(invalid(
-                    "Paragraph tags, styles and paragraph formatting cannot be edited",
+                    "Paragraph styles and paragraph formatting cannot be edited",
                 ));
             }
             match (&paragraph.content, &previous.content) {
                 (ParagraphContent::Text(text), ParagraphContent::Text(previous)) => {
-                    if text.date_field != previous.date_field || text.tags != previous.tags {
-                        return Err(invalid("Text fields and tags cannot be edited"));
+                    if text.date_field != previous.date_field {
+                        return Err(invalid("Text fields cannot be edited"));
                     }
                 }
                 (ParagraphContent::Table(table), ParagraphContent::Table(previous)) => {
@@ -558,12 +563,10 @@ impl Lowering<'_> {
                     let paragraph = new.paragraphs[id];
                     let text = paragraph
                         .text()
-                        .filter(|text| text.date_field.is_none() && text.tags.is_empty())
-                        .filter(|_| paragraph.tags.is_empty() && paragraph.style.is_none())
+                        .filter(|text| text.date_field.is_none())
+                        .filter(|_| paragraph.style.is_none())
                         .ok_or_else(|| {
-                            invalid(
-                                "New paragraphs contain plain text without tags, fields or styles",
-                            )
+                            invalid("New paragraphs contain plain text without fields or styles")
                         })?;
                     let insertion = Insertion::paragraph(
                         self.id(container),
@@ -725,7 +728,7 @@ impl Lowering<'_> {
                 if bullet.is_some() && (format.is_none() || font.is_none()) {
                     return Err(invalid("A bullet definition names its glyph and font"));
                 }
-                let mut values: Vec<(u32, Vec<u8>)> = Vec::new();
+                let mut values: Values = Vec::new();
                 if let Some(format) = format {
                     let units: Vec<u16> = format.encode_utf16().collect();
                     let count = u16::try_from(units.len())
@@ -834,6 +837,186 @@ impl Lowering<'_> {
                     Ok(changed)
                 })
             })?;
+        }
+        Ok(())
+    }
+
+    /// Rewrites the note tags of paragraphs and text objects whose model tags differ from
+    /// the stored ones. A tag definition new to the section becomes a definition object
+    /// carrying the model's identity after squash.
+    fn edit_tags(&mut self, after: &Page, new: &View<'_>) -> Result<(), Error> {
+        fn same(a: &[Tag], b: &[Tag]) -> bool {
+            let key = |t: &Tag| {
+                (
+                    t.definition,
+                    t.action_type,
+                    t.status,
+                    t.created,
+                    t.completed,
+                    t.start,
+                    t.due,
+                    t.task_id,
+                )
+            };
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| key(x) == key(y))
+        }
+        let current = self.current()?;
+        let stored = View::new(&current)?;
+        for (id, paragraph) in &new.paragraphs {
+            let image_id = self.id(*id);
+            let previous = stored
+                .paragraphs
+                .get(&image_id)
+                .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
+            let mut targets = vec![(image_id, &paragraph.tags, &previous.tags)];
+            if let (Some(text), Some(before)) = (paragraph.text(), previous.text()) {
+                targets.push((self.id(text.id), &text.tags, &before.tags));
+            }
+            for (object, tags, stored_tags) in targets {
+                if same(tags, stored_tags) {
+                    continue;
+                }
+                let mut definitions: Vec<(ExGuid, Option<Values>)> = Vec::new();
+                let mut sets: Vec<(usize, Values)> = Vec::new();
+                let mut action_types = BTreeSet::new();
+                for tag in tags {
+                    let definition = tag
+                        .definition
+                        .ok_or_else(|| invalid("A note tag names its definition"))?;
+                    let action_type = if tag.status & 4 != 0 {
+                        tag.action_type
+                    } else {
+                        match after.definitions.get(&definition).map(|d| &d.kind) {
+                            Some(Kind::TagDefinition { action_type, .. }) => *action_type,
+                            _ => return Err(invalid("A note tag must reference a tag definition")),
+                        }
+                    };
+                    if !action_types.insert(action_type.unwrap_or(0)) {
+                        return Err(invalid("An element holds one note tag per action type"));
+                    }
+                    let known = current.definitions.contains_key(&definition)
+                        || self.alias.contains_key(&definition);
+                    let written = if known {
+                        self.id(definition)
+                    } else {
+                        let allocated = ExGuid {
+                            guid: crate::write::fresh_guid()?,
+                            n: 1,
+                        };
+                        self.alias.insert(definition, allocated);
+                        allocated
+                    };
+                    let index = match definitions.iter().position(|(id, _)| *id == written) {
+                        Some(index) => index,
+                        None => {
+                            let values = if known {
+                                None
+                            } else {
+                                let Some(model) = after.definitions.get(&definition) else {
+                                    return Err(invalid(
+                                        "A note tag references a missing tag definition",
+                                    ));
+                                };
+                                let Kind::TagDefinition {
+                                    label,
+                                    action_type,
+                                    shape,
+                                    color,
+                                    highlight,
+                                } = &model.kind
+                                else {
+                                    return Err(invalid(
+                                        "A note tag must reference a tag definition",
+                                    ));
+                                };
+                                let mut values: Values = vec![
+                                    (0x0c003473, vec![0]),
+                                    (0x10003463, action_type.unwrap_or(0).to_le_bytes().to_vec()),
+                                    (0x10003464, shape.unwrap_or(0).to_le_bytes().to_vec()),
+                                    (0x14003467, 0u32.to_le_bytes().to_vec()),
+                                ];
+                                if let Some(label) = label {
+                                    values.push((0x1c003468, crate::create::string(label)));
+                                }
+                                if let Some(color) = color {
+                                    values.push((0x14003466, color.to_le_bytes().to_vec()));
+                                }
+                                if let Some(highlight) = highlight {
+                                    values.push((0x14003465, highlight.to_le_bytes().to_vec()));
+                                }
+                                Some(values)
+                            };
+                            definitions.push((written, values));
+                            definitions.len() - 1
+                        }
+                    };
+                    let mut fields: Values = Vec::new();
+                    if let Some(action_type) = tag.action_type {
+                        fields.push((0x10003463, action_type.to_le_bytes().to_vec()));
+                    }
+                    for (id, value) in [
+                        (0x1400346e, tag.created),
+                        (0x1400346f, tag.completed),
+                        (0x1400346a, tag.start),
+                        (0x1400346b, tag.due),
+                    ] {
+                        if let Some(value) = value {
+                            fields.push((id, value.to_le_bytes().to_vec()));
+                        }
+                    }
+                    fields.push((0x10003470, tag.status.to_le_bytes().to_vec()));
+                    if let Some(task) = tag.task_id {
+                        fields.push((0x1c003469, task.to_vec()));
+                    }
+                    sets.push((index, fields));
+                }
+                let space = self.space;
+                self.apply(|image| {
+                    let store = Store::parse(image)?;
+                    let index = RevisionIndex::parse(&store)?;
+                    let document = Document::parse(&index)?;
+                    let parents = crate::edit::editable_parents(
+                        document.active(space)?,
+                        &document.pages_in(space)?,
+                        object,
+                    )?;
+                    let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+                    crate::write::write_revision(image, space, |raw| {
+                        let mut changed = BTreeMap::new();
+                        for (id, values) in &definitions {
+                            let Some(values) = values else {
+                                continue;
+                            };
+                            let mut node = PropertyObject {
+                                jcid: 0x120043,
+                                bytes: crate::create::properties(values)?,
+                                global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
+                            };
+                            node.reference(*id)?;
+                            changed.insert(*id, node);
+                        }
+                        let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                        let mut encoded = Vec::new();
+                        for (index, fields) in &sets {
+                            let reference = target.reference(definitions[*index].0)?;
+                            let mut set = vec![(0x20003488, reference.to_vec())];
+                            set.extend(fields.iter().cloned());
+                            encoded.push(set);
+                        }
+                        target.set_sets(0x40003489, 0x44000811, &encoded)?;
+                        target.set(&[(0x14001d7a, &modified)])?;
+                        changed.insert(object, target);
+                        crate::formatting::touch_ancestors(
+                            raw,
+                            &parents,
+                            object,
+                            &modified,
+                            &mut changed,
+                        )?;
+                        Ok(changed)
+                    })
+                })?;
+            }
         }
         Ok(())
     }
