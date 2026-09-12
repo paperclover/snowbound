@@ -53,6 +53,26 @@ class PictureEditTest(unittest.TestCase):
         self.assertEqual((size.get('width'), size.get('height'), size.get('isSetByUser')), ('144.0', '108.0', 'true'))
         self.assertEqual(image.get('alt'), 'Resized in Rust')
 
+    def test_onenote_places_a_picture_directly_on_a_page_with_a_rust_picture(self):
+        page = native_page(FIXTURE / 'native-page-level/notebook', FIXTURE / 'native-page-level')
+        images = list(page.iter('{%s}Image' % ns['one']))
+        self.assertEqual(len(images), 2)
+        placed = page.find('one:Image', ns)
+        self.assertEqual(placed.get('alt'), 'Page-level picture')
+        position = placed.find('one:Position', ns)
+        self.assertEqual((position.get('x'), position.get('y')), ('360.0', '240.0'))
+
+    def test_a_rust_page_level_picture_renders_with_its_position_size_and_description(self):
+        page = native_page(FIXTURE / 'page-level/candidate', FIXTURE / 'page-level/cold')
+        placed = page.find('one:Image', ns)
+        self.assertIsNotNone(placed)
+        position = placed.find('one:Position', ns)
+        self.assertEqual((position.get('x'), position.get('y')), ('360.0', '240.0'))
+        size = placed.find('one:Size', ns)
+        self.assertEqual((size.get('width'), size.get('height'), size.get('isSetByUser')), ('96.00000762939453', '71.99998474121093', 'true'))
+        self.assertEqual(placed.get('alt'), 'Placed in Rust')
+        self.assertEqual(texts(page), ['Beside the picture'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -14,7 +14,7 @@ diffs the supplied model against the page stored in the supplied local snapshot,
 writes the difference into the working image and queues one
 `Operation::Page(PageIntent { before, after, author })`; `before` is the page the
 edit started from and is the precondition reconciliation checks. Text, styles,
-paragraph formatting, hyperlinks, bullets, numbering, note tags, table rows and columns, pictures (insertion, size, description) and attachments, paragraph structure,
+paragraph formatting, hyperlinks, bullets, numbering, note tags, table rows and columns, pictures (insertion in paragraphs or on the page, position, size, description) and attachments, paragraph structure,
 outline layout, insertions and deletions are all differences between `before` and
 `after`; the library never sees editor operations.
 

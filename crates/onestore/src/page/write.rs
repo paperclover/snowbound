@@ -28,6 +28,73 @@ fn payload_reference(guid: [u8; 16]) -> String {
     format!("<ifndf>{}", id.split(',').next().unwrap())
 }
 
+fn page_images(page: &Page) -> impl Iterator<Item = (ExGuid, &Image)> {
+    page.objects.iter().filter_map(|object| match object {
+        PageObject::Image(image) => Some((image.id, image)),
+        _ => None,
+    })
+}
+
+fn picture_fixed_fields(stored: &Image, image: &Image) -> Result<(), Error> {
+    if stored.id != image.id
+        || stored.bytes != image.bytes
+        || stored.size != image.size
+        || stored.background != image.background
+    {
+        return Err(invalid(
+            "A stored picture keeps its payload, intrinsic size and background state",
+        ));
+    }
+    Ok(())
+}
+
+/// Position and displayed-size properties that take `layout` from `stored`, and the ones
+/// to remove.
+fn layout_values(
+    stored: &crate::document::Layout,
+    layout: &crate::document::Layout,
+) -> Result<(Values, Vec<u32>), Error> {
+    let mut values = Values::new();
+    let mut removed = Vec::new();
+    if (layout.x, layout.y) != (stored.x, stored.y) {
+        let (Some(x), Some(y)) = (layout.x, layout.y) else {
+            return Err(invalid("A picture position needs both coordinates"));
+        };
+        if !(x.is_finite() && y.is_finite()) {
+            return Err(invalid("A picture position must be finite"));
+        }
+        values.push((0x14001c14, (x / 36.0).to_le_bytes().to_vec()));
+        values.push((0x14001c15, (y / 36.0).to_le_bytes().to_vec()));
+    }
+    if (
+        layout.max_width,
+        layout.max_height,
+        layout.width_set_by_user,
+    ) != (
+        stored.max_width,
+        stored.max_height,
+        stored.width_set_by_user,
+    ) {
+        match (layout.max_width, layout.max_height) {
+            (Some(width), Some(height)) => {
+                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+                    return Err(invalid("Picture size must be positive"));
+                }
+                values.push((0x14001c1b, (width / 36.0).to_le_bytes().to_vec()));
+                values.push((0x14001c1c, (height / 36.0).to_le_bytes().to_vec()));
+                let user_set = u32::from(layout.width_set_by_user == Some(true));
+                values.push((0x08001cbd | (user_set << 31), Vec::new()));
+            }
+            (None, None) => removed.extend([0x14001c1b, 0x14001c1c, 0x08001cbd]),
+            _ => return Err(invalid("A picture size needs both dimensions")),
+        }
+    }
+    if layout.reserved_width != stored.reserved_width {
+        return Err(invalid("A picture has no reserved width"));
+    }
+    Ok((values, removed))
+}
+
 fn measurement_bytes(values: &[f32], header: usize) -> Result<Vec<u8>, Error> {
     let count = u8::try_from(values.len())
         .map_err(|_| invalid("A measurement array exceeds the document range"))?;
@@ -298,10 +365,6 @@ impl Lowering<'_> {
             page.objects
                 .iter()
                 .filter_map(|object| match object {
-                    PageObject::Image(image) => Some(format!(
-                        "{:?} {:?} {:?} {:?}",
-                        image.id, image.layout, image.alt, image.background
-                    )),
                     PageObject::Unsupported(unsupported) => Some(format!("{unsupported:?}")),
                     PageObject::Title(title) => Some(format!(
                         "{:?} {:?} {:?} {:?}",
@@ -310,7 +373,7 @@ impl Lowering<'_> {
                         title.layout,
                         title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()
                     )),
-                    PageObject::Outline(_) => None,
+                    PageObject::Outline(_) | PageObject::Image(_) => None,
                 })
                 .collect()
         };
@@ -320,7 +383,7 @@ impl Lowering<'_> {
         after_fixed.sort();
         if before_fixed != after_fixed {
             return Err(invalid(
-                "Images, titles and unsupported objects cannot be edited through the page model",
+                "Titles and unsupported objects cannot be edited through the page model",
             ));
         }
         for (id, outline) in &new.outlines {
@@ -386,15 +449,9 @@ impl Lowering<'_> {
                 }
                 (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
                 (ParagraphContent::Image(a), ParagraphContent::Image(b)) => {
-                    if a.id != b.id
-                        || a.bytes != b.bytes
-                        || a.size != b.size
-                        || a.background != b.background
-                        || (a.layout.x, a.layout.y) != (b.layout.x, b.layout.y)
-                    {
-                        return Err(invalid(
-                            "A stored picture keeps its payload, intrinsic size, background state and position",
-                        ));
+                    picture_fixed_fields(a, b)?;
+                    if (a.layout.x, a.layout.y) != (b.layout.x, b.layout.y) {
+                        return Err(invalid("A paragraph picture has no position of its own"));
                     }
                 }
                 (ParagraphContent::Attachment(a), ParagraphContent::Attachment(b)) => {
@@ -580,6 +637,7 @@ impl Lowering<'_> {
                 .iter()
                 .any(|object| matches!(object, PageObject::Title(title) if title.id == id))
         };
+        self.edit_page_images(old, new)?;
         let survivors: Vec<ExGuid> = page_order
             .iter()
             .copied()
@@ -764,79 +822,138 @@ impl Lowering<'_> {
                     return Err(invalid("Paragraph content type cannot change"));
                 };
                 if stored != image {
-                    self.resize_image(stored, image)?;
+                    self.edit_image(stored, image)?;
                 }
                 continue;
             }
-            let Some(bytes) = &image.bytes else {
-                return Err(invalid("A new picture needs its payload"));
-            };
-            let extension = match bytes.as_ref() {
-                [0x89, b'P', b'N', b'G', ..] => ".png",
-                [0xff, 0xd8, 0xff, ..] => ".jpg",
-                [b'G', b'I', b'F', b'8', ..] => ".gif",
-                [b'B', b'M', ..] => ".bmp",
-                _ => return Err(invalid("Choose a PNG, JPEG, GIF or BMP picture")),
-            };
-            let image_id = self.allocate(image.id)?;
-            let file_id = ExGuid {
-                guid: crate::write::fresh_guid()?,
-                n: 1,
-            };
-            let payload_guid = crate::write::fresh_guid()?;
-            let reference = payload_reference(payload_guid);
-            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-            let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
-            if let Some([width, height]) = image.size {
-                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-                    return Err(invalid("Picture size must be positive"));
-                }
-                values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
-                values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
+            if image.layout.x.is_some() || image.layout.y.is_some() {
+                return Err(invalid("A paragraph picture has no position of its own"));
             }
-            if let Some(alt) = &image.alt {
-                values.push((0x1c001e58, crate::create::string(alt)));
-            }
-            if image.background {
-                values.push((0x08001d13 | (1 << 31), Vec::new()));
-            }
-            values.push((0x08001d85, Vec::new()));
             let holder = self.id(*paragraph_id);
-            let space = self.space;
-            let payload: &[u8] = bytes;
-            self.apply(|current| {
-                crate::write::write_revision_with_payloads(
-                    current,
-                    space,
-                    &[(payload_guid, payload)],
-                    |raw| {
-                        let mut changed = BTreeMap::new();
-                        let file = PropertyObject::file(file_id, &reference, extension)?;
-                        changed.insert(file_id, file);
-                        let mut picture = PropertyObject {
-                            jcid: 0x60011,
-                            bytes: crate::create::properties(&values)?,
-                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, image_id.guid)])),
-                        };
-                        picture.reference(image_id)?;
-                        let container = picture.reference(file_id)?;
-                        picture.set(&[(0x20001c3f, &container)])?;
-                        changed.insert(image_id, picture);
-                        let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                        let content = object.reference(image_id)?;
-                        object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                        changed.insert(holder, object);
-                        Ok(changed)
-                    },
-                )
-            })?;
+            self.insert_image(image, Some(holder))?;
         }
         Ok(())
     }
 
-    /// Writes a displayed size and description the way OneNote stores a resized picture:
-    /// the layout width and height with the user flag, leaving the intrinsic size alone.
-    fn resize_image(&mut self, stored: &Image, image: &Image) -> Result<(), Error> {
+    /// Page-level pictures are direct page children, as OneNote stores a picture placed
+    /// outside any outline: new ones are appended for the placement pass to order, changed
+    /// ones are moved, resized or described, and removed ones are deleted in the delete pass.
+    fn edit_page_images(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        let stored: BTreeMap<ExGuid, &Image> = page_images(old.page).collect();
+        for (id, image) in page_images(new.page) {
+            match stored.get(&id) {
+                Some(previous) => {
+                    if *previous != image {
+                        self.edit_image(previous, image)?;
+                    }
+                }
+                None => {
+                    if image.layout.x.is_none() || image.layout.y.is_none() {
+                        return Err(invalid("A new page-level picture needs a position"));
+                    }
+                    self.insert_image(image, None)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives a new picture what OneNote stores for an inserted one: the payload embedded
+    /// in the section's file-data store, a file-data object declaring it by identity and
+    /// extension, and a picture object that a paragraph holds as content or the page
+    /// lists as a child.
+    fn insert_image(&mut self, image: &Image, holder: Option<ExGuid>) -> Result<(), Error> {
+        let Some(bytes) = &image.bytes else {
+            return Err(invalid("A new picture needs its payload"));
+        };
+        let extension = match bytes.as_ref() {
+            [0x89, b'P', b'N', b'G', ..] => ".png",
+            [0xff, 0xd8, 0xff, ..] => ".jpg",
+            [b'G', b'I', b'F', b'8', ..] => ".gif",
+            [b'B', b'M', ..] => ".bmp",
+            _ => return Err(invalid("Choose a PNG, JPEG, GIF or BMP picture")),
+        };
+        let image_id = self.allocate(image.id)?;
+        let file_id = ExGuid {
+            guid: crate::write::fresh_guid()?,
+            n: 1,
+        };
+        let payload_guid = crate::write::fresh_guid()?;
+        let reference = payload_reference(payload_guid);
+        let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+        let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
+        if let Some([width, height]) = image.size {
+            if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+                return Err(invalid("Picture size must be positive"));
+            }
+            values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
+            values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
+        }
+        values.extend(layout_values(&Default::default(), &image.layout)?.0);
+        if let Some(alt) = &image.alt {
+            values.push((0x1c001e58, crate::create::string(alt)));
+        }
+        if image.background {
+            values.push((0x08001d13 | (1 << 31), Vec::new()));
+        }
+        values.push((0x08001d85, Vec::new()));
+        let (space, page) = (self.space, self.page);
+        let payload: &[u8] = bytes;
+        self.apply(|current| {
+            crate::write::write_revision_with_payloads(
+                current,
+                space,
+                &[(payload_guid, payload)],
+                |raw| {
+                    let mut changed = BTreeMap::new();
+                    let file = PropertyObject::file(file_id, &reference, extension)?;
+                    changed.insert(file_id, file);
+                    let mut picture = PropertyObject {
+                        jcid: 0x60011,
+                        bytes: crate::create::properties(&values)?,
+                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, image_id.guid)])),
+                    };
+                    picture.reference(image_id)?;
+                    let container = picture.reference(file_id)?;
+                    picture.set(&[(0x20001c3f, &container)])?;
+                    changed.insert(image_id, picture);
+                    match holder {
+                        Some(holder) => {
+                            let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                            let content = object.reference(image_id)?;
+                            object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                            changed.insert(holder, object);
+                        }
+                        None => {
+                            let mut object = PropertyObject::from_object(&raw.objects[&page])?;
+                            let properties = crate::PropertySets::parse(&object.bytes)?;
+                            let mut children = match properties.sets[0]
+                                .iter()
+                                .find(|p| p.id == 0x24001c20)
+                                .map(|p| &p.value)
+                            {
+                                Some(crate::Value::References { compact_ids, .. }) => {
+                                    compact_ids.to_vec()
+                                }
+                                None => Vec::new(),
+                                _ => return Err(invalid("The page has an invalid child list")),
+                            };
+                            children.extend(object.reference(image_id)?);
+                            object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
+                            changed.insert(page, object);
+                        }
+                    }
+                    Ok(changed)
+                },
+            )
+        })
+    }
+
+    /// Writes a moved, resized or described picture the way OneNote stores one: the
+    /// position, the layout width and height with the user flag and the description on
+    /// the picture object, leaving the intrinsic size alone.
+    fn edit_image(&mut self, stored: &Image, image: &Image) -> Result<(), Error> {
+        picture_fixed_fields(stored, image)?;
         let mut values: Values = vec![(
             0x14001d7a,
             crate::create::current_timestamps()?
@@ -844,22 +961,8 @@ impl Lowering<'_> {
                 .to_le_bytes()
                 .to_vec(),
         )];
-        let mut removed = Vec::new();
-        if image.layout != stored.layout {
-            match (image.layout.max_width, image.layout.max_height) {
-                (Some(width), Some(height)) => {
-                    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-                        return Err(invalid("Picture size must be positive"));
-                    }
-                    values.push((0x14001c1b, (width / 36.0).to_le_bytes().to_vec()));
-                    values.push((0x14001c1c, (height / 36.0).to_le_bytes().to_vec()));
-                    let user_set = u32::from(image.layout.width_set_by_user == Some(true));
-                    values.push((0x08001cbd | (user_set << 31), Vec::new()));
-                }
-                (None, None) => removed.extend([0x14001c1b, 0x14001c1c, 0x08001cbd]),
-                _ => return Err(invalid("A picture size needs both dimensions")),
-            }
-        }
+        let (layout, mut removed) = layout_values(&stored.layout, &image.layout)?;
+        values.extend(layout);
         if image.alt != stored.alt {
             match &image.alt {
                 Some(alt) => values.push((0x1c001e58, crate::create::string(alt))),
@@ -1164,6 +1267,14 @@ impl Lowering<'_> {
             let edit = TreeEdit::delete(*id, self.author)?;
             let space = self.space;
             self.apply(|image| edit.apply(image, space))?;
+        }
+        let kept: BTreeSet<ExGuid> = page_images(new.page).map(|(id, _)| id).collect();
+        for (id, _) in page_images(old.page) {
+            if !kept.contains(&id) {
+                let edit = TreeEdit::delete(id, self.author)?;
+                let space = self.space;
+                self.apply(|image| edit.apply(image, space))?;
+            }
         }
         for id in old.outlines.keys() {
             if removed_outline(*id) {

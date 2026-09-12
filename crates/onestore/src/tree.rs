@@ -115,7 +115,7 @@ impl TreeEdit {
             .get(1)
             .ok_or_else(|| invalid("Select a paragraph or ordinary page outline"))?;
         let compatible = |parent: ExGuid| match view.nodes[&self.object].kind {
-            Kind::Outline { .. } => parent == *page,
+            Kind::Outline { .. } | Kind::Image { .. } => parent == *page,
             Kind::Paragraph { .. } => matches!(
                 view.nodes[&parent].kind,
                 Kind::Outline { .. }

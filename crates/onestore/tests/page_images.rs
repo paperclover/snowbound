@@ -9,6 +9,8 @@ const NATIVE: &[u8] =
     include_bytes!("../../../corpus/native/cold-05-05-image/notebook/synthetic.one");
 const NATIVE_RESIZE: &[u8] =
     include_bytes!("../../../corpus/picture-edit/native-resize/notebook/pictures.one");
+const NATIVE_PAGE_LEVEL: &[u8] =
+    include_bytes!("../../../corpus/picture-edit/native-page-level/notebook/pictures.one");
 const AUTHOR: &str = "Picture author";
 /// A one-pixel PNG.
 const PNG: &[u8] = &[
@@ -234,6 +236,113 @@ fn a_rust_picture_resized_natively_reads_back_with_its_size_and_description() {
     resize(&mut wider, layout, Some("Wider in Rust"));
     let written = PreparedEdit::page(NATIVE_RESIZE, space, &wider, AUTHOR).unwrap();
     assert_eq!(page_in(written.as_bytes(), space), wider);
+}
+
+fn page_pictures(page: &Page) -> Vec<&Image> {
+    page.objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Image(image) => Some(image),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_page_level_picture_placed_natively_reads_as_a_page_object() {
+    let (space, page) = first_page(NATIVE_PAGE_LEVEL);
+    assert_eq!(pictures(&page).len(), 1);
+    let found = page_pictures(&page);
+    let [picture] = found.as_slice() else {
+        panic!("{page:?}");
+    };
+    assert_eq!(picture.bytes.as_deref(), Some(PNG));
+    assert_eq!(
+        (picture.layout.x, picture.layout.y),
+        (Some(360.0), Some(240.0))
+    );
+    assert_eq!(picture.layout.width_set_by_user, Some(true));
+    assert_eq!(picture.alt.as_deref(), Some("Page-level picture"));
+    let mut moved = page.clone();
+    for object in &mut moved.objects {
+        if let PageObject::Image(image) = object {
+            image.layout.x = Some(72.0);
+            image.layout.y = Some(400.0);
+        }
+    }
+    let written = PreparedEdit::page(NATIVE_PAGE_LEVEL, space, &moved, AUTHOR).unwrap();
+    assert_eq!(page_in(written.as_bytes(), space), moved);
+}
+
+/// `ONESTORE_PAGE_IMAGE_EXPORT` names a new directory receiving the candidate for a cold reopen.
+#[test]
+fn a_page_level_picture_is_inserted_moved_and_removed() {
+    let source = onestore::create_section("pictures.one", "Beside the picture", "Author").unwrap();
+    let (space, before) = first_page(&source);
+    let mut after = before.clone();
+    let image = Image {
+        id: new_id().unwrap(),
+        layout: Layout {
+            x: Some(360.0),
+            y: Some(240.0),
+            max_width: Some(96.0),
+            width_set_by_user: Some(true),
+            max_height: Some(72.0),
+            reserved_width: None,
+        },
+        size: Some([0.75, 0.75]),
+        bytes: Some(Arc::from(PNG)),
+        alt: Some("Placed in Rust".into()),
+        background: false,
+    };
+    after.objects.push(PageObject::Image(image.clone()));
+    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
+    let stored = page_in(written.as_bytes(), space);
+    let mut expected = after.clone();
+    expected.title = stored.title.clone();
+    assert_eq!(stored, expected);
+    assert_eq!(page_pictures(&stored)[0].bytes.as_deref(), Some(PNG));
+    assert_eq!(
+        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+            .unwrap()
+            .as_bytes(),
+        written.as_bytes()
+    );
+    if let Some(directory) = std::env::var_os("ONESTORE_PAGE_IMAGE_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("pictures.one"), written.as_bytes()).unwrap();
+        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents(
+                "Open Notebook.onetoc2",
+                &[("pictures.one", written_store.header.file_id)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let mut moved = stored.clone();
+    for object in &mut moved.objects {
+        if let PageObject::Image(image) = object {
+            image.layout.x = Some(36.0);
+            image.alt = None;
+        }
+    }
+    let again = PreparedEdit::page(written.as_bytes(), space, &moved, AUTHOR).unwrap();
+    assert_eq!(page_in(again.as_bytes(), space), moved);
+    let mut removed = moved.clone();
+    removed.objects.retain(|object| object.id() != image.id);
+    let last = PreparedEdit::page(again.as_bytes(), space, &removed, AUTHOR).unwrap();
+    let stored = page_in(last.as_bytes(), space);
+    assert!(page_pictures(&stored).is_empty());
+    assert_eq!(stored, removed);
+    let mut unplaced = stored.clone();
+    let mut nowhere = image.clone();
+    nowhere.layout = Layout::default();
+    unplaced.objects.push(PageObject::Image(nowhere));
+    assert!(PreparedEdit::page(last.as_bytes(), space, &unplaced, AUTHOR).is_err());
 }
 
 #[test]

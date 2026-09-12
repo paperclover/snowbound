@@ -28,9 +28,18 @@ container under a native identity with its DPAPI blob and hash.
 layout width, height, user flag and alternative text on the picture object.
 `resized/cold` is its cold read with the size and description.
 
-`tools/test_picture_edit.py` checks all three without a VM. Regenerate the
-candidates with `ONESTORE_IMAGE_EXPORT` and `ONESTORE_IMAGE_RESIZE_EXPORT`
-set to new absolute directories while running the tests, then cold-open
-them with `tools/native_runner.py OUTPUT COLD --expected-pages 1
---collect-notebook`; regenerate `native-resize` with `--author
-tools/native/picture-edit.ps1` on `inserted/candidate`.
+`native-page-level` is OneNote 2010 placing a second picture directly on
+the page of `inserted/candidate` through the COM API
+(`tools/native/page-picture.ps1`): the picture object is a direct page
+child with a position, a user-set size and alternative text, otherwise
+stored like a paragraph picture. `page-level/candidate` is the writer doing
+the same on a fresh section (`a_page_level_picture_is_inserted_moved_and_removed`)
+and `page-level/cold` its cold read with position, size and description.
+
+`tools/test_picture_edit.py` checks all five without a VM. Regenerate the
+candidates with `ONESTORE_IMAGE_EXPORT`, `ONESTORE_IMAGE_RESIZE_EXPORT` and
+`ONESTORE_PAGE_IMAGE_EXPORT` set to new absolute directories while running
+the tests, then cold-open them with `tools/native_runner.py OUTPUT COLD
+--expected-pages 1 --collect-notebook`; regenerate `native-resize` and
+`native-page-level` with `--author tools/native/picture-edit.ps1` or
+`tools/native/page-picture.ps1` on `inserted/candidate`.
