@@ -15,6 +15,16 @@ the stored section and compares it with the exported MathML byte for byte;
 together with `corpus/m6/native-math-01` (superscripts, a fraction, inline
 Greek) that covers the kinds `onestore::page::Math` claims.
 
+`native-editor-2/` is a second session (`ONESTORE_MATH_EQUATIONS` on
+`tools/native_math.py`): `\sqrt x+1`, `\cbrt(x)`, `\sqrt(n&x)`, `a/b`,
+`\lim_(x\to 0) f(x)` (the `\lim` stayed literal), `\prod_(k=1)^n k`,
+`[a+b]`, `\overline(x)` and `x\hat`; `\sqrt (x+1)` again left an empty
+paragraph. Its MathML adds radicals (25: `msqrt`, or `mroot` with the
+degree second), a lower limit (19: `munder`, with the upright `lim` as one
+`mi` in a row), a product, named fences (`mfenced open="[" close="]"`), an
+overbar (23: `mover accent="false"` with a stretchy bar) and an accent (10:
+`mover accent="true"` with the combining circumflex exported as `^`).
+
 `written/candidate` is the page writer's output for
 `equations_are_written_and_read_back`: on a fresh section, every native
 equation of both fixtures copied as a new paragraph, then two expressions

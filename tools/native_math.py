@@ -5,6 +5,7 @@ Usage: native_math.py NOTEBOOK_DIR OUTPUT_DIR
 """
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -23,6 +24,8 @@ EQUATIONS = [
     '\\int_0^1 x dx',
     '\\sum_(i=1)^n i',
 ]
+if os.environ.get('ONESTORE_MATH_EQUATIONS'):
+    EQUATIONS = os.environ['ONESTORE_MATH_EQUATIONS'].split('|')
 
 
 def interaction(name, output):

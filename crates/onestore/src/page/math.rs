@@ -11,6 +11,8 @@ use crate::document::MathObject;
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Math {
     Identifier(char),
+    /// Upright letters, as the editor stores a function name such as `lim`.
+    Function(String),
     Number(String),
     Operator(char),
     Object {
@@ -51,6 +53,7 @@ impl Math {
         let mut frames: Vec<Frame> = Vec::new();
         let mut sequences: Vec<Vec<Math>> = vec![Vec::new()];
         let mut number = String::new();
+        let mut word = String::new();
         let mut offset = 0;
         for character in paragraph.text().chars() {
             let here = offset;
@@ -62,6 +65,14 @@ impl Math {
             if !number.is_empty() {
                 let number = std::mem::take(&mut number);
                 sequences.last_mut().unwrap().push(Math::Number(number));
+            }
+            if character.is_ascii_alphabetic() {
+                word.push(character);
+                continue;
+            }
+            if !word.is_empty() {
+                let word = std::mem::take(&mut word);
+                sequences.last_mut().unwrap().push(Math::Function(word));
             }
             match character {
                 OBJECT_START => {
@@ -108,6 +119,9 @@ impl Math {
         if !number.is_empty() {
             sequences.last_mut().unwrap().push(Math::Number(number));
         }
+        if !word.is_empty() {
+            sequences.last_mut().unwrap().push(Math::Function(word));
+        }
         if !frames.is_empty() {
             return Err(invalid("An equation object never ends"));
         }
@@ -127,6 +141,7 @@ impl Math {
     fn write(&self, out: &mut String) {
         match self {
             Math::Identifier(c) => tag(out, "mi", &c.to_string()),
+            Math::Function(name) => tag(out, "mi", name),
             Math::Number(n) => tag(out, "mn", n),
             Math::Operator(c) => tag(out, "mo", &c.to_string()),
             Math::Object {
@@ -134,12 +149,16 @@ impl Math {
                 symbols,
                 arguments,
             } => {
-                // A lone identifier, number or operator stands bare; anything else is a row.
+                // A lone letter, number or operator stands bare; anything else is a row.
                 let argument = |out: &mut String, index: usize| match arguments
                     .get(index)
                     .map(Vec::as_slice)
                 {
-                    Some([single]) if !matches!(single, Math::Object { .. }) => single.write(out),
+                    Some([single])
+                        if !matches!(single, Math::Object { .. } | Math::Function(_)) =>
+                    {
+                        single.write(out)
+                    }
                     Some(many) => {
                         out.push_str("<mml:mrow>");
                         for node in many {
@@ -165,8 +184,41 @@ impl Math {
                     (25, _) => wrapped(out, "msqrt", &[arguments.len() - 1]),
                     (19, 2) => wrapped(out, "munder", &[0, 1]),
                     (33, 2) => wrapped(out, "mover", &[0, 1]),
-                    // OneNote exports parentheses as default fences, whatever the pair.
-                    (13, _) => wrapped(out, "mfenced", &[0]),
+                    // Parentheses are the default fences; other pairs name themselves.
+                    (13, _) => {
+                        let (open, close) = (symbols.first(), symbols.get(1));
+                        if open == Some(&'(') && close == Some(&')') {
+                            wrapped(out, "mfenced", &[0]);
+                        } else {
+                            out.push_str("<mml:mfenced");
+                            if let Some(open) = open {
+                                out.push_str(&format!(" open=\"{}\"", escaped(*open)));
+                            }
+                            if let Some(close) = close {
+                                out.push_str(&format!(" close=\"{}\"", escaped(*close)));
+                            }
+                            out.push('>');
+                            argument(out, 0);
+                            out.push_str("</mml:mfenced>");
+                        }
+                    }
+                    (10, 1) | (23, 1) => {
+                        let accent = *kind == 10;
+                        out.push_str(&format!("<mml:mover accent=\"{accent}\">"));
+                        argument(out, 0);
+                        if accent {
+                            tag(
+                                out,
+                                "mo",
+                                &spacing(symbols.first().copied().unwrap_or('^')).to_string(),
+                            );
+                        } else {
+                            out.push_str("<mml:mo stretchy=\"true\">");
+                            out.push(symbols.first().copied().unwrap_or('¯'));
+                            out.push_str("</mml:mo>");
+                        }
+                        out.push_str("</mml:mover>");
+                    }
                     // Lower limit, upper limit, body; integrals take their limits as scripts,
                     // other operators above and below.
                     (21, 3) => {
@@ -201,6 +253,25 @@ impl Math {
                 }
             }
         }
+    }
+}
+
+fn escaped(c: char) -> String {
+    match c {
+        '<' => "&lt;".into(),
+        '&' => "&amp;".into(),
+        '"' => "&quot;".into(),
+        c => c.to_string(),
+    }
+}
+
+/// The spacing character OneNote exports for a combining accent.
+fn spacing(c: char) -> char {
+    match c {
+        '\u{302}' => '^',
+        '\u{303}' => '~',
+        '\u{308}' => '¨',
+        c => c,
     }
 }
 
@@ -264,6 +335,7 @@ fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) 
     for node in nodes {
         match node {
             Math::Identifier(c) => leaf.push(italic(*c)),
+            Math::Function(name) => leaf.push_str(name),
             Math::Number(n) => leaf.push_str(n),
             Math::Operator(c) => leaf.push(*c),
             Math::Object {

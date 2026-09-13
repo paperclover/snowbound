@@ -12,6 +12,12 @@ const NATIVE_READ: &str = include_str!("../../../corpus/m6/native-math-01/read/p
 /// subscripts, a sub-superscript, parentheses, an integral and a sum with limits.
 const EDITOR: &[u8] = include_bytes!("../../../corpus/math-edit/native-editor/notebook/links.one");
 const EDITOR_READ: &str = include_str!("../../../corpus/math-edit/native-editor/read/page-000.xml");
+/// A second editor session: square and n-th roots, a plain fraction, a limit, a product,
+/// square brackets, an overbar and a hat.
+const EDITOR_2: &[u8] =
+    include_bytes!("../../../corpus/math-edit/native-editor-2/notebook/links.one");
+const EDITOR_2_READ: &str =
+    include_str!("../../../corpus/math-edit/native-editor-2/read/page-000.xml");
 
 fn native_mathml(read: &str) -> Vec<String> {
     read.split("<mml:math")
@@ -90,6 +96,10 @@ fn equation_editor_expressions_render_to_the_mathml_onenote_exports() {
     assert_eq!(
         rendered_equations(EDITOR, "Read about Rust the Rust site"),
         native_mathml(EDITOR_READ)
+    );
+    assert_eq!(
+        rendered_equations(EDITOR_2, "Read about Rust the Rust site"),
+        native_mathml(EDITOR_2_READ)
     );
 }
 

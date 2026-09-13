@@ -24,3 +24,9 @@ outline grown to contain the strokes' absolute page coordinates.
 directories while running the tests, then cold-open each with
 `tools/native_runner.py OUTPUT COLD --expected-pages 1 --collect-notebook
 --screenshots`.
+
+`native-mouse-over-text/` is OneNote 2010 receiving mouse strokes over an
+outline's text and in empty space (`tools/native_handwriting.py`): both
+became page-level `InkDrawing` objects. Mouse ink never produces
+handwriting paragraphs or embedded ink in text runs, so those forms stay
+read-only retained content until a pen-authored fixture exists.
