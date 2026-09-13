@@ -42,6 +42,7 @@ pub(crate) fn node(text: Paragraph, format: Format) -> Result<PageParagraph, Edi
         }),
         lists: Vec::new(),
         tags: Vec::new(),
+        media: Default::default(),
         collapsed: false,
         style: None,
     })
@@ -471,6 +472,7 @@ mod tests {
             format: format.clone(),
             lists: Vec::new(),
             tags: Vec::new(),
+            media: Default::default(),
             collapsed: false,
             content: ParagraphContent::Table(Table {
                 id: new_id().unwrap(),

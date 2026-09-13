@@ -3014,6 +3014,7 @@ mod tests {
             format: Format::default(),
             lists: Vec::new(),
             tags: Vec::new(),
+            media: Default::default(),
             collapsed: false,
             content: ParagraphContent::Table(Table {
                 id: new_id().unwrap(),

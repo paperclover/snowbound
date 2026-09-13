@@ -412,6 +412,7 @@ fn merge_paragraph(
         content,
         lists,
         tags,
+        media: pick(&base.media, &ours.media, &theirs.media)?,
         collapsed,
     })
 }

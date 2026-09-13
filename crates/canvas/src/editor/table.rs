@@ -124,6 +124,7 @@ impl CanvasEditor {
                 format: source.format.clone(),
                 lists: Vec::new(),
                 tags: Vec::new(),
+                media: Default::default(),
                 collapsed: false,
                 content: ParagraphContent::Table(onestore::page::Table {
                     id: new_id()?,

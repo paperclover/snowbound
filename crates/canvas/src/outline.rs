@@ -640,6 +640,7 @@ mod tests {
             }),
             lists: Vec::new(),
             tags: Vec::new(),
+            media: Default::default(),
             collapsed: false,
             style: None,
         }

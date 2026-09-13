@@ -146,6 +146,7 @@ pub struct PageParagraph {
     pub content: ParagraphContent,
     pub lists: Vec<ExGuid>,
     pub tags: Vec<Tag>,
+    pub media: MediaIndex,
     pub collapsed: bool,
 }
 
@@ -176,6 +177,25 @@ pub struct Attachment {
     pub bytes: Option<Arc<[u8]>>,
     #[serde(with = "payload")]
     pub preview: Option<Arc<[u8]>>,
+    /// Set when the file is an audio or video recording OneNote captured; annotations on
+    /// the page refer to it by identity (`PageParagraph::media`).
+    pub recording: Option<Recording>,
+}
+
+/// A recording's identity and OneNote's type code for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Recording {
+    pub id: [u8; 16],
+    pub kind: u32,
+}
+
+/// A paragraph's link to a moment in recordings on the page: OneNote plays from
+/// `time_ms` when the paragraph is chosen. Read from native pages and preserved through
+/// edits; OneNote alone creates them while recording.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaIndex {
+    pub recordings: Vec<[u8; 16]>,
+    pub time_ms: Option<u32>,
 }
 
 impl PartialEq for Attachment {
@@ -184,6 +204,7 @@ impl PartialEq for Attachment {
             && self.filename == other.filename
             && self.source_path == other.source_path
             && self.size == other.size
+            && self.recording == other.recording
     }
 }
 
@@ -199,9 +220,10 @@ impl Attachment {
             preview,
             filename,
             source_path,
+            recording_id,
+            recording_type,
             icon_width,
             icon_height,
-            ..
         } = &node.kind
         else {
             unreachable!()
@@ -226,6 +248,10 @@ impl Attachment {
             size: icon_width.zip(*icon_height).map(|(w, h)| [w, h]),
             bytes: payload(container)?,
             preview: payload(preview)?,
+            recording: recording_id.map(|id| Recording {
+                id,
+                kind: recording_type.unwrap_or(0),
+            }),
         })
     }
 }
@@ -699,6 +725,10 @@ fn read_paragraphs(
                     .nodes
                     .get(content_id)
                     .ok_or_else(|| invalid("Missing canvas paragraph content"))?;
+                let media = MediaIndex {
+                    recordings: content.media_ids.clone(),
+                    time_ms: content.media_time_ms,
+                };
                 let content = if let Kind::RichText {
                     paragraph_style, ..
                 } = &content.kind
@@ -844,6 +874,7 @@ fn read_paragraphs(
                     content,
                     lists: lists.clone(),
                     tags: node.tags.clone(),
+                    media,
                     collapsed: *collapse_state == Some(1),
                 });
                 pending.extend(

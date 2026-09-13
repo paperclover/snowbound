@@ -1,0 +1,20 @@
+[
+  {
+    "path": "Features.one",
+    "bytes": 123088,
+    "sha256": "a070197bb9c1c2f9fbbe39680173407bb9b5fead4bb442d03a84b77a4036d67b",
+    "mtime_ns": 1789288953404668177
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 1604,
+    "sha256": "7dfd85afb7d1e4cf389bf09b9c934bf4a8bc7922ee676d47c4878309322e72e6",
+    "mtime_ns": 1789288953405483509
+  },
+  {
+    "path": "expected-count.txt",
+    "bytes": 2,
+    "sha256": "3fdba35f04dc8c462986c992bcf875546257113072a909c162f7e470e581e278",
+    "mtime_ns": 1789288953413592244
+  }
+]

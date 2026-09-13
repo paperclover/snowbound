@@ -83,6 +83,7 @@ pub fn body_outline(page: &mut Page, text: &str) -> ExGuid {
             content: ParagraphContent::Text(content),
             lists: Vec::new(),
             tags: Vec::new(),
+            media: Default::default(),
             collapsed: false,
         }],
         unsupported: Vec::new(),

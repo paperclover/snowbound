@@ -611,6 +611,9 @@ impl Lowering<'_> {
             let Some(previous) = old.paragraphs.get(id) else {
                 continue;
             };
+            if paragraph.media != previous.media {
+                return Err(invalid("Recording annotations cannot be edited"));
+            }
             let same = paragraph.style == previous.style && paragraph.format == previous.format;
             if !same {
                 return Err(invalid(
@@ -970,6 +973,9 @@ impl Lowering<'_> {
                     self.edit_attachment(stored, attachment)?;
                 }
                 continue;
+            }
+            if attachment.recording.is_some() {
+                return Err(invalid("Recordings are captured by OneNote, not inserted"));
             }
             let Some(bytes) = &attachment.bytes else {
                 return Err(invalid("A new attachment needs its payload"));
@@ -1383,6 +1389,9 @@ impl Lowering<'_> {
                 .to_le_bytes()
                 .to_vec(),
         )];
+        if attachment.recording != stored.recording {
+            return Err(invalid("A recording stays the recording OneNote captured"));
+        }
         let mut removed = Vec::new();
         if attachment.filename != stored.filename {
             let name = crate::create::string(&attachment.filename);
@@ -1488,6 +1497,11 @@ impl Lowering<'_> {
                     if paragraph.style.is_some() && old.outlines.contains_key(&root) {
                         return Err(invalid(
                             "New paragraphs in a stored outline contain plain text without styles",
+                        ));
+                    }
+                    if paragraph.media != Default::default() {
+                        return Err(invalid(
+                            "Recording annotations are made by OneNote while it records",
                         ));
                     }
                     // A new table starts as an empty text paragraph whose content the
