@@ -496,7 +496,10 @@ impl Lowering<'_> {
             return Err(invalid("Page creation time and margins cannot be edited"));
         }
         for (id, definition) in &after.definitions {
-            if before.definitions.get(id) != Some(definition)
+            if before
+                .definitions
+                .get(id)
+                .is_some_and(|stored| stored != definition)
                 && !matches!(
                     definition.kind,
                     Kind::List { .. } | Kind::TagDefinition { .. }
@@ -540,6 +543,7 @@ impl Lowering<'_> {
         self.delete(&old, &new, &consumed)?;
         self.edit_equations(&new)?;
         self.edit_text(&new)?;
+        self.edit_paragraph_styles(&old, &new, after)?;
         self.edit_lists(after, &new)?;
         self.edit_tags(after, &new)?;
         self.edit_paragraph_formatting(&new)?;
@@ -685,10 +689,23 @@ impl Lowering<'_> {
             let Some(first) = new.children[id].first().copied() else {
                 return Err(invalid("A new outline needs a paragraph"));
             };
-            let text = new
-                .text(first)
-                .ok_or_else(|| invalid("A new outline starts with a text paragraph"))?;
-            let insertion = Insertion::outline(self.page, x, y, text.text.text(), self.author)?;
+            // A new outline starts as one text paragraph; other content replaces it in
+            // its own pass, as for a paragraph inserted into an existing outline.
+            let (text, text_id) = match &new.paragraphs[&first].content {
+                ParagraphContent::Text(text) if text.date_field.is_none() => {
+                    (text.text.text(), Some(text.id))
+                }
+                ParagraphContent::Table(_)
+                | ParagraphContent::Image(_)
+                | ParagraphContent::Attachment(_)
+                | ParagraphContent::Ink(_) => ("", None),
+                _ => {
+                    return Err(invalid(
+                        "A new outline starts with a paragraph the writer builds",
+                    ));
+                }
+            };
+            let insertion = Insertion::outline(self.page, x, y, text, self.author)?;
             let space = self.space;
             self.apply(|image| insertion.apply(image, space))?;
             let outline_id = insertion.object();
@@ -700,7 +717,9 @@ impl Lowering<'_> {
                     n: 3,
                 },
             );
-            self.alias.insert(text.id, insertion.text_object());
+            if let Some(text_id) = text_id {
+                self.alias.insert(text_id, insertion.text_object());
+            }
             placed.insert(*id, vec![first]);
             placed.insert(first, Vec::new());
             page_order.push(*id);
@@ -1428,9 +1447,16 @@ impl Lowering<'_> {
                 let anchor = next.map(|n| self.id(n));
                 if !old.paragraphs.contains_key(id) && !self.alias.contains_key(id) {
                     let paragraph = new.paragraphs[id];
-                    if paragraph.style.is_some() {
+                    // A styled paragraph appended to a stored outline is a split whose
+                    // precondition failed under a merge; it stays for review. A new outline
+                    // takes styled paragraphs as built (a copied page).
+                    let mut root = *container;
+                    while let Some(parent) = new.container.get(&root) {
+                        root = *parent;
+                    }
+                    if paragraph.style.is_some() && old.outlines.contains_key(&root) {
                         return Err(invalid(
-                            "New paragraphs contain plain text without fields or styles",
+                            "New paragraphs in a stored outline contain plain text without styles",
                         ));
                     }
                     // A new table starts as an empty text paragraph whose content the
@@ -2285,6 +2311,93 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// A new paragraph, or one whose style changed, references its paragraph style from
+    /// its text object; a style the page has not stored yet is created from its
+    /// definition, as OneNote keeps quick styles.
+    fn edit_paragraph_styles(
+        &mut self,
+        old: &View<'_>,
+        new: &View<'_>,
+        after: &Page,
+    ) -> Result<(), Error> {
+        let current = self.current()?;
+        for (id, paragraph) in &new.paragraphs {
+            let Some(definition) = paragraph.style else {
+                continue;
+            };
+            if old
+                .paragraphs
+                .get(id)
+                .is_some_and(|previous| previous.style == paragraph.style)
+            {
+                continue;
+            }
+            let Some(text) = paragraph.text() else {
+                return Err(invalid("Only text paragraphs take a paragraph style"));
+            };
+            let known = current.definitions.contains_key(&definition)
+                || self.alias.contains_key(&definition);
+            let style_id = if known {
+                self.id(definition)
+            } else {
+                let allocated = ExGuid {
+                    guid: crate::write::fresh_guid()?,
+                    n: 1,
+                };
+                self.alias.insert(definition, allocated);
+                allocated
+            };
+            let values = if known {
+                None
+            } else {
+                let Some(model) = after.definitions.get(&definition) else {
+                    return Err(invalid("A paragraph references a missing style definition"));
+                };
+                let Kind::Style { name } = &model.kind else {
+                    return Err(invalid("A paragraph style must be a style definition"));
+                };
+                let mut values = style_values(&model.format);
+                if let Some(name) = name {
+                    values.push((0x1c00345a, crate::create::string(name)));
+                }
+                if let Some(alignment) = model.format.alignment {
+                    values.push((0x0c003477, vec![alignment]));
+                }
+                for (property, value) in [
+                    (0x1400342e, model.format.space_before),
+                    (0x1400342f, model.format.space_after),
+                    (0x14003430, model.format.line_spacing),
+                ] {
+                    if let Some(points) = value {
+                        values.push((property, (points / 36.0).to_le_bytes().to_vec()));
+                    }
+                }
+                Some(values)
+            };
+            let (space, object) = (self.space, self.id(text.id));
+            self.apply(|image| {
+                crate::write::write_revision(image, space, |raw| {
+                    let mut changed = BTreeMap::new();
+                    if let Some(values) = &values {
+                        let mut node = PropertyObject {
+                            jcid: 0x12004d,
+                            bytes: crate::create::properties(values)?,
+                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, style_id.guid)])),
+                        };
+                        node.reference(style_id)?;
+                        changed.insert(style_id, node);
+                    }
+                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                    let reference = target.reference(style_id)?;
+                    target.set(&[(0x2000342c, &reference)])?;
+                    changed.insert(object, target);
+                    Ok(changed)
+                })
+            })?;
+        }
+        Ok(())
+    }
+
     fn edit_paragraph_formatting(&mut self, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
         let current = View::new(&current)?;
@@ -2492,6 +2605,21 @@ impl Lowering<'_> {
                 .get(&self.id(*id))
                 .ok_or_else(|| invalid("An outline is missing after text edits"))?;
             let (space, object) = (self.space, self.id(*id));
+            // A new outline takes the model's indentation table (a copied outline keeps
+            // its levels' offsets); a stored table stays as it is.
+            if !old.outlines.contains_key(id)
+                && !outline.indents.is_empty()
+                && outline.indents != stored.indents
+            {
+                let indents = measurement_bytes(&outline.indents, 4)?;
+                self.apply(|current| {
+                    crate::write::write_revision(current, space, |raw| {
+                        let mut node = PropertyObject::from_object(&raw.objects[&object])?;
+                        node.set(&[(0x1c001c12, &indents)])?;
+                        Ok(BTreeMap::from([(object, node)]))
+                    })
+                })?;
+            }
             if (outline.layout.x, outline.layout.y) != (stored.layout.x, stored.layout.y) {
                 let (Some(x), Some(y)) = (outline.layout.x, outline.layout.y) else {
                     return Err(invalid("An outline position needs both coordinates"));

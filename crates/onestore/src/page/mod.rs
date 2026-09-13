@@ -18,6 +18,38 @@ pub mod text;
 pub use ink::{Ink, InkStroke};
 pub use math::Math;
 pub(crate) mod write;
+
+/// Picture and attachment payloads travel with the model (queued intents replay them),
+/// as base64 text.
+mod payload {
+    use base64::Engine;
+    use std::sync::Arc;
+
+    pub fn serialize<S: serde::Serializer>(
+        bytes: &Option<Arc<[u8]>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => {
+                serializer.serialize_some(&base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<[u8]>>, D::Error> {
+        let text: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+        text.map(|text| {
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .map(Arc::from)
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
+    }
+}
 pub use text::Paragraph;
 
 /// The role of a title-outline paragraph that displays the page's creation date or time.
@@ -140,9 +172,9 @@ pub struct Attachment {
     pub source_path: Option<String>,
     /// The icon OneNote rendered for the file, when present.
     pub size: Option<[f32; 2]>,
-    #[serde(skip)]
+    #[serde(with = "payload")]
     pub bytes: Option<Arc<[u8]>>,
-    #[serde(skip)]
+    #[serde(with = "payload")]
     pub preview: Option<Arc<[u8]>>,
 }
 
@@ -245,7 +277,7 @@ pub struct Image {
     pub layout: Layout,
     /// Displayed picture width and height in points.
     pub size: Option<[f32; 2]>,
-    #[serde(skip)]
+    #[serde(with = "payload")]
     pub bytes: Option<Arc<[u8]>>,
     pub alt: Option<String>,
     pub background: bool,
@@ -329,6 +361,67 @@ impl Page {
             message: "No active page has the requested title",
         })?;
         Self::from_revision(revision, id)
+    }
+
+    /// The page's content under fresh identities, for a copy into this or another section:
+    /// OneNote gives a copied page and every object on it new identities, and stored
+    /// links keep naming the original. Content outside the model has no copy, so an
+    /// `Unsupported` object is an error.
+    pub fn copy(&self) -> Result<Self, Error> {
+        let invalid = |message| Error { offset: 0, message };
+        let mut value =
+            serde_json::to_value(self).map_err(|_| invalid("Page is not serializable"))?;
+        let mut fresh: BTreeMap<String, String> = BTreeMap::new();
+        fn walk(
+            value: &mut serde_json::Value,
+            fresh: &mut BTreeMap<String, String>,
+        ) -> Result<(), Error> {
+            match value {
+                serde_json::Value::String(text) if text.starts_with('{') => {
+                    if text.parse::<ExGuid>().is_ok() {
+                        if !fresh.contains_key(text) {
+                            fresh.insert(text.clone(), text::new_id()?.to_string());
+                        }
+                        *text = fresh[text].clone();
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        walk(item, fresh)?;
+                    }
+                }
+                serde_json::Value::Object(fields) => {
+                    if fields.contains_key("Unsupported") {
+                        return Err(Error {
+                            offset: 0,
+                            message: "Content outside the page model cannot be copied",
+                        });
+                    }
+                    let keys: Vec<String> = fields.keys().cloned().collect();
+                    for key in keys {
+                        let mut item = fields.remove(&key).unwrap();
+                        walk(&mut item, fresh)?;
+                        let key = match key.parse::<ExGuid>() {
+                            Ok(_) => {
+                                if !fresh.contains_key(&key) {
+                                    fresh.insert(key.clone(), text::new_id()?.to_string());
+                                }
+                                fresh[&key].clone()
+                            }
+                            Err(_) => key,
+                        };
+                        fields.insert(key, item);
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        walk(&mut value, &mut fresh)?;
+        let mut copy: Self =
+            serde_json::from_value(value).map_err(|_| invalid("Page copy does not deserialize"))?;
+        copy.identity = Some(crate::write::fresh_guid()?);
+        Ok(copy)
     }
 
     /// The notebook-management identity of the page in an active page revision, which

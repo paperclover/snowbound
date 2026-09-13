@@ -5,7 +5,8 @@ use crate::{
     ConflictKind, EditStatus, Error, PendingEdit, Remote, Replica, Result, SyncWorker, discover,
 };
 use onestore::{
-    CommitError, ExGuid, PreparedEdit, RevisionIndex, Store, document::Document, page::Page,
+    CommitError, ExGuid, PageCreation, PreparedEdit, RevisionIndex, Store, document::Document,
+    page::Page,
 };
 use std::{
     collections::BTreeMap,
@@ -659,6 +660,53 @@ impl Section {
         let store = Store::parse(&snapshot)?;
         let index = RevisionIndex::parse(&store)?;
         Ok(Page::from_space(&Document::parse(&index)?, space)?)
+    }
+
+    /// Copies a page (usually from another section) to the end of this section as a
+    /// creation and a save queued like the user's own edits, under fresh identities.
+    /// Returns the new page's space. Content outside the model refuses to copy.
+    pub fn import_page(&self, page: &Page, author: &str) -> Result<ExGuid> {
+        let copy = page.copy()?;
+        let creation = PageCreation::new(None, Some(&page.title), author)?;
+        self.replica
+            .create_page(&self.replica.snapshot()?, &creation)?;
+        let space = creation.space();
+        loop {
+            // The worker may publish the creation, and so replace the working image,
+            // between reading it and saving against it.
+            let source = self.replica.snapshot()?;
+            let mut after = Page::from_space(
+                &Document::parse(&RevisionIndex::parse(&Store::parse(&source)?)?)?,
+                space,
+            )?;
+            after
+                .objects
+                .retain(|object| matches!(object, onestore::page::PageObject::Title(_)));
+            after.objects.extend(
+                copy.objects
+                    .iter()
+                    .filter(|object| !matches!(object, onestore::page::PageObject::Title(_)))
+                    .cloned(),
+            );
+            after.definitions = copy.definitions.clone();
+            match self.replica.save(&source, space, &after, author) {
+                Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => continue,
+                result => result?,
+            };
+            break;
+        }
+        self.wake();
+        Ok(space)
+    }
+
+    /// Removes pages permanently, queued like the user's own edits (a move across
+    /// sections is `import_page` there, then this here).
+    pub fn delete_pages(&self, pages: &[ExGuid]) -> Result<Option<u64>> {
+        let id = self
+            .replica
+            .delete_pages(&self.replica.snapshot()?, pages)?;
+        self.wake();
+        Ok(id)
     }
 
     /// Saves an edited page. `before` is the model the edit started from; a stored page
