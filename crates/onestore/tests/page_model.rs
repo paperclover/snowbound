@@ -27,6 +27,7 @@ fn identities(page: &Page) -> Vec<onestore::ExGuid> {
             ids.push(paragraph.id);
             match &paragraph.content {
                 ParagraphContent::Text(text) => ids.push(text.id),
+                ParagraphContent::Ink(ink) => ids.push(ink.id),
                 ParagraphContent::Table(table) => {
                     ids.push(table.id);
                     for row in &table.rows {
@@ -59,7 +60,7 @@ fn identities(page: &Page) -> Vec<onestore::ExGuid> {
                     ids.extend(outline.unsupported.iter().map(|u| u.id));
                 }
             }
-            PageObject::Image(_) | PageObject::Unsupported(_) => {}
+            PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {}
         }
     }
     ids

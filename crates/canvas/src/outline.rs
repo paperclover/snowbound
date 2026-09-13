@@ -376,6 +376,7 @@ impl OutlineLayout {
                 }
                 ParagraphContent::Image(_)
                 | ParagraphContent::Attachment(_)
+                | ParagraphContent::Ink(_)
                 | ParagraphContent::Unsupported(_) => {
                     return Err(LayoutError::UnsupportedContent);
                 }

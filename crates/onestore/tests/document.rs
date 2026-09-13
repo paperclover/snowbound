@@ -860,7 +860,7 @@ fn native_conflict_relationship_and_opaque_ink_are_retained() {
         .values()
         .flat_map(|s| s.revisions.values())
         .flat_map(|r| r.nodes.values())
-        .filter(|node| matches!(node.kind, Kind::Ink))
+        .filter(|node| matches!(node.kind, Kind::Ink { .. }))
         .collect();
     assert_eq!(ink.len(), 2);
     assert!(

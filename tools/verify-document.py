@@ -83,6 +83,58 @@ def visible_text(node, space):
     return "" if text == "\u00a0" else project_text(text.removesuffix('\r'))
 
 
+ISF_X = bytes.fromhex('8f6a8a59c052a04b93afaf357411a561')
+ISF_Y = bytes.fromhex('759f3fb5e0049844a7eec30dbb5a9011')
+
+
+def multi_byte(data):
+    """ISF multi-byte signed integers: a count, then 7-bit little-endian varints with the sign in bit 0."""
+    values = []
+    index = 0
+    while index < len(data):
+        value = shift = 0
+        while True:
+            byte = data[index]
+            index += 1
+            value |= (byte & 0x7f) << shift
+            shift += 7
+            if not byte & 0x80:
+                break
+        values.append(-(value >> 1) if value & 1 else value >> 1)
+    count, values = values[0], values[1:]
+    assert count == len(values), 'Ink packet count differs'
+    return values
+
+
+def ink_extent(space, container):
+    """Every stroke point of an ink container in points, as [left, top, width, height]."""
+    points = []
+    scale = [container['kind']['scale_x'] or 1.0, container['kind']['scale_y'] or 1.0]
+    for stroke_id in space['nodes'][container['kind']['data']]['kind']['strokes']:
+        stroke = space['nodes'][stroke_id]['kind']
+        style = space['nodes'][stroke['style']]['kind']
+        dimensions = bytes(style['dimensions'])
+        guids = [dimensions[i:i + 16] for i in range(0, len(dimensions), 32)]
+        values = multi_byte(bytes(stroke['path']))
+        per_dimension = len(values) // len(guids)
+        axes = []
+        for guid, factor in ((ISF_X, scale[0]), (ISF_Y, scale[1])):
+            start = guids.index(guid) * per_dimension
+            position, coordinates = 0, []
+            for delta in values[start:start + per_dimension]:
+                position += delta
+                coordinates.append(position * factor * 72 / 2540)
+            axes.append(coordinates)
+        points.extend(zip(*axes))
+    for child in container['content']:
+        nested = space['nodes'][child]
+        if nested['kind']['type'] == 'Ink':
+            x, y, w, h = ink_extent(space, nested)
+            points.extend([(x, y), (x + w, y + h)])
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return [min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)]
+
+
 def compare_objects(space, roots, page, native_roots, assets, native_payloads, autofit):
     types = {'T': 'RichText', 'Image': 'Image', 'InsertedFile': 'Attachment', 'MediaFile': 'Attachment', 'Table': 'Table'}
     actual = [n for root in roots for _, n in walk(space, root)
@@ -280,6 +332,21 @@ def compare(notebook, native, versions=None, password_file=None):
                 z = int(position.attrib['z'])
                 source = space['nodes'][source_page['children'][z]]
                 if source['kind']['type'] == 'Ink':
+                    if child.tag == '{%s}InkDrawing' % ns['one']:
+                        # Stroke coordinates are absolute; left-to-right pages report them
+                        # relative to the canonical margin origin, right-to-left pages as stored.
+                        extent = ink_extent(space, source)
+                        if not source_page['kind']['rtl']:
+                            for index, (axis, canonical_origin) in enumerate((('x', 36.0), ('y', 14.4))):
+                                origin = source_page['kind']['margin_origin_' + axis]
+                                extent[index] += canonical_origin - origin if origin is not None else 0
+                        size = child.find('one:Size', ns)
+                        # Native sizes are one HIMETRIC unit larger than the point extent.
+                        reported = [float(position.attrib['x']), float(position.attrib['y']), float(size.get('width')) - 72 / 2540, float(size.get('height')) - 72 / 2540]
+                        for index, key in enumerate(('x', 'y', 'width', 'height')):
+                            if abs(extent[index] - reported[index]) > 0.01:
+                                geometry.append({'file': str(relative), 'page': ordinal, 'z': z, 'axis': key,
+                                                 'stored': extent[index], 'native': reported[index]})
                     continue
                 for axis in ('x', 'y'):
                     if source['layout'][axis] is not None:

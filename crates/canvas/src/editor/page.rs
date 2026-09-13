@@ -80,10 +80,15 @@ impl ReadOnlyObject {
             [0.0; 2]
         };
         let layout = source.layout();
-        let x = layout.x.unwrap_or(0.0) + offset[0];
-        let y = layout.y.unwrap_or(0.0) + offset[1];
-        let width = layout.max_width.unwrap_or(160.0);
-        let height = layout.max_height.unwrap_or(42.0);
+        // Ink carries no layout of its own; its strokes say where it is.
+        let extent = match &source {
+            PageObject::Ink(ink) => ink.bounds(),
+            _ => None,
+        };
+        let x = extent.map_or(layout.x.unwrap_or(0.0), |e| e[0]) + offset[0];
+        let y = extent.map_or(layout.y.unwrap_or(0.0), |e| e[1]) + offset[1];
+        let width = extent.map_or(layout.max_width.unwrap_or(160.0), |e| e[2]);
+        let height = extent.map_or(layout.max_height.unwrap_or(42.0), |e| e[3]);
         if [x, y, width, height].iter().any(|v| !v.is_finite()) || width <= 0.0 || height <= 0.0 {
             return Err(EditorError::InvalidGeometry);
         }
@@ -321,6 +326,12 @@ pub(crate) fn build(
                 };
                 objects.push(Content::Image(source));
             }
+            PageObject::Ink(_) => objects.push(Content::ReadOnly(ReadOnlyObject::new(
+                object,
+                page.margin_origin,
+                "Ink\nRead-only",
+                engine,
+            )?)),
             PageObject::Unsupported(_) => objects.push(Content::ReadOnly(ReadOnlyObject::new(
                 object,
                 page.margin_origin,

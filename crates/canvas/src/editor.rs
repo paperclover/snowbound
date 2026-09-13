@@ -458,6 +458,7 @@ impl TextOutline {
                 }
                 onestore::page::ParagraphContent::Image(_)
                 | onestore::page::ParagraphContent::Attachment(_)
+                | onestore::page::ParagraphContent::Ink(_)
                 | onestore::page::ParagraphContent::Unsupported(_) => {
                     return Err(EditError::UnsupportedContent);
                 }
@@ -509,6 +510,7 @@ impl TextOutline {
                     }
                     onestore::page::ParagraphContent::Image(_)
                     | onestore::page::ParagraphContent::Attachment(_)
+                    | onestore::page::ParagraphContent::Ink(_)
                     | onestore::page::ParagraphContent::Unsupported(_) => {
                         return Err(EditError::UnsupportedContent);
                     }
@@ -1699,6 +1701,7 @@ impl CanvasEditor {
                         }
                         onestore::page::ParagraphContent::Image(_)
                         | onestore::page::ParagraphContent::Attachment(_)
+                        | onestore::page::ParagraphContent::Ink(_)
                         | onestore::page::ParagraphContent::Unsupported(_) => {
                             return Err(EditError::UnsupportedContent.into());
                         }

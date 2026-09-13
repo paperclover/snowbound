@@ -129,6 +129,7 @@ fn projection(page: &Page) -> String {
                         ParagraphContent::Attachment(attachment) => {
                             out.push_str(&format!(" attachment {}", attachment.id))
                         }
+                        ParagraphContent::Ink(ink) => out.push_str(&format!(" ink {}", ink.id)),
                         ParagraphContent::Unsupported(u) => {
                             out.push_str(&format!(" unsupported {}", u.id))
                         }
@@ -138,6 +139,7 @@ fn projection(page: &Page) -> String {
             }
             PageObject::Title(title) => out.push_str(&format!("title {}\n", title.id)),
             PageObject::Image(image) => out.push_str(&format!("image {}\n", image.id)),
+            PageObject::Ink(ink) => out.push_str(&format!("ink {}\n", ink.id)),
             PageObject::Unsupported(u) => out.push_str(&format!("unsupported {}\n", u.id)),
         }
     }

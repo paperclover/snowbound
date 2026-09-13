@@ -43,7 +43,7 @@ harness also accepts `--client-profile release`.
 | `Object::file_reference`, `Store::file_data` | Identify internal/external payloads and read internal payload bytes |
 | `document::Document`, `Revision::text_runs` | Interpret document objects and inherited text formatting while retaining unknown properties and revision identities |
 | `Document::active`, `Document::pages_in`, `Revision::parents`, `RevisionIndex::active` | Resolve the active revision, the pages of a space and parent links without repeating the lookups |
-| `page::Page`, `page::Paragraph` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images) with stored identities; content outside the model is retained as `Unsupported` |
+| `page::Page`, `page::Paragraph`, `page::Ink` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments, ink drawings and handwriting decoded to stroke polylines in page points) with stored identities; content outside the model is retained as `Unsupported` |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `PageCreation`, `PreparedEdit::create_page` | Add an empty top-level page and its section entry atomically, retaining page identities across retries |
@@ -174,8 +174,8 @@ cargo run --example random_edit -- /tmp/one-demo/synthetic.one /tmp/edited.one 4
 The report contains readable pages, document JSON, assets, source identities and
 coordinates. It preserves paragraph nesting, lists, tables, links and tags.
 Historical contexts, recycle-bin pages and default templates are represented
-separately. Native ink and structured equations retain their source data and
-appear explicitly as opaque content. The report is a reading view; its native
+separately. Native ink is decoded to strokes; structured equations retain their
+source data and appear explicitly as opaque content. The report is a reading view; its native
 PDF references supply the original canvas layout.
 
 Read and validate a snapshot before interpreting its graph:

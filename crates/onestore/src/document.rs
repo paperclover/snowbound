@@ -326,8 +326,41 @@ pub enum Kind<'a> {
         collapse_state: Option<u8>,
     },
     OutlineGroup,
-    /// Native ink properties remain uninterpreted in the element's extra arena.
-    Ink,
+    /// An ink drawing or handwriting container: strokes hang off `data`, nested containers off
+    /// the element's content list. Scaling multiplies stroke coordinates.
+    Ink {
+        data: Option<ExGuid>,
+        scale_x: Option<f32>,
+        scale_y: Option<f32>,
+    },
+    InkData {
+        strokes: Vec<ExGuid>,
+        bounds: Option<[i32; 4]>,
+    },
+    /// One stroke: `path` holds ISF multi-byte first differences, one block per dimension of
+    /// the style's dimension table, in HIMETRIC (1/2540 inch) page coordinates.
+    InkStroke {
+        path: Vec<u8>,
+        style: Option<ExGuid>,
+        bias: Option<u8>,
+        language: Option<u16>,
+        identity: Option<[u8; 16]>,
+        index: Option<u32>,
+    },
+    /// Drawing attributes shared by strokes; `dimensions` holds 32-byte entries of GUID, lower
+    /// and upper limit, and resolution.
+    InkStyle {
+        dimensions: Vec<u8>,
+        width: Option<f32>,
+        height: Option<f32>,
+        color: Option<u32>,
+        transparency: Option<u8>,
+        pen_tip: Option<u8>,
+        raster_operation: Option<u8>,
+        antialiased: Option<bool>,
+        fit_to_curve: Option<bool>,
+        ignore_pressure: Option<bool>,
+    },
     RichText {
         text: String,
         runs: Vec<TextRun>,
@@ -993,7 +1026,39 @@ impl<'a> Element<'a> {
                 level: f.u32(0x14001dff)?,
                 author: f.text(0x1c001d9e)?,
             },
-            0x60014 => Kind::Ink,
+            0x60014 => Kind::Ink {
+                data: f.one(0x20003415)?,
+                scale_x: f.float(0x14001c46, 1.0)?,
+                scale_y: f.float(0x14001c47, 1.0)?,
+            },
+            0x2003b => Kind::InkData {
+                strokes: f.refs(0x24003416, IdStream::Objects)?,
+                bounds: f.fixed::<16>(0x1c003418)?.map(|b| {
+                    std::array::from_fn(|i| {
+                        i32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap())
+                    })
+                }),
+            },
+            0x20047 => Kind::InkStroke {
+                path: f.bytes(0x1c00340b)?.unwrap_or_default().to_vec(),
+                style: f.one(0x20003409)?,
+                bias: f.u8(0x0c00341c)?,
+                language: f.u16(0x1000341b)?,
+                identity: f.fixed(0x1c00341a)?,
+                index: f.u32(0x14003419)?,
+            },
+            0x120048 => Kind::InkStyle {
+                dimensions: f.bytes(0x1c00340a)?.unwrap_or_default().to_vec(),
+                width: f.float(0x1400340d, 1.0)?,
+                height: f.float(0x1400340c, 1.0)?,
+                color: f.u32(0x1400340f)?,
+                transparency: f.u8(0x0c003414)?,
+                pen_tip: f.u8(0x0c003412)?,
+                raster_operation: f.u8(0x0c003413)?,
+                antialiased: f.boolean(0x0800340e)?,
+                fit_to_curve: f.boolean(0x08003410)?,
+                ignore_pressure: f.boolean(0x08003411)?,
+            },
             0x20031 => Kind::SectionMetadata {
                 name: f.text(0x1c00349b)?,
                 color: f.u32(0x14001cbe)?,

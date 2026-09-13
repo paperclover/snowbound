@@ -10,8 +10,11 @@ use std::{
     sync::Arc,
 };
 
+pub mod ink;
 pub mod link;
 pub mod text;
+
+pub use ink::{Ink, InkStroke};
 pub(crate) mod write;
 pub use text::Paragraph;
 
@@ -45,6 +48,7 @@ pub enum PageObject {
     Outline(Outline),
     Title(Title),
     Image(Image),
+    Ink(Ink),
     Unsupported(Unsupported),
 }
 
@@ -54,6 +58,7 @@ impl PageObject {
             Self::Outline(value) => value.id,
             Self::Title(value) => value.id,
             Self::Image(value) => value.id,
+            Self::Ink(value) => value.id,
             Self::Unsupported(value) => value.id,
         }
     }
@@ -62,6 +67,7 @@ impl PageObject {
             Self::Outline(value) => &value.layout,
             Self::Title(value) => &value.layout,
             Self::Image(value) => &value.layout,
+            Self::Ink(value) => &value.layout,
             Self::Unsupported(value) => &value.layout,
         }
     }
@@ -71,6 +77,7 @@ impl PageObject {
             Self::Outline(value) => &mut value.layout,
             Self::Title(value) => &mut value.layout,
             Self::Image(value) => &mut value.layout,
+            Self::Ink(value) => &mut value.layout,
             Self::Unsupported(value) => &mut value.layout,
         }
     }
@@ -116,6 +123,8 @@ pub enum ParagraphContent {
     Image(Image),
     /// An embedded file, as OneNote inserts attachments into outlines.
     Attachment(Attachment),
+    /// Handwriting held by the paragraph.
+    Ink(Ink),
     Unsupported(Unsupported),
 }
 
@@ -471,6 +480,10 @@ impl Page {
                     page.objects
                         .push(PageObject::Image(Image::read(revision, id, node)?));
                 }
+                Kind::Ink { .. } => {
+                    page.objects
+                        .push(PageObject::Ink(Ink::read(revision, id, node)?));
+                }
                 _ => page.objects.push(PageObject::Unsupported(Unsupported {
                     id,
                     jcid: node.jcid,
@@ -601,6 +614,8 @@ fn read_paragraphs(
                     ParagraphContent::Image(Image::read(revision, *content_id, content)?)
                 } else if matches!(content.kind, Kind::Attachment { .. }) {
                     ParagraphContent::Attachment(Attachment::read(revision, *content_id, content)?)
+                } else if matches!(content.kind, Kind::Ink { .. }) {
+                    ParagraphContent::Ink(Ink::read(revision, *content_id, content)?)
                 } else if matches!(content.kind, Kind::Table { .. }) {
                     ParagraphContent::Table(read_table(
                         revision,
@@ -625,6 +640,7 @@ fn read_paragraphs(
                             ParagraphContent::Table(table) => table.tags.as_slice(),
                             ParagraphContent::Image(_)
                             | ParagraphContent::Attachment(_)
+                            | ParagraphContent::Ink(_)
                             | ParagraphContent::Unsupported(_) => &[],
                         })
                         .filter_map(|tag| tag.definition.as_ref())

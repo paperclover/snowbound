@@ -155,6 +155,7 @@ pub(crate) fn validate_nodes(
                 }
                 ParagraphContent::Image(_)
                 | ParagraphContent::Attachment(_)
+                | ParagraphContent::Ink(_)
                 | ParagraphContent::Unsupported(_) => {
                     return Err(EditError::UnsupportedContent);
                 }

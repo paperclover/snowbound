@@ -74,6 +74,7 @@ fn referenced(page: &Page) -> std::collections::BTreeSet<ExGuid> {
                 }
                 ParagraphContent::Image(_)
                 | ParagraphContent::Attachment(_)
+                | ParagraphContent::Ink(_)
                 | ParagraphContent::Unsupported(_) => {}
             }
         }

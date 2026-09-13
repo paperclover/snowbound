@@ -65,6 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             PageObject::Image(image) => objects.push(json!({"kind": "image", "id": image.id,
                 "layout": image.layout, "bytes": image.bytes.as_ref().map(|b| b.len()),
                 "alt": image.alt, "background": image.background})),
+            PageObject::Ink(ink) => objects.push(json!({"kind": "ink", "id": ink.id,
+                "bounds": ink.bounds(), "strokes": ink.strokes.len(), "groups": ink.groups.len()})),
             PageObject::Unsupported(object) => objects.push(json!({"kind": "unsupported",
                 "id": object.id, "layout": object.layout, "jcid": object.jcid})),
         }

@@ -203,7 +203,7 @@ impl<'a> View<'a> {
                         view.outline(outline)?;
                     }
                 }
-                PageObject::Image(_) | PageObject::Unsupported(_) => {}
+                PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {}
             }
         }
         Ok(view)
@@ -366,6 +366,7 @@ impl Lowering<'_> {
                 .iter()
                 .filter_map(|object| match object {
                     PageObject::Unsupported(unsupported) => Some(format!("{unsupported:?}")),
+                    PageObject::Ink(ink) => Some(format!("{ink:?}")),
                     PageObject::Title(title) => Some(format!(
                         "{:?} {:?} {:?} {:?}",
                         title.id,
@@ -383,7 +384,7 @@ impl Lowering<'_> {
         after_fixed.sort();
         if before_fixed != after_fixed {
             return Err(invalid(
-                "Titles and unsupported objects cannot be edited through the page model",
+                "Titles, ink and unsupported objects cannot be edited through the page model",
             ));
         }
         for (id, outline) in &new.outlines {
@@ -672,7 +673,9 @@ impl Lowering<'_> {
             let outlines: Vec<&Outline> = match object {
                 PageObject::Outline(outline) => vec![outline],
                 PageObject::Title(title) => title.outlines.iter().collect(),
-                PageObject::Image(_) | PageObject::Unsupported(_) => Vec::new(),
+                PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {
+                    Vec::new()
+                }
             };
             for outline in outlines {
                 containers.push(outline.id);
