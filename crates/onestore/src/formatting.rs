@@ -35,6 +35,8 @@ pub enum TextAttribute {
     Color(Option<[u8; 3]>),
     /// RGB, or None to clear highlighting.
     Highlight(Option<[u8; 3]>),
+    /// Windows language id of the run, such as 1033 for US English.
+    Language(u32),
     /// Hidden text, such as a hyperlink's field code.
     Hidden(bool),
     /// The run belongs to a hyperlink field.
@@ -73,6 +75,7 @@ impl TextAttribute {
                 }
                 (0x10001c0b, ((*points * 2.0) as u16).to_le_bytes().to_vec())
             }
+            Self::Language(language) => (0x14001c3b, language.to_le_bytes().to_vec()),
             Self::Color(color) | Self::Highlight(color) => (
                 if matches!(self, Self::Color(_)) {
                     0x14001c0c

@@ -13,6 +13,7 @@ use smb2::{
         lock::{LockElement, LockRequest, LockResponse},
         query_info::{InfoType, QueryInfoRequest, QueryInfoResponse},
         read::{ReadRequest, ReadResponse},
+        set_info::{SetInfoRequest, SetInfoResponse},
         write::{WriteRequest, WriteResponse},
     },
     pack::{Pack, ReadCursor, Unpack},
@@ -180,6 +181,23 @@ impl Client {
     }
 
     fn open_shared(&self, path: &str, write: bool, sharing: u32) -> io::Result<File<'_>> {
+        self.open_with(
+            path,
+            if write { 0xc0000000 } else { 0x80000000 },
+            sharing,
+            CreateDisposition::FileOpen,
+            0x42,
+        )
+    }
+
+    fn open_with(
+        &self,
+        path: &str,
+        access: u32,
+        sharing: u32,
+        disposition: CreateDisposition,
+        options: u32,
+    ) -> io::Result<File<'_>> {
         if path.is_empty() || path.contains('\0') || path.encode_utf16().count() > 32767 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -188,11 +206,11 @@ impl Client {
             CreateRequest {
                 requested_oplock_level: OplockLevel::None,
                 impersonation_level: ImpersonationLevel::Impersonation,
-                desired_access: FileAccessMask::new(if write { 0xc0000000 } else { 0x80000000 }),
+                desired_access: FileAccessMask::new(access),
                 file_attributes: 0,
                 share_access: ShareAccess(sharing),
-                create_disposition: CreateDisposition::FileOpen,
-                create_options: 0x42,
+                create_disposition: disposition,
+                create_options: options,
                 name: smb2::encode_path(&path.replace('\\', "/")),
                 create_contexts: Vec::new(),
             },
@@ -200,6 +218,78 @@ impl Client {
         Ok(File {
             client: self,
             id: Some(response.file_id),
+        })
+    }
+
+    /// Creates a file holding `bytes`; an existing file is an error.
+    pub fn create(&self, path: &str, bytes: &[u8]) -> io::Result<()> {
+        let mut file = self.open_with(path, 0xc0000000, 0, CreateDisposition::FileCreate, 0x40)?;
+        let mut written = 0;
+        while written < bytes.len() {
+            let count = file.write_at(written as u64, &bytes[written..])?;
+            if count == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            written += count;
+        }
+        file.flush()?;
+        file.close()
+    }
+
+    /// Creates a directory; an existing one is an error.
+    pub fn create_directory(&self, path: &str) -> io::Result<()> {
+        self.open_with(path, 0x80000000, 7, CreateDisposition::FileCreate, 0x1)?
+            .close()
+    }
+
+    /// Renames or moves a file or directory within the share; an existing target is an
+    /// error.
+    pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        if to.is_empty() || to.contains('\0') {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let file = self.open_with(
+            from,
+            0x00010000 | 0x80000000,
+            7,
+            CreateDisposition::FileOpen,
+            0,
+        )?;
+        let name: Vec<u8> = to
+            .replace('/', "\\")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut buffer = vec![0; 16];
+        buffer.extend_from_slice(&u32::try_from(name.len()).unwrap().to_le_bytes());
+        buffer.extend_from_slice(&name);
+        let _: SetInfoResponse = self.request(
+            Command::SetInfo,
+            SetInfoRequest {
+                info_type: InfoType::File,
+                file_info_class: 10,
+                additional_information: 0,
+                file_id: file.id.ok_or(io::ErrorKind::InvalidInput)?,
+                buffer,
+            },
+        )?;
+        file.close()
+    }
+
+    /// Deletes a file or an empty directory.
+    pub fn delete(&self, path: &str) -> io::Result<()> {
+        self.open_with(path, 0x00010000, 7, CreateDisposition::FileOpen, 0x1000)?
+            .close()
+    }
+
+    /// Names a section or TOC file for its notebook (`onestore::place`) under native
+    /// writer coordination.
+    pub fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<(), CommitError> {
+        self.commit(path, |file| {
+            onestore::place(file, ancestor, name).map_err(|error| CommitError {
+                state: CommitState::NotCommitted,
+                error,
+            })
         })
     }
 

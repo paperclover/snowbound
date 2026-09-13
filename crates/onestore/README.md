@@ -43,7 +43,7 @@ harness also accepts `--client-profile release`.
 | `Object::file_reference`, `Store::file_data` | Identify internal/external payloads and read internal payload bytes |
 | `document::Document`, `Revision::text_runs` | Interpret document objects and inherited text formatting while retaining unknown properties and revision identities |
 | `Document::active`, `Document::pages_in`, `Revision::parents`, `RevisionIndex::active` | Resolve the active revision, the pages of a space and parent links without repeating the lookups |
-| `Page::copy` | The page's content under fresh identities for copying into another section, definitions and payloads included |
+| `Page::copy` | The page's content under fresh identities for copying into another section, definitions and payloads included; indent levels only an outline group carries refuse |
 | `page::link::internal_link`, `page::link::parse_internal_link` | Build and read the `onenote:#…` URLs OneNote stores for links to sections, pages and paragraphs, by identity |
 | `page::Page`, `page::Paragraph`, `page::Ink`, `page::Math` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments, ink drawings and handwriting decoded to stroke polylines in page points) with stored identities; equations parse from their linear text and run data into a tree that renders the MathML OneNote exports; content outside the model is retained as `Unsupported` |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
@@ -53,7 +53,7 @@ harness also accepts `--client-profile release`.
 | `PreparedEdit::delete_pages_permanently` | Remove explicit pages and their section references atomically while retaining stored revisions |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `TocEdit`, `PreparedEdit::table_of_contents` | Add, rename, colour, order and remove a table of contents' section and group entries as one revision |
-| `place_file` | Name a file for its notebook as OneNote does on adoption (parent TOC identity and name CRC in the header), so OneNote keeps its identity |
+| `place`, `place_file` | Name a file for its notebook as OneNote does on adoption (parent TOC identity and name CRC in the header), so OneNote keeps its identity, on any `CommitIo` or under the filesystem adapter |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
 | `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |

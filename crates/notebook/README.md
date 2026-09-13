@@ -334,8 +334,11 @@ metadata; a deleted section moves into `OneNote_RecycleBin`, a group with its
 own TOC. Every created, renamed or moved file is placed with
 `onestore::place_file`, which sets the header's ancestor to the parent TOC's
 identity and the name CRC OneNote checks on open; a file without them is
-re-identified and listed anew. These operate on the mounted directory;
-the SMB transport has no create, rename or delete.
+re-identified and listed anew. They run over `Storage`: a mounted directory
+(`Notebook::open`) or an SMB share (`Notebook::open_smb` with a
+`smb::Client`, which gained create, directory creation, rename, delete and
+header placement under native writer coordination); `tools/test_smb_structure.py
+VM OUTPUT` drives them against a disposable Samba lab VM.
 
 `Notebook::find_page(url)` resolves a stored internal link to a section path
 and page space by identity: the linked section first, then every readable

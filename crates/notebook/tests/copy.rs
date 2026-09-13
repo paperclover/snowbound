@@ -15,11 +15,12 @@ use std::{
 };
 
 /// Pages the writer authored for other rows: text with an attachment and its icon, a
-/// table, an inserted picture, a page-level ink drawing, tags, lists, equations
+/// table, nested tables with cell subtrees, an inserted picture, a page-level ink drawing, tags, lists, equations
 /// and paragraph formatting.
 const SOURCES: &[&str] = &[
     "attachment-edit/icon/candidate/files.one",
     "table-edit/created/candidate/tables.one",
+    "table-edit/nested/candidate/synthetic.one",
     "picture-edit/inserted/candidate/pictures.one",
     "ink-edit/drawing/candidate/ink.one",
     "tag-edit/candidate/tags.one",
@@ -64,8 +65,10 @@ fn shape(page: &Page) -> String {
             serde_json::Value::Object(fields) => {
                 // The writer's canonical formatting: an unset flag is false and unset
                 // spacing is zero.
-                fields.retain(|_, value| {
-                    !value.is_null()
+                fields.retain(|key, value| {
+                    // OneNote lays outlines out again on open.
+                    key != "max_height"
+                        && !value.is_null()
                         && *value != serde_json::Value::Bool(false)
                         && value.as_f64() != Some(0.0)
                 });
@@ -153,6 +156,7 @@ fn pages_copy_into_another_section_with_their_content_and_fresh_identities() {
     .unwrap();
     let section = Section::open(&file, &cache, || {}).unwrap();
     let mut expected = Vec::new();
+    let mut grouped = Vec::new();
     for source in SOURCES {
         let bytes = std::fs::read(
             Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus")).join(source),
@@ -166,7 +170,14 @@ fn pages_copy_into_another_section_with_their_content_and_fresh_identities() {
             {
                 continue;
             }
-            let copy = page.copy().unwrap();
+            let copy = match page.copy() {
+                Ok(copy) => copy,
+                Err(error) if error.message == "Outline groups cannot be copied" => {
+                    grouped.push(page.title.clone());
+                    continue;
+                }
+                Err(error) => panic!("{source} {}: {error}", page.title),
+            };
             assert_ne!(copy.identity, page.identity);
             let space = section
                 .import_page(&page, "Copier")
@@ -175,6 +186,16 @@ fn pages_copy_into_another_section_with_their_content_and_fresh_identities() {
         }
     }
     assert!(expected.len() >= 8, "{} pages", expected.len());
+    // Outdenting leaves paragraphs at levels only an outline group carries.
+    assert_eq!(
+        grouped,
+        [
+            "Outdent first group",
+            "Delete only grouped subtree",
+            "Delete unindented sibling after group",
+            "Outdent child across indentation gap"
+        ]
+    );
     let deadline = Instant::now() + Duration::from_secs(120);
     while section
         .queue()

@@ -505,3 +505,102 @@ fn read_limits_respect_negotiation_and_available_credits() {
         }
     }
 }
+
+/// Notebook structure over the share: sections and groups created, renamed, coloured,
+/// ordered and deleted through `Notebook::open_smb`, seen again by a fresh discovery.
+#[test]
+#[ignore = "requires an owned Samba share at ONESTORE_SMB_LAB"]
+fn live_structure() {
+    use crate::session::Notebook;
+    let client = std::sync::Arc::new(client());
+    let root = format!("structure-{}", std::process::id());
+    client.create_directory(&root).unwrap();
+    let first = onestore::create_section("First.one", "First page", "Author").unwrap();
+    client.create(&format!("{root}/First.one"), &first).unwrap();
+    let first_id = onestore::Store::parse(&first).unwrap().header.file_id;
+    let toc =
+        onestore::create_table_of_contents("Open Notebook.onetoc2", &[("First.one", first_id)])
+            .unwrap();
+    client
+        .create(&format!("{root}/Open Notebook.onetoc2"), &toc)
+        .unwrap();
+    let toc_id = onestore::Store::parse(&toc).unwrap().header.file_id;
+    client
+        .place(&format!("{root}/First.one"), toc_id, "First.one")
+        .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let mut notebook =
+        Notebook::open_smb(std::sync::Arc::clone(&client), &root, cache.path()).unwrap();
+    assert_eq!(
+        notebook.create_section("", "Second", "Author").unwrap(),
+        "Second.one"
+    );
+    assert_eq!(notebook.create_group("", "Archive").unwrap(), "Archive");
+    assert_eq!(
+        notebook
+            .create_section("Archive", "Inner", "Author")
+            .unwrap(),
+        "Archive/Inner.one"
+    );
+    assert_eq!(
+        notebook.rename("Second.one", "Renamed").unwrap(),
+        "Renamed.one"
+    );
+    assert_eq!(notebook.rename("Archive", "Kept").unwrap(), "Kept");
+    notebook
+        .set_section_color("Renamed.one", Some(0x5ed7ff))
+        .unwrap();
+    notebook.reorder("", &["Kept", "Renamed.one"]).unwrap();
+    notebook.delete("First.one").unwrap();
+    let names = |folder: &crate::discover::Folder| {
+        (
+            folder
+                .sections
+                .iter()
+                .map(|s| s.path.clone())
+                .collect::<Vec<_>>(),
+            folder
+                .groups
+                .iter()
+                .map(|g| g.path.clone())
+                .collect::<Vec<_>>(),
+        )
+    };
+    let fresh = Notebook::open_smb(std::sync::Arc::clone(&client), &root, cache.path()).unwrap();
+    assert_eq!(
+        names(fresh.catalog()),
+        (
+            vec!["Renamed.one".to_owned()],
+            vec!["Kept".to_owned(), "OneNote_RecycleBin".to_owned()]
+        )
+    );
+    assert_eq!(
+        names(&fresh.catalog().groups[0]),
+        (vec!["Kept/Inner.one".to_owned()], vec![])
+    );
+    assert_eq!(
+        names(&fresh.catalog().groups[1]),
+        (vec!["OneNote_RecycleBin/First.one".to_owned()], vec![])
+    );
+    assert!(fresh.catalog().toc.as_ref().unwrap().unresolved.is_empty());
+    let renamed = client
+        .read_storage(&format!("{root}/Renamed.one"), 1 << 20)
+        .unwrap();
+    let header = onestore::Store::parse(&renamed).unwrap().header;
+    assert_eq!(header.ancestor, toc_id);
+    assert_eq!(header.name_crc, 0x6108912a);
+    assert!(fresh.section("Renamed.one", || {}).is_err());
+    for path in [
+        "Renamed.one",
+        "Kept/Inner.one",
+        "Kept/Open Notebook.onetoc2",
+        "Kept",
+        "OneNote_RecycleBin/First.one",
+        "OneNote_RecycleBin/Open Notebook.onetoc2",
+        "OneNote_RecycleBin",
+        "Open Notebook.onetoc2",
+    ] {
+        client.delete(&format!("{root}/{path}")).unwrap();
+    }
+    client.delete(&root).unwrap();
+}

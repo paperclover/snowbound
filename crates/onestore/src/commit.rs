@@ -74,23 +74,27 @@ impl Drop for FileIo {
 /// Places a file in its notebook the way OneNote does on adoption: the header's
 /// `guidAncestor` becomes the parent table of contents' file identity and `crcName` the CRC
 /// of `name` (a section's file name, a group's folder name). OneNote re-identifies a file
-/// whose header disagrees with its location, which orphans its TOC entry.
+/// whose header disagrees with its location, which orphans its TOC entry. The caller holds
+/// OneNote-compatible exclusion on `io`.
+pub fn place(io: &mut impl CommitIo, ancestor: [u8; 16], name: &str) -> io::Result<()> {
+    let mut header = [0; 1024];
+    if io.read_at(0, &mut header)? != header.len() {
+        return Err(io::Error::from(ErrorKind::UnexpectedEof));
+    }
+    crate::Header::parse(&header)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.message))?;
+    let placement = crate::create::placement(ancestor, name);
+    if io.write_at(128, &placement)? != placement.len() {
+        return Err(io::Error::from(ErrorKind::WriteZero));
+    }
+    io.flush()
+}
+
+/// `place` under the conservative filesystem adapter's whole-file exclusion.
 #[cfg(any(unix, windows))]
 pub fn place_file(path: impl AsRef<Path>, ancestor: [u8; 16], name: &str) -> io::Result<()> {
     let mut io = FileIo::open(path, true)?;
-    let mut header = [0; 1024];
-    let result = (|| {
-        if io.read_at(0, &mut header)? != header.len() {
-            return Err(io::Error::from(ErrorKind::UnexpectedEof));
-        }
-        crate::Header::parse(&header)
-            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.message))?;
-        let placement = crate::create::placement(ancestor, name);
-        if io.write_at(128, &placement)? != placement.len() {
-            return Err(io::Error::from(ErrorKind::WriteZero));
-        }
-        io.flush()
-    })();
+    let result = place(&mut io, ancestor, name);
     let released = io.release();
     result?;
     released

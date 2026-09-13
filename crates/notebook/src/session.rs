@@ -66,9 +66,195 @@ fn entries(folder: &discover::Folder) -> Entries {
     out
 }
 
-/// A notebook directory and the cache directory holding its section replicas.
+/// Where a notebook's files live: a mounted directory or an SMB share. Paths are catalog
+/// paths, `/`-separated and relative to the notebook root.
+pub trait Storage: Send + Sync {
+    fn discover(&self, limits: discover::Limits) -> Result<discover::Folder>;
+    fn exists(&self, path: &str) -> bool;
+    fn read(&self, path: &str) -> Result<Vec<u8>>;
+    /// Creates a file holding `bytes`; an existing file is an error.
+    fn create(&self, path: &str, bytes: &[u8]) -> Result<()>;
+    fn create_directory(&self, path: &str) -> Result<()>;
+    /// Renames or moves a file or directory; an existing target is an error.
+    fn rename(&self, from: &str, to: &str) -> Result<()>;
+    /// Names a section or TOC file for its notebook, as `onestore::place`.
+    fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()>;
+    fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()>;
+    fn set_property(
+        &self,
+        path: &str,
+        source: &[u8],
+        space: ExGuid,
+        object: ExGuid,
+        property: u32,
+        value: &[u8],
+    ) -> Result<()>;
+}
+
+/// A mounted notebook directory.
+struct Directory(PathBuf);
+
+impl Directory {
+    fn path(&self, relative: &str) -> PathBuf {
+        if relative.is_empty() {
+            self.0.clone()
+        } else {
+            self.0.join(relative)
+        }
+    }
+}
+
+impl Storage for Directory {
+    fn discover(&self, limits: discover::Limits) -> Result<discover::Folder> {
+        Ok(discover::discover(
+            &mut discover::Local::open(&self.0)?,
+            limits,
+        )?)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.path(path).exists()
+    }
+
+    fn read(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(onestore::read_file(self.path(path))?)
+    }
+
+    fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        std::fs::File::create_new(self.path(path))?.write_all(bytes)?;
+        Ok(())
+    }
+
+    fn create_directory(&self, path: &str) -> Result<()> {
+        Ok(std::fs::create_dir(self.path(path))?)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
+        Ok(std::fs::rename(self.path(from), self.path(to))?)
+    }
+
+    fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()> {
+        Ok(onestore::place_file(self.path(path), ancestor, name)?)
+    }
+
+    fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()> {
+        Ok(edit.commit_file(self.path(path))?)
+    }
+
+    fn set_property(
+        &self,
+        path: &str,
+        source: &[u8],
+        space: ExGuid,
+        object: ExGuid,
+        property: u32,
+        value: &[u8],
+    ) -> Result<()> {
+        Ok(onestore::commit_file_property(
+            self.path(path),
+            source,
+            space,
+            object,
+            property,
+            value,
+        )?)
+    }
+}
+
+/// A notebook directory on an SMB share, reached through the native-compatible client.
+#[cfg(feature = "smb")]
+pub struct Share {
+    client: Arc<crate::smb::Client>,
+    root: String,
+}
+
+#[cfg(feature = "smb")]
+impl Share {
+    fn path(&self, relative: &str) -> String {
+        match (self.root.is_empty(), relative.is_empty()) {
+            (_, true) => self.root.clone(),
+            (true, false) => relative.to_owned(),
+            (false, false) => format!("{}/{relative}", self.root),
+        }
+    }
+}
+
+#[cfg(feature = "smb")]
+impl Storage for Share {
+    fn discover(&self, limits: discover::Limits) -> Result<discover::Folder> {
+        Ok(discover::discover(
+            &mut discover::Smb::new(&self.client, &self.root)?,
+            limits,
+        )?)
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        let (folder, name) = split(path);
+        self.client
+            .read_dir(&self.path(folder), 100_000)
+            .is_ok_and(|entries| entries.iter().any(|entry| entry.name == name))
+    }
+
+    fn read(&self, path: &str) -> Result<Vec<u8>> {
+        Ok(self
+            .client
+            .read_storage(&self.path(path), 256 * 1024 * 1024)?)
+    }
+
+    fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        Ok(self.client.create(&self.path(path), bytes)?)
+    }
+
+    fn create_directory(&self, path: &str) -> Result<()> {
+        Ok(self.client.create_directory(&self.path(path))?)
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
+        Ok(self.client.rename(&self.path(from), &self.path(to))?)
+    }
+
+    fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()> {
+        Ok(self.client.place(&self.path(path), ancestor, name)?)
+    }
+
+    fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()> {
+        Ok(self.client.commit_prepared(&self.path(path), edit)?)
+    }
+
+    fn set_property(
+        &self,
+        path: &str,
+        source: &[u8],
+        space: ExGuid,
+        object: ExGuid,
+        property: u32,
+        value: &[u8],
+    ) -> Result<()> {
+        Ok(self.client.commit_property_bytes(
+            &self.path(path),
+            source,
+            space,
+            object,
+            property,
+            value,
+        )?)
+    }
+}
+
+const LIMITS: discover::Limits = discover::Limits {
+    entries: 100_000,
+    bytes_per_file: 256 * 1024 * 1024,
+    depth: 64,
+};
+
+const TOC: &str = "Open Notebook.onetoc2";
+const RECYCLE_BIN: &str = "OneNote_RecycleBin";
+
+/// A notebook's files and the cache directory holding its section replicas.
 pub struct Notebook {
-    root: PathBuf,
+    storage: Box<dyn Storage>,
+    /// The mounted directory, when sections open through local replicas.
+    root: Option<PathBuf>,
     cache: PathBuf,
     catalog: discover::Folder,
 }
@@ -76,17 +262,31 @@ pub struct Notebook {
 impl Notebook {
     pub fn open(root: impl AsRef<Path>, cache: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().canonicalize()?;
+        Self::with(Box::new(Directory(root.clone())), Some(root), cache)
+    }
+
+    /// Opens the notebook at `root` on the share `client` is connected to. Sections open
+    /// through `Section::resume_smb` with the catalog's paths.
+    #[cfg(feature = "smb")]
+    pub fn open_smb(
+        client: Arc<crate::smb::Client>,
+        root: &str,
+        cache: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let root = root.replace('\\', "/");
+        Self::with(Box::new(Share { client, root }), None, cache)
+    }
+
+    fn with(
+        storage: Box<dyn Storage>,
+        root: Option<PathBuf>,
+        cache: impl AsRef<Path>,
+    ) -> Result<Self> {
         let cache = cache.as_ref().to_path_buf();
         std::fs::create_dir_all(&cache)?;
-        let catalog = discover::discover(
-            &mut discover::Local::open(&root)?,
-            discover::Limits {
-                entries: 100_000,
-                bytes_per_file: 256 * 1024 * 1024,
-                depth: 64,
-            },
-        )?;
+        let catalog = storage.discover(LIMITS)?;
         Ok(Self {
+            storage,
             root,
             cache,
             catalog,
@@ -97,18 +297,11 @@ impl Notebook {
         &self.catalog
     }
 
-    /// Rereads the notebook directory and reports what changed since the last catalog,
-    /// keyed by file identity so a renamed or moved section stays the same section. A
-    /// failed read keeps the previous catalog: an unreachable notebook is not an empty one.
+    /// Rereads the notebook and reports what changed since the last catalog, keyed by
+    /// file identity so a renamed or moved section stays the same section. A failed read
+    /// keeps the previous catalog: an unreachable notebook is not an empty one.
     pub fn refresh(&mut self) -> Result<Vec<Change>> {
-        let catalog = discover::discover(
-            &mut discover::Local::open(&self.root)?,
-            discover::Limits {
-                entries: 100_000,
-                bytes_per_file: 256 * 1024 * 1024,
-                depth: 64,
-            },
-        )?;
+        let catalog = self.storage.discover(LIMITS)?;
         let (before, before_orders) = entries(&self.catalog);
         let (after, after_orders) = entries(&catalog);
         let mut changes = Vec::new();
@@ -158,28 +351,27 @@ impl Notebook {
         Err(io::Error::from(io::ErrorKind::NotFound).into())
     }
 
-    fn directory(&self, path: &str) -> Result<PathBuf> {
-        let directory = if path.is_empty() {
-            self.root.clone()
-        } else {
-            self.root.join(path).canonicalize()?
-        };
-        if !directory.starts_with(&self.root) || !directory.is_dir() {
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+    /// A catalog section's path, refusing paths the catalog does not list.
+    fn section_path(&self, path: &str) -> Result<&discover::Section> {
+        let mut folders = vec![&self.catalog];
+        while let Some(folder) = folders.pop() {
+            if let Some(section) = folder.sections.iter().find(|section| section.path == path) {
+                return Ok(section);
+            }
+            folders.extend(&folder.groups);
         }
-        Ok(directory)
+        Err(io::Error::from(io::ErrorKind::NotFound).into())
     }
 
     /// A folder's TOC path and file identity, creating the TOC when the folder has none
     /// (OneNote names it `Open Notebook.onetoc2`).
-    fn toc(&self, folder: &str) -> Result<(PathBuf, [u8; 16])> {
-        let directory = self.directory(folder)?;
+    fn toc(&self, folder: &str) -> Result<(String, [u8; 16])> {
         match &self.folder(folder)?.toc {
-            Some(toc) => Ok((directory.join(&toc.filename), toc.file_id)),
+            Some(toc) => Ok((catalog_path(folder, &toc.filename), toc.file_id)),
             None => {
-                let path = directory.join("Open Notebook.onetoc2");
-                let bytes = onestore::create_table_of_contents("Open Notebook.onetoc2", &[])?;
-                std::fs::File::create_new(&path)?.write_all(&bytes)?;
+                let path = catalog_path(folder, TOC);
+                let bytes = onestore::create_table_of_contents(TOC, &[])?;
+                self.storage.create(&path, &bytes)?;
                 Ok((path, onestore::Store::parse(&bytes)?.header.file_id))
             }
         }
@@ -187,23 +379,21 @@ impl Notebook {
 
     fn edit_toc(&self, folder: &str, edits: &[onestore::TocEdit]) -> Result<()> {
         let (toc, _) = self.toc(folder)?;
-        let source = onestore::read_file(&toc)?;
-        PreparedEdit::table_of_contents(&source, edits)?
-            .commit_file(&toc)
-            .map_err(|error| error.error)?;
-        Ok(())
+        let source = self.storage.read(&toc)?;
+        self.storage
+            .commit(&toc, &PreparedEdit::table_of_contents(&source, edits)?)
     }
 
     /// Creates `name.one` in `folder` with one empty page and lists it last in the folder's
     /// TOC, as OneNote creates a section. Returns the new catalog path.
     pub fn create_section(&mut self, folder: &str, name: &str, author: &str) -> Result<String> {
         let filename = format!("{name}.one");
-        let directory = self.directory(folder)?;
+        self.folder(folder)?;
         let (_, ancestor) = self.toc(folder)?;
         let bytes = onestore::create_section(&filename, "", author)?;
-        let path = directory.join(&filename);
-        std::fs::File::create_new(&path)?.write_all(&bytes)?;
-        onestore::place_file(&path, ancestor, &filename)?;
+        let path = catalog_path(folder, &filename);
+        self.storage.create(&path, &bytes)?;
+        self.storage.place(&path, ancestor, &filename)?;
         let identity = onestore::Store::parse(&bytes)?.header.file_id;
         self.edit_toc(
             folder,
@@ -214,22 +404,22 @@ impl Notebook {
             }],
         )?;
         self.refresh()?;
-        Ok(catalog_path(folder, &filename))
+        Ok(path)
     }
 
     /// Creates a section group: a folder with its own TOC, listed last in the parent's TOC.
     pub fn create_group(&mut self, folder: &str, name: &str) -> Result<String> {
-        let directory = self.directory(folder)?;
+        self.folder(folder)?;
         if !component(name) {
             return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
         }
-        let group = directory.join(name);
         let (_, ancestor) = self.toc(folder)?;
-        std::fs::create_dir(&group)?;
-        let bytes = onestore::create_table_of_contents("Open Notebook.onetoc2", &[])?;
-        let path = group.join("Open Notebook.onetoc2");
-        std::fs::File::create_new(&path)?.write_all(&bytes)?;
-        onestore::place_file(&path, ancestor, name)?;
+        let group = catalog_path(folder, name);
+        self.storage.create_directory(&group)?;
+        let bytes = onestore::create_table_of_contents(TOC, &[])?;
+        let path = catalog_path(&group, TOC);
+        self.storage.create(&path, &bytes)?;
+        self.storage.place(&path, ancestor, name)?;
         let identity = onestore::Store::parse(&bytes)?.header.file_id;
         self.edit_toc(
             folder,
@@ -240,48 +430,46 @@ impl Notebook {
             }],
         )?;
         self.refresh()?;
-        Ok(catalog_path(folder, name))
+        Ok(group)
     }
 
-    /// Renames a section or section group: the file or folder on disk and its TOC entry.
+    /// Renames a section or section group: the file or folder and its TOC entry.
     pub fn rename(&mut self, path: &str, name: &str) -> Result<String> {
         let (folder, entry) = split(path);
-        let directory = self.directory(folder)?;
         let (filename, identity) = self.entry(folder, entry)?;
         let target = if filename.to_ascii_lowercase().ends_with(".one") {
             format!("{name}.one")
         } else {
             name.to_owned()
         };
-        if !component(&target) || directory.join(&target).exists() {
+        let renamed = catalog_path(folder, &target);
+        if !component(&target) || self.storage.exists(&renamed) {
             return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
         }
-        std::fs::rename(directory.join(&filename), directory.join(&target))?;
+        self.storage
+            .rename(&catalog_path(folder, &filename), &renamed)?;
         let (_, ancestor) = self.toc(folder)?;
         let placed = if target.ends_with(".one") {
-            directory.join(&target)
+            renamed.clone()
         } else {
-            directory.join(&target).join("Open Notebook.onetoc2")
+            catalog_path(&renamed, TOC)
         };
-        onestore::place_file(placed, ancestor, &target)?;
+        self.storage.place(&placed, ancestor, &target)?;
         self.edit_toc(
             folder,
             &[onestore::TocEdit::Rename {
                 identity,
-                filename: target.clone(),
+                filename: target,
             }],
         )?;
         self.refresh()?;
-        Ok(catalog_path(folder, &target))
+        Ok(renamed)
     }
 
     /// Sets a section's colour (COLORREF) in its own metadata, where OneNote keeps it.
     pub fn set_section_color(&mut self, path: &str, color: Option<u32>) -> Result<()> {
-        let file = self.root.join(path).canonicalize()?;
-        if !file.starts_with(&self.root) {
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
-        }
-        let source = onestore::read_file(&file)?;
+        let path = self.section_path(path)?.path.clone();
+        let source = self.storage.read(&path)?;
         let store = onestore::Store::parse(&source)?;
         let index = onestore::RevisionIndex::parse(&store)?;
         let document = Document::parse(&index)?;
@@ -290,15 +478,14 @@ impl Notebook {
             .roots
             .get(&2)
             .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-        onestore::commit_file_property(
-            &file,
+        self.storage.set_property(
+            &path,
             &source,
             document.root,
             metadata,
             0x14001cbe,
             &color.unwrap_or(0xffff_ffff).to_le_bytes(),
-        )
-        .map_err(|error| error.error)?;
+        )?;
         self.refresh()?;
         Ok(())
     }
@@ -322,23 +509,23 @@ impl Notebook {
     /// the root TOC lists), and its own folder's TOC entry goes.
     pub fn delete(&mut self, path: &str) -> Result<()> {
         let (folder, entry) = split(path);
-        let directory = self.directory(folder)?;
         let (filename, identity) = self.entry(folder, entry)?;
         if !filename.to_ascii_lowercase().ends_with(".one") {
             return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
         }
-        let bin = self.root.join("OneNote_RecycleBin");
-        let bin_toc = bin.join("Open Notebook.onetoc2");
-        if !bin_toc.exists() {
-            std::fs::create_dir_all(&bin)?;
-            let bytes = onestore::create_table_of_contents("Open Notebook.onetoc2", &[])?;
-            std::fs::File::create_new(&bin_toc)?.write_all(&bytes)?;
-            onestore::place_file(&bin_toc, self.toc("")?.1, "OneNote_RecycleBin")?;
+        let bin_toc = catalog_path(RECYCLE_BIN, TOC);
+        if !self.storage.exists(&bin_toc) {
+            if !self.storage.exists(RECYCLE_BIN) {
+                self.storage.create_directory(RECYCLE_BIN)?;
+            }
+            let bytes = onestore::create_table_of_contents(TOC, &[])?;
+            self.storage.create(&bin_toc, &bytes)?;
+            self.storage.place(&bin_toc, self.toc("")?.1, RECYCLE_BIN)?;
             let bin_identity = onestore::Store::parse(&bytes)?.header.file_id;
             self.edit_toc(
                 "",
                 &[onestore::TocEdit::Add {
-                    filename: "OneNote_RecycleBin".into(),
+                    filename: RECYCLE_BIN.into(),
                     identity: bin_identity,
                     group: true,
                 }],
@@ -346,28 +533,31 @@ impl Notebook {
         }
         let mut target = filename.clone();
         let mut attempt = 1;
-        while bin.join(&target).exists() {
+        while self.storage.exists(&catalog_path(RECYCLE_BIN, &target)) {
             attempt += 1;
             let (stem, extension) = filename.rsplit_once('.').unwrap_or((&filename, ""));
             target = format!("{stem} ({attempt}).{extension}");
         }
-        std::fs::rename(directory.join(&filename), bin.join(&target))?;
-        let source = onestore::read_file(&bin_toc)?;
-        onestore::place_file(
-            bin.join(&target),
+        let binned = catalog_path(RECYCLE_BIN, &target);
+        self.storage
+            .rename(&catalog_path(folder, &filename), &binned)?;
+        let source = self.storage.read(&bin_toc)?;
+        self.storage.place(
+            &binned,
             onestore::Store::parse(&source)?.header.file_id,
             &target,
         )?;
-        PreparedEdit::table_of_contents(
-            &source,
-            &[onestore::TocEdit::Add {
-                filename: target,
-                identity,
-                group: false,
-            }],
-        )?
-        .commit_file(&bin_toc)
-        .map_err(|error| error.error)?;
+        self.storage.commit(
+            &bin_toc,
+            &PreparedEdit::table_of_contents(
+                &source,
+                &[onestore::TocEdit::Add {
+                    filename: target,
+                    identity,
+                    group: false,
+                }],
+            )?,
+        )?;
         self.edit_toc(folder, &[onestore::TocEdit::Remove { identity }])?;
         self.refresh().map(drop)
     }
@@ -419,7 +609,7 @@ impl Notebook {
                 .map(|section| (section.path.clone(), None)));
         };
         for section in sections {
-            let bytes = onestore::read_file(self.root.join(&section.path))?;
+            let bytes = self.storage.read(&section.path)?;
             let store = Store::parse(&bytes)?;
             let index = RevisionIndex::parse(&store)?;
             let document = Document::parse(&index)?;
@@ -436,11 +626,8 @@ impl Notebook {
     /// written, and the decoded buffers go when the pages have been built.
     #[cfg(feature = "protected")]
     pub fn unlock(&self, path: &str, password: &str) -> Result<Vec<(ExGuid, Page)>> {
-        let file = self.root.join(path).canonicalize()?;
-        if !file.starts_with(&self.root) {
-            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
-        }
-        let bytes = onestore::read_file(&file)?;
+        let path = self.section_path(path)?.path.clone();
+        let bytes = self.storage.read(&path)?;
         let store = Store::parse(&bytes)?;
         let index = RevisionIndex::parse(&store)?;
         let unlocked = onestore::protected::UnlockedSection::open(
@@ -456,20 +643,22 @@ impl Notebook {
             .collect()
     }
 
-    /// Opens a section by its catalog path.
+    /// Opens a section of a mounted notebook by its catalog path.
     pub fn section(&self, path: &str, notify: impl Fn() + Send + 'static) -> Result<Section> {
-        let mut folders = vec![&self.catalog];
-        while let Some(folder) = folders.pop() {
-            if folder.sections.iter().any(|section| section.path == path) {
-                let file = self.root.join(path).canonicalize()?;
-                if !file.starts_with(&self.root) {
-                    return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
-                }
-                return Section::open(file, &self.cache, notify);
-            }
-            folders.extend(&folder.groups);
+        let path = self.section_path(path)?.path.clone();
+        let Some(root) = &self.root else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Sections on a share open through Section::resume_smb",
+            )
+            .into());
+        };
+        // A section replaced by a link out of the notebook is not the catalog's section.
+        let file = root.join(path).canonicalize()?;
+        if !file.starts_with(root) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
         }
-        Err(io::Error::from(io::ErrorKind::NotFound).into())
+        Section::open(file, &self.cache, notify)
     }
 }
 

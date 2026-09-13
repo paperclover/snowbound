@@ -27,7 +27,7 @@ mod write;
 
 pub use commit::{
     CommitError, CommitIo, CommitState, PreparedEdit, commit_property_bytes, commit_text,
-    confirm_snapshot,
+    confirm_snapshot, place,
 };
 #[cfg(any(unix, windows))]
 pub use commit::{

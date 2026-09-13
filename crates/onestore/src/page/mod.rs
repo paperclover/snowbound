@@ -421,6 +421,33 @@ impl Page {
         let mut copy: Self =
             serde_json::from_value(value).map_err(|_| invalid("Page copy does not deserialize"))?;
         copy.identity = Some(crate::write::fresh_guid()?);
+        // A paragraph's indent level follows its parent chain; a level beyond that comes
+        // from an outline group, which the model does not hold.
+        fn levels(paragraphs: &[PageParagraph]) -> bool {
+            let by_id: BTreeMap<ExGuid, u32> = paragraphs.iter().map(|p| (p.id, p.level)).collect();
+            paragraphs.iter().all(|paragraph| {
+                let expected = match paragraph.parent {
+                    Some(parent) => by_id.get(&parent).map_or(0, |level| level + 1),
+                    None => 1,
+                };
+                paragraph.level == expected
+                    && match &paragraph.content {
+                        ParagraphContent::Table(table) => table
+                            .rows
+                            .iter()
+                            .flat_map(|row| &row.cells)
+                            .all(|cell| levels(&cell.paragraphs)),
+                        _ => true,
+                    }
+            })
+        }
+        let expressible = copy.objects.iter().all(|object| match object {
+            PageObject::Outline(outline) => levels(&outline.paragraphs),
+            _ => true,
+        });
+        if !expressible {
+            return Err(invalid("Outline groups cannot be copied"));
+        }
         Ok(copy)
     }
 

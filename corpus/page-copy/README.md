@@ -6,7 +6,10 @@
 `Section::import_page` copied one page from each of eight earlier rows (text
 with an attachment and its icon, a table, an inserted picture, a page-level
 ink drawing, note tags, bullets and numbering, equations, paragraph
-formatting), each as a page creation and a save queued through the replica
+formatting) and the `table-edit/nested` pages whose indent levels the model
+can express (nested tables, cell subtrees, mixed languages; four outdent
+pages need outline groups and refuse), each as a page creation and a save
+queued through the replica
 and published to the file; the last copy (paragraph formatting) was then deleted permanently
 through `Section::delete_pages` (`expected-count.txt` is the page count
 left). Every object carries a fresh identity (`Page::copy`), paragraph

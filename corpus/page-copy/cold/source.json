@@ -2,19 +2,19 @@
   {
     "path": "Open Notebook.onetoc2",
     "bytes": 1604,
-    "sha256": "bf856a7700054971543fb890257cba327dfd35ef6e5438a41483490c4e06407b",
-    "mtime_ns": 1789284797191547350
+    "sha256": "acb0747c250f7bebed1e90b18d5dbbf8c32731f9287571b1e732681921fd323a",
+    "mtime_ns": 1789287183577857848
   },
   {
     "path": "copies.one",
-    "bytes": 91008,
-    "sha256": "8f6c9b66379c4bf6730e281d8363737d88fbe1c521a62fd4d054f735b0505cc7",
-    "mtime_ns": 1789284797187906252
+    "bytes": 185400,
+    "sha256": "dcd7c226d86477adc1ad2f8da8a408ffa2b993b372517ab8d464e5746a971aac",
+    "mtime_ns": 1789287183575141938
   },
   {
     "path": "expected-count.txt",
-    "bytes": 1,
-    "sha256": "19581e27de7ced00ff1ce50b2047e7a567c76b1cbaebabe5ef03f7c3017bb5b7",
-    "mtime_ns": 1789284797191633183
+    "bytes": 2,
+    "sha256": "4523540f1504cd17100c4835e85b7eefd49911580f8efff0599a8f283be6b9e3",
+    "mtime_ns": 1789287183577930514
   }
 ]

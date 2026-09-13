@@ -355,6 +355,7 @@ pub(crate) fn write_page(
         page: *page,
         author,
         alias: BTreeMap::new(),
+        built: BTreeSet::new(),
     };
     lowering.run(&before, after, &raw.objects.keys().copied().collect())?;
     if lowering.image == source {
@@ -457,6 +458,8 @@ struct Lowering<'a> {
     author: &'a str,
     /// Model identities of new objects mapped to the identities the typed writers allocated.
     alias: BTreeMap<ExGuid, ExGuid>,
+    /// Tables whose structure this run has written.
+    built: BTreeSet<ExGuid>,
 }
 
 impl Lowering<'_> {
@@ -900,20 +903,48 @@ impl Lowering<'_> {
                 collect_containers(&outline.paragraphs, &mut containers);
             }
         }
-        // Cells that do not exist yet receive their paragraphs once the table structure does.
+        // Cells that do not exist yet, and containers inside them, receive their
+        // paragraphs once the table structure does.
+        let new_cell = |id: &ExGuid| {
+            !(old.children.contains_key(id)
+                || new.paragraphs.contains_key(id)
+                || new.outlines.contains_key(id))
+        };
         let (existing, deferred): (Vec<ExGuid>, Vec<ExGuid>) =
             containers.into_iter().partition(|container| {
-                old.children.contains_key(container)
-                    || new.paragraphs.contains_key(container)
-                    || new.outlines.contains_key(container)
+                let mut at = *container;
+                loop {
+                    if new_cell(&at) {
+                        return false;
+                    }
+                    match new.container.get(&at) {
+                        Some(parent) => at = *parent,
+                        None => return true,
+                    }
+                }
             });
         self.place_containers(old, new, placed, &existing)?;
-        self.edit_table_structure(old, new)?;
+        // Each round builds the tables whose holders exist and fills their cells, which
+        // may hold further new tables.
+        let mut pending = deferred;
+        loop {
+            self.edit_table_structure(old, new)?;
+            if pending.is_empty() {
+                break;
+            }
+            let (ready, waiting): (Vec<ExGuid>, Vec<ExGuid>) = pending
+                .into_iter()
+                .partition(|container| self.alias.contains_key(container));
+            if ready.is_empty() {
+                return Err(invalid("Table content has no table to hold it"));
+            }
+            self.place_containers(old, new, placed, &ready)?;
+            pending = waiting;
+        }
         self.edit_cells(old, new)?;
         self.edit_images(old, new)?;
         self.edit_ink_paragraphs(old, new)?;
         self.edit_attachments(old, new)?;
-        self.place_containers(old, new, placed, &deferred)?;
         Ok(())
     }
 
@@ -1577,6 +1608,13 @@ impl Lowering<'_> {
                 continue;
             };
             let previous = old_tables.get(&table.id).copied();
+            // A table is built once its holder is placed, and only once.
+            if !(old.paragraphs.contains_key(paragraph_id) || self.alias.contains_key(paragraph_id))
+                || self.built.contains(&table.id)
+            {
+                continue;
+            }
+            self.built.insert(table.id);
             let unchanged = previous.is_some_and(|previous| {
                 previous.columns == table.columns
                     && previous.borders == table.borders
@@ -2450,6 +2488,9 @@ impl Lowering<'_> {
             spacing!(space_before, 0x1400342e);
             spacing!(space_after, 0x1400342f);
             spacing!(line_spacing, 0x14003430);
+            field!(language, value, {
+                (0x14001c3b, value.to_le_bytes().to_vec())
+            });
             if values.is_empty() {
                 continue;
             }
@@ -2827,6 +2868,13 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
             None => return Err(inherited()),
         }
     }
+    if current.language != target.language {
+        match target.language {
+            Some(language) => out.push(TextAttribute::Language(language)),
+            None if fresh => {}
+            None => return Err(inherited()),
+        }
+    }
     // An absent value and its stored default are the same formatting.
     let flag = |a: Option<bool>, b: Option<bool>| a.unwrap_or(false) == b.unwrap_or(false);
     let points = |a: Option<f32>, b: Option<f32>| a.unwrap_or(0.0) == b.unwrap_or(0.0);
@@ -2840,7 +2888,7 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
         && points(current.list_spacing, target.list_spacing);
     if !same_rest {
         return Err(invalid(
-            "Fields, language and paragraph spacing cannot be edited through the page model",
+            "Fields and paragraph spacing cannot be edited through the page model",
         ));
     }
     Ok(out)
