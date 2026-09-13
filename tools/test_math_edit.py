@@ -23,6 +23,7 @@ class MathEditTest(unittest.TestCase):
     def test_equation_editor_expressions_export_as_mathml(self):
         self.assertEqual(len(exported_mathml(FIXTURE / 'native-editor/read/page-000.xml')), 5)
         self.assertEqual(len(exported_mathml(FIXTURE / 'native-editor-2/read/page-000.xml')), 9)
+        self.assertEqual(len(exported_mathml(FIXTURE / 'native-editor-3/read/page-000.xml')), 10)
 
     def test_rust_written_equations_export_the_expected_mathml(self):
         with TemporaryDirectory() as temporary:

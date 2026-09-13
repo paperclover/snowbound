@@ -1770,6 +1770,9 @@ impl Lowering<'_> {
                         if let Some(count) = object.arguments {
                             set.push((0x14003450, count.to_le_bytes().to_vec()));
                         }
+                        if let Some(columns) = object.columns {
+                            set.push((0x0c003451, vec![columns]));
+                        }
                         for (id, symbol) in [0x10003453, 0x10003454, 0x10003455]
                             .into_iter()
                             .zip(&object.symbols)

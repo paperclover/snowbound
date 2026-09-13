@@ -1,9 +1,9 @@
 //! Equations as OneNote stores them: a linear text where U+FDD0 opens an inline object,
 //! U+FDEE separates its arguments and U+FDEF closes it, with the object's kind on the run
 //! data of the opening character. `Math::parse` builds the tree and `mathml` renders it the
-//! way OneNote's own export does for the kinds native fixtures have verified (superscript,
-//! subscript, both, fraction, brackets, n-ary operators with limits); radicals, under/over
-//! limits and the rest follow the text object model's meaning without a native check.
+//! way OneNote's own export does, verified against native fixtures for every kind the
+//! equation editor produced: scripts, fractions, fences, n-ary operators with any limits,
+//! radicals, limit objects, accents, overbars, boxes, matrices and equation arrays.
 
 use super::text::Paragraph;
 use crate::document::MathObject;
@@ -18,6 +18,9 @@ pub enum Math {
     Object {
         kind: u32,
         symbols: Vec<char>,
+        /// Column count of a matrix (arguments are its cells, row by row) or an equation
+        /// array (arguments are its rows).
+        columns: Option<u8>,
         arguments: Vec<Vec<Math>>,
     },
 }
@@ -48,6 +51,7 @@ impl Math {
         struct Frame {
             kind: u32,
             symbols: Vec<char>,
+            columns: Option<u8>,
             arguments: Vec<Vec<Math>>,
         }
         let mut frames: Vec<Frame> = Vec::new();
@@ -83,6 +87,7 @@ impl Math {
                     frames.push(Frame {
                         kind: object.kind,
                         symbols: object.symbols.clone(),
+                        columns: object.columns,
                         arguments: Vec::new(),
                     });
                     sequences.push(Vec::new());
@@ -105,6 +110,7 @@ impl Math {
                     sequences.last_mut().unwrap().push(Math::Object {
                         kind: frame.kind,
                         symbols: frame.symbols,
+                        columns: frame.columns,
                         arguments: frame.arguments,
                     });
                 }
@@ -147,6 +153,7 @@ impl Math {
             Math::Object {
                 kind,
                 symbols,
+                columns,
                 arguments,
             } => {
                 // A lone letter, number or operator stands bare; anything else is a row.
@@ -176,6 +183,44 @@ impl Math {
                     out.push_str(&format!("</mml:{element}>"));
                 };
                 match (kind, arguments.len()) {
+                    (11, 1) => wrapped(out, "mpadded", &[0]),
+                    (12, 1) => {
+                        out.push_str("<mml:menclose notation=\"box\">");
+                        argument(out, 0);
+                        out.push_str("</mml:menclose>");
+                    }
+                    // Matrix cells row by row; an equation array's rows carry `&` alignment
+                    // marks, exported as an alignment group at the row start and a mark at each.
+                    (20, _) | (15, _) => {
+                        let width = if *kind == 20 {
+                            usize::from(columns.unwrap_or(1).max(1))
+                        } else {
+                            1
+                        };
+                        out.push_str("<mml:mtable>");
+                        for (r, row) in arguments.chunks(width).enumerate() {
+                            out.push_str("<mml:mtr>");
+                            for (c, cell) in row.iter().enumerate() {
+                                out.push_str("<mml:mtd>");
+                                if *kind == 15 {
+                                    out.push_str("<mml:maligngroup/>");
+                                    for node in cell {
+                                        match node {
+                                            Math::Operator('&') => {
+                                                out.push_str("<mml:malignmark/>")
+                                            }
+                                            node => node.write(out),
+                                        }
+                                    }
+                                } else {
+                                    argument(out, r * width + c);
+                                }
+                                out.push_str("</mml:mtd>");
+                            }
+                            out.push_str("</mml:mtr>");
+                        }
+                        out.push_str("</mml:mtable>");
+                    }
                     (31, 2) => wrapped(out, "msup", &[0, 1]),
                     (29, 2) => wrapped(out, "msub", &[0, 1]),
                     (30, 3) => wrapped(out, "msubsup", &[0, 1, 2]),
@@ -220,19 +265,29 @@ impl Math {
                         out.push_str("</mml:mover>");
                     }
                     // Lower limit, upper limit, body; integrals take their limits as scripts,
-                    // other operators above and below.
+                    // other operators above and below, and an empty limit leaves its side out.
                     (21, 3) => {
                         let operator = symbols.first().copied().unwrap_or('∑');
-                        let element = if ('\u{222b}'..='\u{2233}').contains(&operator) {
-                            "msubsup"
-                        } else {
-                            "munderover"
+                        let scripts = ('\u{222b}'..='\u{2233}').contains(&operator);
+                        let (lower, upper) = (!arguments[0].is_empty(), !arguments[1].is_empty());
+                        let element = match (lower, upper, scripts) {
+                            (true, true, true) => "msubsup",
+                            (true, true, false) => "munderover",
+                            (true, false, true) => "msub",
+                            (true, false, false) => "munder",
+                            (false, true, true) => "msup",
+                            (false, true, false) => "mover",
+                            (false, false, _) => "mrow",
                         };
                         out.push_str(&format!(
                             "<mml:{element}><mml:mo stretchy=\"false\">{operator}</mml:mo>"
                         ));
-                        argument(out, 0);
-                        argument(out, 1);
+                        if lower {
+                            argument(out, 0);
+                        }
+                        if upper {
+                            argument(out, 1);
+                        }
                         out.push_str(&format!("</mml:{element}>"));
                         out.push_str("<mml:mrow>");
                         for node in &arguments[2] {
@@ -320,6 +375,7 @@ impl Math {
             format.math_object = Some(object.unwrap_or(MathObject {
                 kind: PLAIN_RUN,
                 arguments: None,
+                columns: None,
                 symbols: Vec::new(),
             }));
             (text, format)
@@ -341,6 +397,7 @@ fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) 
             Math::Object {
                 kind,
                 symbols,
+                columns,
                 arguments,
             } => {
                 if !leaf.is_empty() {
@@ -351,6 +408,7 @@ fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) 
                     Some(MathObject {
                         kind: *kind,
                         arguments: Some(arguments.len() as u32),
+                        columns: *columns,
                         symbols: symbols.clone(),
                     }),
                 ));
@@ -365,6 +423,7 @@ fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) 
                     let object = MathObject {
                         kind: *kind,
                         arguments: (index > 0).then_some(index as u32),
+                        columns: None,
                         symbols: Vec::new(),
                     };
                     let extended = runs.len() > before;

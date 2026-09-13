@@ -18,6 +18,12 @@ const EDITOR_2: &[u8] =
     include_bytes!("../../../corpus/math-edit/native-editor-2/notebook/links.one");
 const EDITOR_2_READ: &str =
     include_str!("../../../corpus/math-edit/native-editor-2/read/page-000.xml");
+/// A third session: a matrix, an equation array, upper and lower limit objects, boxes, a
+/// nested fraction and a sum with only an upper limit.
+const EDITOR_3: &[u8] =
+    include_bytes!("../../../corpus/math-edit/native-editor-3/notebook/links.one");
+const EDITOR_3_READ: &str =
+    include_str!("../../../corpus/math-edit/native-editor-3/read/page-000.xml");
 
 fn native_mathml(read: &str) -> Vec<String> {
     read.split("<mml:math")
@@ -101,12 +107,17 @@ fn equation_editor_expressions_render_to_the_mathml_onenote_exports() {
         rendered_equations(EDITOR_2, "Read about Rust the Rust site"),
         native_mathml(EDITOR_2_READ)
     );
+    assert_eq!(
+        rendered_equations(EDITOR_3, "Read about Rust the Rust site"),
+        native_mathml(EDITOR_3_READ)
+    );
 }
 
 fn object(kind: u32, symbols: &str, arguments: Vec<Vec<Math>>) -> Math {
     Math::Object {
         kind,
         symbols: symbols.chars().collect(),
+        columns: None,
         arguments,
     }
 }

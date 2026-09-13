@@ -136,6 +136,8 @@ format_fields! {
 pub struct MathObject {
     pub kind: u32,
     pub arguments: Option<u32>,
+    /// Column count of a matrix or equation array.
+    pub columns: Option<u8>,
     pub symbols: Vec<char>,
 }
 
@@ -232,6 +234,7 @@ impl Revision<'_> {
                                 })
                             })
                             .transpose()?,
+                        columns: scalar(0x0c003451).and_then(|b| b.first().copied()),
                         symbols: [0x10003453, 0x10003454, 0x10003455]
                             .into_iter()
                             .filter_map(scalar)

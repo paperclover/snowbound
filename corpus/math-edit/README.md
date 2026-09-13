@@ -25,6 +25,16 @@ degree second), a lower limit (19: `munder`, with the upright `lim` as one
 overbar (23: `mover accent="false"` with a stretchy bar) and an accent (10:
 `mover accent="true"` with the combining circumflex exported as `^`).
 
+`native-editor-3/` is a third session: `\matrix(1&2@3&4)` (exported inline,
+its trailing `(\matrix(a&b@c&d))` staying literal text), `\eqarray(x&=1@y&=2)`,
+`x\above 2`, `x\below 2`, `\box(x)`, `\rect(x)`, `\underline(x)` (a literal
+`▱` before fences), `\iint x dx dy` (a bare operator), `f(x)/(x^2+1)` and
+`\sum^n x`. Its MathML adds matrices (20: `mtable` of cells row by row, the
+column count on the opening run's `0x0c003451`), equation arrays (15: rows
+with `maligngroup` and a `malignmark` for each `&`), an upper limit (33:
+`mover`), boxes (11: `mpadded`; 12: `menclose notation="box"`) and an n-ary
+operator with one empty limit (`mover`, or `msup` for integrals).
+
 `written/candidate` is the page writer's output for
 `equations_are_written_and_read_back`: on a fresh section, every native
 equation of both fixtures copied as a new paragraph, then two expressions
