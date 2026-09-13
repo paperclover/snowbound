@@ -7,7 +7,16 @@ use crate::{
     document::{Kind, Layout, Revision},
 };
 
-const HIMETRIC_PER_POINT: f32 = 2540.0 / 72.0;
+/// Points from a HIMETRIC coordinate, the one conversion every stroke coordinate goes through.
+fn points(himetric: i64, scale: f32) -> f32 {
+    himetric as f32 * scale * 72.0 / 2540.0
+}
+
+/// Rounds a page point to the HIMETRIC grid OneNote stores, so a stroke written from it reads
+/// back equal.
+pub fn snap(value: f32) -> f32 {
+    points((value * 2540.0 / 72.0).round() as i64, 1.0)
+}
 const DIMENSION_X: [u8; 16] = [
     0x8f, 0x6a, 0x8a, 0x59, 0xc0, 0x52, 0xa0, 0x4b, 0x93, 0xaf, 0xaf, 0x35, 0x74, 0x11, 0xa5, 0x61,
 ];
@@ -165,7 +174,7 @@ impl InkStroke {
                 .iter()
                 .map(move |delta| {
                     position += delta;
-                    position as f32 * factor / HIMETRIC_PER_POINT
+                    points(position, factor)
                 })
         };
         let points = coordinates(x, scale[0])
@@ -175,8 +184,8 @@ impl InkStroke {
         Ok(Self {
             id,
             points,
-            width: width.unwrap_or(0.0) / HIMETRIC_PER_POINT,
-            height: height.unwrap_or(0.0) / HIMETRIC_PER_POINT,
+            width: width.unwrap_or(0.0) * 72.0 / 2540.0,
+            height: height.unwrap_or(0.0) * 72.0 / 2540.0,
             color: *color,
             transparency: *transparency,
             pen_tip: *pen_tip,
@@ -212,4 +221,70 @@ fn multi_byte(bytes: &[u8]) -> Option<Vec<i64>> {
         values.push(if raw & 1 == 1 { -magnitude } else { magnitude });
     }
     (cursor == bytes.len()).then_some(values)
+}
+
+impl InkStroke {
+    /// The stroke packet OneNote stores: X then Y as ISF multi-byte first differences of the
+    /// points rounded to HIMETRIC.
+    pub(crate) fn packet(&self) -> Vec<u8> {
+        let axis = |index: usize| {
+            let mut previous = 0i64;
+            self.points.iter().map(move |point| {
+                let value = (point[index] * 2540.0 / 72.0).round() as i64;
+                let delta = value - previous;
+                previous = value;
+                delta
+            })
+        };
+        let values: Vec<i64> = axis(0).chain(axis(1)).collect();
+        let mut out = Vec::new();
+        let mut push = |raw: u64| {
+            let mut raw = raw;
+            loop {
+                let byte = (raw & 0x7f) as u8;
+                raw >>= 7;
+                if raw == 0 {
+                    out.push(byte);
+                    break;
+                }
+                out.push(byte | 0x80);
+            }
+        };
+        push((values.len() as u64) << 1);
+        for value in values {
+            push(((value.unsigned_abs()) << 1) | u64::from(value < 0));
+        }
+        out
+    }
+}
+
+/// The dimension table OneNote 2010 writes for mouse ink: X and Y in HIMETRIC with the limits
+/// and resolution of the authoring screen.
+pub(crate) const DIMENSIONS: [u8; 64] = [
+    0x8f, 0x6a, 0x8a, 0x59, 0xc0, 0x52, 0xa0, 0x4b, 0x93, 0xaf, 0xaf, 0x35, 0x74, 0x11, 0xa5, 0x61,
+    0x00, 0x00, 0x00, 0x00, 0x80, 0x07, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x21, 0xe2, 0xe2, 0x41,
+    0x75, 0x9f, 0x3f, 0xb5, 0xe0, 0x04, 0x98, 0x44, 0xa7, 0xee, 0xc3, 0x0d, 0xbb, 0x5a, 0x90, 0x11,
+    0x00, 0x00, 0x00, 0x00, 0x38, 0x04, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x8b, 0xc5, 0xe2, 0x41,
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packets_round_trip_through_the_multi_byte_coding() {
+        let stroke = InkStroke {
+            id: ExGuid::default(),
+            points: vec![[100.0, 50.0], [100.5, 49.0], [99.0, 49.0]],
+            width: 1.0,
+            height: 1.0,
+            color: None,
+            transparency: None,
+            pen_tip: None,
+        };
+        let values = multi_byte(&stroke.packet()).unwrap();
+        assert_eq!(values.len(), 6);
+        assert_eq!(&values[..3], &[3528, 17, -52]);
+        assert_eq!(&values[3..], &[1764, -35, 0]);
+    }
 }

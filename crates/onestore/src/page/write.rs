@@ -1,7 +1,7 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
 //! the typed writers, then squashing their transactions into one revision per space.
 
-use super::{Image, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
+use super::{Image, Ink, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
@@ -33,6 +33,155 @@ fn page_images(page: &Page) -> impl Iterator<Item = (ExGuid, &Image)> {
         PageObject::Image(image) => Some((image.id, image)),
         _ => None,
     })
+}
+
+fn page_ink(page: &Page) -> impl Iterator<Item = (ExGuid, &Ink)> {
+    page.objects.iter().filter_map(|object| match object {
+        PageObject::Ink(ink) => Some((ink.id, ink)),
+        _ => None,
+    })
+}
+
+/// The compact child references a page object holds.
+fn page_children(object: &PropertyObject) -> Result<Vec<u8>, Error> {
+    let properties = crate::PropertySets::parse(&object.bytes)?;
+    match properties.sets[0]
+        .iter()
+        .find(|p| p.id == 0x24001c20)
+        .map(|p| &p.value)
+    {
+        Some(crate::Value::References { compact_ids, .. }) => Ok(compact_ids.to_vec()),
+        None => Ok(Vec::new()),
+        _ => Err(invalid("The page has an invalid child list")),
+    }
+}
+
+/// Creates stroke objects (numbered from `first`) and one drawing-attribute object per
+/// distinct pen; returns the compact references for the data node's stroke list.
+fn write_strokes(
+    changed: &mut BTreeMap<ExGuid, PropertyObject>,
+    data_object: &mut PropertyObject,
+    strokes: &[(ExGuid, &super::InkStroke)],
+    first: usize,
+    filetime: u64,
+) -> Result<Vec<u8>, Error> {
+    let mut styles: Vec<(InkPen, ExGuid)> = Vec::new();
+    let mut references = Vec::new();
+    for (offset, (stroke_id, stroke)) in strokes.iter().enumerate() {
+        let pen = InkPen::of(stroke);
+        let style = match styles.iter().find(|(known, _)| *known == pen) {
+            Some((_, id)) => *id,
+            None => {
+                let id = ExGuid {
+                    guid: crate::write::fresh_guid()?,
+                    n: 1,
+                };
+                let mut style = PropertyObject {
+                    jcid: 0x120048,
+                    bytes: crate::create::properties(&pen.values())?,
+                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
+                };
+                style.reference(id)?;
+                changed.insert(id, style);
+                styles.push((pen, id));
+                id
+            }
+        };
+        let mut object = PropertyObject {
+            jcid: 0x20047,
+            bytes: crate::create::properties(&stroke_values(
+                stroke,
+                (first + offset) as u32 + 1,
+                filetime,
+            )?)?,
+            global_ids: std::sync::Arc::new(BTreeMap::from([(0, stroke_id.guid)])),
+        };
+        object.reference(*stroke_id)?;
+        let style_reference = object.reference(style)?;
+        object.set(&[(0x20003409, &style_reference)])?;
+        changed.insert(*stroke_id, object);
+        references.extend(data_object.reference(*stroke_id)?);
+    }
+    Ok(references)
+}
+
+/// The drawing attributes OneNote shares between strokes drawn with the same pen.
+#[derive(PartialEq)]
+struct InkPen {
+    width: u32,
+    height: u32,
+    color: Option<u32>,
+    transparency: Option<u8>,
+    pen_tip: Option<u8>,
+}
+
+impl InkPen {
+    fn of(stroke: &super::InkStroke) -> Self {
+        Self {
+            width: (stroke.width * 2540.0 / 72.0).to_bits(),
+            height: (stroke.height * 2540.0 / 72.0).to_bits(),
+            color: stroke.color,
+            transparency: stroke.transparency,
+            pen_tip: stroke.pen_tip,
+        }
+    }
+
+    fn values(&self) -> Values {
+        let mut values: Values = vec![
+            (0x1c00340a, super::ink::DIMENSIONS.to_vec()),
+            (0x1400340c, self.height.to_le_bytes().to_vec()),
+            (0x1400340d, self.width.to_le_bytes().to_vec()),
+        ];
+        if let Some(color) = self.color {
+            values.push((0x1400340f, color.to_le_bytes().to_vec()));
+        }
+        if let Some(transparency) = self.transparency {
+            values.push((0x0c003414, vec![transparency]));
+        }
+        if let Some(tip) = self.pen_tip {
+            values.push((0x0c003412, vec![tip]));
+        }
+        values
+    }
+}
+
+fn stroke_values(stroke: &super::InkStroke, index: u32, filetime: u64) -> Result<Values, Error> {
+    if stroke.points.is_empty() {
+        return Err(invalid("A stroke needs at least one point"));
+    }
+    if stroke
+        .points
+        .iter()
+        .any(|p| !p[0].is_finite() || !p[1].is_finite())
+        || !(stroke.width.is_finite() && stroke.height.is_finite())
+        || stroke.width <= 0.0
+        || stroke.height <= 0.0
+    {
+        return Err(invalid(
+            "Stroke points and pen size must be finite and positive",
+        ));
+    }
+    let left = stroke
+        .points
+        .iter()
+        .map(|p| p[0])
+        .fold(f32::INFINITY, f32::min);
+    let top = stroke
+        .points
+        .iter()
+        .map(|p| p[1])
+        .fold(f32::INFINITY, f32::min);
+    let mut origin = ((left - stroke.width / 2.0) / 36.0).to_le_bytes().to_vec();
+    origin.extend_from_slice(&((top - stroke.height / 2.0) / 36.0).to_le_bytes());
+    Ok(vec![
+        (0x1c00340b, stroke.packet()),
+        (0x14003419, index.to_le_bytes().to_vec()),
+        (0x1000341b, 0x409_u16.to_le_bytes().to_vec()),
+        (0x0c00341c, vec![0]),
+        (0x1c00341a, crate::write::fresh_guid()?.to_vec()),
+        (0x1c00341d, filetime.to_le_bytes().to_vec()),
+        (0x1c00345b, origin),
+    ])
 }
 
 fn picture_fixed_fields(stored: &Image, image: &Image) -> Result<(), Error> {
@@ -366,7 +515,6 @@ impl Lowering<'_> {
                 .iter()
                 .filter_map(|object| match object {
                     PageObject::Unsupported(unsupported) => Some(format!("{unsupported:?}")),
-                    PageObject::Ink(ink) => Some(format!("{ink:?}")),
                     PageObject::Title(title) => Some(format!(
                         "{:?} {:?} {:?} {:?}",
                         title.id,
@@ -374,7 +522,7 @@ impl Lowering<'_> {
                         title.layout,
                         title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()
                     )),
-                    PageObject::Outline(_) | PageObject::Image(_) => None,
+                    PageObject::Outline(_) | PageObject::Image(_) | PageObject::Ink(_) => None,
                 })
                 .collect()
         };
@@ -384,7 +532,7 @@ impl Lowering<'_> {
         after_fixed.sort();
         if before_fixed != after_fixed {
             return Err(invalid(
-                "Titles, ink and unsupported objects cannot be edited through the page model",
+                "Titles and unsupported objects cannot be edited through the page model",
             ));
         }
         for (id, outline) in &new.outlines {
@@ -447,6 +595,11 @@ impl Lowering<'_> {
                     }
                 }
                 (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
+                (ParagraphContent::Ink(a), ParagraphContent::Ink(b)) => {
+                    if a.id != b.id {
+                        return Err(invalid("Ink identity cannot change"));
+                    }
+                }
                 (ParagraphContent::Image(a), ParagraphContent::Image(b)) => {
                     picture_fixed_fields(a, b)?;
                     if (a.layout.x, a.layout.y) != (b.layout.x, b.layout.y) {
@@ -637,6 +790,7 @@ impl Lowering<'_> {
                 .any(|object| matches!(object, PageObject::Title(title) if title.id == id))
         };
         self.edit_page_images(old, new)?;
+        self.edit_page_ink(old, new)?;
         let survivors: Vec<ExGuid> = page_order
             .iter()
             .copied()
@@ -693,6 +847,7 @@ impl Lowering<'_> {
         self.edit_table_structure(old, new)?;
         self.edit_cells(old, new)?;
         self.edit_images(old, new)?;
+        self.edit_ink_paragraphs(old, new)?;
         self.edit_attachments(old, new)?;
         self.place_containers(old, new, placed, &deferred)?;
         Ok(())
@@ -860,6 +1015,179 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// Ink placed on the page: new drawings are appended for the placement pass to order,
+    /// changed ones have their stroke list rewritten, removed ones go in the delete pass.
+    fn edit_page_ink(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        let stored: BTreeMap<ExGuid, &Ink> = page_ink(old.page).collect();
+        for (id, ink) in page_ink(new.page) {
+            match stored.get(&id) {
+                Some(previous) => {
+                    if *previous != ink {
+                        self.edit_ink(previous, ink)?;
+                    }
+                }
+                None => self.insert_ink(ink, None)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn edit_ink_paragraphs(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        for (paragraph_id, paragraph) in &new.paragraphs {
+            let ParagraphContent::Ink(ink) = &paragraph.content else {
+                continue;
+            };
+            match old.paragraphs.get(paragraph_id) {
+                Some(previous) => {
+                    let ParagraphContent::Ink(stored) = &previous.content else {
+                        return Err(invalid("Paragraph content type cannot change"));
+                    };
+                    if stored != ink {
+                        self.edit_ink(stored, ink)?;
+                    }
+                }
+                None => {
+                    let holder = self.id(*paragraph_id);
+                    self.insert_ink(ink, Some(holder))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes new ink the way OneNote 2010 stores a drawing: a container the page lists as a
+    /// child (or a paragraph holds as content), its data node listing stroke objects, each
+    /// stroke's packet and half-inch origin, and one drawing-attribute object per distinct pen.
+    fn insert_ink(&mut self, ink: &Ink, holder: Option<ExGuid>) -> Result<(), Error> {
+        if !ink.groups.is_empty() {
+            return Err(invalid("New ink holds strokes, not nested groups"));
+        }
+        if ink.strokes.is_empty() {
+            return Err(invalid("New ink needs at least one stroke"));
+        }
+        if ink.layout != Default::default() {
+            return Err(invalid("Ink positions come from its strokes"));
+        }
+        let container = self.allocate(ink.id)?;
+        let data = ExGuid {
+            guid: crate::write::fresh_guid()?,
+            n: 1,
+        };
+        let mut strokes = Vec::new();
+        for stroke in &ink.strokes {
+            strokes.push((self.allocate(stroke.id)?, stroke));
+        }
+        let (modified, filetime) = crate::create::current_timestamps()?;
+        let modified = modified.to_le_bytes();
+        let (space, page) = (self.space, self.page);
+        self.apply(|current| {
+            crate::write::write_revision(current, space, |raw| {
+                let mut changed = BTreeMap::new();
+                let mut data_object = PropertyObject {
+                    jcid: 0x2003b,
+                    bytes: crate::create::properties(&[])?,
+                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, data.guid)])),
+                };
+                data_object.reference(data)?;
+                let references =
+                    write_strokes(&mut changed, &mut data_object, &strokes, 0, filetime)?;
+                data_object.set(&[(0x24003416, &references)])?;
+                changed.insert(data, data_object);
+                let mut object = PropertyObject {
+                    jcid: 0x60014,
+                    bytes: crate::create::properties(&[
+                        (0x14001d7a, modified.to_vec()),
+                        (0x14001d4e, 1u32.to_le_bytes().to_vec()),
+                    ])?,
+                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, container.guid)])),
+                };
+                object.reference(container)?;
+                let data_reference = object.reference(data)?;
+                object.set(&[(0x20003415, &data_reference)])?;
+                changed.insert(container, object);
+                match holder {
+                    Some(holder) => {
+                        let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                        let content = object.reference(container)?;
+                        object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                        changed.insert(holder, object);
+                    }
+                    None => {
+                        let mut object = PropertyObject::from_object(&raw.objects[&page])?;
+                        let mut children = page_children(&object)?;
+                        children.extend(object.reference(container)?);
+                        object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
+                        changed.insert(page, object);
+                    }
+                }
+                Ok(changed)
+            })
+        })
+    }
+
+    /// Rewrites a drawing's stroke list: stored strokes stay as they are (OneNote erases whole
+    /// strokes rather than editing them), removed ones leave the list, new ones are created.
+    fn edit_ink(&mut self, stored: &Ink, ink: &Ink) -> Result<(), Error> {
+        if stored.id != ink.id {
+            return Err(invalid("Ink identity cannot change"));
+        }
+        if stored.layout != ink.layout || stored.groups != ink.groups {
+            return Err(invalid("Ink position and groups stay as stored"));
+        }
+        let mut kept = Vec::new();
+        let mut added = Vec::new();
+        for stroke in &ink.strokes {
+            match stored.strokes.iter().find(|s| s.id == stroke.id) {
+                Some(previous) if previous == stroke => kept.push(self.id(stroke.id)),
+                Some(_) => return Err(invalid("A stored stroke keeps its path and pen")),
+                None => added.push((self.allocate(stroke.id)?, stroke)),
+            }
+        }
+        let container = self.id(ink.id);
+        let data = {
+            let store = Store::parse(&self.image)?;
+            let index = RevisionIndex::parse(&store)?;
+            let document = Document::parse(&index)?;
+            let revision = document
+                .spaces
+                .get(&self.space)
+                .and_then(crate::document::Space::active)
+                .ok_or_else(|| invalid("The page space is unavailable"))?;
+            match revision.nodes.get(&container).map(|node| &node.kind) {
+                Some(crate::document::Kind::Ink {
+                    data: Some(data), ..
+                }) => *data,
+                _ => return Err(invalid("Stored ink has no stroke data to rewrite")),
+            }
+        };
+        let (modified, filetime) = crate::create::current_timestamps()?;
+        let modified = modified.to_le_bytes();
+        let space = self.space;
+        self.apply(|current| {
+            crate::write::write_revision(current, space, |raw| {
+                let mut changed = BTreeMap::new();
+                let mut data_object = PropertyObject::from_object(&raw.objects[&data])?;
+                let mut references = Vec::new();
+                for id in &kept {
+                    references.extend(data_object.reference(*id)?);
+                }
+                references.extend(write_strokes(
+                    &mut changed,
+                    &mut data_object,
+                    &added,
+                    kept.len(),
+                    filetime,
+                )?);
+                data_object.set(&[(0x24003416, &references)])?;
+                changed.insert(data, data_object);
+                let mut object = PropertyObject::from_object(&raw.objects[&container])?;
+                object.set(&[(0x14001d7a, &modified)])?;
+                changed.insert(container, object);
+                Ok(changed)
+            })
+        })
+    }
+
     /// Gives a new picture what OneNote stores for an inserted one: the payload embedded
     /// in the section's file-data store, a file-data object declaring it by identity and
     /// extension, and a picture object that a paragraph holds as content or the page
@@ -928,18 +1256,7 @@ impl Lowering<'_> {
                         }
                         None => {
                             let mut object = PropertyObject::from_object(&raw.objects[&page])?;
-                            let properties = crate::PropertySets::parse(&object.bytes)?;
-                            let mut children = match properties.sets[0]
-                                .iter()
-                                .find(|p| p.id == 0x24001c20)
-                                .map(|p| &p.value)
-                            {
-                                Some(crate::Value::References { compact_ids, .. }) => {
-                                    compact_ids.to_vec()
-                                }
-                                None => Vec::new(),
-                                _ => return Err(invalid("The page has an invalid child list")),
-                            };
+                            let mut children = page_children(&object)?;
                             children.extend(object.reference(image_id)?);
                             object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
                             changed.insert(page, object);
@@ -1023,7 +1340,8 @@ impl Lowering<'_> {
                         }
                         ParagraphContent::Table(_)
                         | ParagraphContent::Image(_)
-                        | ParagraphContent::Attachment(_) => ("", None),
+                        | ParagraphContent::Attachment(_)
+                        | ParagraphContent::Ink(_) => ("", None),
                         _ => {
                             return Err(invalid(
                                 "New paragraphs contain plain text without fields or styles",
@@ -1334,8 +1652,14 @@ impl Lowering<'_> {
             let space = self.space;
             self.apply(|image| edit.apply(image, space))?;
         }
-        let kept: BTreeSet<ExGuid> = page_images(new.page).map(|(id, _)| id).collect();
-        for (id, _) in page_images(old.page) {
+        let kept: BTreeSet<ExGuid> = page_images(new.page)
+            .map(|(id, _)| id)
+            .chain(page_ink(new.page).map(|(id, _)| id))
+            .collect();
+        for id in page_images(old.page)
+            .map(|(id, _)| id)
+            .chain(page_ink(old.page).map(|(id, _)| id))
+        {
             if !kept.contains(&id) {
                 let edit = TreeEdit::delete(id, self.author)?;
                 let space = self.space;
