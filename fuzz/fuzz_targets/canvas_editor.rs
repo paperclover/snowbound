@@ -223,11 +223,13 @@ fuzz_target!(|input: &[u8]| {
                     bytes: Some(std::sync::Arc::from(&b"deferred decoding"[..])),
                     background,
                     alt: None,
+                    size: None,
                 }));
             }
             CanvasEditor::from_page(
                 onestore::page::Page {
                     title: String::new(),
+                    identity: None,
                     created: date.map(|date| date.timestamp()),
                     margin_origin: [0.0; 2],
                     definitions: BTreeMap::new(),
