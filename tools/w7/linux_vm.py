@@ -136,7 +136,42 @@ def overlay_path(name):
     return INSTANCES / (name + ".qcow2")
 
 
-def make_seed(path, hostname, public_key, wan_mac, lab_mac):
+DESKTOP_PACKAGES = [
+    "xvfb", "openbox", "xdotool", "xclip", "maim", "x11-utils", "dbus-user-session",
+    "at-spi2-core", "python3-pyatspi", "libatk-adaptor", "mesa-vulkan-drivers",
+    "libgl1-mesa-dri", "libxkbcommon-x11-0", "libxcursor1", "libxi6", "libxrandr2",
+    "fonts-liberation", "fonts-crosextra-carlito", "build-essential", "pkg-config",
+    "rsync", "xterm", "zenity",
+]
+# 1280 wide keeps screenshots under the model's downscale threshold, so image
+# pixels stay click coordinates.
+DESKTOP_UNITS = {
+    "agent-display.service": """[Unit]
+Description=Agent X display
+
+[Service]
+ExecStart=/usr/bin/Xvfb :0 -screen 0 1280x800x24 -nolisten tcp
+
+[Install]
+WantedBy=default.target
+""",
+    "agent-wm.service": """[Unit]
+Description=Agent window manager
+Requires=agent-display.service
+After=agent-display.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'until xdpyinfo >/dev/null 2>&1; do sleep 0.1; done'
+ExecStartPre=/usr/bin/busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status IsEnabled b true
+ExecStart=/usr/bin/openbox
+
+[Install]
+WantedBy=default.target
+""",
+}
+
+
+def make_seed(path, hostname, public_key, wan_mac, lab_mac, desktop=False):
     samba = """[global]
 workgroup = WORKGROUP
 server role = standalone server
@@ -175,7 +210,7 @@ users:
 ssh_pwauth: false
 disable_root: true
 package_update: true
-packages: [samba, dnsmasq, cifs-utils, smbclient, fio]
+packages: [{packages}]
 write_files:
   - path: /etc/samba/smb.conf
     permissions: '0644'
@@ -185,16 +220,35 @@ write_files:
     permissions: '0644'
     encoding: b64
     content: {dnsmasq}
-runcmd:
+{desktop_files}runcmd:
   - [mkdir, -p, /srv/agent]
   - [chown, agent:agent, /srv/agent]
   - [systemctl, enable, --now, dnsmasq]
   - [systemctl, enable, --now, smbd]
-""".format(
+{desktop_commands}""".format(
         hostname=hostname,
         public_key=public_key,
+        packages=", ".join(["samba", "dnsmasq", "cifs-utils", "smbclient", "fio"] +
+                           (DESKTOP_PACKAGES if desktop else [])),
         samba=base64.b64encode(samba.encode()).decode(),
         dnsmasq=base64.b64encode(dnsmasq.encode()).decode(),
+        # /etc/environment reaches SSH sessions; environment.d reaches user units.
+        desktop_files="".join(
+            "  - path: %s\n    append: true\n    encoding: b64\n    content: %s\n"
+            % (path, base64.b64encode(content.encode()).decode())
+            for path, content in [("/etc/systemd/user/" + unit, text)
+                                  for unit, text in DESKTOP_UNITS.items()] +
+            [("/etc/environment", "DISPLAY=:0\n"),
+             ("/etc/environment.d/display.conf", "DISPLAY=:0\n")]
+        ) if desktop else "",
+        # The wait loop's SSH probes start the user manager before these units
+        # and dbus-user-session exist, so it must restart to pick them up.
+        desktop_commands=(
+            "  - [systemctl, --global, enable, %s]\n"
+            "  - [loginctl, enable-linger, agent]\n"
+            "  - [sh, -c, 'systemctl restart user@$(id -u agent).service']\n"
+            % ", ".join(DESKTOP_UNITS)
+        ) if desktop else "",
     )
     network = """version: 2
 ethernets:
@@ -268,7 +322,7 @@ def fetch_base():
 
 
 def create_instance(name, cpus=2, memory_mb=2048, disk_gb=16,
-                    ssh_port=None, samba_port=None):
+                    ssh_port=None, samba_port=None, desktop=False):
     require_vm_home()
     validate_name(name)
     if not BASE.is_file() or not BASE_MANIFEST.is_file():
@@ -304,9 +358,10 @@ def create_instance(name, cpus=2, memory_mb=2048, disk_gb=16,
                             "%dG" % disk_gb], check=True)
             wan = mac("wan:", name)
             lab = mac("lab:", name)
-            make_seed(seed, hostname, public.read_text().strip(), wan, lab)
+            make_seed(seed, hostname, public.read_text().strip(), wan, lab, desktop)
             seed.chmod(0o600)
-            config = {"cpus": cpus, "disk_gb": disk_gb, "hostname": hostname,
+            config = {"cpus": cpus, "desktop": desktop, "disk_gb": disk_gb,
+                      "hostname": hostname,
                       "lab_address": LAB_ADDRESS, "lab_mac": lab,
                       "memory_mb": memory_mb, "samba_port": samba_port,
                       "ssh_port": ssh_port, "wan_mac": wan}
@@ -397,14 +452,14 @@ def wait_instance(name, timeout):
     else:
         raise SystemExit("SSH did not become ready within %d seconds: %s" % (timeout, name))
     remaining = max(1, int(deadline - time.monotonic()))
+    validation = ("sudo cloud-init status --wait && "
+                  "command -v smbd dnsmasq mount.cifs smbclient fio >/dev/null && "
+                  "systemctl is-active --quiet smbd dnsmasq")
+    if load_instance(name).get("desktop"):
+        validation += (" && timeout 60 sh -c 'until systemctl --user is-active --quiet "
+                       "agent-wm; do sleep 0.2; done'")
     try:
-        result = run_ssh(
-            name,
-            "sudo cloud-init status --wait && "
-            "command -v smbd dnsmasq mount.cifs smbclient fio >/dev/null && "
-            "systemctl is-active --quiet smbd dnsmasq",
-            timeout=remaining,
-        )
+        result = run_ssh(name, validation, timeout=remaining)
     except subprocess.TimeoutExpired:
         raise SystemExit("Cloud-init did not finish within %d seconds: %s" % (timeout, name))
     if result.returncode:
@@ -491,6 +546,7 @@ def main():
     up.add_argument("--disk", type=int, default=16, dest="disk_gb")
     up.add_argument("--ssh-port", type=int)
     up.add_argument("--samba-port", type=int)
+    up.add_argument("--desktop", action="store_true")
     up.add_argument("--wait", action="store_true")
     up.add_argument("--timeout", type=int, default=600)
     ssh = commands.add_parser("ssh")
@@ -506,7 +562,7 @@ def main():
     elif args.command == "up":
         if not instance_path(args.name).exists():
             create_instance(args.name, args.cpus, args.memory_mb, args.disk_gb,
-                            args.ssh_port, args.samba_port)
+                            args.ssh_port, args.samba_port, args.desktop)
         if running(args.name):
             print("Linux VM already running: %s" % args.name)
         else:

@@ -1,15 +1,45 @@
 #!/usr/bin/env python3
-"""MCP server for disposable SSH-only Linux Samba VMs."""
+"""MCP server for disposable Linux VMs: Samba appliances and agent-driven desktops."""
 
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+import uuid
+
+import linux_vm
+from mcp_win7 import shot_blocks, text_result
 
 
 ROOT = Path(__file__).resolve().parent
 VM = ROOT / "linux_vm.py"
+GUEST = ROOT / "linux_desktop.py"
 
+
+EXEC_DESCRIPTION = """Run a bash script on a desktop clone's X display (:0, 1280x800,
+openbox). Returns exit code, stdout, stderr, the active window, and a screenshot
+taken shot_delay_ms after the script exits.
+
+Screenshot pixels are screen coordinates. Put a whole sequence of actions in one
+script; one call per click is slow and blind. Input is xdotool:
+
+  xdotool mousemove 640 400 click 1
+  xdotool type --delay 5 'literal text, {braces} and all'
+  xdotool key ctrl+a ctrl+c && xclip -o -selection clipboard
+  xdotool search --sync --name 'Title' windowactivate --sync
+
+Start GUI apps in the background (`app &`) so the script can go on driving them;
+they outlive the script. Use linux_spawn for anything whose output you want to
+read later. Close what you opened when the task is done. A timeout screenshots
+the blocked screen, then kills the script's process group, including apps it
+started."""
+
+UI_DESCRIPTION = """Dump the active application's accessibility (AT-SPI) tree:
+role, name, screen rect x,y,w,h, text value and focus for each showing node.
+GTK 4 reports zero origins, so use its sizes and a screenshot for placement."""
+
+NAME = {"type": "string", "description": "VM name."}
 
 TOOLS = [
     {
@@ -24,8 +54,10 @@ TOOLS = [
         "name": "linux_vm_up",
         "description": (
             "Create a Linux clone when absent, then boot it headlessly. Creation settings "
-            "are ignored for an existing clone. Set wait to return after cloud-init and "
-            "Samba validation. One VM owns the shared lab address 192.168.77.1."
+            "are ignored for an existing clone. Set desktop for an X display driven by "
+            "linux_exec, linux_shot and linux_ui. Set wait to return after cloud-init, "
+            "Samba and (for desktops) display validation. One VM owns the shared lab "
+            "address 192.168.77.1."
         ),
         "inputSchema": {
             "type": "object",
@@ -41,6 +73,7 @@ TOOLS = [
                                         "maximum": 65535},
                            "samba_port": {"type": "integer", "minimum": 1024,
                                           "maximum": 65535},
+                           "desktop": {"type": "boolean", "default": False},
                            "wait": {"type": "boolean", "default": False},
                            "timeout": {"type": "integer", "default": 600,
                                        "minimum": 1, "maximum": 900}},
@@ -50,16 +83,79 @@ TOOLS = [
     {
         "name": "linux_ssh",
         "description": (
-            "Run a shell command over the clone's private SSH key. Use /srv/agent for "
-            "the Samba share exported to Windows as //192.168.77.1/agent."
+            "Run a shell command over the clone's private SSH key. No screenshot. Use "
+            "/srv/agent for the Samba share exported to Windows as //192.168.77.1/agent."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"name": {"type": "string"},
+            "properties": {"name": NAME,
                            "command": {"type": "string"},
                            "timeout": {"type": "integer", "default": 120,
                                        "minimum": 1, "maximum": 900}},
             "required": ["name", "command"],
+        },
+    },
+    {
+        "name": "linux_exec",
+        "description": EXEC_DESCRIPTION,
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": NAME,
+                           "script": {"type": "string", "description": "bash source."},
+                           "shot_delay_ms": {"type": "integer", "default": 500},
+                           "timeout_ms": {"type": "integer", "default": 60000}},
+            "required": ["name", "script"],
+        },
+    },
+    {
+        "name": "linux_shot",
+        "description": "Screenshot a desktop clone without running anything.",
+        "inputSchema": {"type": "object", "properties": {"name": NAME},
+                        "required": ["name"]},
+    },
+    {
+        "name": "linux_ui",
+        "description": UI_DESCRIPTION,
+        "inputSchema": {"type": "object", "properties": {"name": NAME},
+                        "required": ["name"]},
+    },
+    {
+        "name": "linux_spawn",
+        "description": (
+            "Start a long-lived command as a transient systemd user unit on the display "
+            "and return its unit name immediately. Read its output with "
+            "`journalctl --user -u UNIT` and end it with `systemctl --user stop UNIT`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": NAME,
+                           "command": {"type": "string", "description": "bash source."}},
+            "required": ["name", "command"],
+        },
+    },
+    {
+        "name": "linux_put",
+        "description": (
+            "Copy a file from this Mac to a clone. The bytes never pass through the "
+            "conversation, so file size costs nothing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": NAME,
+                           "local": {"type": "string", "description": "Path on the Mac."},
+                           "remote": {"type": "string", "description": "Path on the clone."}},
+            "required": ["name", "local", "remote"],
+        },
+    },
+    {
+        "name": "linux_get",
+        "description": "Copy a file from a clone back to this Mac.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"name": NAME,
+                           "remote": {"type": "string", "description": "Path on the clone."},
+                           "local": {"type": "string", "description": "Path on the Mac."}},
+            "required": ["name", "remote", "local"],
         },
     },
     {
@@ -70,7 +166,7 @@ TOOLS = [
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"name": {"type": "string"},
+            "properties": {"name": NAME,
                            "timeout": {"type": "integer", "default": 60,
                                        "minimum": 1, "maximum": 120},
                            "preserve_machine": {"type": "boolean", "default": False}},
@@ -85,11 +181,30 @@ TOOLS = [
 ]
 
 
+def text(value):
+    return [{"type": "text", "text": value}]
+
+
 def run(argv, timeout=120):
     process = subprocess.run([sys.executable, str(VM)] + argv, capture_output=True,
                              text=True, timeout=timeout)
     output = (process.stdout + process.stderr).strip()
-    return [{"type": "text", "text": output or "ok"}], process.returncode != 0
+    return text(output or "ok"), process.returncode != 0
+
+
+def ssh(name, command, timeout, **streams):
+    try:
+        return subprocess.run(linux_vm.ssh_argv(name, command), timeout=timeout, **streams)
+    except subprocess.TimeoutExpired:
+        raise SystemExit("SSH to %s timed out after %d seconds" % (name, timeout))
+
+
+def guest(name, request, timeout=60):
+    source = GUEST.read_text() + "\nmain(%r)\n" % json.dumps(request)
+    process = ssh(name, "python3 -", timeout, input=source, capture_output=True, text=True)
+    if process.returncode:
+        raise SystemExit(process.stderr.strip() or "guest exited %d" % process.returncode)
+    return json.loads(process.stdout)
 
 
 def call_tool(name, args):
@@ -102,6 +217,8 @@ def call_tool(name, args):
                             ("samba_port", "--samba-port")):
             if args.get(key) is not None:
                 argv += [option, str(args[key])]
+        if args.get("desktop"):
+            argv.append("--desktop")
         timeout = args.get("timeout", 600)
         if args.get("wait"):
             argv += ["--wait", "--timeout", str(timeout)]
@@ -117,7 +234,45 @@ def call_tool(name, args):
         return run(argv, timeout + 15)
     if name == "linux_vm_status":
         return run(["status"] + ([args["name"]] if args.get("name") else []))
-    return [{"type": "text", "text": "unknown tool: %s" % name}], True
+    vm = args["name"]
+    if name == "linux_exec":
+        timeout_ms = args.get("timeout_ms", 60000)
+        resp = guest(vm, {"verb": "exec", "script": args["script"], "timeout_ms": timeout_ms,
+                          "shot_delay_ms": args.get("shot_delay_ms", 500)},
+                     timeout_ms // 1000 + 30)
+        return shot_blocks(resp, text_result(resp) + "\n"), False
+    if name == "linux_shot":
+        return shot_blocks(guest(vm, {"verb": "shot"})), False
+    if name == "linux_ui":
+        resp = guest(vm, {"verb": "ui"})
+        win = resp.get("win") or {}
+        header = 'window: "%s" (%s)\n' % (win.get("title", ""), win.get("class", ""))
+        return text(header + resp["controls"]), False
+    if name == "linux_spawn":
+        unit = "spawn-" + uuid.uuid4().hex[:8]
+        process = ssh(vm, "systemd-run --user --collect --quiet --unit=%s -- bash -c %s"
+                      % (unit, shlex.quote(args["command"])), 30,
+                      capture_output=True, text=True)
+        return text(process.stderr.strip() or "unit=" + unit), process.returncode != 0
+    if name == "linux_put":
+        remote = shlex.quote(args["remote"])
+        with open(args["local"], "rb") as source:
+            process = ssh(vm, 'mkdir -p -- "$(dirname -- %s)" && cat > %s' % (remote, remote),
+                          600, stdin=source, capture_output=True)
+        if process.returncode:
+            return text(process.stderr.decode(errors="replace").strip()), True
+        return text("wrote %d bytes to %s" % (Path(args["local"]).stat().st_size,
+                                               args["remote"])), False
+    if name == "linux_get":
+        local = Path(args["local"])
+        with local.open("wb") as target:
+            process = ssh(vm, "cat -- %s" % shlex.quote(args["remote"]), 600,
+                          stdout=target, stderr=subprocess.PIPE)
+        if process.returncode:
+            local.unlink()
+            return text(process.stderr.decode(errors="replace").strip()), True
+        return text("read %d bytes to %s" % (local.stat().st_size, local.resolve())), False
+    return text("unknown tool: %s" % name), True
 
 
 def handle(method, params):
@@ -129,8 +284,12 @@ def handle(method, params):
     if method == "tools/list":
         return {"tools": TOOLS}
     if method == "tools/call":
-        content, is_error = call_tool(params.get("name"), params.get("arguments") or {})
-        result = {"content": content}
+        try:
+            content, is_error = call_tool(params.get("name"), params.get("arguments") or {})
+        except SystemExit as e:  # linux_vm reports every failure this way
+            content, is_error = text(str(e)), True
+        # Never structuredContent: Codex then drops content[] and its screenshot.
+        result = {"content": content, "_meta": {"codex/imageDetail": "original"}}
         if is_error:
             result["isError"] = True
         return result

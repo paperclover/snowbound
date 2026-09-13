@@ -163,6 +163,25 @@ clients. A local VDE switch joins up to 63 guests without host privileges. The
 `one-linux` MCP exposes fetch, up, SSH, down, and status; its `up` and `down`
 follow the same auto-create, wait-flag, and preserve conventions as Windows.
 
+## Linux desktop VM
+
+`up --desktop` adds an X display for driving GUI apps: Xvfb `:0` at 1280x800
+under openbox, run as lingering systemd user units, with xdotool, xclip, maim,
+AT-SPI and Mesa's software Vulkan (lavapipe) for wgpu. There is no guest agent;
+each MCP call pipes [linux_desktop.py](linux_desktop.py) into `python3 -` over
+SSH.
+
+```sh
+./linux_vm.py up desk --desktop --cpus 8 --memory 8192 --disk 40 --wait
+./linux_vm.py ssh desk -- 'xdotool getmouselocation'
+```
+
+`linux_exec` runs a bash script and returns output plus a screenshot, the
+counterpart of `win7_exec` with xdotool in place of AutoHotkey. `linux_shot`,
+`linux_ui` (AT-SPI tree), `linux_spawn` (transient user unit), `linux_put` and
+`linux_get` mirror the Windows tools. A desktop clone is still a Samba
+appliance, so it shares the one-at-a-time lab address rule.
+
 To restore a base from private object storage, upload the sealed qcow2 beside
 its JSON manifest and pass the manifest URL. A presigned URL needs no secret;
 otherwise set `ONE_VM_AUTHORIZATION` to the complete HTTP Authorization value.
