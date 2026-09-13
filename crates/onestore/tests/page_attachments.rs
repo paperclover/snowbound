@@ -169,7 +169,7 @@ fn an_attachment_inserted_on_a_fresh_page_reads_back_and_can_be_removed() {
 }
 
 #[test]
-fn attachments_need_a_file_name_and_stored_ones_stay_fixed() {
+fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
     let source = onestore::create_section("files.one", "Text", "Author").unwrap();
     let (space, before) = first_page(&source);
     let mut after = before.clone();
@@ -192,12 +192,38 @@ fn attachments_need_a_file_name_and_stored_ones_stay_fixed() {
         if let PageObject::Outline(outline) = object {
             for paragraph in &mut outline.paragraphs {
                 if let ParagraphContent::Attachment(attachment) = &mut paragraph.content {
-                    attachment.filename = "renamed.txt".into();
+                    attachment.filename = "renamed \u{1f980}.txt".into();
+                    attachment.source_path = Some("C:\\inputs\\renamed \u{1f980}.txt".into());
                     found += 1;
                 }
             }
         }
     }
     assert_eq!(found, 1);
-    assert!(PreparedEdit::page(NATIVE, space, &renamed, AUTHOR).is_err());
+    let written = PreparedEdit::page(NATIVE, space, &renamed, AUTHOR).unwrap();
+    let stored = page_in(written.as_bytes(), space);
+    let (before, after) = (attachments(&native)[0], attachments(&stored)[0]);
+    assert_eq!(after.filename, "renamed \u{1f980}.txt");
+    assert_eq!(
+        after.source_path.as_deref(),
+        Some("C:\\inputs\\renamed \u{1f980}.txt")
+    );
+    assert_eq!((after.id, after.size), (before.id, before.size));
+    assert_eq!(after.bytes, before.bytes);
+    assert_eq!(after.preview, before.preview);
+    if let Some(directory) = std::env::var_os("ONESTORE_ATTACHMENT_RENAME_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
+        let file_id = Store::parse(written.as_bytes()).unwrap().header.file_id;
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents(
+                "Open Notebook.onetoc2",
+                &[("synthetic.one", file_id)],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
 }

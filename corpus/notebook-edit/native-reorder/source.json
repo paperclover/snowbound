@@ -1,0 +1,38 @@
+[
+  {
+    "path": "Group/Inner.one",
+    "bytes": 4016,
+    "sha256": "7a482b9feafd8220bc9f8c60aca78b4710d64cdc233d7e4aff2d43214f30d26d",
+    "mtime_ns": 1789276348740792164
+  },
+  {
+    "path": "Group/Open Notebook.onetoc2",
+    "bytes": 3752,
+    "sha256": "5a81be6da6b559291303c74fede90e0d6f7f78b640c3bce9c1365edb0d99d1b4",
+    "mtime_ns": 1789276348740542872
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 4116,
+    "sha256": "bb8943cc70108ff95a393122f53fd06864db347aafe865f2cf4094ff202c3bbc",
+    "mtime_ns": 1789276348741057831
+  },
+  {
+    "path": "Second.one",
+    "bytes": 4016,
+    "sha256": "b1c37af371bb1d7b93950b6b73920d5080178156b7448f3aa30f45472f441ad5",
+    "mtime_ns": 1789276348741246832
+  },
+  {
+    "path": "Third.one",
+    "bytes": 4016,
+    "sha256": "6654509286c8c342844a6b716407cfb3dc1303aa8b9c7a0cfff606cc900aea33",
+    "mtime_ns": 1789276348739887203
+  },
+  {
+    "path": "links.one",
+    "bytes": 6128,
+    "sha256": "85d17a08e48b0fc0c6d49c4389c80c58910ff64ed2ffd464522523256d2db5dc",
+    "mtime_ns": 1789276348740094245
+  }
+]

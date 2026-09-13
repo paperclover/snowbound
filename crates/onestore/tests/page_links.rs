@@ -3,7 +3,7 @@ use onestore::{
     document::Document,
     page::{
         Page, PageObject, PageParagraph, Paragraph,
-        link::{LinkTarget, internal_link},
+        link::{InternalLink, LinkTarget, internal_link, parse_internal_link},
         text::Edit,
     },
 };
@@ -258,6 +258,32 @@ fn internal_links_match_what_onenote_stores() {
         ),
         "onenote:#A%20b%2Fc&section-id={00000000-0000-0000-0000-000000000000}&page-id={00000000-0000-0000-0000-000000000000}&end&base-path=p"
     );
+    let identity = target.identity.unwrap();
+    assert_eq!(
+        stored[1..]
+            .iter()
+            .map(|url| parse_internal_link(url))
+            .collect::<Vec<_>>(),
+        [
+            Some(InternalLink {
+                section,
+                page: Some(identity),
+                object: None
+            }),
+            Some(InternalLink {
+                section,
+                page: Some(identity),
+                object: Some(paragraph)
+            }),
+            Some(InternalLink {
+                section,
+                page: None,
+                object: None
+            }),
+        ]
+    );
+    assert_eq!(parse_internal_link(&stored[0]), None);
+    assert_eq!(parse_internal_link("onenote:#x&page-id={0}"), None);
 }
 
 /// `ONESTORE_INTERNAL_LINK_EXPORT` names a new directory receiving the candidate for a cold

@@ -160,6 +160,17 @@ in one local transaction. The supplied images must still match `snapshot()` and
 so another overlapping remote edit can produce a new conflict. Pending intents
 and uncertain attempts cannot be reviewed.
 
+An attempt that stays `AwaitingConfirmation` is released by review, never by
+replay: `release_attempt(id, local, remote, archive, after)` on the replica
+(`release` on a session) exports the branch to a new archive, then retires
+the oldest edit's attempt. `Some(page)` continues from a page reviewed
+against the current remote image as a fresh intent under the same id,
+keeping later edits; `None` abandons the local branch, whose ids report
+`EditStatus::Archived { archive }` from then on, and the working image
+returns to the remote image. Neither writes a receipt: the uncertain
+publication may or may not have landed, and the archive is the record of
+what was attempted.
+
 Opening recognizes the application identity and the current schema version only;
 caches and archives written by other versions are refused unchanged. Until the
 application is usable end to end there are no migrations.
@@ -295,7 +306,8 @@ Discovery returns ordered sections and nested groups with file identities and
 share-relative paths. Section display-name overrides remain distinct from file
 names. TOC references whose identities are absent from the directory remain
 inspectable; a cached filename never substitutes for an identity match.
-Reserved `_onefiles` directories are excluded from section-group traversal.
+Reserved `_onefiles` directories are excluded from section-group traversal;
+OneNote's `OneNote_RecycleBin` is listed as the section group OneNote shows.
 Encrypted sections and valid storage with an unreadable document graph retain
 their identity as `Locked` or `Unreadable`, without being presented as empty pages.
 Malformed storage, failed reads and ambiguous identities reject the discovery.
@@ -311,6 +323,37 @@ selected section's sibling `_onefiles` folder and returns exact bounded bytes.
 Missing files, permissions and size failures retain their I/O error kinds; an
 empty payload is a successful empty buffer. Embedded payloads remain available
 directly from the core document model.
+
+## Notebook structure
+
+`Notebook::create_section`, `create_group`, `rename`, `set_section_color`,
+`reorder` and `delete` change a notebook the way OneNote does: the table of
+contents (`Open Notebook.onetoc2`, created when a folder has none) gains,
+renames, reorders or loses entries; a section's colour lives in its own
+metadata; a deleted section moves into `OneNote_RecycleBin`, a group with its
+own TOC. Every created, renamed or moved file is placed with
+`onestore::place_file`, which sets the header's ancestor to the parent TOC's
+identity and the name CRC OneNote checks on open; a file without them is
+re-identified and listed anew. These operate on the mounted directory;
+the SMB transport has no create, rename or delete.
+
+`Notebook::find_page(url)` resolves a stored internal link to a section path
+and page space by identity: the linked section first, then every readable
+section, so a link follows its page when the section is renamed or moved and
+when the page itself was moved to another section. Other URLs and unknown
+targets are `None`.
+
+With the optional `protected` feature, `Notebook::unlock(path, password)`
+reads the pages of a `Locked` section for display; nothing is cached or
+written, and a wrong password is `Error::Protected(PasswordMismatch)`.
+
+`Notebook::refresh` rereads the directory on the caller's schedule and reports
+what another client changed as `Change`s keyed by file identity: a renamed or
+moved section is `Moved`, not removed and added, and a deleted section moves
+into `OneNote_RecycleBin`; a folder whose surviving entries changed sequence
+is `Reordered`. A failed read returns the error and keeps
+the previous catalog, so an unreachable share never reads as an emptied
+notebook.
 
 ## SMB (feature `smb`)
 

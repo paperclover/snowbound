@@ -43,6 +43,7 @@ harness also accepts `--client-profile release`.
 | `Object::file_reference`, `Store::file_data` | Identify internal/external payloads and read internal payload bytes |
 | `document::Document`, `Revision::text_runs` | Interpret document objects and inherited text formatting while retaining unknown properties and revision identities |
 | `Document::active`, `Document::pages_in`, `Revision::parents`, `RevisionIndex::active` | Resolve the active revision, the pages of a space and parent links without repeating the lookups |
+| `page::link::internal_link`, `page::link::parse_internal_link` | Build and read the `onenote:#…` URLs OneNote stores for links to sections, pages and paragraphs, by identity |
 | `page::Page`, `page::Paragraph`, `page::Ink`, `page::Math` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments, ink drawings and handwriting decoded to stroke polylines in page points) with stored identities; equations parse from their linear text and run data into a tree that renders the MathML OneNote exports; content outside the model is retained as `Unsupported` |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
@@ -50,6 +51,8 @@ harness also accepts `--client-profile release`.
 | `PageEdit`, `PreparedEdit::pages` | Publish explicitly selected page moves and indentation changes together, preserving page content and historical revisions |
 | `PreparedEdit::delete_pages_permanently` | Remove explicit pages and their section references atomically while retaining stored revisions |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
+| `TocEdit`, `PreparedEdit::table_of_contents` | Add, rename, colour, order and remove a table of contents' section and group entries as one revision |
+| `place_file` | Name a file for its notebook as OneNote does on adoption (parent TOC identity and name CRC in the header), so OneNote keeps its identity |
 | `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
 | `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
 | `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |
@@ -57,7 +60,7 @@ harness also accepts `--client-profile release`.
 | `ParagraphJoin`, `PreparedEdit::join` | Join adjacent ordinary text while preserving inherited character styles and native text-identity rules |
 | `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `OutlineEdit`, `PreparedEdit::outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
-| `PreparedEdit::page` | Publish an edited `page::Page` as one revision per changed space: text, character and paragraph formatting, hyperlinks (external and, via `page::link`, to pages, paragraphs and sections), bullets and numbering, note tags, table rows, columns, cell shading and indents, nested tables, inserted pictures (in paragraphs or on the page) and attachments, picture position, size and description, ink drawings and handwriting (strokes added and erased), equations (built from `page::Math` trees), paragraph insertion/split/join/move/deletion, outline insertion/deletion/position/width and saved collapse state, lowered onto the typed writers with the model's identities |
+| `PreparedEdit::page` | Publish an edited `page::Page` as one revision per changed space: text, character and paragraph formatting, hyperlinks (external and, via `page::link`, to pages, paragraphs and sections), bullets and numbering, note tags, table rows, columns, cell shading and indents, nested tables, inserted pictures (in paragraphs or on the page) and attachments, picture position, size and description, a stored attachment's shown name, source path and icon size, ink drawings and handwriting (strokes added and erased), equations (built from `page::Math` trees), paragraph insertion/split/join/move/deletion, outline insertion/deletion/position/width and saved collapse state, lowered onto the typed writers with the model's identities |
 | `TreeEdit`, `PreparedEdit::tree` | Move or delete a subtree on one page, normalize surviving containers, and replace an emptied table cell's paragraph atomically |
 | `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
 | `read_file` | Read a snapshot under whole-file exclusion |

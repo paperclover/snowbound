@@ -1,7 +1,9 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
 //! the typed writers, then squashing their transactions into one revision per space.
 
-use super::{Image, Ink, Math, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
+use super::{
+    Attachment, Image, Ink, Math, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table,
+};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
@@ -650,8 +652,8 @@ impl Lowering<'_> {
                     }
                 }
                 (ParagraphContent::Attachment(a), ParagraphContent::Attachment(b)) => {
-                    if a != b {
-                        return Err(invalid("A stored attachment cannot be edited"));
+                    if a.id != b.id {
+                        return Err(invalid("Attachment identity cannot change"));
                     }
                 }
                 _ => return Err(invalid("Paragraph content type cannot change")),
@@ -904,21 +906,24 @@ impl Lowering<'_> {
             let ParagraphContent::Attachment(attachment) = &paragraph.content else {
                 continue;
             };
-            if let Some(previous) = old.paragraphs.get(paragraph_id) {
-                if previous.content != paragraph.content {
-                    return Err(invalid("A stored attachment cannot be edited"));
-                }
-                continue;
-            }
-            let Some(bytes) = &attachment.bytes else {
-                return Err(invalid("A new attachment needs its payload"));
-            };
             let name = attachment.filename.as_str();
             if name.is_empty() || name.contains(['\0', '/', '\\']) {
                 return Err(invalid(
                     "An attachment needs a file name without path separators",
                 ));
             }
+            if let Some(previous) = old.paragraphs.get(paragraph_id) {
+                let ParagraphContent::Attachment(stored) = &previous.content else {
+                    return Err(invalid("Paragraph content type cannot change"));
+                };
+                if stored != attachment {
+                    self.edit_attachment(stored, attachment)?;
+                }
+                continue;
+            }
+            let Some(bytes) = &attachment.bytes else {
+                return Err(invalid("A new attachment needs its payload"));
+            };
             let extension = name
                 .rfind('.')
                 .filter(|dot| *dot > 0)
@@ -1314,6 +1319,59 @@ impl Lowering<'_> {
     /// Writes a moved, resized or described picture the way OneNote stores one: the
     /// position, the layout width and height with the user flag and the description on
     /// the picture object, leaving the intrinsic size alone.
+    /// A stored attachment keeps its payload and preview; its shown name, recorded source
+    /// path and icon size change in place, as OneNote's rename does.
+    fn edit_attachment(
+        &mut self,
+        stored: &Attachment,
+        attachment: &Attachment,
+    ) -> Result<(), Error> {
+        let mut values: Values = vec![(
+            0x14001d7a,
+            crate::create::current_timestamps()?
+                .0
+                .to_le_bytes()
+                .to_vec(),
+        )];
+        let mut removed = Vec::new();
+        if attachment.filename != stored.filename {
+            let name = crate::create::string(&attachment.filename);
+            values.push((0x1c001c22, name.clone()));
+            values.push((0x1c001d9c, name));
+        }
+        if attachment.source_path != stored.source_path {
+            match &attachment.source_path {
+                Some(path) => values.push((0x1c001d9d, crate::create::string(path))),
+                None => removed.push(0x1c001d9d),
+            }
+        }
+        if attachment.size != stored.size {
+            match attachment.size {
+                Some([width, height]) => {
+                    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
+                        return Err(invalid("Attachment icon size must be positive"));
+                    }
+                    values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
+                    values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
+                }
+                None => removed.extend([0x140034cd, 0x140034ce]),
+            }
+        }
+        let (space, object) = (self.space, self.id(attachment.id));
+        self.apply(|current| {
+            crate::write::write_revision(current, space, |raw| {
+                let mut node = PropertyObject::from_object(&raw.objects[&object])?;
+                node.remove(&removed)?;
+                let values: Vec<(u32, &[u8])> = values
+                    .iter()
+                    .map(|(id, bytes)| (*id, bytes.as_slice()))
+                    .collect();
+                node.set(&values)?;
+                Ok(BTreeMap::from([(object, node)]))
+            })
+        })
+    }
+
     fn edit_image(&mut self, stored: &Image, image: &Image) -> Result<(), Error> {
         picture_fixed_fields(stored, image)?;
         let mut values: Values = vec![(

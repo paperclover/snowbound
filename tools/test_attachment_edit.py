@@ -31,6 +31,15 @@ class AttachmentEditTest(unittest.TestCase):
     def test_a_rust_inserted_attachment_with_an_icon_preview_renders_natively(self):
         self.check('icon')
 
+    def test_a_stored_attachment_renamed_by_rust_shows_its_new_name_and_source(self):
+        with TemporaryDirectory() as temporary:
+            read = Path(temporary) / 'read'
+            shutil.copytree(FIXTURE / 'renamed/cold/read', read)
+            compare(FIXTURE / 'renamed/candidate', read)
+        page, = (ET.parse(path).getroot() for path in sorted((FIXTURE / 'renamed/cold/read').glob('page-*.xml')))
+        inserted, = page.iter('{%s}InsertedFile' % ns['one'])
+        self.assertEqual((inserted.get('preferredName'), inserted.get('pathSource')), ('renamed 🦀.txt', 'C:\\inputs\\renamed 🦀.txt'))
+
 
 if __name__ == '__main__':
     unittest.main()

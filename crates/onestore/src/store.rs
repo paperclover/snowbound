@@ -71,6 +71,10 @@ impl Chunk {
 pub struct Header {
     pub file_type: FileType,
     pub file_id: [u8; 16],
+    /// The parent table of contents' file identity; zero outside a notebook.
+    pub ancestor: [u8; 16],
+    /// CRC of the file name (a section's file name, a group's folder name).
+    pub name_crc: u32,
     pub transaction_count: u32,
     pub expected_length: u64,
     pub version_id: [u8; 16],
@@ -166,7 +170,9 @@ impl Header {
                 message: "Missing committed transaction",
             });
         }
-        c.take(48)?;
+        c.take(28)?;
+        let ancestor = c.read()?;
+        let name_crc = u32::from_le_bytes(c.read()?);
         let hashed_chunks = c.chunk()?;
         let transaction_log = c.chunk()?;
         let root = c.chunk()?;
@@ -179,6 +185,8 @@ impl Header {
         Ok(Self {
             file_type,
             file_id,
+            ancestor,
+            name_crc,
             transaction_count,
             expected_length,
             version_id,

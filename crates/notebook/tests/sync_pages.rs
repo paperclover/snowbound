@@ -302,7 +302,7 @@ fn uncertain_page_batches_survive_recovery_and_do_not_replay() {
         cache.export_recovery(&archive).unwrap();
         let recovery = Recovery::open(&archive).unwrap();
         assert_eq!(recovery.pending().unwrap(), queue);
-        assert_eq!(recovery.status(id).unwrap(), Some(attempted));
+        assert_eq!(recovery.status(id).unwrap(), Some(attempted.clone()));
         assert_eq!(recovery.snapshot().unwrap(), local);
         assert!(
             cache
@@ -315,7 +315,7 @@ fn uncertain_page_batches_survive_recovery_and_do_not_replay() {
             assert!(matches!(result.1, EditStatus::Published { .. }));
             assert_eq!(server.confirmations, 1);
         } else {
-            assert_eq!(result, (id, attempted));
+            assert_eq!(result, (id, attempted.clone()));
             assert_eq!(server.confirmations, 0);
         }
     }
@@ -366,7 +366,10 @@ fn an_unchanged_section_revision_cannot_confirm_a_changed_page() {
     let cache = Replica::open(&path).unwrap();
     let complete = server.visible.clone();
     server.visible = source;
-    assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, attempted)));
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((id, attempted.clone()))
+    );
     assert_eq!(server.confirmations, 0);
     server.visible = complete;
     assert!(matches!(

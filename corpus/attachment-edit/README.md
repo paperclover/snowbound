@@ -21,3 +21,15 @@ without a VM. Regenerate with `ONESTORE_ATTACHMENT_EXPORT` set to a directory
 while running the test (it writes `plain/` and `icon/`), then cold-open each
 with `tools/native_runner.py OUTPUT/plain COLD --expected-pages 1
 --collect-notebook`.
+
+## Renaming a stored attachment
+
+`renamed/candidate` is the writer's output for
+`attachments_need_a_file_name_and_stored_ones_are_renamed_in_place` in
+`crates/onestore/tests/page_attachments.rs`: the native attachment of
+`corpus/native/cold-05-06-attachment` with its shown name and recorded source
+path changed in place (properties `0x1c001c22`, `0x1c001d9c` and
+`0x1c001d9d` on the attachment node), payload and preview untouched.
+`renamed/cold` is its cold read: `preferredName` and `pathSource` carry the
+new values. Regenerate with `ONESTORE_ATTACHMENT_RENAME_EXPORT` and cold-open
+with `--expected-pages 1`.

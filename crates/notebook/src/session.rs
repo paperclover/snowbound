@@ -8,7 +8,9 @@ use onestore::{
     CommitError, ExGuid, PreparedEdit, RevisionIndex, Store, document::Document, page::Page,
 };
 use std::{
+    collections::BTreeMap,
     io,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -16,6 +18,52 @@ use std::{
     },
     time::Duration,
 };
+
+/// A difference between two catalog reads of a notebook, in catalog paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// A section or group appeared, including one replacing a file under an existing path.
+    Added(String),
+    /// A section or group is no longer in the notebook.
+    Removed(String),
+    /// The same file now lives at another path: a rename or a move between groups.
+    Moved { from: String, to: String },
+    /// A folder's surviving sections and groups changed order.
+    Reordered(String),
+}
+
+/// Sections and groups are followed by file identity; a group without a TOC only by path.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    File([u8; 16]),
+    Folder(String),
+}
+
+type Entries = (BTreeMap<Key, String>, BTreeMap<String, Vec<Key>>);
+
+fn entries(folder: &discover::Folder) -> Entries {
+    fn walk(folder: &discover::Folder, out: &mut Entries) {
+        let mut order = Vec::new();
+        for section in &folder.sections {
+            let key = Key::File(section.file_id);
+            out.0.insert(key.clone(), section.path.clone());
+            order.push(key);
+        }
+        for group in &folder.groups {
+            let key = match &group.toc {
+                Some(toc) => Key::File(toc.file_id),
+                None => Key::Folder(group.path.clone()),
+            };
+            out.0.insert(key.clone(), group.path.clone());
+            order.push(key);
+            walk(group, out);
+        }
+        out.1.insert(folder.path.clone(), order);
+    }
+    let mut out = Entries::default();
+    walk(folder, &mut out);
+    out
+}
 
 /// A notebook directory and the cache directory holding its section replicas.
 pub struct Notebook {
@@ -48,6 +96,365 @@ impl Notebook {
         &self.catalog
     }
 
+    /// Rereads the notebook directory and reports what changed since the last catalog,
+    /// keyed by file identity so a renamed or moved section stays the same section. A
+    /// failed read keeps the previous catalog: an unreachable notebook is not an empty one.
+    pub fn refresh(&mut self) -> Result<Vec<Change>> {
+        let catalog = discover::discover(
+            &mut discover::Local::open(&self.root)?,
+            discover::Limits {
+                entries: 100_000,
+                bytes_per_file: 256 * 1024 * 1024,
+                depth: 64,
+            },
+        )?;
+        let (before, before_orders) = entries(&self.catalog);
+        let (after, after_orders) = entries(&catalog);
+        let mut changes = Vec::new();
+        for key in before_orders.values().flatten() {
+            let from = &before[key];
+            match after.get(key) {
+                None => changes.push(Change::Removed(from.clone())),
+                Some(to) if to != from => changes.push(Change::Moved {
+                    from: from.clone(),
+                    to: to.clone(),
+                }),
+                Some(_) => {}
+            }
+        }
+        for key in after_orders.values().flatten() {
+            if !before.contains_key(key) {
+                changes.push(Change::Added(after[key].clone()));
+            }
+        }
+        for (folder, order) in &after_orders {
+            let Some(previous) = before_orders.get(folder) else {
+                continue;
+            };
+            let kept = |sequence: &[Key], other: &[Key]| -> Vec<Key> {
+                sequence
+                    .iter()
+                    .filter(|key| other.contains(key))
+                    .cloned()
+                    .collect()
+            };
+            if kept(previous, order) != kept(order, previous) {
+                changes.push(Change::Reordered(folder.clone()));
+            }
+        }
+        self.catalog = catalog;
+        Ok(changes)
+    }
+
+    fn folder(&self, path: &str) -> Result<&discover::Folder> {
+        let mut folders = vec![&self.catalog];
+        while let Some(folder) = folders.pop() {
+            if folder.path == path {
+                return Ok(folder);
+            }
+            folders.extend(&folder.groups);
+        }
+        Err(io::Error::from(io::ErrorKind::NotFound).into())
+    }
+
+    fn directory(&self, path: &str) -> Result<PathBuf> {
+        let directory = if path.is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(path).canonicalize()?
+        };
+        if !directory.starts_with(&self.root) || !directory.is_dir() {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        Ok(directory)
+    }
+
+    /// A folder's TOC path and file identity, creating the TOC when the folder has none
+    /// (OneNote names it `Open Notebook.onetoc2`).
+    fn toc(&self, folder: &str) -> Result<(PathBuf, [u8; 16])> {
+        let directory = self.directory(folder)?;
+        match &self.folder(folder)?.toc {
+            Some(toc) => Ok((directory.join(&toc.filename), toc.file_id)),
+            None => {
+                let path = directory.join("Open Notebook.onetoc2");
+                let bytes = onestore::create_table_of_contents("Open Notebook.onetoc2", &[])?;
+                std::fs::File::create_new(&path)?.write_all(&bytes)?;
+                Ok((path, onestore::Store::parse(&bytes)?.header.file_id))
+            }
+        }
+    }
+
+    fn edit_toc(&self, folder: &str, edits: &[onestore::TocEdit]) -> Result<()> {
+        let (toc, _) = self.toc(folder)?;
+        let source = onestore::read_file(&toc)?;
+        PreparedEdit::table_of_contents(&source, edits)?
+            .commit_file(&toc)
+            .map_err(|error| error.error)?;
+        Ok(())
+    }
+
+    /// Creates `name.one` in `folder` with one empty page and lists it last in the folder's
+    /// TOC, as OneNote creates a section. Returns the new catalog path.
+    pub fn create_section(&mut self, folder: &str, name: &str, author: &str) -> Result<String> {
+        let filename = format!("{name}.one");
+        let directory = self.directory(folder)?;
+        let (_, ancestor) = self.toc(folder)?;
+        let bytes = onestore::create_section(&filename, "", author)?;
+        let path = directory.join(&filename);
+        std::fs::File::create_new(&path)?.write_all(&bytes)?;
+        onestore::place_file(&path, ancestor, &filename)?;
+        let identity = onestore::Store::parse(&bytes)?.header.file_id;
+        self.edit_toc(
+            folder,
+            &[onestore::TocEdit::Add {
+                filename: filename.clone(),
+                identity,
+                group: false,
+            }],
+        )?;
+        self.refresh()?;
+        Ok(catalog_path(folder, &filename))
+    }
+
+    /// Creates a section group: a folder with its own TOC, listed last in the parent's TOC.
+    pub fn create_group(&mut self, folder: &str, name: &str) -> Result<String> {
+        let directory = self.directory(folder)?;
+        if !component(name) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        let group = directory.join(name);
+        let (_, ancestor) = self.toc(folder)?;
+        std::fs::create_dir(&group)?;
+        let bytes = onestore::create_table_of_contents("Open Notebook.onetoc2", &[])?;
+        let path = group.join("Open Notebook.onetoc2");
+        std::fs::File::create_new(&path)?.write_all(&bytes)?;
+        onestore::place_file(&path, ancestor, name)?;
+        let identity = onestore::Store::parse(&bytes)?.header.file_id;
+        self.edit_toc(
+            folder,
+            &[onestore::TocEdit::Add {
+                filename: name.to_owned(),
+                identity,
+                group: true,
+            }],
+        )?;
+        self.refresh()?;
+        Ok(catalog_path(folder, name))
+    }
+
+    /// Renames a section or section group: the file or folder on disk and its TOC entry.
+    pub fn rename(&mut self, path: &str, name: &str) -> Result<String> {
+        let (folder, entry) = split(path);
+        let directory = self.directory(folder)?;
+        let (filename, identity) = self.entry(folder, entry)?;
+        let target = if filename.to_ascii_lowercase().ends_with(".one") {
+            format!("{name}.one")
+        } else {
+            name.to_owned()
+        };
+        if !component(&target) || directory.join(&target).exists() {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+        }
+        std::fs::rename(directory.join(&filename), directory.join(&target))?;
+        let (_, ancestor) = self.toc(folder)?;
+        let placed = if target.ends_with(".one") {
+            directory.join(&target)
+        } else {
+            directory.join(&target).join("Open Notebook.onetoc2")
+        };
+        onestore::place_file(placed, ancestor, &target)?;
+        self.edit_toc(
+            folder,
+            &[onestore::TocEdit::Rename {
+                identity,
+                filename: target.clone(),
+            }],
+        )?;
+        self.refresh()?;
+        Ok(catalog_path(folder, &target))
+    }
+
+    /// Sets a section's colour (COLORREF) in its own metadata, where OneNote keeps it.
+    pub fn set_section_color(&mut self, path: &str, color: Option<u32>) -> Result<()> {
+        let file = self.root.join(path).canonicalize()?;
+        if !file.starts_with(&self.root) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        let source = onestore::read_file(&file)?;
+        let store = onestore::Store::parse(&source)?;
+        let index = onestore::RevisionIndex::parse(&store)?;
+        let document = Document::parse(&index)?;
+        let revision = document.active(document.root)?;
+        let metadata = *revision
+            .roots
+            .get(&2)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        onestore::commit_file_property(
+            &file,
+            &source,
+            document.root,
+            metadata,
+            0x14001cbe,
+            &color.unwrap_or(0xffff_ffff).to_le_bytes(),
+        )
+        .map_err(|error| error.error)?;
+        self.refresh()?;
+        Ok(())
+    }
+
+    /// Orders a folder's sections and groups; entries left out follow in their current order.
+    pub fn reorder(&mut self, folder: &str, paths: &[&str]) -> Result<()> {
+        let mut identities = Vec::new();
+        for path in paths {
+            let (parent, entry) = split(path);
+            if parent != folder {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+            }
+            identities.push(self.entry(folder, entry)?.1);
+        }
+        self.edit_toc(folder, &[onestore::TocEdit::Order(identities)])?;
+        self.refresh().map(drop)
+    }
+
+    /// Deletes a section the way OneNote does: the file moves into the notebook's
+    /// `OneNote_RecycleBin` folder, a section group with its own TOC that lists it (and that
+    /// the root TOC lists), and its own folder's TOC entry goes.
+    pub fn delete(&mut self, path: &str) -> Result<()> {
+        let (folder, entry) = split(path);
+        let directory = self.directory(folder)?;
+        let (filename, identity) = self.entry(folder, entry)?;
+        if !filename.to_ascii_lowercase().ends_with(".one") {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        let bin = self.root.join("OneNote_RecycleBin");
+        let bin_toc = bin.join("Open Notebook.onetoc2");
+        if !bin_toc.exists() {
+            std::fs::create_dir_all(&bin)?;
+            let bytes = onestore::create_table_of_contents("Open Notebook.onetoc2", &[])?;
+            std::fs::File::create_new(&bin_toc)?.write_all(&bytes)?;
+            onestore::place_file(&bin_toc, self.toc("")?.1, "OneNote_RecycleBin")?;
+            let bin_identity = onestore::Store::parse(&bytes)?.header.file_id;
+            self.edit_toc(
+                "",
+                &[onestore::TocEdit::Add {
+                    filename: "OneNote_RecycleBin".into(),
+                    identity: bin_identity,
+                    group: true,
+                }],
+            )?;
+        }
+        let mut target = filename.clone();
+        let mut attempt = 1;
+        while bin.join(&target).exists() {
+            attempt += 1;
+            let (stem, extension) = filename.rsplit_once('.').unwrap_or((&filename, ""));
+            target = format!("{stem} ({attempt}).{extension}");
+        }
+        std::fs::rename(directory.join(&filename), bin.join(&target))?;
+        let source = onestore::read_file(&bin_toc)?;
+        onestore::place_file(
+            bin.join(&target),
+            onestore::Store::parse(&source)?.header.file_id,
+            &target,
+        )?;
+        PreparedEdit::table_of_contents(
+            &source,
+            &[onestore::TocEdit::Add {
+                filename: target,
+                identity,
+                group: false,
+            }],
+        )?
+        .commit_file(&bin_toc)
+        .map_err(|error| error.error)?;
+        self.edit_toc(folder, &[onestore::TocEdit::Remove { identity }])?;
+        self.refresh().map(drop)
+    }
+
+    /// The stored filename and TOC identity of a folder's section or group.
+    fn entry(&self, folder: &str, name: &str) -> Result<(String, [u8; 16])> {
+        let parent = self.folder(folder)?;
+        if let Some(section) = parent
+            .sections
+            .iter()
+            .find(|section| split(&section.path).1 == name)
+        {
+            return Ok((name.to_owned(), section.file_id));
+        }
+        if let Some(group) = parent
+            .groups
+            .iter()
+            .find(|group| split(&group.path).1 == name)
+        {
+            let toc = group
+                .toc
+                .as_ref()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            return Ok((name.to_owned(), toc.file_id));
+        }
+        Err(io::Error::from(io::ErrorKind::NotFound).into())
+    }
+
+    /// The section path and page space a stored internal link opens, found by identity:
+    /// in the linked section first, then in every other readable section, so a link
+    /// follows its page across sections. `None` for other URLs and unknown targets.
+    pub fn find_page(&self, url: &str) -> Result<Option<(String, Option<ExGuid>)>> {
+        let Some(link) = onestore::page::link::parse_internal_link(url) else {
+            return Ok(None);
+        };
+        let mut sections = Vec::new();
+        let mut folders = vec![&self.catalog];
+        while let Some(folder) = folders.pop() {
+            sections.extend(folder.sections.iter().filter(|section| {
+                matches!(section.state, discover::SectionState::Readable { .. })
+            }));
+            folders.extend(&folder.groups);
+        }
+        sections.sort_by_key(|section| section.file_id != link.section);
+        let Some(page) = link.page else {
+            return Ok(sections
+                .first()
+                .filter(|section| section.file_id == link.section)
+                .map(|section| (section.path.clone(), None)));
+        };
+        for section in sections {
+            let bytes = onestore::read_file(self.root.join(&section.path))?;
+            let store = Store::parse(&bytes)?;
+            let index = RevisionIndex::parse(&store)?;
+            let document = Document::parse(&index)?;
+            for (space, _) in document.pages()? {
+                if Page::identity_of(document.active(space)?) == Some(page) {
+                    return Ok(Some((section.path.clone(), Some(space))));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// The pages of a password-protected section, for reading: nothing is cached or
+    /// written, and the decoded buffers go when the pages have been built.
+    #[cfg(feature = "protected")]
+    pub fn unlock(&self, path: &str, password: &str) -> Result<Vec<(ExGuid, Page)>> {
+        let file = self.root.join(path).canonicalize()?;
+        if !file.starts_with(&self.root) {
+            return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        let bytes = onestore::read_file(&file)?;
+        let store = Store::parse(&bytes)?;
+        let index = RevisionIndex::parse(&store)?;
+        let unlocked = onestore::protected::UnlockedSection::open(
+            &index,
+            password,
+            onestore::protected::Limits::default(),
+        )?;
+        let document = unlocked.document()?;
+        document
+            .pages()?
+            .into_iter()
+            .map(|(space, _)| Ok((space, Page::from_space(&document, space)?)))
+            .collect()
+    }
+
     /// Opens a section by its catalog path.
     pub fn section(&self, path: &str, notify: impl Fn() + Send + 'static) -> Result<Section> {
         let mut folders = vec![&self.catalog];
@@ -62,6 +469,25 @@ impl Notebook {
             folders.extend(&folder.groups);
         }
         Err(io::Error::from(io::ErrorKind::NotFound).into())
+    }
+}
+
+fn component(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['/', '\\', '\0']) && name != "." && name != ".."
+}
+
+fn split(path: &str) -> (&str, &str) {
+    match path.rsplit_once('/') {
+        Some((folder, name)) => (folder, name),
+        None => ("", path),
+    }
+}
+
+fn catalog_path(folder: &str, name: &str) -> String {
+    if folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{folder}/{name}")
     }
 }
 
@@ -181,7 +607,7 @@ impl Section {
                 Ok(None) => Event::Refreshed,
                 Ok(Some((id, status))) => Event::Attempt {
                     id: *id,
-                    status: *status,
+                    status: status.clone(),
                 },
                 Err(Error::RemoteIo(error)) => Event::Unreachable(match error.raw_os_error() {
                     Some(code) => io::Error::from_raw_os_error(code),
@@ -304,6 +730,18 @@ impl Section {
         let local = self.replica.snapshot()?;
         let remote = self.replica.remote_snapshot()?;
         self.replica.review_page(id, &local, &remote, after)?;
+        self.wake();
+        Ok(())
+    }
+
+    /// Retires an uncertain attempt after review, exporting the branch to `archive`
+    /// first: `Some(page)` continues from the reviewed page against `remote_page`,
+    /// `None` abandons the local branch. Neither claims the attempt was acknowledged.
+    pub fn release(&self, id: u64, archive: impl AsRef<Path>, after: Option<&Page>) -> Result<()> {
+        let local = self.replica.snapshot()?;
+        let remote = self.replica.remote_snapshot()?;
+        self.replica
+            .release_attempt(id, &local, &remote, archive.as_ref(), after)?;
         self.wake();
         Ok(())
     }

@@ -410,11 +410,17 @@ fn an_uncertain_layout_attempt_confirms_by_revision_or_by_an_equal_remote_page()
             assert_eq!((server.publications, server.confirmations), (1, 1));
             continue;
         }
-        assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, status)));
+        assert_eq!(
+            cache.sync_once(&mut server).unwrap(),
+            Some((id, status.clone()))
+        );
         server.visible = remote_with(&source, space, |page| {
             resized(216.0, true)(outline_mut(page, outline));
         });
-        assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, status)));
+        assert_eq!(
+            cache.sync_once(&mut server).unwrap(),
+            Some((id, status.clone()))
+        );
         assert_eq!(cache.snapshot().unwrap(), local);
         server.visible = remote_with(&source, space, |page| {
             resized(144.0, true)(outline_mut(page, outline));

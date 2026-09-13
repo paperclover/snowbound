@@ -21,6 +21,7 @@ pub mod protected;
 mod revisions;
 mod snapshot;
 mod store;
+mod toc;
 mod tree;
 mod write;
 
@@ -30,7 +31,8 @@ pub use commit::{
 };
 #[cfg(any(unix, windows))]
 pub use commit::{
-    commit_file_property, commit_file_text, confirm_file_snapshot, read_file, read_file_limited,
+    commit_file_property, commit_file_text, confirm_file_snapshot, place_file, read_file,
+    read_file_limited,
 };
 pub use create::{create_section, create_table_of_contents};
 pub use edit::replace_text;
@@ -45,5 +47,6 @@ pub use properties::{IdStream, Property, PropertySets, Value};
 pub use revisions::{ExGuid, ObjectSpace, Revision, RevisionIndex};
 pub use snapshot::{read_snapshot, read_storage_snapshot};
 pub use store::{Chunk, Error, FileType, Header, Node, NodeList, Reference, Store};
+pub use toc::TocEdit;
 pub use tree::TreeEdit;
 pub use write::replace_property_bytes;

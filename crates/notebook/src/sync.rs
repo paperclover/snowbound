@@ -27,7 +27,7 @@ pub enum ConflictKind {
     ContentChanged = 3,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditStatus {
     Pending,
     /// Retained publication attempt; this revision alone may be insufficient to confirm it.
@@ -38,6 +38,11 @@ pub enum EditStatus {
     /// Historical confirmation; later remote edits or restores may remove the effect.
     Published {
         revision: ExGuid,
+    },
+    /// Retired unpublished by a reviewed release; the archive at this path holds the
+    /// intent, its attempt evidence and both images.
+    Archived {
+        archive: String,
     },
 }
 
@@ -355,6 +360,120 @@ impl Replica {
         })
     }
 
+    /// Retires the oldest edit's uncertain attempt after review. The branch is first
+    /// exported to `archive` (a new file), which is the record: no receipt is written.
+    /// `Some(after)` continues from the reviewed page as a fresh intent against the
+    /// current remote page, keeping the edit's id and its dependents; `None` abandons
+    /// the whole local branch, whose edits become `Archived`, and the working image
+    /// returns to the remote image. Both need the reviewed images to be current.
+    pub fn release_attempt(
+        &self,
+        id: u64,
+        local: &[u8],
+        remote: &[u8],
+        archive: &Path,
+        after: Option<&Page>,
+    ) -> Result<()> {
+        let owner = self.sync_owner()?;
+        let intent = self
+            .pending()?
+            .into_iter()
+            .next()
+            .filter(|intent| intent.id == id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Only the oldest edit can hold an attempt",
+                )
+            })?;
+        let continued = match after {
+            Some(after) => {
+                let Operation::Page(edit) = intent.operation else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Select a page save to continue from",
+                    )
+                    .into());
+                };
+                let before = page_of(remote, intent.space)?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "The page is no longer in the remote section",
+                    )
+                })?;
+                PreparedEdit::page(remote, intent.space, after, &edit.author)?;
+                Some(Operation::Page(PageIntent {
+                    before,
+                    after: after.clone(),
+                    author: edit.author,
+                }))
+            }
+            None => None,
+        };
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::Error::other("Cache owner panicked"))?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (base, working): (Vec<u8>, Vec<u8>) =
+            transaction.query_row("SELECT base, working FROM replica WHERE id=1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        if working != local || base != remote {
+            return Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "The reviewed cache images changed",
+            )
+            .into());
+        }
+        let id = i64::try_from(id).map_err(io::Error::other)?;
+        let attempted: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM attempt WHERE edit_id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !attempted {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The edit has no uncertain attempt",
+            )
+            .into());
+        }
+        drop(transaction);
+        drop(connection);
+        self.export_recovery(archive)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::Error::other("Cache owner panicked"))?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("DELETE FROM attempt WHERE edit_id=?1", [id])?;
+        match continued {
+            Some(operation) => {
+                transaction.execute(
+                    "UPDATE edits SET operation=?1 WHERE id=?2",
+                    params![
+                        serde_json::to_string(&operation).map_err(io::Error::other)?,
+                        id
+                    ],
+                )?;
+            }
+            None => {
+                transaction.execute(
+                    "INSERT INTO archived(edit_id, archive) SELECT id, ?1 FROM edits",
+                    [archive.to_string_lossy().into_owned()],
+                )?;
+                transaction.execute("DELETE FROM edits", [])?;
+                transaction.execute("UPDATE replica SET working=base WHERE id=1", [])?;
+            }
+        }
+        transaction.commit()?;
+        drop(connection);
+        drop(owner);
+        self.wake_sync();
+        Ok(())
+    }
+
     fn resolve_conflict(
         &self,
         id: u64,
@@ -461,6 +580,16 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
         return Ok(Some(EditStatus::Published {
             revision: revision.parse()?,
         }));
+    }
+    if let Some(archive) = connection
+        .query_row(
+            "SELECT archive FROM archived WHERE edit_id=?1",
+            [id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        return Ok(Some(EditStatus::Archived { archive }));
     }
     let record: Option<(Option<String>, Option<i64>, String)> = connection.query_row(
         "SELECT attempt.revisions, conflicts.kind, edits.space FROM edits LEFT JOIN attempt ON attempt.edit_id=edits.id LEFT JOIN conflicts ON conflicts.edit_id=edits.id WHERE edits.id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?, row.get(2)?))).optional()?;

@@ -732,7 +732,7 @@ fn uncertain_splits_and_joins_keep_the_original_attempt_across_reopen() {
             let state = cache.status(id).unwrap().unwrap();
             drop(cache);
             let cache = Replica::open(&path).unwrap();
-            assert_eq!(cache.status(id).unwrap(), Some(state));
+            assert_eq!(cache.status(id).unwrap(), Some(state.clone()));
             match fault {
                 Fault::Before => {
                     assert_eq!(state, EditStatus::Pending);
@@ -748,7 +748,10 @@ fn uncertain_splits_and_joins_keep_the_original_attempt_across_reopen() {
                     assert_eq!(cache.pending().unwrap(), pending);
                     assert_eq!(cache.snapshot().unwrap(), local);
                     for _ in 0..3 {
-                        assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, state)));
+                        assert_eq!(
+                            cache.sync_once(&mut server).unwrap(),
+                            Some((id, state.clone()))
+                        );
                     }
                     assert_eq!(server.publications, 1);
                     assert_eq!(server.durable, BEFORE);

@@ -62,6 +62,49 @@ pub fn internal_link(section: [u8; 16], base_path: &str, target: LinkTarget<'_>)
     url
 }
 
+/// The identities a stored internal link names. OneNote resolves links by identity, so
+/// the title and base path in the URL are hints only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InternalLink {
+    pub section: [u8; 16],
+    pub page: Option<[u8; 16]>,
+    pub object: Option<ExGuid>,
+}
+
+/// The identities in an `onenote:#…` link, or `None` for any other URL.
+pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
+    let guid = |value: &str| {
+        format!("{value},0")
+            .parse::<ExGuid>()
+            .ok()
+            .map(|id| id.guid)
+    };
+    let parts: Vec<&str> = url.strip_prefix("onenote:#")?.split('&').collect();
+    let value = |name: &str| {
+        parts.iter().find_map(|part| {
+            part.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('='))
+        })
+    };
+    let section = guid(value("section-id")?)?;
+    let page = match value("page-id") {
+        Some(id) => Some(guid(id)?),
+        None => None,
+    };
+    let object = match parts.iter().position(|part| part.starts_with("object-id=")) {
+        Some(at) => Some(ExGuid {
+            guid: guid(&parts[at]["object-id=".len()..])?,
+            n: parts.get(at + 1)?.parse().ok()?,
+        }),
+        None => None,
+    };
+    Some(InternalLink {
+        section,
+        page,
+        object,
+    })
+}
+
 /// Percent-encodes a page title the way OneNote does in a link fragment.
 fn encoded(title: &str) -> String {
     let mut out = String::new();

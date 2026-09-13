@@ -140,7 +140,7 @@ fn uncertain_page_publication_retains_both_revisions_and_never_replays() {
         cache.export_recovery(&archive).unwrap();
         assert_eq!(
             Recovery::open(&archive).unwrap().status(id).unwrap(),
-            Some(attempted)
+            Some(attempted.clone())
         );
         drop(cache);
         let db = rusqlite::Connection::open(&path).unwrap();
@@ -163,7 +163,7 @@ fn uncertain_page_publication_retains_both_revisions_and_never_replays() {
             assert!(observed[..212] == server.durable[..212]);
             assert!(observed[252..] == server.durable[252..]);
         } else {
-            assert_eq!(result, (id, attempted));
+            assert_eq!(result, (id, attempted.clone()));
             assert_eq!(cache.snapshot().unwrap(), local);
         }
     }
@@ -219,7 +219,10 @@ fn surviving_page_revision_alone_does_not_confirm_section_publication() {
             .contains_key(&revisions[&page.space()])
     );
     let cache = Replica::open(&path).unwrap();
-    assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, attempted)));
+    assert_eq!(
+        cache.sync_once(&mut server).unwrap(),
+        Some((id, attempted.clone()))
+    );
     assert_eq!(server.confirmations, 0);
     assert_eq!(server.publications, 1);
     server.visible = complete;

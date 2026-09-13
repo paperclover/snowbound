@@ -51,12 +51,15 @@ pub enum Error {
     Discovery(#[from] discover::Error),
     #[error("External payload identity now refers to different bytes")]
     AssetChanged,
+    #[cfg(feature = "protected")]
+    #[error(transparent)]
+    Protected(#[from] onestore::protected::Error),
 }
 
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 
 /// An edited page model together with the stored model it was edited from.
 /// `before` is the precondition reconciliation checks against the remote page.

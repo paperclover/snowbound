@@ -91,6 +91,7 @@ fn report(cache: &Replica, root: &Path) -> Result<(), Box<dyn std::error::Error>
         }
         Some(EditStatus::Published { revision }) => ("published", Some(revision.to_string())),
         Some(EditStatus::Conflict(_)) => ("conflict", None),
+        Some(EditStatus::Archived { archive }) => ("archived", Some(archive)),
         None => ("missing", None),
     };
     println!(

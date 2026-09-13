@@ -108,7 +108,7 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
             },
             move |result| {
                 observed_tx
-                    .send(result.as_ref().copied().map_err(|error| error.to_string()))
+                    .send(result.as_ref().cloned().map_err(|error| error.to_string()))
                     .unwrap();
             },
         )
@@ -163,7 +163,7 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                observed_tx.send(*result.as_ref().unwrap()).unwrap();
+                observed_tx.send(result.as_ref().unwrap().clone()).unwrap();
                 if first {
                     first = false;
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -305,7 +305,7 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                tx.send(*result.as_ref().unwrap()).unwrap();
+                tx.send(result.as_ref().unwrap().clone()).unwrap();
             },
         )
         .unwrap();
@@ -377,7 +377,7 @@ fn polling_preserves_conflicts_and_absent_uncertain_revisions_without_replay() {
                 Duration::from_millis(10),
                 move || Ok(shared.clone()),
                 move |result| {
-                    tx.send(result.as_ref().copied().map_err(|_| ())).unwrap();
+                    tx.send(result.as_ref().cloned().map_err(|_| ())).unwrap();
                 },
             )
             .unwrap();
@@ -401,7 +401,7 @@ fn polling_preserves_conflicts_and_absent_uncertain_revisions_without_replay() {
             if let Some(previous) = previous {
                 assert_eq!(previous, status);
             }
-            previous = Some(status);
+            previous = Some(status.clone());
         }
         assert!(
             started.elapsed() >= Duration::from_millis(30),
@@ -508,7 +508,7 @@ fn invalid_intervals_and_callback_panics_leave_worker_ownership_recoverable() {
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                tx.send(*result.as_ref().unwrap()).unwrap();
+                tx.send(result.as_ref().unwrap().clone()).unwrap();
             },
         )
         .unwrap();
@@ -535,7 +535,7 @@ fn reviewed_conflict_wakes_the_worker_and_publishes_the_original_intent_once() {
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                tx.send(*result.as_ref().unwrap()).unwrap();
+                tx.send(result.as_ref().unwrap().clone()).unwrap();
                 if first {
                     first = false;
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -615,7 +615,7 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
             Duration::from_millis(1),
             move || Ok(remote.take().expect("Contention caused a reconnect")),
             move |result| {
-                tx.send(result.as_ref().copied().map_err(|error| error.to_string()))
+                tx.send(result.as_ref().cloned().map_err(|error| error.to_string()))
                     .unwrap();
             },
         )
@@ -678,7 +678,7 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
                         .unwrap();
                     tx.send((second, None)).unwrap();
                 }
-                Ok(Some((id, status))) => tx.send((*id, Some(*status))).unwrap(),
+                Ok(Some((id, status))) => tx.send((*id, Some(status.clone()))).unwrap(),
                 Ok(None) => {}
                 other => panic!("Unexpected worker result: {other:?}"),
             },

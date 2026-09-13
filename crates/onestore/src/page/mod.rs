@@ -331,6 +331,22 @@ impl Page {
         Self::from_revision(revision, id)
     }
 
+    /// The notebook-management identity of the page in an active page revision, which
+    /// internal links name.
+    pub fn identity_of(revision: &Revision<'_>) -> Option<[u8; 16]> {
+        revision
+            .roots
+            .get(&2)
+            .and_then(|id| revision.nodes.get(id))
+            .filter(|node| matches!(node.kind, Kind::Metadata { .. }))
+            .and_then(|node| node.extra.first())
+            .and_then(|fields| fields.iter().find(|field| field.id == 0x1c001c30))
+            .and_then(|field| match field.value {
+                FieldValue::Bytes(bytes) => bytes.try_into().ok(),
+                _ => None,
+            })
+    }
+
     /// The single active page declared in one page object space.
     pub fn from_space(document: &Document<'_>, space: ExGuid) -> Result<Self, Error> {
         let pages = document.pages_in(space)?;
@@ -365,12 +381,7 @@ impl Page {
             .and_then(|node| node.extra.first());
         let mut page = Self {
             title: page_title(revision, id).unwrap_or_default().to_owned(),
-            identity: metadata
-                .and_then(|fields| fields.iter().find(|field| field.id == 0x1c001c30))
-                .and_then(|field| match field.value {
-                    FieldValue::Bytes(bytes) => bytes.try_into().ok(),
-                    _ => None,
-                }),
+            identity: Self::identity_of(revision),
             created: metadata
                 .and_then(|fields| fields.iter().find(|field| field.id == 0x18001c65))
                 .map(|field| {

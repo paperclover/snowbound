@@ -1,0 +1,32 @@
+[
+  {
+    "path": "First.one",
+    "bytes": 3212,
+    "sha256": "d926b2f5502dd1bb2768928e44020497248299b9e6c1c8ddcec999117279c177",
+    "mtime_ns": 1789279283377754822
+  },
+  {
+    "path": "Kept/Inner.one",
+    "bytes": 3164,
+    "sha256": "33e43aef96619ba34e4499b605e21540ac25475542ae8817e37ed10382ac25ca",
+    "mtime_ns": 1789279283538323423
+  },
+  {
+    "path": "Kept/Open Notebook.onetoc2",
+    "bytes": 3824,
+    "sha256": "432b3413622bb8eabacc640ffc8c6ad80dee94cd45bed6154f5afbc2ae443965",
+    "mtime_ns": 1789279283654960588
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 5408,
+    "sha256": "e713f4d9cca21552e7fd650c54b6072fc2d8875e48b738b00887324f82331728",
+    "mtime_ns": 1789279283758856923
+  },
+  {
+    "path": "Renamed.one",
+    "bytes": 5504,
+    "sha256": "9ee7bd23c1679ce5035c92adca0416730b149d11bedd1b4a7c181a0186df7007",
+    "mtime_ns": 1789279283726949659
+  }
+]

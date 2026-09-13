@@ -391,10 +391,13 @@ fn uncertain_formatting_attempts_keep_the_original_attempt_and_never_replay() {
         assert!(matches!(state, EditStatus::AwaitingConfirmation { .. }));
         drop(cache);
         let cache = Replica::open(&path).unwrap();
-        assert_eq!(cache.status(id).unwrap(), Some(state));
+        assert_eq!(cache.status(id).unwrap(), Some(state.clone()));
         if matches!(fault, Fault::UnknownBefore) {
             for _ in 0..3 {
-                assert_eq!(cache.sync_once(&mut server).unwrap(), Some((id, state)));
+                assert_eq!(
+                    cache.sync_once(&mut server).unwrap(),
+                    Some((id, state.clone()))
+                );
             }
             assert_eq!(server.publications, 1);
             assert_eq!(server.durable, OUTLINES);

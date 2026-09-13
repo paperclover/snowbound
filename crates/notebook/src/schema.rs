@@ -27,6 +27,10 @@ pub(crate) fn create(transaction: &Transaction<'_>) -> Result<()> {
         CREATE TABLE receipts (
             edit_id INTEGER PRIMARY KEY CHECK(edit_id>0),
             revision TEXT NOT NULL
+        ) STRICT;
+        CREATE TABLE archived (
+            edit_id INTEGER PRIMARY KEY CHECK(edit_id>0),
+            archive TEXT NOT NULL
         ) STRICT;",
     )?;
     transaction.execute_batch(CONFLICTS)?;

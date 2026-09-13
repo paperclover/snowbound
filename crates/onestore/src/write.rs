@@ -838,6 +838,7 @@ pub(crate) fn write_revisions_with_payloads(
                 )
             }
         };
+        let existing: BTreeSet<ExGuid> = revision.objects.keys().copied().collect();
         let reachable = if rid.is_some() {
             revision.reachable()?
         } else {
@@ -859,10 +860,10 @@ pub(crate) fn write_revisions_with_payloads(
                         message: "An existing object's type cannot be changed",
                     });
                 }
-            } else if !is_section {
+            } else if !is_section && replacement.jcid != 0x20001 {
                 return Err(Error {
                     offset: 0,
-                    message: "New objects require a section file",
+                    message: "New objects in a table of contents are its entries",
                 });
             }
             if replacement.global_ids.keys().any(|i| *i > 0xffffff) {
@@ -1006,10 +1007,16 @@ pub(crate) fn write_revisions_with_payloads(
             .iter()
             .filter(|(id, _)| checkpoint || changed.contains(id))
             .collect();
-        let toc_table = if checkpoint && !is_section {
-            if selected.iter().any(|(_, object)| {
-                object.jcid != 0x20001 || !matches!(object.data, ObjectData::Properties(_))
-            }) {
+        // A table-of-contents manifest has one global id table (sections group objects,
+        // each group with its own table); OneNote resolves every node against it.
+        let toc_table = if is_section {
+            None
+        } else {
+            if checkpoint
+                && selected.iter().any(|(_, object)| {
+                    object.jcid != 0x20001 || !matches!(object.data, ObjectData::Properties(_))
+                })
+            {
                 return Err(Error {
                     offset: 0,
                     message: "TOC checkpoint requires table-of-contents property objects",
@@ -1032,8 +1039,6 @@ pub(crate) fn write_revisions_with_payloads(
                     .map(|(i, guid)| (u32::try_from(i).unwrap(), guid))
                     .collect::<BTreeMap<_, _>>(),
             )
-        } else {
-            None
         };
         let mut groups = BTreeMap::<_, Vec<_>>::new();
         for (id, object) in selected {
@@ -1144,10 +1149,13 @@ pub(crate) fn write_revisions_with_payloads(
                                 length: u64::try_from(bytes.len()).unwrap(),
                             }
                         };
+                        // A table-of-contents object is declared when the revision is a
+                        // checkpoint or the object is new, and revised otherwise.
+                        let declared = checkpoint || !existing.contains(&id);
                         if is_section {
                             declaration.extend_from_slice(&object.jcid.to_le_bytes());
                             declaration.push(flags);
-                        } else if checkpoint {
+                        } else if declared {
                             let body = 1_u64 | (u64::from(flags & 1) << 16);
                             declaration.extend_from_slice(&body.to_le_bytes()[..6]);
                         } else {
@@ -1161,7 +1169,7 @@ pub(crate) fn write_revisions_with_payloads(
                         group.push(node(
                             if is_section {
                                 if readonly { 0xc5 } else { 0xa5 }
-                            } else if checkpoint {
+                            } else if declared {
                                 0x2e
                             } else {
                                 0x42

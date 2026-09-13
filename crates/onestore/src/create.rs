@@ -101,6 +101,15 @@ struct NewSpace {
     objects: Vec<NewObject>,
 }
 
+/// Header bytes 128..148: `guidAncestor` and `crcName`, which OneNote checks against a
+/// file's location and name; a mismatch makes it re-identify the file.
+pub(crate) fn placement(ancestor: [u8; 16], name: &str) -> [u8; 20] {
+    let mut bytes = [0; 20];
+    bytes[..16].copy_from_slice(&ancestor);
+    bytes[16..].copy_from_slice(&(!crc(u32::MAX, &string(name), FileType::Section)).to_le_bytes());
+    bytes
+}
+
 pub(crate) fn current_timestamps() -> Result<(u32, u64)> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -537,8 +546,7 @@ fn create(file_name: &str, file_type: FileType, spaces: Vec<NewSpace>) -> Result
         output[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     }
     output[96..100].copy_from_slice(&1_u32.to_le_bytes());
-    output[144..148]
-        .copy_from_slice(&(!crc(u32::MAX, &string(file_name), FileType::Section)).to_le_bytes());
+    output[128..148].copy_from_slice(&placement([0; 16], file_name));
     for (at, chunk) in hashed_chunk
         .map(|chunk| (148, chunk))
         .into_iter()

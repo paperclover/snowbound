@@ -1,0 +1,38 @@
+[
+  {
+    "path": "Kept/First.one",
+    "bytes": 3164,
+    "sha256": "61be453f86b7791923497293f74db57bc7f33b6e8d5fd38ad57631571475a1cf",
+    "mtime_ns": 1789279283845197267
+  },
+  {
+    "path": "Kept/Open Notebook.onetoc2",
+    "bytes": 4120,
+    "sha256": "7d734133a1019a00260296bfd143282a7411b667f68956874f7e7ffaa97518b8",
+    "mtime_ns": 1789279283861857142
+  },
+  {
+    "path": "OneNote_RecycleBin/First.one",
+    "bytes": 3212,
+    "sha256": "25d2946bbef7c546dc7391f848d43b7b7a4270cf8e0c35264e6939a1a083821c",
+    "mtime_ns": 1789279283804243010
+  },
+  {
+    "path": "OneNote_RecycleBin/Open Notebook.onetoc2",
+    "bytes": 3824,
+    "sha256": "8e3ad16bb0ed85c55577d0996a6a3f98df2537f82e3d1d48a35be40283cf4a40",
+    "mtime_ns": 1789279283820890719
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 6328,
+    "sha256": "0c10b7470bb74f2e17b3319707f2f422370fcbde05f09bd7c0e9dd088483c97e",
+    "mtime_ns": 1789279283837910881
+  },
+  {
+    "path": "Renamed.one",
+    "bytes": 5504,
+    "sha256": "9ee7bd23c1679ce5035c92adca0416730b149d11bedd1b4a7c181a0186df7007",
+    "mtime_ns": 1789279283726949659
+  }
+]

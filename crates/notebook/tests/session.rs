@@ -680,3 +680,100 @@ fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recov
     assert!(section.queue().unwrap().is_empty());
     section.close().unwrap();
 }
+
+#[path = "support/server.rs"]
+mod server;
+
+/// An uncertain attempt survives a restart as `AwaitingConfirmation`; after exporting the
+/// archive the user either continues from a reviewed page or abandons the branch. Neither
+/// path records a receipt for the uncertain attempt.
+#[test]
+fn an_uncertain_attempt_is_released_after_restart_by_review() {
+    for continued in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("notes.one");
+        let cache = directory.path().join("cache.sqlite");
+        let source = onestore::create_section("notes.one", "Original", "Author").unwrap();
+        std::fs::write(&file, &source).unwrap();
+        let replica = notebook::Replica::create(&cache, &source).unwrap();
+        let space = space_of(&source);
+        let page = model_ops::page_of(&source, space);
+        let text = first_text(&page);
+        let local = edited(&page, "Uncertain ");
+        let id = replica
+            .save(&source, space, &local, "Author")
+            .unwrap()
+            .unwrap();
+        let mut faulty = server::Server::new(&source);
+        faulty.fault = server::Fault::UnknownBefore;
+        assert!(replica.sync_once(&mut faulty).is_err());
+        assert!(matches!(
+            replica.status(id).unwrap(),
+            Some(EditStatus::AwaitingConfirmation { .. })
+        ));
+        drop(replica);
+
+        let notified = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&notified);
+        let section = Section::resume(&file, notebook::Replica::open(&cache).unwrap(), move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        wait(
+            &section,
+            |event| matches!(event, Event::Attempt { id: n, status: EditStatus::AwaitingConfirmation { .. } } if *n == id),
+        );
+        assert_eq!(
+            section
+                .queue()
+                .unwrap()
+                .iter()
+                .map(|edit| edit.id)
+                .collect::<Vec<_>>(),
+            [id]
+        );
+        assert_same(section.page(space).unwrap(), &local);
+        let archive = directory.path().join("review.sqlite");
+        if continued {
+            let mut reviewed = section.remote_page(space).unwrap();
+            model_ops::replace_text(&mut reviewed, text, 0..0, "Reviewed ");
+            section.release(id, &archive, Some(&reviewed)).unwrap();
+            assert_eq!(section.status(id).unwrap(), Some(EditStatus::Pending));
+            published(&section, id);
+            assert_same(stored_page(&file, space), &reviewed);
+        } else {
+            section.release(id, &archive, None).unwrap();
+            assert_eq!(
+                section.status(id).unwrap(),
+                Some(EditStatus::Archived {
+                    archive: archive.to_string_lossy().into_owned()
+                })
+            );
+            assert_same(section.page(space).unwrap(), &page);
+            assert_eq!(stored_page(&file, space), page);
+        }
+        let recovery = Recovery::open(&archive).unwrap();
+        assert_eq!(recovery.pending().unwrap().len(), 1);
+        assert!(matches!(
+            recovery.status(id).unwrap(),
+            Some(EditStatus::AwaitingConfirmation { .. })
+        ));
+        assert!(section.queue().unwrap().is_empty());
+        assert!(
+            section
+                .release(id, directory.path().join("again.sqlite"), None)
+                .is_err()
+        );
+        section.close().unwrap();
+    }
+}
+
+fn space_of(source: &[u8]) -> ExGuid {
+    let store = onestore::Store::parse(source).unwrap();
+    let index = onestore::RevisionIndex::parse(&store).unwrap();
+    onestore::document::Document::parse(&index)
+        .unwrap()
+        .pages()
+        .unwrap()[0]
+        .0
+}
