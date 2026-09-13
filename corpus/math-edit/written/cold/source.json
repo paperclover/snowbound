@@ -1,0 +1,20 @@
+[
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 1596,
+    "sha256": "bc31e9f663f68420b4f7684641e2a75abefddd97256074bae432dff0fff5244c",
+    "mtime_ns": 1789267920902398086
+  },
+  {
+    "path": "expected-mathml.json",
+    "bytes": 1536,
+    "sha256": "7c0f17965424fbfee0f952b0293a2daf5fcd7040d50b7482e90785cc52192c84",
+    "mtime_ns": 1789267920927591231
+  },
+  {
+    "path": "math.one",
+    "bytes": 15424,
+    "sha256": "70b09e61eaca321b6aa555316b59769f282843c7710c4ca311f1b5d2d7ec42bd",
+    "mtime_ns": 1789267920871282689
+  }
+]

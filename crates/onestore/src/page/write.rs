@@ -1,7 +1,7 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
 //! the typed writers, then squashing their transactions into one revision per space.
 
-use super::{Image, Ink, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
+use super::{Image, Ink, Math, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
@@ -182,6 +182,48 @@ fn stroke_values(stroke: &super::InkStroke, index: u32, filetime: u64) -> Result
         (0x1c00341d, filetime.to_le_bytes().to_vec()),
         (0x1c00345b, origin),
     ])
+}
+
+/// The character-style properties a span format sets; paragraph-level fields stay on the
+/// paragraph style.
+fn style_values(format: &crate::document::Format) -> Values {
+    let mut values = Values::new();
+    for (id, flag) in [
+        (0x08001c04, format.bold),
+        (0x08001c05, format.italic),
+        (0x08001c06, format.underline),
+        (0x08001c07, format.strike),
+        (0x08001c08, format.superscript),
+        (0x08001c09, format.subscript),
+        (0x08001e16, format.hidden),
+        (0x08001e14, format.hyperlink),
+        (0x08001e19, format.hyperlink_label),
+        (0x08003401, format.math),
+        (0x08001e22, format.embedded_object),
+    ] {
+        if let Some(flag) = flag {
+            values.push((id | (u32::from(flag) << 31), Vec::new()));
+        }
+    }
+    if let Some(font) = &format.font {
+        values.push((0x1c001c0a, crate::create::string(font)));
+    }
+    if let Some(size) = format.font_size {
+        values.push((
+            0x10001c0b,
+            ((size * 2.0).round() as u16).to_le_bytes().to_vec(),
+        ));
+    }
+    if let Some(color) = format.color {
+        values.push((0x14001c0c, color.to_le_bytes().to_vec()));
+    }
+    if let Some(highlight) = format.highlight {
+        values.push((0x14001c0d, highlight.to_le_bytes().to_vec()));
+    }
+    if let Some(language) = format.language {
+        values.push((0x14001c3b, language.to_le_bytes().to_vec()));
+    }
+    values
 }
 
 fn picture_fixed_fields(stored: &Image, image: &Image) -> Result<(), Error> {
@@ -494,6 +536,7 @@ impl Lowering<'_> {
         self.split_and_join(&old, &new, &mut placed, &mut consumed)?;
         self.place(&old, &new, &placed, &page_order)?;
         self.delete(&old, &new, &consumed)?;
+        self.edit_equations(&new)?;
         self.edit_text(&new)?;
         self.edit_lists(after, &new)?;
         self.edit_tags(after, &new)?;
@@ -1675,6 +1718,125 @@ impl Lowering<'_> {
                 let space = self.space;
                 self.apply(|image| edit.apply(image, space))?;
             }
+        }
+        Ok(())
+    }
+
+    /// Rewrites every equation paragraph whose stored text object differs from the model, the
+    /// way OneNote stores an equation: the linear text, one run per span with a style
+    /// carrying the span's format, the run-data array naming each run's inline object, and
+    /// the math language marker on the text object.
+    fn edit_equations(&mut self, new: &View<'_>) -> Result<(), Error> {
+        let current = self.current()?;
+        let current = View::new(&current)?;
+        for (id, paragraph) in &new.paragraphs {
+            let Some(text) = paragraph.text() else {
+                continue;
+            };
+            if !Math::is_equation(&text.text) {
+                continue;
+            }
+            let stored = current
+                .text(self.id(*id))
+                .ok_or_else(|| invalid("An equation paragraph is missing after placement"))?;
+            if stored.text == text.text {
+                continue;
+            }
+            let object = stored.id;
+            if text.text.text().contains('\u{fffc}') {
+                return Err(invalid("Equations cannot hold embedded objects"));
+            }
+            let encoded: Vec<u8> = text
+                .text
+                .text()
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let mut ends = Vec::new();
+            let mut styles: Vec<Values> = Vec::new();
+            let mut sets = Vec::new();
+            let all_math = text
+                .text
+                .spans()
+                .iter()
+                .all(|s| s.format.math == Some(true));
+            for span in text.text.spans() {
+                ends.extend(text.text.utf16_offset(span.end)?.to_le_bytes());
+                styles.push(style_values(&span.format));
+                sets.push(match &span.format.math_object {
+                    Some(object) => {
+                        let mut set = vec![(0x1400344f, object.kind.to_le_bytes().to_vec())];
+                        if let Some(count) = object.arguments {
+                            set.push((0x14003450, count.to_le_bytes().to_vec()));
+                        }
+                        for (id, symbol) in [0x10003453, 0x10003454, 0x10003455]
+                            .into_iter()
+                            .zip(&object.symbols)
+                        {
+                            let unit = u16::try_from(u32::from(*symbol))
+                                .map_err(|_| invalid("Math symbols are single UTF-16 units"))?;
+                            set.push((id, unit.to_le_bytes().to_vec()));
+                        }
+                        set
+                    }
+                    None => Vec::new(),
+                });
+            }
+            ends.truncate(ends.len() - 4);
+            let has_objects = sets.iter().any(|set| !set.is_empty());
+            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+            let space = self.space;
+            self.apply(|current| {
+                crate::write::write_revision(current, space, |raw| {
+                    let mut changed = BTreeMap::new();
+                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                    let mut references = Vec::new();
+                    let mut created: Vec<(Values, ExGuid)> = Vec::new();
+                    for values in &styles {
+                        let id = match created.iter().find(|(known, _)| known == values) {
+                            Some((_, id)) => *id,
+                            None => {
+                                let id = ExGuid {
+                                    guid: crate::write::fresh_guid()?,
+                                    n: 1,
+                                };
+                                let mut style = PropertyObject {
+                                    jcid: 0x12004d,
+                                    bytes: crate::create::properties(values)?,
+                                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
+                                };
+                                style.reference(id)?;
+                                changed.insert(id, style);
+                                created.push((values.clone(), id));
+                                id
+                            }
+                        };
+                        references.extend(target.reference(id)?);
+                    }
+                    target.remove(&[0x1c003498, 0x40003499])?;
+                    target.set(&[
+                        (0x1c001c22, &encoded),
+                        (0x1c001e12, &ends),
+                        (0x24001e13, &references),
+                        (0x14001d7a, &modified),
+                    ])?;
+                    if has_objects {
+                        target.set_sets(0x40003499, 0x44000811, &sets)?;
+                    }
+                    if all_math {
+                        // The flags and language marker OneNote's equation editor leaves on
+                        // every equation text object.
+                        target.set(&[
+                            (0x10001cfe, &0x7f_u16.to_le_bytes()),
+                            (0x14001c3e, &1u32.to_le_bytes()),
+                            (0x14001c84, &1u32.to_le_bytes()),
+                        ])?;
+                    }
+                    changed.insert(object, target);
+                    Ok(changed)
+                })
+            })?;
         }
         Ok(())
     }

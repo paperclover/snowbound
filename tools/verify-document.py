@@ -78,8 +78,10 @@ def verify_pdf_black(path, paragraphs):
 def visible_text(node, space):
     kind = node['kind']
     data = kind['text'].encode('utf-16-le')
+    # Hidden runs and equation runs (exported as MathML) have no visible native text.
     text = ''.join(data[run['start'] * 2:run['end'] * 2].decode('utf-16-le') for run in kind['runs']
-                   if not run['format'] or not space['nodes'][run['format']]['format']['hidden'])
+                   if not run['format'] or not (space['nodes'][run['format']]['format']['hidden']
+                                                or space['nodes'][run['format']]['format']['math']))
     return "" if text == "\u00a0" else project_text(text.removesuffix('\r'))
 
 
@@ -391,8 +393,9 @@ def compare(notebook, native, versions=None, password_file=None):
                 text_ids = [oid for root in roots for oid, n in walk(space, root)
                             if n['kind']['type'] == 'RichText' and not n['kind']['boilerplate']]
                 for text_id, expected_runs in zip(text_ids, native_runs, strict=True):
+                    # Native XML exports equation runs as MathML, not text (tools/test_math_edit.py compares that).
                     observed_runs = [(char, run['link']) for run in resolved_text[sid][rid][text_id]
-                                     if not run['format']['hidden'] for char in run['text']]
+                                     if not run['format']['hidden'] and not run['format']['math'] for char in run['text']]
                     if observed_runs and observed_runs[-1][0] == '\r':
                         observed_runs.pop()
                     observed_runs = [(projected, link) for char, link in observed_runs for projected in project_text(char)]

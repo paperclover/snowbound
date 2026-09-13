@@ -154,10 +154,12 @@ impl From<EditError> for crate::Error {
 }
 
 /// A fresh random identity for a new paragraph or text object.
+/// A fresh identity with `n` 1: OneNote never stores an object as `{guid},0`, and OneNote
+/// 2010 loses outline elements stored that way (corpus/math-edit/native-drop).
 pub fn new_id() -> Result<ExGuid, EditError> {
     Ok(ExGuid {
         guid: crate::write::fresh_guid().map_err(|_| EditError::Identity)?,
-        n: 0,
+        n: 1,
     })
 }
 

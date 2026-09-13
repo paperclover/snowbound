@@ -782,6 +782,17 @@ pub(crate) fn write_revisions_with_payloads(
     index.validate_current()?;
     let changes = edit(&index)?;
     let mut output = source.to_vec();
+    // Native files reserve 1 KiB per transaction-log fragment; a fragment that ends the file
+    // keeps that room before the first new chunk.
+    let tail = store.transaction_fragments.last().unwrap().chunk;
+    let reserved = usize::try_from(tail.offset + tail.length.max(1024) + 32).unwrap();
+    if usize::try_from(tail.offset + tail.length)
+        .unwrap()
+        .next_multiple_of(8)
+        >= output.len()
+    {
+        output.resize(reserved, 0);
+    }
     let mut maximum = store
         .transaction_fragments
         .iter()

@@ -97,7 +97,8 @@ def compare_formats(space, nodes, native):
         for run in kind['runs']:
             style = {**base, **({k: v for k, v in space['nodes'][run['format']]['format'].items() if v is not None} if run['format'] else {})}
             text = source[run['start'] * 2:run['end'] * 2].decode('utf-16-le')
-            if not style.get('hidden'):
+            # Hidden runs and equation runs (exported as MathML) have no visible native text.
+            if not style.get('hidden') and not style.get('math'):
                 actual.extend((char, style) for char in text)
         if actual and actual[-1][0] == '\r':
             actual.pop()
