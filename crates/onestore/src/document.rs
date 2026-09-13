@@ -125,6 +125,18 @@ format_fields! {
     space_after: f32,
     line_spacing: f32,
     list_spacing: f32,
+    math_object: MathObject,
+}
+
+/// The inline math object a run belongs to, from its text-run data: `kind` follows the
+/// `OBJECTTYPE` values of the Windows text object model (31 superscript, 16 fraction, …),
+/// `arguments` counts the object's arguments on its opening run, and `symbols` are the
+/// characters the object builds with (a bracket pair, an n-ary operator, `^` or `/`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MathObject {
+    pub kind: u32,
+    pub arguments: Option<u32>,
+    pub symbols: Vec<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -194,12 +206,46 @@ impl Revision<'_> {
                 return Err(invalid("Text-run boundary splits a surrogate pair"));
             }
             let fragment = &text[start..byte];
-            let format = run
+            let mut format = run
                 .format
                 .map(style)
                 .transpose()?
                 .unwrap_or(&default)
                 .inherit(&base);
+            if let Some(set) = run.extra_set.and_then(|index| node.extra.get(index)) {
+                let scalar = |id: u32| {
+                    set.iter().find_map(|field| match field.value {
+                        FieldValue::Bytes(bytes) if field.id == id => Some(bytes),
+                        _ => None,
+                    })
+                };
+                if let Some(kind) = scalar(0x1400344f) {
+                    format.math_object = Some(MathObject {
+                        kind: u32::from_le_bytes(
+                            kind.try_into()
+                                .map_err(|_| invalid("Math object type has an invalid length"))?,
+                        ),
+                        arguments: scalar(0x14003450)
+                            .map(|b| {
+                                b.try_into().map(u32::from_le_bytes).map_err(|_| {
+                                    invalid("Math argument count has an invalid length")
+                                })
+                            })
+                            .transpose()?,
+                        symbols: [0x10003453, 0x10003454, 0x10003455]
+                            .into_iter()
+                            .filter_map(scalar)
+                            .map(|b| {
+                                b.try_into()
+                                    .ok()
+                                    .map(u16::from_le_bytes)
+                                    .and_then(|unit| char::from_u32(u32::from(unit)))
+                                    .ok_or_else(|| invalid("Math symbol is not a character"))
+                            })
+                            .collect::<Result<_>>()?,
+                    });
+                }
+            }
             let mut link = None;
             if format.hyperlink != Some(true) {
                 target = None;
@@ -943,6 +989,7 @@ impl<'a> Element<'a> {
             space_after: f.float(0x1400342f, 36.0)?,
             line_spacing: f.float(0x14003430, 36.0)?,
             list_spacing: f.float(0x14001ccb, 36.0)?,
+            math_object: None,
         };
         let mut tags = Vec::new();
         if let Some(property) = f.take(0x40003489) {

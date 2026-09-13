@@ -12,9 +12,11 @@ use std::{
 
 pub mod ink;
 pub mod link;
+pub mod math;
 pub mod text;
 
 pub use ink::{Ink, InkStroke};
+pub use math::Math;
 pub(crate) mod write;
 pub use text::Paragraph;
 
