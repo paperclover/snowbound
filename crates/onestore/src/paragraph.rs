@@ -3,7 +3,7 @@ use crate::{
     create::{current_timestamps, properties, string},
     document::{Document, Element, Kind},
     edit::{editable_parents, update_title},
-    write::{PropertyObject, fresh_guid, write_revision},
+    write::{PropertyObject, fresh_guid, write_revision_on},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -252,7 +252,7 @@ impl ParagraphSplit {
             object.set(&[(0x14001d7a, &modified)])?;
         }
         update_title(&store, &raw, view, &pages, &mut changed)?;
-        write_revision(source, space, |_| Ok(changed))
+        write_revision_on(&index, space, |_| Ok(changed))
     }
 }
 
@@ -682,7 +682,7 @@ impl ParagraphJoin {
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
         update_title(&store, &raw, view, &pages, &mut changed)?;
-        write_revision(source, space, |_| Ok(changed))
+        write_revision_on(&index, space, |_| Ok(changed))
     }
 }
 

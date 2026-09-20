@@ -3,7 +3,7 @@ use crate::{
     create::{current_timestamps, default_text_style, properties, string},
     document::{Document, Element, Kind},
     edit::{editable_parents, page_title},
-    write::{PropertyObject, fresh_guid, write_revision},
+    write::{PropertyObject, fresh_guid, write_revision_on},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -394,7 +394,7 @@ impl Insertion {
             drop(view);
             title
         };
-        write_revision(source, space, |raw| {
+        write_revision_on(&index, space, |raw| {
             let mut changed = new;
             for id in &ancestors {
                 let mut object = PropertyObject::from_object(&raw.objects[id])?;

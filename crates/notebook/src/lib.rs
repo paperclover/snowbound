@@ -20,6 +20,7 @@ use std::{
 };
 
 mod assets;
+mod images;
 mod merge;
 mod pages;
 mod rebase;
@@ -59,7 +60,7 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 13;
+const SCHEMA_VERSION: u32 = 14;
 
 /// An edited page model together with the stored model it was edited from.
 /// `before` is the precondition reconciliation checks against the remote page.
@@ -217,7 +218,7 @@ impl Replica {
             ",
             )?;
             schema::create(&transaction)?;
-            transaction.execute("INSERT INTO replica VALUES (1, ?1, ?1)", [source])?;
+            transaction.execute("INSERT INTO replica VALUES (1, ?1, x'')", [source])?;
         } else {
             if application != APPLICATION_ID {
                 return Err(
@@ -251,11 +252,7 @@ impl Replica {
             .connection
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        Ok(
-            connection.query_row("SELECT working FROM replica WHERE id=1", [], |row| {
-                row.get(0)
-            })?,
-        )
+        images::working(&connection)
     }
 
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
@@ -294,10 +291,7 @@ impl Replica {
                 .map_err(|_| io::Error::other("Cache owner panicked"))?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let current: Vec<u8> =
-                transaction.query_row("SELECT working FROM replica WHERE id=1", [], |row| {
-                    row.get(0)
-                })?;
+            let (base, current) = images::both(&transaction)?;
             if current != source {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
@@ -334,10 +328,7 @@ impl Replica {
                             id
                         ],
                     )?;
-                    transaction.execute(
-                        "UPDATE replica SET working=?1 WHERE id=1",
-                        [prepared.as_bytes()],
-                    )?;
+                    images::set_working(&transaction, &base, prepared.as_bytes())?;
                     transaction.commit()?;
                     drop(connection);
                     self.wake_sync();
@@ -388,10 +379,7 @@ impl Replica {
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current: Vec<u8> =
-            transaction.query_row("SELECT working FROM replica WHERE id=1", [], |row| {
-                row.get(0)
-            })?;
+        let (base, current) = images::both(&transaction)?;
         if current != source {
             return Err(io::Error::new(
                 io::ErrorKind::ResourceBusy,
@@ -410,10 +398,7 @@ impl Replica {
             ],
         )?;
         let id = u64::try_from(transaction.last_insert_rowid()).map_err(io::Error::other)?;
-        transaction.execute(
-            "UPDATE replica SET working=?1 WHERE id=1",
-            [edit.as_bytes()],
-        )?;
+        images::set_working(&transaction, &base, edit.as_bytes())?;
         transaction.commit()?;
         drop(connection);
         self.wake_sync();
@@ -514,10 +499,7 @@ fn validate_images(connection: &Connection) -> Result<()> {
             io::Error::new(io::ErrorKind::InvalidData, "Cache integrity check failed").into(),
         );
     }
-    let (base, working): (Vec<u8>, Vec<u8>) =
-        connection.query_row("SELECT base, working FROM replica WHERE id=1", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?;
+    let (base, working) = images::both(connection)?;
     if validate(&base)? != validate(&working)? {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

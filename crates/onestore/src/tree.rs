@@ -3,7 +3,7 @@ use crate::{
     create::{current_timestamps, properties, string},
     document::{Document, Kind, Revision},
     edit::{editable_parents, update_title},
-    write::{PropertyObject, fresh_guid, write_revision},
+    write::{PropertyObject, fresh_guid, write_revision_on},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -371,7 +371,7 @@ impl TreeEdit {
             changed.insert(self.object, object);
         }
         update_title(&store, &raw, view, &pages, &mut changed)?;
-        write_revision(source, space, |_| Ok(changed))
+        write_revision_on(&index, space, |_| Ok(changed))
     }
 }
 
@@ -416,6 +416,7 @@ fn checked_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::write::write_revision;
     use crate::{Insertion, PreparedEdit};
 
     #[test]

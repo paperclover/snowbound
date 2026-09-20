@@ -2,8 +2,9 @@
 
 The application-facing crate: notebook discovery, a durable local replica with
 reconnect reconciliation, external-asset caching, recovery export and optional
-embedded SMB access. The replica stores a complete working image of one section
-and the editor's intents in a local SQLite database. `sync_once` provides a
+embedded SMB access. The replica stores the last observed remote image of one section,
+the working image as its difference from that, and the editor's intents in a
+local SQLite database; a save writes the revision it appended, not the section. `sync_once` provides a
 reconciliation step and `start_sync` owns automatic polling and reconnects. Local
 success does not acknowledge publication to a shared notebook.
 

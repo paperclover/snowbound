@@ -305,8 +305,11 @@ pub fn replace_property_bytes(
             message: "Property does not contain scalar bytes",
         });
     }
+    let store = Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    index.validate_current()?;
     replace_objects(
-        source,
+        &index,
         space,
         &[ObjectEdit {
             object: object_id,
@@ -316,12 +319,13 @@ pub fn replace_property_bytes(
     )
 }
 
+/// Patches objects of a source the caller has parsed and validated.
 pub(crate) fn replace_objects(
-    source: &[u8],
+    index: &RevisionIndex<'_>,
     space: ExGuid,
     edits: &[ObjectEdit<'_>],
 ) -> Result<Vec<u8>> {
-    write_revision(source, space, |revision| {
+    write_revision_on(index, space, |revision| {
         let mut changed = BTreeMap::new();
         for edit in edits {
             if changed.contains_key(&edit.object) {
@@ -788,23 +792,86 @@ pub(crate) fn write_revisions_with_payloads(
     payloads: &[([u8; 16], &[u8])],
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
-    let store = Store::parse(source)?;
-    RevisionIndex::parse(&store)?.validate_current()?;
-    let output = append_revisions(source, payloads, None, edit)?;
-    let store = Store::parse(&output)?;
-    RevisionIndex::parse(&store)?.validate_current()?;
-    Ok(output)
+    publish(source, payloads, None, true, edit)
 }
 
 /// `write_revisions_with_payloads` without validating that current revisions are
 /// complete: a protected section is validated by unlocking it, through `protection`.
+#[cfg(feature = "protected")]
 pub(crate) fn append_revisions(
     source: &[u8],
     payloads: &[([u8; 16], &[u8])],
     protection: Option<&dyn Protection>,
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
+    publish(source, payloads, protection, false, edit)
+}
+
+fn publish(
+    source: &[u8],
+    payloads: &[([u8; 16], &[u8])],
+    protection: Option<&dyn Protection>,
+    validate: bool,
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
+) -> Result<Vec<u8>> {
+    // The parsed source is released before the result is parsed.
+    let output = build(source, payloads, protection, validate, edit)?;
+    check(&output, validate)?;
+    Ok(output)
+}
+
+/// Parses a written image, and with `validate` requires its current revisions complete.
+pub(crate) fn check(output: &[u8], validate: bool) -> Result<()> {
+    let store = Store::parse(output)?;
+    let index = RevisionIndex::parse(&store)?;
+    if validate {
+        index.validate_current()?;
+    }
+    Ok(())
+}
+
+/// The written image, unchecked: `check` follows once the caller has released whatever
+/// `edit` borrowed.
+pub(crate) fn build(
+    source: &[u8],
+    payloads: &[([u8; 16], &[u8])],
+    protection: Option<&dyn Protection>,
+    validate: bool,
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
+) -> Result<Vec<u8>> {
     let store = Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    if validate {
+        index.validate_current()?;
+    }
+    build_on(&index, payloads, protection, edit)
+}
+
+/// `write_revision` on a source the caller has parsed and validated.
+pub(crate) fn write_revision_on(
+    index: &RevisionIndex<'_>,
+    space: ExGuid,
+    edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
+) -> Result<Vec<u8>> {
+    let output = build_on(index, &[], None, |index| {
+        let revision = index.resolve(space, index.active(space)?)?;
+        Ok(BTreeMap::from([(
+            space,
+            RevisionEdit::Update(edit(&revision)?),
+        )]))
+    })?;
+    check(&output, true)?;
+    Ok(output)
+}
+
+fn build_on(
+    index: &RevisionIndex<'_>,
+    payloads: &[([u8; 16], &[u8])],
+    protection: Option<&dyn Protection>,
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
+) -> Result<Vec<u8>> {
+    let store = index.store;
+    let source = store.data;
     let is_section = store.header.file_type == FileType::Section;
     if !store.checksum_mismatches.is_empty() {
         return Err(Error {
@@ -812,13 +879,14 @@ pub(crate) fn append_revisions(
             message: "Cannot write a file with transaction checksum damage",
         });
     }
-    let index = RevisionIndex::parse(&store)?;
     let resolve = |space, rid| match protection {
         Some(protection) => protection.resolve(space, rid),
         None => index.resolve(space, rid),
     };
-    let changes = edit(&index)?;
-    let mut output = source.to_vec();
+    let changes = edit(index)?;
+    // Room for the revision, so appending does not double the image.
+    let mut output = Vec::with_capacity(source.len() + source.len() / 16 + (1 << 16));
+    output.extend_from_slice(source);
     // Native files reserve 1 KiB per transaction-log fragment; a fragment that ends the file
     // keeps that room before the first new chunk.
     let tail = store.transaction_fragments.last().unwrap().chunk;
@@ -1348,12 +1416,12 @@ pub(crate) fn append_revisions(
             let space_node = root
                 .nodes
                 .iter()
-                .find(|node| node.id == 8 && node.fields(&store).exguid() == Ok(space))
+                .find(|node| node.id == 8 && node.fields(store).exguid() == Ok(space))
                 .ok_or(Error {
                     offset: 0,
                     message: "Object space is absent from the root list",
                 })?;
-            let space_list = space_node.referenced_list(&store)?;
+            let space_list = space_node.referenced_list(store)?;
             let revision_node = space_list.iter().rfind(|node| node.id == 0x10).unwrap();
             let Some(Reference::NodeList(manifest_reference)) = revision_node.reference else {
                 unreachable!()
@@ -1522,6 +1590,5 @@ pub(crate) fn append_revisions(
         message: "File generation counter is exhausted",
     })?;
     output[228..236].copy_from_slice(&generation.to_le_bytes());
-    RevisionIndex::parse(&Store::parse(&output)?)?;
     Ok(output)
 }

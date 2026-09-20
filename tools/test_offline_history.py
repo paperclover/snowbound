@@ -141,7 +141,7 @@ class OfflineLedgerTests(unittest.TestCase):
                 connection = sqlite3.connect(output / 'rust' / f'{actor}.sqlite')
                 connection.executescript('CREATE TABLE receipts(edit_id INTEGER, revision TEXT); CREATE TABLE edits(id INTEGER); CREATE TABLE attempt(id INTEGER); CREATE TABLE conflicts(id INTEGER); CREATE TABLE replica(id INTEGER, base BLOB, working BLOB);')
                 connection.executemany('INSERT INTO receipts VALUES (?,?)', [(op+1, f'{actor}-{op}') for op in range(2)])
-                connection.execute('INSERT INTO replica VALUES (1, ?, ?)', (b'opaque image', b'opaque image'))
+                connection.execute('INSERT INTO replica VALUES (1, ?, ?)', (b'opaque image', b''))
                 connection.commit()
                 connection.close()
             for i in range(4):
@@ -166,7 +166,7 @@ class OfflineLedgerTests(unittest.TestCase):
             connection = sqlite3.connect(output / 'rust/w0.sqlite')
             for sql, undo in [("UPDATE receipts SET revision='wrong' WHERE edit_id=1", "UPDATE receipts SET revision='w0-0' WHERE edit_id=1"),
                               ('INSERT INTO attempt VALUES (1)', 'DELETE FROM attempt'),
-                              ("UPDATE replica SET working=X'00'", "UPDATE replica SET working=base")]:
+                              ("UPDATE replica SET working=X'00'", "UPDATE replica SET working=X''")]:
                 connection.execute(sql)
                 connection.commit()
                 with self.assertRaises(AssertionError): verify(output)

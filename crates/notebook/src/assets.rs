@@ -79,12 +79,8 @@ pub(crate) fn key(filename: &str) -> Result<String> {
 }
 
 fn referenced(connection: &Connection, key: &str) -> Result<bool> {
-    for column in ["working", "base"] {
-        let image: Vec<u8> = connection.query_row(
-            &format!("SELECT {column} FROM replica WHERE id=1"),
-            [],
-            |row| row.get(0),
-        )?;
+    let (base, working) = crate::images::both(connection)?;
+    for image in [working, base] {
         let store = Store::parse(&image)?;
         let index = RevisionIndex::parse(&store)?;
         let document = Document::parse(&index)?;

@@ -63,7 +63,7 @@ impl Replica {
             .connection
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        Ok(connection.query_row("SELECT base FROM replica WHERE id=1", [], |row| row.get(0))?)
+        images::base(&connection)
     }
 
     /// Reconciles one pending edit, or refreshes the working image when the queue is empty.
@@ -79,7 +79,12 @@ impl Replica {
         }
         let _step = Step(self);
         let snapshot = remote.read().map_err(Error::RemoteIo)?;
-        let identity = validate(&snapshot)?;
+        // An unchanged remote is the base image, validated when it was stored.
+        let identity = if snapshot == self.remote_snapshot()? {
+            None
+        } else {
+            Some(validate(&snapshot)?)
+        };
         let (intent, attempted) = {
             let mut connection = self
                 .connection
@@ -87,11 +92,10 @@ impl Replica {
                 .map_err(|_| io::Error::other("Cache owner panicked"))?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let base: Vec<u8> =
-                transaction
-                    .query_row("SELECT base FROM replica WHERE id=1", [], |row| row.get(0))?;
-            let base_store = Store::parse(&base)?;
-            if RevisionIndex::parse(&base_store)?.root != identity {
+            let (base, working) = images::both(&transaction)?;
+            if let Some(identity) = identity
+                && RevisionIndex::parse(&Store::parse(&base)?)?.root != identity
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "Remote snapshot belongs to another document",
@@ -105,10 +109,7 @@ impl Replica {
                 rows.next()?.map(pending_edit).transpose()?
             };
             let Some(intent) = intent else {
-                transaction.execute(
-                    "UPDATE replica SET base=?1, working=?1 WHERE id=1",
-                    [&snapshot],
-                )?;
+                images::set_base(&transaction, &base, &snapshot, &snapshot)?;
                 transaction.commit()?;
                 return Ok(None);
             };
@@ -123,7 +124,7 @@ impl Replica {
                     |row| row.get::<_, String>(0),
                 )
                 .optional()?;
-            transaction.execute("UPDATE replica SET base=?1 WHERE id=1", [&snapshot])?;
+            images::set_base(&transaction, &base, &snapshot, &working)?;
             transaction.commit()?;
             (intent, attempted)
         };
@@ -415,10 +416,7 @@ impl Replica {
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (base, working): (Vec<u8>, Vec<u8>) =
-            transaction.query_row("SELECT base, working FROM replica WHERE id=1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
+        let (base, working) = images::both(&transaction)?;
         if working != local || base != remote {
             return Err(io::Error::new(
                 io::ErrorKind::ResourceBusy,
@@ -464,7 +462,7 @@ impl Replica {
                     [archive.to_string_lossy().into_owned()],
                 )?;
                 transaction.execute("DELETE FROM edits", [])?;
-                transaction.execute("UPDATE replica SET working=base WHERE id=1", [])?;
+                transaction.execute("UPDATE replica SET working=x'' WHERE id=1", [])?;
             }
         }
         transaction.commit()?;
@@ -499,10 +497,7 @@ impl Replica {
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (base, working): (Vec<u8>, Vec<u8>) =
-            transaction.query_row("SELECT base, working FROM replica WHERE id=1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })?;
+        let (base, working) = images::both(&transaction)?;
         if working != local || base != remote {
             return Err(io::Error::new(
                 io::ErrorKind::ResourceBusy,
@@ -561,7 +556,15 @@ impl Replica {
             params![id, revision.to_string()],
         )?;
         transaction.execute("DELETE FROM edits WHERE id=?1", [id])?;
-        transaction.execute("UPDATE replica SET base=?1, working=CASE WHEN EXISTS(SELECT 1 FROM edits) THEN working ELSE ?1 END WHERE id=1", [snapshot])?;
+        let (base, working) = images::both(&transaction)?;
+        let pending: bool =
+            transaction.query_row("SELECT EXISTS(SELECT 1 FROM edits)", [], |row| row.get(0))?;
+        images::set_base(
+            &transaction,
+            &base,
+            snapshot,
+            if pending { &working } else { snapshot },
+        )?;
         transaction.commit()?;
         Ok(())
     }

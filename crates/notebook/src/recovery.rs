@@ -58,17 +58,11 @@ impl Recovery {
     }
 
     pub fn snapshot(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .connection
-            .query_row("SELECT working FROM replica WHERE id=1", [], |row| {
-                row.get(0)
-            })?)
+        crate::images::working(&self.connection)
     }
 
     pub fn remote_snapshot(&self) -> Result<Vec<u8>> {
-        Ok(self
-            .connection
-            .query_row("SELECT base FROM replica WHERE id=1", [], |row| row.get(0))?)
+        crate::images::base(&self.connection)
     }
 
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
@@ -150,10 +144,11 @@ fn summary(connection: &Connection) -> Result<RecoverySummary> {
         [],
         |row| Ok((unsigned(row, 0)?, unsigned(row, 1)?)),
     )?;
+    let working_bytes = crate::images::working(connection)?.len() as u64;
     Ok(connection.query_row(
         "SELECT (SELECT count(*) FROM edits), (SELECT count(*) FROM conflicts),
                 (SELECT count(*) FROM attempt), (SELECT count(*) FROM receipts),
-                length(working), length(base) FROM replica WHERE id=1",
+                length(base) FROM replica WHERE id=1",
         [],
         |row| {
             Ok(RecoverySummary {
@@ -161,8 +156,8 @@ fn summary(connection: &Connection) -> Result<RecoverySummary> {
                 conflicts: unsigned(row, 1)?,
                 uncertain_edits: unsigned(row, 2)?,
                 published_receipts: unsigned(row, 3)?,
-                working_bytes: unsigned(row, 4)?,
-                remote_bytes: unsigned(row, 5)?,
+                working_bytes,
+                remote_bytes: unsigned(row, 4)?,
                 cached_assets,
                 cached_asset_bytes,
             })

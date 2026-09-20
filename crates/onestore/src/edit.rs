@@ -237,7 +237,7 @@ pub fn replace_text(
     let Some((page, automatic, title_text)) =
         page_title(revision, &pages, Some((object, &changed)))?
     else {
-        return crate::write::replace_objects(source, space, &edits);
+        return crate::write::replace_objects(&index, space, &edits);
     };
     let Kind::Page {
         alternate_title, ..
@@ -296,7 +296,7 @@ pub fn replace_text(
             &[]
         },
     });
-    crate::write::replace_objects(source, space, &edits)
+    crate::write::replace_objects(&index, space, &edits)
 }
 
 pub(crate) fn editable_parents(

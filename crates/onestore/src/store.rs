@@ -505,6 +505,7 @@ impl<'a> Store<'a> {
                     pending.push(reference);
                 }
             }
+            nodes.shrink_to_fit();
             lists.insert(list_id.unwrap(), NodeList { fragments, nodes });
         }
         Ok(Self {

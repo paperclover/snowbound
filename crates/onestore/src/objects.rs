@@ -277,6 +277,8 @@ impl<'a> RevisionIndex<'a> {
             let mut pending: Vec<&Node<'a>> = revision.nodes.iter().rev().collect();
             let mut groups = BTreeSet::new();
             let mut defining_table = false;
+            // Entries of the table being defined; the map is built once, at its end.
+            let mut defining: Vec<(u32, [u8; 16])> = Vec::new();
             let initial_crc = if self.store.header.file_type == crate::FileType::Section {
                 u32::MAX
             } else {
@@ -333,6 +335,7 @@ impl<'a> RevisionIndex<'a> {
                             });
                         }
                         table = Arc::new(GlobalIds::new());
+                        defining.clear();
                         defining_table = true;
                     }
                     0x24..=0x26 => {
@@ -343,8 +346,9 @@ impl<'a> RevisionIndex<'a> {
                             });
                         }
                         let first = u32::from_le_bytes(c.read()?);
-                        let entries: Vec<_> = match node.id {
-                            0x24 => vec![(first, c.read()?)],
+                        let start = defining.len();
+                        match node.id {
+                            0x24 => defining.push((first, c.read()?)),
                             0x25 | 0x26 => {
                                 let count = if node.id == 0x26 {
                                     u32::from_le_bytes(c.read()?)
@@ -364,30 +368,28 @@ impl<'a> RevisionIndex<'a> {
                                         message: "Global ID import range exceeds its table",
                                     });
                                 }
-                                let entries: Vec<_> = dependency_table
-                                    .range(first..end)
-                                    .map(|(from, guid)| (to + from - first, *guid))
-                                    .collect();
-                                if entries.len() as u64 != u64::from(count) {
+                                defining.extend(
+                                    dependency_table
+                                        .range(first..end)
+                                        .map(|(from, guid)| (to + from - first, *guid)),
+                                );
+                                if (defining.len() - start) as u64 != u64::from(count) {
                                     return Err(Error {
                                         offset: node.offset,
                                         message: "Global ID import refers to a missing entry",
                                     });
                                 }
-                                entries
                             }
                             _ => unreachable!(),
-                        };
-                        for (index, guid) in entries {
-                            if index >= 0xffffff
-                                || guid == [0; 16]
-                                || Arc::make_mut(&mut table).insert(index, guid).is_some()
-                            {
-                                return Err(Error {
-                                    offset: node.offset,
-                                    message: "Invalid or repeated global ID entry",
-                                });
-                            }
+                        }
+                        if defining[start..]
+                            .iter()
+                            .any(|(index, guid)| *index >= 0xffffff || *guid == [0; 16])
+                        {
+                            return Err(Error {
+                                offset: node.offset,
+                                message: "Invalid or repeated global ID entry",
+                            });
                         }
                     }
                     0x28 => {
@@ -398,13 +400,22 @@ impl<'a> RevisionIndex<'a> {
                             });
                         }
                         defining_table = false;
-                        let unique: BTreeSet<_> = table.values().collect();
-                        if unique.len() != table.len() {
+                        defining.sort_unstable();
+                        if defining.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                            return Err(Error {
+                                offset: node.offset,
+                                message: "Invalid or repeated global ID entry",
+                            });
+                        }
+                        let mut guids: Vec<_> = defining.iter().map(|(_, guid)| *guid).collect();
+                        guids.sort_unstable();
+                        if guids.windows(2).any(|pair| pair[0] == pair[1]) {
                             return Err(Error {
                                 offset: node.offset,
                                 message: "Global ID table repeats a GUID",
                             });
                         }
+                        table = Arc::new(defining.drain(..).collect());
                     }
                     0x59 | 0x5a => {
                         let id = if node.id == 0x5a {

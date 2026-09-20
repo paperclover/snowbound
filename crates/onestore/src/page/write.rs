@@ -339,25 +339,34 @@ pub(crate) fn write_page(
     if author.contains('\0') {
         return Err(invalid("Choose an author name without NUL"));
     }
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
-    let document = Document::parse(&index)?;
-    let pages = document.pages_in(space)?;
-    let [page] = pages.as_slice() else {
-        return Err(invalid("Choose an object space containing one active page"));
+    // The parsed source is released before the writers parse their own images.
+    let (page, before, existing) = {
+        let store = Store::parse(source)?;
+        let index = RevisionIndex::parse(&store)?;
+        index.validate_current()?;
+        let document = Document::parse(&index)?;
+        let pages = document.pages_in(space)?;
+        let [page] = pages.as_slice() else {
+            return Err(invalid("Choose an object space containing one active page"));
+        };
+        let existing = index
+            .resolve_active(space)?
+            .objects
+            .keys()
+            .copied()
+            .collect();
+        (*page, Page::from_space(&document, space)?, existing)
     };
-    let before = Page::from_space(&document, space)?;
-    let raw = index.resolve_active(space)?;
     let mut lowering = Lowering {
         image: source.to_vec(),
+        current: Some(before.clone()),
         space,
-        page: *page,
+        page,
         author,
         alias: BTreeMap::new(),
         built: BTreeSet::new(),
     };
-    lowering.run(&before, after, &raw.objects.keys().copied().collect())?;
+    lowering.run(&before, after, &existing)?;
     if lowering.image == source {
         return Ok(lowering.image);
     }
@@ -453,6 +462,8 @@ impl<'a> View<'a> {
 
 struct Lowering<'a> {
     image: Vec<u8>,
+    /// The page as `image` stores it, until a writer changes the image.
+    current: Option<Page>,
     space: ExGuid,
     page: ExGuid,
     author: &'a str,
@@ -478,15 +489,22 @@ impl Lowering<'_> {
     }
 
     fn apply(&mut self, edit: impl FnOnce(&[u8]) -> Result<Vec<u8>, Error>) -> Result<(), Error> {
-        self.image = edit(&self.image)?;
+        let image = edit(&self.image)?;
+        if image != self.image {
+            self.image = image;
+            self.current = None;
+        }
         Ok(())
     }
 
-    fn current(&self) -> Result<Page, Error> {
-        let store = Store::parse(&self.image)?;
-        let index = RevisionIndex::parse(&store)?;
-        let document = Document::parse(&index)?;
-        Page::from_space(&document, self.space)
+    fn current(&mut self) -> Result<Page, Error> {
+        if self.current.is_none() {
+            let store = Store::parse(&self.image)?;
+            let index = RevisionIndex::parse(&store)?;
+            let document = Document::parse(&index)?;
+            self.current = Some(Page::from_space(&document, self.space)?);
+        }
+        Ok(self.current.clone().unwrap())
     }
 
     fn run(
@@ -2921,10 +2939,6 @@ pub(crate) fn squash(
         .iter()
         .map(|(model, image)| (*image, *model))
         .collect();
-    let applied_store = Store::parse(applied)?;
-    let applied_index = RevisionIndex::parse(&applied_store)?;
-    // Payloads the typed edits embedded travel into the squashed transaction as well.
-    let source_store = Store::parse(source)?;
     let declared = |store: &Store<'_>| -> Vec<[u8; 16]> {
         store
             .lists
@@ -2934,7 +2948,10 @@ pub(crate) fn squash(
             .filter_map(|node| node.payload.get(..16).and_then(|g| g.try_into().ok()))
             .collect()
     };
-    let existing = declared(&source_store);
+    let existing = declared(&Store::parse(source)?);
+    let applied_store = Store::parse(applied)?;
+    let applied_index = RevisionIndex::parse(&applied_store)?;
+    // Payloads the typed edits embedded travel into the squashed transaction as well.
     let mut payloads = Vec::new();
     for guid in declared(&applied_store) {
         if !existing.contains(&guid) {
@@ -3018,10 +3035,13 @@ pub(crate) fn squash(
         }
         Ok(changes)
     };
-    match protection {
-        Some(_) => crate::write::append_revisions(source, &payloads, protection, edit),
-        None => crate::write::write_revisions_with_payloads(source, &payloads, edit),
-    }
+    let validate = protection.is_none();
+    let output = crate::write::build(source, &payloads, protection, validate, edit)?;
+    // The parsed images are released before the result is parsed.
+    drop(applied_index);
+    drop(applied_store);
+    crate::write::check(&output, validate)?;
+    Ok(output)
 }
 
 fn remap(object: &mut PropertyObject, rename: &BTreeMap<ExGuid, ExGuid>) -> Result<(), Error> {

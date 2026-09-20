@@ -46,7 +46,7 @@ def verify(output, max_gap=120):
             persisted = dict(connection.execute('SELECT edit_id, revision FROM receipts'))
             assert persisted == {id: event['revision'] for id, event in receipts.items()}, 'SQLite receipts differ from observed acknowledgements'
             base, working = connection.execute('SELECT base, working FROM replica WHERE id=1').fetchone()
-            assert base == working, 'A drained cache retained a divergent local branch'
+            assert working == b'', 'A drained cache retained a divergent local branch'
             caches[actor] = {'receipts': len(persisted), 'image_bytes': len(base), 'image_sha256': hashlib.sha256(base).hexdigest(), 'database_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
         finally:
             connection.close()

@@ -3,7 +3,7 @@ use crate::{
     create::current_timestamps,
     document::{Document, Kind},
     edit::{editable_parents, update_title},
-    write::{PropertyObject, write_revision},
+    write::{PropertyObject, write_revision_on},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -105,7 +105,7 @@ impl OutlineEdit {
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
         let modified = current_timestamps()?.0.to_le_bytes();
-        write_revision(source, space, |raw| {
+        write_revision_on(&index, space, |raw| {
             let mut target = PropertyObject::from_object(&raw.objects[&object])?;
             target.set(
                 &values
@@ -139,6 +139,7 @@ impl OutlineEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::write::write_revision;
 
     #[test]
     fn protection_on_the_target_or_ancestor_prevents_layout_edits() {

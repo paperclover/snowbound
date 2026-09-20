@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Kill owned processes across local-cache/remote-file publication boundaries."""
 import argparse
+import cache_images
 import hashlib
 import json
 import os
@@ -186,7 +187,7 @@ def run(source, output):
         try:
             assert connection.execute('PRAGMA quick_check').fetchall() == [('ok',)]
             assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
-            local_image = save_image(output, connection.execute('SELECT working FROM replica WHERE id=1').fetchone()[0])
+            local_image = save_image(output, cache_images.working(connection))
         finally:
             connection.close()
         result = {'case': index, 'phase': phase, 'during_confirmation': confirmation, 'before_status': before['status'], 'after_status': after['status'],

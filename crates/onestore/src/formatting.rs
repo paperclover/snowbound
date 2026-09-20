@@ -3,7 +3,7 @@ use crate::{
     create::{current_timestamps, properties, string},
     document::{Document, Kind},
     edit::editable_parents,
-    write::{PropertyObject, fresh_guid, write_revision},
+    write::{PropertyObject, fresh_guid, write_revision_on},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -172,7 +172,7 @@ pub(crate) fn format_text(
         }
     }
     let modified = current_timestamps()?.0.to_le_bytes();
-    write_revision(source, space, |raw| {
+    write_revision_on(&index, space, |raw| {
         let mut target = PropertyObject::from_object(&raw.objects[&object])?;
         let fields = PropertySets::parse(&target.bytes)?;
         if fields.sets[0].iter().any(|p| p.id == 0x24003458) {
