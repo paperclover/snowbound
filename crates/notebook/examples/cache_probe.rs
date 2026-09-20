@@ -110,8 +110,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             !intent.before.objects.iter().any(|o| o.id() == object.id())
                         })
                         .collect();
-                    let [PageObject::Outline(outline)] = added.as_slice() else {
-                        panic!("Expected one added outline")
+                    // A save that replaced a pending one carries its outlines too.
+                    let Some(PageObject::Outline(outline)) = added.last() else {
+                        panic!("Expected an added outline")
                     };
                     let text = outline.paragraphs[0].text().unwrap().text.text();
                     let operation: u64 = text.split_once(':').unwrap().0.parse()?;

@@ -83,7 +83,7 @@ struct Decoded<'a> {
 /// Owns decoded buffers until dropped; returned views cannot outlive this owner.
 ///
 /// Passwords are not retained. Dropping this owner clears its derived key and
-/// decoded buffers. Owned strings or exports made from a `Document` are separate
+/// decoded buffers; a protected save works on ordinary buffers, which are not cleared. Owned strings or exports made from a `Document` are separate
 /// caller-owned copies and must be disposed of by the caller when locking.
 /// Opening never rewrites the source image or changes its protection state.
 ///
@@ -302,15 +302,19 @@ impl UnlockedSection<'_> {
                         extension,
                     } => {
                         let text = |bytes: &[u8]| {
-                            String::from_utf16_lossy(
+                            String::from_utf16(
                                 &bytes
                                     .chunks_exact(2)
                                     .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                                     .collect::<Vec<_>>(),
                             )
+                            .map_err(|_| crate::Error {
+                                offset: 0,
+                                message: "Invalid UTF-16 file-data declaration",
+                            })
                         };
                         let mut copy =
-                            PropertyObject::file(*id, &text(reference), &text(extension))?;
+                            PropertyObject::file(*id, &text(reference)?, &text(extension)?)?;
                         copy.jcid = object.jcid;
                         copy.global_ids = std::sync::Arc::clone(&object.global_ids);
                         copy
@@ -336,7 +340,7 @@ impl UnlockedSection<'_> {
         };
         let store = crate::Store::parse(&scaffold)?;
         let placeholder = identity(RevisionIndex::parse(&store)?.root);
-        for at in 0..scaffold.len() - 20 {
+        for at in 0..=scaffold.len() - 20 {
             if scaffold[at..at + 20] == placeholder {
                 scaffold[at..at + 20].copy_from_slice(&identity(self.index.root));
             }
@@ -398,12 +402,30 @@ pub(crate) fn write_page(
     let store = crate::Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     let unlocked = UnlockedSection::open(&index, password, Limits::default())?;
+    if unlocked.keys.len() != 1 {
+        return Err(Error::Unsupported);
+    }
     let twin = unlocked.twin()?;
     let applied = Zeroizing::new(crate::page::write::write_page(&twin, space, page, author)?);
+    // Squash skips the spaces the source lacks as the twin's scaffold; the writers added none.
+    let spaces = |image: &[u8]| -> Result<Vec<ExGuid>> {
+        let store = crate::Store::parse(image)?;
+        Ok(RevisionIndex::parse(&store)?.spaces.into_keys().collect())
+    };
+    if spaces(&twin)? != spaces(&applied)? {
+        return Err(invalid("Page edits cannot create object spaces"));
+    }
     let written = crate::page::write::squash(source, &applied, &BTreeMap::new(), Some(&unlocked))?;
     let store = crate::Store::parse(&written)?;
     UnlockedSection::open(&RevisionIndex::parse(&store)?, password, Limits::default())?;
     Ok(written)
+}
+
+impl UnlockedSection<'_> {
+    /// The section key; `write_page` admits sections with exactly one.
+    fn key(&self) -> &crypto::Key {
+        self.keys.values().next().expect("one section key")
+    }
 }
 
 impl crate::write::Protection for UnlockedSection<'_> {
@@ -423,20 +445,21 @@ impl crate::write::Protection for UnlockedSection<'_> {
     }
 
     fn seal_property(&self, clear: &[u8]) -> std::result::Result<Vec<u8>, crate::Error> {
-        let [key] = self.keys.values().collect::<Vec<_>>()[..] else {
-            return Err(crate::Error {
-                offset: 0,
-                message: "Protected writing needs one section key",
-            });
+        let random = crate::Error {
+            offset: 0,
+            message: "System random source failed",
         };
-        let failed = |message| crate::Error { offset: 0, message };
         let mut iv = [0; 16];
-        getrandom::fill(&mut iv).map_err(|_| failed("System random source failed"))?;
-        key.seal_property(clear, iv)
-            .map_err(|_| failed("Malformed property object"))
+        getrandom::fill(&mut iv).map_err(|_| random)?;
+        self.key()
+            .seal_property(clear, iv)
+            .map_err(|error| match error {
+                Error::Invalid(error) => error,
+                _ => random,
+            })
     }
 
     fn seal_file(&self, clear: &[u8]) -> Vec<u8> {
-        self.keys.values().next().unwrap().seal_file(clear)
+        self.key().seal_file(clear)
     }
 }

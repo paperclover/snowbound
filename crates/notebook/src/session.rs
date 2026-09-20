@@ -91,6 +91,14 @@ pub trait Storage: Send + Sync {
     ) -> Result<()>;
 }
 
+/// A password-protected section as `Notebook::unlock` read it.
+#[cfg(feature = "protected")]
+pub struct Unlocked {
+    pub pages: Vec<(ExGuid, Page)>,
+    /// The stored section the pages came from, which a save must still find in place.
+    snapshot: Vec<u8>,
+}
+
 /// A mounted notebook directory.
 struct Directory(PathBuf);
 
@@ -622,43 +630,55 @@ impl Notebook {
         Ok(None)
     }
 
-    /// The pages of a password-protected section, for reading: nothing is cached or
-    /// written, and the decoded buffers go when the pages have been built.
+    /// The pages of a password-protected section: nothing is cached, and the decoded
+    /// buffers go when the pages have been built.
     #[cfg(feature = "protected")]
-    pub fn unlock(&self, path: &str, password: &str) -> Result<Vec<(ExGuid, Page)>> {
+    pub fn unlock(&self, path: &str, password: &str) -> Result<Unlocked> {
         let path = self.section_path(path)?.path.clone();
-        let bytes = self.storage.read(&path)?;
-        let store = Store::parse(&bytes)?;
-        let index = RevisionIndex::parse(&store)?;
-        let unlocked = onestore::protected::UnlockedSection::open(
-            &index,
-            password,
-            onestore::protected::Limits::default(),
-        )?;
-        let document = unlocked.document()?;
-        document
-            .pages()?
-            .into_iter()
-            .map(|(space, _)| Ok((space, Page::from_space(&document, space)?)))
-            .collect()
+        let snapshot = self.storage.read(&path)?;
+        let pages = {
+            let store = Store::parse(&snapshot)?;
+            let index = RevisionIndex::parse(&store)?;
+            let unlocked = onestore::protected::UnlockedSection::open(
+                &index,
+                password,
+                onestore::protected::Limits::default(),
+            )?;
+            let document = unlocked.document()?;
+            document
+                .pages()?
+                .into_iter()
+                .map(|(space, _)| Ok((space, Page::from_space(&document, space)?)))
+                .collect::<Result<_>>()?
+        };
+        Ok(Unlocked { pages, snapshot })
     }
 
-    /// Saves a page read through `unlock`, stored under the section's key. The save goes
-    /// straight to the file and fails if the section changed since `unlock` read it;
-    /// nothing of a protected section is cached or queued.
+    /// Saves an edited page of `unlocked` under the section's key, straight to the file:
+    /// nothing of a protected section is cached or queued. A section written since
+    /// `unlocked` was read fails the save; unlock again for its pages.
     #[cfg(feature = "protected")]
     pub fn save_unlocked(
         &self,
         path: &str,
         password: &str,
+        unlocked: &mut Unlocked,
         space: ExGuid,
         page: &Page,
         author: &str,
     ) -> Result<()> {
         let path = self.section_path(path)?.path.clone();
-        let bytes = self.storage.read(&path)?;
-        let edit = onestore::PreparedEdit::page_protected(&bytes, password, space, page, author)?;
-        self.storage.commit(&path, &edit)
+        let edit = onestore::PreparedEdit::page_protected(
+            &unlocked.snapshot,
+            password,
+            space,
+            page,
+            author,
+        )?;
+        self.storage.commit(&path, &edit)?;
+        let written = edit.as_bytes().to_vec();
+        unlocked.snapshot = written;
+        Ok(())
     }
 
     /// Opens a section of a mounted notebook by its catalog path.

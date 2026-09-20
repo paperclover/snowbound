@@ -104,6 +104,21 @@ fn compact(id: ExGuid, table: &BTreeMap<u32, [u8; 16]>) -> Result<[u8; 4]> {
     Ok(((index << 8) | id.n).to_le_bytes())
 }
 
+/// The global id table entries a property object's references name.
+pub(crate) fn table_entries(bytes: &[u8]) -> Result<BTreeSet<u32>> {
+    let mut entries = BTreeSet::new();
+    for property in PropertySets::parse(bytes)?.sets.iter().flatten() {
+        if let Value::References { compact_ids, .. } = property.value {
+            entries.extend(
+                compact_ids
+                    .chunks_exact(4)
+                    .map(|id| u32::from_le_bytes(id.try_into().unwrap()) >> 8),
+            );
+        }
+    }
+    Ok(entries)
+}
+
 fn field_length(property: &crate::Property<'_>, set_lengths: &[usize]) -> usize {
     match &property.value {
         Value::NoData => 0,
@@ -734,14 +749,21 @@ pub(crate) fn write_revision_with_payloads(
     payloads: &[([u8; 16], &[u8])],
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
-    write_revisions_with_payloads(source, payloads, |index| {
-        let rid = index.active(space)?;
-        let revision = index.resolve(space, rid)?;
+    write_revisions_with_payloads(source, payloads, update(space, edit))
+}
+
+/// One space's active revision edited into its update.
+fn update(
+    space: ExGuid,
+    edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
+) -> impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>> {
+    move |index| {
+        let revision = index.resolve(space, index.active(space)?)?;
         Ok(BTreeMap::from([(
             space,
             RevisionEdit::Update(edit(&revision)?),
         )]))
-    })
+    }
 }
 
 fn append_fragment(
@@ -853,13 +875,7 @@ pub(crate) fn write_revision_on(
     space: ExGuid,
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
-    let output = build_on(index, &[], None, |index| {
-        let revision = index.resolve(space, index.active(space)?)?;
-        Ok(BTreeMap::from([(
-            space,
-            RevisionEdit::Update(edit(&revision)?),
-        )]))
-    })?;
+    let output = build_on(index, &[], None, update(space, edit))?;
     check(&output, true)?;
     Ok(output)
 }
@@ -1079,14 +1095,24 @@ fn build_on(
                 object.bytes[offset..offset + 4].copy_from_slice(&reference);
             }
         }
-        replacements.retain(|id, replacement| {
-            // Detached objects must pass the final reachability check even when unchanged.
-            !reachable.contains(id)
-                || !revision.objects.get(id).is_some_and(|object| {
-                    object.data == ObjectData::Properties(&replacement.bytes)
-                        && object.global_ids == replacement.global_ids
-                })
-        });
+        // Detached objects must pass the final reachability check even when unchanged. Equal
+        // bytes are the same object when the table entries they name agree: stored tables
+        // keep only those.
+        let mut unchanged = Vec::new();
+        for (id, replacement) in &replacements {
+            if let Some(object) = revision.objects.get(id)
+                && reachable.contains(id)
+                && object.data == ObjectData::Properties(&replacement.bytes)
+                && table_entries(&replacement.bytes)?
+                    .iter()
+                    .all(|entry| object.global_ids.get(entry) == replacement.global_ids.get(entry))
+            {
+                unchanged.push(*id);
+            }
+        }
+        for id in unchanged {
+            replacements.remove(&id);
+        }
         if replacements.is_empty() {
             continue;
         }
@@ -1244,7 +1270,19 @@ fn build_on(
             } else {
                 vec![node(0x21, None, &[0])?]
             };
+            // A table read from a long-lived page names every session that edited it; the
+            // group stores the entries its objects use.
+            let mut used = BTreeSet::new();
+            for (id, object) in &objects {
+                used.insert(u32::from_le_bytes(compact(*id, table)?) >> 8);
+                if let ObjectData::Properties(bytes) = object.data {
+                    used.extend(table_entries(bytes)?);
+                }
+            }
             for (id, guid) in table {
+                if is_section && !used.contains(id) {
+                    continue;
+                }
                 let mut entry = id.to_le_bytes().to_vec();
                 entry.extend_from_slice(guid);
                 group.push(node(0x24, None, &entry)?);

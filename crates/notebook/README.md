@@ -348,10 +348,11 @@ when the page itself was moved to another section. Other URLs and unknown
 targets are `None`.
 
 With the optional `protected` feature, `Notebook::unlock(path, password)`
-reads the pages of a `Locked` section, and `Notebook::save_unlocked(path,
-password, space, page, author)` saves an edited one under the section's key,
-straight to the file: nothing of a protected section is cached or queued, a
-section changed since the read fails the save, and a wrong password is
+reads a `Locked` section as `Unlocked { pages, .. }`, and
+`Notebook::save_unlocked(path, password, &mut unlocked, space, page, author)`
+saves an edited page under the section's key, straight to the file: nothing of
+a protected section is cached or queued, a section written since `unlocked`
+was read fails the save, and a wrong password is
 `Error::Protected(PasswordMismatch)`.
 
 `Section::import_page(page, author)` copies a page, usually read from another

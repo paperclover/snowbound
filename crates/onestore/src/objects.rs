@@ -335,7 +335,6 @@ impl<'a> RevisionIndex<'a> {
                             });
                         }
                         table = Arc::new(GlobalIds::new());
-                        defining.clear();
                         defining_table = true;
                     }
                     0x24..=0x26 => {
@@ -382,9 +381,12 @@ impl<'a> RevisionIndex<'a> {
                             }
                             _ => unreachable!(),
                         }
-                        if defining[start..]
-                            .iter()
-                            .any(|(index, guid)| *index >= 0xffffff || *guid == [0; 16])
+                        // More entries than indices repeats one; checked here so imports
+                        // cannot grow the list without bound.
+                        if defining.len() > 0xffffff
+                            || defining[start..]
+                                .iter()
+                                .any(|(index, guid)| *index >= 0xffffff || *guid == [0; 16])
                         {
                             return Err(Error {
                                 offset: node.offset,
@@ -407,9 +409,8 @@ impl<'a> RevisionIndex<'a> {
                                 message: "Invalid or repeated global ID entry",
                             });
                         }
-                        let mut guids: Vec<_> = defining.iter().map(|(_, guid)| *guid).collect();
-                        guids.sort_unstable();
-                        if guids.windows(2).any(|pair| pair[0] == pair[1]) {
+                        defining.sort_unstable_by_key(|(_, guid)| *guid);
+                        if defining.windows(2).any(|pair| pair[0].1 == pair[1].1) {
                             return Err(Error {
                                 offset: node.offset,
                                 message: "Global ID table repeats a GUID",

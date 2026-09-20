@@ -55,7 +55,11 @@ fn scalar_edit_appends_a_revision_and_preserves_every_prior_object() {
                     let same = &unchanged.objects[&id];
                     assert_eq!(object.jcid, same.jcid);
                     assert_eq!(object.reference_count, same.reference_count);
-                    assert_eq!(object.global_ids, same.global_ids);
+                    assert!(
+                        same.global_ids
+                            .iter()
+                            .all(|(entry, guid)| object.global_ids.get(entry) == Some(guid))
+                    );
                     assert_eq!(object.data, same.data);
                 }
             }
@@ -403,7 +407,11 @@ fn checkpoints_bound_dependencies_and_preserve_native_objects_and_history() {
                     assert_eq!(a.object_spaces, b.object_spaces);
                     assert_eq!(a.contexts, b.contexts);
                     if section {
-                        assert_eq!(object.global_ids, same.global_ids);
+                        assert!(
+                            same.global_ids
+                                .iter()
+                                .all(|(entry, guid)| object.global_ids.get(entry) == Some(guid))
+                        );
                         if *id != oid {
                             assert_eq!(object.data, same.data);
                         }
@@ -437,7 +445,11 @@ fn checkpoints_bound_dependencies_and_preserve_native_objects_and_history() {
                             let same = &preserved.objects[&id];
                             assert_eq!(object.jcid, same.jcid);
                             assert_eq!(object.reference_count, same.reference_count);
-                            assert_eq!(object.global_ids, same.global_ids);
+                            assert!(
+                                same.global_ids
+                                    .iter()
+                                    .all(|(entry, guid)| object.global_ids.get(entry) == Some(guid))
+                            );
                             assert_eq!(object.data, same.data);
                         }
                     }

@@ -2987,12 +2987,21 @@ pub(crate) fn squash(
                 if !live.contains(id) {
                     continue;
                 }
-                if before.objects.get(id).is_some_and(|previous| {
-                    previous.jcid == object.jcid
-                        && previous.data == object.data
-                        && previous.global_ids == object.global_ids
-                }) {
-                    continue;
+                // Stored tables keep the entries an object names, so those decide.
+                if let Some(previous) = before.objects.get(id)
+                    && previous.jcid == object.jcid
+                    && previous.data == object.data
+                {
+                    let entries = match object.data {
+                        ObjectData::Properties(bytes) => crate::write::table_entries(bytes)?,
+                        _ => BTreeSet::new(),
+                    };
+                    if entries
+                        .iter()
+                        .all(|entry| previous.global_ids.get(entry) == object.global_ids.get(entry))
+                    {
+                        continue;
+                    }
                 }
                 let id = rename.get(id).copied().unwrap_or(*id);
                 let mut replacement = match object.data {

@@ -144,7 +144,7 @@ fn summary(connection: &Connection) -> Result<RecoverySummary> {
         [],
         |row| Ok((unsigned(row, 0)?, unsigned(row, 1)?)),
     )?;
-    let working_bytes = crate::images::working(connection)?.len() as u64;
+    let working_bytes = crate::images::working_length(connection)?;
     Ok(connection.query_row(
         "SELECT (SELECT count(*) FROM edits), (SELECT count(*) FROM conflicts),
                 (SELECT count(*) FROM attempt), (SELECT count(*) FROM receipts),

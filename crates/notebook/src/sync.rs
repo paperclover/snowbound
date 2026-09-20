@@ -225,6 +225,8 @@ impl Replica {
             self.acknowledge(intent.id, revision, &snapshot)?;
             return Ok(Some((intent.id, EditStatus::Published { revision })));
         }
+        // Once acknowledged this image is the base, which polls trust without validating.
+        validate(prepared.as_bytes())?;
         let store = Store::parse(prepared.as_bytes())?;
         let index = RevisionIndex::parse(&store)?;
         let revision = index.active(intent.space)?;

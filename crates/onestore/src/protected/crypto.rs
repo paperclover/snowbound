@@ -228,7 +228,9 @@ impl Key {
         crate::properties::reference_streams(&mut c)?;
         let prefix = c.offset;
         let padding = (16 - (2 + clear.len() - prefix) % 16) % 16;
-        let mut body = Zeroizing::new((padding as u16).to_le_bytes().to_vec());
+        // Sized once: a buffer abandoned by growth would keep plaintext.
+        let mut body = Zeroizing::new(Vec::with_capacity(2 + clear.len() - prefix + padding));
+        body.extend_from_slice(&(padding as u16).to_le_bytes());
         body.extend_from_slice(&clear[prefix..]);
         let length = body.len() + padding;
         body.resize(length, 0);
@@ -248,7 +250,8 @@ impl Key {
         if clear.is_empty() {
             return Vec::new();
         }
-        let mut output = (clear.len() as u64).to_le_bytes().to_vec();
+        let mut output = Vec::with_capacity((8 + clear.len()).next_multiple_of(16));
+        output.extend_from_slice(&(clear.len() as u64).to_le_bytes());
         output.extend_from_slice(clear);
         output.resize(output.len().next_multiple_of(16), 0);
         encrypt(&self.value, &self.file_iv, &mut output);

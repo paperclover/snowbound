@@ -46,10 +46,12 @@ fn restore(mut base: Vec<u8>, patch: &[u8]) -> Result<Vec<u8>> {
             Err(damaged().into())
         };
     };
-    base.resize(
-        usize::try_from(u64::from_le_bytes(*length)).map_err(|_| damaged())?,
-        0,
-    );
+    // Every block past the base is a run, so a whole patch bounds the image.
+    let length = usize::try_from(u64::from_le_bytes(*length))
+        .ok()
+        .filter(|length| *length <= base.len() + patch.len())
+        .ok_or_else(damaged)?;
+    base.resize(length, 0);
     while let Some((header, rest)) = runs.split_first_chunk::<16>() {
         let offset = usize::try_from(u64::from_le_bytes(header[..8].try_into().unwrap()))
             .map_err(|_| damaged())?;
@@ -81,6 +83,21 @@ pub(crate) fn both(connection: &Connection) -> Result<(Vec<u8>, Vec<u8>)> {
         })?;
     let working = restore(base.clone(), &patch)?;
     Ok((base, working))
+}
+
+/// The working image's length, without restoring it.
+pub(crate) fn working_length(connection: &Connection) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT length(base), substr(working, 1, 8) FROM replica WHERE id=1",
+        [],
+        |row| {
+            let header: Vec<u8> = row.get(1)?;
+            Ok(match header.first_chunk::<8>() {
+                Some(length) => u64::from_le_bytes(*length),
+                None => row.get::<_, i64>(0)? as u64,
+            })
+        },
+    )?)
 }
 
 pub(crate) fn working(connection: &Connection) -> Result<Vec<u8>> {
@@ -141,6 +158,9 @@ mod tests {
         }
         assert!(difference(&base, &base).is_empty());
         assert!(difference(&base, &edited).len() < 3 * BLOCK);
+        let mut huge = difference(&base, &edited);
+        huge[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(restore(base.clone(), &huge).is_err());
         let patch = difference(&base, &edited);
         for cut in 1..patch.len() {
             if let Ok(image) = restore(base.clone(), &patch[..cut]) {

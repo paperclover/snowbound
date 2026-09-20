@@ -17,7 +17,7 @@ fn a_locked_section_unlocks_for_reading() {
     let notebook = Notebook::open(root.join("notebook"), temporary.path()).unwrap();
     let section = &notebook.catalog().sections[0];
     assert!(matches!(section.state, SectionState::Locked));
-    let pages = notebook.unlock(&section.path, password).unwrap();
+    let pages = notebook.unlock(&section.path, password).unwrap().pages;
     assert_eq!(pages.len(), 11);
     assert!(pages.iter().all(|(_, page)| !page.title.is_empty()));
     assert!(matches!(
@@ -57,7 +57,8 @@ fn an_unlocked_page_is_saved_under_the_section_key() {
         .unwrap()
         .path
         .clone();
-    let (space, mut page) = notebook.unlock(&section, password).unwrap().remove(0);
+    let mut unlocked = notebook.unlock(&section, password).unwrap();
+    let (space, mut page) = unlocked.pages[0].clone();
     let paragraphs = page
         .objects
         .iter_mut()
@@ -95,15 +96,22 @@ fn an_unlocked_page_is_saved_under_the_section_key() {
         ))
         .unwrap();
     assert!(matches!(
-        notebook.save_unlocked(&section, "wrong", space, &page, "Rust"),
+        notebook.save_unlocked(&section, "wrong", &mut unlocked, space, &page, "Rust"),
         Err(notebook::Error::Protected(
             onestore::protected::Error::PasswordMismatch
         ))
     ));
+    let mut stale = notebook.unlock(&section, password).unwrap();
     notebook
-        .save_unlocked(&section, password, space, &page, "Rust")
+        .save_unlocked(&section, password, &mut unlocked, space, &page, "Rust")
         .unwrap();
-    let (_, stored) = notebook.unlock(&section, password).unwrap().remove(0);
+    // A view read before that save no longer matches the file.
+    assert!(
+        notebook
+            .save_unlocked(&section, password, &mut stale, space, &page, "Rust")
+            .is_err()
+    );
+    let (_, stored) = notebook.unlock(&section, password).unwrap().pages.remove(0);
     assert!(stored.objects == page.objects);
     if let Some(export) = std::env::var_os("ONESTORE_PROTECTED_EXPORT") {
         let export = Path::new(&export);

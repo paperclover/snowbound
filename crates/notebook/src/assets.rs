@@ -79,8 +79,9 @@ pub(crate) fn key(filename: &str) -> Result<String> {
 }
 
 fn referenced(connection: &Connection, key: &str) -> Result<bool> {
-    let (base, working) = crate::images::both(connection)?;
-    for image in [working, base] {
+    // One image at a time: the working image usually answers.
+    for read in [crate::images::working, crate::images::base] {
+        let image = read(connection)?;
         let store = Store::parse(&image)?;
         let index = RevisionIndex::parse(&store)?;
         let document = Document::parse(&index)?;

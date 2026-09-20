@@ -264,7 +264,13 @@ fn assert_other_objects_preserved(
         }
         let current = &after.objects[id];
         assert_eq!(object.jcid, current.jcid);
-        assert_eq!(object.global_ids, current.global_ids);
+        // A rewritten object keeps the table entries it names.
+        assert!(
+            current
+                .global_ids
+                .iter()
+                .all(|(entry, guid)| object.global_ids.get(entry) == Some(guid))
+        );
         let mut pending = vec![*id];
         let mut visited = std::collections::BTreeSet::new();
         while let Some(next) = pending.pop() {
