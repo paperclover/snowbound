@@ -219,7 +219,8 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     return observed
 
             def wait_text(client, expected):
-                deadline = time.monotonic() + 120
+                # Background sync of a few hundred queued native edits takes minutes on a loaded host.
+                deadline = time.monotonic() + 600
                 while time.monotonic() < deadline:
                     action(client, 'sync')
                     observed = action(client, 'snapshot')

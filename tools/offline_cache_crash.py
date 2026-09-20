@@ -88,7 +88,9 @@ def run(binary, output):
                 actual = json.loads(read.stdout)
                 operations = actual["operations"]
                 ids = actual["ids"]
-                assert operations in (retained, retained + [operation]), (retained, operation, actual)
+                # A save replaces the newest pending save of its page under the same intent.
+                coalesced = retained[:-1] + [operation] if ids == retained_ids else None
+                assert operations in (retained, retained + [operation], coalesced), (retained, operation, actual)
                 assert ids[:len(retained_ids)] == retained_ids, (retained_ids, actual)
                 if acknowledgement:
                     assert operations[-1] == operation

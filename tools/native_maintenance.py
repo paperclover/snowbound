@@ -125,7 +125,7 @@ Sleep(1000)
             hold.mkdir()
             config = json.loads((output / 'linux.json').read_text())
             with (hold / 'run.log').open('w') as guardian_log:
-                guardian = subprocess.Popen(['cargo', 'test', '-p', 'notebook', '--features', 'smb', 'live_reader_hold', '--', '--ignored', '--nocapture'],
+                guardian = subprocess.Popen(['cargo', 'test', '-p', 'notebook', '--features', 'smb', '--lib', 'live_reader_hold', '--', '--ignored', '--nocapture'],
                     cwd=ROOT, stdout=guardian_log, stderr=subprocess.STDOUT,
                     env={**os.environ, 'ONESTORE_SMB_LAB': f'127.0.0.1:{config["samba_port"]}',
                          'ONESTORE_SMB_PATH': 'm6-collaboration/synthetic.one', 'ONESTORE_SMB_HOLD': str(hold)})
