@@ -643,6 +643,24 @@ impl Notebook {
             .collect()
     }
 
+    /// Saves a page read through `unlock`, stored under the section's key. The save goes
+    /// straight to the file and fails if the section changed since `unlock` read it;
+    /// nothing of a protected section is cached or queued.
+    #[cfg(feature = "protected")]
+    pub fn save_unlocked(
+        &self,
+        path: &str,
+        password: &str,
+        space: ExGuid,
+        page: &Page,
+        author: &str,
+    ) -> Result<()> {
+        let path = self.section_path(path)?.path.clone();
+        let bytes = self.storage.read(&path)?;
+        let edit = onestore::PreparedEdit::page_protected(&bytes, password, space, page, author)?;
+        self.storage.commit(&path, &edit)
+    }
+
     /// Opens a section of a mounted notebook by its catalog path.
     pub fn section(&self, path: &str, notify: impl Fn() + Send + 'static) -> Result<Section> {
         let path = self.section_path(path)?.path.clone();

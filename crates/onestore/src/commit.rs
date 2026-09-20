@@ -261,6 +261,22 @@ impl<'a> PreparedEdit<'a> {
         })
     }
 
+    /// `page` for a password-protected section: the revision is stored under the section's
+    /// key. The model must come from this snapshot unlocked with `password`.
+    #[cfg(feature = "protected")]
+    pub fn page_protected(
+        source: &'a [u8],
+        password: &str,
+        space: ExGuid,
+        page: &crate::page::Page,
+        author: &str,
+    ) -> Result<Self, crate::protected::Error> {
+        Ok(Self {
+            source,
+            written: crate::protected::write_page(source, password, space, page, author)?,
+        })
+    }
+
     /// Creates a page and its section entry in one transaction, retaining the intent's identities.
     pub fn create_page(source: &'a [u8], page: &crate::PageCreation) -> Result<Self, crate::Error> {
         Ok(Self {

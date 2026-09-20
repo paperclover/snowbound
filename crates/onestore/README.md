@@ -82,7 +82,9 @@ sections retain their encrypted structure and payloads. With the optional
 `protected` feature, `protected::UnlockedSection` opens native OneNote 2010
 AES-128/CBC, SHA-1 password wrappers into a borrowed document view. Incorrect
 passwords, unsupported protection profiles and work-limit failures remain distinct.
-The source stays encrypted; protected writes are rejected.
+The source stays encrypted. `PreparedEdit::page_protected` publishes a page-model
+edit stored under the section's key (fresh IV per object, payloads under the file
+IV); the other writers reject protected sections.
 `PageCreation::new` appends, or inserts before the first page space of an existing
 series. `Some("")` creates an empty title field; `None` omits the title node.
 The page has no body outlines, generated date/time text or applied template.
@@ -337,8 +339,8 @@ drop(unlocked);
 # }
 ```
 
-This example requires `features = ["protected"]`. The owner retains no password or
-key after opening. Its source-buffer views cannot outlive it; copies of parsed
+This example requires `features = ["protected"]`. The owner retains no password;
+its derived key is cleared on drop. Its source-buffer views cannot outlive it; copies of parsed
 strings, serialized models and exports have their own lifetimes. These copies are
 plaintext, and dropping the unlock owner does not clear them. CBC has no general
 ciphertext-authentication guarantee; native read-only hashes and model validation

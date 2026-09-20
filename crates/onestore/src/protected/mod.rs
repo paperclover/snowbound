@@ -75,9 +75,14 @@ impl Default for Limits {
     }
 }
 
+struct Decoded<'a> {
+    stored: &'a [u8],
+    clear: Zeroizing<Vec<u8>>,
+}
+
 /// Owns decoded buffers until dropped; returned views cannot outlive this owner.
 ///
-/// Passwords and derived keys are not retained. Dropping this owner clears its
+/// Passwords are not retained. Dropping this owner clears its derived key and
 /// decoded buffers. Owned strings or exports made from a `Document` are separate
 /// caller-owned copies and must be disposed of by the caller when locking.
 /// Opening never rewrites the source image or changes its protection state.
@@ -93,8 +98,10 @@ impl Default for Limits {
 /// ```
 pub struct UnlockedSection<'a> {
     index: &'a RevisionIndex<'a>,
-    objects: BTreeMap<(ExGuid, usize), Zeroizing<Vec<u8>>>,
+    /// By object space and stored address.
+    objects: BTreeMap<(ExGuid, usize), Decoded<'a>>,
     files: BTreeMap<[u8; 16], Zeroizing<Vec<u8>>>,
+    keys: BTreeMap<&'a [u8], crypto::Key>,
 }
 
 impl<'a> UnlockedSection<'a> {
@@ -111,6 +118,7 @@ impl<'a> UnlockedSection<'a> {
             index,
             objects: BTreeMap::new(),
             files: BTreeMap::new(),
+            keys: BTreeMap::new(),
         };
         let mut keys = BTreeMap::new();
         let mut file_keys = BTreeMap::new();
@@ -141,10 +149,9 @@ impl<'a> UnlockedSection<'a> {
                 if !revision.encrypted {
                     return Err(Error::Unsupported);
                 }
-                let node = revision
-                    .nodes
-                    .first()
-                    .ok_or_else(|| invalid("Missing encryption key node"))?;
+                let Some(node) = revision.nodes.first().filter(|node| node.id == 0x7c) else {
+                    continue;
+                };
                 let Some(Reference::Data(chunk)) = node.reference else {
                     return Err(invalid("Missing encryption key reference"));
                 };
@@ -194,7 +201,13 @@ impl<'a> UnlockedSection<'a> {
                                     ));
                                 }
                             }
-                            result.objects.insert(identity, decoded);
+                            result.objects.insert(
+                                identity,
+                                Decoded {
+                                    stored: bytes,
+                                    clear: decoded,
+                                },
+                            );
                         }
                         ObjectData::File { .. } => {
                             if let Some(FileDataReference::Internal(guid)) =
@@ -226,7 +239,7 @@ impl<'a> UnlockedSection<'a> {
                 }
             }
         }
-        drop(keys);
+        result.keys = keys;
         for (space, info) in &index.spaces {
             for rid in info.labels.values().copied().collect::<BTreeSet<_>>() {
                 result.resolve(*space, rid)?.reachable()?;
@@ -251,7 +264,7 @@ impl<'a> UnlockedSection<'a> {
                             offset: 0,
                             message: "Protected object was not decoded",
                         })?;
-                object.data = ObjectData::Properties(decoded);
+                object.data = ObjectData::Properties(&decoded.clear);
             }
         }
         Ok(revision)
@@ -271,5 +284,159 @@ impl<'a> UnlockedSection<'a> {
                     })
             },
         )
+    }
+}
+
+impl UnlockedSection<'_> {
+    /// A plaintext section holding every object space's current revision and payloads
+    /// under their own identities, for writers that read ordinary sections.
+    fn twin(&self) -> std::result::Result<Zeroizing<Vec<u8>>, crate::Error> {
+        use crate::write::{PropertyObject, RevisionEdit, append_revisions};
+        let copy = |space: ExGuid, revision: ExGuid| {
+            let revision = self.resolve(space, revision)?;
+            let mut objects = BTreeMap::new();
+            for (id, object) in &revision.objects {
+                let copy = match object.data {
+                    ObjectData::File {
+                        reference,
+                        extension,
+                    } => {
+                        let text = |bytes: &[u8]| {
+                            String::from_utf16_lossy(
+                                &bytes
+                                    .chunks_exact(2)
+                                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                                    .collect::<Vec<_>>(),
+                            )
+                        };
+                        let mut copy =
+                            PropertyObject::file(*id, &text(reference), &text(extension))?;
+                        copy.jcid = object.jcid;
+                        copy.global_ids = std::sync::Arc::clone(&object.global_ids);
+                        copy
+                    }
+                    _ => PropertyObject::from_object(object)?,
+                };
+                objects.insert(*id, copy);
+            }
+            Ok::<_, crate::Error>((revision.roots, objects))
+        };
+        let payloads: Vec<_> = self
+            .files
+            .iter()
+            .map(|(id, bytes)| (*id, bytes.as_slice()))
+            .collect();
+        let current = (ExGuid::default(), 1);
+        // The scaffold's root space takes the section's identity, then its content.
+        let mut scaffold = crate::create_section("twin.one", "", "")?;
+        let identity = |id: ExGuid| {
+            let mut bytes = Vec::new();
+            id.encode(&mut bytes);
+            bytes
+        };
+        let store = crate::Store::parse(&scaffold)?;
+        let placeholder = identity(RevisionIndex::parse(&store)?.root);
+        for at in 0..scaffold.len() - 20 {
+            if scaffold[at..at + 20] == placeholder {
+                scaffold[at..at + 20].copy_from_slice(&identity(self.index.root));
+            }
+        }
+        let mut twin = Zeroizing::new(append_revisions(&scaffold, &payloads, None, |_| {
+            let mut spaces = BTreeMap::new();
+            for id in self.index.spaces.keys() {
+                let (roots, objects) = copy(*id, self.index.active(*id)?)?;
+                let edit = if *id == self.index.root {
+                    RevisionEdit::Label {
+                        context: current.0,
+                        role: current.1,
+                        roots,
+                        objects,
+                    }
+                } else {
+                    RevisionEdit::Create { roots, objects }
+                };
+                spaces.insert(*id, edit);
+            }
+            Ok(spaces)
+        })?);
+        // One revision per call and space: the remaining labels follow in rounds.
+        for round in 0.. {
+            let mut spaces = BTreeMap::new();
+            for (id, space) in &self.index.spaces {
+                let label = space.labels.iter().filter(|(label, _)| **label != current);
+                if let Some(((context, role), revision)) = label.clone().nth(round) {
+                    let (roots, objects) = copy(*id, *revision)?;
+                    spaces.insert(
+                        *id,
+                        RevisionEdit::Label {
+                            context: *context,
+                            role: *role,
+                            roots,
+                            objects,
+                        },
+                    );
+                }
+            }
+            if spaces.is_empty() {
+                break;
+            }
+            twin = Zeroizing::new(append_revisions(&twin, &[], None, |_| Ok(spaces))?);
+        }
+        Ok(twin)
+    }
+}
+
+/// An edited page of a protected section as one stored revision per changed space, the
+/// protected counterpart of [`crate::PreparedEdit::page`].
+pub(crate) fn write_page(
+    source: &[u8],
+    password: &str,
+    space: ExGuid,
+    page: &crate::page::Page,
+    author: &str,
+) -> Result<Vec<u8>> {
+    let store = crate::Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    let unlocked = UnlockedSection::open(&index, password, Limits::default())?;
+    let twin = unlocked.twin()?;
+    let applied = Zeroizing::new(crate::page::write::write_page(&twin, space, page, author)?);
+    let written = crate::page::write::squash(source, &applied, &BTreeMap::new(), Some(&unlocked))?;
+    let store = crate::Store::parse(&written)?;
+    UnlockedSection::open(&RevisionIndex::parse(&store)?, password, Limits::default())?;
+    Ok(written)
+}
+
+impl crate::write::Protection for UnlockedSection<'_> {
+    fn resolve(
+        &self,
+        space: ExGuid,
+        revision: ExGuid,
+    ) -> std::result::Result<crate::ResolvedRevision<'_>, crate::Error> {
+        self.resolve(space, revision)
+    }
+
+    fn stored(&self, clear: &[u8]) -> Option<&[u8]> {
+        self.objects
+            .values()
+            .find(|decoded| std::ptr::eq(decoded.clear.as_ptr(), clear.as_ptr()))
+            .map(|decoded| decoded.stored)
+    }
+
+    fn seal_property(&self, clear: &[u8]) -> std::result::Result<Vec<u8>, crate::Error> {
+        let [key] = self.keys.values().collect::<Vec<_>>()[..] else {
+            return Err(crate::Error {
+                offset: 0,
+                message: "Protected writing needs one section key",
+            });
+        };
+        let failed = |message| crate::Error { offset: 0, message };
+        let mut iv = [0; 16];
+        getrandom::fill(&mut iv).map_err(|_| failed("System random source failed"))?;
+        key.seal_property(clear, iv)
+            .map_err(|_| failed("Malformed property object"))
+    }
+
+    fn seal_file(&self, clear: &[u8]) -> Vec<u8> {
+        self.keys.values().next().unwrap().seal_file(clear)
     }
 }

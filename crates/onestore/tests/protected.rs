@@ -108,3 +108,132 @@ fn limits_and_password_bytes_are_explicit() {
         Err(Error::Unsupported)
     ));
 }
+
+/// The first text paragraph of every page gains text; the written file stays protected,
+/// opens with the same password and reads back as the edited model.
+#[test]
+fn a_protected_page_edit_is_stored_under_the_section_key() {
+    use onestore::page::{Page, PageObject, Paragraph};
+    for (root, notebook) in [
+        ("native-encrypted", "encrypted-01/notebook/synthetic.one"),
+        ("native-protected-boundaries", "notebook/synthetic.one"),
+    ] {
+        let root = Path::new("../../corpus").join(root);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("manifest.json")).unwrap()).unwrap();
+        let password = manifest["password"].as_str().unwrap();
+        let mut bytes = fs::read(root.join(notebook)).unwrap();
+        let pages = |bytes: &[u8]| -> Vec<(onestore::ExGuid, Page)> {
+            let store = Store::parse(bytes).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            assert!(Document::parse(&index).unwrap().pages().unwrap().is_empty());
+            let unlocked = UnlockedSection::open(&index, password, Limits::default()).unwrap();
+            let document = unlocked.document().unwrap();
+            document
+                .pages()
+                .unwrap()
+                .into_iter()
+                .map(|(space, _)| (space, Page::from_space(&document, space).unwrap()))
+                .collect()
+        };
+        let mut expected = pages(&bytes);
+        let mut edited = 0;
+        for (space, page) in &mut expected {
+            let paragraphs = page.objects.iter_mut().find_map(|object| match object {
+                PageObject::Outline(outline)
+                    if outline.paragraphs.iter().any(|p| p.text().is_some()) =>
+                {
+                    Some(&mut outline.paragraphs)
+                }
+                _ => None,
+            });
+            let Some(paragraphs) = paragraphs else {
+                continue;
+            };
+            edited += 1;
+            let at = paragraphs.iter().position(|p| p.text().is_some()).unwrap();
+            let mut file = paragraphs[at].clone();
+            file.id = onestore::page::text::new_id().unwrap();
+            file.lists.clear();
+            file.tags.clear();
+            file.style = None;
+            file.format = Default::default();
+            file.content =
+                onestore::page::ParagraphContent::Attachment(onestore::page::Attachment {
+                    id: onestore::page::text::new_id().unwrap(),
+                    filename: "sealed.txt".into(),
+                    source_path: None,
+                    size: Some([24.0, 24.0]),
+                    bytes: Some(std::sync::Arc::from(&b"A payload that stays sealed"[..])),
+                    preview: None,
+                    recording: None,
+                });
+            paragraphs.insert(at + 1, file);
+            let text = paragraphs[at].text_mut().unwrap();
+            let format = text.text.format_at(0).unwrap().clone();
+            text.text
+                .append(Paragraph::new(" still protected".to_owned(), format))
+                .unwrap();
+            let edit =
+                onestore::PreparedEdit::page_protected(&bytes, password, *space, page, "Rust")
+                    .unwrap();
+            assert!(matches!(
+                onestore::PreparedEdit::page_protected(&bytes, "wrong", *space, page, "Rust"),
+                Err(Error::PasswordMismatch)
+            ));
+            let written = edit.as_bytes().to_vec();
+            for clear in [&b" still protected"[..], b"stays sealed"] {
+                assert!(!written.windows(clear.len()).any(|w| w == clear));
+            }
+            let revisions = |bytes: &[u8]| {
+                let store = Store::parse(bytes).unwrap();
+                let index = RevisionIndex::parse(&store).unwrap();
+                index
+                    .spaces
+                    .iter()
+                    .map(|(id, space)| (*id, space.revisions.len()))
+                    .collect::<Vec<_>>()
+            };
+            let grown: Vec<_> = revisions(&bytes)
+                .into_iter()
+                .zip(revisions(&written))
+                .filter(|(before, after)| before != after)
+                .map(|(before, _)| before.0)
+                .collect();
+            assert_eq!(grown, [*space]);
+            bytes = written;
+        }
+        assert!(edited > 0);
+        let stored = pages(&bytes);
+        assert_eq!(stored.len(), expected.len());
+        for ((_, stored), (_, expected)) in stored.iter().zip(&expected) {
+            assert_eq!(stored.objects, expected.objects);
+        }
+    }
+}
+
+/// OneNote's revisions that depend on an earlier one carry no key node of their own.
+#[test]
+fn a_native_revision_inherits_the_key_of_its_dependency() {
+    let bytes = fs::read("../../corpus/protected-edit/native-after/synthetic.one").unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read("../../corpus/native-encrypted/manifest.json").unwrap())
+            .unwrap();
+    let store = Store::parse(&bytes).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    assert!(index.spaces.values().any(|space| {
+        space.revisions.values().any(|revision| {
+            revision.encrypted && revision.nodes.first().is_none_or(|node| node.id != 0x7c)
+        })
+    }));
+    let unlocked = UnlockedSection::open(
+        &index,
+        manifest["password"].as_str().unwrap(),
+        Limits::default(),
+    )
+    .unwrap();
+    let document = unlocked.document().unwrap();
+    let (space, _) = document.pages().unwrap()[0];
+    let page = onestore::page::Page::from_space(&document, space).unwrap();
+    assert!(format!("{:?}", page.objects).contains("Native edit after Rust."));
+}

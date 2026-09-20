@@ -361,7 +361,7 @@ pub(crate) fn write_page(
     if lowering.image == source {
         return Ok(lowering.image);
     }
-    squash(source, &lowering.image, &lowering.alias)
+    squash(source, &lowering.image, &lowering.alias, None)
 }
 
 /// Direct children of every container, in model order, plus lookups by identity.
@@ -2909,11 +2909,13 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
 }
 
 /// Rewrites every revision the typed writers appended as one transaction on `source`,
-/// renaming writer-allocated identities to the model's.
-fn squash(
+/// renaming writer-allocated identities to the model's. A protected `source` takes the
+/// revisions its plaintext twin gained.
+pub(crate) fn squash(
     source: &[u8],
     applied: &[u8],
     alias: &BTreeMap<ExGuid, ExGuid>,
+    protection: Option<&dyn crate::write::Protection>,
 ) -> Result<Vec<u8>, Error> {
     let rename: BTreeMap<ExGuid, ExGuid> = alias
         .iter()
@@ -2939,17 +2941,24 @@ fn squash(
             payloads.push((guid, applied_store.file_data(guid)?));
         }
     }
-    crate::write::write_revisions_with_payloads(source, &payloads, |index| {
+    let edit = |index: &RevisionIndex<'_>| {
         let mut changes = BTreeMap::new();
         for sid in applied_index.spaces.keys() {
             let Some(space) = index.spaces.get(sid) else {
+                // The twin's scaffold spaces are not the section's.
+                if protection.is_some() {
+                    continue;
+                }
                 return Err(invalid("Page edits cannot create object spaces"));
             };
             let after_rid = applied_index.active(*sid)?;
             if space.labels.get(&(ExGuid::default(), 1)) == Some(&after_rid) {
                 continue;
             }
-            let before = index.resolve_active(*sid)?;
+            let before = match protection {
+                Some(protection) => protection.resolve(*sid, index.active(*sid)?)?,
+                None => index.resolve_active(*sid)?,
+            };
             let after = applied_index.resolve(*sid, after_rid)?;
             if before.roots != after.roots {
                 return Err(invalid("Page edits cannot change revision roots"));
@@ -3008,7 +3017,11 @@ fn squash(
             changes.insert(*sid, RevisionEdit::Update(changed));
         }
         Ok(changes)
-    })
+    };
+    match protection {
+        Some(_) => crate::write::append_revisions(source, &payloads, protection, edit),
+        None => crate::write::write_revisions_with_payloads(source, &payloads, edit),
+    }
 }
 
 fn remap(object: &mut PropertyObject, rename: &BTreeMap<ExGuid, ExGuid>) -> Result<(), Error> {

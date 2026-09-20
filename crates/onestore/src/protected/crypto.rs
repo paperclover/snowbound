@@ -1,5 +1,5 @@
 use super::{Error, Result, invalid};
-use aes::cipher::{BlockModeDecrypt, KeyIvInit, block_padding::NoPadding};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sha1::{Digest, Sha1};
 use subtle::ConstantTimeEq;
@@ -79,6 +79,13 @@ fn decrypt(key: &[u8; 16], iv: &[u8; 16], bytes: &mut [u8]) -> Result<()> {
         .decrypt_padded::<NoPadding>(bytes)
         .map_err(|_| invalid("Encrypted payload is not block aligned"))?;
     Ok(())
+}
+
+fn encrypt(key: &[u8; 16], iv: &[u8; 16], bytes: &mut [u8]) {
+    let length = bytes.len();
+    cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
+        .encrypt_padded::<NoPadding>(bytes, length)
+        .expect("block aligned");
 }
 
 impl Key {
@@ -212,6 +219,42 @@ impl Key {
         Ok(output)
     }
 
+    /// The stored form of a plaintext property object, the inverse of `property`.
+    pub(super) fn seal_property(&self, clear: &[u8], iv: [u8; 16]) -> Result<Vec<u8>> {
+        let mut c = crate::bytes::Cursor {
+            bytes: clear,
+            offset: 0,
+        };
+        crate::properties::reference_streams(&mut c)?;
+        let prefix = c.offset;
+        let padding = (16 - (2 + clear.len() - prefix) % 16) % 16;
+        let mut body = Zeroizing::new((padding as u16).to_le_bytes().to_vec());
+        body.extend_from_slice(&clear[prefix..]);
+        let length = body.len() + padding;
+        body.resize(length, 0);
+        getrandom::fill(&mut body[length - padding..])
+            .map_err(|_| invalid("System random source failed"))?;
+        encrypt(&self.value, &iv, &mut body);
+        let mut output = clear[..prefix].to_vec();
+        output.extend_from_slice(&((16 + body.len()) as u32).to_le_bytes());
+        output.extend_from_slice(&iv);
+        output.extend_from_slice(&body);
+        output.resize(output.len().next_multiple_of(8), 0);
+        Ok(output)
+    }
+
+    /// The stored form of a file payload, the inverse of `file`.
+    pub(super) fn seal_file(&self, clear: &[u8]) -> Vec<u8> {
+        if clear.is_empty() {
+            return Vec::new();
+        }
+        let mut output = (clear.len() as u64).to_le_bytes().to_vec();
+        output.extend_from_slice(clear);
+        output.resize(output.len().next_multiple_of(16), 0);
+        encrypt(&self.value, &self.file_iv, &mut output);
+        output
+    }
+
     pub(super) fn file(&self, input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         if input.is_empty() {
             return Ok(Zeroizing::new(Vec::new()));
@@ -312,7 +355,17 @@ mod tests {
                         crate::properties::reference_streams(&mut cursor).unwrap();
                         let length = u32::from_le_bytes(cursor.read().unwrap()) as usize;
                         let end = cursor.offset + length;
-                        assert!(key.property(bytes).is_ok());
+                        let iv = bytes[cursor.offset..cursor.offset + 16].try_into().unwrap();
+                        // Native padding is arbitrary; it only reaches the last block.
+                        let sealed = key
+                            .seal_property(&key.property(bytes).unwrap(), iv)
+                            .unwrap();
+                        assert_eq!(sealed.len(), bytes.len());
+                        assert_eq!(sealed[..end - 16], bytes[..end - 16]);
+                        assert_eq!(
+                            *key.property(&sealed).unwrap(),
+                            *key.property(bytes).unwrap()
+                        );
                         assert_eq!(
                             *key.property(bytes).unwrap(),
                             *spaced.property(bytes).unwrap()

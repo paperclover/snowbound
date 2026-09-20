@@ -286,8 +286,11 @@ impl<'a> RevisionIndex<'a> {
                                         });
                                     }
                                 }
-                                if (encoding == 2)
-                                    != body.first().is_some_and(|node| node.id == 0x7c)
+                                // A protected revision names its key unless it inherits the
+                                // key of the revision it depends on.
+                                let keyed = body.first().is_some_and(|node| node.id == 0x7c);
+                                if keyed && encoding != 2
+                                    || !keyed && encoding == 2 && dependency.is_none()
                                 {
                                     return Err(Error {
                                         offset: node.offset,
@@ -304,7 +307,7 @@ impl<'a> RevisionIndex<'a> {
                                         message: "Object space mixes encrypted and unencrypted revisions",
                                     });
                                 }
-                                if encoding == 2 {
+                                if keyed {
                                     let key = &body[0];
                                     let Some(Reference::Data(chunk)) = key.reference else {
                                         return Err(Error {

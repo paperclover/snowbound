@@ -136,3 +136,10 @@ path = "fuzz_targets/page_model.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "protected_write"
+path = "fuzz_targets/protected_write.rs"
+test = false
+doc = false
+bench = false

@@ -374,6 +374,14 @@ pub(crate) enum RevisionEdit {
         roots: BTreeMap<u32, ExGuid>,
         objects: BTreeMap<ExGuid, PropertyObject>,
     },
+    /// A complete revision of an existing space under a context and role, without history.
+    #[cfg(feature = "protected")]
+    Label {
+        context: ExGuid,
+        role: u32,
+        roots: BTreeMap<u32, ExGuid>,
+        objects: BTreeMap<ExGuid, PropertyObject>,
+    },
 }
 
 impl PropertyObject {
@@ -698,6 +706,16 @@ impl PropertyObject {
     }
 }
 
+/// A password-protected section's unlocked view, through which its revisions are
+/// read as plaintext and written back in their stored form.
+pub(crate) trait Protection {
+    fn resolve(&self, space: ExGuid, revision: ExGuid) -> Result<crate::ResolvedRevision<'_>>;
+    /// The stored bytes a resolved object's plaintext was decoded from.
+    fn stored(&self, clear: &[u8]) -> Option<&[u8]>;
+    fn seal_property(&self, clear: &[u8]) -> Result<Vec<u8>>;
+    fn seal_file(&self, clear: &[u8]) -> Vec<u8>;
+}
+
 pub(crate) fn write_revision(
     source: &[u8],
     space: ExGuid,
@@ -771,6 +789,22 @@ pub(crate) fn write_revisions_with_payloads(
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
     let store = Store::parse(source)?;
+    RevisionIndex::parse(&store)?.validate_current()?;
+    let output = append_revisions(source, payloads, None, edit)?;
+    let store = Store::parse(&output)?;
+    RevisionIndex::parse(&store)?.validate_current()?;
+    Ok(output)
+}
+
+/// `write_revisions_with_payloads` without validating that current revisions are
+/// complete: a protected section is validated by unlocking it, through `protection`.
+pub(crate) fn append_revisions(
+    source: &[u8],
+    payloads: &[([u8; 16], &[u8])],
+    protection: Option<&dyn Protection>,
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
+) -> Result<Vec<u8>> {
+    let store = Store::parse(source)?;
     let is_section = store.header.file_type == FileType::Section;
     if !store.checksum_mismatches.is_empty() {
         return Err(Error {
@@ -779,7 +813,10 @@ pub(crate) fn write_revisions_with_payloads(
         });
     }
     let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
+    let resolve = |space, rid| match protection {
+        Some(protection) => protection.resolve(space, rid),
+        None => index.resolve(space, rid),
+    };
     let changes = edit(&index)?;
     let mut output = source.to_vec();
     // Native files reserve 1 KiB per transaction-log fragment; a fragment that ends the file
@@ -810,10 +847,12 @@ pub(crate) fn write_revisions_with_payloads(
     let mut counts = Vec::new();
     let mut root_nodes = Vec::new();
     for (space, change) in changes {
-        let (rid, mut revision, mut replacements) = match change {
+        let new_space = matches!(change, RevisionEdit::Create { .. });
+        let current = (ExGuid::default(), 1_u32);
+        let (rid, label, mut revision, mut replacements) = match change {
             RevisionEdit::Update(objects) => {
                 let rid = index.active(space)?;
-                (Some(rid), index.resolve(space, rid)?, objects)
+                (Some(rid), current, resolve(space, rid)?, objects)
             }
             RevisionEdit::Create { roots, objects } => {
                 if !is_section || space.guid == [0; 16] || index.spaces.contains_key(&space) {
@@ -830,6 +869,30 @@ pub(crate) fn write_revisions_with_payloads(
                 }
                 (
                     None,
+                    current,
+                    crate::ResolvedRevision {
+                        roots,
+                        objects: BTreeMap::new(),
+                    },
+                    objects,
+                )
+            }
+            #[cfg(feature = "protected")]
+            RevisionEdit::Label {
+                context,
+                role,
+                roots,
+                objects,
+            } => {
+                if !is_section || role > 0xffff || !index.spaces.contains_key(&space) {
+                    return Err(Error {
+                        offset: 0,
+                        message: "Choose a label in a section's object space",
+                    });
+                }
+                (
+                    None,
+                    (context, role),
                     crate::ResolvedRevision {
                         roots,
                         objects: BTreeMap::new(),
@@ -1062,16 +1125,45 @@ pub(crate) fn write_revisions_with_payloads(
         if !is_section {
             start.extend_from_slice(&0_u64.to_le_bytes());
         }
-        start.extend_from_slice(&1_u32.to_le_bytes());
-        start.extend_from_slice(&0_u16.to_le_bytes());
+        start.extend_from_slice(&label.1.to_le_bytes());
+        start.extend_from_slice(&(if protection.is_some() { 2_u16 } else { 0 }).to_le_bytes());
+        let contextual = label.0 != ExGuid::default();
+        if contextual {
+            label.0.encode(&mut start);
+        }
         let mut manifest = Vec::new();
-        if rid.is_none() {
+        if new_space {
             let mut payload = Vec::new();
             space.encode(&mut payload);
             payload.extend_from_slice(&0_u32.to_le_bytes());
             manifest.push(node(0x14, None, &payload)?);
         }
-        manifest.push(node(if is_section { 0x1e } else { 0x1b }, None, &start)?);
+        manifest.push(node(
+            match (is_section, contextual) {
+                (true, true) => 0x1f,
+                (true, false) => 0x1e,
+                (false, _) => 0x1b,
+            },
+            None,
+            &start,
+        )?);
+        // A dependent revision inherits its key, as OneNote writes it.
+        if protection.is_some() && checkpoint {
+            let key = index
+                .spaces
+                .get(&space)
+                .and_then(|space| {
+                    space
+                        .revisions
+                        .values()
+                        .find_map(|revision| revision.nodes.first().filter(|node| node.id == 0x7c))
+                })
+                .ok_or(Error {
+                    offset: 0,
+                    message: "Protected revisions continue a protected object space",
+                })?;
+            manifest.push(node(0x7c, key.reference, key.payload)?);
+        }
         for (table, objects) in groups {
             let mut payload = Vec::new();
             let mut group = if is_section {
@@ -1139,14 +1231,26 @@ pub(crate) fn write_revisions_with_payloads(
                             }
                             append(&mut output, &mapped)?
                         } else if replacements.contains_key(&id) {
-                            append(&mut output, bytes)?
+                            match protection {
+                                Some(protection) => {
+                                    append(&mut output, &protection.seal_property(bytes)?)?
+                                }
+                                None => append(&mut output, bytes)?,
+                            }
                         } else {
+                            let stored = match protection {
+                                Some(protection) => protection.stored(bytes).ok_or(Error {
+                                    offset: 0,
+                                    message: "Protected object has no stored form",
+                                })?,
+                                None => bytes,
+                            };
                             Chunk {
                                 offset: u64::try_from(
-                                    bytes.as_ptr().addr() - source.as_ptr().addr(),
+                                    stored.as_ptr().addr() - source.as_ptr().addr(),
                                 )
                                 .unwrap(),
-                                length: u64::try_from(bytes.len()).unwrap(),
+                                length: u64::try_from(stored.len()).unwrap(),
                             }
                         };
                         // A table-of-contents object is declared when the revision is a
@@ -1164,7 +1268,13 @@ pub(crate) fn write_revisions_with_payloads(
                         declaration.extend_from_slice(&object.reference_count.to_le_bytes());
                         let readonly = object.jcid & 0x100000 != 0;
                         if readonly {
-                            declaration.extend_from_slice(&md5::compute(bytes).0);
+                            // A protected declaration hashes the plaintext as aligned.
+                            let mut hash = md5::Context::new();
+                            hash.consume(bytes);
+                            if protection.is_some() {
+                                hash.consume(&[0; 7][..(8 - bytes.len() % 8) % 8]);
+                            }
+                            declaration.extend_from_slice(&hash.finalize().0);
                         }
                         group.push(node(
                             if is_section {
@@ -1219,7 +1329,7 @@ pub(crate) fn write_revisions_with_payloads(
             }
         }
         manifest.push(node(0x1c, None, &[])?);
-        if rid.is_none() {
+        if new_space {
             let list_id = allocate_list()?;
             let chunk = append_list(&mut output, list_id, &manifest)?;
             counts.push((list_id, manifest.len()));
@@ -1269,6 +1379,8 @@ pub(crate) fn write_revisions_with_payloads(
             0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
             0x9e, 0xac,
         ];
+        let sealed = protection.map(|protection| protection.seal_file(payload));
+        let payload = sealed.as_deref().unwrap_or(*payload);
         blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         blob.extend_from_slice(&[0; 12]);
         blob.extend_from_slice(payload);
@@ -1410,8 +1522,6 @@ pub(crate) fn write_revisions_with_payloads(
         message: "File generation counter is exhausted",
     })?;
     output[228..236].copy_from_slice(&generation.to_le_bytes());
-    let written = Store::parse(&output)?;
-    let written_index = RevisionIndex::parse(&written)?;
-    written_index.validate_current()?;
+    RevisionIndex::parse(&Store::parse(&output)?)?;
     Ok(output)
 }
