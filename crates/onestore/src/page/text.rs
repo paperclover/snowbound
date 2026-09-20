@@ -153,14 +153,23 @@ impl From<EditError> for crate::Error {
     }
 }
 
-/// A fresh random identity for a new paragraph or text object.
-/// A fresh identity with `n` 1: OneNote never stores an object as `{guid},0`, and OneNote
-/// 2010 loses outline elements stored that way (corpus/math-edit/native-drop).
+/// A fresh identity for a new paragraph or text object. Identities share one random GUID
+/// per 255 allocations, as OneNote's do within a session: an object's stored id table has
+/// an entry per distinct GUID it references, in every revision that rewrites it. `n` starts
+/// at 1: OneNote never stores an object as `{guid},0`, and OneNote 2010 loses outline
+/// elements stored that way (corpus/math-edit/native-drop).
 pub fn new_id() -> Result<ExGuid, EditError> {
-    Ok(ExGuid {
-        guid: crate::write::fresh_guid().map_err(|_| EditError::Identity)?,
-        n: 1,
-    })
+    static NEXT: std::sync::Mutex<Option<ExGuid>> = std::sync::Mutex::new(None);
+    let mut next = NEXT.lock().map_err(|_| EditError::Identity)?;
+    let id = match *next {
+        Some(id) => id,
+        None => ExGuid {
+            guid: crate::write::fresh_guid().map_err(|_| EditError::Identity)?,
+            n: 1,
+        },
+    };
+    *next = (id.n < 255).then_some(ExGuid { n: id.n + 1, ..id });
+    Ok(id)
 }
 
 impl Paragraph {

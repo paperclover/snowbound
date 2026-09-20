@@ -70,7 +70,10 @@ fn locate_in<T>(
 fn split_paragraph(page: &mut Page, text: ExGuid, offset: u32) {
     locate_in(page, text, |list, index| {
         // One identity per split, numbered as OneNote numbers the paragraph it creates.
-        let guid = new_id().unwrap().guid;
+        // A GUID of the split's own: `new_id` shares its GUID across identities.
+        let ExGuid { mut guid, n } = new_id().unwrap();
+        guid[14] ^= n as u8;
+        guid[15] ^= 0xff;
         let mut right = list[index].clone();
         right.id = ExGuid { guid, n: 1 };
         right.tags.clear();

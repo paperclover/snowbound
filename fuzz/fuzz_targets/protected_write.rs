@@ -45,7 +45,9 @@ fuzz_target!(|data: &[u8]| {
         let stop = (start + u32::from(step[2]) % 8).min(end);
         // Marked so its absence from the stored bytes is checkable.
         let inserted = format!("\u{1f512}sealed\u{1f512}{}", String::from_utf8_lossy(&step[3..]).replace('\0', ""));
-        let format = text.format_at(start.min(end.saturating_sub(1))).unwrap().clone();
+        let Ok(format) = text.format_at(start.min(end.saturating_sub(1))).cloned() else {
+            return;
+        };
         let edit = Edit {
             range: start..stop,
             replacement: Paragraph::new(inserted.clone(), format),

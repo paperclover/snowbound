@@ -219,7 +219,7 @@ def exercise(output, shared, clients, action, wait_action, wait_text, checkpoint
     (output / 'clocks.json').write_text(json.dumps(clocks, indent=2))
     rust = {actor: [json.loads(line) for line in (folder / f'{actor}.jsonl').read_text().splitlines()] for actor in processes}
     commits, expected_rust = edit_history(rust, operations, edit, offline=config.get('offline', False))
-    assert len(commits) == rust_writers * operations, 'Missing Rust acknowledgements'
+    assert sum(event.get('operations', 1) for event in commits) == rust_writers * operations, 'Missing Rust acknowledgements'
     native_events = []
     for client in clients:
         local = client['folder'] / 'stress-events.jsonl'

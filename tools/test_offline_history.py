@@ -25,6 +25,25 @@ class OfflineHistoryTests(unittest.TestCase):
         self.assertEqual([event['token'] for event in commits], [' [w1:0]', ' [w0:0]'])
         self.assertEqual(text, self.logs['r0'][1]['text'])
 
+    def test_a_save_that_replaced_a_pending_save_shares_its_intent_and_publication(self):
+        base = 'Concurrent edits:'
+        logs = {'w0': [
+            {'event': 'ready', 'offline': True},
+            {'event': 'local_commit', 'id': 1, 'operation': 0, 'before': base, 'token': ' [w0:0]', 'started_us': 1, 'finished_us': 2},
+            {'event': 'local_commit', 'id': 1, 'operation': 1, 'before': base + ' [w0:0]', 'token': ' [w0:1]', 'started_us': 3, 'finished_us': 4},
+            {'event': 'remote_attempt', 'revision': 'a', 'before': base, 'after': base + ' [w0:0] [w0:1]', 'state': 'Committed', 'started_us': 5, 'finished_us': 6},
+            {'event': 'remote_receipt', 'id': 1, 'revision': 'a', 'at_us': 7},
+            {'event': 'remote_receipt', 'id': 1, 'revision': 'a', 'at_us': 7},
+            {'event': 'reopened_receipt', 'id': 1, 'revision': 'a'},
+            {'event': 'reopened_receipt', 'id': 1, 'revision': 'a'},
+            {'event': 'done'},
+        ], 'r0': [{'event': 'ready'}, {'event': 'done'}]}
+        commits, text = edit_history(logs, 2, offline=True)
+        self.assertEqual([(event['token'], event['operations']) for event in commits], [(' [w0:0] [w0:1]', 2)])
+        self.assertEqual(text, base + ' [w0:0] [w0:1]')
+        logs['w0'][3]['after'] = base + ' [w0:1]'
+        with self.assertRaises(AssertionError): edit_history(logs, 2, offline=True)
+
     def test_false_receipts_lost_local_intents_and_changed_reopen_state_fail(self):
         for index, field, value in [(1, 'id', 2), (1, 'token', ' [w0:9]'), (3, 'state', 'Unknown'),
                                     (3, 'after', 'Concurrent edits: [w1:0]'), (4, 'at_us', 0),

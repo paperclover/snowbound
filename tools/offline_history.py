@@ -20,7 +20,6 @@ def publication_links(logs, operations, partial=False):
         edits = [event for event in events if event['event'] == 'local_commit']
         assert [event['operation'] for event in edits] == list(range(len(edits))), 'Missing or duplicate local acknowledgement'
         assert len(edits) <= operations and (partial or len(edits) == operations), 'Local operation count differs'
-        assert len({event['id'] for event in edits}) == len(edits), 'Duplicate local intent ID'
         assert [event['id'] for event in edits] == sorted(event['id'] for event in edits), 'Local IDs went backwards'
         for event in edits:
             token = f' [{actor}:{event["operation"]}]'
@@ -37,16 +36,28 @@ def publication_links(logs, operations, partial=False):
     seen_revisions = set()
     for actor, events in logs.items():
         if not actor.startswith('w'): continue
-        edits = {event['id']: event for event in events if event['event'] == 'local_commit'}
-        receipts = [event for event in events if event['event'] == 'remote_receipt']
-        assert len({event['id'] for event in receipts}) == len(receipts), 'Duplicate remote receipt'
+        # A save replaces the newest pending save of its page, so consecutive operations
+        # can share one intent and one publication.
+        edits = {}
+        for event in events:
+            if event['event'] == 'local_commit': edits.setdefault(event['id'], []).append(event)
+        def once(rows):
+            # The client reports a coalesced intent's receipt once per operation.
+            found, seen = {}, {}
+            for row in rows:
+                assert found.setdefault(row['id'], row)['revision'] == row['revision'], 'One intent has two receipts'
+                seen[row['id']] = seen.get(row['id'], 0) + 1
+            assert all(count == len(edits.get(id, [])) for id, count in seen.items()), 'Duplicate remote receipt'
+            return list(found.values())
+        receipts = once(event for event in events if event['event'] == 'remote_receipt')
         assert set(event['id'] for event in receipts) <= set(edits), 'Receipt lacks a local intent'
         assert partial or len(receipts) == len(edits), 'Local success lacks remote acknowledgement'
-        reopened = [event for event in events if event['event'] == 'reopened_receipt']
+        reopened = once(event for event in events if event['event'] == 'reopened_receipt')
         if not partial:
             assert [(event['id'], event['revision']) for event in reopened] == [(event['id'], event['revision']) for event in receipts], 'Receipt changed across reopen'
         for receipt in receipts:
-            intent = edits[receipt['id']]
+            group = edits[receipt['id']]
+            intent = {**group[0], 'token': ''.join(event['token'] for event in group)}
             attempts = [event for event in events if event['event'] == 'remote_attempt' and event['revision'] == receipt['revision']]
             assert len(attempts) == 1, 'Receipt does not identify one publication attempt'
             attempt, = attempts
@@ -68,6 +79,6 @@ def publication_links(logs, operations, partial=False):
             assert attempt['after'] == attempt['before'] + intent['token'], 'Remote publication differs from local intent'
             tokens(attempt['after'])
             assert attempt['before'] not in links, 'Remote publications branched from the same content'
-            event = {**attempt, 'event': 'commit', 'operation': intent['operation'], 'token': intent['token'], 'finished_us': receipt['at_us']}
+            event = {**attempt, 'event': 'commit', 'operation': group[-1]['operation'], 'operations': len(group), 'token': intent['token'], 'finished_us': receipt['at_us']}
             links[attempt['before']] = event, attempt['after']
     return links
