@@ -176,7 +176,12 @@ impl TextEngine {
         }
         let mut shaped = builder.build(text);
         shaped.break_all_lines(Some(width));
-        shaped.align(Alignment::Start, AlignmentOptions::default());
+        let alignment = match paragraph.spans()[0].format.alignment {
+            Some(1) => Alignment::Center,
+            Some(2) => Alignment::End,
+            _ => Alignment::Start,
+        };
+        shaped.align(alignment, AlignmentOptions::default());
         Ok(shaped)
     }
 
@@ -547,6 +552,39 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(fonts.len(), 1);
+    }
+
+    #[test]
+    fn paragraph_alignment_offsets_lines_within_the_wrap_width() {
+        let mut engine = TextEngine::default();
+        let mut offset = |alignment| {
+            let layout = engine
+                .layout(
+                    &Paragraph::new(
+                        "Short".into(),
+                        Format {
+                            alignment,
+                            ..Format::default()
+                        },
+                    ),
+                    200.0,
+                )
+                .unwrap();
+            let (line, _) = layout.lines().next().unwrap();
+            let advance = line.metrics().advance;
+            let x = line
+                .items()
+                .find_map(|item| match item {
+                    PositionedLayoutItem::GlyphRun(run) => Some(run.offset()),
+                    _ => None,
+                })
+                .unwrap();
+            (x, advance)
+        };
+        let (left, advance) = offset(None);
+        assert_eq!(left, 0.0);
+        assert!(((offset(Some(1)).0) - (200.0 - advance) / 2.0).abs() < 0.01);
+        assert!(((offset(Some(2)).0) - (200.0 - advance)).abs() < 0.01);
     }
 
     #[test]
