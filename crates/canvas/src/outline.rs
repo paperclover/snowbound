@@ -90,7 +90,7 @@ impl ParagraphTag {
 }
 
 pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32, LayoutError> {
-    if indents.len() < 2 || indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
+    if indents.is_empty() || indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
         return Err(LayoutError::InvalidIndentation);
     }
     let known = (level as usize).min(indents.len() - 1);
@@ -536,9 +536,6 @@ pub(crate) fn outline_layout(
     definitions: &BTreeMap<ExGuid, Definition>,
     width: f32,
 ) -> Result<OutlineLayout, LayoutError> {
-    if outline.indents.len() < 2 || outline.indents.iter().any(|v| !v.is_finite() || *v < 0.0) {
-        return Err(LayoutError::InvalidIndentation);
-    }
     if !outline.unsupported.is_empty() {
         return Err(LayoutError::UnsupportedContent);
     }
@@ -1125,6 +1122,11 @@ mod tests {
             outline.layout(&mut engine, &BTreeMap::new()),
             Err(LayoutError::InvalidIndentation)
         ));
+        // OneNote stores only the level-zero indent for an outline of top-level paragraphs.
+        outline.indents = vec![0.0];
+        outline.paragraphs.truncate(1);
+        let single = outline.layout(&mut engine, &BTreeMap::new()).unwrap();
+        assert_eq!(single.paragraphs[0].origin[0], 0.0);
     }
 
     #[test]
