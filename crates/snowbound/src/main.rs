@@ -1354,6 +1354,9 @@ impl ApplicationHandler<UserEvent> for App {
                             .surface
                             .configure(&state.renderer.device, &state.config);
                         state.changed()?;
+                        // Present inside AppKit's resize transaction; a redraw on the next turn
+                        // lets the window show the previous frame at the new size.
+                        state.draw()?;
                     }
                 }
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
