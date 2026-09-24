@@ -15,8 +15,9 @@ impl Scroll {
                 max[axis] = max[axis].max(rect[axis + 2]);
             }
         }
+        // OneNote stops at the page origin or the object furthest above or left of it.
         for axis in 0..2 {
-            min[axis] = (min[axis] - 36.0) * viewport.scale;
+            min[axis] *= viewport.scale;
             max[axis] =
                 ((max[axis] + 36.0) * viewport.scale - viewport.size[axis] as f32).max(min[axis]);
         }
@@ -100,7 +101,7 @@ mod tests {
         };
         let scroll = Scroll::new(viewport, [[-80.0, -20.0, 1000.0, 1200.0]].into_iter());
         scroll.clamp(&mut viewport);
-        assert_eq!(viewport.origin, [232.0, 112.0]);
+        assert_eq!(viewport.origin, [160.0, 40.0]);
         viewport.origin = [-9999.0; 2];
         scroll.clamp(&mut viewport);
         assert_eq!(viewport.origin, [-1272.0, -1872.0]);
