@@ -5,7 +5,7 @@ use crate::{
     outline::{Arrange, OutlineLayout},
 };
 use onestore::page::text::Paragraph;
-use onestore::page::{Image, Outline, Page, PageObject};
+use onestore::page::{Image, Ink, Outline, Page, PageObject};
 use std::collections::BTreeMap;
 
 /// A title object's own state, plus the child origins `build` replaces with page coordinates.
@@ -33,6 +33,7 @@ pub(crate) enum Content {
         below_title: Option<onestore::ExGuid>,
     },
     Image(Image),
+    Ink(Ink),
     Editable(onestore::ExGuid),
     ReadOnly(Box<ReadOnlyObject>),
 }
@@ -50,6 +51,7 @@ impl Content {
         match self {
             Self::Outline { source, .. } => Some((source.id, &source.layout)),
             Self::Image(source) => Some((source.id, &source.layout)),
+            Self::Ink(source) => Some((source.id, &source.layout)),
             Self::ReadOnly(object) => Some((object.source.id(), object.source.layout())),
             Self::Date { .. } | Self::Editable(_) => None,
         }
@@ -62,7 +64,8 @@ impl Content {
             Self::Outline { source, .. } => Some((source.id, &mut source.layout)),
             Self::Image(source) => Some((source.id, &mut source.layout)),
             Self::ReadOnly(object) => Some((object.source.id(), object.source.layout_mut())),
-            Self::Date { .. } | Self::Editable(_) => None,
+            // Strokes carry their own page coordinates, so a layout move would not move them.
+            Self::Date { .. } | Self::Ink(_) | Self::Editable(_) => None,
         }
     }
 }
@@ -80,15 +83,10 @@ impl ReadOnlyObject {
             [0.0; 2]
         };
         let layout = source.layout();
-        // Ink carries no layout of its own; its strokes say where it is.
-        let extent = match &source {
-            PageObject::Ink(ink) => ink.bounds(),
-            _ => None,
-        };
-        let x = extent.map_or(layout.x.unwrap_or(0.0), |e| e[0]) + offset[0];
-        let y = extent.map_or(layout.y.unwrap_or(0.0), |e| e[1]) + offset[1];
-        let width = extent.map_or(layout.max_width.unwrap_or(160.0), |e| e[2]);
-        let height = extent.map_or(layout.max_height.unwrap_or(42.0), |e| e[3]);
+        let x = layout.x.unwrap_or(0.0) + offset[0];
+        let y = layout.y.unwrap_or(0.0) + offset[1];
+        let width = layout.max_width.unwrap_or(160.0);
+        let height = layout.max_height.unwrap_or(42.0);
         if [x, y, width, height].iter().any(|v| !v.is_finite()) || width <= 0.0 || height <= 0.0 {
             return Err(EditorError::InvalidGeometry);
         }
@@ -326,12 +324,15 @@ pub(crate) fn build(
                 };
                 objects.push(Content::Image(source));
             }
-            PageObject::Ink(_) => objects.push(Content::ReadOnly(ReadOnlyObject::new(
-                object,
-                page.margin_origin,
-                "Ink\nRead-only",
-                engine,
-            )?)),
+            PageObject::Ink(ink) => {
+                if ink_bounds(ink).is_some_and(|b| b.iter().any(|v| !v.is_finite())) {
+                    return Err(EditorError::InvalidGeometry);
+                }
+                let PageObject::Ink(ink) = object else {
+                    unreachable!()
+                };
+                objects.push(Content::Ink(ink))
+            }
             PageObject::Unsupported(_) => objects.push(Content::ReadOnly(ReadOnlyObject::new(
                 object,
                 page.margin_origin,
@@ -346,4 +347,26 @@ pub(crate) fn build(
         date,
         areas,
     })
+}
+
+/// The painted extent of every stroke, pen included, as `[x0, y0, x1, y1]` page points.
+pub(crate) fn ink_bounds(ink: &Ink) -> Option<[f32; 4]> {
+    ink.strokes
+        .iter()
+        .flat_map(|stroke| {
+            let r = stroke.width.max(stroke.height) * 0.5;
+            stroke
+                .points
+                .iter()
+                .map(move |[x, y]| [x - r, y - r, x + r, y + r])
+        })
+        .chain(ink.groups.iter().filter_map(ink_bounds))
+        .reduce(|a, b| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        })
 }

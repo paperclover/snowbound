@@ -686,6 +686,7 @@ impl CanvasEditor {
                 .iter()
                 .filter_map(|object| match object {
                     page::Content::ReadOnly(object) => Some(object.rect()[2]),
+                    page::Content::Ink(ink) => page::ink_bounds(ink).map(|b| b[2]),
                     _ => None,
                 })
                 .fold(0.0_f32, f32::max);
@@ -738,6 +739,10 @@ impl CanvasEditor {
                     .clone(),
                 page::Content::Image(image) => {
                     objects.push(PageObject::Image(image.clone()));
+                    continue;
+                }
+                page::Content::Ink(ink) => {
+                    objects.push(PageObject::Ink(ink.clone()));
                     continue;
                 }
                 page::Content::ReadOnly(object) => {

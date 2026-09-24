@@ -217,6 +217,15 @@ pub enum Primitive<'a> {
         image: &'a RasterImage,
         rect: [f32; 4],
     },
+    /// A pen stroke between two points, `width` points across.
+    Segment {
+        from: [f32; 2],
+        to: [f32; 2],
+        width: f32,
+        /// A round pen tip caps the ends; otherwise they are square.
+        round: bool,
+        color: [f32; 4],
+    },
 }
 
 #[derive(Debug)]
@@ -578,6 +587,13 @@ impl Renderer {
                         vertex.stroke = width;
                     }
                 }
+                Primitive::Segment {
+                    from,
+                    to,
+                    width,
+                    round,
+                    color,
+                } => self.segment(viewport, *from, *to, *width, *round, *color)?,
                 Primitive::Image { image, rect } => {
                     if let Some(rect) = viewport.visible_image_rect(*rect)? {
                         self.image(image, active_images)?;
@@ -943,6 +959,76 @@ impl Renderer {
         )
     }
 
+    /// Draws the segment as a capsule in its own frame, reusing the rounded-rectangle distance.
+    fn segment(
+        &mut self,
+        viewport: Viewport,
+        from: [f32; 2],
+        to: [f32; 2],
+        width: f32,
+        round: bool,
+        color: [f32; 4],
+    ) -> Result<(), RenderError> {
+        let pixel = |p: [f32; 2]| {
+            [
+                p[0] * viewport.scale + viewport.origin[0],
+                p[1] * viewport.scale + viewport.origin[1],
+            ]
+        };
+        let [from, to] = [pixel(from), pixel(to)];
+        // Hairlines stay one device pixel wide, as OneNote draws its thinnest pen.
+        let radius = (width * viewport.scale).max(1.0) * 0.5;
+        if from.iter().chain(&to).chain(&color).any(|v| !v.is_finite()) || !radius.is_finite() {
+            return Err(RenderError::InvalidPrimitive);
+        }
+        let pad = radius + 1.0;
+        if from[0].max(to[0]) + pad < 0.0
+            || from[1].max(to[1]) + pad < 0.0
+            || from[0].min(to[0]) - pad > viewport.size[0] as f32
+            || from[1].min(to[1]) - pad > viewport.size[1] as f32
+        {
+            return Ok(());
+        }
+        if self.vertices.len() + 6 > MAX_VERTICES {
+            return Err(RenderError::FrameTooLarge);
+        }
+        let delta = [to[0] - from[0], to[1] - from[1]];
+        let length = delta[0].hypot(delta[1]);
+        let along = if length > 0.0 {
+            [delta[0] / length, delta[1] / length]
+        } else {
+            [1.0, 0.0]
+        };
+        let across = [-along[1], along[0]];
+        let center = [(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5];
+        let half = [length * 0.5 + radius, radius];
+        let corner = if round { radius } else { 0.0 };
+        let [hx, hy] = [half[0] + 1.0, half[1] + 1.0];
+        for local in [
+            [-hx, -hy],
+            [-hx, hy],
+            [hx, hy],
+            [-hx, -hy],
+            [hx, hy],
+            [hx, -hy],
+        ] {
+            let x = center[0] + along[0] * local[0] + across[0] * local[1];
+            let y = center[1] + along[1] * local[0] + across[1] * local[1];
+            self.vertices.push(Vertex {
+                position: [
+                    x * 2.0 / viewport.size[0] as f32 - 1.0,
+                    1.0 - y * 2.0 / viewport.size[1] as f32,
+                ],
+                uv: [0.5 / ATLAS_SIZE as f32; 2],
+                color,
+                local,
+                shape: [half[0], half[1], corner, corner],
+                stroke: 0.0,
+            });
+        }
+        Ok(())
+    }
+
     fn quad(
         &mut self,
         viewport: Viewport,
@@ -1241,6 +1327,13 @@ mod tests {
                 tag: &tags[3],
                 origin: [188.125, 80.25],
             },
+            Primitive::Segment {
+                from: [226.0, 104.0],
+                to: [240.0, 104.0],
+                width: 4.0,
+                round: true,
+                color: [1.0, 0.0, 0.0, 1.0],
+            },
         ];
         primitives.extend((0..9).map(|step| Primitive::Text {
             clip: None,
@@ -1325,6 +1418,10 @@ mod tests {
             })
             .collect();
         let pixel = |x: usize, y: usize| &captures[0][(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];
+        assert_eq!(pixel(490, 232), [255, 0, 0, 255]);
+        assert_eq!(pixel(473, 232), [255, 0, 0, 255]);
+        assert_eq!(pixel(490, 238), [255; 4]);
+        assert_eq!(pixel(472, 228), [255; 4]);
         assert_eq!(pixel(300, 140), [255, 0, 0, 255]);
         assert_eq!(pixel(280, 120), [255; 4]);
         assert_eq!(pixel(282, 124), [255; 4]);

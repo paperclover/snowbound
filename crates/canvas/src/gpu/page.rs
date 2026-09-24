@@ -37,6 +37,50 @@ fn outline_origin(
     Ok(origin)
 }
 
+fn append_ink(ink: &onestore::page::Ink, offset: [f32; 2], primitives: &mut Vec<Primitive<'_>>) {
+    for stroke in &ink.strokes {
+        let mut color = colorref(stroke.color.unwrap_or(0));
+        color[3] = 1.0 - f32::from(stroke.transparency.unwrap_or(0)) / 255.0;
+        let width = stroke.width.max(stroke.height);
+        let round = stroke.pen_tip != Some(1);
+        let mut points = stroke
+            .points
+            .iter()
+            .map(|[x, y]| [x + offset[0], y + offset[1]]);
+        let Some(mut from) = points.next() else {
+            continue;
+        };
+        let mut drawn = false;
+        for to in points {
+            // Pen samples far closer than a pixel add vertices without changing the stroke.
+            if (to[0] - from[0]).hypot(to[1] - from[1]) < 0.2 {
+                continue;
+            }
+            primitives.push(Primitive::Segment {
+                from,
+                to,
+                width,
+                round,
+                color,
+            });
+            from = to;
+            drawn = true;
+        }
+        if !drawn {
+            primitives.push(Primitive::Segment {
+                from,
+                to: from,
+                width,
+                round,
+                color,
+            });
+        }
+    }
+    for group in &ink.groups {
+        append_ink(group, offset, primitives);
+    }
+}
+
 #[derive(Debug)]
 pub enum SceneError {
     Layout(LayoutError),
@@ -204,6 +248,7 @@ impl PageScene {
                     source.layout.x.unwrap_or(0.0) + source.layout.max_width?,
                     source.layout.y.unwrap_or(0.0) + source.layout.max_height?,
                 ]),
+                Content::Ink(ink) => crate::editor::page::ink_bounds(ink),
                 Content::ReadOnly(object) => Some(object.rect()),
                 Content::Editable(_) => None,
             })
@@ -297,7 +342,7 @@ impl PageScene {
                         return Some(SceneHit::Image(source.id));
                     }
                 }
-                Content::Outline { .. } | Content::Image(_) => {}
+                Content::Outline { .. } | Content::Image(_) | Content::Ink(_) => {}
             }
         }
         None
@@ -381,6 +426,10 @@ impl PageScene {
                     outline(*id, offset, primitives)?;
                     continue;
                 }
+                Content::Ink(ink) => {
+                    append_ink(ink, offset, primitives);
+                    continue;
+                }
             };
             let object_origin = [origin[0] + offset[0], origin[1] + offset[1]];
             match content {
@@ -453,7 +502,7 @@ impl PageScene {
                         }
                     }
                 }
-                Content::Editable(_) | Content::ReadOnly(_) => unreachable!(),
+                Content::Editable(_) | Content::ReadOnly(_) | Content::Ink(_) => unreachable!(),
             }
         }
         Ok(())
@@ -1520,6 +1569,75 @@ mod tests {
             scene.append_primitives(&mut Vec::new(), [0.0; 2]),
             Err(SceneError::MissingOutline)
         ));
+    }
+
+    #[test]
+    fn ink_draws_every_stroke_and_bounds_include_the_pen() {
+        use onestore::page::{Ink, InkStroke};
+        let stroke = |points: Vec<[f32; 2]>, color| InkStroke {
+            id: ExGuid::default(),
+            points,
+            width: 2.0,
+            height: 2.0,
+            color,
+            transparency: Some(51),
+            pen_tip: None,
+        };
+        let ink = Ink {
+            id: ExGuid::default(),
+            layout: Layout::default(),
+            // A straight vertical line has no width of its own.
+            strokes: vec![stroke(vec![[10.0, 20.0], [10.0, 20.1], [10.0, 60.0]], None)],
+            groups: vec![Ink {
+                id: ExGuid::default(),
+                layout: Layout::default(),
+                strokes: vec![stroke(vec![[40.0, 30.0]], Some(0x0000ff))],
+                groups: Vec::new(),
+            }],
+        };
+        let page = Page {
+            identity: None,
+            created: None,
+            title: String::new(),
+            margin_origin: [0.0; 2],
+            definitions: BTreeMap::new(),
+            objects: vec![PageObject::Ink(ink.clone())],
+        };
+        let mut engine = TextEngine::default();
+        let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+        assert!(
+            scene
+                .content_bounds(&editor)
+                .any(|bounds| bounds == [9.0, 19.0, 41.0, 61.0])
+        );
+        let mut primitives = Vec::new();
+        scene
+            .append_primitives_with::<SceneError>(
+                &mut primitives,
+                [5.0, 0.0],
+                Some(&editor),
+                None,
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let segments: Vec<_> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Segment {
+                    from, to, color, ..
+                } => Some((*from, *to, *color)),
+                _ => None,
+            })
+            .collect();
+        let red = colorref(0x0000ff);
+        assert_eq!(
+            segments,
+            [
+                ([15.0, 20.0], [15.0, 60.0], [0.0, 0.0, 0.0, 0.8]),
+                ([45.0, 30.0], [45.0, 30.0], [red[0], red[1], red[2], 0.8]),
+            ]
+        );
+        assert_eq!(editor.page().unwrap().objects, [PageObject::Ink(ink)]);
     }
 
     #[test]
