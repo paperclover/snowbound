@@ -1596,8 +1596,17 @@ fn page_hit_test(
     point: [f32; 2],
     pixel: f32,
 ) -> Option<Hit> {
-    let hit = |outline: &TextOutline, offset: [f32; 2], below: bool| {
-        if below {
+    /// Grips and text resolve front to back before any outline's padding, as a native
+    /// width handle stays reachable under the next outline's left padding; the typing room
+    /// below an outline comes last.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Layer {
+        Grips,
+        Body,
+        Below,
+    }
+    let hit = |outline: &TextOutline, offset: [f32; 2], layer: Layer| {
+        if layer == Layer::Below {
             let outline = editor
                 .outlines()
                 .iter()
@@ -1614,20 +1623,34 @@ fn page_hit_test(
         let (bounds, body_top) = outline_chrome(outline, pixel);
         let local = [point[0] - offset[0], point[1] - offset[1]];
         let [x, y] = local;
-        if x >= bounds[0] && x <= bounds[2] && y >= bounds[1] && y < body_top {
-            if x >= bounds[2] - 9.0 * pixel {
+        if layer == Layer::Grips {
+            // Width handles: 15 px inside to 6 px outside the header's right end, and 6 px
+            // either side of the right border below it.
+            let inside = if y < body_top { 15.0 } else { 6.0 };
+            if !outline.title
+                && (bounds[2] - inside * pixel..=bounds[2] + 6.0 * pixel).contains(&x)
+                && (bounds[1]..=bounds[3]).contains(&y)
+            {
                 return Some(Hit::Resize {
                     id: outline.id,
                     grab: point[0] - outline.bounds().x1 as f32,
                 });
             }
-            return Some(Hit::Handle {
-                id: outline.id,
-                grab: [
-                    point[0] - outline.origin()[0],
-                    point[1] - outline.origin()[1],
-                ],
-            });
+            if x >= bounds[0] && x <= bounds[2] && y >= bounds[1] && y < body_top {
+                return Some(Hit::Handle {
+                    id: outline.id,
+                    grab: [
+                        point[0] - outline.origin()[0],
+                        point[1] - outline.origin()[1],
+                    ],
+                });
+            }
+            let text = outline.bounds();
+            if !(text.x0..=text.x1).contains(&f64::from(x))
+                || !(text.y0..=text.y1).contains(&f64::from(y))
+            {
+                return None;
+            }
         }
         if (x >= bounds[0] && x <= bounds[2] && y >= body_top && y <= bounds[3])
             || outline.layouts().any(|(_, paragraph)| {
@@ -1650,12 +1673,12 @@ fn page_hit_test(
         }
         None
     };
-    let pass = |below| {
+    let pass = |layer| {
         if let Some(hit) = editor
             .visible_outlines()
             .rev()
             .filter(|outline| scene.is_none() || !editor.has_page_outline(outline.id))
-            .find_map(|outline| hit(outline, [0.0; 2], below))
+            .find_map(|outline| hit(outline, [0.0; 2], layer))
         {
             return Some(hit);
         }
@@ -1667,7 +1690,7 @@ fn page_hit_test(
                 editor
                     .visible_outlines()
                     .find(|outline| outline.id == id)
-                    .and_then(|outline| hit(outline, *offset, below))
+                    .and_then(|outline| hit(outline, *offset, layer))
             },
         )? {
             canvas::gpu::page::SceneHit::Outline(hit) => Some(hit),
@@ -1675,7 +1698,9 @@ fn page_hit_test(
             canvas::gpu::page::SceneHit::ReadOnly(index) => Some(Hit::ReadOnly(index)),
         }
     };
-    pass(false).or_else(|| pass(true))
+    [Layer::Grips, Layer::Body, Layer::Below]
+        .into_iter()
+        .find_map(pass)
 }
 
 fn page_primitives<'a>(
@@ -2424,6 +2449,54 @@ mod tests {
         assert_eq!(moved[1][1] - hovered[1][1], 50.0);
         assert!(
             matches!(page_hit_test(&editor, None, [225.0, 5.0], 1.0), Some(Hit::Text { id, .. }) if id == second)
+        );
+    }
+
+    #[test]
+    fn a_covered_width_handle_stays_reachable_beside_the_outline_above_it() {
+        let mut engine = TextEngine::default();
+        let pixel = 0.75;
+        let mut first = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("text".into(), Format::default())]).unwrap(),
+            100.0,
+            [36.0, 68.4],
+        )
+        .unwrap();
+        let editor =
+            CanvasEditor::from_text_outlines(vec![first.clone()], Default::default(), None)
+                .unwrap();
+        first = editor.preview_resize(&mut engine, 226.5).unwrap();
+        let (frame, body_top) = outline_chrome(&first, pixel);
+        // The casual night page: the next outline starts 7.5 pt right of the first one.
+        let second = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("text".into(), Format::default())]).unwrap(),
+            100.0,
+            [first.bounds().x1 as f32 + 7.5, 68.4],
+        )
+        .unwrap();
+        let (first_id, second_id) = (first.id, second.id);
+        let editor =
+            CanvasEditor::from_text_outlines(vec![first, second], Default::default(), None)
+                .unwrap();
+        let header = (frame[1] + body_top) / 2.0;
+        let hit = |x| page_hit_test(&editor, None, [x, header], pixel);
+        assert!(
+            matches!(hit(frame[2] - 12.0 * pixel), Some(Hit::Resize { id, .. }) if id == first_id)
+        );
+        assert!(
+            matches!(hit(frame[2] - 2.0 * pixel), Some(Hit::Handle { id, .. }) if id == second_id)
+        );
+        let body = |x| page_hit_test(&editor, None, [x, body_top + 20.0], pixel);
+        assert!(
+            matches!(body(frame[2] - 4.0 * pixel), Some(Hit::Resize { id, .. }) if id == first_id)
+        );
+        assert!(
+            matches!(body(frame[2] - 8.0 * pixel), Some(Hit::Text { id, .. }) if id == second_id)
+        );
+        assert!(
+            matches!(body(frame[2] - 12.0 * pixel), Some(Hit::Text { id, .. }) if id == first_id)
         );
     }
 
