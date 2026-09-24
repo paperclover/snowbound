@@ -1401,6 +1401,11 @@ impl CanvasEditor {
         self.active_outline().selection
     }
 
+    /// OneNote's 18 pt placement grid passes through this point.
+    pub fn margin_origin(&self) -> [f32; 2] {
+        self.header.margin_origin
+    }
+
     pub fn resize(&mut self, engine: &mut TextEngine, width: f32) -> Result<(), EditorError> {
         let outline = self.active_outline();
         if outline.layout.reserved_width.or(outline.layout.max_width) == Some(width)

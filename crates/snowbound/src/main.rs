@@ -372,7 +372,7 @@ impl State {
             if self.modifiers.alt_key() {
                 position
             } else {
-                snap_to_grid(position)
+                snap_to_grid(position, self.editor.margin_origin())
             },
         ))
     }
@@ -398,7 +398,7 @@ impl State {
         let origin = if self.modifiers.alt_key() {
             origin
         } else {
-            snap_to_grid(origin)
+            snap_to_grid(origin, self.editor.margin_origin())
         };
         Some((*id, origin, size))
     }
@@ -1028,7 +1028,7 @@ impl State {
                     };
                     self.editor.place_caret(
                         &mut self.engine,
-                        snap_to_grid(position),
+                        snap_to_grid(position, self.editor.margin_origin()),
                         DEFAULT_OUTLINE_WIDTH,
                     )?;
                     self.set_object_focus(None);
@@ -1571,7 +1571,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     let position = if state.modifiers.alt_key() {
                                         position
                                     } else {
-                                        snap_to_grid(position)
+                                        snap_to_grid(position, state.editor.margin_origin())
                                     };
                                     state.editor.place_caret(
                                         &mut state.engine,
@@ -2071,9 +2071,9 @@ fn drag_selection(anchor: Selection, target: Selection, unit: SelectionUnit) -> 
     }
 }
 
-fn snap_to_grid(point: [f32; 2]) -> [f32; 2] {
+fn snap_to_grid(point: [f32; 2], margin: [f32; 2]) -> [f32; 2] {
     std::array::from_fn(|axis| {
-        let offset = [0.0, 14.4][axis];
+        let offset = margin[axis];
         let cell = (point[axis] - offset) / 18.0;
         let nearest = cell.round();
         // Native midpoints remain free; account for the source coordinate's float precision.
@@ -2816,6 +2816,17 @@ mod tests {
         );
     }
 
+    const DEFAULT_MARGIN: [f32; 2] = [36.0, 14.4];
+
+    #[test]
+    fn native_grid_follows_the_page_margin_origin() {
+        // "av: casual night in the trees": margin 36.75; a 22.5 x 15 pt drag lands one cell on.
+        let margin = [36.75, 14.4];
+        let result = snap_to_grid([468.75 + 22.5, 86.4 + 15.0], margin);
+        assert!((result[0] - 486.75).abs() < 0.0001);
+        assert!((result[1] - 104.4).abs() < 0.0001);
+    }
+
     #[test]
     fn native_grid_matches_drag_offsets_midpoints_and_zoom() {
         for (pixels, points) in [
@@ -2839,13 +2850,16 @@ mod tests {
         ] {
             let origin = [486.0, 230.40001];
             let proposed = origin.map(|v| v + pixels * 72.0 / 96.0);
-            let result = snap_to_grid(proposed);
+            let result = snap_to_grid(proposed, DEFAULT_MARGIN);
             for axis in 0..2 {
                 assert!((result[axis] - origin[axis] - points).abs() < 0.00004);
             }
         }
         for pixels in [6.0, 7.0, 12.0, 13.0, 19.0] {
-            let result = snap_to_grid([491.25 + pixels * 0.75, 235.65 + pixels * 0.75]);
+            let result = snap_to_grid(
+                [491.25 + pixels * 0.75, 235.65 + pixels * 0.75],
+                DEFAULT_MARGIN,
+            );
             assert!((result[0] - 504.0).abs() < 0.00004);
             assert!((result[1] - 248.4).abs() < 0.00004);
         }
@@ -2858,14 +2872,14 @@ mod tests {
                 let origin = [36.0, 90.0];
                 let proposed =
                     std::array::from_fn(|axis| origin[axis] + delta[axis] * dpr / (scale * dpr));
-                let result = snap_to_grid(proposed);
+                let result = snap_to_grid(proposed, DEFAULT_MARGIN);
                 for axis in 0..2 {
                     assert!((result[axis] - expected[axis]).abs() < 0.00004);
                 }
             }
         }
         for point in [[9.0, 5.4], [-9.0, -12.6], [423.0, 239.4]] {
-            assert_eq!(snap_to_grid(point), point);
+            assert_eq!(snap_to_grid(point, DEFAULT_MARGIN), point);
         }
     }
 
@@ -2888,7 +2902,10 @@ mod tests {
                     scale: scale * dpr,
                 };
                 let point = viewport.document_point([x * dpr, y * dpr]);
-                let result = snap_to_grid([point[0], point[1] - 7.0 * dpr / viewport.scale]);
+                let result = snap_to_grid(
+                    [point[0], point[1] - 7.0 * dpr / viewport.scale],
+                    DEFAULT_MARGIN,
+                );
                 for axis in 0..2 {
                     assert!((result[axis] - expected[axis]).abs() < 0.00004);
                 }
