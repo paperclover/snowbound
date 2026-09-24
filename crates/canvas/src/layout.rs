@@ -1,7 +1,8 @@
 use onestore::page::text::Paragraph;
 use parley::{
-    Affinity, Alignment, AlignmentOptions, BoundingBox, FontContext, FontFamily, FontStyle,
-    FontWeight, Layout, LayoutContext, OverflowWrap, PositionedLayoutItem, StyleProperty,
+    Affinity, Alignment, AlignmentOptions, BoundingBox, FontContext, FontFamily, FontFamilyName,
+    FontStyle, FontWeight, GenericFamily, Layout, LayoutContext, OverflowWrap,
+    PositionedLayoutItem, StyleProperty,
     editing::{Cursor, Selection},
 };
 use skrifa::{FontRef, MetadataProvider, raw::TableProvider, string::StringId};
@@ -139,8 +140,13 @@ impl TextEngine {
                 return Err(LayoutError::InvalidFontSize);
             }
             let properties = [
-                StyleProperty::FontFamily(FontFamily::named(
-                    format.font.as_deref().unwrap_or("Arial"),
+                StyleProperty::FontFamily(FontFamily::List(
+                    vec![
+                        FontFamilyName::named(format.font.as_deref().unwrap_or("Arial")),
+                        // A missing family otherwise falls back per script and can put digits in an emoji font.
+                        GenericFamily::SansSerif.into(),
+                    ]
+                    .into(),
                 )),
                 StyleProperty::FontSize(size),
                 StyleProperty::FontWeight(if format.bold == Some(true) {
@@ -520,6 +526,27 @@ mod tests {
                 .data
                 .id()
         );
+    }
+
+    #[test]
+    fn missing_family_keeps_digits_in_the_letters_face() {
+        let paragraph = Paragraph::new(
+            "Monday, August 10, 2026".into(),
+            Format {
+                font: Some("Snowbound Missing Family".into()),
+                ..Format::default()
+            },
+        );
+        let layout = TextEngine::default().layout(&paragraph, 468.0).unwrap();
+        let fonts = layout
+            .lines()
+            .flat_map(|(line, _)| {
+                line.runs()
+                    .map(|run| run.font().font.data.id())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(fonts.len(), 1);
     }
 
     #[test]
