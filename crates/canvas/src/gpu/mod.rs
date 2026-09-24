@@ -715,10 +715,11 @@ impl Renderer {
                     .map(|c| c.to_bits())
                     .collect();
                 let color = glyph_run.style().brush.color;
+                let rise = glyph_run.style().brush.rise;
                 for glyph in glyph_run.positioned_glyphs() {
                     let x = glyph.x * scale + origin[0];
-                    let y =
-                        (glyph.y + line_box.baseline - line.metrics().baseline) * scale + origin[1];
+                    let y = (glyph.y + line_box.baseline - line.metrics().baseline - rise) * scale
+                        + origin[1];
                     // Quantization affects raster coverage only, never advances or line breaks.
                     let x = (x * 4.0).round() * 0.25;
                     let y = (y * 4.0).round() * 0.25;
@@ -830,7 +831,8 @@ impl Renderer {
                 ] {
                     if let Some(decoration) = decoration {
                         let x = glyph_run.offset() * scale + origin[0];
-                        let y = (line_box.baseline - decoration.offset.unwrap_or(offset)) * scale
+                        let y = (line_box.baseline - rise - decoration.offset.unwrap_or(offset))
+                            * scale
                             + origin[1];
                         self.quad(
                             viewport,

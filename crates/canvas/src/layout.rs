@@ -23,10 +23,18 @@ pub struct TextEngine {
     arial_substitutes: BTreeSet<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Superscripts and subscripts draw at this fraction of their run's size.
+const SCRIPT_SCALE: f32 = 2.0 / 3.0;
+const SUPERSCRIPT_RISE: f32 = 1.0 / 3.0;
+const SUBSCRIPT_DROP: f32 = 0.08;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextBrush {
     pub color: u32,
     pub highlight: Option<u32>,
+    /// Points the run draws above the line's baseline: positive for a superscript,
+    /// negative for a subscript. Line metrics and hit-testing keep the baseline.
+    pub rise: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -140,6 +148,18 @@ impl TextEngine {
             if !size.is_finite() || size <= 0.0 {
                 return Err(LayoutError::InvalidFontSize);
             }
+            let rise = if format.superscript == Some(true) {
+                SUPERSCRIPT_RISE * size
+            } else if format.subscript == Some(true) {
+                -SUBSCRIPT_DROP * size
+            } else {
+                0.0
+            };
+            let size = if rise == 0.0 {
+                size
+            } else {
+                size * SCRIPT_SCALE
+            };
             let properties = [
                 StyleProperty::FontFamily(FontFamily::List(
                     [
@@ -176,6 +196,7 @@ impl TextEngine {
                         _ => 0,
                     },
                     highlight: format.highlight.filter(|color| *color != 0xff000000),
+                    rise,
                 }),
                 StyleProperty::Underline(format.underline.unwrap_or(false) || link),
                 StyleProperty::Strikethrough(format.strike.unwrap_or(false)),
@@ -566,6 +587,47 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(fonts.len(), 1);
+    }
+
+    #[test]
+    fn scripts_shrink_and_shift_without_moving_the_baseline() {
+        let mut engine = TextEngine::default();
+        let script = |superscript, subscript| Format {
+            superscript,
+            subscript,
+            ..Format::default()
+        };
+        let layout = engine
+            .layout(
+                &Paragraph::from_runs([
+                    ("x".into(), Format::default()),
+                    ("2".into(), script(Some(true), None)),
+                    ("i".into(), script(None, Some(true))),
+                ]),
+                300.0,
+            )
+            .unwrap();
+        let runs: Vec<_> = layout
+            .lines()
+            .flat_map(|(line, _)| line.items().collect::<Vec<_>>())
+            .filter_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(run) => {
+                    Some((run.run().font_size(), run.style().brush.rise))
+                }
+                _ => None,
+            })
+            .collect();
+        let third = 11.0 / 3.0;
+        assert_eq!(runs[0], (11.0, 0.0));
+        assert!((runs[1].0 - 2.0 * third).abs() < 0.001 && (runs[1].1 - third).abs() < 0.001);
+        assert!(runs[2].1 < 0.0);
+        let plain = engine
+            .layout(&Paragraph::new("x2i".into(), Format::default()), 300.0)
+            .unwrap();
+        assert_eq!(
+            layout.lines().next().unwrap().1.baseline,
+            plain.lines().next().unwrap().1.baseline
+        );
     }
 
     #[test]
