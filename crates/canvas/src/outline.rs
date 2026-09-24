@@ -86,6 +86,8 @@ pub struct ParagraphLayout {
     /// Marker x is outline-local; y is paragraph-local so reflow cannot accumulate rounding drift.
     pub markers: Vec<(TextLayout, [f32; 2])>,
     pub tags: Vec<ParagraphTag>,
+    /// An equation draws in two dimensions in place of its linear text.
+    pub math: Option<crate::math::MathLayout>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -201,6 +203,9 @@ impl ParagraphLayout {
     }
 
     fn size(&self) -> [f32; 2] {
+        if let Some(math) = &self.math {
+            return [self.origin[0] + math.size[0], math.size[1]];
+        }
         [
             self.origin[0] + self.text.shaped.width(),
             self.markers
@@ -257,7 +262,8 @@ impl ParagraphLayout {
         // The newest tag that sets a colour wins.
         let color = tag_definitions.iter().rev().find_map(|tag| tag.3);
         let highlight = tag_definitions.iter().rev().find_map(|tag| tag.4);
-        let mut text = if color.is_none() && highlight.is_none() {
+        let equation = onestore::page::Math::is_equation(&source.text);
+        let mut text = if color.is_none() && highlight.is_none() && !equation {
             engine.layout(projection.text(), width - indent)?
         } else {
             let visible = projection.text();
@@ -266,6 +272,11 @@ impl ParagraphLayout {
                 let mut format = span.format.clone();
                 format.color = color.or(format.color);
                 format.highlight = highlight.or(format.highlight);
+                // An equation draws in two dimensions; its linear text only holds the caret,
+                // which the body font sizes like a line of text.
+                if equation {
+                    format.font = None;
+                }
                 let run = (visible.text()[start..span.end].to_owned(), format);
                 start = span.end;
                 run
@@ -337,6 +348,9 @@ impl ParagraphLayout {
                 disabled: tag.status & 2 != 0,
             });
         }
+        let math = equation
+            .then(|| crate::math::layout(engine, &source.text))
+            .transpose()?;
         Ok(Self {
             id: paragraph.id,
             origin: [indent, 0.0],
@@ -344,6 +358,7 @@ impl ParagraphLayout {
             text,
             markers,
             tags,
+            math,
         })
     }
 }

@@ -2226,33 +2226,9 @@ fn append_outline<'a>(
         }
     }
     for (index, (_, paragraph)) in outline.layouts().enumerate() {
-        let layout = &paragraph.text;
-        let paragraph_origin = paragraph.origin;
-        let clip = outline.shaped().paragraph_cell(index).map(|cell| {
-            let [left, top, right, bottom] = cell.text_bounds();
-            [left + x, top + y, right + x, bottom + y]
-        });
-        primitives.push(Primitive::Text {
-            clip,
-            layout,
-            origin: [x + paragraph_origin[0], y + paragraph_origin[1]],
-        });
-        for (layout, origin) in &paragraph.markers {
-            primitives.push(Primitive::Text {
-                clip,
-                layout,
-                origin: [x + origin[0], y + (origin[1] + paragraph_origin[1])],
-            });
-        }
-        for tag in &paragraph.tags {
-            primitives.push(Primitive::Tag {
-                tag,
-                origin: [
-                    x + outline.shaped().tag_column_offset(),
-                    y + paragraph_origin[1],
-                ],
-            });
-        }
+        outline
+            .shaped()
+            .append_paragraph_primitives(index, paragraph, origin, primitives);
     }
     if let Some(editor) = editor {
         for rect in editor.marked_rects()? {

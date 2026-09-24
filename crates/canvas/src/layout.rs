@@ -142,11 +142,19 @@ impl TextEngine {
             }
             let properties = [
                 StyleProperty::FontFamily(FontFamily::List(
-                    vec![
-                        FontFamilyName::named(format.font.as_deref().unwrap_or("Arial")),
+                    [
+                        Some(FontFamilyName::named(
+                            format.font.as_deref().unwrap_or("Arial"),
+                        )),
+                        // macOS ships STIX Two Math where Windows has Cambria Math.
+                        (format.font.as_deref() == Some("Cambria Math"))
+                            .then_some(FontFamilyName::named("STIX Two Math")),
                         // A missing family otherwise falls back per script and can put digits in an emoji font.
-                        GenericFamily::SansSerif.into(),
+                        Some(GenericFamily::SansSerif.into()),
                     ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
                     .into(),
                 )),
                 StyleProperty::FontSize(size),

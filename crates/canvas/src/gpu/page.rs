@@ -546,43 +546,12 @@ impl PageScene {
                     outline.append_background_primitives(primitives, object_origin);
                     self.append_outline_objects(outline, object_origin, primitives);
                     for (index, paragraph) in outline.paragraphs.iter().enumerate() {
-                        let origin = [
-                            object_origin[0] + paragraph.origin[0],
-                            object_origin[1] + paragraph.origin[1],
-                        ];
-                        let clip = outline.paragraph_cell(index).map(|cell| {
-                            let [left, top, right, bottom] = cell.text_bounds();
-                            [
-                                left + object_origin[0],
-                                top + object_origin[1],
-                                right + object_origin[0],
-                                bottom + object_origin[1],
-                            ]
-                        });
-                        primitives.push(Primitive::Text {
-                            clip,
-                            layout: &paragraph.text,
-                            origin,
-                        });
-                        for (layout, origin) in &paragraph.markers {
-                            primitives.push(Primitive::Text {
-                                clip,
-                                layout,
-                                origin: [
-                                    object_origin[0] + origin[0],
-                                    object_origin[1] + (origin[1] + paragraph.origin[1]),
-                                ],
-                            });
-                        }
-                        for tag in &paragraph.tags {
-                            primitives.push(Primitive::Tag {
-                                tag,
-                                origin: [
-                                    object_origin[0] + outline.tag_column_offset(),
-                                    object_origin[1] + paragraph.origin[1],
-                                ],
-                            });
-                        }
+                        outline.append_paragraph_primitives(
+                            index,
+                            paragraph,
+                            object_origin,
+                            primitives,
+                        );
                     }
                 }
                 Content::Editable(_) | Content::ReadOnly(_) | Content::Ink(_) => unreachable!(),
@@ -620,6 +589,86 @@ impl crate::outline::OutlineLayout {
                     color: colorref(color),
                 });
             }
+        }
+    }
+
+    /// One paragraph of this outline, whose origin is `origin`: its text or equation, list
+    /// markers and tags.
+    pub fn append_paragraph_primitives<'a>(
+        &'a self,
+        index: usize,
+        paragraph: &'a crate::outline::ParagraphLayout,
+        origin: [f32; 2],
+        primitives: &mut Vec<Primitive<'a>>,
+    ) {
+        let [x, y] = [
+            origin[0] + paragraph.origin[0],
+            origin[1] + paragraph.origin[1],
+        ];
+        let clip = self.paragraph_cell(index).map(|cell| {
+            let [left, top, right, bottom] = cell.text_bounds();
+            [
+                left + origin[0],
+                top + origin[1],
+                right + origin[0],
+                bottom + origin[1],
+            ]
+        });
+        match &paragraph.math {
+            Some(math) => {
+                for item in &math.items {
+                    primitives.push(match item {
+                        crate::math::MathItem::Text { layout, origin } => Primitive::Text {
+                            clip,
+                            layout,
+                            origin: [x + origin[0], y + origin[1]],
+                        },
+                        // As pen strokes, so hairline rules keep a device pixel.
+                        crate::math::MathItem::Rule([x0, y0, x1, y1]) => {
+                            let width = (x1 - x0).min(y1 - y0);
+                            let [from, to] = if x1 - x0 >= y1 - y0 {
+                                let middle = (y0 + y1) / 2.0;
+                                [[x0 + width / 2.0, middle], [x1 - width / 2.0, middle]]
+                            } else {
+                                let middle = (x0 + x1) / 2.0;
+                                [[middle, y0 + width / 2.0], [middle, y1 - width / 2.0]]
+                            };
+                            Primitive::Segment {
+                                from: [x + from[0], y + from[1]],
+                                to: [x + to[0], y + to[1]],
+                                width,
+                                round: false,
+                                color: colorref(math.color),
+                            }
+                        }
+                        crate::math::MathItem::Stroke { from, to, width } => Primitive::Segment {
+                            from: [x + from[0], y + from[1]],
+                            to: [x + to[0], y + to[1]],
+                            width: *width,
+                            round: true,
+                            color: colorref(math.color),
+                        },
+                    });
+                }
+            }
+            None => primitives.push(Primitive::Text {
+                clip,
+                layout: &paragraph.text,
+                origin: [x, y],
+            }),
+        }
+        for (layout, marker) in &paragraph.markers {
+            primitives.push(Primitive::Text {
+                clip,
+                layout,
+                origin: [origin[0] + marker[0], y + marker[1]],
+            });
+        }
+        for tag in &paragraph.tags {
+            primitives.push(Primitive::Tag {
+                tag,
+                origin: [origin[0] + self.tag_column_offset(), y],
+            });
         }
     }
 

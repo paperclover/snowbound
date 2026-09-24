@@ -49,6 +49,10 @@ Paragraph layout retains checkbox (shape 3), question mark (15), exclamation (17
 
 Checkboxes display completion; noncheckable tags ignore the completion bit required by the file format. Disabled tags dim. Accessibility descriptions expose source labels and checkbox/disabled state without changing selectable text. Tag state is read-only; text edits and undo retain it. Clicking a tag gutter focuses its outline. Unsupported icon shapes and task tags return `UnsupportedContent` during layout.
 
+## Equations
+
+A paragraph stored as an equation draws in two dimensions from the tree `onestore::page::Math` parses: sub- and superscripts at 70%, fractions over a rule on the math axis, radicals drawn with the pen, n-ary operators at display size with limits above and below (integrals take them as scripts), stretched fences, accents and bars above, boxes, matrices and equation arrays. Latin letters draw in mathematical italic. Cambria Math falls back to STIX Two Math on macOS, and atoms are placed by their glyph ink rather than the math font's tall line box; an equation line is at least as tall as a line of text. The linear text stays the editable source, laid out in the body font so the caret keeps a text height; editing equations in two dimensions is a follow-up.
+
 ## Optional font substitution
 
 The host and `layout-probe` accept repeated `--substitute-font FONT_FILE` options. Supply Arimo regular/italic variable fonts or Carlito regular/bold/italic/bold-italic files. Each file is registered only in this process, as Arial or Calibri respectively; this explicitly replaces that family even when a system copy exists. Stored `Format.font` values remain unchanged. No font files are installed or bundled by this option.
