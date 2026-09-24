@@ -154,12 +154,23 @@ pub(crate) fn validate_nodes(
                         return Err(EditError::InvalidStructure);
                     }
                 }
-                ParagraphContent::Image(_)
-                | ParagraphContent::Attachment(_)
-                | ParagraphContent::Ink(_)
-                | ParagraphContent::Unsupported(_) => {
-                    return Err(EditError::UnsupportedContent);
+                ParagraphContent::Image(image) => {
+                    if !ids.insert(image.id) {
+                        return Err(EditError::InvalidStructure);
+                    }
+                    crate::outline::image_size(image).ok_or(EditError::UnsupportedContent)?;
                 }
+                ParagraphContent::Attachment(file) => {
+                    if !ids.insert(file.id) {
+                        return Err(EditError::InvalidStructure);
+                    }
+                }
+                ParagraphContent::Ink(ink) => {
+                    if !ids.insert(ink.id) {
+                        return Err(EditError::InvalidStructure);
+                    }
+                }
+                ParagraphContent::Unsupported(_) => return Err(EditError::UnsupportedContent),
                 ParagraphContent::Table(table) => {
                     if !ids.insert(table.id)
                         || table.rows.is_empty()

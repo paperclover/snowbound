@@ -126,7 +126,7 @@ impl PageScene {
         let objects = crate::editor::page::build(&mut page, engine, false)
             .map_err(SceneError::from)?
             .objects;
-        let images = Self::decode_images(&objects)?;
+        let images = Self::decode_images(&objects, None)?;
         Ok(Self {
             reference: Some(objects),
             images,
@@ -138,7 +138,7 @@ impl PageScene {
         engine: &mut TextEngine,
     ) -> Result<(Self, CanvasEditor), SceneError> {
         let editor = CanvasEditor::from_page(page, engine).map_err(SceneError::from)?;
-        let images = Self::decode_images(&editor.objects)?;
+        let images = Self::decode_images(&editor.objects, Some(&editor))?;
         Ok((
             Self {
                 reference: None,
@@ -148,26 +148,105 @@ impl PageScene {
         ))
     }
 
+    /// Decodes every picture the page draws: page-level ones and those inside outlines.
     fn decode_images(
         objects: &[Content],
+        editor: Option<&CanvasEditor>,
     ) -> Result<std::collections::BTreeMap<onestore::ExGuid, RasterImage>, SceneError> {
-        let mut images = std::collections::BTreeMap::new();
-        let mut bytes = 0_u64;
-        for object in objects {
-            if let Content::Image(source) = object {
-                let image =
-                    RasterImage::decode(source.bytes.as_deref().ok_or(SceneError::MissingImage)?)
-                        .map_err(SceneError::Image)?;
-                bytes += image.pixels.as_ref().len() as u64;
-                if bytes > super::MAX_IMAGE_BYTES {
-                    return Err(SceneError::Image(RenderError::ImageBudget));
-                }
-                if images.insert(source.id, image).is_some() {
-                    return Err(SceneError::InvalidGeometry);
+        fn nested<'a>(
+            nodes: &'a [onestore::page::PageParagraph],
+            payloads: &mut Vec<(onestore::ExGuid, Option<&'a [u8]>)>,
+        ) {
+            for node in nodes {
+                match &node.content {
+                    onestore::page::ParagraphContent::Image(image) => {
+                        payloads.push((image.id, image.bytes.as_deref()))
+                    }
+                    // A file without the icon OneNote rendered for it keeps an empty slot.
+                    onestore::page::ParagraphContent::Attachment(file) => {
+                        if let Some(icon) = file.preview.as_deref() {
+                            payloads.push((file.id, Some(icon)))
+                        }
+                    }
+                    onestore::page::ParagraphContent::Table(table) => {
+                        for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                            nested(&cell.paragraphs, payloads);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
+        let mut payloads = Vec::new();
+        for object in objects {
+            match object {
+                Content::Image(source) => payloads.push((source.id, source.bytes.as_deref())),
+                Content::Outline { source, .. } => nested(&source.paragraphs, &mut payloads),
+                Content::Editable(id) => {
+                    if let Some(outline) =
+                        editor.and_then(|editor| editor.outlines().iter().find(|o| o.id == *id))
+                    {
+                        nested(outline.document().nodes(), &mut payloads);
+                    }
+                }
+                Content::Date { .. } | Content::Ink(_) | Content::ReadOnly(_) => {}
+            }
+        }
+        let mut images = std::collections::BTreeMap::new();
+        let mut bytes = 0_u64;
+        for (id, encoded) in payloads {
+            let image = RasterImage::decode(encoded.ok_or(SceneError::MissingImage)?)
+                .map_err(SceneError::Image)?;
+            bytes += image.pixels.as_ref().len() as u64;
+            if bytes > super::MAX_IMAGE_BYTES {
+                return Err(SceneError::Image(RenderError::ImageBudget));
+            }
+            if images.insert(id, image).is_some() {
+                return Err(SceneError::InvalidGeometry);
+            }
+        }
         Ok(images)
+    }
+
+    pub fn image(&self, id: onestore::ExGuid) -> Option<&RasterImage> {
+        self.images.get(&id)
+    }
+
+    /// Pictures, files and handwriting inside an outline whose origin is `origin`.
+    pub fn append_outline_objects<'a>(
+        &'a self,
+        outline: &'a crate::outline::OutlineLayout,
+        origin: [f32; 2],
+        primitives: &mut Vec<Primitive<'a>>,
+    ) {
+        for object in &outline.objects {
+            if let Some(image) = self.images.get(&object.id) {
+                let [x0, y0, x1, y1] = object.rect;
+                primitives.push(Primitive::Image {
+                    image,
+                    rect: [
+                        x0 + origin[0],
+                        y0 + origin[1],
+                        x1 + origin[0],
+                        y1 + origin[1],
+                    ],
+                });
+            }
+            if let Some(ink) = &object.ink {
+                append_ink(
+                    ink,
+                    [origin[0] + object.rect[0], origin[1] + object.rect[1]],
+                    primitives,
+                );
+            }
+            if let Some(label) = &object.label {
+                primitives.push(Primitive::Text {
+                    layout: &label.text,
+                    origin: [origin[0] + label.origin[0], origin[1] + label.origin[1]],
+                    clip: None,
+                });
+            }
+        }
     }
 
     fn objects<'a>(
@@ -465,6 +544,7 @@ impl PageScene {
                     };
                     outline.append_table_primitives(primitives, object_origin);
                     outline.append_background_primitives(primitives, object_origin);
+                    self.append_outline_objects(outline, object_origin, primitives);
                     for (index, paragraph) in outline.paragraphs.iter().enumerate() {
                         let origin = [
                             object_origin[0] + paragraph.origin[0],

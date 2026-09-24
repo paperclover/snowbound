@@ -1874,7 +1874,15 @@ fn page_primitives<'a>(
             scale,
             display_scale / scale,
             primitives,
-        )
+        )?;
+        if let Some((scene, _)) = scene {
+            scene.append_outline_objects(
+                outline.shaped(),
+                [origin[0] + offset[0], origin[1] + offset[1]],
+                primitives,
+            );
+        }
+        Ok::<_, Box<dyn Error>>(())
     };
     if let Some((scene, origin)) = scene {
         let moving = match preview {

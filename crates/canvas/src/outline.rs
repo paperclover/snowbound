@@ -16,8 +16,27 @@ pub(crate) const TITLE_WIDTH: f32 = 468.0;
 pub struct OutlineLayout {
     pub paragraphs: Vec<ParagraphLayout>,
     pub tables: Vec<TableLayout>,
+    /// Pictures, files and handwriting that occupy a paragraph of their own.
+    pub objects: Vec<ObjectLayout>,
     pub size: [f32; 2],
 }
+
+#[derive(Clone)]
+pub struct ObjectLayout {
+    /// The picture's, file's or drawing's identity, which keys a decoded image.
+    pub id: ExGuid,
+    /// Where the picture or file icon draws, outline-local.
+    pub rect: [f32; 4],
+    /// A file's name, centered under its icon.
+    pub label: Option<ParagraphLayout>,
+    /// Handwriting, whose strokes are relative to the rect's top-left.
+    pub ink: Option<onestore::page::Ink>,
+    /// Outline-local bottom of the whole object, label included.
+    pub bottom: f32,
+}
+
+/// OneNote centers a file's icon and name in a column this wide.
+const ATTACHMENT_WIDTH: f32 = 54.0;
 
 #[derive(Clone)]
 pub struct TableLayout {
@@ -93,6 +112,48 @@ impl ParagraphTag {
     pub const SIZE: f32 = 12.0;
 }
 
+/// The centered caption OneNote draws under a file's icon: its name without the extension.
+fn attachment_label(node: &PageParagraph, file: &onestore::page::Attachment) -> PageParagraph {
+    let name = std::path::Path::new(&file.filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(&file.filename);
+    PageParagraph {
+        id: node.id,
+        parent: None,
+        level: 1,
+        style: None,
+        format: Format::default(),
+        content: ParagraphContent::Text(onestore::page::TextObject {
+            id: file.id,
+            date_field: None,
+            text: Paragraph::new(
+                name.into(),
+                Format {
+                    alignment: Some(1),
+                    ..node.format.clone()
+                },
+            ),
+            tags: Vec::new(),
+        }),
+        lists: Vec::new(),
+        tags: Vec::new(),
+        media: Default::default(),
+        collapsed: false,
+    }
+}
+
+/// A picture's displayed size: the user-set layout size, else its intrinsic size.
+pub(crate) fn image_size(image: &onestore::page::Image) -> Option<[f32; 2]> {
+    let size = [
+        image.layout.max_width.or(image.size.map(|s| s[0]))?,
+        image.layout.max_height.or(image.size.map(|s| s[1]))?,
+    ];
+    size.iter()
+        .all(|v| v.is_finite() && *v > 0.0)
+        .then_some(size)
+}
+
 pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32, LayoutError> {
     if indents.is_empty() || indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
         return Err(LayoutError::InvalidIndentation);
@@ -128,6 +189,17 @@ fn spacing(
 }
 
 impl ParagraphLayout {
+    pub(crate) fn reset_origin(&mut self, x: f32) {
+        let offset = x - self.origin[0];
+        self.origin = [x, 0.0];
+        for (_, origin) in &mut self.markers {
+            origin[0] += offset;
+        }
+        for tag in &mut self.tags {
+            tag.origin[0] += offset;
+        }
+    }
+
     fn size(&self) -> [f32; 2] {
         [
             self.origin[0] + self.text.shaped.width(),
@@ -373,8 +445,19 @@ impl OutlineLayout {
                 }
             }
         }
+        for object in &mut child.objects {
+            for (value, offset) in object.rect.iter_mut().zip(origin.into_iter().cycle()) {
+                *value += offset;
+            }
+            object.bottom += origin[1];
+            if let Some(label) = &mut object.label {
+                label.reset_origin(label.origin[0] + origin[0]);
+                label.origin[1] += origin[1];
+            }
+        }
         self.paragraphs.extend(child.paragraphs);
         self.tables.extend(child.tables);
+        self.objects.extend(child.objects);
     }
 
     pub(crate) fn flow<'a>(
@@ -395,6 +478,7 @@ impl OutlineLayout {
         let mut result = Self {
             paragraphs: Vec::new(),
             tables: Vec::new(),
+            objects: Vec::new(),
             size: [36.0, 0.0],
         };
         let mut bottom = 0.0;
@@ -422,10 +506,59 @@ impl OutlineLayout {
                     bottom += f64::from(child.size[1]);
                     result.append(child, [x, y]);
                 }
-                ParagraphContent::Image(_)
-                | ParagraphContent::Attachment(_)
-                | ParagraphContent::Ink(_)
-                | ParagraphContent::Unsupported(_) => {
+                ParagraphContent::Image(image) => {
+                    let x = indentation(node.level, indents, width)?;
+                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
+                    let [w, h] = image_size(image).ok_or(LayoutError::UnsupportedContent)?;
+                    result.objects.push(ObjectLayout {
+                        id: image.id,
+                        rect: [x, y, x + w, y + h],
+                        label: None,
+                        ink: None,
+                        bottom: y + h,
+                    });
+                    result.size[0] = result.size[0].max(x + w);
+                    bottom += f64::from(h);
+                }
+                ParagraphContent::Attachment(file) => {
+                    let x = indentation(node.level, indents, width)?;
+                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
+                    let [w, h] = file.size.unwrap_or([24.0, 24.0]);
+                    let icon = [x + (ATTACHMENT_WIDTH - w) / 2.0, y + 6.0];
+                    let mut label = shape(&attachment_label(node, file), ATTACHMENT_WIDTH, &[0.0])?;
+                    label.reset_origin(x);
+                    label.origin[1] = icon[1] + h + 10.5;
+                    let end = label.origin[1] + label.text.height() + 9.0;
+                    result.objects.push(ObjectLayout {
+                        id: file.id,
+                        rect: [icon[0], icon[1], icon[0] + w, icon[1] + h],
+                        label: Some(label),
+                        ink: None,
+                        bottom: end,
+                    });
+                    result.size[0] = result.size[0].max(x + ATTACHMENT_WIDTH);
+                    bottom += f64::from(end - y);
+                }
+                ParagraphContent::Ink(ink) => {
+                    let x = indentation(node.level, indents, width)?;
+                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
+                    // The paragraph reaches from its origin to the farthest stroke point.
+                    let [w, h] = ink
+                        .bounds()
+                        .map(|[x, y, w, h]| [x + w, y + h])
+                        .filter(|size| size.iter().all(|v| v.is_finite() && *v >= 0.0))
+                        .ok_or(LayoutError::UnsupportedContent)?;
+                    result.objects.push(ObjectLayout {
+                        id: ink.id,
+                        rect: [x, y, x + w, y + h],
+                        label: None,
+                        ink: Some(ink.clone()),
+                        bottom: y + h,
+                    });
+                    result.size[0] = result.size[0].max(x + w);
+                    bottom += f64::from(h);
+                }
+                ParagraphContent::Unsupported(_) => {
                     return Err(LayoutError::UnsupportedContent);
                 }
             }
@@ -479,6 +612,7 @@ impl OutlineLayout {
                 cells: Vec::new(),
                 borders: table.borders.unwrap_or(true),
             }],
+            objects: Vec::new(),
             size: [
                 (0..table.columns.len())
                     .map(|index| width(index) + 4.98)
@@ -546,6 +680,7 @@ impl OutlineLayout {
         Ok(Self {
             paragraphs,
             tables: Vec::new(),
+            objects: Vec::new(),
             size,
         })
     }
@@ -578,6 +713,13 @@ impl Arrange for Outline {
     }
 }
 
+/// Outlines of plain paragraphs stack them; tables and pictures, files or ink need the full flow.
+pub(crate) fn all_text<'a>(nodes: impl IntoIterator<Item = &'a PageParagraph>) -> bool {
+    nodes
+        .into_iter()
+        .all(|node| matches!(node.content, ParagraphContent::Text(_)))
+}
+
 pub(crate) fn outline_layout(
     outline: &Outline,
     engine: &mut TextEngine,
@@ -587,11 +729,7 @@ pub(crate) fn outline_layout(
     if !outline.unsupported.is_empty() {
         return Err(LayoutError::UnsupportedContent);
     }
-    if outline
-        .paragraphs
-        .iter()
-        .any(|node| matches!(node.content, ParagraphContent::Table(_)))
-    {
+    if !all_text(&outline.paragraphs) {
         return OutlineLayout::flow(
             outline.paragraphs.iter(),
             &outline.indents,
@@ -1050,6 +1188,70 @@ mod tests {
             ParagraphLayout::shape(&mut engine, &node, 120.0, &[18.0, 0.0, 27.0], &definitions),
             Err(LayoutError::UnsupportedContent)
         ));
+    }
+
+    #[test]
+    fn files_and_ink_take_their_own_paragraph_in_the_flow() {
+        use onestore::page::{Attachment, Ink, InkStroke};
+        let before = paragraph(1, "Before", 1, None);
+        let mut file = paragraph(2, "", 1, None);
+        file.content = ParagraphContent::Attachment(Attachment {
+            id: ExGuid {
+                n: 20,
+                ..ExGuid::default()
+            },
+            filename: "notes 🦀.txt".into(),
+            source_path: None,
+            size: Some([24.0, 24.0]),
+            bytes: None,
+            preview: None,
+            recording: None,
+        });
+        let mut ink = paragraph(3, "", 1, None);
+        ink.content = ParagraphContent::Ink(Ink {
+            id: ExGuid {
+                n: 30,
+                ..ExGuid::default()
+            },
+            layout: Default::default(),
+            strokes: vec![InkStroke {
+                id: ExGuid::default(),
+                points: vec![[300.0, 120.0], [360.0, 180.0]],
+                width: 1.0,
+                height: 1.0,
+                color: None,
+                transparency: None,
+                pen_tip: None,
+            }],
+            groups: Vec::new(),
+        });
+        let after = paragraph(4, "After", 1, None);
+        let mut engine = TextEngine::default();
+        let layout = OutlineLayout::flow(
+            [&before, &file, &ink, &after].into_iter(),
+            &[0.0],
+            468.0,
+            false,
+            0,
+            None,
+            &mut |node, width, indents| {
+                ParagraphLayout::shape(&mut engine, node, width, indents, &BTreeMap::new())
+            },
+        )
+        .unwrap();
+        let top = layout.paragraphs[0].text.height();
+        let [icon, handwriting] = [&layout.objects[0], &layout.objects[1]];
+        assert_eq!(icon.rect, [15.0, top + 6.0, 39.0, top + 30.0]);
+        let label = icon.label.as_ref().unwrap();
+        assert_eq!(label.projection.text().text(), "notes 🦀");
+        assert_eq!(label.origin, [0.0, top + 40.5]);
+        assert_eq!(icon.bottom, label.origin[1] + label.text.height() + 9.0);
+        assert_eq!(
+            handwriting.rect,
+            [0.0, icon.bottom, 360.0, icon.bottom + 180.0]
+        );
+        assert_eq!(layout.paragraphs[1].origin[1], handwriting.bottom);
+        assert_eq!(layout.size[0], 360.0);
     }
 
     #[test]
