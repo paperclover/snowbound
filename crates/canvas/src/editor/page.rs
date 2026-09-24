@@ -1,4 +1,4 @@
-use super::{EditorError, TextOutline};
+use super::{EditError, EditorError, TextOutline};
 use crate::{
     date::PageDate,
     layout::{LayoutError, TextEngine, TextLayout},
@@ -153,39 +153,40 @@ pub(crate) fn build(
                 if origin.iter().any(|v| !v.is_finite()) {
                     return Err(EditorError::InvalidGeometry);
                 }
+                let unsupported = |error: &EditorError| {
+                    matches!(
+                        error,
+                        EditorError::Layout(LayoutError::UnsupportedContent)
+                            | EditorError::Edit(EditError::UnsupportedContent)
+                    )
+                };
                 if editable {
                     match TextOutline::from_outline(engine, outline, &page.definitions) {
                         Ok(outline) => {
                             objects.push(Content::Editable(outline.id));
                             outlines.push(outline);
+                            continue;
                         }
-                        Err(EditorError::Layout(LayoutError::UnsupportedContent)) => {
-                            objects.push(Content::ReadOnly(ReadOnlyObject::new(
-                                object,
-                                page.margin_origin,
-                                "Unsupported content\nRead-only",
-                                engine,
-                            )?))
-                        }
-                        Err(error) => return Err(error),
+                        Err(error) if !unsupported(&error) => return Err(error),
+                        // Drawn as stored when the editor cannot hold it.
+                        Err(_) => {}
                     }
-                } else {
-                    match outline.layout(engine, &page.definitions) {
-                        Ok(layout) => objects.push(Content::Outline {
-                            source: outline.clone(),
-                            layout,
-                            below_title: None,
-                        }),
-                        Err(LayoutError::UnsupportedContent) => {
-                            objects.push(Content::ReadOnly(ReadOnlyObject::new(
-                                object,
-                                page.margin_origin,
-                                "Unsupported content\nRead-only",
-                                engine,
-                            )?))
-                        }
-                        Err(error) => return Err(error.into()),
+                }
+                match outline.layout(engine, &page.definitions) {
+                    Ok(layout) => objects.push(Content::Outline {
+                        source: outline.clone(),
+                        layout,
+                        below_title: None,
+                    }),
+                    Err(LayoutError::UnsupportedContent) => {
+                        objects.push(Content::ReadOnly(ReadOnlyObject::new(
+                            object,
+                            page.margin_origin,
+                            "Unsupported content\nRead-only",
+                            engine,
+                        )?))
                     }
+                    Err(error) => return Err(error.into()),
                 }
             }
             PageObject::Title(title) => {

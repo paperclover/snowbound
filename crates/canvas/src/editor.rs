@@ -255,6 +255,10 @@ impl TextOutline {
             outline.layout(engine, definitions)?
         };
         let document = TextDocument::from_nodes(outline.paragraphs.clone())?;
+        // The caret needs a paragraph of text to stand in.
+        if document.text_nodes().next().is_none() {
+            return Err(EditError::UnsupportedContent.into());
+        }
         Ok(Self {
             id: outline.id,
             title: outline.title,
@@ -458,10 +462,8 @@ impl TextOutline {
                 }
                 onestore::page::ParagraphContent::Image(_)
                 | onestore::page::ParagraphContent::Attachment(_)
-                | onestore::page::ParagraphContent::Ink(_) => {}
-                onestore::page::ParagraphContent::Unsupported(_) => {
-                    return Err(EditError::UnsupportedContent);
-                }
+                | onestore::page::ParagraphContent::Ink(_)
+                | onestore::page::ParagraphContent::Unsupported(_) => {}
             }
         }
         Ok(result)
@@ -508,13 +510,11 @@ impl TextOutline {
                             .rect[1]
                             - 1.86
                     }
-                    // Pictures, files and ink hold no caret; text around them takes the hit.
+                    // Objects hold no caret; text around them takes the hit.
                     onestore::page::ParagraphContent::Image(_)
                     | onestore::page::ParagraphContent::Attachment(_)
-                    | onestore::page::ParagraphContent::Ink(_) => continue,
-                    onestore::page::ParagraphContent::Unsupported(_) => {
-                        return Err(EditError::UnsupportedContent);
-                    }
+                    | onestore::page::ParagraphContent::Ink(_)
+                    | onestore::page::ParagraphContent::Unsupported(_) => continue,
                 };
                 if target.is_none() || top <= y {
                     target = Some(node);
@@ -1829,16 +1829,16 @@ impl CanvasEditor {
                         )
                         | onestore::page::ParagraphContent::Ink(onestore::page::Ink {
                             id, ..
-                        }) => outline
+                        })
+                        | onestore::page::ParagraphContent::Unsupported(
+                            onestore::page::Unsupported { id, .. },
+                        ) => outline
                             .shaped
                             .objects
                             .iter()
                             .find(|object| object.id == *id)
                             .map(|object| f64::from(object.bottom))
                             .ok_or(EditError::InvalidStructure)?,
-                        onestore::page::ParagraphContent::Unsupported(_) => {
-                            return Err(EditError::UnsupportedContent.into());
-                        }
                     } + f64::from(outline.origin()[1]);
                     let cell = (bottom - 14.4) / 18.0;
                     // Stored coordinates can straddle a grid boundary by one f32 ULP.
@@ -2848,13 +2848,7 @@ impl CanvasEditor {
                         .shaped
                         .paragraphs
                         .iter()
-                        .chain(
-                            outline
-                                .shaped
-                                .objects
-                                .iter()
-                                .filter_map(|o| o.label.as_ref()),
-                        )
+                        .chain(outline.shaped.objects.iter().filter_map(|o| o.label()))
                         .map(|paragraph| (paragraph.id, paragraph))
                         .collect::<BTreeMap<_, _>>();
                     let shaped = OutlineLayout::flow(
@@ -4738,6 +4732,77 @@ mod tests {
         assert!(editor.undo(&mut engine).unwrap());
         assert_eq!(editor.active_outline().shaped().paragraphs.len(), 2);
         assert_eq!(editor.active_outline().shaped().objects.len(), 1);
+    }
+
+    #[test]
+    fn unknown_paragraphs_and_text_free_outlines_stay_on_the_page() {
+        use onestore::page::{Image, Page, PageObject, ParagraphContent, Unsupported};
+        let mut engine = TextEngine::default();
+        let outline = |engine: &mut TextEngine| {
+            TextOutline::new(
+                engine,
+                TextDocument::new(vec![
+                    Paragraph::new("Before".into(), Default::default()),
+                    Paragraph::new("After".into(), Default::default()),
+                ])
+                .unwrap(),
+                240.0,
+                [36.0, 36.0],
+            )
+            .unwrap()
+            .snapshot()
+        };
+        let mut mixed = outline(&mut engine);
+        let mut unknown = mixed.paragraphs[0].clone();
+        unknown.id = onestore::page::text::new_id().unwrap();
+        unknown.content = ParagraphContent::Unsupported(Unsupported {
+            id: onestore::page::text::new_id().unwrap(),
+            jcid: 0x60012,
+            layout: Default::default(),
+        });
+        mixed.paragraphs.insert(1, unknown);
+        let mut picture_only = outline(&mut engine);
+        picture_only.id = onestore::page::text::new_id().unwrap();
+        picture_only.paragraphs.truncate(1);
+        picture_only.paragraphs[0].content = ParagraphContent::Image(Image {
+            size: Some([40.0, 30.0]),
+            id: onestore::page::text::new_id().unwrap(),
+            layout: Default::default(),
+            bytes: Some(std::sync::Arc::from(b"deferred image payload".as_slice())),
+            alt: None,
+            background: false,
+        });
+        let (mixed_id, picture_id) = (mixed.id, picture_only.id);
+        let editor = CanvasEditor::from_page(
+            Page {
+                title: String::new(),
+                identity: None,
+                created: None,
+                margin_origin: [36.0, 14.4],
+                definitions: BTreeMap::new(),
+                objects: vec![
+                    PageObject::Outline(mixed),
+                    PageObject::Outline(picture_only),
+                ],
+            },
+            &mut engine,
+        )
+        .unwrap();
+        let mixed = editor.outlines().iter().find(|o| o.id == mixed_id).unwrap();
+        let [placeholder] = &mixed.shaped().objects[..] else {
+            panic!()
+        };
+        assert!(matches!(
+            placeholder.kind,
+            crate::outline::ObjectKind::Unsupported(_)
+        ));
+        assert_eq!(placeholder.rect[2] - placeholder.rect[0], 160.0);
+        assert!(mixed.shaped().paragraphs[1].origin[1] >= placeholder.bottom);
+        assert!(editor.objects.iter().any(|object| matches!(
+            object,
+            page::Content::Outline { source, .. } if source.id == picture_id
+        )));
+        assert_eq!(editor.page().unwrap().objects.len(), 2);
     }
 
     #[test]

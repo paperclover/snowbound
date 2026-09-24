@@ -220,26 +220,33 @@ impl PageScene {
         primitives: &mut Vec<Primitive<'a>>,
     ) {
         for object in &outline.objects {
+            let [x0, y0, x1, y1] = object.rect;
+            let rect = [
+                x0 + origin[0],
+                y0 + origin[1],
+                x1 + origin[0],
+                y1 + origin[1],
+            ];
             if let Some(image) = self.images.get(&object.id) {
-                let [x0, y0, x1, y1] = object.rect;
-                primitives.push(Primitive::Image {
-                    image,
-                    rect: [
-                        x0 + origin[0],
-                        y0 + origin[1],
-                        x1 + origin[0],
-                        y1 + origin[1],
-                    ],
-                });
+                primitives.push(Primitive::Image { image, rect });
             }
-            if let Some(ink) = &object.ink {
-                append_ink(
-                    ink,
-                    [origin[0] + object.rect[0], origin[1] + object.rect[1]],
-                    primitives,
-                );
+            match &object.kind {
+                crate::outline::ObjectKind::Ink(ink) => {
+                    append_ink(ink, [rect[0], rect[1]], primitives)
+                }
+                crate::outline::ObjectKind::Unsupported(_) => {
+                    primitives.push(Primitive::Rect {
+                        rect,
+                        color: colorref(0x00e4ddd6),
+                    });
+                    primitives.push(Primitive::Rect {
+                        rect: [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 1.0, rect[3] - 1.0],
+                        color: colorref(0x00faf7f3),
+                    });
+                }
+                crate::outline::ObjectKind::Picture | crate::outline::ObjectKind::File(_) => {}
             }
-            if let Some(label) = &object.label {
+            if let Some(label) = object.label() {
                 primitives.push(Primitive::Text {
                     layout: &label.text,
                     origin: [origin[0] + label.origin[0], origin[1] + label.origin[1]],

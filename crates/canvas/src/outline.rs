@@ -23,16 +23,33 @@ pub struct OutlineLayout {
 
 #[derive(Clone)]
 pub struct ObjectLayout {
-    /// The picture's, file's or drawing's identity, which keys a decoded image.
+    /// The object's identity, which keys a picture's or file icon's decoded image.
     pub id: ExGuid,
-    /// Where the picture or file icon draws, outline-local.
+    /// Where the picture, file icon, drawing or placeholder draws, outline-local.
     pub rect: [f32; 4],
-    /// A file's name, centered under its icon.
-    pub label: Option<ParagraphLayout>,
-    /// Handwriting, whose strokes are relative to the rect's top-left.
-    pub ink: Option<onestore::page::Ink>,
+    pub kind: ObjectKind,
     /// Outline-local bottom of the whole object, label included.
     pub bottom: f32,
+}
+
+#[derive(Clone)]
+pub enum ObjectKind {
+    Picture,
+    /// A file's icon with its name centered below.
+    File(ParagraphLayout),
+    /// Handwriting, whose strokes are relative to the rect's top-left.
+    Ink(onestore::page::Ink),
+    /// Content the canvas cannot draw, marked by a labelled box.
+    Unsupported(ParagraphLayout),
+}
+
+impl ObjectLayout {
+    pub fn label(&self) -> Option<&ParagraphLayout> {
+        match &self.kind {
+            ObjectKind::File(label) | ObjectKind::Unsupported(label) => Some(label),
+            ObjectKind::Picture | ObjectKind::Ink(_) => None,
+        }
+    }
 }
 
 /// OneNote centers a file's icon and name in a column this wide.
@@ -114,28 +131,19 @@ impl ParagraphTag {
     pub const SIZE: f32 = 12.0;
 }
 
-/// The centered caption OneNote draws under a file's icon: its name without the extension.
-fn attachment_label(node: &PageParagraph, file: &onestore::page::Attachment) -> PageParagraph {
-    let name = std::path::Path::new(&file.filename)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or(&file.filename);
+/// A one-run paragraph standing in for an object's caption, so it lays out through the same
+/// shaping (and caching) as the outline's text.
+fn caption(id: ExGuid, text_id: ExGuid, text: &str, format: Format) -> PageParagraph {
     PageParagraph {
-        id: node.id,
+        id,
         parent: None,
         level: 1,
         style: None,
         format: Format::default(),
         content: ParagraphContent::Text(onestore::page::TextObject {
-            id: file.id,
+            id: text_id,
             date_field: None,
-            text: Paragraph::new(
-                name.into(),
-                Format {
-                    alignment: Some(1),
-                    ..node.format.clone()
-                },
-            ),
+            text: Paragraph::new(text.into(), format),
             tags: Vec::new(),
         }),
         lists: Vec::new(),
@@ -465,7 +473,7 @@ impl OutlineLayout {
                 *value += offset;
             }
             object.bottom += origin[1];
-            if let Some(label) = &mut object.label {
+            if let ObjectKind::File(label) | ObjectKind::Unsupported(label) = &mut object.kind {
                 label.reset_origin(label.origin[0] + origin[0]);
                 label.origin[1] += origin[1];
             }
@@ -528,8 +536,7 @@ impl OutlineLayout {
                     result.objects.push(ObjectLayout {
                         id: image.id,
                         rect: [x, y, x + w, y + h],
-                        label: None,
-                        ink: None,
+                        kind: ObjectKind::Picture,
                         bottom: y + h,
                     });
                     result.size[0] = result.size[0].max(x + w);
@@ -540,15 +547,27 @@ impl OutlineLayout {
                     let y = spacing(&mut bottom, &mut previous, &node.format)?;
                     let [w, h] = file.size.unwrap_or([24.0, 24.0]);
                     let icon = [x + (ATTACHMENT_WIDTH - w) / 2.0, y + 6.0];
-                    let mut label = shape(&attachment_label(node, file), ATTACHMENT_WIDTH, &[0.0])?;
+                    // OneNote shows the name without its extension.
+                    let name = std::path::Path::new(&file.filename)
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .unwrap_or(&file.filename);
+                    let format = Format {
+                        alignment: Some(1),
+                        ..node.format.clone()
+                    };
+                    let mut label = shape(
+                        &caption(node.id, file.id, name, format),
+                        ATTACHMENT_WIDTH,
+                        &[0.0],
+                    )?;
                     label.reset_origin(x);
                     label.origin[1] = icon[1] + h + 10.5;
                     let end = label.origin[1] + label.text.height() + 9.0;
                     result.objects.push(ObjectLayout {
                         id: file.id,
                         rect: [icon[0], icon[1], icon[0] + w, icon[1] + h],
-                        label: Some(label),
-                        ink: None,
+                        kind: ObjectKind::File(label),
                         bottom: end,
                     });
                     result.size[0] = result.size[0].max(x + ATTACHMENT_WIDTH);
@@ -566,15 +585,41 @@ impl OutlineLayout {
                     result.objects.push(ObjectLayout {
                         id: ink.id,
                         rect: [x, y, x + w, y + h],
-                        label: None,
-                        ink: Some(ink.clone()),
+                        kind: ObjectKind::Ink(ink.clone()),
                         bottom: y + h,
                     });
                     result.size[0] = result.size[0].max(x + w);
                     bottom += f64::from(h);
                 }
-                ParagraphContent::Unsupported(_) => {
-                    return Err(LayoutError::UnsupportedContent);
+                ParagraphContent::Unsupported(unsupported) => {
+                    let x = indentation(node.level, indents, width)?;
+                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
+                    let w = unsupported.layout.max_width.unwrap_or(160.0).max(160.0);
+                    let mut label = shape(
+                        &caption(
+                            node.id,
+                            unsupported.id,
+                            "Unsupported content",
+                            Format::default(),
+                        ),
+                        w - 16.0,
+                        &[0.0],
+                    )?;
+                    label.reset_origin(x + 8.0);
+                    label.origin[1] = y + 8.0;
+                    let h = unsupported
+                        .layout
+                        .max_height
+                        .unwrap_or(0.0)
+                        .max(label.text.height() + 16.0);
+                    result.objects.push(ObjectLayout {
+                        id: unsupported.id,
+                        rect: [x, y, x + w, y + h],
+                        kind: ObjectKind::Unsupported(label),
+                        bottom: y + h,
+                    });
+                    result.size[0] = result.size[0].max(x + w);
+                    bottom += f64::from(h);
                 }
             }
             if !(bottom as f32).is_finite() || !result.size[0].is_finite() {
@@ -1257,7 +1302,7 @@ mod tests {
         let top = layout.paragraphs[0].text.height();
         let [icon, handwriting] = [&layout.objects[0], &layout.objects[1]];
         assert_eq!(icon.rect, [15.0, top + 6.0, 39.0, top + 30.0]);
-        let label = icon.label.as_ref().unwrap();
+        let label = icon.label().unwrap();
         assert_eq!(label.projection.text().text(), "notes 🦀");
         assert_eq!(label.origin, [0.0, top + 40.5]);
         assert_eq!(icon.bottom, label.origin[1] + label.text.height() + 9.0);

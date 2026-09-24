@@ -170,7 +170,11 @@ pub(crate) fn validate_nodes(
                         return Err(EditError::InvalidStructure);
                     }
                 }
-                ParagraphContent::Unsupported(_) => return Err(EditError::UnsupportedContent),
+                ParagraphContent::Unsupported(unsupported) => {
+                    if !ids.insert(unsupported.id) {
+                        return Err(EditError::InvalidStructure);
+                    }
+                }
                 ParagraphContent::Table(table) => {
                     if !ids.insert(table.id)
                         || table.rows.is_empty()
@@ -942,7 +946,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_cannot_alias_existing_objects_or_publish_unsupported_nodes() {
+    fn replacement_cannot_alias_existing_objects() {
         let mut document =
             TextDocument::new(vec![Paragraph::new("text".into(), Format::default())]).unwrap();
         let original = document.clone();
@@ -960,18 +964,14 @@ mod tests {
                 jcid: 0x60012,
                 layout: Default::default(),
             });
+        // Content the canvas cannot draw is kept as a placeholder paragraph, once.
+        assert!(TextDocument::from_nodes(unsupported.clone()).is_ok());
+        let mut twice = unsupported.clone();
+        twice[0].id = new_id().unwrap();
+        twice.extend(unsupported);
         assert_eq!(
-            TextDocument::from_nodes(unsupported.clone()),
-            Err(EditError::UnsupportedContent)
-        );
-        assert_eq!(
-            document.apply(DocumentEdit {
-                columns: BTreeMap::new(),
-                container: None,
-                range: 0..1,
-                replacement: unsupported
-            }),
-            Err(EditError::UnsupportedContent)
+            TextDocument::from_nodes(twice),
+            Err(EditError::InvalidStructure)
         );
         assert_eq!(document, original);
     }
