@@ -1051,6 +1051,14 @@ mod tests {
         assert_eq!(decoded.size, [4, 4]);
         assert_eq!(decoded.pixels.as_ref(), [255; 4 * 4 * 4]);
 
+        let mut gif = Vec::new();
+        image::codecs::gif::GifEncoder::new(&mut gif)
+            .encode(&[255; 2 * 2 * 4], 2, 2, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let decoded = RasterImage::decode(&gif).unwrap();
+        assert_eq!(decoded.size, [2, 2]);
+        assert_eq!(decoded.pixels.as_ref(), [255; 2 * 2 * 4]);
+
         for size in [[8192, 8192], [16_385, 1]] {
             let mut header = Vec::new();
             let mut encoder = png::Encoder::new(&mut header, size[0], size[1]);
