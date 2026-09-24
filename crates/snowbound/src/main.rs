@@ -123,6 +123,13 @@ enum Drag {
         grab: [f32; 2],
         pending_press: Option<[f32; 2]>,
     },
+    Image {
+        id: onestore::ExGuid,
+        handle: [i8; 2],
+        /// Document point of the press.
+        press: [f32; 2],
+        pending_press: Option<[f32; 2]>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +137,24 @@ enum PointerFeedback<'a> {
     Hover(onestore::ExGuid),
     Move(onestore::ExGuid, [f32; 2]),
     Resize(&'a TextOutline),
+    /// A picture being moved or resized, drawn at this origin and size.
+    Image(onestore::ExGuid, [f32; 2], [f32; 2]),
+}
+
+/// A non-text object holding focus, which hides the text caret and suspends typing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ObjectFocus {
+    ReadOnly(usize),
+    Image(onestore::ExGuid),
+}
+
+impl ObjectFocus {
+    fn read_only(self) -> Option<usize> {
+        match self {
+            Self::ReadOnly(index) => Some(index),
+            Self::Image(_) => None,
+        }
+    }
 }
 
 struct State {
@@ -151,7 +176,7 @@ struct State {
     pointer_inside: bool,
     last_click: Option<(Instant, [f32; 2], u8)>,
     drag: Option<Drag>,
-    read_only_focus: Option<usize>,
+    object_focus: Option<ObjectFocus>,
     modifiers: ModifiersState,
     focused: bool,
     occluded: bool,
@@ -310,7 +335,7 @@ impl State {
             pointer_inside: false,
             last_click: None,
             drag: None,
-            read_only_focus: None,
+            object_focus: None,
             modifiers: ModifiersState::empty(),
             focused: true,
             occluded: false,
@@ -352,13 +377,73 @@ impl State {
         ))
     }
 
-    fn set_read_only_focus(&mut self, index: Option<usize>) {
-        if self.read_only_focus != index {
+    fn image_preview(&self) -> Option<(onestore::ExGuid, [f32; 2], [f32; 2])> {
+        let Drag::Image {
+            id,
+            handle,
+            press,
+            pending_press: None,
+        } = self.drag.as_ref()?
+        else {
+            return None;
+        };
+        let (origin, size) = self.editor.image_placement(*id)?;
+        let point = self.viewport.document_point(self.pointer);
+        let delta = [point[0] - press[0], point[1] - press[1]];
+        if *handle != [0, 0] {
+            let (origin, size) = resize_image(origin, size, *handle, delta);
+            return Some((*id, origin, size));
+        }
+        let origin = [origin[0] + delta[0], origin[1] + delta[1]];
+        let origin = if self.modifiers.alt_key() {
+            origin
+        } else {
+            snap_to_grid(origin)
+        };
+        Some((*id, origin, size))
+    }
+
+    /// The selected picture's handles lie above the page; its body keeps its paint order.
+    fn hit_test(&self, point: [f32; 2]) -> Option<Hit> {
+        let pixel = self.display_scale / self.viewport.scale;
+        if let Some(ObjectFocus::Image(id)) = self.object_focus
+            && let Some((origin, size)) = self.editor.image_placement(id)
+            && let Some(handle) = image_handle_at(image_rect(origin, size), pixel, point)
+        {
+            return Some(Hit::Image { id, handle });
+        }
+        page_hit_test(&self.editor, self.scene.as_ref(), point, pixel)
+    }
+
+    fn set_object_focus(&mut self, focus: Option<ObjectFocus>) {
+        if self.object_focus != focus {
             self.editor.finish_composition();
             self.drag = None;
-            self.read_only_focus = index;
-            self.window.set_ime_allowed(index.is_none());
+            self.object_focus = focus;
+            self.window.set_ime_allowed(focus.is_none());
         }
+    }
+
+    /// Page coordinates of a focused object.
+    fn object_rect(&self, focus: ObjectFocus) -> [f32; 4] {
+        let (scene, offset) = self.scene.as_ref().unwrap();
+        let [x0, y0, x1, y1] = match focus {
+            ObjectFocus::ReadOnly(index) => scene
+                .read_only(Some(&self.editor))
+                .nth(index)
+                .unwrap()
+                .rect(),
+            ObjectFocus::Image(id) => {
+                let (origin, size) = self.editor.image_placement(id).unwrap();
+                image_rect(origin, size)
+            }
+        };
+        [
+            x0 + offset[0],
+            y0 + offset[1],
+            x1 + offset[0],
+            y1 + offset[1],
+        ]
     }
 
     fn changed(&mut self) -> Result<(), Box<dyn Error>> {
@@ -446,7 +531,7 @@ impl State {
         self.editor = editor;
         self.scene = Some((scene, [0.0; 2]));
         self.drag = None;
-        self.read_only_focus = None;
+        self.object_focus = None;
         self.window.set_title(&session.window_title());
         self.update_accessibility()?;
         self.window.request_redraw();
@@ -535,7 +620,7 @@ impl State {
                         self.scene.as_ref(),
                         &self.editor,
                         self.viewport,
-                        self.read_only_focus,
+                        self.object_focus.and_then(ObjectFocus::read_only),
                     );
                     update
                 }
@@ -573,7 +658,7 @@ impl State {
         }
         if let Some(index) = self.accessibility.read_only_for_node(request.target_node) {
             if request.action == Action::Focus {
-                self.set_read_only_focus(Some(index));
+                self.set_object_focus(Some(ObjectFocus::ReadOnly(index)));
                 self.window.focus_window();
                 self.reveal_focus()?;
                 self.changed()?;
@@ -605,7 +690,7 @@ impl State {
             }
             _ => return Ok(()),
         }
-        self.set_read_only_focus(None);
+        self.set_object_focus(None);
         self.reveal_focus()?;
         self.changed()
     }
@@ -614,19 +699,9 @@ impl State {
         if self.viewport.size.contains(&0) {
             return Ok(());
         }
-        let rect = if let Some(index) = self.read_only_focus {
-            let (scene, offset) = self.scene.as_ref().unwrap();
-            let [x0, y0, x1, y1] = scene
-                .read_only(Some(&self.editor))
-                .nth(index)
-                .unwrap()
-                .rect();
-            parley::BoundingBox {
-                x0: f64::from(x0 + offset[0]),
-                y0: f64::from(y0 + offset[1]),
-                x1: f64::from(x1 + offset[0]),
-                y1: f64::from(y1 + offset[1]),
-            }
+        let rect = if let Some(focus) = self.object_focus {
+            let [x0, y0, x1, y1] = self.object_rect(focus).map(f64::from);
+            parley::BoundingBox { x0, y0, x1, y1 }
         } else {
             let mut rect = self.editor.caret(1.0)?;
             let origin = self.editor.active_outline().origin();
@@ -647,7 +722,7 @@ impl State {
                 [(outline.x0, outline.x1), (outline.y0, outline.y1)][axis];
             let outline_start = outline_start.min(start);
             let outline_end = outline_end.max(end);
-            if self.read_only_focus.is_none()
+            if self.object_focus.is_none()
                 && (outline_end - outline_start) * f64::from(self.viewport.scale)
                     <= size - margin * 2.0
             {
@@ -760,6 +835,10 @@ impl State {
                     .preview()
                     .map(|(id, origin)| PointerFeedback::Move(id, origin))
                     .or_else(|| {
+                        self.image_preview()
+                            .map(|(id, origin, size)| PointerFeedback::Image(id, origin, size))
+                    })
+                    .or_else(|| {
                         if !self.pointer_inside {
                             return None;
                         }
@@ -778,10 +857,13 @@ impl State {
                         }
                     }),
             },
-            self.read_only_focus,
+            self.object_focus,
             self.caret
                 && self.focused
-                && !matches!(self.drag, Some(Drag::Outline { .. } | Drag::Resize { .. })),
+                && !matches!(
+                    self.drag,
+                    Some(Drag::Outline { .. } | Drag::Resize { .. } | Drag::Image { .. })
+                ),
             self.viewport.scale,
             self.display_scale,
         )?;
@@ -807,12 +889,15 @@ impl State {
         let shift = self.modifiers.shift_key();
         let command = self.modifiers.super_key();
         let option = self.modifiers.alt_key();
-        if self.read_only_focus.is_some() {
-            if !read_only_shortcut(key, self.modifiers) {
+        if let Some(focus) = self.object_focus {
+            let undo = matches!(focus, ObjectFocus::Image(_))
+                && command
+                && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("z"));
+            if !undo && !read_only_shortcut(key, self.modifiers) {
                 return Ok(());
             }
             if key == &Key::Named(NamedKey::Escape) {
-                self.set_read_only_focus(None);
+                self.set_object_focus(None);
                 self.reveal_focus()?;
                 return self.changed();
             }
@@ -832,7 +917,10 @@ impl State {
                 _ => {}
             }
         }
-        if matches!(self.drag, Some(Drag::Outline { .. } | Drag::Resize { .. })) {
+        if matches!(
+            self.drag,
+            Some(Drag::Outline { .. } | Drag::Resize { .. } | Drag::Image { .. })
+        ) {
             if matches!(
                 key,
                 Key::Named(
@@ -881,14 +969,17 @@ impl State {
             if count == 0 {
                 return self.changed();
             }
-            let index = self.read_only_focus.map_or_else(
-                || {
-                    outlines
-                        .iter()
-                        .position(|outline| outline.id == self.editor.active_outline().id)
-                },
-                |index| Some(outlines.len() + index),
-            );
+            let index = self
+                .object_focus
+                .and_then(ObjectFocus::read_only)
+                .map_or_else(
+                    || {
+                        outlines
+                            .iter()
+                            .position(|outline| outline.id == self.editor.active_outline().id)
+                    },
+                    |index| Some(outlines.len() + index),
+                );
             let next = index.map_or(if shift { count - 1 } else { 0 }, |index| {
                 if shift {
                     (index + count - 1) % count
@@ -898,9 +989,9 @@ impl State {
             });
             if next < outlines.len() {
                 self.editor.focus_outline(outlines[next].id)?;
-                self.set_read_only_focus(None);
+                self.set_object_focus(None);
             } else {
-                self.set_read_only_focus(Some(next - outlines.len()));
+                self.set_object_focus(Some(ObjectFocus::ReadOnly(next - outlines.len())));
             }
             self.reveal_focus()?;
             return self.changed();
@@ -908,14 +999,9 @@ impl State {
         if command && let Key::Character(key) = key {
             match key.to_lowercase().as_str() {
                 "n" if shift => {
-                    let position = if let Some(index) = self.read_only_focus {
-                        let (scene, offset) = self.scene.as_ref().unwrap();
-                        let rect = scene
-                            .read_only(Some(&self.editor))
-                            .nth(index)
-                            .unwrap()
-                            .rect();
-                        [rect[2] + offset[0] + 24.0, rect[1] + offset[1]]
+                    let position = if let Some(focus) = self.object_focus {
+                        let rect = self.object_rect(focus);
+                        [rect[2] + 24.0, rect[1]]
                     } else {
                         let bounds = self.editor.active_outline().bounds();
                         [bounds.x1 as f32 + 24.0, bounds.y0 as f32]
@@ -925,7 +1011,7 @@ impl State {
                         snap_to_grid(position),
                         DEFAULT_OUTLINE_WIDTH,
                     )?;
-                    self.set_read_only_focus(None);
+                    self.set_object_focus(None);
                 }
                 "a" => self.editor.select_all()?,
                 "z" => {
@@ -1137,7 +1223,7 @@ impl ApplicationHandler<UserEvent> for App {
         let event = match event {
             UserEvent::InsertText(text) => {
                 if let Some(state) = &mut self.state
-                    && state.read_only_focus.is_none()
+                    && state.object_focus.is_none()
                     && !text.is_empty()
                     && !text.chars().any(char::is_control)
                 {
@@ -1282,12 +1368,7 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::CursorMoved { position, .. } => {
                     state.pointer_inside = true;
                     state.pointer = [position.x as f32, position.y as f32];
-                    let hit = page_hit_test(
-                        &state.editor,
-                        state.scene.as_ref(),
-                        state.viewport.document_point(state.pointer),
-                        state.display_scale / state.viewport.scale,
-                    );
+                    let hit = state.hit_test(state.viewport.document_point(state.pointer));
                     let scrollbar = state
                         .scroll()
                         .hit_test(state.viewport, state.display_scale, state.pointer)
@@ -1295,6 +1376,8 @@ impl ApplicationHandler<UserEvent> for App {
                     state.window.set_cursor(match (&state.drag, hit) {
                         (Some(Drag::Scrollbar { .. }), _) => winit::window::CursorIcon::Default,
                         (None, _) if scrollbar => winit::window::CursorIcon::Default,
+                        (Some(Drag::Image { handle, .. }), _) => handle_cursor(*handle),
+                        (None, Some(Hit::Image { handle, .. })) => handle_cursor(handle),
                         (Some(Drag::Resize { .. }), _) | (None, Some(Hit::Resize { .. })) => {
                             winit::window::CursorIcon::EwResize
                         }
@@ -1330,7 +1413,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 .select(drag_selection(*anchor, target, *unit))?;
                             state.changed()?;
                         }
-                        Some(Drag::Outline { pending_press, .. }) => {
+                        Some(
+                            Drag::Outline { pending_press, .. } | Drag::Image { pending_press, .. },
+                        ) => {
                             if pending_press.is_some_and(|press| {
                                 (0..2).any(|axis| {
                                     (state.pointer[axis] - press[axis]).abs()
@@ -1387,18 +1472,22 @@ impl ApplicationHandler<UserEvent> for App {
                         if scrollbar.is_some() {
                             state.drag = scrollbar;
                         } else {
-                            match page_hit_test(
-                                &state.editor,
-                                state.scene.as_ref(),
-                                point,
-                                state.display_scale / state.viewport.scale,
-                            ) {
+                            match state.hit_test(point) {
                                 Some(Hit::Date(field)) => state.edit_date(field)?,
                                 Some(Hit::ReadOnly(index)) => {
-                                    state.set_read_only_focus(Some(index))
+                                    state.set_object_focus(Some(ObjectFocus::ReadOnly(index)))
+                                }
+                                Some(Hit::Image { id, handle }) => {
+                                    state.set_object_focus(Some(ObjectFocus::Image(id)));
+                                    state.drag = Some(Drag::Image {
+                                        id,
+                                        handle,
+                                        press: point,
+                                        pending_press: Some(state.pointer),
+                                    });
                                 }
                                 Some(Hit::Handle { id, grab }) => {
-                                    state.set_read_only_focus(None);
+                                    state.set_object_focus(None);
                                     state.editor.focus_outline(id)?;
                                     state.drag = Some(Drag::Outline {
                                         id,
@@ -1407,7 +1496,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     });
                                 }
                                 Some(Hit::Resize { id, grab }) => {
-                                    state.set_read_only_focus(None);
+                                    state.set_object_focus(None);
                                     state.editor.focus_outline(id)?;
                                     state.drag = Some(Drag::Resize {
                                         outline: None,
@@ -1416,9 +1505,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                                 Some(Hit::Text { id, point }) => {
                                     let extend = state.modifiers.shift_key()
-                                        && state.read_only_focus.is_none()
+                                        && state.object_focus.is_none()
                                         && id == state.editor.active_outline().id;
-                                    state.set_read_only_focus(None);
+                                    state.set_object_focus(None);
                                     state.editor.focus_outline(id)?;
                                     let previous = state.editor.selection();
                                     state.editor.select_below(&mut state.engine, id, point)?;
@@ -1464,7 +1553,7 @@ impl ApplicationHandler<UserEvent> for App {
                                         position,
                                         DEFAULT_OUTLINE_WIDTH,
                                     )?;
-                                    state.set_read_only_focus(None);
+                                    state.set_object_focus(None);
                                     state.drag = Some(Drag::Text {
                                         anchor: state.editor.selection(),
                                         unit: SelectionUnit::Grapheme,
@@ -1474,6 +1563,9 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     } else {
                         let preview = state.preview();
+                        if let Some((id, origin, size)) = state.image_preview() {
+                            state.editor.place_image(id, origin, size)?;
+                        }
                         if let Some(Drag::Resize {
                             outline: Some(outline),
                             ..
@@ -1508,7 +1600,7 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     state.key(&event.logical_key, event.text.as_deref())?;
                 }
-                WindowEvent::Ime(_) if state.read_only_focus.is_some() => {}
+                WindowEvent::Ime(_) if state.object_focus.is_some() => {}
                 WindowEvent::Ime(Ime::Preedit(text, cursor)) => {
                     if text.is_empty() {
                         state.editor.cancel_composition(&mut state.engine)?;
@@ -1558,7 +1650,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         };
         let [anchor, focus] = state.editor.selection().positions;
-        if state.focused && !state.occluded && state.read_only_focus.is_none() && anchor == focus {
+        if state.focused && !state.occluded && state.object_focus.is_none() && anchor == focus {
             let now = Instant::now();
             if now >= state.blink_at {
                 state.caret = !state.caret;
@@ -1588,6 +1680,11 @@ enum Hit {
         grab: [f32; 2],
     },
     ReadOnly(usize),
+    /// `handle` is [0, 0] on the picture and a direction on the selected picture's handles.
+    Image {
+        id: onestore::ExGuid,
+        handle: [i8; 2],
+    },
 }
 
 fn page_hit_test(
@@ -1696,6 +1793,7 @@ fn page_hit_test(
             canvas::gpu::page::SceneHit::Outline(hit) => Some(hit),
             canvas::gpu::page::SceneHit::Date(field) => Some(Hit::Date(field)),
             canvas::gpu::page::SceneHit::ReadOnly(index) => Some(Hit::ReadOnly(index)),
+            canvas::gpu::page::SceneHit::Image(id) => Some(Hit::Image { id, handle: [0, 0] }),
         }
     };
     [Layer::Grips, Layer::Body, Layer::Below]
@@ -1707,7 +1805,7 @@ fn page_primitives<'a>(
     editor: &'a CanvasEditor,
     scene: Option<&'a (PageScene, [f32; 2])>,
     preview: Option<PointerFeedback<'a>>,
-    read_only_focus: Option<usize>,
+    object_focus: Option<ObjectFocus>,
     show_caret: bool,
     scale: f32,
     display_scale: f32,
@@ -1726,7 +1824,7 @@ fn page_primitives<'a>(
             Some(PointerFeedback::Move(id, origin)) if id == outline.id => origin,
             _ => outline.origin(),
         };
-        if (read_only_focus.is_none() && outline.id == editor.active_outline().id)
+        if (object_focus.is_none() && outline.id == editor.active_outline().id)
             || matches!(preview, Some(PointerFeedback::Hover(id) | PointerFeedback::Move(id, _)) if id == outline.id)
             || matches!(preview, Some(PointerFeedback::Resize(resized)) if resized.id == outline.id)
         {
@@ -1738,7 +1836,7 @@ fn page_primitives<'a>(
             );
         }
         append_outline(
-            (read_only_focus.is_none()
+            (object_focus.is_none()
                 && outline.id == editor.active_outline().id
                 && !matches!(preview, Some(PointerFeedback::Resize(_))))
             .then_some(editor),
@@ -1751,7 +1849,11 @@ fn page_primitives<'a>(
         )
     };
     if let Some((scene, origin)) = scene {
-        scene.append_primitives_with(&mut primitives, *origin, Some(editor), &paint)?;
+        let moving = match preview {
+            Some(PointerFeedback::Image(id, origin, size)) => Some((id, image_rect(origin, size))),
+            _ => None,
+        };
+        scene.append_primitives_with(&mut primitives, *origin, Some(editor), moving, &paint)?;
     }
     for outline in editor
         .visible_outlines()
@@ -1759,7 +1861,7 @@ fn page_primitives<'a>(
     {
         paint(outline.id, [0.0; 2], &mut primitives)?;
     }
-    if read_only_focus.is_none()
+    if object_focus.is_none()
         && let Some(outline) = editor.caret_outline()
     {
         append_outline(
@@ -1772,7 +1874,20 @@ fn page_primitives<'a>(
             &mut primitives,
         )?;
     }
-    if let Some(index) = read_only_focus {
+    if let Some(ObjectFocus::Image(id)) = object_focus {
+        let (origin, size) = match preview {
+            Some(PointerFeedback::Image(moving, origin, size)) if moving == id => (origin, size),
+            _ => editor
+                .image_placement(id)
+                .ok_or("The selected picture is missing.")?,
+        };
+        append_image_chrome(
+            image_rect(origin, size),
+            display_scale / scale,
+            &mut primitives,
+        );
+    }
+    if let Some(ObjectFocus::ReadOnly(index)) = object_focus {
         let (scene, offset) = scene.unwrap();
         let [x0, y0, x1, y1] = scene.read_only(Some(editor)).nth(index).unwrap().rect();
         let [x0, y0, x1, y1] = [
@@ -1795,6 +1910,124 @@ fn page_primitives<'a>(
         }
     }
     Ok(primitives)
+}
+
+/// Native picture handles sit on a selection border drawn 5 px outside the picture, named
+/// by their direction from its center.
+fn image_handles(rect: [f32; 4], pixel: f32) -> impl Iterator<Item = ([i8; 2], [f32; 2])> {
+    let border = [
+        rect[0] - 5.0 * pixel,
+        rect[1] - 5.0 * pixel,
+        rect[2] + 5.0 * pixel,
+        rect[3] + 5.0 * pixel,
+    ];
+    [-1, 0, 1]
+        .into_iter()
+        .flat_map(|y| [-1, 0, 1].map(|x| [x, y]))
+        .filter(|handle| *handle != [0, 0])
+        .map(move |handle| {
+            (
+                handle,
+                std::array::from_fn(|axis| {
+                    let [start, end] = [border[axis], border[axis + 2]];
+                    start + (end - start) * f32::from(handle[axis] + 1) * 0.5
+                }),
+            )
+        })
+}
+
+fn image_handle_at(rect: [f32; 4], pixel: f32, point: [f32; 2]) -> Option<[i8; 2]> {
+    image_handles(rect, pixel)
+        .find(|(_, center)| (0..2).all(|axis| (point[axis] - center[axis]).abs() <= 5.0 * pixel))
+        .map(|(handle, _)| handle)
+}
+
+fn handle_cursor(handle: [i8; 2]) -> winit::window::CursorIcon {
+    use winit::window::CursorIcon;
+    match handle {
+        [0, 0] => CursorIcon::Move,
+        [_, 0] => CursorIcon::EwResize,
+        [0, _] => CursorIcon::NsResize,
+        [x, y] if x == y => CursorIcon::NwseResize,
+        _ => CursorIcon::NeswResize,
+    }
+}
+
+fn image_rect(origin: [f32; 2], size: [f32; 2]) -> [f32; 4] {
+    [
+        origin[0],
+        origin[1],
+        origin[0] + size[0],
+        origin[1] + size[1],
+    ]
+}
+
+/// Drags a picture's `handle` by `delta`: edges stretch one axis, corners keep the aspect
+/// ratio at the larger of the two scales, and the opposite side stays fixed.
+fn resize_image(
+    origin: [f32; 2],
+    size: [f32; 2],
+    handle: [i8; 2],
+    delta: [f32; 2],
+) -> ([f32; 2], [f32; 2]) {
+    let mut scale: [f32; 2] = std::array::from_fn(|axis| {
+        (size[axis] + f32::from(handle[axis]) * delta[axis]) / size[axis]
+    });
+    if !handle.contains(&0) {
+        scale = [scale[0].max(scale[1]); 2];
+    }
+    let resized: [f32; 2] = std::array::from_fn(|axis| (size[axis] * scale[axis]).max(1.0));
+    let origin = std::array::from_fn(|axis| {
+        if handle[axis] < 0 {
+            origin[axis] + size[axis] - resized[axis]
+        } else {
+            origin[axis]
+        }
+    });
+    (origin, resized)
+}
+
+fn append_image_chrome(rect: [f32; 4], pixel: f32, primitives: &mut Vec<Primitive<'_>>) {
+    let mut tint = canvas::gpu::colorref(0x00e0d2e6);
+    // Native pictures take this tint at 25% in sRGB; 10% in linear light matches it.
+    tint[3] = 0.1;
+    primitives.push(Primitive::Rect { rect, color: tint });
+    primitives.push(Primitive::RoundedRect {
+        rect: [
+            rect[0] - 5.0 * pixel,
+            rect[1] - 5.0 * pixel,
+            rect[2] + 5.0 * pixel,
+            rect[3] + 5.0 * pixel,
+        ],
+        radius: [0.0; 2],
+        stroke: Some(Stroke::Dashed(pixel)),
+        color: canvas::gpu::colorref(0x00ff9a31),
+    });
+    for (handle, [x, y]) in image_handles(rect, pixel) {
+        let (half, radius) = if handle.contains(&0) {
+            (3.5, 0.0)
+        } else {
+            (4.0, 4.0)
+        };
+        let rect = [
+            x - half * pixel,
+            y - half * pixel,
+            x + half * pixel,
+            y + half * pixel,
+        ];
+        primitives.push(Primitive::RoundedRect {
+            rect,
+            radius: [radius * pixel; 2],
+            stroke: None,
+            color: canvas::gpu::colorref(0x00ffefe7),
+        });
+        primitives.push(Primitive::RoundedRect {
+            rect,
+            radius: [radius * pixel; 2],
+            stroke: Some(Stroke::Solid(pixel)),
+            color: canvas::gpu::colorref(0x00dea67b),
+        });
+    }
 }
 
 fn drag_selection(anchor: Selection, target: Selection, unit: SelectionUnit) -> Selection {
@@ -2498,6 +2731,33 @@ mod tests {
         assert!(
             matches!(body(frame[2] - 12.0 * pixel), Some(Hit::Text { id, .. }) if id == first_id)
         );
+    }
+
+    #[test]
+    fn picture_handles_resize_as_onenote_does() {
+        // Native drags of the 333 x 200.1 pt mockup on "av: casual night in the trees".
+        let (origin, size) = ([468.0, 86.4], [333.0, 200.1]);
+        let (corner_origin, corner) = resize_image(origin, size, [1, -1], [-75.0, 30.75]);
+        assert!((corner[0] - 281.827).abs() < 0.01 && (corner[1] - 169.351).abs() < 0.01);
+        assert!((corner_origin[1] - 117.15).abs() < 0.01 && corner_origin[0] == 468.0);
+        assert_eq!(
+            resize_image(origin, size, [1, 0], [46.5, 10.0]),
+            (origin, [379.5, 200.1])
+        );
+        let (left_origin, left) = resize_image(origin, size, [-1, 0], [400.0, 0.0]);
+        assert_eq!(left, [1.0, 200.1]);
+        assert_eq!(left_origin[0], 468.0 + 333.0 - 1.0);
+        let pixel = 0.75;
+        let rect = image_rect(origin, size);
+        assert_eq!(
+            image_handle_at(rect, pixel, [468.0 - 3.75, 86.4 - 3.75]),
+            Some([-1, -1])
+        );
+        assert_eq!(
+            image_handle_at(rect, pixel, [468.0 + 166.5, 286.5 + 3.75]),
+            Some([0, 1])
+        );
+        assert_eq!(image_handle_at(rect, pixel, [600.0, 150.0]), None);
     }
 
     #[test]
@@ -3257,7 +3517,16 @@ mod tests {
                     .any(|(_, color)| *color == macos::text_colors()[0])
             );
             let selected = rectangles(
-                page_primitives(&editor, Some(&scene), None, Some(0), true, scale, 1.0).unwrap(),
+                page_primitives(
+                    &editor,
+                    Some(&scene),
+                    None,
+                    Some(ObjectFocus::ReadOnly(0)),
+                    true,
+                    scale,
+                    1.0,
+                )
+                .unwrap(),
             );
             assert!(
                 !selected
@@ -3267,8 +3536,16 @@ mod tests {
             assert_eq!(
                 selected,
                 rectangles(
-                    page_primitives(&editor, Some(&scene), None, Some(0), false, scale, 1.0)
-                        .unwrap()
+                    page_primitives(
+                        &editor,
+                        Some(&scene),
+                        None,
+                        Some(ObjectFocus::ReadOnly(0)),
+                        false,
+                        scale,
+                        1.0
+                    )
+                    .unwrap()
                 )
             );
             assert_eq!(
@@ -3285,7 +3562,16 @@ mod tests {
                 .any(|(_, color)| *color == macos::text_colors()[1])
         );
         let selected = rectangles(
-            page_primitives(&editor, Some(&scene), None, Some(0), true, 1.0, 1.0).unwrap(),
+            page_primitives(
+                &editor,
+                Some(&scene),
+                None,
+                Some(ObjectFocus::ReadOnly(0)),
+                true,
+                1.0,
+                1.0,
+            )
+            .unwrap(),
         );
         assert!(
             !selected

@@ -620,6 +620,10 @@ enum History {
         outline: ExGuid,
         layout: onestore::document::Layout,
     },
+    Image {
+        image: ExGuid,
+        layout: onestore::document::Layout,
+    },
     Remove {
         outline: onestore::ExGuid,
         focus: RestoreFocus,
@@ -1268,6 +1272,62 @@ impl CanvasEditor {
         layout.y = Some(position[1]);
         self.active = Focus::Outline(index);
         self.preferred_x = None;
+        Ok(())
+    }
+
+    /// Origin and size of a picture the user can select; OneNote passes clicks through
+    /// backgrounds.
+    pub fn image_placement(&self, id: ExGuid) -> Option<([f32; 2], [f32; 2])> {
+        let layout = &self.image(id)?.layout;
+        Some((
+            [layout.x.unwrap_or(0.0), layout.y.unwrap_or(0.0)],
+            [layout.max_width?, layout.max_height?],
+        ))
+    }
+
+    fn image(&self, id: ExGuid) -> Option<&onestore::page::Image> {
+        self.objects.iter().find_map(|object| match object {
+            page::Content::Image(image) if image.id == id && !image.background => Some(image),
+            _ => None,
+        })
+    }
+
+    fn image_mut(&mut self, id: ExGuid) -> Option<&mut onestore::page::Image> {
+        self.objects.iter_mut().find_map(|object| match object {
+            page::Content::Image(image) if image.id == id && !image.background => Some(image),
+            _ => None,
+        })
+    }
+
+    /// Moves a picture, and resizes it when `size` differs from the stored size.
+    pub fn place_image(
+        &mut self,
+        id: ExGuid,
+        origin: [f32; 2],
+        size: [f32; 2],
+    ) -> Result<(), EditError> {
+        if !origin.iter().chain(&size).all(|value| value.is_finite())
+            || size.iter().any(|value| *value <= 0.0)
+        {
+            return Err(EditError::InvalidRange);
+        }
+        let image = self.image(id).ok_or(EditError::InvalidRange)?;
+        let mut layout = image.layout.clone();
+        [layout.x, layout.y] = origin.map(Some);
+        if [layout.max_width, layout.max_height] != size.map(Some) {
+            [layout.max_width, layout.max_height] = size.map(Some);
+            layout.width_set_by_user = Some(true);
+        }
+        if layout == image.layout {
+            return Ok(());
+        }
+        self.finish_composition();
+        let previous = std::mem::replace(&mut self.image_mut(id).unwrap().layout, layout);
+        self.undo.push(History::Image {
+            image: id,
+            layout: previous,
+        });
+        self.redo.clear();
         Ok(())
     }
 
@@ -2249,6 +2309,7 @@ impl CanvasEditor {
             | History::Layout { outline, .. } => {
                 self.outlines.iter().any(|item| item.id == *outline)
             }
+            History::Image { image, .. } => self.image(*image).is_some(),
             History::Remove { outline, focus } => {
                 self.outlines.iter().any(|item| item.id == *outline)
                     && match focus {
@@ -2396,6 +2457,10 @@ impl CanvasEditor {
                     layout: previous,
                 }
             }
+            History::Image { image, layout } => History::Image {
+                image,
+                layout: std::mem::replace(&mut self.image_mut(image).unwrap().layout, layout),
+            },
             History::Remove { outline, focus } => {
                 let index = self
                     .outlines
@@ -4328,6 +4393,87 @@ mod tests {
                 Err(EditorError::Edit(EditError::InvalidStructure))
             ));
         }
+    }
+
+    #[test]
+    fn pictures_move_and_resize_through_history_and_backgrounds_stay_put() {
+        use onestore::page::{Image, Page, PageObject};
+        let mut engine = TextEngine::default();
+        let [picture, background] = [false, true].map(|background| Image {
+            size: None,
+            id: onestore::page::text::new_id().unwrap(),
+            layout: onestore::document::Layout {
+                x: Some(468.75),
+                y: Some(86.4),
+                max_width: Some(333.0),
+                max_height: Some(200.1),
+                ..Default::default()
+            },
+            bytes: Some(std::sync::Arc::from(b"deferred image payload".as_slice())),
+            alt: None,
+            background,
+        });
+        let (id, background_id) = (picture.id, background.id);
+        let mut editor = CanvasEditor::from_page(
+            Page {
+                title: String::new(),
+                identity: None,
+                created: None,
+                margin_origin: [36.0, 14.4],
+                definitions: BTreeMap::new(),
+                objects: vec![PageObject::Image(background), PageObject::Image(picture)],
+            },
+            &mut engine,
+        )
+        .unwrap();
+        let stored = |editor: &CanvasEditor| {
+            editor
+                .page()
+                .unwrap()
+                .objects
+                .into_iter()
+                .find_map(|object| match object {
+                    PageObject::Image(image) if image.id == id => Some(image.layout),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let original = stored(&editor);
+        assert_eq!(
+            editor.image_placement(id),
+            Some(([468.75, 86.4], [333.0, 200.1]))
+        );
+        assert!(editor.image_placement(background_id).is_none());
+        assert_eq!(
+            editor.place_image(background_id, [0.0; 2], [10.0; 2]),
+            Err(EditError::InvalidRange)
+        );
+        assert_eq!(
+            editor.place_image(id, [0.0; 2], [0.0, 10.0]),
+            Err(EditError::InvalidRange)
+        );
+        editor
+            .place_image(id, [513.75, 104.4], [333.0, 200.1])
+            .unwrap();
+        let moved = stored(&editor);
+        assert_eq!([moved.x, moved.y], [Some(513.75), Some(104.4)]);
+        assert_eq!(moved.width_set_by_user, None);
+        editor
+            .place_image(id, [513.75, 104.4], [281.8, 169.4])
+            .unwrap();
+        let resized = stored(&editor);
+        assert_eq!(
+            [resized.max_width, resized.max_height],
+            [Some(281.8), Some(169.4)]
+        );
+        assert_eq!(resized.width_set_by_user, Some(true));
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(stored(&editor), moved);
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(stored(&editor), original);
+        assert!(editor.redo(&mut engine).unwrap());
+        assert!(editor.redo(&mut engine).unwrap());
+        assert_eq!(stored(&editor), resized);
     }
 
     #[test]

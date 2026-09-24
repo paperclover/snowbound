@@ -20,6 +20,7 @@ pub enum SceneHit<T> {
     Outline(T),
     Date(DateField),
     ReadOnly(usize),
+    Image(onestore::ExGuid),
 }
 
 fn outline_origin(
@@ -283,6 +284,19 @@ impl PageScene {
                         return Some(SceneHit::ReadOnly(readonly));
                     }
                 }
+                Content::Image(source) if !source.background => {
+                    let [x, y] = [
+                        source.layout.x.unwrap_or(0.0),
+                        source.layout.y.unwrap_or(0.0),
+                    ];
+                    if let (Some(width), Some(height)) =
+                        (source.layout.max_width, source.layout.max_height)
+                        && (x..=x + width).contains(&point[0])
+                        && (y..=y + height).contains(&point[1])
+                    {
+                        return Some(SceneHit::Image(source.id));
+                    }
+                }
                 Content::Outline { .. } | Content::Image(_) => {}
             }
         }
@@ -295,16 +309,18 @@ impl PageScene {
         primitives: &mut Vec<Primitive<'a>>,
         offset: [f32; 2],
     ) -> Result<(), SceneError> {
-        self.append_primitives_with(primitives, offset, None, |_, _, _| {
+        self.append_primitives_with(primitives, offset, None, None, |_, _, _| {
             Err(SceneError::MissingOutline)
         })
     }
 
+    /// `moving` draws one picture at a previewed rectangle instead of its stored layout.
     pub fn append_primitives_with<'a, E: From<SceneError>>(
         &'a self,
         primitives: &mut Vec<Primitive<'a>>,
         offset: [f32; 2],
         editor: Option<&'a CanvasEditor>,
+        moving: Option<(onestore::ExGuid, [f32; 4])>,
         mut outline: impl FnMut(onestore::ExGuid, [f32; 2], &mut Vec<Primitive<'a>>) -> Result<(), E>,
     ) -> Result<(), E> {
         for content in self.objects(editor)? {
@@ -373,14 +389,22 @@ impl PageScene {
                         .images
                         .get(&source.id)
                         .ok_or(SceneError::MissingImage)?,
-                    rect: [
-                        object_origin[0],
-                        object_origin[1],
-                        object_origin[0]
-                            + source.layout.max_width.ok_or(SceneError::MissingImage)?,
-                        object_origin[1]
-                            + source.layout.max_height.ok_or(SceneError::MissingImage)?,
-                    ],
+                    rect: match moving {
+                        Some((id, [x0, y0, x1, y1])) if id == source.id => [
+                            x0 + offset[0],
+                            y0 + offset[1],
+                            x1 + offset[0],
+                            y1 + offset[1],
+                        ],
+                        _ => [
+                            object_origin[0],
+                            object_origin[1],
+                            object_origin[0]
+                                + source.layout.max_width.ok_or(SceneError::MissingImage)?,
+                            object_origin[1]
+                                + source.layout.max_height.ok_or(SceneError::MissingImage)?,
+                        ],
+                    },
                 }),
                 Content::Outline { .. } | Content::Date { .. } => {
                     let outline = match content {
@@ -930,6 +954,7 @@ mod tests {
                         &mut primitives,
                         [0.0; 2],
                         Some(editor),
+                        None,
                         |_, _, _| Ok(()),
                     )
                     .unwrap();
@@ -1327,6 +1352,7 @@ mod tests {
                 &mut primitives,
                 [0.0; 2],
                 Some(editor),
+                None,
                 |id, offset, primitives| {
                     let outline = editor
                         .outlines()
@@ -1560,5 +1586,67 @@ mod tests {
         assert_eq!(*b, [12.0, -15.0, 15.0, -11.0]);
         assert_eq!(first.pixels.id(), second.pixels.id());
         assert_eq!(first.pixels.as_ref(), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn foreground_pictures_take_hits_and_draw_at_their_moving_preview() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[17, 34, 51, 255])
+                .unwrap();
+        }
+        let image = |x: f32, background| Image {
+            size: None,
+            id: onestore::page::text::new_id().unwrap(),
+            layout: Layout {
+                x: Some(x),
+                y: Some(0.0),
+                max_width: Some(100.0),
+                max_height: Some(100.0),
+                ..Default::default()
+            },
+            bytes: Some(Arc::from(bytes.clone())),
+            alt: None,
+            background,
+        };
+        let [background, picture] = [image(0.0, true), image(50.0, false)];
+        let id = picture.id;
+        let page = Page {
+            identity: None,
+            created: None,
+            title: String::new(),
+            margin_origin: [0.0; 2],
+            definitions: BTreeMap::new(),
+            objects: vec![PageObject::Image(background), PageObject::Image(picture)],
+        };
+        let mut engine = TextEngine::default();
+        let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+        let hit = |x| scene.hit_test::<()>([x, 10.0], Some(&editor), |_| None);
+        assert_eq!(hit(60.0), Some(SceneHit::Image(id)));
+        assert_eq!(hit(10.0), None);
+        let mut primitives = Vec::new();
+        scene
+            .append_primitives_with::<SceneError>(
+                &mut primitives,
+                [0.0; 2],
+                Some(&editor),
+                Some((id, [70.0, 5.0, 120.0, 55.0])),
+                |_, _, _| Ok(()),
+            )
+            .unwrap();
+        let rects: Vec<_> = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Image { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rects, [[0.0, 0.0, 100.0, 100.0], [70.0, 5.0, 120.0, 55.0]]);
     }
 }
