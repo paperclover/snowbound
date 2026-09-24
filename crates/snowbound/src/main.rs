@@ -394,6 +394,10 @@ impl State {
             let (origin, size) = resize_image(origin, size, *handle, delta);
             return Some((*id, origin, size));
         }
+        // A picture in an outline's flow keeps its place.
+        if self.editor.image_in_outline(*id) {
+            return Some((*id, origin, size));
+        }
         let origin = [origin[0] + delta[0], origin[1] + delta[1]];
         let origin = if self.modifiers.alt_key() {
             origin
@@ -892,7 +896,7 @@ impl State {
         if let Some(ObjectFocus::Image(id)) = self.object_focus
             && matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete))
         {
-            self.editor.remove_image(id)?;
+            self.editor.remove_image(&mut self.engine, id)?;
             self.set_object_focus(None);
             return self.changed();
         }
@@ -1592,7 +1596,9 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         let preview = state.preview();
                         if let Some((id, origin, size)) = state.image_preview() {
-                            state.editor.place_image(id, origin, size)?;
+                            state
+                                .editor
+                                .place_image(&mut state.engine, id, origin, size)?;
                         }
                         if let Some(Drag::Resize {
                             outline: Some(outline),
@@ -1777,6 +1783,17 @@ fn page_hit_test(
                 return None;
             }
         }
+        let inner = [x - outline.origin()[0], y - outline.origin()[1]];
+        if let Some(picture) = outline.shaped().objects.iter().find(|object| {
+            matches!(object.kind, canvas::outline::ObjectKind::Picture)
+                && (object.rect[0]..=object.rect[2]).contains(&inner[0])
+                && (object.rect[1]..=object.rect[3]).contains(&inner[1])
+        }) {
+            return Some(Hit::Image {
+                id: picture.id,
+                handle: [0, 0],
+            });
+        }
         if (x >= bounds[0] && x <= bounds[2] && y >= body_top && y <= bounds[3])
             || outline.layouts().any(|(_, paragraph)| {
                 paragraph.tags.iter().any(|tag| {
@@ -1876,9 +1893,25 @@ fn page_primitives<'a>(
             primitives,
         )?;
         if let Some((scene, _)) = scene {
+            let moving = match preview {
+                Some(PointerFeedback::Image(id, origin, size)) => {
+                    let [x0, y0, x1, y1] = image_rect(origin, size);
+                    Some((
+                        id,
+                        [
+                            x0 + offset[0],
+                            y0 + offset[1],
+                            x1 + offset[0],
+                            y1 + offset[1],
+                        ],
+                    ))
+                }
+                _ => None,
+            };
             scene.append_outline_objects(
                 outline.shaped(),
                 [origin[0] + offset[0], origin[1] + offset[1]],
+                moving,
                 primitives,
             );
         }
@@ -2746,6 +2779,58 @@ mod tests {
         assert!(
             matches!(body(frame[2] - 12.0 * pixel), Some(Hit::Text { id, .. }) if id == first_id)
         );
+    }
+
+    #[test]
+    fn a_picture_in_an_outline_takes_the_click_over_its_text() {
+        use onestore::page::{Image, Page, PageObject, ParagraphContent};
+        let mut engine = TextEngine::default();
+        let mut source = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![
+                Paragraph::new("Before".into(), Default::default()),
+                Paragraph::new("After".into(), Default::default()),
+            ])
+            .unwrap(),
+            240.0,
+            [36.0, 36.0],
+        )
+        .unwrap()
+        .snapshot();
+        let mut picture = source.paragraphs[0].clone();
+        picture.id = onestore::page::text::new_id().unwrap();
+        let id = onestore::page::text::new_id().unwrap();
+        picture.content = ParagraphContent::Image(Image {
+            size: Some([40.0, 30.0]),
+            id,
+            layout: Default::default(),
+            bytes: None,
+            alt: None,
+            background: false,
+        });
+        source.paragraphs.insert(1, picture);
+        let editor = CanvasEditor::from_page(
+            Page {
+                title: String::new(),
+                identity: None,
+                created: None,
+                margin_origin: [36.0, 14.4],
+                definitions: Default::default(),
+                objects: vec![PageObject::Outline(source)],
+            },
+            &mut engine,
+        )
+        .unwrap();
+        let (origin, size) = editor.image_placement(id).unwrap();
+        let center = [origin[0] + size[0] / 2.0, origin[1] + size[1] / 2.0];
+        assert_eq!(
+            page_hit_test(&editor, None, center, 1.0),
+            Some(Hit::Image { id, handle: [0, 0] })
+        );
+        assert!(matches!(
+            page_hit_test(&editor, None, [origin[0] + 2.0, origin[1] - 4.0], 1.0),
+            Some(Hit::Text { .. })
+        ));
     }
 
     #[test]

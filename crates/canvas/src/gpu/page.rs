@@ -213,20 +213,25 @@ impl PageScene {
     }
 
     /// Pictures, files and handwriting inside an outline whose origin is `origin`.
+    /// `moving` draws one picture at a previewed rectangle, in the same coordinates as `origin`.
     pub fn append_outline_objects<'a>(
         &'a self,
         outline: &'a crate::outline::OutlineLayout,
         origin: [f32; 2],
+        moving: Option<(onestore::ExGuid, [f32; 4])>,
         primitives: &mut Vec<Primitive<'a>>,
     ) {
         for object in &outline.objects {
             let [x0, y0, x1, y1] = object.rect;
-            let rect = [
-                x0 + origin[0],
-                y0 + origin[1],
-                x1 + origin[0],
-                y1 + origin[1],
-            ];
+            let rect = match moving {
+                Some((id, rect)) if id == object.id => rect,
+                _ => [
+                    x0 + origin[0],
+                    y0 + origin[1],
+                    x1 + origin[0],
+                    y1 + origin[1],
+                ],
+            };
             if let Some(image) = self.images.get(&object.id) {
                 primitives.push(Primitive::Image { image, rect });
             }
@@ -551,7 +556,7 @@ impl PageScene {
                     };
                     outline.append_table_primitives(primitives, object_origin);
                     outline.append_background_primitives(primitives, object_origin);
-                    self.append_outline_objects(outline, object_origin, primitives);
+                    self.append_outline_objects(outline, object_origin, None, primitives);
                     for (index, paragraph) in outline.paragraphs.iter().enumerate() {
                         outline.append_paragraph_primitives(
                             index,

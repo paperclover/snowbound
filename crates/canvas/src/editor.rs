@@ -1,6 +1,6 @@
 use crate::{
     date::PageDate,
-    document::{DocumentEdit, TextDocument, TextPosition, edited_nodes, leaves},
+    document::{DocumentEdit, TextDocument, TextPosition, descendants, edited_nodes, leaves},
     layout::{LayoutError, TextEngine},
     outline::{
         Arrange, OutlineLayout, ParagraphLayout, arrange, indentation, outline_layout,
@@ -1278,11 +1278,60 @@ impl CanvasEditor {
     /// Origin and size of a picture the user can select; OneNote passes clicks through
     /// backgrounds.
     pub fn image_placement(&self, id: ExGuid) -> Option<([f32; 2], [f32; 2])> {
-        let layout = &self.image(id)?.layout;
-        Some((
-            [layout.x.unwrap_or(0.0), layout.y.unwrap_or(0.0)],
-            [layout.max_width?, layout.max_height?],
-        ))
+        if let Some(image) = self.image(id) {
+            let layout = &image.layout;
+            return Some((
+                [layout.x.unwrap_or(0.0), layout.y.unwrap_or(0.0)],
+                [layout.max_width?, layout.max_height?],
+            ));
+        }
+        let (outline, ..) = self.outline_picture(id)?;
+        let outline = self.outlines.iter().find(|item| item.id == outline)?;
+        let [x0, y0, x1, y1] = outline.shaped.objects.iter().find(|o| o.id == id)?.rect;
+        let origin = outline.origin();
+        Some(([origin[0] + x0, origin[1] + y0], [x1 - x0, y1 - y0]))
+    }
+
+    /// Whether the picture sits in an outline's flow, where only its size can change.
+    pub fn image_in_outline(&self, id: ExGuid) -> bool {
+        self.outline_picture(id).is_some()
+    }
+
+    /// A picture held as a paragraph: its outline, the paragraph's container and index there,
+    /// and the paragraph.
+    fn outline_picture(
+        &self,
+        id: ExGuid,
+    ) -> Option<(ExGuid, Option<ExGuid>, usize, &PageParagraph)> {
+        self.outlines.iter().find_map(|outline| {
+            descendants(outline.document.nodes(), None).find_map(|(container, index, node)| {
+                matches!(&node.content, onestore::page::ParagraphContent::Image(image) if image.id == id)
+                    .then_some((outline.id, container, index, node))
+            })
+        })
+    }
+
+    /// Replaces a picture paragraph through the outline's text history.
+    fn edit_outline_picture(
+        &mut self,
+        engine: &mut TextEngine,
+        id: ExGuid,
+        replacement: Option<PageParagraph>,
+    ) -> Result<(), EditorError> {
+        let (outline, container, index, _) =
+            self.outline_picture(id).ok_or(EditError::InvalidRange)?;
+        self.focus_outline(outline)?;
+        let selection = self.selection();
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index..index + 1,
+                replacement: replacement.into_iter().collect(),
+            },
+            selection,
+        )
     }
 
     fn image(&self, id: ExGuid) -> Option<&onestore::page::Image> {
@@ -1299,17 +1348,31 @@ impl CanvasEditor {
         })
     }
 
-    /// Moves a picture, and resizes it when `size` differs from the stored size.
+    /// Moves a picture, and resizes it when `size` differs from the stored size. A picture in
+    /// an outline's flow keeps its place.
     pub fn place_image(
         &mut self,
+        engine: &mut TextEngine,
         id: ExGuid,
         origin: [f32; 2],
         size: [f32; 2],
-    ) -> Result<(), EditError> {
+    ) -> Result<(), EditorError> {
         if !origin.iter().chain(&size).all(|value| value.is_finite())
             || size.iter().any(|value| *value <= 0.0)
         {
-            return Err(EditError::InvalidRange);
+            return Err(EditError::InvalidRange.into());
+        }
+        if let Some((.., node)) = self.outline_picture(id) {
+            let mut node = node.clone();
+            let onestore::page::ParagraphContent::Image(image) = &mut node.content else {
+                unreachable!()
+            };
+            if crate::outline::image_size(image) == Some(size) {
+                return Ok(());
+            }
+            [image.layout.max_width, image.layout.max_height] = size.map(Some);
+            image.layout.width_set_by_user = Some(true);
+            return self.edit_outline_picture(engine, id, Some(node));
         }
         let image = self.image(id).ok_or(EditError::InvalidRange)?;
         let mut layout = image.layout.clone();
@@ -1340,6 +1403,44 @@ impl CanvasEditor {
         id: ExGuid,
         forward: bool,
     ) -> Result<bool, EditorError> {
+        if let Some((outline, ..)) = self.outline_picture(id) {
+            // Within an outline, the caret goes to the text beside the picture.
+            let source = self
+                .outlines
+                .iter()
+                .find(|item| item.id == outline)
+                .unwrap();
+            let mut leaf = 0;
+            let mut before = None;
+            let mut after = None;
+            let mut passed = false;
+            for (_, _, node) in descendants(source.document.nodes(), None) {
+                match &node.content {
+                    onestore::page::ParagraphContent::Image(image) if image.id == id => {
+                        passed = true
+                    }
+                    onestore::page::ParagraphContent::Text(text) => {
+                        let end = text.text.utf16_offset(text.text.text().len())?;
+                        if passed {
+                            after = after.or(Some((leaf, 0)));
+                        } else {
+                            before = Some((leaf, end));
+                        }
+                        leaf += 1;
+                    }
+                    _ => {}
+                }
+            }
+            let Some((paragraph, offset)) = (if forward { after } else { before }) else {
+                return Ok(false);
+            };
+            self.focus_outline(outline)?;
+            self.select(Selection {
+                positions: [TextPosition { paragraph, offset }; 2],
+                affinities: [Affinity::Downstream; 2],
+            })?;
+            return Ok(true);
+        }
         let index = self
             .objects
             .iter()
@@ -1367,7 +1468,10 @@ impl CanvasEditor {
         Ok(true)
     }
 
-    pub fn remove_image(&mut self, id: ExGuid) -> Result<(), EditError> {
+    pub fn remove_image(&mut self, engine: &mut TextEngine, id: ExGuid) -> Result<(), EditorError> {
+        if self.outline_picture(id).is_some() {
+            return self.edit_outline_picture(engine, id, None);
+        }
         let index = self
             .objects
             .iter()
@@ -4538,22 +4642,22 @@ mod tests {
             Some(([468.75, 86.4], [333.0, 200.1]))
         );
         assert!(editor.image_placement(background_id).is_none());
-        assert_eq!(
-            editor.place_image(background_id, [0.0; 2], [10.0; 2]),
-            Err(EditError::InvalidRange)
-        );
-        assert_eq!(
-            editor.place_image(id, [0.0; 2], [0.0, 10.0]),
-            Err(EditError::InvalidRange)
-        );
+        assert!(matches!(
+            editor.place_image(&mut engine, background_id, [0.0; 2], [10.0; 2]),
+            Err(EditorError::Edit(EditError::InvalidRange))
+        ));
+        assert!(matches!(
+            editor.place_image(&mut engine, id, [0.0; 2], [0.0, 10.0]),
+            Err(EditorError::Edit(EditError::InvalidRange))
+        ));
         editor
-            .place_image(id, [513.75, 104.4], [333.0, 200.1])
+            .place_image(&mut engine, id, [513.75, 104.4], [333.0, 200.1])
             .unwrap();
         let moved = stored(&editor);
         assert_eq!([moved.x, moved.y], [Some(513.75), Some(104.4)]);
         assert_eq!(moved.width_set_by_user, None);
         editor
-            .place_image(id, [513.75, 104.4], [281.8, 169.4])
+            .place_image(&mut engine, id, [513.75, 104.4], [281.8, 169.4])
             .unwrap();
         let resized = stored(&editor);
         assert_eq!(
@@ -4579,11 +4683,11 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let before = ids(&editor);
-        assert_eq!(
-            editor.remove_image(background_id),
-            Err(EditError::InvalidRange)
-        );
-        editor.remove_image(id).unwrap();
+        assert!(matches!(
+            editor.remove_image(&mut engine, background_id),
+            Err(EditorError::Edit(EditError::InvalidRange))
+        ));
+        editor.remove_image(&mut engine, id).unwrap();
         assert!(editor.image_placement(id).is_none());
         assert_eq!(ids(&editor), [background_id]);
         assert!(editor.undo(&mut engine).unwrap());
@@ -4732,6 +4836,53 @@ mod tests {
         assert!(editor.undo(&mut engine).unwrap());
         assert_eq!(editor.active_outline().shaped().paragraphs.len(), 2);
         assert_eq!(editor.active_outline().shaped().objects.len(), 1);
+
+        // Selected, it resizes and deletes in place through the outline's history.
+        assert!(editor.image_in_outline(image.id));
+        let (origin, size) = editor.image_placement(image.id).unwrap();
+        assert_eq!(size, [40.0, 30.0]);
+        editor
+            .place_image(&mut engine, image.id, [0.0; 2], [80.0, 60.0])
+            .unwrap();
+        assert_eq!(
+            editor.image_placement(image.id),
+            Some((origin, [80.0, 60.0]))
+        );
+        let shaped = editor.active_outline().shaped();
+        assert!(shaped.paragraphs[1].origin[1] >= shaped.objects[0].bottom);
+        assert!(editor.step_from_image(&mut engine, image.id, true).unwrap());
+        assert_eq!(
+            editor.selection().positions[0],
+            TextPosition {
+                paragraph: 1,
+                offset: 0
+            }
+        );
+        assert!(
+            editor
+                .step_from_image(&mut engine, image.id, false)
+                .unwrap()
+        );
+        assert_eq!(
+            editor.selection().positions[0],
+            TextPosition {
+                paragraph: 0,
+                offset: 6
+            }
+        );
+        editor.remove_image(&mut engine, image.id).unwrap();
+        assert!(editor.image_placement(image.id).is_none());
+        assert!(editor.active_outline().shaped().objects.is_empty());
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(
+            editor.image_placement(image.id),
+            Some((origin, [80.0, 60.0]))
+        );
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(
+            editor.image_placement(image.id),
+            Some((origin, [40.0, 30.0]))
+        );
     }
 
     #[test]
