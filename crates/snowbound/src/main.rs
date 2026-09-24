@@ -1753,7 +1753,7 @@ fn page_hit_test(
             || outline.layouts().any(|(_, paragraph)| {
                 paragraph.tags.iter().any(|tag| {
                     let origin = outline.origin();
-                    let x = origin[0] + tag.origin[0];
+                    let x = origin[0] + outline.shaped().tag_column_offset() + tag.origin[0];
                     let y = origin[1] + paragraph.origin[1] + tag.origin[1];
                     let size = canvas::outline::ParagraphTag::SIZE;
                     (x..=x + size).contains(&local[0]) && (y..=y + size).contains(&local[1])
@@ -2211,7 +2211,10 @@ fn append_outline<'a>(
         for tag in &paragraph.tags {
             primitives.push(Primitive::Tag {
                 tag,
-                origin: [x, y + paragraph_origin[1]],
+                origin: [
+                    x + outline.shaped().tag_column_offset(),
+                    y + paragraph_origin[1],
+                ],
             });
         }
     }

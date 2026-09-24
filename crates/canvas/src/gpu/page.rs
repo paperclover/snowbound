@@ -497,7 +497,10 @@ impl PageScene {
                         for tag in &paragraph.tags {
                             primitives.push(Primitive::Tag {
                                 tag,
-                                origin: [object_origin[0], object_origin[1] + paragraph.origin[1]],
+                                origin: [
+                                    object_origin[0] + outline.tag_column_offset(),
+                                    object_origin[1] + paragraph.origin[1],
+                                ],
                             });
                         }
                     }

@@ -12,6 +12,10 @@ pub(crate) fn rasterize(icon: TagIcon, size: f32, phase: [u8; 2]) -> Image {
         ),
         TagIcon::Question => (include_str!("../../assets/tags/question.svg"), None),
         TagIcon::Music => (include_str!("../../assets/tags/music.svg"), None),
+        TagIcon::Exclamation => (include_str!("../../assets/tags/exclamation.svg"), None),
+        TagIcon::RedSquare => (include_str!("../../assets/tags/red-square.svg"), None),
+        TagIcon::YellowSquare => (include_str!("../../assets/tags/yellow-square.svg"), None),
+        TagIcon::BlueSquare => (include_str!("../../assets/tags/blue-square.svg"), None),
     };
     let width = (size + 1.0).ceil() as u32;
     let mut pixels = vec![[0.0_f32; 4]; (width * width) as usize];
@@ -107,6 +111,10 @@ mod tests {
                     TagIcon::CheckBox { checked: true },
                     TagIcon::Question,
                     TagIcon::Music,
+                    TagIcon::Exclamation,
+                    TagIcon::RedSquare,
+                    TagIcon::YellowSquare,
+                    TagIcon::BlueSquare,
                 ] {
                     let image = rasterize(icon, size, phase);
                     assert_eq!(

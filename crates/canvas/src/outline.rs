@@ -74,6 +74,10 @@ pub enum TagIcon {
     CheckBox { checked: bool },
     Question,
     Music,
+    Exclamation,
+    RedSquare,
+    YellowSquare,
+    BlueSquare,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -155,7 +159,50 @@ impl ParagraphLayout {
         if !spacing.is_finite() || spacing < 0.0 {
             return Err(LayoutError::InvalidSpacing);
         }
-        let mut text = engine.layout(projection.text(), width - indent)?;
+        // Stored newest first; OneNote lists and paints tags oldest first.
+        let mut tag_definitions = paragraph
+            .tags
+            .iter()
+            .chain(&source.tags)
+            .map(
+                |tag| match tag.definition.as_ref().and_then(|id| definitions.get(id)) {
+                    Some(Definition {
+                        kind:
+                            Kind::TagDefinition {
+                                shape,
+                                label,
+                                color,
+                                highlight,
+                                ..
+                            },
+                        ..
+                    }) if tag.status & 4 == 0 => Ok((tag, *shape, label, *color, *highlight)),
+                    _ => Err(LayoutError::UnsupportedContent),
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        tag_definitions.reverse();
+        // The newest tag that sets a colour wins.
+        let color = tag_definitions.iter().rev().find_map(|tag| tag.3);
+        let highlight = tag_definitions.iter().rev().find_map(|tag| tag.4);
+        let mut text = if color.is_none() && highlight.is_none() {
+            engine.layout(projection.text(), width - indent)?
+        } else {
+            let visible = projection.text();
+            let mut start = 0;
+            let runs = visible.spans().iter().map(|span| {
+                let mut format = span.format.clone();
+                format.color = color.or(format.color);
+                format.highlight = highlight.or(format.highlight);
+                let run = (visible.text()[start..span.end].to_owned(), format);
+                start = span.end;
+                run
+            });
+            engine.layout(
+                &Paragraph::from_runs(runs.collect::<Vec<_>>()),
+                width - indent,
+            )?
+        };
         let mut markers = Vec::new();
         let mut marker_x = indent;
         for id in paragraph.lists.iter().rev() {
@@ -194,37 +241,26 @@ impl ParagraphLayout {
         }
         text.minimum_line_height(format.line_spacing.unwrap_or(0.0))?;
         let mut tags = Vec::new();
-        for tag in paragraph.tags.iter().chain(&source.tags) {
-            let Some(Definition {
-                kind:
-                    Kind::TagDefinition {
-                        shape,
-                        label,
-                        color,
-                        highlight,
-                        ..
-                    },
-                ..
-            }) = tag.definition.as_ref().and_then(|id| definitions.get(id))
-            else {
-                return Err(LayoutError::UnsupportedContent);
-            };
-            if color.is_some() || highlight.is_some() || tag.status & 4 != 0 {
-                return Err(LayoutError::UnsupportedContent);
-            }
+        for tag in &tag_definitions {
+            let (tag, shape, label) = (tag.0, tag.1, tag.2);
             let icon = match shape {
                 Some(0) => continue,
                 Some(3) => TagIcon::CheckBox {
                     checked: tag.status & 1 != 0,
                 },
                 Some(15) => TagIcon::Question,
+                Some(17) => TagIcon::Exclamation,
+                Some(100) => TagIcon::RedSquare,
+                Some(101) => TagIcon::YellowSquare,
+                Some(102) => TagIcon::BlueSquare,
                 Some(121) => TagIcon::Music,
                 _ => return Err(LayoutError::UnsupportedContent),
             };
-            marker_x -= 20.25;
+            // Later tags follow the first to its right, toward the text.
+            let x = marker_x - 20.25 + 12.0 * tags.len() as f32;
             tags.push(ParagraphTag {
                 icon,
-                origin: [marker_x, 0.0],
+                origin: [x, 0.0],
                 label: label.clone().unwrap_or_default(),
                 disabled: tag.status & 2 != 0,
             });
@@ -292,6 +328,18 @@ pub(crate) fn arrange<'a>(
 }
 
 impl OutlineLayout {
+    /// OneNote gives an outline one tag column, as wide as its most-tagged paragraph needs; each
+    /// paragraph's tags start at the column's left edge. Tag origins assume a one-tag column.
+    pub fn tag_column_offset(&self) -> f32 {
+        let widest = self
+            .paragraphs
+            .iter()
+            .map(|p| p.tags.len())
+            .max()
+            .unwrap_or(0);
+        -12.0 * widest.saturating_sub(1) as f32
+    }
+
     /// Innermost table cell containing a visible paragraph index.
     pub fn paragraph_cell(&self, index: usize) -> Option<&CellLayout> {
         self.tables.iter().rev().find_map(|table| {
@@ -932,6 +980,10 @@ mod tests {
         for (shape, expected) in [
             (3, TagIcon::CheckBox { checked: true }),
             (15, TagIcon::Question),
+            (17, TagIcon::Exclamation),
+            (100, TagIcon::RedSquare),
+            (101, TagIcon::YellowSquare),
+            (102, TagIcon::BlueSquare),
             (121, TagIcon::Music),
         ] {
             definitions.insert(
@@ -998,6 +1050,75 @@ mod tests {
             ParagraphLayout::shape(&mut engine, &node, 120.0, &[18.0, 0.0, 27.0], &definitions),
             Err(LayoutError::UnsupportedContent)
         ));
+    }
+
+    #[test]
+    fn tags_paint_oldest_first_and_the_newest_colour_wins() {
+        use onestore::document::Tag;
+        let mut definitions = BTreeMap::new();
+        let mut tag = |n, shape, color| {
+            let id = ExGuid {
+                n,
+                ..ExGuid::default()
+            };
+            definitions.insert(
+                id,
+                Definition {
+                    kind: Kind::TagDefinition {
+                        shape: Some(shape),
+                        label: None,
+                        action_type: None,
+                        color,
+                        highlight: None,
+                    },
+                    format: Format::default(),
+                },
+            );
+            Tag {
+                definition: Some(id),
+                status: 1,
+                action_type: None,
+                created: None,
+                completed: None,
+                start: None,
+                due: None,
+                task_id: None,
+                extra_set: 0,
+            }
+        };
+        let [action, mood, project, question] = [
+            tag(1, 0, Some(0x0080_0080)),
+            tag(2, 0, Some(0x0080_8000)),
+            tag(3, 100, None),
+            tag(4, 15, None),
+        ];
+        let mut node = paragraph(1, "Lyric", 1, None);
+        // As stored: newest first.
+        node.text_mut().unwrap().tags = vec![question, project, mood, action];
+        let mut engine = TextEngine::default();
+        let shaped =
+            ParagraphLayout::shape(&mut engine, &node, 200.0, &[0.0, 0.0], &definitions).unwrap();
+        assert_eq!(
+            shaped
+                .tags
+                .iter()
+                .map(|tag| (tag.icon, tag.origin[0]))
+                .collect::<Vec<_>>(),
+            [(TagIcon::RedSquare, -20.25), (TagIcon::Question, -8.25)]
+        );
+        let colors: Vec<_> = shaped
+            .text
+            .lines()
+            .flat_map(|(line, _)| line.items().collect::<Vec<_>>())
+            .filter_map(|item| match item {
+                parley::PositionedLayoutItem::GlyphRun(run) => Some(run.style().brush.color),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(colors, [0x0080_8000]);
+        assert_eq!(shaped.projection.text().spans()[0].format.color, None);
+        let outline = OutlineLayout::new(vec![shaped], 200.0, false).unwrap();
+        assert_eq!(outline.tag_column_offset(), -12.0);
     }
 
     #[test]

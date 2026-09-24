@@ -366,6 +366,10 @@ impl Accessibility {
                                 TagIcon::CheckBox { .. } => "To do",
                                 TagIcon::Question => "Question",
                                 TagIcon::Music => "Music",
+                                TagIcon::Exclamation => "Critical",
+                                TagIcon::RedSquare => "Project A",
+                                TagIcon::YellowSquare => "Project B",
+                                TagIcon::BlueSquare => "Project C",
                             };
                             let label = if tag.label.is_empty() {
                                 fallback
