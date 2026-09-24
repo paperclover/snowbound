@@ -624,6 +624,11 @@ enum History {
         image: ExGuid,
         layout: onestore::document::Layout,
     },
+    /// Restores the picture at `index` in paint order, or removes the one there when `None`.
+    Picture {
+        index: usize,
+        image: Option<Box<onestore::page::Image>>,
+    },
     Remove {
         outline: onestore::ExGuid,
         focus: RestoreFocus,
@@ -1331,6 +1336,62 @@ impl CanvasEditor {
         self.undo.push(History::Image {
             image: id,
             layout: previous,
+        });
+        self.redo.clear();
+        Ok(())
+    }
+
+    /// Leaves a picture as OneNote's Left and Right arrows do: the caret goes to the end of the
+    /// text outline before it in page order, or to the start of the one after. False when there
+    /// is none.
+    pub fn step_from_image(
+        &mut self,
+        engine: &mut TextEngine,
+        id: ExGuid,
+        forward: bool,
+    ) -> Result<bool, EditorError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| matches!(object, page::Content::Image(image) if image.id == id))
+            .ok_or(EditError::InvalidRange)?;
+        let editable = |object: &page::Content| match object {
+            page::Content::Editable(outline) => Some(*outline),
+            _ => None,
+        };
+        let outline = if forward {
+            self.objects[index + 1..].iter().find_map(editable)
+        } else {
+            self.objects[..index].iter().rev().find_map(editable)
+        };
+        let Some(outline) = outline else {
+            return Ok(false);
+        };
+        self.focus_outline(outline)?;
+        let edge = if forward {
+            Movement::DocumentStart
+        } else {
+            Movement::DocumentEnd
+        };
+        self.move_selection(engine, edge, false)?;
+        Ok(true)
+    }
+
+    pub fn remove_image(&mut self, id: ExGuid) -> Result<(), EditError> {
+        let index = self
+            .objects
+            .iter()
+            .position(|object| {
+                matches!(object, page::Content::Image(image) if image.id == id && !image.background)
+            })
+            .ok_or(EditError::InvalidRange)?;
+        self.finish_composition();
+        let page::Content::Image(image) = self.objects.remove(index) else {
+            unreachable!()
+        };
+        self.undo.push(History::Picture {
+            index,
+            image: Some(Box::new(image)),
         });
         self.redo.clear();
         Ok(())
@@ -2315,6 +2376,13 @@ impl CanvasEditor {
                 self.outlines.iter().any(|item| item.id == *outline)
             }
             History::Image { image, .. } => self.image(*image).is_some(),
+            History::Picture {
+                index,
+                image: Some(_),
+            } => *index <= self.objects.len(),
+            History::Picture { index, image: None } => {
+                matches!(self.objects.get(*index), Some(page::Content::Image(_)))
+            }
             History::Remove { outline, focus } => {
                 self.outlines.iter().any(|item| item.id == *outline)
                     && match focus {
@@ -2465,6 +2533,19 @@ impl CanvasEditor {
             History::Image { image, layout } => History::Image {
                 image,
                 layout: std::mem::replace(&mut self.image_mut(image).unwrap().layout, layout),
+            },
+            History::Picture { index, image } => History::Picture {
+                index,
+                image: match image {
+                    Some(image) => {
+                        self.objects.insert(index, page::Content::Image(*image));
+                        None
+                    }
+                    None => match self.objects.remove(index) {
+                        page::Content::Image(image) => Some(Box::new(image)),
+                        _ => unreachable!(),
+                    },
+                },
             },
             History::Remove { outline, focus } => {
                 let index = self
@@ -4479,6 +4560,88 @@ mod tests {
         assert!(editor.redo(&mut engine).unwrap());
         assert!(editor.redo(&mut engine).unwrap());
         assert_eq!(stored(&editor), resized);
+
+        let ids = |editor: &CanvasEditor| {
+            editor
+                .page()
+                .unwrap()
+                .objects
+                .iter()
+                .map(PageObject::id)
+                .collect::<Vec<_>>()
+        };
+        let before = ids(&editor);
+        assert_eq!(
+            editor.remove_image(background_id),
+            Err(EditError::InvalidRange)
+        );
+        editor.remove_image(id).unwrap();
+        assert!(editor.image_placement(id).is_none());
+        assert_eq!(ids(&editor), [background_id]);
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(ids(&editor), before);
+        assert_eq!(stored(&editor), resized);
+        assert!(editor.redo(&mut engine).unwrap());
+        assert_eq!(ids(&editor), [background_id]);
+    }
+
+    #[test]
+    fn arrows_leave_a_picture_for_the_neighbouring_outlines_in_page_order() {
+        use onestore::page::{Image, Page, PageObject};
+        let mut engine = TextEngine::default();
+        let outline = |engine: &mut TextEngine, text: &str, x| {
+            PageObject::Outline(
+                TextOutline::new(
+                    engine,
+                    TextDocument::new(vec![Paragraph::new(text.into(), Default::default())])
+                        .unwrap(),
+                    120.0,
+                    [x, 0.0],
+                )
+                .unwrap()
+                .snapshot(),
+            )
+        };
+        let picture = Image {
+            size: None,
+            id: onestore::page::text::new_id().unwrap(),
+            layout: onestore::document::Layout {
+                x: Some(200.0),
+                y: Some(0.0),
+                max_width: Some(40.0),
+                max_height: Some(40.0),
+                ..Default::default()
+            },
+            bytes: Some(std::sync::Arc::from(b"deferred image payload".as_slice())),
+            alt: None,
+            background: false,
+        };
+        let id = picture.id;
+        let objects = vec![
+            outline(&mut engine, "Before", 0.0),
+            PageObject::Image(picture),
+            outline(&mut engine, "After", 300.0),
+        ];
+        let [before, after] = [0, 2].map(|index| objects[index].id());
+        let mut editor = CanvasEditor::from_page(
+            Page {
+                title: String::new(),
+                identity: None,
+                created: None,
+                margin_origin: [36.0, 14.4],
+                definitions: BTreeMap::new(),
+                objects,
+            },
+            &mut engine,
+        )
+        .unwrap();
+        let caret = |paragraph, offset| [TextPosition { paragraph, offset }; 2];
+        assert!(editor.step_from_image(&mut engine, id, false).unwrap());
+        assert_eq!(editor.active_outline().id, before);
+        assert_eq!(editor.selection().positions, caret(0, 6));
+        assert!(editor.step_from_image(&mut engine, id, true).unwrap());
+        assert_eq!(editor.active_outline().id, after);
+        assert_eq!(editor.selection().positions, caret(0, 0));
     }
 
     #[test]

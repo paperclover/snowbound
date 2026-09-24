@@ -889,6 +889,26 @@ impl State {
         let shift = self.modifiers.shift_key();
         let command = self.modifiers.super_key();
         let option = self.modifiers.alt_key();
+        if let Some(ObjectFocus::Image(id)) = self.object_focus
+            && matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete))
+        {
+            self.editor.remove_image(id)?;
+            self.set_object_focus(None);
+            return self.changed();
+        }
+        if let Some(ObjectFocus::Image(id)) = self.object_focus
+            && !(shift || command || option || self.modifiers.control_key())
+            && let Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) = key
+            && self.editor.step_from_image(
+                &mut self.engine,
+                id,
+                key == &Key::Named(NamedKey::ArrowRight),
+            )?
+        {
+            self.set_object_focus(None);
+            self.reveal_focus()?;
+            return self.changed();
+        }
         if let Some(focus) = self.object_focus {
             let undo = matches!(focus, ObjectFocus::Image(_))
                 && command
@@ -1019,6 +1039,11 @@ impl State {
                         self.editor.redo(&mut self.engine)?;
                     } else {
                         self.editor.undo(&mut self.engine)?;
+                    }
+                    if let Some(ObjectFocus::Image(id)) = self.object_focus
+                        && self.editor.image_placement(id).is_none()
+                    {
+                        self.set_object_focus(None);
                     }
                 }
                 "c" | "x" => {
