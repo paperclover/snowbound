@@ -135,6 +135,7 @@ impl TextEngine {
         let mut start = 0;
         for (index, span) in paragraph.spans().iter().enumerate() {
             let format = &span.format;
+            let link = format.hyperlink == Some(true);
             let size = format.font_size.unwrap_or(11.0);
             if !size.is_finite() || size <= 0.0 {
                 return Err(LayoutError::InvalidFontSize);
@@ -160,10 +161,15 @@ impl TextEngine {
                     FontStyle::Normal
                 }),
                 StyleProperty::Brush(TextBrush {
-                    color: format.color.unwrap_or(0),
+                    // Links take OneNote's blue unless given a colour of their own.
+                    color: match format.color {
+                        Some(color) if color != 0xff000000 => color,
+                        _ if link => 0x00ff0000,
+                        _ => 0,
+                    },
                     highlight: format.highlight.filter(|color| *color != 0xff000000),
                 }),
-                StyleProperty::Underline(format.underline.unwrap_or(false)),
+                StyleProperty::Underline(format.underline.unwrap_or(false) || link),
                 StyleProperty::Strikethrough(format.strike.unwrap_or(false)),
             ];
             for property in properties {
@@ -552,6 +558,43 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(fonts.len(), 1);
+    }
+
+    #[test]
+    fn links_draw_blue_and_underlined_unless_coloured() {
+        let mut engine = TextEngine::default();
+        let link = Format {
+            hyperlink: Some(true),
+            ..Format::default()
+        };
+        let layout = engine
+            .layout(
+                &Paragraph::from_runs([
+                    ("plain ".into(), Format::default()),
+                    ("link".into(), link.clone()),
+                    (
+                        " red".into(),
+                        Format {
+                            color: Some(0x0000_00ff),
+                            ..link
+                        },
+                    ),
+                ]),
+                300.0,
+            )
+            .unwrap();
+        let runs: Vec<_> = layout
+            .lines()
+            .flat_map(|(line, _)| line.items().collect::<Vec<_>>())
+            .filter_map(|item| match item {
+                PositionedLayoutItem::GlyphRun(run) => {
+                    let style = run.style();
+                    Some((style.brush.color, style.underline.is_some()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs, [(0, false), (0x00ff_0000, true), (0x0000_00ff, true)]);
     }
 
     #[test]
