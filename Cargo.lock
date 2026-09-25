@@ -395,17 +395,14 @@ version = "0.1.0"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
- "bytemuck",
- "image",
+ "draw",
  "onestore",
  "parley",
  "png",
  "pollster",
- "roxmltree",
  "serde",
  "serde_json",
  "skrifa",
- "swash",
  "wgpu",
 ]
 
@@ -723,6 +720,20 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "draw"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "image",
+ "parley",
+ "png",
+ "pollster",
+ "roxmltree",
+ "swash",
+ "wgpu",
+]
 
 [[package]]
 name = "equivalent"
@@ -2632,6 +2643,7 @@ dependencies = [
  "accesskit_winit",
  "arboard",
  "canvas",
+ "draw",
  "notebook",
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",

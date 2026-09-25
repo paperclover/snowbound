@@ -1,7 +1,9 @@
 use super::*;
 use crate::layout::TextEngine;
+use draw::Renderer;
 use onestore::page::Page;
 use onestore::page::text::Paragraph;
+use parley::fontique::Blob;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -54,10 +56,11 @@ fn renderer_cost() {
     });
     let view = target.create_view(&Default::default());
     let mut renderer = Renderer::new(device, queue, format);
+    let occupancy = renderer.occupancy();
     eprintln!(
         "canvas_gpu_allocated_bytes\tatlas\t{}\tvertex_buffer\t{}\ttarget\t{}",
-        u64::from(renderer.atlas.width()) * u64::from(renderer.atlas.height()) * 4,
-        renderer.vertex_buffer.size(),
+        occupancy.atlas_bytes,
+        occupancy.vertex_buffer_bytes,
         u64::from(size[0]) * u64::from(size[1]) * 4
     );
     for phase in [
@@ -74,12 +77,12 @@ fn renderer_cost() {
         }
         if phase.starts_with("offscreen") {
             renderer.clear_glyph_cache();
-            renderer.images.clear();
+            renderer.clear_images();
         }
         for sample in 0..32 {
             if phase == "evict" {
                 renderer.clear_glyph_cache();
-                renderer.images.clear();
+                renderer.clear_images();
             }
             let mut viewport = Viewport {
                 size,
@@ -100,14 +103,16 @@ fn renderer_cost() {
             if let Some(scene) = &scene {
                 scene.append_primitives(&mut primitives, [0.0; 2]).unwrap();
             } else {
-                primitives.push(Primitive::Text {
+                primitives.push(draw::Primitive::Text {
                     clip: None,
-                    layout: layout.as_ref().unwrap(),
+                    text: layout.as_ref().unwrap(),
                     origin: [36.0, 90.0],
                 });
             }
             let start = Instant::now();
-            renderer.draw(&view, viewport, &primitives).unwrap();
+            renderer
+                .draw(&view, size, [1.0; 4], &[viewport.layer(&primitives)])
+                .unwrap();
             let submitted = start.elapsed().as_nanos();
             renderer
                 .device
@@ -117,26 +122,20 @@ fn renderer_cost() {
                 })
                 .unwrap();
             let completed = start.elapsed().as_nanos();
-            let image_bytes: u64 = renderer.images.values().map(|image| image.bytes).sum();
-            let atlas_texels: u64 = renderer
-                .glyphs
-                .values()
-                .flatten()
-                .map(|glyph| u64::from(glyph.width) * u64::from(glyph.height))
-                .sum();
-            assert!(renderer.glyphs.len() <= MAX_GLYPHS);
-            assert!(renderer.images.len() <= MAX_IMAGES && image_bytes <= MAX_IMAGE_BYTES);
-            assert!(renderer.vertices.len() <= MAX_VERTICES);
+            let occupancy = renderer.occupancy();
+            assert!(occupancy.within_budget);
             eprintln!(
-                "canvas_gpu_sample\t{phase}\t{sample}\t{submitted}\t{completed}\t{}\t{atlas_texels}\t{}\t{image_bytes}\t{}\t{}\t{}\t{}\t{}\t{}",
-                renderer.glyphs.len(),
-                renderer.images.len(),
-                renderer.vertices.len(),
-                renderer.batches.len(),
-                renderer.vertices.capacity() * size_of::<Vertex>(),
-                renderer.batches.capacity() * size_of::<Batch>(),
-                renderer.glyphs.capacity(),
-                renderer.images.capacity()
+                "canvas_gpu_sample\t{phase}\t{sample}\t{submitted}\t{completed}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                occupancy.glyphs,
+                occupancy.atlas_texels,
+                occupancy.images,
+                occupancy.image_bytes,
+                occupancy.vertices,
+                occupancy.batches,
+                occupancy.vertex_capacity_bytes,
+                occupancy.batch_capacity_bytes,
+                occupancy.glyph_capacity,
+                occupancy.image_capacity
             );
         }
     }

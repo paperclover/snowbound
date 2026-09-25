@@ -1,4 +1,4 @@
-use super::{Primitive, RasterImage, RenderError, colorref};
+use super::colorref;
 use crate::editor::ReadOnlyObject;
 use crate::editor::page::Content;
 use crate::{
@@ -6,6 +6,7 @@ use crate::{
     editor::{CanvasEditor, EditorError},
     layout::{LayoutError, TextEngine},
 };
+use draw::{Primitive, RasterImage, RenderError};
 use onestore::page::Page;
 use std::fmt;
 
@@ -197,8 +198,8 @@ impl PageScene {
         for (id, encoded) in payloads {
             let image = RasterImage::decode(encoded.ok_or(SceneError::MissingImage)?)
                 .map_err(SceneError::Image)?;
-            bytes += image.pixels.as_ref().len() as u64;
-            if bytes > super::MAX_IMAGE_BYTES {
+            bytes += image.pixels().len() as u64;
+            if bytes > draw::MAX_IMAGE_BYTES {
                 return Err(SceneError::Image(RenderError::ImageBudget));
             }
             if images.insert(id, image).is_some() {
@@ -253,7 +254,7 @@ impl PageScene {
             }
             if let Some(label) = object.label() {
                 primitives.push(Primitive::Text {
-                    layout: &label.text,
+                    text: &label.text,
                     origin: [origin[0] + label.origin[0], origin[1] + label.origin[1]],
                     clip: None,
                 });
@@ -508,7 +509,7 @@ impl PageScene {
                     });
                     primitives.push(Primitive::Text {
                         clip: None,
-                        layout: &object.label,
+                        text: &object.label,
                         origin: [rect[0] + 8.0, rect[1] + 8.0],
                     });
                     continue;
@@ -632,7 +633,7 @@ impl crate::outline::OutlineLayout {
                     primitives.push(match item {
                         crate::math::MathItem::Text { layout, origin } => Primitive::Text {
                             clip,
-                            layout,
+                            text: layout,
                             origin: [x + origin[0], y + origin[1]],
                         },
                         // As pen strokes, so hairline rules keep a device pixel.
@@ -665,21 +666,26 @@ impl crate::outline::OutlineLayout {
             }
             None => primitives.push(Primitive::Text {
                 clip,
-                layout: &paragraph.text,
+                text: &paragraph.text,
                 origin: [x, y],
             }),
         }
         for (layout, marker) in &paragraph.markers {
             primitives.push(Primitive::Text {
                 clip,
-                layout,
+                text: layout,
                 origin: [origin[0] + marker[0], y + marker[1]],
             });
         }
         for tag in &paragraph.tags {
-            primitives.push(Primitive::Tag {
-                tag,
-                origin: [origin[0] + self.tag_column_offset(), y],
+            primitives.push(Primitive::Icon {
+                sources: super::tag_sources(tag.icon),
+                origin: [
+                    origin[0] + self.tag_column_offset() + tag.origin[0],
+                    y + tag.origin[1],
+                ],
+                size: crate::outline::ParagraphTag::SIZE,
+                opacity: if tag.disabled { 0.45 } else { 1.0 },
             });
         }
     }
@@ -702,7 +708,7 @@ impl crate::outline::OutlineLayout {
                     bounds[3] + origin[1] + 0.375,
                 ],
                 radius: [3.6; 2],
-                stroke: Some(super::Stroke::Solid(0.75)),
+                stroke: Some(draw::Stroke::Solid(0.75)),
                 color,
             });
             for cell in &table.cells {
@@ -738,6 +744,7 @@ impl crate::outline::OutlineLayout {
 mod tests {
     use super::*;
     use crate::editor::TextOutline;
+    use crate::gpu::painted_layout;
     use onestore::page::text::Paragraph;
     use onestore::page::{Image, PageObject};
     use onestore::{ExGuid, document::Layout};
@@ -1154,7 +1161,7 @@ mod tests {
                 primitives
                     .into_iter()
                     .filter_map(|primitive| match primitive {
-                        Primitive::Image { image, rect } => Some((image.pixels.id(), rect)),
+                        Primitive::Image { image, rect } => Some((image.id(), rect)),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
@@ -1555,7 +1562,7 @@ mod tests {
                     for (_, paragraph) in outline.layouts() {
                         primitives.push(Primitive::Text {
                             clip: None,
-                            layout: &paragraph.text,
+                            text: &paragraph.text,
                             origin: [
                                 outline.origin()[0] + paragraph.origin[0] + offset[0],
                                 outline.origin()[1] + paragraph.origin[1] + offset[1],
@@ -1647,19 +1654,31 @@ mod tests {
                     (
                         Primitive::Text {
                             clip: None,
-                            layout: a,
+                            text: a,
                             origin: x,
                         },
                         Primitive::Text {
                             clip: None,
-                            layout: b,
+                            text: b,
                             origin: y,
                         },
                     ) => {
                         assert_eq!(x, y);
                         assert_eq!(
-                            a.lines().next().unwrap().0.metrics().advance,
-                            b.lines().next().unwrap().0.metrics().advance
+                            painted_layout(*a)
+                                .lines()
+                                .next()
+                                .unwrap()
+                                .0
+                                .metrics()
+                                .advance,
+                            painted_layout(*b)
+                                .lines()
+                                .next()
+                                .unwrap()
+                                .0
+                                .metrics()
+                                .advance
                         );
                     }
                     (
@@ -1667,7 +1686,7 @@ mod tests {
                         Primitive::Image { image: b, rect: y },
                     ) => {
                         assert_eq!(x, y);
-                        assert_eq!(a.pixels.as_ref(), b.pixels.as_ref());
+                        assert_eq!(a.pixels(), b.pixels());
                     }
                     _ => panic!("paint order changed"),
                 }
@@ -1675,39 +1694,63 @@ mod tests {
             let Primitive::Image { image, .. } = &actual[1] else {
                 panic!()
             };
-            image_id = image.pixels.id();
+            image_id = image.id();
         }
         let original = editor.active_outline().document().clone();
         editor.insert(&mut engine, "new words ").unwrap();
         {
             let actual = paint_editor(&scene, &editor);
-            let Primitive::Text { layout, .. } = &actual[0] else {
+            let Primitive::Text { text, .. } = &actual[0] else {
                 panic!()
             };
-            let Primitive::Text { layout: before, .. } = &reference_primitives[0] else {
+            let Primitive::Text { text: before, .. } = &reference_primitives[0] else {
                 panic!()
             };
             assert!(
-                layout.lines().next().unwrap().0.metrics().advance
-                    > before.lines().next().unwrap().0.metrics().advance
+                painted_layout(*text)
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .0
+                    .metrics()
+                    .advance
+                    > painted_layout(*before)
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .0
+                        .metrics()
+                        .advance
             );
             let Primitive::Image { image, .. } = &actual[1] else {
                 panic!()
             };
-            assert_eq!(image.pixels.id(), image_id);
+            assert_eq!(image.id(), image_id);
         }
         editor.undo(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document(), &original);
         let actual = paint_editor(&scene, &editor);
-        let Primitive::Text { layout, .. } = &actual[0] else {
+        let Primitive::Text { text, .. } = &actual[0] else {
             panic!()
         };
-        let Primitive::Text { layout: before, .. } = &reference_primitives[0] else {
+        let Primitive::Text { text: before, .. } = &reference_primitives[0] else {
             panic!()
         };
         assert_eq!(
-            layout.lines().next().unwrap().0.metrics().advance,
-            before.lines().next().unwrap().0.metrics().advance
+            painted_layout(*text)
+                .lines()
+                .next()
+                .unwrap()
+                .0
+                .metrics()
+                .advance,
+            painted_layout(*before)
+                .lines()
+                .next()
+                .unwrap()
+                .0
+                .metrics()
+                .advance
         );
         assert!(matches!(
             scene.append_primitives(&mut Vec::new(), [0.0; 2]),
@@ -1846,8 +1889,8 @@ mod tests {
         };
         assert_eq!(*a, [2.0, 5.0, 5.0, 9.0]);
         assert_eq!(*b, [12.0, -15.0, 15.0, -11.0]);
-        assert_eq!(first.pixels.id(), second.pixels.id());
-        assert_eq!(first.pixels.as_ref(), [255, 0, 0, 255]);
+        assert_eq!(first.id(), second.id());
+        assert_eq!(first.pixels(), [255, 0, 0, 255]);
     }
 
     #[test]

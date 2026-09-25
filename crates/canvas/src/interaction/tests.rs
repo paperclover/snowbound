@@ -1,5 +1,6 @@
 use super::*;
 use crate::document::TextDocument;
+use crate::gpu::painted_layout;
 use onestore::document::Format;
 use onestore::page::Page;
 use onestore::page::text::Paragraph;
@@ -385,7 +386,12 @@ fn imported_page_widgets_and_accessibility_follow_edits() {
         .unwrap()
         .into_iter()
         .filter_map(|primitive| match primitive {
-            Primitive::Tag { tag, origin } => Some((tag.clone(), origin)),
+            Primitive::Icon {
+                sources,
+                origin,
+                opacity,
+                ..
+            } => Some(((sources, opacity), origin)),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -427,9 +433,7 @@ fn imported_page_widgets_and_accessibility_follow_edits() {
             let edited_tags = tags(&editor);
             assert_eq!(edited_tags.len(), original_tags.len());
             for ((edited, _), (original, _)) in edited_tags.iter().zip(&original_tags) {
-                assert_eq!(edited.icon, original.icon);
-                assert_eq!(edited.label, original.label);
-                assert_eq!(edited.disabled, original.disabled);
+                assert_eq!(edited, original);
             }
         }
         editor.undo(&mut engine).unwrap();
@@ -891,14 +895,14 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
     .unwrap();
     let color = crate::gpu::colorref(0x00a3a3a3);
     assert!(matches!(primitives[0], Primitive::RoundedRect {
-        stroke: Some(crate::gpu::Stroke::Solid(0.75)), color: actual, ..
+        stroke: Some(draw::Stroke::Solid(0.75)), color: actual, ..
     } if actual == color));
     assert!(matches!(primitives[1], Primitive::Rect { color: actual, .. } if actual == color));
     assert!(matches!(primitives[2], Primitive::Rect { color, .. } if color == COLORS.selection));
     let painted = primitives
         .iter()
         .filter_map(|primitive| match primitive {
-            Primitive::Text { layout, origin, .. } => Some((layout.id(), *origin)),
+            Primitive::Text { text, origin, .. } => Some((painted_layout(*text).id(), *origin)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -948,7 +952,7 @@ fn resize_preview_paints_reflowed_text_without_changing_the_editor() {
     let painted = primitives
         .iter()
         .find_map(|primitive| match primitive {
-            Primitive::Text { layout, .. } => Some(*layout),
+            Primitive::Text { text, .. } => Some(painted_layout(*text)),
             _ => None,
         })
         .unwrap();
@@ -1161,7 +1165,7 @@ fn overlapping_objects_follow_paint_order_through_creation_movement_and_undo() {
                 .unwrap()
                 .into_iter()
                 .filter_map(|p| match p {
-                    Primitive::Text { layout, .. } => Some(layout.id()),
+                    Primitive::Text { text, .. } => Some(painted_layout(text).id()),
                     _ => None,
                 })
                 .collect();
@@ -1213,7 +1217,7 @@ fn overlapping_objects_follow_paint_order_through_creation_movement_and_undo() {
                 .unwrap()
                 .into_iter()
                 .filter_map(|p| match p {
-                    Primitive::Text { layout, .. } => Some(layout.id()),
+                    Primitive::Text { text, .. } => Some(painted_layout(text).id()),
                     _ => None,
                 })
                 .collect();

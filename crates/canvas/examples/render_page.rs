@@ -1,5 +1,6 @@
-use canvas::gpu::{Renderer, Viewport, page::PageScene};
+use canvas::gpu::{Viewport, page::PageScene};
 use canvas::layout::TextEngine;
+use draw::Renderer;
 use onestore::page::Page;
 use onestore::{RevisionIndex, Store, document::Document};
 use std::{env, fs, sync::Arc, time::Duration};
@@ -67,18 +68,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mapped_at_creation: false,
     });
     let mut renderer = Renderer::new(device, queue, format);
+    let viewport = Viewport {
+        size,
+        scale: 96.0 / 72.0,
+        origin: [
+            (36.0 - margin_origin[0]) * (96.0 / 72.0),
+            (14.4 - margin_origin[1]) * (96.0 / 72.0) + origin_y,
+        ],
+    };
     renderer
         .draw(
             &target.create_view(&Default::default()),
-            Viewport {
-                size,
-                scale: 96.0 / 72.0,
-                origin: [
-                    (36.0 - margin_origin[0]) * (96.0 / 72.0),
-                    (14.4 - margin_origin[1]) * (96.0 / 72.0) + origin_y,
-                ],
-            },
-            &primitives,
+            size,
+            [1.0; 4],
+            &[viewport.layer(&primitives)],
         )
         .map_err(|e| format!("Page comparison rendering failed: {e:?}"))?;
     let mut encoder = renderer.device.create_command_encoder(&Default::default());

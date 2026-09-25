@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
-gpu = ["dep:bytemuck", "dep:swash", "dep:wgpu", "dep:image", "dep:roxmltree"]
+gpu = ["dep:draw"]
 # How a page responds to input and presents itself to assistive technology.
 interaction = ["gpu", "dep:accesskit"]
 
@@ -16,11 +16,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 skrifa = "0.44.0"
 
-bytemuck = { version = "1.25", features = ["derive"], optional = true }
-swash = { version = "0.2.10", optional = true }
-wgpu = { workspace = true, optional = true }
-image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"], optional = true }
-roxmltree = { version = "0.21", optional = true }
+draw = { path = "../draw", optional = true }
 accesskit = { version = "0.25.0", optional = true }
 
 [[bin]]
@@ -35,6 +31,7 @@ path = "src/bin/page_probe.rs"
 accesskit_consumer = "0.39.0"
 pollster = "0.4"
 png = "0.18"
+wgpu.workspace = true
 
 [[example]]
 name = "render_page"

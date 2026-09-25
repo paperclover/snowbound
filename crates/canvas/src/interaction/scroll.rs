@@ -1,4 +1,5 @@
-use crate::gpu::{Primitive, Viewport};
+use crate::gpu::Viewport;
+use draw::Primitive;
 
 pub struct Scroll {
     pub min: [f32; 2],

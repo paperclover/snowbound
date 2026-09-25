@@ -1,6 +1,6 @@
 mod macos;
 
-use canvas::gpu::{Renderer, page::PageScene};
+use canvas::gpu::page::PageScene;
 use canvas::interaction::{
     Cursor, Key as PageKey, Modifiers, NamedKey as PageNamedKey, PageView, Request, Response,
     TextColors, accessibility,
@@ -11,6 +11,7 @@ use canvas::{
     editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, TextOutline},
     layout::TextEngine,
 };
+use draw::Renderer;
 use onestore::document::Format;
 use onestore::page::Page;
 use onestore::page::text::Paragraph;
@@ -604,8 +605,9 @@ impl State {
         self.renderer
             .draw(
                 &frame.texture.create_view(&Default::default()),
-                viewport,
-                &primitives,
+                viewport.size,
+                [1.0; 4],
+                &[viewport.layer(&primitives)],
             )
             .map_err(|error| format!("Canvas drawing failed: {error:?}"))?;
         self.window.pre_present_notify();

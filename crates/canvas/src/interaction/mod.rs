@@ -9,7 +9,7 @@ mod scroll;
 #[cfg(test)]
 mod tests;
 
-use crate::gpu::{Primitive, Stroke, Viewport, page::PageScene};
+use crate::gpu::{Viewport, page::PageScene};
 use crate::{
     date::DateField,
     editor::{
@@ -17,6 +17,7 @@ use crate::{
     },
     layout::TextEngine,
 };
+use draw::{Primitive, Stroke};
 use std::{
     error::Error,
     time::{Duration, Instant},

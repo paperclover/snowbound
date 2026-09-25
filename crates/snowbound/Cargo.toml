@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 canvas = { path = "../canvas", features = ["interaction"] }
+draw = { path = "../draw" }
 onestore = { path = "../onestore" }
 notebook = { path = "../notebook" }
 pollster = "0.4"

@@ -10,6 +10,7 @@ The host opens nonempty UTF-8 text as paragraphs in one temporary text outline. 
 python3 tools/canvas/build_macos.py
 "target/Snowbound.app/Contents/MacOS/Snowbound"
 cargo test -p canvas --features interaction
+cargo test -p draw -- --ignored
 cargo test -p canvas --features gpu gpu:: -- --ignored
 ```
 
@@ -30,7 +31,9 @@ onestore::Format
        ↓
 canvas       text edits · inverse history · composition · paragraph layout · structural edits
        ↓
-canvas::gpu     Swash glyph rasterization · custom wgpu quads · bounded glyph/image caches
+canvas::gpu     page scene · text runs, tag icons, pictures and ink as draw primitives
+       ↓
+draw            Swash glyph rasterization · custom wgpu quads · bounded glyph/image caches · layers
        ↓
 canvas::interaction   hit layers · drags · placement grid · picture handles · chrome · key routing
                       · scrolling and zoom · caret blink · AccessKit tree
@@ -40,9 +43,9 @@ snowbound   Winit window and events · AppKit pickers and quit guard · clipboar
 
 The renderer allocates a 2048² RGBA glyph atlas and a 3.5 MiB vertex buffer, limits combined text-glyph and tag-icon entries to 8192, and rebuilds a frame after atlas eviction. Font scaling uses 32 cache entries. These limits bound those caches; they are not a process-memory or worst-case rasterization budget. Drawing and hit-testing share Windows-metric line boxes. First-baseline fidelity and substitute-font metric selection remain experimental; the `windows_*` probe values expose that policy independently from Parley's original metrics.
 
-Drawing accepts a flat sequence of positioned text layouts, tag icons, rectangles and immutable raster images. Consecutive primitives with the same texture share a batch without changing paint order. The host emits selection, composition and caret rectangles through that same interface; repainting multiple placements reuses the retained layout and glyph cache.
+The `draw` crate owns the renderer so the page and application chrome share one pass, atlas and image cache. It paints layers, each a transform and device clip over a flat sequence of glyph runs, SVG icons, rectangles, pen strokes and immutable raster images. Text reaches it through the `Glyphs` trait, which visits positioned glyph runs, so the page's Windows-metric line boxes stay in `canvas` and the renderer never measures text. Consecutive primitives with the same texture and clip share a batch without changing paint order. The host emits selection, composition and caret rectangles through that same interface; repainting multiple placements reuses the retained layout and glyph cache.
 
-Glyph coverage uses quarter-pixel phases with the vertical sign converted to Swash's Y-up coordinates. The GPU readback test checks nine successive quarter-pixel translations by their linear-light ink centroids, then requires identical pixels on repaint, cache eviction and renderer reconstruction on the same device. The native caret experiment exposed the previous inverted vertical phase; correcting raster placement does not change line metrics or wrapping.
+Glyph coverage uses quarter-pixel phases with the vertical sign converted to Swash's Y-up coordinates. The `draw` GPU readback test checks nine successive quarter-pixel translations by their linear-light ink centroids, then requires identical pixels on repaint, cache eviction and renderer reconstruction on the same device. The native caret experiment exposed the previous inverted vertical phase; correcting raster placement does not change line metrics or wrapping.
 
 Image textures have a separate 64 MiB / 256-entry cache. Offscreen images do not upload or consume the active-frame budget; a frame whose visible images exceed that budget returns an error. Under pressure, eviction preserves every image needed by the current frame. PNG/JPEG decoding checks encoded size, dimensions and decoded output size, with a best-effort codec allocation limit. These limits do not bound all CPU buffers or driver allocations. Images use linear filtering of premultiplied, linear-light colors; glyphs retain their own sampling/blending policy. Decoded color values are currently interpreted as sRGB; ICC and orientation metadata are not transformed by this experiment.
 
