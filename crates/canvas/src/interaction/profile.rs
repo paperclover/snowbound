@@ -1,5 +1,10 @@
 use super::*;
-use canvas::document::TextPosition;
+use crate::document::TextDocument;
+use crate::document::TextPosition;
+use onestore::document::Format;
+use onestore::page::Page;
+use onestore::page::text::Paragraph;
+use std::sync::Arc;
 use std::{hint::black_box, process::Command};
 
 fn timed<T>(case: &str, phase: &str, sample: usize, operation: impl FnOnce() -> T) -> T {
@@ -95,8 +100,14 @@ fn editing_cost(
         assert_eq!(changed, 1);
         eprintln!("canvas_count\t{case}\tchanged_layouts\t{sample}\t{changed}");
         let primitives = timed(case, "frame_primitives", sample, || {
-            let primitives =
-                page_primitives(editor, scene, None, None, true, viewport.scale, 1.0).unwrap();
+            let primitives = page_primitives(
+                editor,
+                scene,
+                None,
+                None,
+                super::tests::paint(true, viewport.scale, 1.0),
+            )
+            .unwrap();
             black_box(&primitives);
             primitives.len()
         });
@@ -154,8 +165,14 @@ fn canvas_pipeline_cost() {
                 editing_cost("native", &mut engine, &mut editor, Some(&scene));
             } else {
                 black_box(
-                    page_primitives(&editor, Some(&scene), None, None, false, 96.0 / 72.0, 1.0)
-                        .unwrap(),
+                    page_primitives(
+                        &editor,
+                        Some(&scene),
+                        None,
+                        None,
+                        super::tests::paint(false, 96.0 / 72.0, 1.0),
+                    )
+                    .unwrap(),
                 );
             }
             resident("native", "open", cycle);

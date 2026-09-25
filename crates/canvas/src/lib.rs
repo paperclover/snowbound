@@ -7,6 +7,8 @@ pub mod outline;
 pub mod date;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "interaction")]
+pub mod interaction;
 
 /// Parley's caret affinity mapped onto the page model's hidden-field affinity.
 pub fn affinity(affinity: parley::Affinity) -> onestore::page::text::Affinity {

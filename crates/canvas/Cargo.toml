@@ -6,6 +6,8 @@ publish = false
 
 [features]
 gpu = ["dep:bytemuck", "dep:swash", "dep:wgpu", "dep:image", "dep:roxmltree"]
+# How a page responds to input and presents itself to assistive technology.
+interaction = ["gpu", "dep:accesskit"]
 
 [dependencies]
 onestore = { path = "../onestore" }
@@ -19,6 +21,7 @@ swash = { version = "0.2.10", optional = true }
 wgpu = { workspace = true, optional = true }
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"], optional = true }
 roxmltree = { version = "0.21", optional = true }
+accesskit = { version = "0.25.0", optional = true }
 
 [[bin]]
 name = "layout-probe"
@@ -29,6 +32,7 @@ name = "page-probe"
 path = "src/bin/page_probe.rs"
 
 [dev-dependencies]
+accesskit_consumer = "0.39.0"
 pollster = "0.4"
 png = "0.18"
 

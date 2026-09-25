@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-canvas = { path = "../canvas", features = ["gpu"] }
+canvas = { path = "../canvas", features = ["interaction"] }
 onestore = { path = "../onestore" }
 notebook = { path = "../notebook" }
 pollster = "0.4"
@@ -19,5 +19,3 @@ objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSLocale", "NSTimeZone"] }
 
-[dev-dependencies]
-accesskit_consumer = "0.39.0"

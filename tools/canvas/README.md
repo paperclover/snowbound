@@ -9,7 +9,7 @@ The host opens nonempty UTF-8 text as paragraphs in one temporary text outline. 
 ```sh
 python3 tools/canvas/build_macos.py
 "target/Snowbound.app/Contents/MacOS/Snowbound"
-cargo test -p canvas
+cargo test -p canvas --features interaction
 cargo test -p canvas --features gpu gpu:: -- --ignored
 ```
 
@@ -32,7 +32,10 @@ canvas       text edits · inverse history · composition · paragraph layout ·
        ↓
 canvas::gpu     Swash glyph rasterization · custom wgpu quads · bounded glyph/image caches
        ↓
-snowbound   Winit window/input · AppKit quit guard · clipboard · AccessKit
+canvas::interaction   hit layers · drags · placement grid · picture handles · chrome · key routing
+                      · scrolling and zoom · caret blink · AccessKit tree
+       ↓
+snowbound   Winit window and events · AppKit pickers and quit guard · clipboard · saving
 ```
 
 The renderer allocates a 2048² RGBA glyph atlas and a 3.5 MiB vertex buffer, limits combined text-glyph and tag-icon entries to 8192, and rebuilds a frame after atlas eviction. Font scaling uses 32 cache entries. These limits bound those caches; they are not a process-memory or worst-case rasterization budget. Drawing and hit-testing share Windows-metric line boxes. First-baseline fidelity and substitute-font metric selection remain experimental; the `windows_*` probe values expose that policy independently from Parley's original metrics.
@@ -99,7 +102,7 @@ CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVA
 AccessKit exposes each text outline as an independent editable macOS text area. Logical text runs carry the canvas line boxes, cluster advances and source positions, including blank paragraphs and hidden-field projection. They use the editor's retained projections and explicit source indices; separators connect the next visible paragraph across collapsed children. Native selection, whole-field replacement and keyboard edits share the editor history. Focus transfers retire native AppKit preedit when the canvas commits or cancels composition, preventing dead-key state from transferring to another outline. Selection/navigation reveals the caret; pan and zoom keep their own viewport behavior. Accessibility updates run only when the adapter is active and the host changes, not for caret-blink redraws. Cached paragraph runs reuse text and character geometry when the shaped-layout identity, source index, next visible paragraph and local origin match; reflow or changed source mappings invalidate them. The cache retains only the current page’s paragraph ranges and clears on adapter deactivation. IDs survive geometry/selection updates; changed run text or source mappings receive fresh IDs so obsolete action positions are rejected.
 
 ```sh
-cargo test -p snowbound
+cargo test -p canvas --features interaction accessibility
 SNOWBOUND_TRACE_INPUT=1 "target/Snowbound.app/Contents/MacOS/Snowbound" SYNTHETIC_TEXT_FILE
 ```
 
@@ -130,7 +133,7 @@ The host sleeps its caret timer while macOS reports the window occluded and requ
 The app's private integration test exercises the actual outline painter and accessibility consumer for each imported outline, then verifies text restoration through undo:
 
 ```sh
-CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test -p snowbound imported_page_widgets_and_accessibility_follow_edits -- --ignored --nocapture
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test -p canvas --features interaction imported_page_widgets_and_accessibility_follow_edits -- --ignored --nocapture
 ```
 
 ## Unsupported page content
@@ -222,8 +225,8 @@ Full native captures, candidate font binaries/licenses and probe outputs remain 
 The opt-in release probe measures engine construction, document baseline cloning, editing, undo, the host’s production page primitive collection and accessibility construction. Synthetic cases contain 100, 1,000 and 5,000 paragraphs. Each runs 32 insertion/undo samples alternating between the first and last paragraph; assertions require one changed layout per insertion, retained layouts through drawing/accessibility, and exact document restoration after undo. The accessibility regression compares cached output with full reconstruction through 160 mixed editing operations and complete undo/redo, including composition, source index changes, resize and viewport transforms.
 
 ```sh
-cargo test --release -p snowbound canvas_pipeline_cost -- --ignored --nocapture --test-threads=1
-CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test --release -p snowbound canvas_pipeline_cost -- --ignored --nocapture --test-threads=1
+cargo test --release -p canvas --features interaction canvas_pipeline_cost -- --ignored --nocapture --test-threads=1
+CANVAS_TEST_SECTION=PRIVATE_SECTION_COPY CANVAS_TEST_PAGE=EXACT_PAGE_TITLE CANVAS_TEST_SUBSTITUTE=CARLITO_REGULAR_FILE cargo test --release -p canvas --features interaction canvas_pipeline_cost -- --ignored --nocapture --test-threads=1
 ```
 
 Private-page mode reads the section once and measures 16 parse/open/close cycles with one retained text engine, recording first construction separately from repeated cycles. Set `CANVAS_PROFILE_CYCLES` to a positive count for longer retention runs. It samples this process’s resident memory through macOS `ps` with each page open and closed. Tab-separated `canvas_profile` records report nanoseconds; `canvas_count` records report object counts; `canvas_rss_kib` records report KiB. The test harness can prefix the first record on a line. Times exclude log output, layout identity scans and memory sampling. Primitive collection includes its temporary allocation and destruction but excludes GPU preparation, submission and presentation. File reads can hit the OS cache. Resident memory includes allocator retention and is neither live allocation accounting nor GPU occupancy; these measurements do not establish input-to-present latency or a process memory limit.

@@ -1,12 +1,12 @@
-use accesskit::{
-    Action, Affine, Node, NodeId, Rect, Role, TextDirection, TextSelection, TreeId, TreeInfo,
-    TreeUpdate,
-};
-use canvas::gpu::Viewport;
-use canvas::{
+use crate::gpu::Viewport;
+use crate::{
     date::DateField,
     document::TextPosition,
     editor::{CanvasEditor, Selection, TextOutline},
+};
+use accesskit::{
+    Action, Affine, Node, NodeId, Rect, Role, TextDirection, TextSelection, TreeId, TreeInfo,
+    TreeUpdate,
 };
 use onestore::page::text::EditError;
 use parley::Affinity;
@@ -64,7 +64,7 @@ impl Accessibility {
     pub fn append_page_fields(
         &mut self,
         update: &mut TreeUpdate,
-        scene: Option<&(canvas::gpu::page::PageScene, [f32; 2])>,
+        scene: Option<&(crate::gpu::page::PageScene, [f32; 2])>,
         editor: &CanvasEditor,
         viewport: Viewport,
         focus: Option<usize>,
@@ -110,7 +110,7 @@ impl Accessibility {
                 self.dates[index].0 = field;
                 let id = self.dates[index].1;
                 let mut node = Node::new(Role::Button);
-                node.set_label(crate::DATE_LABELS[field as usize]);
+                node.set_label(super::DATE_LABELS[field as usize]);
                 node.set_value(
                     editor.date().unwrap().source().paragraphs[index]
                         .text()
@@ -361,7 +361,7 @@ impl Accessibility {
                         .tags
                         .iter()
                         .map(|tag| {
-                            use canvas::outline::TagIcon;
+                            use crate::outline::TagIcon;
                             let fallback = match tag.icon {
                                 TagIcon::CheckBox { .. } => "To do",
                                 TagIcon::Question => "Question",
@@ -588,7 +588,7 @@ impl Accessibility {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canvas::{document::TextDocument, layout::TextEngine};
+    use crate::{document::TextDocument, layout::TextEngine};
     use onestore::document::Format;
     use onestore::page::text::Paragraph;
 
@@ -641,7 +641,7 @@ mod tests {
             ],
         };
         let (scene, mut editor) =
-            canvas::gpu::page::PageScene::from_page(page, &mut engine).unwrap();
+            crate::gpu::page::PageScene::from_page(page, &mut engine).unwrap();
         let scene = (scene, [30.0, 40.0]);
         let viewport = Viewport {
             size: [800, 600],
@@ -688,13 +688,13 @@ mod tests {
             assert!((bounds.y0 - expected.y0).abs() < 0.001);
             assert!((bounds.y1 - expected.y1).abs() < 0.001);
             assert_eq!(
-                crate::page_hit_test(&editor, Some(&scene), [155.0, y + 45.0], 1.0),
-                Some(crate::Hit::ReadOnly(0))
+                super::super::page_hit_test(&editor, Some(&scene), [155.0, y + 45.0], 1.0),
+                Some(super::super::Hit::ReadOnly(0))
             );
             if phase % 2 == 1 {
                 assert_ne!(
-                    crate::page_hit_test(&editor, Some(&scene), [155.0, 125.0], 1.0),
-                    Some(crate::Hit::ReadOnly(0))
+                    super::super::page_hit_test(&editor, Some(&scene), [155.0, 125.0], 1.0),
+                    Some(super::super::Hit::ReadOnly(0))
                 );
             }
         }
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn read_only_objects_keep_accessibility_identity_through_edits_and_view_changes() {
-        use canvas::gpu::page::PageScene;
+        use crate::gpu::page::PageScene;
         use onestore::page::{Page, PageObject, Unsupported};
         let page = Page {
             identity: None,
@@ -1217,7 +1217,7 @@ mod tests {
     }
     #[test]
     fn keyboard_and_accessibility_preserve_visual_caret_at_wraps() {
-        use canvas::editor::Movement;
+        use crate::editor::Movement;
         let mut engine = TextEngine::default();
         let document = TextDocument::new(vec![
             Paragraph::new(

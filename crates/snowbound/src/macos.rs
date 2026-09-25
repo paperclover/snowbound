@@ -116,7 +116,7 @@ pub fn edit_date(
         picker.setMinDate(Some(&NSDate::dateWithTimeIntervalSince1970(
             -11_644_473_600.0,
         )));
-        let label = NSString::from_str(crate::DATE_LABELS[field as usize]);
+        let label = NSString::from_str(canvas::interaction::DATE_LABELS[field as usize]);
         let _: () = msg_send![&picker, setAccessibilityLabel: &*label];
         picker.sizeToFit();
         let alert = NSAlert::new(mtm);

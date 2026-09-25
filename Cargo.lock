@@ -393,6 +393,8 @@ dependencies = [
 name = "canvas"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "accesskit_consumer",
  "bytemuck",
  "image",
  "onestore",
@@ -2627,7 +2629,6 @@ name = "snowbound"
 version = "0.1.0"
 dependencies = [
  "accesskit",
- "accesskit_consumer",
  "accesskit_winit",
  "arboard",
  "canvas",
