@@ -28,6 +28,8 @@ pub enum SectionState {
     Readable {
         /// An explicit SectionDisplayName; otherwise use the current filename without its extension.
         name: Option<String>,
+        /// The tab colour as a COLORREF; OneNote assigns one when absent.
+        color: Option<u32>,
     },
     Locked,
     Unreadable(onestore::Error),
@@ -267,18 +269,21 @@ fn scan(
                 }
                 index.validate_current()?;
                 document.pages()?;
-                let name = revision
+                let (name, color) = revision
                     .roots
                     .get(&2)
                     .and_then(|id| revision.nodes.get(id))
-                    .and_then(|node| match &node.kind {
-                        Kind::SectionMetadata { name, .. } => name.clone(),
-                        _ => None,
+                    .map_or((None, None), |node| match &node.kind {
+                        Kind::SectionMetadata { name, color } => (name.clone(), *color),
+                        _ => (None, None),
                     });
                 result.sections.push(Section {
                     path: child.clone(),
                     file_id,
-                    state: SectionState::Readable { name },
+                    state: SectionState::Readable {
+                        name,
+                        color: color.filter(|color| *color != 0xffff_ffff),
+                    },
                 });
             } else {
                 index.validate_current()?;

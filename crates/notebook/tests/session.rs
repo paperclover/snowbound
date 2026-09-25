@@ -259,7 +259,7 @@ fn a_notebook_directory_lists_its_sections_and_opens_them() {
     assert_eq!(catalog.groups[0].sections.len(), 1);
     let path = catalog.groups[0].sections[0].path.clone();
     let section = notebook.section(&path, || {}).unwrap();
-    let (space, _) = section.pages().unwrap()[0];
+    let (space, _, _) = section.pages().unwrap()[0];
     let page = section.page(space).unwrap();
     let text = first_text(&page);
     assert_eq!(

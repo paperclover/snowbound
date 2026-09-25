@@ -6,6 +6,8 @@ pub mod accessibility;
 #[cfg(test)]
 mod profile;
 mod scroll;
+
+pub use scroll::Scroll;
 #[cfg(test)]
 mod tests;
 
@@ -143,10 +145,6 @@ enum Drag {
         anchor: Selection,
         unit: SelectionUnit,
     },
-    Scrollbar {
-        axis: usize,
-        grab: f32,
-    },
     Resize {
         outline: Option<Box<TextOutline>>,
         grab: f32,
@@ -219,6 +217,11 @@ pub struct PageView {
     blink_at: Instant,
 }
 
+/// Where a page's origin sits in a view that has not scrolled, in device pixels.
+fn home(display_scale: f32) -> [f32; 2] {
+    [48.0 * display_scale; 2]
+}
+
 impl PageView {
     /// `size` is in device pixels; `double_click` is the platform's double-click interval.
     pub fn new(
@@ -236,7 +239,7 @@ impl PageView {
             viewport: Viewport {
                 size,
                 scale: display_scale * 96.0 / 72.0,
-                origin: [48.0 * display_scale; 2],
+                origin: home(display_scale),
             },
             display_scale,
             double_click,
@@ -258,6 +261,13 @@ impl PageView {
         self.scene = scene;
         self.drag = None;
         self.object_focus = None;
+    }
+
+    /// Shows another page from its top-left corner, keeping the zoom.
+    pub fn open(&mut self, editor: CanvasEditor, scene: Option<(PageScene, [f32; 2])>) {
+        self.replace(editor, scene);
+        self.viewport.origin = home(self.display_scale);
+        self.scroll().clamp(&mut self.viewport);
     }
 
     pub fn modifiers(&self) -> Modifiers {
@@ -474,7 +484,8 @@ impl PageView {
         ];
     }
 
-    fn scroll(&self) -> scroll::Scroll {
+    /// How far the view may scroll; the current offset is `-viewport.origin`.
+    pub fn scroll(&self) -> Scroll {
         let editable = self
             .editor
             .visible_outlines()
@@ -507,7 +518,14 @@ impl PageView {
         scroll::Scroll::new(self.viewport, editable.chain(fixed))
     }
 
-    /// Everything to draw this frame, scrollbars included.
+    /// Scrolls the view's corner `offset` device pixels from the page origin along `axis`,
+    /// within the page's bounds.
+    pub fn scroll_to(&mut self, axis: usize, offset: f32) -> Result<Response> {
+        self.viewport.origin[axis] = -offset;
+        self.changed()
+    }
+
+    /// Everything to draw this frame.
     pub fn primitives(&self, colors: TextColors) -> Result<Vec<Primitive<'_>>> {
         let preview = match &self.drag {
             Some(Drag::Resize {
@@ -538,7 +556,7 @@ impl PageView {
                     }
                 }),
         };
-        let mut primitives = page_primitives(
+        page_primitives(
             &self.editor,
             self.scene.as_ref(),
             preview,
@@ -554,22 +572,13 @@ impl PageView {
                 pixel: self.pixel(),
                 colors,
             },
-        )?;
-        self.scroll()
-            .append(self.viewport, self.display_scale, &mut primitives);
-        Ok(primitives)
+        )
     }
 
     /// The pointer shape at the pointer's position.
     pub fn cursor(&self) -> Cursor {
         let hit = self.hit_test(self.viewport.document_point(self.pointer));
-        let scrollbar = self
-            .scroll()
-            .hit_test(self.viewport, self.display_scale, self.pointer)
-            .is_some();
         match (&self.drag, hit) {
-            (Some(Drag::Scrollbar { .. }), _) => Cursor::Default,
-            (None, _) if scrollbar => Cursor::Default,
             (Some(Drag::Image { handle, .. }), _) => handle_cursor(*handle),
             (None, Some(Hit::Image { handle, .. })) => handle_cursor(handle),
             (Some(Drag::Resize { .. }), _) | (None, Some(Hit::Resize { .. })) => Cursor::EwResize,
@@ -638,17 +647,6 @@ impl PageView {
         self.pointer_inside = true;
         self.pointer = position;
         match &mut self.drag {
-            Some(Drag::Scrollbar { axis, grab }) => {
-                let (axis, grab) = (*axis, *grab);
-                self.scroll().drag(
-                    &mut self.viewport,
-                    self.display_scale,
-                    axis,
-                    self.pointer[axis],
-                    grab,
-                );
-                self.changed()
-            }
             Some(Drag::Text { anchor, unit }) => {
                 let (anchor, unit) = (*anchor, *unit);
                 let point = self.viewport.document_point(self.pointer);
@@ -700,13 +698,6 @@ impl PageView {
             })
             .map_or(1, |(_, _, count)| (count % 3) + 1);
         self.last_click = Some((now, self.pointer, count));
-        if let Some((axis, grab)) =
-            self.scroll()
-                .hit_test(self.viewport, self.display_scale, self.pointer)
-        {
-            self.drag = Some(Drag::Scrollbar { axis, grab });
-            return self.changed();
-        }
         match self.hit_test(point) {
             Some(Hit::Date(field)) => {
                 self.editor.finish_composition();

@@ -31,7 +31,7 @@ fn internal_links_find_their_page_by_identity() {
     .unwrap();
     let mut notebook = Notebook::open(&root, temporary.path().join("cache")).unwrap();
     let section = notebook.section("First.one", || {}).unwrap();
-    let (space, _) = section.pages().unwrap()[0];
+    let (space, _, _) = section.pages().unwrap()[0];
     let page = section.page(space).unwrap();
     section.close().unwrap();
     let target = LinkTarget::Page {

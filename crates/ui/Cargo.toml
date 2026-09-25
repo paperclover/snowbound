@@ -1,0 +1,10 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+draw = { path = "../draw" }
+parley.workspace = true
+winit = "0.30.13"

@@ -24,7 +24,7 @@ The explicit output path must not exist. Its filename supplies the bundle's disp
 
 Control-Command-Space opens the macOS character picker for the active text field.
 
-Omit both arguments for a blank page with provisional caret placement, or provide a UTF-8 file and optional document width (default 480 pt). Typing, single/double/triple-click selection, drag selection, arrow/word/line/paragraph/document navigation, Backspace/Delete, word/line deletion, indentation, clipboard shortcuts, Cmd-Z/Shift-Cmd-Z and IME use the shared editor. Tab/Shift-Tab indent plain paragraphs; Enter retains their indentation. Cmd-Up/Down reach document boundaries, Option-Up/Down reach paragraph boundaries, and Home/End scroll without moving the caret. Mid-text Tab currently indents; OneNote’s table creation is not implemented. Scrolling is bounded by page objects, including negative coordinates, with draggable overlay indicators; Cmd-wheel or Cmd-plus/minus zooms without changing document width, and Cmd-0 returns to 100%. The GPU test requires an available native adapter and compares readback pixels before/after repaint and forced glyph/image-cache eviction.
+Omit both arguments for a blank page with provisional caret placement, or provide a UTF-8 file and optional document width (default 480 pt). Typing, single/double/triple-click selection, drag selection, arrow/word/line/paragraph/document navigation, Backspace/Delete, word/line deletion, indentation, clipboard shortcuts, Cmd-Z/Shift-Cmd-Z and IME use the shared editor. Tab/Shift-Tab indent plain paragraphs; Enter retains their indentation. Cmd-Up/Down reach document boundaries, Option-Up/Down reach paragraph boundaries, and Home/End scroll without moving the caret. Mid-text Tab currently indents; OneNote’s table creation is not implemented. Scrolling is bounded by page objects, including negative coordinates; Cmd-wheel or Cmd-plus/minus zooms without changing document width, and Cmd-0 returns to 100%. The GPU test requires an available native adapter and compares readback pixels before/after repaint and forced glyph/image-cache eviction.
 
 ```text
 onestore::Format
@@ -36,9 +36,26 @@ canvas::gpu     page scene · text runs, tag icons, pictures and ink as draw pri
 draw            Swash glyph rasterization · custom wgpu quads · bounded glyph/image caches · layers
        ↓
 canvas::interaction   hit layers · drags · placement grid · picture handles · chrome · key routing
-                      · scrolling and zoom · caret blink · AccessKit tree
+                      · scroll bounds and zoom · caret blink · AccessKit tree
        ↓
-snowbound   Winit window and events · AppKit pickers and quit guard · clipboard · saving
+ui          immediate-mode boxes · keyed state · autolayout · event routing · labels · widgets
+       ↓
+snowbound   section tabs · page list · the page as a custom box · Winit window and events
+            · AppKit pickers and quit guard · clipboard · saving
+```
+
+## Desktop shell
+
+`--notebook FOLDER` opens a notebook with its readable top-level sections as tabs in the window's top strip, in the notebook's order and colours, and the open section's pages listed on the right, subpages indented. Command-F filters the list; Enter opens the first match and Escape clears it. A page that also changed on another computer shows Keep mine / Keep theirs above it. `--section FILE TITLE` opens one section the same way at that page. Section files must be regular files; discovery rejects symbolic links.
+
+The `ui` crate builds every frame from the application's state. A cache keyed by stable box ids keeps hover, press, focus, scroll and animation values, and the previous frame's layout routes the frame's input before building, so a frame answers input one layout late and paints with its own. Sizes are solved per axis after building: fixed, label-sized, a fraction of an ancestor, or the sum of children, with overflow shared out by each box's strictness. The page is a custom box: `ui` routes it the pointer, wheel, key and input-method events that land on it, in order, and the host hands them to `PageView` and paints the page in a clipped layer of the same frame. Page scrollbars are `ui` widgets over that box; the canvas reports only its scroll bounds. Work the frame asks for (opening pages or sections, page requests, saving) runs after the frame is painted and requests the frame that shows it.
+
+A covered window receives no redraws, so interaction can be scripted: `SNOWBOUND_REPLAY` names a file of `move X Y`, `press`, `release`, `wheel DX DY`, `key NAME`, `type TEXT`, `modifiers [shift] [command]`, `wait MS` and `snapshot PNG_PATH` lines in logical pixels, and each step draws its own frame. Replays edit and save like a user, so point them at a copy of a notebook.
+
+```sh
+cp -RL SOURCE_NOTEBOOK /tmp/notebook-copy && chmod u+w /tmp/notebook-copy/*.one
+SNOWBOUND_REPLAY=SCRIPT "target/Snowbound.app/Contents/MacOS/Snowbound" --notebook /tmp/notebook-copy --cache /tmp/notebook-cache
+cargo test -p ui
 ```
 
 The renderer allocates a 2048² RGBA glyph atlas and a 3.5 MiB vertex buffer, limits combined text-glyph and tag-icon entries to 8192, and rebuilds a frame after atlas eviction. Font scaling uses 32 cache entries. These limits bound those caches; they are not a process-memory or worst-case rasterization budget. Drawing and hit-testing share Windows-metric line boxes. First-baseline fidelity and substitute-font metric selection remain experimental; the `windows_*` probe values expose that policy independently from Parley's original metrics.

@@ -134,7 +134,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let pages = section.pages()?;
     let mut queued = Vec::new();
-    for (space, title) in pages.iter().filter(|(_, title)| title.starts_with("Move")) {
+    for (space, title, _) in pages
+        .iter()
+        .filter(|(_, title, _)| title.starts_with("Move"))
+    {
         let before = section.page(*space)?;
         let mut after = before.clone();
         edit(&mut after, label);

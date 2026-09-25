@@ -493,6 +493,23 @@ impl Page {
             })
     }
 
+    /// The title and outline level (1 at the top) a section's page list shows, read from
+    /// the page's metadata without building its content.
+    pub fn heading(revision: &Revision<'_>, id: ExGuid) -> (String, u32) {
+        let level = revision
+            .roots
+            .get(&2)
+            .and_then(|id| revision.nodes.get(id))
+            .and_then(|node| match node.kind {
+                Kind::Metadata { level, .. } => level,
+                _ => None,
+            });
+        (
+            page_title(revision, id).unwrap_or_default().to_owned(),
+            level.unwrap_or(1),
+        )
+    }
+
     /// The single active page declared in one page object space.
     pub fn from_space(document: &Document<'_>, space: ExGuid) -> Result<Self, Error> {
         let pages = document.pages_in(space)?;

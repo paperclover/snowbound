@@ -869,16 +869,28 @@ impl Section {
         Ok(Store::parse(&self.replica.snapshot()?)?.header.file_id)
     }
 
-    /// Page spaces and titles in section order, from the local working image.
-    pub fn pages(&self) -> Result<Vec<(ExGuid, String)>> {
+    /// Page spaces, titles and outline levels (1 at the top) in section order, from the
+    /// local working image.
+    pub fn pages(&self) -> Result<Vec<(ExGuid, String, u32)>> {
         let snapshot = self.replica.snapshot()?;
         let store = Store::parse(&snapshot)?;
         let index = RevisionIndex::parse(&store)?;
         let document = Document::parse(&index)?;
-        document
-            .pages()?
+        let pages = document.pages()?;
+        let mut spaces = std::collections::BTreeSet::new();
+        pages
             .into_iter()
-            .map(|(space, _)| Ok((space, Page::from_space(&document, space)?.title)))
+            .map(|(space, page)| {
+                if !spaces.insert(space) {
+                    return Err(onestore::Error {
+                        offset: 0,
+                        message: "Choose an object space containing one active page",
+                    }
+                    .into());
+                }
+                let (title, level) = Page::heading(document.active(space)?, page);
+                Ok((space, title, level))
+            })
             .collect()
     }
 
