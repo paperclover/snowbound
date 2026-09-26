@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 176 513" preserveAspectRatio="none">
+<defs>
+<g id="bloom"><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(0)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(45)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(90)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(135)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(180)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(225)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(270)"/><ellipse cx="4.9" rx="5.1" ry="1.15" transform="rotate(315)"/></g>
+<g id="spark"><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(0)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(45)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(90)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(135)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(180)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(225)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(270)"/><ellipse cx="4.9" rx="5.1" ry="1.25" transform="rotate(315)"/></g>
+</defs>
+<g fill="#f9c7bf">
+<use href="#spark" transform="translate(89.5 16.5) scale(1.65)"/>
+<use href="#bloom" transform="translate(80.5 64) scale(3.30)"/>
+<use href="#spark" transform="translate(28 79) scale(1.70)"/>
+<use href="#spark" transform="translate(103.5 113) scale(1.70)"/>
+<use href="#bloom" transform="translate(46 144) scale(4.60)"/>
+<use href="#spark" transform="translate(136 159) scale(1.40)"/>
+<use href="#bloom" transform="translate(109 224.5) scale(6.65)"/>
+<use href="#spark" transform="translate(26.5 206) scale(1.70)"/>
+<use href="#spark" transform="translate(49 248) scale(1.40)"/>
+<use href="#bloom" transform="translate(44 313) scale(4.50)"/>
+<use href="#spark" transform="translate(145 293) scale(1.40)"/>
+<use href="#spark" transform="translate(117 330) scale(1.70)"/>
+<use href="#bloom" transform="translate(133 376) scale(2.70)"/>
+<use href="#bloom" transform="translate(64.5 390) scale(4.05)"/>
+<use href="#spark" transform="translate(130 427.5) scale(1.70)"/>
+<use href="#spark" transform="translate(86.5 452) scale(1.40)"/>
+<use href="#bloom" transform="translate(53 485) scale(2.70)"/>
+</g>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 177 123" preserveAspectRatio="none">
+<defs>
+<radialGradient id="reach" cx="40" cy="20" r="1" gradientTransform="translate(40 20) scale(180 120) translate(-40 -20)" gradientUnits="userSpaceOnUse"><stop offset="0.2" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></radialGradient><mask id="glow"><rect width="177" height="123" fill="url(#reach)"/></mask>
+<linearGradient id="navy" x2="1"><stop offset="0" stop-color="#1f2d4a"/><stop offset=".45" stop-color="#6d7f9f"/><stop offset="1" stop-color="#1f2d4a"/></linearGradient>
+<g id="pin">
+<path d="M-11-30C-11-36 11-36 11-30L8-12C16-8 18 0 15 4H-15C-18 0-16-8-8-12Z"/>
+<path d="M-1.2 4L0 34L1.2 4Z" fill="#9aa9b8"/>
+</g>
+<filter id="shadow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="3"/></filter>
+<filter id="focus" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="1.5"/></filter>
+</defs>
+<rect width="177" height="123" fill="#d4e6f6" mask="url(#glow)"/>
+<g fill="#8fb8dc" filter="url(#shadow)" opacity=".7"><ellipse cx="60" cy="100" rx="18" ry="7"/><ellipse cx="130" cy="40" rx="18" ry="7"/></g>
+<use href="#pin" fill="url(#navy)" transform="translate(45 40) rotate(-15) scale(.85)"/>
+<use href="#pin" fill="url(#navy)" transform="translate(110 12) rotate(-25) scale(.7)" filter="url(#focus)" opacity=".8"/>
+</svg>

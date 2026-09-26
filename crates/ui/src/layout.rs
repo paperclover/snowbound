@@ -11,7 +11,17 @@ pub(crate) fn solve(nodes: &mut [Built], states: &HashMap<Id, State>, scale: f32
             node.computed[axis] = match node.size[axis].size {
                 Size::Pixels(pixels) => pixels,
                 Size::Text => {
-                    node.label.as_ref().map_or(0.0, |label| label.size[axis]) + 2.0 * node.pad[axis]
+                    let content = if axis == 0 {
+                        node.content_width()
+                    } else {
+                        let label = node.label.as_ref().map_or(0.0, |label| label.size[1]);
+                        if node.icon.is_some() || node.image.is_some() {
+                            label.max(crate::ICON)
+                        } else {
+                            label
+                        }
+                    };
+                    content + 2.0 * node.pad[axis]
                 }
                 Size::Fraction(_) | Size::Children => 0.0,
             };

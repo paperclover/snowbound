@@ -45,7 +45,7 @@ fn editing_cost(
     editor: &mut CanvasEditor,
     scene: Option<&(PageScene, [f32; 2])>,
 ) {
-    let viewport = Viewport {
+    let mut viewport = Viewport {
         size: [1000, 720],
         scale: 96.0 / 72.0,
         origin: [48.0; 2],
@@ -59,7 +59,9 @@ fn editing_cost(
     });
     let mut access = accessibility::Accessibility::default();
     let update = timed(case, "ax_first", 0, || {
-        access.update(editor, viewport, "Profile", None).unwrap()
+        access
+            .update(editor, scene, viewport, "Profile", None, None)
+            .unwrap()
     });
     eprintln!("canvas_count\t{case}\tax_nodes\t0\t{}", update.nodes.len());
     drop(update);
@@ -113,14 +115,30 @@ fn editing_cost(
         });
         eprintln!("canvas_count\t{case}\tprimitives\t{sample}\t{primitives}");
         timed(case, "ax_insert", sample, || {
-            black_box(access.update(editor, viewport, "Profile", None).unwrap());
+            black_box(
+                access
+                    .update(editor, scene, viewport, "Profile", None, None)
+                    .unwrap(),
+            );
+        });
+        viewport.origin[1] -= 40.0;
+        timed(case, "ax_scroll", sample, || {
+            black_box(
+                access
+                    .update(editor, scene, viewport, "Profile", None, None)
+                    .unwrap(),
+            );
         });
         assert_eq!(edited_layouts, layout_ids(editor));
         timed(case, "undo", sample, || {
             assert!(editor.undo(engine).unwrap())
         });
         timed(case, "ax_undo", sample, || {
-            black_box(access.update(editor, viewport, "Profile", None).unwrap());
+            black_box(
+                access
+                    .update(editor, scene, viewport, "Profile", None, None)
+                    .unwrap(),
+            );
         });
         assert_eq!(editor.active_outline().document(), &initial[index]);
     }

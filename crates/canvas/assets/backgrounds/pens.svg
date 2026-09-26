@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="fx0" x2="612" gradientUnits="userSpaceOnUse"><stop offset="0.392" stop-color="white"/><stop offset="0.915" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="fy0" x2="0" y2="792" gradientUnits="userSpaceOnUse"><stop offset="0.556" stop-color="white"/><stop offset="0.960" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="across"><rect width="612" height="792" fill="url(#fx0)"/></mask>
+<mask id="down"><rect width="612" height="792" fill="url(#fy0)"/></mask>
+<radialGradient id="corner" cx="0" cy="0" r="1" gradientTransform="scale(300 260)" gradientUnits="userSpaceOnUse"><stop offset=".45" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></radialGradient>
+<mask id="art"><rect width="612" height="792" fill="url(#corner)"/></mask>
+</defs>
+<g mask="url(#art)" opacity=".85">
+<g transform="translate(95 -18) rotate(8)">
+<rect width="150" height="150" fill="#fff3ea" stroke="#f6c3a2"/>
+<g stroke="#f7c7a8" stroke-width=".8"><path d="M0 8H150"/><path d="M0 15H150"/><path d="M0 22H150"/><path d="M0 29H150"/><path d="M0 36H150"/><path d="M0 43H150"/><path d="M0 50H150"/><path d="M0 57H150"/><path d="M0 64H150"/><path d="M0 71H150"/><path d="M0 78H150"/><path d="M0 85H150"/><path d="M0 92H150"/><path d="M0 99H150"/><path d="M0 106H150"/><path d="M0 113H150"/><path d="M0 120H150"/><path d="M0 127H150"/><path d="M0 134H150"/><path d="M0 141H150"/><path d="M0 148H150"/></g>
+</g>
+<rect x="-10" y="60" width="44" height="130" rx="4" transform="rotate(10)" fill="#fbd4bb" stroke="#f3a578" stroke-width="1.5"/>
+<path d="M152 -10L230 150L222 156L140 0Z" fill="#fbb98e"/>
+<path d="M230 150L236 170L222 156Z" fill="#e89468"/>
+<path d="M0 222L170 140L176 150L6 238Z" fill="#fcc6a3"/>
+<path d="M170 140L192 132L176 150Z" fill="#ef9f73"/>
+</g>
+<g fill="#a2552b">
+<rect x="23" y="19" width="3" height="773" mask="url(#down)"/>
+<rect x="40" y="36" width="1.5" height="756" mask="url(#down)"/>
+<rect x="23" y="19" width="589" height="3" mask="url(#across)"/>
+<rect x="40" y="36" width="572" height="1.5" mask="url(#across)"/>
+</g>
+</svg>

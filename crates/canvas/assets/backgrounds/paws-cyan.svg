@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 500" preserveAspectRatio="none">
+<defs>
+<g id="paw">
+<path d="M-12 6C-11-2-5-8 0-8S11-2 12 6C12 10 8 10 0 8.5C-8 10-12 10-12 6Z"/>
+<ellipse rx="4.4" ry="5.6" transform="translate(-13.5 -9) rotate(-28)"/>
+<ellipse rx="4" ry="6.5" transform="translate(-7 -19) rotate(-10)"/>
+<ellipse rx="4" ry="6.5" transform="translate(4 -19.5) rotate(10)"/>
+<ellipse rx="4.2" ry="5.6" transform="translate(11 -10) rotate(28)"/>
+</g>
+</defs>
+<use href="#paw" fill="#d6f3ef" transform="translate(21 37)"/>
+<use href="#paw" fill="#d6f3ef" transform="translate(21 175)"/>
+<use href="#paw" fill="#d6f3ef" transform="translate(21 321)"/>
+<use href="#paw" fill="#d6f3ef" transform="translate(21 476)"/>
+<use href="#paw" fill="#adcbc6" transform="translate(25 106) rotate(15)"/>
+<use href="#paw" fill="#adcbc6" transform="translate(25 245) rotate(15)"/>
+<use href="#paw" fill="#adcbc6" transform="translate(25 395) rotate(15)"/>
+</svg>

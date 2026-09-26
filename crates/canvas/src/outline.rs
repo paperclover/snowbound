@@ -1,5 +1,5 @@
 use crate::{
-    document::{DocumentEdit, edited_nodes},
+    document::{DocumentEdit, edited_nodes, leaves},
     layout::{LayoutError, TextEngine, TextLayout},
 };
 use onestore::page::text::{Paragraph, TextProjection};
@@ -8,17 +8,50 @@ use onestore::{
     ExGuid,
     document::{Format, Kind},
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+};
 
 pub(crate) const TITLE_WIDTH: f32 = 468.0;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct OutlineLayout {
     pub paragraphs: Vec<ParagraphLayout>,
     pub tables: Vec<TableLayout>,
     /// Pictures, files and handwriting that occupy a paragraph of their own.
     pub objects: Vec<ObjectLayout>,
     pub size: [f32; 2],
+    /// One per root node, so an edit places anew only what it changes and moves what follows.
+    blocks: Vec<Block>,
+    /// The widest root node, at least 36 points, and the widest root text's line boxes; kept so
+    /// an edit sizes an automatic width without measuring every node.
+    pub(crate) widths: [f32; 2],
+}
+
+/// A root node's place in its outline's flow.
+#[derive(Clone)]
+struct Block {
+    /// Where the node's paragraphs, tables and objects start.
+    first: [usize; 3],
+    /// Spacing before and after the node and its own height, or `None` while hidden.
+    metrics: Option<[f32; 3]>,
+    /// The node's right edge and, for text, its line boxes' right edge.
+    extent: [f32; 2],
+    /// The flow's bottom and pending spacing after the node.
+    state: (f64, Option<f32>),
+    /// A table's vertical coordinates before its offset.
+    rel: Vec<f32>,
+}
+
+/// A layout of root nodes `range` once an edit applies, and how the nodes after them move.
+pub(crate) struct Relayout {
+    pub range: Range<usize>,
+    pub segment: OutlineLayout,
+    /// Each following node's new top and flow state, up to the first that stays.
+    moved: Vec<(f32, (f64, Option<f32>))>,
+    pub size: [f32; 2],
+    widths: [f32; 2],
 }
 
 #[derive(Clone)]
@@ -50,6 +83,61 @@ impl ObjectLayout {
             ObjectKind::Picture | ObjectKind::Ink(_) => None,
         }
     }
+
+    /// The rect's top and bottom, the object's bottom and its label's top once the object
+    /// starts at `y`, given its own height, and the height it takes in the flow.
+    fn at(&self, y: f32, height: f32) -> ([f32; 4], f32) {
+        match &self.kind {
+            ObjectKind::File(label) => {
+                let top = y + 6.0;
+                let label_top = top + height + 10.5;
+                let bottom = label_top + label.text.height() + 9.0;
+                ([top, top + height, bottom, label_top], bottom - y)
+            }
+            ObjectKind::Unsupported(_) => ([y, y + height, y + height, y + 8.0], height),
+            ObjectKind::Picture | ObjectKind::Ink(_) => ([y, y + height, y + height, 0.0], height),
+        }
+    }
+
+    fn place(&mut self, y: f32, height: f32) -> f32 {
+        let ([top, end, bottom, label_top], flow) = self.at(y, height);
+        [self.rect[1], self.rect[3], self.bottom] = [top, end, bottom];
+        if let ObjectKind::File(label) | ObjectKind::Unsupported(label) = &mut self.kind {
+            label.origin[1] = label_top;
+        }
+        flow
+    }
+}
+
+/// The vertical coordinates of these pieces, in a fixed order.
+fn verticals<'a>(
+    paragraphs: &'a mut [ParagraphLayout],
+    tables: &'a mut [TableLayout],
+    objects: &'a mut [ObjectLayout],
+) -> impl Iterator<Item = &'a mut f32> {
+    let cells = tables.iter_mut().flat_map(|table| &mut table.cells);
+    paragraphs
+        .iter_mut()
+        .map(|paragraph| &mut paragraph.origin[1])
+        .chain(cells.flat_map(|cell| {
+            let [_, top, _, bottom] = &mut cell.rect;
+            [top, bottom]
+        }))
+        .chain(objects.iter_mut().flat_map(|object| {
+            let ObjectLayout {
+                rect: [_, top, _, end],
+                bottom,
+                kind,
+                ..
+            } = object;
+            let label = match kind {
+                ObjectKind::File(label) | ObjectKind::Unsupported(label) => {
+                    Some(&mut label.origin[1])
+                }
+                ObjectKind::Picture | ObjectKind::Ink(_) => None,
+            };
+            [top, end, bottom].into_iter().chain(label)
+        }))
 }
 
 /// OneNote centers a file's icon and name in a column this wide.
@@ -181,21 +269,21 @@ pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32
     Ok(indent)
 }
 
-fn spacing(
-    bottom: &mut f64,
-    previous: &mut Option<f32>,
-    format: &Format,
-) -> Result<f32, LayoutError> {
-    let before = format.space_before.unwrap_or(0.0);
-    let after = format.space_after.unwrap_or(0.0);
-    if [before, after].iter().any(|v| !v.is_finite() || *v < 0.0) {
+fn spacing(format: &Format) -> Result<[f32; 2], LayoutError> {
+    let spacing = [format.space_before, format.space_after].map(|space| space.unwrap_or(0.0));
+    if spacing.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return Err(LayoutError::InvalidSpacing);
     }
-    if let Some(previous) = previous {
-        *bottom += f64::from(previous.max(before));
+    Ok(spacing)
+}
+
+/// Where a node with `spacing` starts after the flow `state` of a bottom and pending spacing.
+fn top(state: &mut (f64, Option<f32>), [before, after]: [f32; 2]) -> f32 {
+    if let Some(previous) = state.1 {
+        state.0 += f64::from(previous.max(before));
     }
-    *previous = Some(after);
-    Ok(*bottom as f32)
+    state.1 = Some(after);
+    state.0 as f32
 }
 
 impl ParagraphLayout {
@@ -386,42 +474,6 @@ pub(crate) fn visible_paragraphs<'a>(
     })
 }
 
-pub(crate) fn arrange<'a>(
-    paragraphs: impl Iterator<Item = &'a ParagraphLayout>,
-    width: f32,
-    width_set_by_user: bool,
-) -> Result<(Vec<f32>, [f32; 2]), LayoutError> {
-    let mut origins = Vec::new();
-    let mut bottom = 0.0_f64;
-    let mut previous_after = None;
-    let mut content_width = 0.0_f32;
-    for paragraph in paragraphs {
-        let format = &paragraph.projection.text().spans()[0].format;
-        origins.push(spacing(&mut bottom, &mut previous_after, format)?);
-        let size = paragraph.size();
-        bottom += f64::from(size[1]);
-        if !(bottom as f32).is_finite() {
-            return Err(LayoutError::InvalidSpacing);
-        }
-        content_width = content_width.max(size[0]);
-    }
-    let height = bottom as f32;
-    if !height.is_finite() || !content_width.is_finite() {
-        return Err(LayoutError::InvalidSpacing);
-    }
-    Ok((
-        origins,
-        [
-            if width_set_by_user {
-                width
-            } else {
-                content_width.max(36.0)
-            },
-            height,
-        ],
-    ))
-}
-
 impl OutlineLayout {
     /// OneNote gives an outline one tag column, as wide as its most-tagged paragraph needs; each
     /// paragraph's tags start at the column's left edge. Tag origins assume a one-tag column.
@@ -492,6 +544,33 @@ impl OutlineLayout {
         edit: Option<&DocumentEdit>,
         shape: &mut impl FnMut(&PageParagraph, f32, &[f32]) -> Result<ParagraphLayout, LayoutError>,
     ) -> Result<Self, LayoutError> {
+        let mut result = Self::stack(
+            nodes,
+            indents,
+            width,
+            depth,
+            edit,
+            BTreeSet::new(),
+            (0.0, None),
+            shape,
+        )?;
+        result.size[0] = if fixed_width { width } else { result.size[0] }.max(result.table_width());
+        Ok(result)
+    }
+
+    /// Lays out `nodes` after the flow `state`, hiding the children of `hiding`; at the root,
+    /// keeps a block for each node.
+    #[allow(clippy::too_many_arguments)]
+    fn stack<'a>(
+        nodes: impl Iterator<Item = &'a PageParagraph>,
+        indents: &[f32],
+        width: f32,
+        depth: usize,
+        edit: Option<&DocumentEdit>,
+        mut hiding: BTreeSet<ExGuid>,
+        mut state: (f64, Option<f32>),
+        shape: &mut impl FnMut(&PageParagraph, f32, &[f32]) -> Result<ParagraphLayout, LayoutError>,
+    ) -> Result<Self, LayoutError> {
         if !width.is_finite() || width <= 0.0 {
             return Err(LayoutError::InvalidWidth);
         }
@@ -499,145 +578,424 @@ impl OutlineLayout {
             return Err(LayoutError::UnsupportedContent);
         }
         let mut result = Self {
-            paragraphs: Vec::new(),
-            tables: Vec::new(),
-            objects: Vec::new(),
             size: [36.0, 0.0],
+            widths: [36.0, f32::NEG_INFINITY],
+            ..Self::default()
         };
-        let mut bottom = 0.0;
-        let mut previous = None;
-        for node in visible_paragraphs(nodes) {
-            match &node.content {
-                ParagraphContent::Text(_) => {
-                    let mut paragraph = shape(node, width, indents)?;
-                    let y = spacing(
-                        &mut bottom,
-                        &mut previous,
-                        &paragraph.projection.text().spans()[0].format,
-                    )?;
-                    let size = paragraph.size();
-                    paragraph.origin[1] = y;
-                    result.paragraphs.push(paragraph);
-                    result.size[0] = result.size[0].max(size[0]);
-                    bottom += f64::from(size[1]);
-                }
-                ParagraphContent::Table(table) => {
-                    let x = indentation(node.level, indents, width)?;
-                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
-                    let child = Self::table(table, depth + 1, edit, shape)?;
-                    result.size[0] = result.size[0].max(x + child.size[0]);
-                    bottom += f64::from(child.size[1]);
-                    result.append(child, [x, y]);
-                }
-                ParagraphContent::Image(image) => {
-                    let x = indentation(node.level, indents, width)?;
-                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
-                    let [w, h] = image_size(image).ok_or(LayoutError::UnsupportedContent)?;
-                    result.objects.push(ObjectLayout {
-                        id: image.id,
-                        rect: [x, y, x + w, y + h],
-                        kind: ObjectKind::Picture,
-                        bottom: y + h,
-                    });
-                    result.size[0] = result.size[0].max(x + w);
-                    bottom += f64::from(h);
-                }
-                ParagraphContent::Attachment(file) => {
-                    let x = indentation(node.level, indents, width)?;
-                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
-                    let [w, h] = file.size.unwrap_or([24.0, 24.0]);
-                    let icon = [x + (ATTACHMENT_WIDTH - w) / 2.0, y + 6.0];
-                    // OneNote shows the name without its extension.
-                    let name = std::path::Path::new(&file.filename)
-                        .file_stem()
-                        .and_then(|stem| stem.to_str())
-                        .unwrap_or(&file.filename);
-                    let format = Format {
-                        alignment: Some(1),
-                        ..node.format.clone()
-                    };
-                    let mut label = shape(
-                        &caption(node.id, file.id, name, format),
-                        ATTACHMENT_WIDTH,
-                        &[0.0],
-                    )?;
-                    label.reset_origin(x);
-                    label.origin[1] = icon[1] + h + 10.5;
-                    let end = label.origin[1] + label.text.height() + 9.0;
-                    result.objects.push(ObjectLayout {
-                        id: file.id,
-                        rect: [icon[0], icon[1], icon[0] + w, icon[1] + h],
-                        kind: ObjectKind::File(label),
-                        bottom: end,
-                    });
-                    result.size[0] = result.size[0].max(x + ATTACHMENT_WIDTH);
-                    bottom += f64::from(end - y);
-                }
-                ParagraphContent::Ink(ink) => {
-                    let x = indentation(node.level, indents, width)?;
-                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
-                    // The paragraph reaches from its origin to the farthest stroke point.
-                    let [w, h] = ink
-                        .bounds()
-                        .map(|[x, y, w, h]| [x + w, y + h])
-                        .filter(|size| size.iter().all(|v| v.is_finite() && *v >= 0.0))
-                        .ok_or(LayoutError::UnsupportedContent)?;
-                    result.objects.push(ObjectLayout {
-                        id: ink.id,
-                        rect: [x, y, x + w, y + h],
-                        kind: ObjectKind::Ink(ink.clone()),
-                        bottom: y + h,
-                    });
-                    result.size[0] = result.size[0].max(x + w);
-                    bottom += f64::from(h);
-                }
-                ParagraphContent::Unsupported(unsupported) => {
-                    let x = indentation(node.level, indents, width)?;
-                    let y = spacing(&mut bottom, &mut previous, &node.format)?;
-                    let w = unsupported.layout.max_width.unwrap_or(160.0).max(160.0);
-                    let mut label = shape(
-                        &caption(
-                            node.id,
-                            unsupported.id,
-                            "Unsupported content",
-                            Format::default(),
-                        ),
-                        w - 16.0,
-                        &[0.0],
-                    )?;
-                    label.reset_origin(x + 8.0);
-                    label.origin[1] = y + 8.0;
-                    let h = unsupported
-                        .layout
-                        .max_height
-                        .unwrap_or(0.0)
-                        .max(label.text.height() + 16.0);
-                    result.objects.push(ObjectLayout {
-                        id: unsupported.id,
-                        rect: [x, y, x + w, y + h],
-                        kind: ObjectKind::Unsupported(label),
-                        bottom: y + h,
-                    });
-                    result.size[0] = result.size[0].max(x + w);
-                    bottom += f64::from(h);
+        for node in nodes {
+            let hidden = node.parent.is_some_and(|parent| hiding.contains(&parent));
+            if hidden || node.collapsed {
+                hiding.insert(node.id);
+            }
+            let mut block = Block {
+                first: [
+                    result.paragraphs.len(),
+                    result.tables.len(),
+                    result.objects.len(),
+                ],
+                metrics: None,
+                extent: [f32::NEG_INFINITY; 2],
+                state,
+                rel: Vec::new(),
+            };
+            if !hidden {
+                let (space, height, flow, extent) = match &node.content {
+                    ParagraphContent::Text(_) => {
+                        let mut paragraph = shape(node, width, indents)?;
+                        let space = spacing(&paragraph.projection.text().spans()[0].format)?;
+                        paragraph.origin[1] = top(&mut state, space);
+                        let size = paragraph.size();
+                        block.extent[1] = paragraph.origin[0] + paragraph.text.shaped.width();
+                        result.paragraphs.push(paragraph);
+                        (space, size[1], size[1], size[0])
+                    }
+                    ParagraphContent::Table(table) => {
+                        let x = indentation(node.level, indents, width)?;
+                        let space = spacing(&node.format)?;
+                        let y = top(&mut state, space);
+                        let mut child = Self::table(table, depth + 1, edit, shape)?;
+                        if depth == 0 {
+                            block.rel = verticals(
+                                &mut child.paragraphs,
+                                &mut child.tables,
+                                &mut child.objects,
+                            )
+                            .map(|value| *value)
+                            .collect();
+                        }
+                        let size = child.size;
+                        result.append(child, [x, y]);
+                        (space, size[1], size[1], x + size[0])
+                    }
+                    content => {
+                        let x = indentation(node.level, indents, width)?;
+                        let space = spacing(&node.format)?;
+                        let y = top(&mut state, space);
+                        let (mut object, height, extent) = match content {
+                            ParagraphContent::Image(image) => {
+                                let [w, h] =
+                                    image_size(image).ok_or(LayoutError::UnsupportedContent)?;
+                                let object = ObjectLayout {
+                                    id: image.id,
+                                    rect: [x, 0.0, x + w, 0.0],
+                                    kind: ObjectKind::Picture,
+                                    bottom: 0.0,
+                                };
+                                (object, h, x + w)
+                            }
+                            ParagraphContent::Attachment(file) => {
+                                let [w, h] = file.size.unwrap_or([24.0, 24.0]);
+                                let left = x + (ATTACHMENT_WIDTH - w) / 2.0;
+                                // OneNote shows the name without its extension.
+                                let name = std::path::Path::new(&file.filename)
+                                    .file_stem()
+                                    .and_then(|stem| stem.to_str())
+                                    .unwrap_or(&file.filename);
+                                let format = Format {
+                                    alignment: Some(1),
+                                    ..node.format.clone()
+                                };
+                                let mut label = shape(
+                                    &caption(node.id, file.id, name, format),
+                                    ATTACHMENT_WIDTH,
+                                    &[0.0],
+                                )?;
+                                label.reset_origin(x);
+                                let object = ObjectLayout {
+                                    id: file.id,
+                                    rect: [left, 0.0, left + w, 0.0],
+                                    kind: ObjectKind::File(label),
+                                    bottom: 0.0,
+                                };
+                                (object, h, x + ATTACHMENT_WIDTH)
+                            }
+                            ParagraphContent::Ink(ink) => {
+                                // The paragraph reaches from its origin to the farthest stroke point.
+                                let [w, h] = ink
+                                    .bounds()
+                                    .map(|[x, y, w, h]| [x + w, y + h])
+                                    .filter(|size| size.iter().all(|v| v.is_finite() && *v >= 0.0))
+                                    .ok_or(LayoutError::UnsupportedContent)?;
+                                let object = ObjectLayout {
+                                    id: ink.id,
+                                    rect: [x, 0.0, x + w, 0.0],
+                                    kind: ObjectKind::Ink(ink.clone()),
+                                    bottom: 0.0,
+                                };
+                                (object, h, x + w)
+                            }
+                            ParagraphContent::Unsupported(unsupported) => {
+                                let w = unsupported.layout.max_width.unwrap_or(160.0).max(160.0);
+                                let mut label = shape(
+                                    &caption(
+                                        node.id,
+                                        unsupported.id,
+                                        "Unsupported content",
+                                        Format::default(),
+                                    ),
+                                    w - 16.0,
+                                    &[0.0],
+                                )?;
+                                label.reset_origin(x + 8.0);
+                                let h = unsupported
+                                    .layout
+                                    .max_height
+                                    .unwrap_or(0.0)
+                                    .max(label.text.height() + 16.0);
+                                let object = ObjectLayout {
+                                    id: unsupported.id,
+                                    rect: [x, 0.0, x + w, 0.0],
+                                    kind: ObjectKind::Unsupported(label),
+                                    bottom: 0.0,
+                                };
+                                (object, h, x + w)
+                            }
+                            ParagraphContent::Text(_) | ParagraphContent::Table(_) => {
+                                unreachable!("text and tables are not objects")
+                            }
+                        };
+                        let flow = object.place(y, height);
+                        result.objects.push(object);
+                        (space, height, flow, extent)
+                    }
+                };
+                state.0 += f64::from(flow);
+                result.size[0] = result.size[0].max(extent);
+                result.widths[1] = result.widths[1].max(block.extent[1]);
+                block.extent[0] = extent;
+                block.metrics = Some([space[0], space[1], height]);
+                if !(state.0 as f32).is_finite() || !result.size[0].is_finite() {
+                    return Err(LayoutError::InvalidSpacing);
                 }
             }
-            if !(bottom as f32).is_finite() || !result.size[0].is_finite() {
-                return Err(LayoutError::InvalidSpacing);
+            block.state = state;
+            if depth == 0 {
+                result.blocks.push(block);
             }
         }
-        result.size[1] = bottom as f32;
-        result.size[0] = if fixed_width { width } else { result.size[0] }.max(result.table_width());
+        result.size[1] = state.0 as f32;
+        result.widths[0] = result.size[0];
         Ok(result)
     }
 
+    /// The paragraphs, tables and objects of root nodes `range`.
+    pub(crate) fn pieces(&self, range: Range<usize>) -> [Range<usize>; 3] {
+        let first = |root: usize| {
+            self.blocks.get(root).map_or(
+                [self.paragraphs.len(), self.tables.len(), self.objects.len()],
+                |block| block.first,
+            )
+        };
+        let [start, end] = [first(range.start), first(range.end)];
+        [0, 1, 2].map(|kind| start[kind]..end[kind])
+    }
+
+    /// Lays out root nodes `range` of `nodes` once `edit` applies, the edit's own or the table
+    /// holding its cell, and works out where the nodes after them move. Resizing columns or
+    /// showing or hiding other nodes lays out every node.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn relayout(
+        &self,
+        nodes: &[PageParagraph],
+        edit: &DocumentEdit,
+        range: Range<usize>,
+        indents: &[f32],
+        width: f32,
+        fixed_width: bool,
+        shape: &mut impl FnMut(&PageParagraph, f32, &[f32]) -> Result<ParagraphLayout, LayoutError>,
+    ) -> Result<Relayout, LayoutError> {
+        let mut range = if edit.columns.is_empty() {
+            range
+        } else {
+            0..nodes.len()
+        };
+        loop {
+            let old = self.pieces(range.clone());
+            let sources = leaves(&nodes[range.clone()], None)
+                .map(|(_, _, node)| (node.id, node))
+                .collect::<BTreeMap<_, _>>();
+            let cached = self.paragraphs[old[0].clone()]
+                .iter()
+                .filter_map(|layout| Some((layout.id, (*sources.get(&layout.id)?, layout))))
+                .collect::<BTreeMap<_, _>>();
+            let count = match edit.container {
+                None => range.len() - edit.range.len() + edit.replacement.len(),
+                Some(_) => range.len(),
+            };
+            let replacement = edited_nodes(nodes, None, Some(edit))
+                .skip(range.start)
+                .take(count);
+            let supplied = replacement
+                .clone()
+                .map(|node| node.id)
+                .collect::<BTreeSet<_>>();
+            // Children of a hidden or collapsed earlier node stay hidden.
+            let hiding = replacement
+                .clone()
+                .filter_map(|node| {
+                    let parent = node.parent.filter(|parent| !supplied.contains(parent))?;
+                    let root = nodes[..range.start]
+                        .iter()
+                        .rposition(|node| node.id == parent)?;
+                    (self.blocks[root].metrics.is_none() || nodes[root].collapsed).then_some(parent)
+                })
+                .collect();
+            let start = range
+                .start
+                .checked_sub(1)
+                .map_or((0.0, None), |root| self.blocks[root].state);
+            let segment = Self::stack(
+                replacement.clone(),
+                indents,
+                width,
+                0,
+                Some(edit),
+                hiding,
+                start,
+                &mut |node, width, indents| {
+                    let indent = indentation(node.level, indents, width)?;
+                    if let Some((source, cached)) = cached.get(&node.id)
+                        && *source == node
+                        && cached.text.shaped.layout_max_advance() == width - indent
+                        && cached
+                            .markers
+                            .iter()
+                            .all(|(marker, _)| marker.shaped.layout_max_advance() == width)
+                    {
+                        let mut result = (*cached).clone();
+                        result.reset_origin(indent);
+                        return Ok(result);
+                    }
+                    shape(node, width, indents)
+                },
+            )?;
+            let hides =
+                |block: &Block, node: &PageParagraph| block.metrics.is_none() || node.collapsed;
+            if range.end < nodes.len() {
+                let now = replacement
+                    .zip(&segment.blocks)
+                    .map(|(node, block)| (node.id, hides(block, node)))
+                    .collect::<BTreeMap<_, _>>();
+                if nodes[range.clone()]
+                    .iter()
+                    .zip(&self.blocks[range.clone()])
+                    .any(|(node, block)| {
+                        now.get(&node.id)
+                            .is_some_and(|now| *now != hides(block, node))
+                    })
+                {
+                    range = 0..nodes.len();
+                    continue;
+                }
+            }
+            let mut state = segment.blocks.last().map_or(start, |block| block.state);
+            let mut incoming = range
+                .end
+                .checked_sub(1)
+                .map_or((0.0, None), |root| self.blocks[root].state);
+            let mut moved = Vec::new();
+            for root in range.end..self.blocks.len() {
+                if state == incoming {
+                    break;
+                }
+                let block = &self.blocks[root];
+                incoming = block.state;
+                let mut y = 0.0;
+                if let Some([before, after, height]) = block.metrics {
+                    y = top(&mut state, [before, after]);
+                    let [_, tables, objects] = self.pieces(root..root + 1);
+                    let flow = match self.objects[objects].first() {
+                        Some(object) if tables.is_empty() => object.at(y, height).1,
+                        _ => height,
+                    };
+                    state.0 += f64::from(flow);
+                    if !(state.0 as f32).is_finite() {
+                        return Err(LayoutError::InvalidSpacing);
+                    }
+                }
+                moved.push((y, state));
+            }
+            let bottom = if moved.len() == self.blocks.len() - range.end {
+                state.0 as f32
+            } else {
+                self.size[1]
+            };
+            let widest = |blocks: &[Block], side: usize| {
+                blocks
+                    .iter()
+                    .map(|block| block.extent[side])
+                    .fold(f32::NEG_INFINITY, f32::max)
+            };
+            let widths = [0, 1].map(|side| {
+                let [before, after] = [
+                    widest(&self.blocks[range.clone()], side),
+                    widest(&segment.blocks, side),
+                ];
+                if after >= before || before < self.widths[side] {
+                    self.widths[side].max(after)
+                } else {
+                    [
+                        &self.blocks[..range.start],
+                        &segment.blocks,
+                        &self.blocks[range.end..],
+                    ]
+                    .into_iter()
+                    .map(|blocks| widest(blocks, side))
+                    .fold([36.0, f32::NEG_INFINITY][side], f32::max)
+                }
+            });
+            let tables = &old[1];
+            let tables = self.tables[..tables.start]
+                .iter()
+                .chain(&segment.tables)
+                .chain(&self.tables[tables.end..]);
+            let size = [
+                if fixed_width { width } else { widths[0] }.max(table_width(tables)),
+                bottom,
+            ];
+            return Ok(Relayout {
+                range,
+                segment,
+                moved,
+                size,
+                widths,
+            });
+        }
+    }
+
+    /// Puts a [`Relayout`] of this layout in place.
+    pub(crate) fn commit(&mut self, relayout: Relayout) {
+        let Relayout {
+            range,
+            mut segment,
+            moved,
+            size,
+            widths,
+        } = relayout;
+        let [paragraphs, tables, objects] = self.pieces(range.clone());
+        let first = [paragraphs.start, tables.start, objects.start];
+        let delta = [
+            segment.paragraphs.len() as isize - paragraphs.len() as isize,
+            segment.tables.len() as isize - tables.len() as isize,
+            segment.objects.len() as isize - objects.len() as isize,
+        ];
+        for cell in segment.tables.iter_mut().flat_map(|table| &mut table.cells) {
+            cell.paragraphs = cell.paragraphs.start + first[0]..cell.paragraphs.end + first[0];
+        }
+        for block in &mut segment.blocks {
+            for (value, first) in block.first.iter_mut().zip(first) {
+                *value += first;
+            }
+        }
+        let after = range.start + segment.blocks.len();
+        let later_tables = tables.start + segment.tables.len();
+        self.paragraphs.splice(paragraphs, segment.paragraphs);
+        self.tables.splice(tables, segment.tables);
+        self.objects.splice(objects, segment.objects);
+        self.blocks.splice(range, segment.blocks);
+        if delta != [0; 3] {
+            for block in &mut self.blocks[after..] {
+                for (value, delta) in block.first.iter_mut().zip(delta) {
+                    *value = value.wrapping_add_signed(delta);
+                }
+            }
+            for cell in self.tables[later_tables..]
+                .iter_mut()
+                .flat_map(|table| &mut table.cells)
+            {
+                cell.paragraphs = cell.paragraphs.start.wrapping_add_signed(delta[0])
+                    ..cell.paragraphs.end.wrapping_add_signed(delta[0]);
+            }
+        }
+        for (root, (y, state)) in (after..).zip(moved) {
+            let [paragraphs, tables, objects] = self.pieces(root..root + 1);
+            let block = &mut self.blocks[root];
+            block.state = state;
+            let Some([.., height]) = block.metrics else {
+                continue;
+            };
+            if !tables.is_empty() {
+                for (value, rel) in verticals(
+                    &mut self.paragraphs[paragraphs],
+                    &mut self.tables[tables],
+                    &mut self.objects[objects],
+                )
+                .zip(&block.rel)
+                {
+                    *value = rel + y;
+                }
+            } else if let Some(object) = self.objects[objects].first_mut() {
+                object.place(y, height);
+            } else {
+                self.paragraphs[paragraphs.start].origin[1] = y;
+            }
+        }
+        self.size = size;
+        self.widths = widths;
+    }
+
     pub(crate) fn table_width(&self) -> f32 {
-        // Stored column widths extend 1.77pt past the final cell border.
-        self.tables
-            .iter()
-            .filter_map(|table| table.cells.last())
-            .map(|cell| cell.rect[2] + 1.77)
-            .fold(0.0, f32::max)
+        table_width(&self.tables)
     }
 
     fn table(
@@ -666,13 +1024,11 @@ impl OutlineLayout {
             return Err(LayoutError::UnsupportedContent);
         }
         let mut result = Self {
-            paragraphs: Vec::new(),
             tables: vec![TableLayout {
                 id: table.id,
                 cells: Vec::new(),
                 borders: table.borders.unwrap_or(true),
             }],
-            objects: Vec::new(),
             size: [
                 (0..table.columns.len())
                     .map(|index| width(index) + 4.98)
@@ -680,6 +1036,7 @@ impl OutlineLayout {
                     - 1.83,
                 3.54,
             ],
+            ..Self::default()
         };
         let mut y = 0.0;
         for row in &table.rows {
@@ -724,26 +1081,15 @@ impl OutlineLayout {
         }
         Ok(result)
     }
+}
 
-    pub(crate) fn new(
-        mut paragraphs: Vec<ParagraphLayout>,
-        width: f32,
-        width_set_by_user: bool,
-    ) -> Result<Self, LayoutError> {
-        if !width.is_finite() || width <= 0.0 {
-            return Err(LayoutError::InvalidWidth);
-        }
-        let (origins, size) = arrange(paragraphs.iter(), width, width_set_by_user)?;
-        for (paragraph, y) in paragraphs.iter_mut().zip(origins) {
-            paragraph.origin[1] = y;
-        }
-        Ok(Self {
-            paragraphs,
-            tables: Vec::new(),
-            objects: Vec::new(),
-            size,
-        })
-    }
+/// Stored column widths extend 1.77pt past the final cell border.
+fn table_width<'a>(tables: impl IntoIterator<Item = &'a TableLayout>) -> f32 {
+    tables
+        .into_iter()
+        .filter_map(|table| table.cells.last())
+        .map(|cell| cell.rect[2] + 1.77)
+        .fold(0.0, f32::max)
 }
 
 /// Shapes a page object into positioned paragraph layouts.
@@ -773,13 +1119,6 @@ impl Arrange for Outline {
     }
 }
 
-/// Outlines of plain paragraphs stack them; tables and pictures, files or ink need the full flow.
-pub(crate) fn all_text<'a>(nodes: impl IntoIterator<Item = &'a PageParagraph>) -> bool {
-    nodes
-        .into_iter()
-        .all(|node| matches!(node.content, ParagraphContent::Text(_)))
-}
-
 pub(crate) fn outline_layout(
     outline: &Outline,
     engine: &mut TextEngine,
@@ -789,26 +1128,16 @@ pub(crate) fn outline_layout(
     if !outline.unsupported.is_empty() {
         return Err(LayoutError::UnsupportedContent);
     }
-    if !all_text(&outline.paragraphs) {
-        return OutlineLayout::flow(
-            outline.paragraphs.iter(),
-            &outline.indents,
-            width,
-            outline.layout.width_set_by_user == Some(true),
-            0,
-            None,
-            &mut |node, width, indents| {
-                ParagraphLayout::shape(engine, node, width, indents, definitions)
-            },
-        );
-    }
-    let paragraphs = visible_paragraphs(outline.paragraphs.iter())
-        .map(|p| ParagraphLayout::shape(engine, p, width, &outline.indents, definitions))
-        .collect::<Result<_, _>>()?;
-    OutlineLayout::new(
-        paragraphs,
+    OutlineLayout::flow(
+        outline.paragraphs.iter(),
+        &outline.indents,
         width,
         outline.layout.width_set_by_user == Some(true),
+        0,
+        None,
+        &mut |node, width, indents| {
+            ParagraphLayout::shape(engine, node, width, indents, definitions)
+        },
     )
 }
 
@@ -1377,9 +1706,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(colors, [0x0080_8000]);
+        assert_eq!(colors, [Some(0x0080_8000)]);
         assert_eq!(shaped.projection.text().spans()[0].format.color, None);
-        let outline = OutlineLayout::new(vec![shaped], 200.0, false).unwrap();
+        let outline = OutlineLayout {
+            paragraphs: vec![shaped],
+            ..OutlineLayout::default()
+        };
         assert_eq!(outline.tag_column_offset(), -12.0);
     }
 

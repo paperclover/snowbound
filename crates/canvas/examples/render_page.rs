@@ -1,4 +1,4 @@
-use canvas::gpu::{Viewport, page::PageScene};
+use canvas::gpu::{Paper, Viewport, page::PageScene};
 use canvas::layout::TextEngine;
 use draw::Renderer;
 use onestore::page::Page;
@@ -38,9 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let margin_origin = page.margin_origin;
     let object_count = page.objects.len();
-    let scene = PageScene::new(page, &mut engine)?;
+    let mut scene = PageScene::new(page, &mut engine)?;
+    while !scene.update_backgrounds(Paper::WHITE, 96.0 / 72.0, std::task::Waker::noop()) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let mut primitives = Vec::new();
-    scene.append_primitives(&mut primitives, [0.0; 2])?;
+    scene.append_primitives(&mut primitives, [0.0; 2], Paper::WHITE)?;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default()))?;
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))?;

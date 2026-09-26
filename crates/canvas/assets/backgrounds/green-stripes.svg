@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="columns" x2="88" gradientUnits="userSpaceOnUse"><stop offset="0.000" stop-color="#c0cbab"/><stop offset="0.045" stop-color="#c9d3ba"/><stop offset="0.114" stop-color="#d4dcc7"/><stop offset="0.136" stop-color="#dbe2d2"/><stop offset="0.182" stop-color="#c0cdaf"/><stop offset="0.227" stop-color="#bfcdac"/><stop offset="0.273" stop-color="#d2dac3"/><stop offset="0.341" stop-color="#e0e4d6"/><stop offset="0.386" stop-color="#cad4bb"/><stop offset="0.432" stop-color="#c6d3b7"/><stop offset="0.477" stop-color="#c6d0b5"/><stop offset="0.523" stop-color="#d0d9c4"/><stop offset="0.591" stop-color="#dde1d2"/><stop offset="0.636" stop-color="#c1ceb0"/><stop offset="0.682" stop-color="#b9c9a5"/><stop offset="0.727" stop-color="#c3ceb0"/><stop offset="0.773" stop-color="#dce2d4"/><stop offset="0.795" stop-color="#a3ad92"/><stop offset="0.818" stop-color="#b1bba3"/><stop offset="0.864" stop-color="#d1d5c7"/><stop offset="0.909" stop-color="#e8ebe4"/><stop offset="0.955" stop-color="#f8f8f6"/><stop offset="1" stop-color="#f8f8f6" stop-opacity="0"/></linearGradient>
+<linearGradient id="rows" x2="0" y2="30" gradientUnits="userSpaceOnUse"><stop offset="0.000" stop-color="#bbc9a6"/><stop offset="0.133" stop-color="#d4dbc9"/><stop offset="0.200" stop-color="#d0d8c1"/><stop offset="0.333" stop-color="#c1ccae"/><stop offset="0.533" stop-color="#b9c7a4"/><stop offset="0.667" stop-color="#bdcbaa"/><stop offset="0.733" stop-color="#a1ab90"/><stop offset="0.800" stop-color="#bec5b3"/><stop offset="0.867" stop-color="#e5e8e1"/><stop offset="1" stop-color="#e5e8e1" stop-opacity="0"/></linearGradient>
+<linearGradient id="fade-down" x2="0" y2="1"><stop offset=".6" stop-color="white"/><stop offset=".88" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="fade-across" x2="1"><stop offset=".44" stop-color="white"/><stop offset=".69" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="columns-fade"><rect width="612" height="792" fill="url(#fade-down)"/></mask>
+<mask id="rows-fade"><rect width="612" height="792" fill="url(#fade-across)"/></mask>
+</defs>
+<rect width="88" height="792" fill="url(#columns)" mask="url(#columns-fade)"/>
+<rect width="612" height="30" fill="url(#rows)" mask="url(#rows-fade)"/>
+</svg>

@@ -11,15 +11,16 @@ pub use scroll::Scroll;
 #[cfg(test)]
 mod tests;
 
-use crate::gpu::{Viewport, page::PageScene};
+use crate::gpu::{Paper, Viewport, page::PageScene};
 use crate::{
     date::DateField,
-    editor::{
-        CanvasEditor, DEFAULT_OUTLINE_WIDTH, Movement, Selection, SelectionUnit, TextOutline,
-    },
+    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, Selection, TextOutline},
     layout::TextEngine,
 };
-use draw::{Primitive, Stroke};
+use draw::{
+    Primitive, Stroke,
+    edit::{self, Clicks, Command, Key, Modifiers, Movement, NamedKey, SelectionUnit},
+};
 use std::{
     error::Error,
     time::{Duration, Instant},
@@ -30,39 +31,6 @@ const HANDLE_HEIGHT: f32 = 6.75;
 pub const DATE_LABELS: [&str; 2] = ["Page date", "Page time"];
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Key {
-    Named(NamedKey),
-    Character(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum NamedKey {
-    Escape,
-    Tab,
-    Space,
-    Enter,
-    Backspace,
-    Delete,
-    ArrowLeft,
-    ArrowRight,
-    ArrowUp,
-    ArrowDown,
-    Home,
-    End,
-    /// Shift, Control, Option or Command pressed alone.
-    Modifier,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Modifiers {
-    pub shift: bool,
-    pub control: bool,
-    pub option: bool,
-    pub command: bool,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cursor {
@@ -89,12 +57,14 @@ pub enum Request {
     CharacterPalette,
 }
 
-/// What an event did: `changed` means the page, selection or view changed (the host saves,
-/// updates accessibility and redraws); `redraw` alone repaints hover feedback.
+/// What an event did: `changed` means the page or selection changed (the host saves,
+/// updates accessibility and redraws); `moved` that only the view scrolled or zoomed (the
+/// host updates accessibility and redraws); `redraw` alone repaints hover feedback.
 #[must_use]
 #[derive(Debug, Default, PartialEq)]
 pub struct Response {
     pub changed: bool,
+    pub moved: bool,
     pub redraw: bool,
     pub request: Option<Request>,
 }
@@ -104,7 +74,7 @@ impl Response {
         Self {
             changed: true,
             redraw: true,
-            request: None,
+            ..Self::default()
         }
     }
 
@@ -123,11 +93,12 @@ impl Response {
     }
 }
 
-/// The platform's caret and text selection colours, linear RGBA.
+/// The platform's caret and text selection colours, linear RGBA, and the page's paper.
 #[derive(Clone, Copy, Debug)]
 pub struct TextColors {
     pub caret: [f32; 4],
     pub selection: [f32; 4],
+    pub paper: Paper,
 }
 
 /// How to paint an outline: whether the caret is in its blink-on phase, the view scale,
@@ -138,6 +109,9 @@ struct Paint {
     scale: f32,
     pixel: f32,
     colors: TextColors,
+    /// The document's top and bottom the view shows; paragraphs wholly outside it are
+    /// not painted.
+    visible: [f32; 2],
 }
 
 enum Drag {
@@ -205,10 +179,9 @@ pub struct PageView {
     pub viewport: Viewport,
     /// Device pixels per logical pixel.
     display_scale: f32,
-    double_click: Duration,
+    clicks: Clicks,
     pointer: [f32; 2],
     pointer_inside: bool,
-    last_click: Option<(Instant, [f32; 2], u8)>,
     drag: Option<Drag>,
     object_focus: Option<ObjectFocus>,
     modifiers: Modifiers,
@@ -242,10 +215,9 @@ impl PageView {
                 origin: home(display_scale),
             },
             display_scale,
-            double_click,
+            clicks: Clicks::new(double_click),
             pointer: [0.0; 2],
             pointer_inside: false,
-            last_click: None,
             drag: None,
             object_focus: None,
             modifiers: Modifiers::default(),
@@ -397,6 +369,15 @@ impl PageView {
         Ok(Response::changed())
     }
 
+    fn moved(&mut self) -> Result<Response> {
+        self.scroll().clamp(&mut self.viewport);
+        Ok(Response {
+            moved: true,
+            redraw: true,
+            ..Response::default()
+        })
+    }
+
     /// The caret's rectangle in device pixels, for placing the platform's input method.
     pub fn caret_area(&self) -> Result<[f32; 4]> {
         let mut rect = self.editor.caret(1.0)?;
@@ -474,13 +455,26 @@ impl PageView {
         self.changed()
     }
 
-    fn zoom(&mut self, factor: f32) {
-        let point = self.viewport.document_point(self.pointer);
+    /// The page's zoom, where 1 is OneNote's 100%: 96 pixels per inch.
+    pub fn zoom(&self) -> f32 {
+        self.viewport.scale / (self.display_scale * 96.0 / 72.0)
+    }
+
+    /// Zooms to `zoom` about the middle of the view, within 25% to 400%.
+    pub fn set_zoom(&mut self, zoom: f32) -> Result<Response> {
+        let middle = self.viewport.size.map(|size| size as f32 / 2.0);
+        self.zoom_about(zoom / self.zoom(), middle);
+        self.moved()
+    }
+
+    /// Scales the view by `factor`, keeping the document point under `anchor` in place.
+    fn zoom_about(&mut self, factor: f32, anchor: [f32; 2]) {
+        let point = self.viewport.document_point(anchor);
         let dpr = self.display_scale;
         self.viewport.scale = (self.viewport.scale * factor).clamp(dpr / 3.0, dpr * 16.0 / 3.0);
         self.viewport.origin = [
-            self.pointer[0] - point[0] * self.viewport.scale,
-            self.pointer[1] - point[1] * self.viewport.scale,
+            anchor[0] - point[0] * self.viewport.scale,
+            anchor[1] - point[1] * self.viewport.scale,
         ];
     }
 
@@ -522,7 +516,16 @@ impl PageView {
     /// within the page's bounds.
     pub fn scroll_to(&mut self, axis: usize, offset: f32) -> Result<Response> {
         self.viewport.origin[axis] = -offset;
-        self.changed()
+        self.moved()
+    }
+
+    /// Brings the page's template backgrounds to `paper` and the current zoom before a
+    /// frame's primitives; `waker` is woken off the main thread when the view should be
+    /// drawn again because a background raster landed.
+    pub fn update_backgrounds(&mut self, paper: Paper, waker: &std::task::Waker) {
+        if let Some((scene, _)) = &mut self.scene {
+            scene.update_backgrounds(paper, self.viewport.scale, waker);
+        }
     }
 
     /// Everything to draw this frame.
@@ -571,6 +574,8 @@ impl PageView {
                 scale: self.viewport.scale,
                 pixel: self.pixel(),
                 colors,
+                visible: [0.0, self.viewport.size[1] as f32]
+                    .map(|y| (y - self.viewport.origin[1]) / self.viewport.scale),
             },
         )
     }
@@ -609,7 +614,7 @@ impl PageView {
         if size.contains(&0) {
             return Ok(Response::default());
         }
-        self.changed()
+        self.moved()
     }
 
     pub fn scale_factor_changed(&mut self, scale: f32) -> Result<Response> {
@@ -618,7 +623,7 @@ impl PageView {
         self.viewport.origin[0] *= ratio;
         self.viewport.origin[1] *= ratio;
         self.display_scale = scale;
-        self.changed()
+        self.moved()
     }
 
     pub fn focus_changed(&mut self, focused: bool) -> Result<Response> {
@@ -654,7 +659,14 @@ impl PageView {
                 let target =
                     self.editor
                         .selection_at(point[0] - origin[0], point[1] - origin[1], unit)?;
-                self.editor.select(drag_selection(anchor, target, unit))?;
+                let pair = |selection: Selection| {
+                    [0, 1].map(|end| (selection.positions[end], selection.affinities[end]))
+                };
+                let ends = edit::drag(pair(anchor), pair(target), unit, |(position, _)| position);
+                self.editor.select(Selection {
+                    positions: ends.map(|(position, _)| position),
+                    affinities: ends.map(|(_, affinity)| affinity),
+                })?;
                 self.changed()
             }
             Some(Drag::Outline { pending_press, .. } | Drag::Image { pending_press, .. }) => {
@@ -688,16 +700,9 @@ impl PageView {
     /// A primary-button press at the pointer's position, at `now` for click counting.
     pub fn pointer_pressed(&mut self, now: Instant) -> Result<Response> {
         let point = self.viewport.document_point(self.pointer);
-        let count = self
-            .last_click
-            .filter(|(time, point, _)| {
-                now.duration_since(*time) <= self.double_click
-                    && (0..2).all(|axis| {
-                        (point[axis] - self.pointer[axis]).abs() <= 4.0 * self.display_scale
-                    })
-            })
-            .map_or(1, |(_, _, count)| (count % 3) + 1);
-        self.last_click = Some((now, self.pointer, count));
+        let unit = self
+            .clicks
+            .press(now, self.pointer, 4.0 * self.display_scale);
         match self.hit_test(point) {
             Some(Hit::Date(field)) => {
                 self.editor.finish_composition();
@@ -739,11 +744,6 @@ impl PageView {
                 self.editor.focus_outline(id)?;
                 let previous = self.editor.selection();
                 self.editor.select_below(&mut self.engine, id, point)?;
-                let unit = match count {
-                    2 => SelectionUnit::Word,
-                    3 => SelectionUnit::Paragraph,
-                    _ => SelectionUnit::Grapheme,
-                };
                 let selection = self.editor.selection_at(point[0], point[1], unit)?;
                 let selection = if extend {
                     Selection {
@@ -802,12 +802,12 @@ impl PageView {
     /// `delta` in device pixels; Command zooms about the pointer instead of scrolling.
     pub fn wheel(&mut self, delta: [f32; 2]) -> Result<Response> {
         if self.modifiers.command {
-            self.zoom((delta[1] * 0.005).exp());
+            self.zoom_about((delta[1] * 0.005).exp(), self.pointer);
         } else {
             self.viewport.origin[0] += delta[0];
             self.viewport.origin[1] += delta[1];
         }
-        self.changed()
+        self.moved()
     }
 
     /// Text the platform inserts outside key events, such as the character picker's;
@@ -1046,118 +1046,50 @@ impl PageView {
                 }
                 "v" => request = Some(Request::Paste),
                 "+" | "=" => {
-                    self.zoom(1.1);
-                    return self.changed();
+                    self.zoom_about(1.1, self.pointer);
+                    return self.moved();
                 }
                 "-" => {
-                    self.zoom(1.0 / 1.1);
-                    return self.changed();
+                    self.zoom_about(1.0 / 1.1, self.pointer);
+                    return self.moved();
                 }
                 "0" => {
-                    self.zoom((self.display_scale * 96.0 / 72.0) / self.viewport.scale);
-                    return self.changed();
+                    self.zoom_about(1.0 / self.zoom(), self.pointer);
+                    return self.moved();
                 }
                 _ => return Ok(Response::default()),
             }
         } else {
-            let movement = match key {
-                Key::Named(NamedKey::ArrowLeft) => Some(if command {
-                    Movement::LineStart
-                } else if option {
-                    Movement::WordLeft
-                } else {
-                    Movement::Left
-                }),
-                Key::Named(NamedKey::ArrowRight) => Some(if command {
-                    Movement::LineEnd
-                } else if option {
-                    Movement::WordRight
-                } else {
-                    Movement::Right
-                }),
-                Key::Named(NamedKey::ArrowUp) => Some(if command {
-                    Movement::DocumentStart
-                } else if option {
-                    Movement::ParagraphStart
-                } else {
-                    Movement::Up
-                }),
-                Key::Named(NamedKey::ArrowDown) => Some(if command {
-                    Movement::DocumentEnd
-                } else if option {
-                    Movement::ParagraphEnd
-                } else {
-                    Movement::Down
-                }),
-                Key::Named(NamedKey::Home) if shift => Some(Movement::DocumentStart),
-                Key::Named(NamedKey::End) if shift => Some(Movement::DocumentEnd),
-                Key::Character(key) if control && !option => match key.as_str() {
-                    "a" => Some(Movement::LineStart),
-                    "e" => Some(Movement::LineEnd),
-                    "b" => Some(Movement::Left),
-                    "f" => Some(Movement::Right),
-                    "p" => Some(Movement::Up),
-                    "n" => Some(Movement::Down),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(movement) = movement {
+            let chord = Command::from_key(key, self.modifiers);
+            if let Some(Command::Move(movement)) = chord {
                 self.editor
                     .move_selection(&mut self.engine, movement, shift)?;
             } else if self.editor.marked_range().is_none() {
-                match key {
-                    Key::Named(NamedKey::Backspace) if command || option => {
-                        self.editor.delete_to(
-                            &mut self.engine,
-                            if command {
-                                Movement::LineStart
-                            } else {
-                                Movement::WordLeft
-                            },
-                        )?;
+                match (chord, key) {
+                    (Some(Command::DeleteTo(movement)), _) => {
+                        self.editor.delete_to(&mut self.engine, movement)?;
                     }
-                    Key::Named(NamedKey::Delete) if command || option => {
-                        self.editor.delete_to(
-                            &mut self.engine,
-                            if command {
-                                Movement::LineEnd
-                            } else {
-                                Movement::WordRight
-                            },
-                        )?;
+                    (Some(Command::Delete { backward }), _) => {
+                        self.editor.delete(&mut self.engine, backward)?;
                     }
-                    Key::Named(NamedKey::Backspace) => {
-                        self.editor.delete(&mut self.engine, true)?;
+                    (Some(Command::Kill), _) => {
+                        if !self.editor.delete_to(&mut self.engine, Movement::LineEnd)? {
+                            self.editor.delete(&mut self.engine, false)?;
+                        }
                     }
-                    Key::Named(NamedKey::Delete) => {
-                        self.editor.delete(&mut self.engine, false)?;
-                    }
-                    Key::Named(end @ (NamedKey::Home | NamedKey::End)) => {
+                    (_, Key::Named(end @ (NamedKey::Home | NamedKey::End))) => {
                         let limits = self.scroll();
                         self.viewport.origin[1] = -if *end == NamedKey::Home {
                             limits.min[1]
                         } else {
                             limits.max[1]
                         };
-                        return self.changed();
+                        return self.moved();
                     }
-                    Key::Character(key) if control && !option => match key.as_str() {
-                        "h" => {
-                            self.editor.delete(&mut self.engine, true)?;
-                        }
-                        "d" => {
-                            self.editor.delete(&mut self.engine, false)?;
-                        }
-                        "k" if !self.editor.delete_to(&mut self.engine, Movement::LineEnd)? => {
-                            self.editor.delete(&mut self.engine, false)?;
-                        }
-                        _ => {}
-                    },
-                    Key::Named(NamedKey::Enter) => {
+                    (_, Key::Named(NamedKey::Enter)) => {
                         self.editor.enter(&mut self.engine, shift)?;
                     }
-                    Key::Named(NamedKey::Tab) => {
+                    (_, Key::Named(NamedKey::Tab)) => {
                         self.editor.tab(&mut self.engine, shift)?;
                     }
                     _ if !command && !control => {
@@ -1392,6 +1324,7 @@ fn page_primitives<'a>(
                 outline.shaped(),
                 [origin[0] + offset[0], origin[1] + offset[1]],
                 moving,
+                paint.colors.paper,
                 primitives,
             );
         }
@@ -1407,6 +1340,7 @@ fn page_primitives<'a>(
             *origin,
             Some(editor),
             moving,
+            paint.colors.paper,
             &draw_outline,
         )?;
     }
@@ -1578,22 +1512,6 @@ fn append_image_chrome(rect: [f32; 4], pixel: f32, primitives: &mut Vec<Primitiv
     }
 }
 
-fn drag_selection(anchor: Selection, target: Selection, unit: SelectionUnit) -> Selection {
-    if unit == SelectionUnit::Grapheme {
-        return Selection {
-            positions: [anchor.positions[0], target.positions[1]],
-            affinities: [anchor.affinities[0], target.affinities[1]],
-        };
-    }
-    let backwards = target.positions[0] < anchor.positions[0].min(anchor.positions[1]);
-    let start = usize::from((anchor.positions[0] > anchor.positions[1]) != backwards);
-    let end = usize::from((target.positions[0] > target.positions[1]) == backwards);
-    Selection {
-        positions: [anchor.positions[start], target.positions[end]],
-        affinities: [anchor.affinities[start], target.affinities[end]],
-    }
-}
-
 fn snap_to_grid(point: [f32; 2], margin: [f32; 2]) -> [f32; 2] {
     std::array::from_fn(|axis| {
         let offset = margin[axis];
@@ -1722,11 +1640,15 @@ fn append_outline<'a>(
         scale,
         pixel,
         colors,
+        visible,
     } = paint;
-    outline.shaped().append_table_primitives(primitives, origin);
+    let rows = [visible[0] - y, visible[1] - y];
     outline
         .shaped()
-        .append_background_primitives(primitives, origin);
+        .append_table_primitives(primitives, origin, colors.paper);
+    outline
+        .shaped()
+        .append_background_primitives(primitives, origin, rows);
     if let Some(editor) = editor {
         for rect in editor.selection_rects()? {
             primitives.push(Primitive::Rect {
@@ -1740,10 +1662,14 @@ fn append_outline<'a>(
             });
         }
     }
-    for (index, (_, paragraph)) in outline.layouts().enumerate() {
-        outline
-            .shaped()
-            .append_paragraph_primitives(index, paragraph, origin, primitives);
+    for (index, paragraph) in outline.shaped().visible(rows) {
+        outline.shaped().append_paragraph_primitives(
+            index,
+            paragraph,
+            origin,
+            colors.paper.ink,
+            primitives,
+        );
     }
     if let Some(editor) = editor {
         for rect in editor.marked_rects()? {
@@ -1754,7 +1680,7 @@ fn append_outline<'a>(
                     rect.x1 as f32 + x,
                     rect.y1 as f32 + y,
                 ],
-                color: [0.0, 0.0, 0.0, 1.0],
+                color: colors.paper.ink,
             });
         }
         let [anchor, focus] = editor.selection().positions;

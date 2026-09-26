@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 onestore = { path = "../crates/onestore", features = ["protected"] }
 notebook = { path = "../crates/notebook" }
 canvas = { path = "../crates/canvas" }
+draw = { path = "../crates/draw", default-features = false }
 tempfile = "3"
 md5 = "0.8.1"
 serde_json = "1"

@@ -81,6 +81,7 @@ dependencies = [
 name = "canvas"
 version = "0.1.0"
 dependencies = [
+ "draw",
  "onestore",
  "parley",
  "serde",
@@ -193,6 +194,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
+]
+
+[[package]]
+name = "draw"
+version = "0.1.0"
+dependencies = [
+ "parley",
 ]
 
 [[package]]
@@ -646,6 +654,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "base64",
+ "bumpalo",
  "cbc",
  "getrandom",
  "md5",
@@ -663,6 +672,7 @@ name = "onestore-fuzz"
 version = "0.0.0"
 dependencies = [
  "canvas",
+ "draw",
  "libfuzzer-sys",
  "md5",
  "notebook",

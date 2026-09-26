@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 95 498" preserveAspectRatio="none">
+<defs><filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="4"/></filter></defs>
+<g opacity=".85"><g filter="url(#glow)" fill="#e6e0c9"><circle cx="2" cy="335" r="74"/></g><g fill="#e6e0c9" stroke="#c3bca8"><circle cx="2" cy="335" r="74"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#d3e4d4"><rect x="21" y="9" width="19" height="148" rx="4"/></g><g fill="#d3e4d4" stroke="#9fb8a4"><rect x="21" y="9" width="19" height="148" rx="4"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#c6dfdd"><rect x="31" y="54" width="19" height="149" rx="4"/></g><g fill="#c6dfdd" stroke="#9ab7bb"><rect x="31" y="54" width="19" height="149" rx="4"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#f2d3d5"><rect x="21" y="180" width="19" height="149" rx="4"/></g><g fill="#f2d3d5" stroke="#c4959a"><rect x="21" y="180" width="19" height="149" rx="4"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#f2d3d5"><circle cx="60" cy="437" r="18"/></g><g fill="#f2d3d5" stroke="#c4959a"><circle cx="60" cy="437" r="18"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#d3e4d4"><circle cx="33" cy="481" r="6.5"/></g><g fill="#d3e4d4" stroke="#9fb8a4"><circle cx="33" cy="481" r="6.5"/></g></g>
+</svg>

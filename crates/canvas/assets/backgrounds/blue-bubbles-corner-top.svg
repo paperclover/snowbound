@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 76 97" preserveAspectRatio="none">
+<defs><filter id="glow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3"/></filter></defs>
+<g fill="#d9e8fc" filter="url(#glow)"><circle cx="36" cy="4" r="20"/><circle cx="42" cy="42" r="13"/><circle cx="29" cy="67" r="7.5"/></g>
+<g fill="#b5d6ff" stroke="#ffffff" stroke-width="2"><circle cx="36" cy="4" r="17"/><circle cx="42" cy="42" r="10"/><circle cx="29" cy="67" r="4.5"/></g>
+</svg>

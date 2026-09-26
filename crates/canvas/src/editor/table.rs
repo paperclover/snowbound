@@ -84,8 +84,9 @@ impl CanvasEditor {
         }
         let outline = self.active_outline();
         let [anchor, focus] = outline.selection.positions;
-        let (cell, local, source) = leaves(outline.document.nodes(), None)
-            .nth(focus.paragraph)
+        let (cell, local, source) = outline
+            .document
+            .leaf(focus.paragraph)
             .ok_or(EditError::InvalidRange)?;
         let Some(cell) = cell else {
             if backward || anchor != focus || focus.offset == 0 {
@@ -255,8 +256,9 @@ impl CanvasEditor {
         }
         let outline = self.active_outline();
         let [anchor, focus] = outline.selection.positions;
-        let (cell, local, source) = leaves(outline.document.nodes(), None)
-            .nth(focus.paragraph)
+        let (cell, local, source) = outline
+            .document
+            .leaf(focus.paragraph)
             .ok_or(EditError::InvalidRange)?;
         let Some(cell) = cell.filter(|_| anchor == focus) else {
             return self.insert(engine, "\n");

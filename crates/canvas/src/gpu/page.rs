@@ -1,4 +1,6 @@
-use super::colorref;
+mod background;
+
+use super::{Paper, colorref};
 use crate::editor::ReadOnlyObject;
 use crate::editor::page::Content;
 use crate::{
@@ -6,6 +8,7 @@ use crate::{
     editor::{CanvasEditor, EditorError},
     layout::{LayoutError, TextEngine},
 };
+use background::Background;
 use draw::{Primitive, RasterImage, RenderError};
 use onestore::page::Page;
 use std::fmt;
@@ -14,6 +17,8 @@ use std::fmt;
 pub struct PageScene {
     reference: Option<Vec<Content>>,
     images: std::collections::BTreeMap<onestore::ExGuid, RasterImage>,
+    /// Background pictures from OneNote's page templates, painted from their recreations.
+    backgrounds: std::collections::BTreeMap<onestore::ExGuid, Background>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -82,6 +87,17 @@ fn append_ink(ink: &onestore::page::Ink, offset: [f32; 2], primitives: &mut Vec<
     }
 }
 
+fn append_placeholder(rect: [f32; 4], paper: Paper, primitives: &mut Vec<Primitive<'_>>) {
+    primitives.push(Primitive::Rect {
+        rect,
+        color: paper.shade(colorref(0x00e4ddd6)),
+    });
+    primitives.push(Primitive::Rect {
+        rect: [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 1.0, rect[3] - 1.0],
+        color: paper.shade(colorref(0x00faf7f3)),
+    });
+}
+
 #[derive(Debug)]
 pub enum SceneError {
     Layout(LayoutError),
@@ -127,10 +143,10 @@ impl PageScene {
         let objects = crate::editor::page::build(&mut page, engine, false)
             .map_err(SceneError::from)?
             .objects;
-        let images = Self::decode_images(&objects, None)?;
+        let pictures = Self::decode_images(&objects, None)?;
         Ok(Self {
             reference: Some(objects),
-            images,
+            ..pictures
         })
     }
 
@@ -139,21 +155,15 @@ impl PageScene {
         engine: &mut TextEngine,
     ) -> Result<(Self, CanvasEditor), SceneError> {
         let editor = CanvasEditor::from_page(page, engine).map_err(SceneError::from)?;
-        let images = Self::decode_images(&editor.objects, Some(&editor))?;
-        Ok((
-            Self {
-                reference: None,
-                images,
-            },
-            editor,
-        ))
+        Ok((Self::decode_images(&editor.objects, Some(&editor))?, editor))
     }
 
-    /// Decodes every picture the page draws: page-level ones and those inside outlines.
+    /// Decodes every picture the page draws, page-level ones and those inside outlines,
+    /// except the template backgrounds it recognises.
     fn decode_images(
         objects: &[Content],
         editor: Option<&CanvasEditor>,
-    ) -> Result<std::collections::BTreeMap<onestore::ExGuid, RasterImage>, SceneError> {
+    ) -> Result<Self, SceneError> {
         fn nested<'a>(
             nodes: &'a [onestore::page::PageParagraph],
             payloads: &mut Vec<(onestore::ExGuid, Option<&'a [u8]>)>,
@@ -179,9 +189,18 @@ impl PageScene {
             }
         }
         let mut payloads = Vec::new();
+        let mut backgrounds = std::collections::BTreeMap::new();
         for object in objects {
             match object {
-                Content::Image(source) => payloads.push((source.id, source.bytes.as_deref())),
+                Content::Image(source) => {
+                    if source.background
+                        && let Some(art) = Background::recognise(source)
+                    {
+                        backgrounds.insert(source.id, art);
+                    } else {
+                        payloads.push((source.id, source.bytes.as_deref()))
+                    }
+                }
                 Content::Outline { source, .. } => nested(&source.paragraphs, &mut payloads),
                 Content::Editable(id) => {
                     if let Some(outline) =
@@ -206,11 +225,32 @@ impl PageScene {
                 return Err(SceneError::InvalidGeometry);
             }
         }
-        Ok(images)
+        Ok(Self {
+            reference: None,
+            images,
+            backgrounds,
+        })
     }
 
     pub fn image(&self, id: onestore::ExGuid) -> Option<&RasterImage> {
         self.images.get(&id)
+    }
+
+    /// Brings template backgrounds to `paper` at `scale` device pixels per point, rasterizing
+    /// off this thread; `waker` is woken when a raster lands and the page should be drawn
+    /// again. Call before collecting each frame's primitives. True once every background
+    /// shows its raster for this paper and scale.
+    pub fn update_backgrounds(
+        &mut self,
+        paper: Paper,
+        scale: f32,
+        waker: &std::task::Waker,
+    ) -> bool {
+        let mut settled = true;
+        for art in self.backgrounds.values_mut() {
+            settled &= art.update(paper, scale, waker);
+        }
+        settled
     }
 
     /// Pictures, files and handwriting inside an outline whose origin is `origin`.
@@ -220,6 +260,7 @@ impl PageScene {
         outline: &'a crate::outline::OutlineLayout,
         origin: [f32; 2],
         moving: Option<(onestore::ExGuid, [f32; 4])>,
+        paper: Paper,
         primitives: &mut Vec<Primitive<'a>>,
     ) {
         for object in &outline.objects {
@@ -241,14 +282,7 @@ impl PageScene {
                     append_ink(ink, [rect[0], rect[1]], primitives)
                 }
                 crate::outline::ObjectKind::Unsupported(_) => {
-                    primitives.push(Primitive::Rect {
-                        rect,
-                        color: colorref(0x00e4ddd6),
-                    });
-                    primitives.push(Primitive::Rect {
-                        rect: [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 1.0, rect[3] - 1.0],
-                        color: colorref(0x00faf7f3),
-                    });
+                    append_placeholder(rect, paper, primitives)
                 }
                 crate::outline::ObjectKind::Picture | crate::outline::ObjectKind::File(_) => {}
             }
@@ -257,6 +291,7 @@ impl PageScene {
                     text: &label.text,
                     origin: [origin[0] + label.origin[0], origin[1] + label.origin[1]],
                     clip: None,
+                    ink: paper.ink,
                 });
             }
         }
@@ -445,8 +480,9 @@ impl PageScene {
         &'a self,
         primitives: &mut Vec<Primitive<'a>>,
         offset: [f32; 2],
+        paper: Paper,
     ) -> Result<(), SceneError> {
-        self.append_primitives_with(primitives, offset, None, None, |_, _, _| {
+        self.append_primitives_with(primitives, offset, None, None, paper, |_, _, _| {
             Err(SceneError::MissingOutline)
         })
     }
@@ -458,6 +494,7 @@ impl PageScene {
         offset: [f32; 2],
         editor: Option<&'a CanvasEditor>,
         moving: Option<(onestore::ExGuid, [f32; 4])>,
+        paper: Paper,
         mut outline: impl FnMut(onestore::ExGuid, [f32; 2], &mut Vec<Primitive<'a>>) -> Result<(), E>,
     ) -> Result<(), E> {
         for content in self.objects(editor)? {
@@ -499,18 +536,12 @@ impl PageScene {
                         x1 + offset[0],
                         y1 + offset[1],
                     ];
-                    primitives.push(Primitive::Rect {
-                        rect,
-                        color: colorref(0x00e4ddd6),
-                    });
-                    primitives.push(Primitive::Rect {
-                        rect: [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 1.0, rect[3] - 1.0],
-                        color: colorref(0x00faf7f3),
-                    });
+                    append_placeholder(rect, paper, primitives);
                     primitives.push(Primitive::Text {
                         clip: None,
                         text: &object.label,
                         origin: [rect[0] + 8.0, rect[1] + 8.0],
+                        ink: paper.shade(colorref(0x005d554e)),
                     });
                     continue;
                 }
@@ -525,28 +556,41 @@ impl PageScene {
             };
             let object_origin = [origin[0] + offset[0], origin[1] + offset[1]];
             match content {
-                Content::Image(source) => primitives.push(Primitive::Image {
-                    image: self
-                        .images
-                        .get(&source.id)
-                        .ok_or(SceneError::MissingImage)?,
-                    rect: match moving {
-                        Some((id, [x0, y0, x1, y1])) if id == source.id => [
-                            x0 + offset[0],
-                            y0 + offset[1],
-                            x1 + offset[0],
-                            y1 + offset[1],
-                        ],
-                        _ => [
-                            object_origin[0],
-                            object_origin[1],
-                            object_origin[0]
-                                + source.layout.max_width.ok_or(SceneError::MissingImage)?,
-                            object_origin[1]
-                                + source.layout.max_height.ok_or(SceneError::MissingImage)?,
-                        ],
-                    },
-                }),
+                Content::Image(source) => {
+                    let (image, [width, height]) = match self.backgrounds.get(&source.id) {
+                        // The paper shows until the worker's raster lands.
+                        Some(art) => match art.image(paper) {
+                            Some(image) => (image, art.size),
+                            None => continue,
+                        },
+                        None => (
+                            self.images
+                                .get(&source.id)
+                                .ok_or(SceneError::MissingImage)?,
+                            [
+                                source.layout.max_width.ok_or(SceneError::MissingImage)?,
+                                source.layout.max_height.ok_or(SceneError::MissingImage)?,
+                            ],
+                        ),
+                    };
+                    primitives.push(Primitive::Image {
+                        image,
+                        rect: match moving {
+                            Some((id, [x0, y0, x1, y1])) if id == source.id => [
+                                x0 + offset[0],
+                                y0 + offset[1],
+                                x1 + offset[0],
+                                y1 + offset[1],
+                            ],
+                            _ => [
+                                object_origin[0],
+                                object_origin[1],
+                                object_origin[0] + width,
+                                object_origin[1] + height,
+                            ],
+                        },
+                    })
+                }
                 Content::Outline { .. } | Content::Date { .. } => {
                     let outline = match content {
                         Content::Outline { layout, .. } => layout,
@@ -555,14 +599,16 @@ impl PageScene {
                             .ok_or(SceneError::MissingOutline)?
                             .layout(),
                     };
-                    outline.append_table_primitives(primitives, object_origin);
-                    outline.append_background_primitives(primitives, object_origin);
-                    self.append_outline_objects(outline, object_origin, None, primitives);
-                    for (index, paragraph) in outline.paragraphs.iter().enumerate() {
+                    outline.append_table_primitives(primitives, object_origin, paper);
+                    let everything = [f32::NEG_INFINITY, f32::INFINITY];
+                    outline.append_background_primitives(primitives, object_origin, everything);
+                    self.append_outline_objects(outline, object_origin, None, paper, primitives);
+                    for (index, paragraph) in outline.visible(everything) {
                         outline.append_paragraph_primitives(
                             index,
                             paragraph,
                             object_origin,
+                            paper.ink,
                             primitives,
                         );
                     }
@@ -575,12 +621,33 @@ impl PageScene {
 }
 
 impl crate::outline::OutlineLayout {
+    /// Paragraphs that may paint between outline-local `rows`, with their indices.
+    pub fn visible(
+        &self,
+        rows: [f32; 2],
+    ) -> impl Iterator<Item = (usize, &crate::outline::ParagraphLayout)> {
+        // Markers, tags and overhanging ink stay within this of a paragraph's lines.
+        const OVERHANG: f32 = 72.0;
+        self.paragraphs
+            .iter()
+            .enumerate()
+            .filter(move |(_, paragraph)| {
+                let [start, end] = [
+                    paragraph.origin[1] - OVERHANG,
+                    paragraph.origin[1] + paragraph.text.height() + OVERHANG,
+                ];
+                paragraph.math.is_some() || (end >= rows[0] && start <= rows[1])
+            })
+    }
+
+    /// Highlights behind the paragraphs `visible` finds between outline-local `rows`.
     pub fn append_background_primitives(
         &self,
         primitives: &mut Vec<Primitive<'_>>,
         origin: [f32; 2],
+        rows: [f32; 2],
     ) {
-        for (index, paragraph) in self.paragraphs.iter().enumerate() {
+        for (index, paragraph) in self.visible(rows) {
             for (mut rect, color) in paragraph.text.backgrounds() {
                 rect.x0 += f64::from(paragraph.origin[0]);
                 rect.x1 += f64::from(paragraph.origin[0]);
@@ -612,6 +679,7 @@ impl crate::outline::OutlineLayout {
         index: usize,
         paragraph: &'a crate::outline::ParagraphLayout,
         origin: [f32; 2],
+        ink: [f32; 4],
         primitives: &mut Vec<Primitive<'a>>,
     ) {
         let [x, y] = [
@@ -635,6 +703,7 @@ impl crate::outline::OutlineLayout {
                             clip,
                             text: layout,
                             origin: [x + origin[0], y + origin[1]],
+                            ink,
                         },
                         // As pen strokes, so hairline rules keep a device pixel.
                         crate::math::MathItem::Rule([x0, y0, x1, y1]) => {
@@ -651,7 +720,7 @@ impl crate::outline::OutlineLayout {
                                 to: [x + to[0], y + to[1]],
                                 width,
                                 round: false,
-                                color: colorref(math.color),
+                                color: math.color.map_or(ink, colorref),
                             }
                         }
                         crate::math::MathItem::Stroke { from, to, width } => Primitive::Segment {
@@ -659,7 +728,7 @@ impl crate::outline::OutlineLayout {
                             to: [x + to[0], y + to[1]],
                             width: *width,
                             round: true,
-                            color: colorref(math.color),
+                            color: math.color.map_or(ink, colorref),
                         },
                     });
                 }
@@ -668,6 +737,7 @@ impl crate::outline::OutlineLayout {
                 clip,
                 text: &paragraph.text,
                 origin: [x, y],
+                ink,
             }),
         }
         for (layout, marker) in &paragraph.markers {
@@ -675,6 +745,7 @@ impl crate::outline::OutlineLayout {
                 clip,
                 text: layout,
                 origin: [origin[0] + marker[0], y + marker[1]],
+                ink,
             });
         }
         for tag in &paragraph.tags {
@@ -685,12 +756,17 @@ impl crate::outline::OutlineLayout {
                     y + tag.origin[1],
                 ],
                 size: crate::outline::ParagraphTag::SIZE,
-                opacity: if tag.disabled { 0.45 } else { 1.0 },
+                tint: [1.0, 1.0, 1.0, if tag.disabled { 0.45 } else { 1.0 }],
             });
         }
     }
 
-    pub fn append_table_primitives(&self, primitives: &mut Vec<Primitive<'_>>, origin: [f32; 2]) {
+    pub fn append_table_primitives(
+        &self,
+        primitives: &mut Vec<Primitive<'_>>,
+        origin: [f32; 2],
+        paper: Paper,
+    ) {
         for table in &self.tables {
             let (Some(first), Some(last)) = (table.cells.first(), table.cells.last()) else {
                 continue;
@@ -699,7 +775,7 @@ impl crate::outline::OutlineLayout {
                 continue;
             }
             let bounds = [first.rect[0], first.rect[1], last.rect[2], last.rect[3]];
-            let color = colorref(0x00a3a3a3);
+            let color = paper.shade(colorref(0x00a3a3a3));
             primitives.push(Primitive::RoundedRect {
                 rect: [
                     bounds[0] + origin[0] - 0.375,
@@ -1155,6 +1231,7 @@ mod tests {
                         [0.0; 2],
                         Some(editor),
                         None,
+                        Paper::WHITE,
                         |_, _, _| Ok(()),
                     )
                     .unwrap();
@@ -1553,6 +1630,7 @@ mod tests {
                 [0.0; 2],
                 Some(editor),
                 None,
+                Paper::WHITE,
                 |id, offset, primitives| {
                     let outline = editor
                         .outlines()
@@ -1563,6 +1641,7 @@ mod tests {
                         primitives.push(Primitive::Text {
                             clip: None,
                             text: &paragraph.text,
+                            ink: Paper::WHITE.ink,
                             origin: [
                                 outline.origin()[0] + paragraph.origin[0] + offset[0],
                                 outline.origin()[1] + paragraph.origin[1] + offset[1],
@@ -1643,7 +1722,7 @@ mod tests {
         let (scene, mut editor) = PageScene::from_page(page(), &mut engine).unwrap();
         let mut reference_primitives = Vec::new();
         reference
-            .append_primitives(&mut reference_primitives, [0.0; 2])
+            .append_primitives(&mut reference_primitives, [0.0; 2], Paper::WHITE)
             .unwrap();
         let image_id;
         {
@@ -1656,11 +1735,13 @@ mod tests {
                             clip: None,
                             text: a,
                             origin: x,
+                            ..
                         },
                         Primitive::Text {
                             clip: None,
                             text: b,
                             origin: y,
+                            ..
                         },
                     ) => {
                         assert_eq!(x, y);
@@ -1753,7 +1834,7 @@ mod tests {
                 .advance
         );
         assert!(matches!(
-            scene.append_primitives(&mut Vec::new(), [0.0; 2]),
+            scene.append_primitives(&mut Vec::new(), [0.0; 2], Paper::WHITE),
             Err(SceneError::MissingOutline)
         ));
     }
@@ -1804,6 +1885,7 @@ mod tests {
                 [5.0, 0.0],
                 Some(&editor),
                 None,
+                Paper::WHITE,
                 |_, _, _| Ok(()),
             )
             .unwrap();
@@ -1870,9 +1952,11 @@ mod tests {
             ));
         }
         let mut primitives = Vec::new();
-        scene.append_primitives(&mut primitives, [0.0; 2]).unwrap();
         scene
-            .append_primitives(&mut primitives, [10.0, -20.0])
+            .append_primitives(&mut primitives, [0.0; 2], Paper::WHITE)
+            .unwrap();
+        scene
+            .append_primitives(&mut primitives, [10.0, -20.0], Paper::WHITE)
             .unwrap();
         let [
             Primitive::Image {
@@ -1942,6 +2026,7 @@ mod tests {
                 [0.0; 2],
                 Some(&editor),
                 Some((id, [70.0, 5.0, 120.0, 55.0])),
+                Paper::WHITE,
                 |_, _, _| Ok(()),
             )
             .unwrap();

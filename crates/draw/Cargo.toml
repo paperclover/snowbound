@@ -4,13 +4,19 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["render"]
+# The wgpu renderer; `edit` needs only parley.
+render = ["dep:bytemuck", "dep:image", "dep:roxmltree", "dep:swash", "dep:wgpu"]
+
 [dependencies]
-bytemuck = { version = "1.25", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"] }
 parley.workspace = true
-roxmltree = "0.21"
-swash = "0.2.10"
-wgpu.workspace = true
+
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png"], optional = true }
+roxmltree = { version = "0.21", optional = true }
+swash = { version = "0.2.10", optional = true }
+wgpu = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = "0.4"

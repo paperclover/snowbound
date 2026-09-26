@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<radialGradient id="reach" cx="180" cy="0" r="1" gradientTransform="translate(180 0) scale(440 220) translate(-180 0)" gradientUnits="userSpaceOnUse"><stop offset="0.4" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></radialGradient><mask id="art"><rect width="612" height="792" fill="url(#reach)"/></mask>
+<linearGradient id="down" x2="0" y2="1"><stop offset="0.55" stop-color="white"/><stop offset="0.75" stop-color="white" stop-opacity="0"/></linearGradient><mask id="rule-down"><rect width="612" height="792" fill="url(#down)"/></mask>
+</defs>
+<g mask="url(#art)">
+<g transform="rotate(-8 200 100)">
+<rect x="-40" y="-10" width="540" height="250" fill="#e3e8f3"/>
+<g stroke="#a4b2cc" stroke-width=".9"><path d="M-40 -10V240"/><path d="M-24 -10V240"/><path d="M-8 -10V240"/><path d="M8 -10V240"/><path d="M24 -10V240"/><path d="M40 -10V240"/><path d="M56 -10V240"/><path d="M72 -10V240"/><path d="M88 -10V240"/><path d="M104 -10V240"/><path d="M120 -10V240"/><path d="M136 -10V240"/><path d="M152 -10V240"/><path d="M168 -10V240"/><path d="M184 -10V240"/><path d="M200 -10V240"/><path d="M216 -10V240"/><path d="M232 -10V240"/><path d="M248 -10V240"/><path d="M264 -10V240"/><path d="M280 -10V240"/><path d="M296 -10V240"/><path d="M312 -10V240"/><path d="M328 -10V240"/><path d="M344 -10V240"/><path d="M360 -10V240"/><path d="M376 -10V240"/><path d="M392 -10V240"/><path d="M408 -10V240"/><path d="M424 -10V240"/><path d="M440 -10V240"/><path d="M456 -10V240"/><path d="M472 -10V240"/><path d="M488 -10V240"/><path d="M-40 -10H500"/><path d="M-40 6H500"/><path d="M-40 22H500"/><path d="M-40 38H500"/><path d="M-40 54H500"/><path d="M-40 70H500"/><path d="M-40 86H500"/><path d="M-40 102H500"/><path d="M-40 118H500"/><path d="M-40 134H500"/><path d="M-40 150H500"/><path d="M-40 166H500"/><path d="M-40 182H500"/><path d="M-40 198H500"/><path d="M-40 214H500"/><path d="M-40 230H500"/></g>
+<g stroke="#f6f8fb" stroke-width="18" stroke-linecap="square">
+<path d="M70 50L150 150M150 50L70 150"/><path d="M230 60H330M230 110H330"/>
+</g>
+</g>
+<path d="M385 70L425 110M425 70L385 110" stroke="#d9dfeb" stroke-width="6"/>
+</g>
+<rect x="0" y="0" width="3" height="792" fill="#576c97" mask="url(#rule-down)"/>
+</svg>

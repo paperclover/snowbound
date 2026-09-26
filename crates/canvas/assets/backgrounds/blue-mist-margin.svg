@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 69 630" preserveAspectRatio="none">
+<defs>
+<linearGradient id="down" x2="0" y2="1"><stop offset=".38" stop-color="white"/><stop offset=".99" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="fade"><rect width="69" height="630" fill="url(#down)"/></mask>
+</defs>
+<g mask="url(#fade)">
+<rect width="40" height="630" fill="#698686"/>
+<g fill="#adb7b9">
+<rect x="43" width="4" height="630"/>
+<rect x="50" width="1" height="630"/>
+<rect x="64.5" width="2.5" height="630"/>
+</g>
+</g>
+</svg>

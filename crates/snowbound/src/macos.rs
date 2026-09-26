@@ -13,7 +13,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
-    NSDateFormatterStyle, NSRange, NSString,
+    NSDateFormatterStyle, NSPoint, NSRange, NSRect, NSSize, NSString,
 };
 use std::{cell::Cell, sync::OnceLock};
 use winit::{
@@ -259,6 +259,56 @@ pub fn configure_presentation(surface: &wgpu::Surface<'_>) {
             .lock()
             .setPresentsWithTransaction(true);
     }
+}
+
+/// The application's icon as the Dock shows it, `pixels` square.
+pub fn app_icon(pixels: u32) -> Option<draw::RasterImage> {
+    let side = pixels as usize;
+    let mut rgba = unsafe {
+        let mtm = MainThreadMarker::new()?;
+        let icon: Retained<AnyObject> =
+            msg_send_id![&NSApplication::sharedApplication(mtm), applicationIconImage];
+        let bitmap: Allocated<AnyObject> = msg_send_id![AnyClass::get("NSBitmapImageRep")?, alloc];
+        let planes: *mut *mut u8 = std::ptr::null_mut();
+        let bitmap: Option<Retained<AnyObject>> = msg_send_id![
+            bitmap,
+            initWithBitmapDataPlanes: planes,
+            pixelsWide: side as isize,
+            pixelsHigh: side as isize,
+            bitsPerSample: 8isize,
+            samplesPerPixel: 4isize,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: &*NSString::from_str("NSCalibratedRGBColorSpace"),
+            bytesPerRow: 4 * side as isize,
+            bitsPerPixel: 32isize
+        ];
+        let bitmap = bitmap?;
+        let contexts = AnyClass::get("NSGraphicsContext")?;
+        let context: Option<Retained<AnyObject>> =
+            msg_send_id![contexts, graphicsContextWithBitmapImageRep: &*bitmap];
+        let _: () = msg_send![contexts, saveGraphicsState];
+        let _: () = msg_send![contexts, setCurrentContext: &*context?];
+        let bounds = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(side as f64, side as f64),
+        );
+        // NSCompositingOperationSourceOver
+        let _: () = msg_send![&icon, drawInRect: bounds, fromRect: NSRect::ZERO, operation: 2usize, fraction: 1.0f64];
+        let _: () = msg_send![contexts, restoreGraphicsState];
+        let data: *const u8 = msg_send![&bitmap, bitmapData];
+        std::slice::from_raw_parts(data, 4 * side * side).to_vec()
+    };
+    // AppKit's bitmap is premultiplied.
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        for channel in &mut pixel[..3] {
+            *channel = (u32::from(*channel) * 255)
+                .checked_div(alpha)
+                .map_or(0, |value| value.min(255) as u8);
+        }
+    }
+    draw::RasterImage::new([pixels; 2], rgba).ok()
 }
 
 pub fn text_colors() -> [[f32; 4]; 2] {

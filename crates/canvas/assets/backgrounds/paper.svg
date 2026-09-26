@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="fx0" x2="612" gradientUnits="userSpaceOnUse"><stop offset="0.490" stop-color="white"/><stop offset="1.000" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="fy0" x2="0" y2="792" gradientUnits="userSpaceOnUse"><stop offset="0.581" stop-color="white"/><stop offset="0.972" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="across"><rect width="612" height="792" fill="url(#fx0)"/></mask>
+<mask id="down"><rect width="612" height="792" fill="url(#fy0)"/></mask>
+<linearGradient id="bar" x2="0" y2="1"><stop offset="0" stop-color="#e2e9f5"/><stop offset=".6" stop-color="#c8d5e3"/><stop offset=".85" stop-color="#8d9dad"/><stop offset="1" stop-color="#7f8f9f"/></linearGradient>
+<linearGradient id="post" x2="1"><stop offset="0" stop-color="#c8d4e1"/><stop offset=".5" stop-color="#a6b7c7"/><stop offset=".85" stop-color="#74808e"/><stop offset="1" stop-color="#c7c7c7"/></linearGradient>
+<filter id="soft"><feGaussianBlur stdDeviation="1.5"/></filter>
+</defs>
+<rect width="30" height="792" fill="url(#post)" mask="url(#down)"/>
+<rect width="612" height="55" fill="url(#bar)" mask="url(#across)"/>
+<rect y="55" width="612" height="4" fill="#bcbcbc" mask="url(#across)" filter="url(#soft)"/>
+<g><rect x="22" y="24.0" width="100" height="2" rx="1" fill="#8a8178"/><rect x="25" y="26.4" width="97" height="2" rx="1" fill="#f4f4f2"/><rect x="23" y="28.8" width="99" height="2" rx="1" fill="#bebebe"/><rect x="26" y="31.2" width="96" height="2" rx="1" fill="#fafafa"/><rect x="24" y="33.6" width="98" height="2" rx="1" fill="#6f655c"/><rect x="22" y="36.0" width="100" height="2" rx="1" fill="#e8e8e6"/><rect x="25" y="38.4" width="97" height="2" rx="1" fill="#c4c5c7"/><rect x="23" y="40.8" width="99" height="2" rx="1" fill="#ffffff"/><rect x="24" y="43.2" width="98" height="2" rx="1" fill="#b1b7b5"/></g>
+</svg>

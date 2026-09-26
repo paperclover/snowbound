@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 102 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="down" x2="0" y2="1"><stop offset=".7" stop-color="white"/><stop offset=".99" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="fade"><rect width="102" height="792" fill="url(#down)"/></mask>
+<g id="sprig">
+<path d="M42 70C36 95 33 125 34 150S31 200 31 240" fill="none" stroke="#7fbf73" stroke-width="1.8"/>
+<path d="M57 205C62 215 64 222 60 232" fill="none" stroke="#7fbf73" stroke-width="1.2"/>
+<path d="M29 80C20 86 17 100 24 110C28 104 31 92 29 80Z" fill="#6cb05f"/>
+<path d="M31 148C20 160 14 185 17 212C26 200 32 175 31 148Z" fill="#6cb05f"/>
+<path d="M31 212C30 190 42 170 66 160C68 168 62 176 56 180C54 194 44 206 31 212Z" fill="#92c886"/>
+<path d="M62 214C55 226 55 242 62 258C68 244 68 228 62 214Z" fill="#8cc580"/>
+<path d="M14 245C18 230 28 222 33 228C31 238 22 245 14 245Z" fill="#8cc580"/>
+<g fill="none" stroke="#e8837b" stroke-width="2.2" stroke-linecap="round">
+<path d="M31 106C24 110 12 109 6 102C2 95 6 88 13 89C16 84 24 85 25 92C26 98 30 101 31 106"/>
+<path d="M33 224C29 226 27 219 30 216C32 212 37 215 36 218C40 216 43 221 40 224C37 227 33 226 33 224Z"/>
+</g>
+<path d="M44 44L49 50L52 42L56 50L64 46C62 56 60 66 52 70C46 71 41 66 41 58C41 52 42 47 44 44Z" fill="#e8837b"/>
+<path d="M47 50C46 58 48 65 52 68" fill="none" stroke="#d6655e" stroke-width="1.2"/>
+<path d="M62 48C66 49 65 56 61 60" fill="none" stroke="#f3aaa3" stroke-width="1.4"/>
+<g transform="translate(51 133)">
+<path d="M-28 5C-30-6-22-14-8-14C0-22 16-20 22-12C32-10 36-2 30 6C36 12 32 22 22 22C14 26 0 26-8 22C-20 24-28 16-28 5Z" fill="#f1a09a"/>
+<path d="M-20 -6C-10-10 6-10 16-4C24 0 26 6 22 8C12 2 0 0-14 2C-18 1-21-2-20-6Z" fill="#e07571"/>
+<ellipse cx="-12" cy="9" rx="10" ry="8" fill="#f7cdc8"/>
+<ellipse cx="12" cy="13" rx="11" ry="6" fill="#f5c3be"/>
+<path d="M-26-4C-24-10-16-14-10-12" fill="none" stroke="#f7d3cf" stroke-width="2.4" stroke-linecap="round"/>
+</g>
+</g>
+</defs>
+<g mask="url(#fade)">
+<rect width="50" height="792" fill="#b6d6b1"/>
+<use href="#sprig"/>
+<use href="#sprig" y="248"/>
+<use href="#sprig" y="496"/>
+<use href="#sprig" y="744"/>
+</g>
+</svg>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="rule-across" x2="1"><stop offset="0" stop-color="#777c99"/><stop offset=".92" stop-color="#777c99" stop-opacity="0"/></linearGradient>
+<linearGradient id="rule-down" x2="0" y2="1"><stop offset="0" stop-color="#777c99"/><stop offset=".72" stop-color="#777c99" stop-opacity="0"/></linearGradient>
+<linearGradient id="band" x2="1"><stop offset=".2" stop-color="#233776"/><stop offset=".9" stop-color="#233776" stop-opacity="0"/></linearGradient>
+<linearGradient id="margin" x2="0" y2="1"><stop offset="0" stop-color="#ececf1"/><stop offset=".38" stop-color="#ececf1" stop-opacity="0"/></linearGradient>
+</defs>
+<rect y="16" width="29" height="776" fill="url(#margin)"/>
+<rect width="612" height="6" fill="url(#rule-across)"/>
+<rect x="29" width="3" height="792" fill="url(#rule-down)"/>
+<rect y="8" width="612" height="8" fill="url(#band)"/>
+</svg>

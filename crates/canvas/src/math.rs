@@ -10,8 +10,8 @@ use onestore::page::text::Paragraph;
 #[derive(Clone)]
 pub struct MathLayout {
     pub size: [f32; 2],
-    /// COLORREF for rules and strokes.
-    pub color: u32,
+    /// COLORREF for rules and strokes, or `None` for the paper's ink.
+    pub color: Option<u32>,
     /// Distance from the top to the baseline of the equation's main row.
     pub baseline: f32,
     pub items: Vec<MathItem>,
@@ -616,7 +616,7 @@ pub fn layout(engine: &mut TextEngine, paragraph: &Paragraph) -> Result<MathLayo
     body.descent = body.descent.max(line.height - line.baseline);
     Ok(MathLayout {
         size: [body.width, body.height()],
-        color: color.unwrap_or(0),
+        color,
         baseline: body.ascent,
         items: body
             .items

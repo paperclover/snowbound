@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 39 600" preserveAspectRatio="none">
+<defs><linearGradient id="blend" x2="0" y2="1">
+<stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+<stop offset="0.046" stop-color="#fff3fb"/>
+<stop offset="0.106" stop-color="#f2d7e4"/>
+<stop offset="0.166" stop-color="#fff5e6"/>
+<stop offset="0.226" stop-color="#ffd9c0"/>
+<stop offset="0.286" stop-color="#fffde6"/>
+<stop offset="0.346" stop-color="#fff0bb"/>
+<stop offset="0.406" stop-color="#eef7ff"/>
+<stop offset="0.466" stop-color="#c9d7f6"/>
+<stop offset="0.526" stop-color="#fbf1ff"/>
+<stop offset="0.586" stop-color="#e0d2f2"/>
+<stop offset="0.646" stop-color="#f3f7ee"/>
+<stop offset="0.706" stop-color="#e0e7d2"/>
+<stop offset="0.766" stop-color="#eaf9f7"/>
+<stop offset="0.826" stop-color="#d2e2e0"/>
+<stop offset="0.886" stop-color="#fff3f3"/>
+<stop offset="0.946" stop-color="#fbced2"/>
+<stop offset=".985" stop-color="#ffffff" stop-opacity="0"/>
+</linearGradient></defs>
+<rect x="15" width="17" height="600" fill="url(#blend)"/>
+<rect x="7" y="19" width="17" height="17" fill="#ffe7f7"/>
+<rect x="7" y="55" width="17" height="17" fill="#e7b6ce"/>
+<rect x="7" y="91" width="17" height="17" fill="#ffebce"/>
+<rect x="7" y="127" width="17" height="17" fill="#ffba8c"/>
+<rect x="7" y="163" width="17" height="17" fill="#fffbce"/>
+<rect x="7" y="199" width="17" height="17" fill="#ffe384"/>
+<rect x="7" y="235" width="17" height="17" fill="#deefff"/>
+<rect x="7" y="271" width="17" height="17" fill="#9cb6ef"/>
+<rect x="7" y="307" width="17" height="17" fill="#f7e3ff"/>
+<rect x="7" y="343" width="17" height="17" fill="#c6aee7"/>
+<rect x="7" y="379" width="17" height="17" fill="#e7efde"/>
+<rect x="7" y="415" width="17" height="17" fill="#c6d3ad"/>
+<rect x="7" y="451" width="17" height="17" fill="#d6f3ef"/>
+<rect x="7" y="487" width="17" height="17" fill="#adcbc6"/>
+<rect x="7" y="523" width="17" height="17" fill="#ffe7e7"/>
+<rect x="7" y="559" width="17" height="17" fill="#f7a6ad"/>
+</svg>

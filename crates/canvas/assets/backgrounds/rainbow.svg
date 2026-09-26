@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="sky" x2="0" y2="1"><stop offset=".1" stop-color="#daedfb"/><stop offset=".38" stop-color="#cfe3f6"/><stop offset=".55" stop-color="#bcd6ef"/></linearGradient>
+<linearGradient id="cloud" x2="0" y2="1"><stop offset=".45" stop-color="#ffffff"/><stop offset="1" stop-color="#e3ecf7"/></linearGradient>
+<g id="scene">
+<rect width="612" height="792" fill="url(#sky)"/>
+<ellipse cx="290" cy="420" rx="200" ry="120" fill="#f1f6fc"/>
+<g fill="none" stroke-width="7.5">
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(0.0 0.0)" stroke="#f47473"/>
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(6.3 3.15)" stroke="#f9b0a8"/>
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(12.6 6.3)" stroke="#97dd09"/>
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(18.900000000000002 9.450000000000001)" stroke="#fde706"/>
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(25.2 12.6)" stroke="#ffffff"/>
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(31.5 15.75)" stroke="#9fb1f3"/>
+<path d="M-4 640C14 300 250-80 425-62C525-52 585 80 616 205" transform="translate(37.800000000000004 18.900000000000002)" stroke="#ffffff"/>
+</g>
+<g fill="none" stroke-width="3">
+<path d="M470 505C488 530 502 580 508 625" transform="translate(0.0 0)" stroke="#f47473"/>
+<path d="M470 505C488 530 502 580 508 625" transform="translate(2.8000000000000003 0)" stroke="#f9b0a8"/>
+<path d="M470 505C488 530 502 580 508 625" transform="translate(5.6000000000000005 0)" stroke="#97dd09"/>
+<path d="M470 505C488 530 502 580 508 625" transform="translate(8.4 0)" stroke="#fde706"/>
+<path d="M470 505C488 530 502 580 508 625" transform="translate(11.200000000000001 0)" stroke="#ffffff"/>
+</g>
+<g fill="url(#cloud)"><circle cx="30" cy="200" r="70"/><circle cx="80" cy="150" r="60"/><circle cx="40" cy="260" r="45"/><circle cx="160" cy="130" r="85"/><circle cx="240" cy="200" r="70"/><circle cx="130" cy="230" r="70"/><circle cx="270" cy="260" r="50"/><circle cx="300" cy="300" r="45"/><circle cx="350" cy="330" r="40"/><circle cx="260" cy="320" r="35"/><circle cx="510" cy="410" r="55"/><circle cx="450" cy="430" r="45"/><circle cx="560" cy="440" r="45"/><circle cx="470" cy="480" r="35"/></g>
+<ellipse cx="440" cy="760" rx="360" ry="140" fill="#8fc865"/>
+<ellipse cx="150" cy="800" rx="200" ry="110" fill="#79ba59"/>
+<ellipse cx="-10" cy="720" rx="85" ry="110" fill="#46963f"/>
+</g>
+<clipPath id="strip"><rect width="42" height="792"/></clipPath>
+<clipPath id="page"><rect x="42" width="570" height="792"/></clipPath>
+<linearGradient id="across" x2="1"><stop offset=".88" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="down" x2="0" y2="1"><stop offset=".82" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="fade-across"><rect width="612" height="792" fill="url(#across)"/></mask>
+<mask id="fade-down"><rect width="612" height="792" fill="url(#down)"/></mask>
+</defs>
+<g mask="url(#fade-down)">
+<use href="#scene" clip-path="url(#strip)"/>
+<g mask="url(#fade-across)"><use href="#scene" clip-path="url(#page)" opacity=".16"/></g>
+</g>
+</svg>

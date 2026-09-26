@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 813 99" preserveAspectRatio="none">
+<defs>
+<linearGradient id="across" x2="1"><stop offset=".76" stop-color="#f4f5f1"/><stop offset=".99" stop-color="#f4f5f1" stop-opacity="0"/></linearGradient>
+<linearGradient id="rule" x2="1"><stop offset=".76" stop-color="#e09c71"/><stop offset=".98" stop-color="#e09c71" stop-opacity="0"/></linearGradient>
+<linearGradient id="metal" x2="0" y2="1"><stop offset="0" stop-color="#e1e6f5"/><stop offset=".3" stop-color="#98a4cf"/><stop offset=".65" stop-color="#5c6897"/><stop offset="1" stop-color="#aeb9dd"/></linearGradient>
+<filter id="depth" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="1.3"/></filter>
+</defs>
+<rect width="813" height="98" fill="url(#across)"/>
+<rect y="98" width="813" height="1" fill="url(#rule)"/>
+<g opacity=".9">
+<g filter="url(#depth)" opacity=".75">
+<rect x="-52" y="-19" width="104" height="38" rx="19" transform="translate(236 30) rotate(58)" fill="none" stroke="url(#metal)" stroke-width="13"/>
+</g>
+<rect x="-44" y="-14" width="88" height="28" rx="14" transform="translate(478 104) rotate(14)" fill="none" stroke="url(#metal)" stroke-width="13"/>
+<rect x="-54" y="-8" width="108" height="16" rx="8" transform="translate(405 76) rotate(27)" fill="url(#metal)"/>
+<path d="M-44 -2H44" transform="translate(405 76) rotate(27)" stroke="#eef1fa" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="14 5"/>
+<rect x="-68" y="-21" width="136" height="42" rx="21" transform="translate(333 46) rotate(14)" fill="none" stroke="url(#metal)" stroke-width="14"/>
+<rect x="-68" y="-21" width="136" height="42" rx="21" transform="translate(332 44) rotate(14)" fill="none" stroke="#f3f5fb" stroke-width="2" opacity=".8"/>
+</g>
+</svg>

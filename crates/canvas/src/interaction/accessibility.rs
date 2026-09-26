@@ -1,139 +1,87 @@
-use crate::gpu::Viewport;
+use crate::gpu::{Viewport, page::PageScene};
 use crate::{
     date::DateField,
     document::TextPosition,
-    editor::{CanvasEditor, Selection, TextOutline},
+    editor::{CanvasEditor, Selection},
+    outline::ParagraphLayout,
 };
 use accesskit::{
     Action, Affine, Node, NodeId, Rect, Role, TextDirection, TextSelection, TreeId, TreeInfo,
     TreeUpdate,
 };
-use onestore::page::text::EditError;
+use onestore::{ExGuid, page::text::EditError};
 use parley::Affinity;
-use std::{collections::HashMap, ops::Range};
+use std::collections::HashMap;
 
 pub const ROOT: NodeId = NodeId(0);
+/// The page in document coordinates; its transform is the viewport, so scrolling and zooming
+/// change only this node.
+const PAGE: NodeId = NodeId(1);
 
 struct Run {
-    outline: onestore::ExGuid,
     id: NodeId,
     node: Node,
-    positions: Vec<TextPosition>,
+    /// Paragraph-relative source offset of each character boundary, except the end of a
+    /// paragraph break, which is the next paragraph's start.
+    offsets: Vec<u32>,
 }
 
-#[derive(Hash, PartialEq, Eq)]
-struct ParagraphKey {
+/// A paragraph's runs, in paragraph coordinates under a node at its origin, so reflow above
+/// it moves one node.
+struct Paragraph {
+    id: NodeId,
     layout: u64,
     source: usize,
-    next: Option<usize>,
-    origin: [u32; 2],
+    origin: [f32; 2],
+    /// Its text's byte length in the field's value.
+    length: usize,
+    runs: Vec<Run>,
 }
 
+impl Paragraph {
+    fn node(&self) -> Node {
+        let mut node = Node::new(Role::GenericContainer);
+        node.set_transform(Affine::translate((
+            f64::from(self.origin[0]),
+            f64::from(self.origin[1]),
+        )));
+        node.set_children(self.runs.iter().map(|run| run.id).collect::<Vec<_>>());
+        node
+    }
+}
+
+struct Field {
+    outline: ExGuid,
+    id: NodeId,
+    node: Node,
+    paragraphs: Vec<Paragraph>,
+}
+
+/// The nodes last sent to assistive technology, so each update sends only what changed.
 pub struct Accessibility {
-    outlines: Vec<(onestore::ExGuid, NodeId)>,
-    runs: Vec<Run>,
-    paragraphs: HashMap<ParagraphKey, Range<usize>>,
-    read_only: Vec<NodeId>,
-    dates: Vec<(DateField, NodeId)>,
+    fields: Vec<Field>,
+    read_only: Vec<(NodeId, Node)>,
+    dates: Vec<(DateField, NodeId, Node)>,
     next_id: u64,
 }
 
 impl Default for Accessibility {
     fn default() -> Self {
         Self {
-            outlines: Vec::new(),
-            runs: Vec::new(),
-            paragraphs: HashMap::new(),
+            fields: Vec::new(),
             read_only: Vec::new(),
             dates: Vec::new(),
-            next_id: 1,
+            next_id: 2,
         }
     }
 }
 
 impl Accessibility {
-    /// Retire published runs without recycling their IDs.
+    /// Retire published nodes without recycling their IDs; the next update sends the whole tree.
     pub fn deactivate(&mut self) {
-        self.runs.clear();
-        self.paragraphs.clear();
-        self.outlines.clear();
+        self.fields.clear();
         self.read_only.clear();
         self.dates.clear();
-    }
-
-    pub fn append_page_fields(
-        &mut self,
-        update: &mut TreeUpdate,
-        scene: Option<&(crate::gpu::page::PageScene, [f32; 2])>,
-        editor: &CanvasEditor,
-        viewport: Viewport,
-        focus: Option<usize>,
-    ) {
-        let mut count = 0;
-        if let Some((scene, offset)) = scene {
-            for (index, object) in scene.read_only(Some(editor)).enumerate() {
-                if index == self.read_only.len() {
-                    let id = self.allocate();
-                    self.read_only.push(id);
-                }
-                let id = self.read_only[index];
-                let mut node = Node::new(Role::Label);
-                node.set_value(object.message);
-                node.set_read_only();
-                node.add_action(Action::Focus);
-                if focus == Some(index) {
-                    update.focus = id;
-                }
-                let [x0, y0, x1, y1] = object.rect();
-                let x = |v| f64::from((v + offset[0]) * viewport.scale + viewport.origin[0]);
-                let y = |v| f64::from((v + offset[1]) * viewport.scale + viewport.origin[1]);
-                node.set_bounds(Rect::new(x(x0), y(y0), x(x1), y(y1)));
-                update
-                    .nodes
-                    .iter_mut()
-                    .find(|(id, _)| *id == ROOT)
-                    .unwrap()
-                    .1
-                    .push_child(id);
-                update.nodes.push((id, node));
-                count += 1;
-            }
-        }
-        self.read_only.truncate(count);
-        let mut date_count = 0;
-        if let Some((scene, offset)) = scene {
-            for (index, (field, rect)) in scene.date_fields(editor).enumerate() {
-                if index == self.dates.len() {
-                    let id = self.allocate();
-                    self.dates.push((field, id));
-                }
-                self.dates[index].0 = field;
-                let id = self.dates[index].1;
-                let mut node = Node::new(Role::Button);
-                node.set_label(super::DATE_LABELS[field as usize]);
-                node.set_value(
-                    editor.date().unwrap().source().paragraphs[index]
-                        .text()
-                        .unwrap()
-                        .text
-                        .text(),
-                );
-                node.add_action(Action::Click);
-                let x = |v| f64::from((v + offset[0]) * viewport.scale + viewport.origin[0]);
-                let y = |v| f64::from((v + offset[1]) * viewport.scale + viewport.origin[1]);
-                node.set_bounds(Rect::new(x(rect[0]), y(rect[1]), x(rect[2]), y(rect[3])));
-                update
-                    .nodes
-                    .iter_mut()
-                    .find(|(id, _)| *id == ROOT)
-                    .unwrap()
-                    .1
-                    .push_child(id);
-                update.nodes.push((id, node));
-                date_count += 1;
-            }
-        }
-        self.dates.truncate(date_count);
     }
 
     fn allocate(&mut self) -> NodeId {
@@ -146,309 +94,132 @@ impl Accessibility {
     }
 
     pub fn read_only_for_node(&self, node: NodeId) -> Option<usize> {
-        self.read_only.iter().position(|id| *id == node)
+        self.read_only.iter().position(|(id, _)| *id == node)
     }
 
     pub fn date_for_node(&self, node: NodeId) -> Option<DateField> {
         self.dates
             .iter()
-            .find(|(_, id)| *id == node)
-            .map(|(field, _)| *field)
+            .find(|(_, id, _)| *id == node)
+            .map(|(field, ..)| *field)
     }
 
-    pub fn outline_for_node(&self, node: NodeId) -> Option<onestore::ExGuid> {
-        self.outlines
+    pub fn outline_for_node(&self, node: NodeId) -> Option<ExGuid> {
+        self.fields
             .iter()
-            .find(|(_, id)| *id == node)
-            .map(|(outline, _)| *outline)
+            .find(|field| field.id == node)
+            .map(|field| field.outline)
     }
 
+    /// The nodes that changed since the last update. After an error, `deactivate` before the
+    /// next update.
     pub fn update(
         &mut self,
         editor: &CanvasEditor,
+        scene: Option<&(PageScene, [f32; 2])>,
         viewport: Viewport,
         title: &str,
-        preview: Option<(onestore::ExGuid, [f32; 2])>,
+        preview: Option<(ExGuid, [f32; 2])>,
+        read_only_focus: Option<usize>,
     ) -> Result<TreeUpdate, EditError> {
-        let mut runs = Vec::new();
-        let mut outlines = Vec::new();
-        let mut paragraph_ranges = HashMap::new();
-        for outline in editor.visible_outlines().chain(editor.caret_outline()) {
-            let field = self
-                .outlines
-                .iter()
-                .find(|(id, _)| *id == outline.id)
-                .map(|(_, node)| *node)
-                .unwrap_or_else(|| self.allocate());
-            outlines.push((outline.id, field));
-            let mut paragraphs = outline.layouts().peekable();
-            while let Some((paragraph, shaped)) = paragraphs.next() {
-                let layout = &shaped.text;
-                let origin = shaped.origin;
-                let key = ParagraphKey {
-                    layout: layout.id(),
-                    source: paragraph,
-                    next: paragraphs.peek().map(|(next, _)| *next),
-                    origin: origin.map(f32::to_bits),
-                };
-                let start = runs.len();
-                if let Some(range) = self.paragraphs.get(&key) {
-                    runs.extend(
-                        self.runs[range.clone()]
-                            .iter()
-                            .map(|run| (run.outline, run.node.clone(), run.positions.clone())),
-                    );
-                    paragraph_ranges.insert(key, start..runs.len());
-                    continue;
-                }
-                let projection = &shaped.projection;
-                let text = projection.text().text();
-                let boundaries: Vec<_> = projection.source_boundaries().collect();
-                let source_position = |byte| -> Result<TextPosition, EditError> {
-                    let index = boundaries
-                        .binary_search_by_key(&byte, |(byte, _)| *byte)
-                        .map_err(|_| EditError::InvalidRange)?;
-                    Ok(TextPosition {
-                        paragraph,
-                        offset: boundaries[index].1,
-                    })
-                };
-                let line_count = layout.lines().count();
-                for (line_index, (line, bounds)) in layout.lines().enumerate() {
-                    let line_start = runs.len();
-                    let mut x = line.metrics().offset;
-                    let mut logical_runs = Vec::new();
-                    for run in line.runs() {
-                        let advance = run.advance();
-                        logical_runs.push((run, x));
-                        x += advance;
-                    }
-                    logical_runs.sort_by_key(|(run, _)| run.text_range().start);
-                    for (run, x) in logical_runs {
-                        // AccessKit stores each character's byte length in a u8.
-                        let mut characters = Vec::new();
-                        for cluster in run.clusters() {
-                            let range = cluster.text_range();
-                            if range.is_empty() || range.start == text.len() {
-                                continue;
-                            }
-                            let cluster_text =
-                                text.get(range.clone()).ok_or(EditError::InvalidRange)?;
-                            if range.len() <= u8::MAX as usize {
-                                characters.push((
-                                    range,
-                                    cluster.advance(),
-                                    cluster.is_word_boundary(),
-                                ));
-                            } else {
-                                for (index, (offset, ch)) in cluster_text.char_indices().enumerate()
-                                {
-                                    characters.push((
-                                        range.start + offset..range.start + offset + ch.len_utf8(),
-                                        if index == 0 { cluster.advance() } else { 0.0 },
-                                        index == 0 && cluster.is_word_boundary(),
-                                    ));
-                                }
-                            }
-                        }
-                        let mut advance = 0.0;
-                        for chunk in characters.chunks(256) {
-                            let width: f32 = chunk.iter().map(|(_, width, _)| width).sum();
-                            let left = x + if run.is_rtl() {
-                                run.advance() - advance - width
-                            } else {
-                                advance
-                            };
-                            let mut node = Node::new(Role::TextRun);
-                            node.set_bounds(Rect::new(
-                                f64::from(left + origin[0]),
-                                f64::from(bounds.top + origin[1]),
-                                f64::from(left + width + origin[0]),
-                                f64::from(bounds.top + bounds.height + origin[1]),
-                            ));
-                            node.set_text_direction(if run.is_rtl() {
-                                TextDirection::RightToLeft
-                            } else {
-                                TextDirection::LeftToRight
-                            });
-                            node.set_font_size(run.font_size());
-                            let start = chunk[0].0.start;
-                            let end = chunk.last().unwrap().0.end;
-                            node.set_value(text.get(start..end).ok_or(EditError::InvalidRange)?);
-                            node.set_character_lengths(
-                                chunk
-                                    .iter()
-                                    .map(|(range, _, _)| u8::try_from(range.len()).unwrap())
-                                    .collect::<Vec<_>>(),
-                            );
-                            let mut offset = 0.0;
-                            node.set_character_positions(
-                                chunk
-                                    .iter()
-                                    .map(|(_, width, _)| {
-                                        let position = offset;
-                                        offset += width;
-                                        position
-                                    })
-                                    .collect::<Vec<_>>(),
-                            );
-                            node.set_character_widths(
-                                chunk.iter().map(|(_, width, _)| *width).collect::<Vec<_>>(),
-                            );
-                            node.set_word_starts(
-                                chunk
-                                    .iter()
-                                    .enumerate()
-                                    .filter_map(|(index, (_, _, word))| word.then_some(index as u8))
-                                    .collect::<Vec<_>>(),
-                            );
-                            let positions = chunk
-                                .iter()
-                                .map(|(range, _, _)| source_position(range.start))
-                                .chain(std::iter::once(source_position(end)))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            runs.push((outline.id, node, positions));
-                            advance += width;
-                        }
-                    }
-                    // Empty lines still need a text position for selection and insertion.
-                    if runs.len() == line_start {
-                        let mut node = Node::new(Role::TextRun);
-                        node.set_value("");
-                        node.set_character_lengths(Vec::<u8>::new());
-                        node.set_character_positions(Vec::<f32>::new());
-                        node.set_character_widths(Vec::<f32>::new());
-                        node.set_text_direction(TextDirection::LeftToRight);
-                        node.set_bounds(Rect::new(
-                            f64::from(origin[0]),
-                            f64::from(bounds.top + origin[1]),
-                            f64::from(origin[0]),
-                            f64::from(bounds.top + bounds.height + origin[1]),
-                        ));
-                        runs.push((
-                            outline.id,
-                            node,
-                            vec![source_position(bounds.source.start)?],
-                        ));
-                    }
-                    if line_index + 1 == line_count
-                        && let Some((next, _)) = paragraphs.peek()
-                    {
-                        let (_, node, source_positions) = runs.last_mut().unwrap();
-                        let mut value = node.value().unwrap().to_owned();
-                        value.push('\n');
-                        node.set_value(value);
-                        let mut lengths = node.character_lengths().to_vec();
-                        lengths.push(1);
-                        node.set_character_lengths(lengths);
-                        if let Some(rect) = node.bounds() {
-                            let mut positions =
-                                node.character_positions().unwrap_or_default().to_vec();
-                            positions.push(rect.width() as f32);
-                            node.set_character_positions(positions);
-                            let mut widths = node.character_widths().unwrap_or_default().to_vec();
-                            widths.push(4.0);
-                            node.set_character_widths(widths);
-                        }
-                        source_positions.push(TextPosition {
-                            paragraph: *next,
-                            offset: 0,
-                        });
-                    }
-                }
-                if !shaped.tags.is_empty() {
-                    let descriptions = shaped
-                        .tags
-                        .iter()
-                        .map(|tag| {
-                            use crate::outline::TagIcon;
-                            let fallback = match tag.icon {
-                                TagIcon::CheckBox { .. } => "To do",
-                                TagIcon::Question => "Question",
-                                TagIcon::Music => "Music",
-                                TagIcon::Exclamation => "Critical",
-                                TagIcon::RedSquare => "Project A",
-                                TagIcon::YellowSquare => "Project B",
-                                TagIcon::BlueSquare => "Project C",
-                            };
-                            let label = if tag.label.is_empty() {
-                                fallback
-                            } else {
-                                &tag.label
-                            };
-                            let state = match tag.icon {
-                                TagIcon::CheckBox { checked: true } => ", completed",
-                                TagIcon::CheckBox { checked: false } => ", incomplete",
-                                _ => "",
-                            };
-                            format!(
-                                "{label}{state}{}",
-                                if tag.disabled { ", disabled" } else { "" }
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    runs[start].1.set_description(descriptions);
-                }
-                paragraph_ranges.insert(key, start..runs.len());
-            }
-        }
-        let mut runs: Vec<_> = runs
-            .into_iter()
-            .enumerate()
-            .map(|(index, (outline, mut node, positions))| {
-                node.clear_next_on_line();
-                node.clear_previous_on_line();
-                let id = match self.runs.get(index) {
-                    Some(old)
-                        if old.outline == outline
-                            && old.positions == positions
-                            && old.node.value() == node.value() =>
-                    {
-                        old.id
-                    }
-                    _ => self.allocate(),
-                };
-                Run {
-                    outline,
-                    id,
-                    node,
-                    positions,
-                }
-            })
-            .collect();
-        for index in 1..runs.len() {
-            if runs[index - 1].outline == runs[index].outline
-                && runs[index - 1].node.bounds().map(|r| r.y0)
-                    == runs[index].node.bounds().map(|r| r.y0)
-            {
-                let (before, after) = runs.split_at_mut(index);
-                before[index - 1].node.set_next_on_line(after[0].id);
-                after[0].node.set_previous_on_line(before[index - 1].id);
-            }
-        }
-        self.runs = runs;
-        self.paragraphs = paragraph_ranges;
-        self.outlines = outlines;
-        let mut root = Node::new(Role::Window);
-        root.set_label(title);
-        root.set_children(self.outlines.iter().map(|(_, id)| *id).collect::<Vec<_>>());
-        root.set_bounds(Rect::new(
-            0.0,
-            0.0,
-            viewport.size[0] as f64,
-            viewport.size[1] as f64,
-        ));
-        let mut nodes = vec![(ROOT, root)];
+        let mut nodes = Vec::new();
         let mut focus = ROOT;
-        for (index, (outline, (_, id))) in editor
+        let mut previous: HashMap<_, _> = self
+            .fields
+            .drain(..)
+            .map(|field| (field.outline, field))
+            .collect();
+        for (ordinal, outline) in editor
             .visible_outlines()
             .chain(editor.caret_outline())
-            .zip(&self.outlines)
             .enumerate()
         {
-            let mut field = Node::new(Role::MultilineTextInput);
-            field.set_label(if outline.title {
+            let (id, sent, old) = match previous.remove(&outline.id) {
+                Some(field) => (field.id, Some(field.node), field.paragraphs),
+                None => (self.allocate(), None, Vec::new()),
+            };
+            let layouts: Vec<_> = outline.layouts().collect();
+            // Only a paragraph with a successor ends its last run with the paragraph break.
+            let same = |old_index: usize, index: usize| {
+                old[old_index].layout == layouts[index].1.text.id()
+                    && (old_index + 1 == old.len()) == (index + 1 == layouts.len())
+            };
+            let shorter = old.len().min(layouts.len());
+            let prefix = (0..shorter).take_while(|&i| same(i, i)).count();
+            let suffix = (1..=shorter - prefix)
+                .take_while(|&i| same(old.len() - i, layouts.len() - i))
+                .count();
+            let text = sent.as_ref().and_then(Node::value).unwrap_or_default();
+            let length = |paragraphs: &[Paragraph]| paragraphs.iter().map(|p| p.length).sum();
+            let mut value = text[..length(&old[..prefix])].to_owned();
+            let tail = &text[text.len() - length(&old[old.len() - suffix..])..];
+            let mut paragraphs = old;
+            let kept = paragraphs.split_off(paragraphs.len() - suffix);
+            let mut replaced = paragraphs.split_off(prefix).into_iter();
+            for (at, (source, shaped)) in layouts
+                .iter()
+                .enumerate()
+                .take(layouts.len() - suffix)
+                .skip(prefix)
+            {
+                let (id, old) = match replaced.next() {
+                    Some(paragraph) => (paragraph.id, paragraph.runs),
+                    None => (self.allocate(), Vec::new()),
+                };
+                let mut runs = Vec::new();
+                for (index, (node, offsets)) in runs_of(shaped, at + 1 < layouts.len())?
+                    .into_iter()
+                    .enumerate()
+                {
+                    let id = match old.get(index) {
+                        Some(old) if old.offsets == offsets && old.node.value() == node.value() => {
+                            old.id
+                        }
+                        _ => self.allocate(),
+                    };
+                    runs.push(Run { id, node, offsets });
+                }
+                for index in 1..runs.len() {
+                    if runs[index - 1].node.bounds().map(|r| r.y0)
+                        == runs[index].node.bounds().map(|r| r.y0)
+                    {
+                        let (before, after) = runs.split_at_mut(index);
+                        before[index - 1].node.set_next_on_line(after[0].id);
+                        after[0].node.set_previous_on_line(before[index - 1].id);
+                    }
+                }
+                for (index, run) in runs.iter().enumerate() {
+                    if old
+                        .get(index)
+                        .is_none_or(|old| old.id != run.id || old.node != run.node)
+                    {
+                        nodes.push((run.id, run.node.clone()));
+                    }
+                }
+                let start = value.len();
+                value.extend(runs.iter().filter_map(|run| run.node.value()));
+                let paragraph = Paragraph {
+                    id,
+                    layout: shaped.text.id(),
+                    source: *source,
+                    origin: shaped.origin,
+                    length: value.len() - start,
+                    runs,
+                };
+                nodes.push((id, paragraph.node()));
+                paragraphs.push(paragraph);
+            }
+            paragraphs.extend(kept);
+            value.push_str(tail);
+            for (paragraph, (source, shaped)) in paragraphs.iter_mut().zip(&layouts) {
+                paragraph.source = *source;
+                if paragraph.origin != shaped.origin {
+                    paragraph.origin = shaped.origin;
+                    nodes.push((paragraph.id, paragraph.node()));
+                }
+            }
+            let mut node = Node::new(Role::MultilineTextInput);
+            node.set_label(if outline.title {
                 "Page title".into()
             } else if editor
                 .caret_outline()
@@ -456,47 +227,121 @@ impl Accessibility {
             {
                 "Text input".into()
             } else {
-                format!("Text outline {}", index + 1)
+                format!("Text outline {}", ordinal + 1)
             });
-            field.add_action(Action::Focus);
-            field.add_action(Action::SetTextSelection);
-            field.add_action(Action::ReplaceSelectedText);
-            field.add_action(Action::SetValue);
-            let runs = self.runs.iter().filter(|run| run.outline == outline.id);
-            field.set_value(
-                runs.clone()
-                    .filter_map(|run| run.node.value())
-                    .collect::<String>(),
+            node.add_action(Action::Focus);
+            node.add_action(Action::SetTextSelection);
+            node.add_action(Action::ReplaceSelectedText);
+            node.add_action(Action::SetValue);
+            node.set_value(value);
+            node.set_children(
+                paragraphs
+                    .iter()
+                    .map(|paragraph| paragraph.id)
+                    .collect::<Vec<_>>(),
             );
-            field.set_children(runs.map(|run| run.id).collect::<Vec<_>>());
             let origin = preview
                 .filter(|(id, _)| *id == outline.id)
                 .map(|(_, origin)| origin)
                 .unwrap_or_else(|| outline.origin());
-            field.set_transform(Affine::new([
-                f64::from(viewport.scale),
-                0.0,
-                0.0,
-                f64::from(viewport.scale),
-                f64::from(viewport.origin[0]) + f64::from(origin[0]) * f64::from(viewport.scale),
-                f64::from(viewport.origin[1]) + f64::from(origin[1]) * f64::from(viewport.scale),
-            ]));
+            node.set_transform(Affine::translate((
+                f64::from(origin[0]),
+                f64::from(origin[1]),
+            )));
             let bounds = outline.bounds();
-            field.set_bounds(Rect::new(0.0, 0.0, bounds.width(), bounds.height()));
+            node.set_bounds(Rect::new(0.0, 0.0, bounds.width(), bounds.height()));
             if outline.id == editor.active_outline().id {
                 let Selection {
                     positions: [anchor, caret],
                     affinities,
                 } = editor.selection();
-                field.set_text_selection(TextSelection {
-                    anchor: self.position(outline, anchor, affinities[0])?,
-                    focus: self.position(outline, caret, affinities[1])?,
+                node.set_text_selection(TextSelection {
+                    anchor: position(&layouts, &paragraphs, anchor, affinities[0])?,
+                    focus: position(&layouts, &paragraphs, caret, affinities[1])?,
                 });
-                focus = *id;
+                focus = id;
             }
-            nodes.push((*id, field));
+            if sent.as_ref() != Some(&node) {
+                nodes.push((id, node.clone()));
+            }
+            self.fields.push(Field {
+                outline: outline.id,
+                id,
+                node,
+                paragraphs,
+            });
         }
-        nodes.extend(self.runs.iter().map(|run| (run.id, run.node.clone())));
+        let mut children: Vec<_> = self.fields.iter().map(|field| field.id).collect();
+        let sent_read_only = std::mem::take(&mut self.read_only);
+        let sent_dates = std::mem::take(&mut self.dates);
+        if let Some((scene, offset)) = scene {
+            let rect = |[x0, y0, x1, y1]: [f32; 4]| {
+                Rect::new(
+                    f64::from(x0 + offset[0]),
+                    f64::from(y0 + offset[1]),
+                    f64::from(x1 + offset[0]),
+                    f64::from(y1 + offset[1]),
+                )
+            };
+            for (index, object) in scene.read_only(Some(editor)).enumerate() {
+                let mut node = Node::new(Role::Label);
+                node.set_value(object.message);
+                node.set_read_only();
+                node.add_action(Action::Focus);
+                node.set_bounds(rect(object.rect()));
+                let sent = sent_read_only.get(index);
+                let id = sent.map_or_else(|| self.allocate(), |(id, _)| *id);
+                if sent.is_none_or(|(_, sent)| *sent != node) {
+                    nodes.push((id, node.clone()));
+                }
+                if read_only_focus == Some(index) {
+                    focus = id;
+                }
+                children.push(id);
+                self.read_only.push((id, node));
+            }
+            for (index, (field, bounds)) in scene.date_fields(editor).enumerate() {
+                let mut node = Node::new(Role::Button);
+                node.set_label(super::DATE_LABELS[field as usize]);
+                node.set_value(
+                    editor.date().unwrap().source().paragraphs[index]
+                        .text()
+                        .unwrap()
+                        .text
+                        .text(),
+                );
+                node.add_action(Action::Click);
+                node.set_bounds(rect(bounds));
+                let sent = sent_dates.get(index);
+                let id = sent.map_or_else(|| self.allocate(), |(_, id, _)| *id);
+                if sent.is_none_or(|(_, _, sent)| *sent != node) {
+                    nodes.push((id, node.clone()));
+                }
+                children.push(id);
+                self.dates.push((field, id, node));
+            }
+        }
+        let mut page = Node::new(Role::GenericContainer);
+        page.set_transform(Affine::new([
+            f64::from(viewport.scale),
+            0.0,
+            0.0,
+            f64::from(viewport.scale),
+            f64::from(viewport.origin[0]),
+            f64::from(viewport.origin[1]),
+        ]));
+        page.set_children(children);
+        let mut root = Node::new(Role::Window);
+        root.set_label(title);
+        root.set_children(vec![PAGE]);
+        root.set_bounds(Rect::new(
+            0.0,
+            0.0,
+            viewport.size[0] as f64,
+            viewport.size[1] as f64,
+        ));
+        nodes.push((ROOT, root));
+        nodes.push((PAGE, page));
         Ok(TreeUpdate {
             nodes,
             tree: Some(TreeInfo::new(ROOT)),
@@ -505,71 +350,47 @@ impl Accessibility {
         })
     }
 
-    fn position(
-        &self,
-        outline: &TextOutline,
-        mut position: TextPosition,
-        affinity: Affinity,
-    ) -> Result<accesskit::TextPosition, EditError> {
-        let shaped = outline.paragraph_layout(position.paragraph)?;
-        let projection = &shaped.projection;
-        let layout = &shaped.text;
-        let origin = shaped.origin;
-        let cursor = layout.cursor(
-            projection
-                .text()
-                .byte_offset(projection.visible_offset(position.offset)?)?,
-            affinity,
-        );
-        position.offset = projection.source_offset(
-            projection.text().utf16_offset(cursor.index())?,
-            onestore::page::text::Affinity::Downstream,
-        )?;
-        let caret = layout.caret(cursor, 0.0);
-        let mut positions = self
-            .runs
-            .iter()
-            .filter(|run| {
-                run.outline == outline.id
-                    && run
-                        .node
-                        .bounds()
-                        .is_some_and(|rect| rect.y0 == f64::from(caret.y0 as f32 + origin[1]))
-            })
-            .filter_map(|run| {
-                run.positions
-                    .iter()
-                    .position(|p| *p == position)
-                    .map(|character_index| accesskit::TextPosition {
-                        node: run.id,
-                        character_index,
-                    })
-            });
-        match affinity {
-            Affinity::Upstream => positions.next(),
-            Affinity::Downstream => positions.next_back(),
-        }
-        .ok_or(EditError::InvalidRange)
-    }
-
     pub fn selection(
         &self,
-        outline: onestore::ExGuid,
+        outline: ExGuid,
         selection: TextSelection,
     ) -> Result<Selection, EditError> {
+        let field = self
+            .fields
+            .iter()
+            .find(|field| field.outline == outline)
+            .ok_or(EditError::InvalidRange)?;
         let position = |position: accesskit::TextPosition| {
-            let run = self
-                .runs
+            let (index, paragraph, run) = field
+                .paragraphs
                 .iter()
-                .find(|run| run.outline == outline && run.id == position.node)
+                .enumerate()
+                .find_map(|(index, paragraph)| {
+                    let run = paragraph
+                        .runs
+                        .iter()
+                        .position(|run| run.id == position.node)?;
+                    Some((index, paragraph, run))
+                })
                 .ok_or(EditError::InvalidRange)?;
-            let source = *run
-                .positions
-                .get(position.character_index)
-                .ok_or(EditError::InvalidRange)?;
-            let affinity = if position.character_index > 0
-                && position.character_index + 1 == run.positions.len()
-            {
+            let offsets = &paragraph.runs[run].offsets;
+            let breaks = run + 1 == paragraph.runs.len() && index + 1 < field.paragraphs.len();
+            let count = offsets.len() + usize::from(breaks);
+            let character = position.character_index;
+            if character >= count {
+                return Err(EditError::InvalidRange);
+            }
+            let source = match offsets.get(character) {
+                Some(offset) => TextPosition {
+                    paragraph: paragraph.source,
+                    offset: *offset,
+                },
+                None => TextPosition {
+                    paragraph: field.paragraphs[index + 1].source,
+                    offset: 0,
+                },
+            };
+            let affinity = if character > 0 && character + 1 == count {
                 Affinity::Upstream
             } else {
                 Affinity::Downstream
@@ -585,12 +406,303 @@ impl Accessibility {
     }
 }
 
+/// The accessible position of a source position in `layouts`, which `paragraphs` mirrors.
+fn position(
+    layouts: &[(usize, &ParagraphLayout)],
+    paragraphs: &[Paragraph],
+    mut position: TextPosition,
+    affinity: Affinity,
+) -> Result<accesskit::TextPosition, EditError> {
+    let index = layouts
+        .binary_search_by_key(&position.paragraph, |(source, _)| *source)
+        .map_err(|_| EditError::InvalidRange)?;
+    let shaped = layouts[index].1;
+    let projection = &shaped.projection;
+    let layout = &shaped.text;
+    let cursor = layout.cursor(
+        projection
+            .text()
+            .byte_offset(projection.visible_offset(position.offset)?)?,
+        affinity,
+    );
+    position.offset = projection.source_offset(
+        projection.text().utf16_offset(cursor.index())?,
+        onestore::page::text::Affinity::Downstream,
+    )?;
+    let caret = layout.caret(cursor, 0.0);
+    let mut positions = paragraphs[index]
+        .runs
+        .iter()
+        .filter(|run| run.node.bounds().is_some_and(|rect| rect.y0 == caret.y0))
+        .filter_map(|run| {
+            run.offsets
+                .iter()
+                .position(|offset| *offset == position.offset)
+                .map(|character_index| accesskit::TextPosition {
+                    node: run.id,
+                    character_index,
+                })
+        });
+    match affinity {
+        Affinity::Upstream => positions.next(),
+        Affinity::Downstream => positions.next_back(),
+    }
+    .ok_or(EditError::InvalidRange)
+}
+
+/// A paragraph's text runs in paragraph coordinates, each with its character boundaries'
+/// source offsets; `breaks` ends the last run with the paragraph break.
+fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>)>, EditError> {
+    let mut runs = Vec::new();
+    let layout = &shaped.text;
+    let projection = &shaped.projection;
+    let text = projection.text().text();
+    let boundaries: Vec<_> = projection.source_boundaries().collect();
+    let source_offset = |byte| -> Result<u32, EditError> {
+        let index = boundaries
+            .binary_search_by_key(&byte, |(byte, _)| *byte)
+            .map_err(|_| EditError::InvalidRange)?;
+        Ok(boundaries[index].1)
+    };
+    for (line, bounds) in layout.lines() {
+        let line_start = runs.len();
+        let mut x = line.metrics().offset;
+        let mut logical_runs = Vec::new();
+        for run in line.runs() {
+            let advance = run.advance();
+            logical_runs.push((run, x));
+            x += advance;
+        }
+        logical_runs.sort_by_key(|(run, _)| run.text_range().start);
+        for (run, x) in logical_runs {
+            // AccessKit stores each character's byte length in a u8.
+            let mut characters = Vec::new();
+            for cluster in run.clusters() {
+                let range = cluster.text_range();
+                if range.is_empty() || range.start == text.len() {
+                    continue;
+                }
+                let cluster_text = text.get(range.clone()).ok_or(EditError::InvalidRange)?;
+                if range.len() <= u8::MAX as usize {
+                    characters.push((range, cluster.advance(), cluster.is_word_boundary()));
+                } else {
+                    for (index, (offset, ch)) in cluster_text.char_indices().enumerate() {
+                        characters.push((
+                            range.start + offset..range.start + offset + ch.len_utf8(),
+                            if index == 0 { cluster.advance() } else { 0.0 },
+                            index == 0 && cluster.is_word_boundary(),
+                        ));
+                    }
+                }
+            }
+            let mut advance = 0.0;
+            for chunk in characters.chunks(256) {
+                let width: f32 = chunk.iter().map(|(_, width, _)| width).sum();
+                let left = x + if run.is_rtl() {
+                    run.advance() - advance - width
+                } else {
+                    advance
+                };
+                let mut node = Node::new(Role::TextRun);
+                node.set_bounds(Rect::new(
+                    f64::from(left),
+                    f64::from(bounds.top),
+                    f64::from(left + width),
+                    f64::from(bounds.top + bounds.height),
+                ));
+                node.set_text_direction(if run.is_rtl() {
+                    TextDirection::RightToLeft
+                } else {
+                    TextDirection::LeftToRight
+                });
+                node.set_font_size(run.font_size());
+                let start = chunk[0].0.start;
+                let end = chunk.last().unwrap().0.end;
+                node.set_value(text.get(start..end).ok_or(EditError::InvalidRange)?);
+                node.set_character_lengths(
+                    chunk
+                        .iter()
+                        .map(|(range, _, _)| u8::try_from(range.len()).unwrap())
+                        .collect::<Vec<_>>(),
+                );
+                let mut offset = 0.0;
+                node.set_character_positions(
+                    chunk
+                        .iter()
+                        .map(|(_, width, _)| {
+                            let position = offset;
+                            offset += width;
+                            position
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                node.set_character_widths(
+                    chunk.iter().map(|(_, width, _)| *width).collect::<Vec<_>>(),
+                );
+                node.set_word_starts(
+                    chunk
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, (_, _, word))| word.then_some(index as u8))
+                        .collect::<Vec<_>>(),
+                );
+                let offsets = chunk
+                    .iter()
+                    .map(|(range, _, _)| source_offset(range.start))
+                    .chain(std::iter::once(source_offset(end)))
+                    .collect::<Result<Vec<_>, _>>()?;
+                runs.push((node, offsets));
+                advance += width;
+            }
+        }
+        // Empty lines still need a text position for selection and insertion.
+        if runs.len() == line_start {
+            let mut node = Node::new(Role::TextRun);
+            node.set_value("");
+            node.set_character_lengths(Vec::<u8>::new());
+            node.set_character_positions(Vec::<f32>::new());
+            node.set_character_widths(Vec::<f32>::new());
+            node.set_text_direction(TextDirection::LeftToRight);
+            node.set_bounds(Rect::new(
+                0.0,
+                f64::from(bounds.top),
+                0.0,
+                f64::from(bounds.top + bounds.height),
+            ));
+            runs.push((node, vec![source_offset(bounds.source.start)?]));
+        }
+    }
+    if breaks {
+        let (node, _) = runs.last_mut().unwrap();
+        let mut value = node.value().unwrap().to_owned();
+        value.push('\n');
+        node.set_value(value);
+        let mut lengths = node.character_lengths().to_vec();
+        lengths.push(1);
+        node.set_character_lengths(lengths);
+        if let Some(rect) = node.bounds() {
+            let mut positions = node.character_positions().unwrap_or_default().to_vec();
+            positions.push(rect.width() as f32);
+            node.set_character_positions(positions);
+            let mut widths = node.character_widths().unwrap_or_default().to_vec();
+            widths.push(4.0);
+            node.set_character_widths(widths);
+        }
+    }
+    if !shaped.tags.is_empty() {
+        let descriptions = shaped
+            .tags
+            .iter()
+            .map(|tag| {
+                use crate::outline::TagIcon;
+                let fallback = match tag.icon {
+                    TagIcon::CheckBox { .. } => "To do",
+                    TagIcon::Question => "Question",
+                    TagIcon::Music => "Music",
+                    TagIcon::Exclamation => "Critical",
+                    TagIcon::RedSquare => "Project A",
+                    TagIcon::YellowSquare => "Project B",
+                    TagIcon::BlueSquare => "Project C",
+                };
+                let label = if tag.label.is_empty() {
+                    fallback
+                } else {
+                    &tag.label
+                };
+                let state = match tag.icon {
+                    TagIcon::CheckBox { checked: true } => ", completed",
+                    TagIcon::CheckBox { checked: false } => ", incomplete",
+                    _ => "",
+                };
+                format!(
+                    "{label}{state}{}",
+                    if tag.disabled { ", disabled" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        runs[0].0.set_description(descriptions);
+    }
+    Ok(runs)
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use crate::{document::TextDocument, layout::TextEngine};
+    use crate::{document::TextDocument, editor::TextOutline, layout::TextEngine};
+    use accesskit_consumer::{NodeRef, Tree, TreeState};
     use onestore::document::Format;
     use onestore::page::text::Paragraph;
+
+    /// Applies `update` to the platform's copy of the tree, as an adapter does.
+    pub(in crate::interaction) fn apply(tree: &mut Option<Tree>, update: TreeUpdate) -> &TreeState {
+        struct Ignore;
+        impl accesskit_consumer::TreeChangeHandler for Ignore {
+            fn node_added(&mut self, _: &NodeRef) {}
+            fn node_updated(&mut self, _: &NodeRef, _: &NodeRef) {}
+            fn focus_moved(&mut self, _: Option<&NodeRef>, _: Option<&NodeRef>) {}
+            fn node_removed(&mut self, _: &NodeRef) {}
+        }
+        match tree {
+            Some(tree) => tree.update_and_process_changes(update, &mut Ignore),
+            None => *tree = Some(Tree::new(update, true)),
+        }
+        tree.as_ref().unwrap().state()
+    }
+
+    /// Every node of `state`, depth first.
+    pub(in crate::interaction) fn nodes(state: &TreeState) -> Vec<NodeRef<'_>> {
+        let mut nodes = Vec::new();
+        let mut pending = vec![state.root()];
+        while let Some(node) = pending.pop() {
+            pending.extend(node.children().rev());
+            nodes.push(node);
+        }
+        nodes
+    }
+
+    /// `state`'s nodes and focus with IDs renumbered depth first, to compare trees whose IDs differ.
+    fn canonical(state: &TreeState) -> (Vec<Node>, NodeId) {
+        let nodes = nodes(state);
+        let order: HashMap<_, _> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.locate().0, NodeId(index as u64)))
+            .collect();
+        let id = |id: NodeId| order[&id];
+        let canonical = nodes
+            .iter()
+            .map(|node| {
+                let mut data = node.data().clone();
+                data.set_children(
+                    data.children()
+                        .iter()
+                        .map(|child| id(*child))
+                        .collect::<Vec<_>>(),
+                );
+                if let Some(next) = data.next_on_line() {
+                    data.set_next_on_line(id(next));
+                }
+                if let Some(previous) = data.previous_on_line() {
+                    data.set_previous_on_line(id(previous));
+                }
+                if let Some(&TextSelection { anchor, focus }) = data.text_selection() {
+                    data.set_text_selection(TextSelection {
+                        anchor: accesskit::TextPosition {
+                            node: id(anchor.node),
+                            ..anchor
+                        },
+                        focus: accesskit::TextPosition {
+                            node: id(focus.node),
+                            ..focus
+                        },
+                    });
+                }
+                data
+            })
+            .collect();
+        (canonical, id(state.focus_in_tree().locate().0))
+    }
 
     #[test]
     fn title_flow_updates_read_only_hit_and_accessibility_bounds() {
@@ -649,6 +761,7 @@ mod tests {
             scale: 2.0,
         };
         let mut access = Accessibility::default();
+        let mut tree = None;
         let mut identity = None;
         for phase in 0..4 {
             match phase {
@@ -664,17 +777,18 @@ mod tests {
                 }
                 _ => {}
             }
-            let mut update = access.update(&editor, viewport, "Test", None).unwrap();
-            access.append_page_fields(&mut update, Some(&scene), &editor, viewport, Some(0));
-            let (id, node) = update
-                .nodes
-                .iter()
-                .find(|(_, node)| node.role() == Role::Label)
+            let update = access
+                .update(&editor, Some(&scene), viewport, "Test", None, Some(0))
                 .unwrap();
+            let node = nodes(apply(&mut tree, update))
+                .into_iter()
+                .find(|node| node.role() == Role::Label)
+                .unwrap();
+            let id = node.locate().0;
             if let Some(identity) = identity {
-                assert_eq!(*id, identity);
+                assert_eq!(id, identity);
             }
-            identity = Some(*id);
+            identity = Some(id);
             let y = if phase % 2 == 0 { 80.0 } else { 145.92 };
             let expected = Rect::new(
                 310.0,
@@ -682,7 +796,7 @@ mod tests {
                 710.0,
                 f64::from((y + 100.0) * 2.0 - 20.0),
             );
-            let bounds = node.bounds().unwrap();
+            let bounds = node.bounding_box().unwrap();
             assert_eq!(bounds.x0, expected.x0);
             assert_eq!(bounds.x1, expected.x1);
             assert!((bounds.y0 - expected.y0).abs() < 0.001);
@@ -726,6 +840,7 @@ mod tests {
         let (scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();
         let scene = (scene, [30.0, 40.0]);
         let mut access = Accessibility::default();
+        let mut tree = None;
         let mut identity = None;
         for scale in [1.0, 2.0, 0.5] {
             editor.insert(&mut engine, "annotation ").unwrap();
@@ -734,29 +849,31 @@ mod tests {
                 origin: [-200.0, 10.0],
                 scale,
             };
-            let mut update = access.update(&editor, viewport, "Test", None).unwrap();
-            access.append_page_fields(&mut update, Some(&scene), &editor, viewport, None);
-            let (id, node) = update
-                .nodes
-                .iter()
-                .find(|(_, node)| node.role() == Role::Label)
+            let update = access
+                .update(&editor, Some(&scene), viewport, "Test", None, None)
                 .unwrap();
+            let state = apply(&mut tree, update);
+            let node = nodes(state)
+                .into_iter()
+                .find(|node| node.role() == Role::Label)
+                .unwrap();
+            let id = node.locate().0;
             if let Some(identity) = identity {
-                assert_eq!(*id, identity);
+                assert_eq!(id, identity);
             }
-            identity = Some(*id);
-            assert_eq!(node.value(), Some("Unsupported content\nRead-only"));
+            identity = Some(id);
+            assert_eq!(node.data().value(), Some("Unsupported content\nRead-only"));
             assert!(node.is_read_only());
-            assert!(node.supports_action(Action::Focus));
+            assert!(node.data().supports_action(Action::Focus));
             for action in [
                 Action::SetValue,
                 Action::ReplaceSelectedText,
                 Action::SetTextSelection,
             ] {
-                assert!(!node.supports_action(action));
+                assert!(!node.data().supports_action(action));
             }
             assert_eq!(
-                node.bounds(),
+                node.bounding_box(),
                 Some(Rect::new(
                     f64::from(40.0 * scale - 200.0),
                     f64::from(60.0 * scale + 10.0),
@@ -764,19 +881,22 @@ mod tests {
                     f64::from(120.0 * scale + 10.0)
                 ))
             );
-            assert_eq!(access.outline_for_node(*id), None);
-            let tree = accesskit_consumer::Tree::new(update, true);
+            assert_eq!(access.outline_for_node(id), None);
             assert_eq!(
-                tree.state().focus().unwrap().document_range().text(),
+                state.focus().unwrap().document_range().text(),
                 "annotation "
             );
-            let mut focused = access.update(&editor, viewport, "Test", None).unwrap();
-            access.append_page_fields(&mut focused, Some(&scene), &editor, viewport, Some(0));
+            let focused = access
+                .update(&editor, Some(&scene), viewport, "Test", None, Some(0))
+                .unwrap();
             assert_eq!(focused.focus, identity.unwrap());
             assert_eq!(access.read_only_for_node(focused.focus), Some(0));
-            let tree = accesskit_consumer::Tree::new(focused, true);
             assert_eq!(
-                tree.state().focus().unwrap().value().as_deref(),
+                apply(&mut tree, focused)
+                    .focus()
+                    .unwrap()
+                    .value()
+                    .as_deref(),
                 Some("Unsupported content\nRead-only")
             );
             editor.undo(&mut engine).unwrap();
@@ -800,7 +920,7 @@ mod tests {
                 .collect(),
         )
         .unwrap();
-        let mut nodes = text.nodes().to_vec();
+        let mut paragraphs = text.nodes().to_vec();
         let mut definitions = BTreeMap::new();
         for (index, (shape, label, status)) in [
             (3, Some("Rehearsal"), 0),
@@ -828,7 +948,7 @@ mod tests {
                     format: Format::default(),
                 },
             );
-            nodes[index].text_mut().unwrap().tags.push(Tag {
+            paragraphs[index].text_mut().unwrap().tags.push(Tag {
                 definition: Some(id),
                 action_type: None,
                 status,
@@ -855,13 +975,14 @@ mod tests {
                     ..Layout::default()
                 },
                 indents: vec![18.0, 0.0],
-                paragraphs: nodes,
+                paragraphs,
                 unsupported: Vec::new(),
             }],
             definitions,
         )
         .unwrap();
         let mut access = Accessibility::default();
+        let mut tree = None;
         let viewport = Viewport {
             size: [800, 600],
             origin: [48.0; 2],
@@ -874,12 +995,14 @@ mod tests {
             if step == 3 {
                 editor.undo(&mut engine).unwrap();
             }
-            let update = access.update(&editor, viewport, "Test", None).unwrap();
+            let update = access
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap();
+            let state = apply(&mut tree, update);
             assert_eq!(
-                update
-                    .nodes
+                nodes(state)
                     .iter()
-                    .filter_map(|(_, n)| n.description())
+                    .filter_map(|node| node.data().description())
                     .collect::<Vec<_>>(),
                 [
                     "Rehearsal, incomplete",
@@ -888,8 +1011,7 @@ mod tests {
                     "Music, disabled"
                 ]
             );
-            let tree = accesskit_consumer::Tree::new(update, true);
-            let text = tree.state().focus().unwrap().document_range().text();
+            let text = state.focus().unwrap().document_range().text();
             assert_eq!(
                 text,
                 if step == 2 {
@@ -929,24 +1051,27 @@ mod tests {
             CanvasEditor::new(&mut engine, TextDocument::from_nodes(nodes).unwrap(), 180.0)
                 .unwrap();
         let mut access = Accessibility::default();
+        let mut tree = None;
         let viewport = Viewport {
             size: [900, 700],
             scale: 2.0,
             origin: [13.0, 19.0],
         };
-        let update = access.update(&editor, viewport, "Test", None).unwrap();
-        let tree = accesskit_consumer::Tree::new(update, true);
-        let field = tree.state().focus().unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
+        let field = apply(&mut tree, update).focus().unwrap();
         assert_eq!(
             field.document_range().text(),
             "root\nfolded\nlast\nfolded tail"
         );
-        assert!(
-            access
-                .runs
+        assert_eq!(
+            access.fields[0]
+                .paragraphs
                 .iter()
-                .flat_map(|run| &run.positions)
-                .all(|position| ![2, 5].contains(&position.paragraph))
+                .map(|paragraph| paragraph.source)
+                .collect::<Vec<_>>(),
+            [0, 1, 3, 4]
         );
         let source = access
             .selection(
@@ -969,10 +1094,11 @@ mod tests {
             }
         );
         editor.select(source).unwrap();
-        let update = access.update(&editor, viewport, "Test", None).unwrap();
-        let tree = accesskit_consumer::Tree::new(update, true);
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
         assert_eq!(
-            tree.state()
+            apply(&mut tree, update)
                 .focus()
                 .unwrap()
                 .text_selection()
@@ -989,23 +1115,20 @@ mod tests {
                     .into(),
             )
             .unwrap();
-        access.update(&editor, viewport, "Test", None).unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
         let caret = editor.caret(1.0).unwrap();
         assert_eq!(caret.x0, 27.0);
-        let position = access
-            .position(
-                editor.active_outline(),
-                editor.selection().positions[1],
-                Affinity::Downstream,
-            )
-            .unwrap();
-        let run = access
-            .runs
-            .iter()
-            .find(|run| run.id == position.node)
-            .unwrap();
-        assert_eq!(run.node.bounds().unwrap().x0, 27.0);
-        assert_eq!(run.node.bounds().unwrap().y0, caret.y0);
+        let rects = apply(&mut tree, update)
+            .focus()
+            .unwrap()
+            .text_selection()
+            .unwrap()
+            .bounding_boxes();
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].x0, 27.0 * 2.0 + 13.0);
+        assert_eq!(rects[0].y0, caret.y0 * 2.0 + 19.0);
     }
 
     #[test]
@@ -1043,12 +1166,15 @@ mod tests {
                 .unwrap();
                 let mut editor = CanvasEditor::new(&mut engine, document, width).unwrap();
                 let mut access = Accessibility::default();
+                let mut tree = None;
                 let viewport = Viewport {
                     size: [800, 600],
                     origin: [48.0; 2],
                     scale: 2.0,
                 };
-                let update = access.update(&editor, viewport, "Test", None).unwrap();
+                let update = access
+                    .update(&editor, None, viewport, "Test", None, None)
+                    .unwrap();
                 for (_, node) in &update.nodes {
                     if node.role() == Role::TextRun {
                         assert_eq!(
@@ -1066,18 +1192,18 @@ mod tests {
                         }
                     }
                 }
-                let tree = accesskit_consumer::Tree::new(update, true);
-                let field = tree.state().focus().unwrap();
+                let field = apply(&mut tree, update).focus().unwrap();
                 assert_eq!(field.document_range().text(), text, "width {width}");
                 let selection = field.document_range().to_text_selection();
                 let source_selection = access
                     .selection(editor.active_outline().id, selection)
                     .unwrap();
                 editor.select(source_selection).unwrap();
-                let selected = access.update(&editor, viewport, "Test", None).unwrap();
-                let tree = accesskit_consumer::Tree::new(selected, true);
+                let selected = access
+                    .update(&editor, None, viewport, "Test", None, None)
+                    .unwrap();
                 assert_eq!(
-                    tree.state()
+                    apply(&mut tree, selected)
                         .focus()
                         .unwrap()
                         .text_selection()
@@ -1085,48 +1211,57 @@ mod tests {
                         .text(),
                     text
                 );
-                let stable_ids: Vec<_> = access.runs.iter().map(|run| run.id).collect();
-                access
+                let zoomed = access
                     .update(
                         &editor,
+                        None,
                         Viewport {
                             scale: 3.0,
                             ..viewport
                         },
                         "Test",
                         None,
+                        None,
                     )
                     .unwrap();
                 assert_eq!(
-                    stable_ids,
-                    access.runs.iter().map(|run| run.id).collect::<Vec<_>>()
+                    zoomed.nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    [ROOT, PAGE]
                 );
+                apply(&mut tree, zoomed);
                 access.deactivate();
-                access.update(&editor, viewport, "Test", None).unwrap();
+                let update = access
+                    .update(&editor, None, viewport, "Test", None, None)
+                    .unwrap();
+                let state = apply(&mut tree, update);
                 assert!(
                     access
                         .selection(editor.active_outline().id, selection)
                         .is_err()
                 );
-                let selection = access
-                    .update(&editor, viewport, "Test", None)
-                    .unwrap()
-                    .nodes[1]
-                    .1
-                    .text_selection()
-                    .copied()
-                    .unwrap();
+                let selection = *state.focus().unwrap().data().text_selection().unwrap();
                 editor.insert(&mut engine, "replacement").unwrap();
-                access.update(&editor, viewport, "Test", None).unwrap();
+                let update = access
+                    .update(&editor, None, viewport, "Test", None, None)
+                    .unwrap();
+                apply(&mut tree, update);
                 assert!(
                     access
                         .selection(editor.active_outline().id, selection)
                         .is_err()
                 );
                 editor.undo(&mut engine).unwrap();
-                let update = access.update(&editor, viewport, "Test", None).unwrap();
-                let tree = accesskit_consumer::Tree::new(update, true);
-                assert_eq!(tree.state().focus().unwrap().document_range().text(), text);
+                let update = access
+                    .update(&editor, None, viewport, "Test", None, None)
+                    .unwrap();
+                assert_eq!(
+                    apply(&mut tree, update)
+                        .focus()
+                        .unwrap()
+                        .document_range()
+                        .text(),
+                    text
+                );
             }
         }
     }
@@ -1166,6 +1301,7 @@ mod tests {
             .collect();
         let mut editor = CanvasEditor::new(&mut engine, document, 48.0).unwrap();
         let mut access = Accessibility::default();
+        let mut tree = None;
         let viewport = Viewport {
             size: [800, 600],
             origin: [31.0, -57.0],
@@ -1181,9 +1317,10 @@ mod tests {
                 })
                 .unwrap();
             let caret = editor.caret(0.0).unwrap();
-            let update = access.update(&editor, viewport, "Test", None).unwrap();
-            let tree = accesskit_consumer::Tree::new(update, true);
-            let field = tree.state().focus().unwrap();
+            let update = access
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap();
+            let field = apply(&mut tree, update).focus().unwrap();
             assert_eq!(
                 field.document_range().text(),
                 "abc e\u{301} 🌳 words wrap here\n\nabc שלום def عالم end\nlast\nline\n"
@@ -1217,7 +1354,7 @@ mod tests {
     }
     #[test]
     fn keyboard_and_accessibility_preserve_visual_caret_at_wraps() {
-        use crate::editor::Movement;
+        use draw::edit::Movement;
         let mut engine = TextEngine::default();
         let document = TextDocument::new(vec![
             Paragraph::new(
@@ -1230,6 +1367,7 @@ mod tests {
         .unwrap();
         let mut editor = CanvasEditor::new(&mut engine, document, 72.0).unwrap();
         let mut access = Accessibility::default();
+        let mut tree = None;
         let viewport = Viewport {
             size: [800, 600],
             origin: [0.0; 2],
@@ -1256,11 +1394,10 @@ mod tests {
         ] {
             editor.move_selection(&mut engine, movement, false).unwrap();
             let caret = editor.caret(0.0).unwrap();
-            let tree = accesskit_consumer::Tree::new(
-                access.update(&editor, viewport, "Test", None).unwrap(),
-                true,
-            );
-            let field = tree.state().focus().unwrap();
+            let update = access
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap();
+            let field = apply(&mut tree, update).focus().unwrap();
             let selection = field.text_selection().unwrap();
             let rects = selection.bounding_boxes();
             assert_eq!(rects.len(), 1);
@@ -1303,7 +1440,7 @@ mod tests {
         .unwrap();
         let mut editor = CanvasEditor::new(&mut engine, document, 72.0).unwrap();
         let mut cached = Accessibility::default();
-        let mut rebuilt = Accessibility::default();
+        let mut tree = None;
         let mut compare = |editor: &CanvasEditor, step: usize| {
             let viewport = Viewport {
                 size: [800, 600],
@@ -1314,28 +1451,44 @@ mod tests {
                 .is_multiple_of(2)
                 .then_some((editor.active_outline().id, [13.5, -7.25]));
             for repeat in 0..2 {
-                rebuilt.paragraphs.clear();
-                let actual = cached.update(editor, viewport, "Test", preview).unwrap();
-                let expected = rebuilt.update(editor, viewport, "Test", preview).unwrap();
-                assert_eq!(actual.nodes, expected.nodes, "step {step}, repeat {repeat}");
-                assert_eq!(actual.focus, expected.focus);
-                let tree = accesskit_consumer::Tree::new(actual, true);
-                let field = tree.state().focus().unwrap();
-                let selection = field.document_range().to_text_selection();
-                assert_eq!(
-                    cached
-                        .selection(editor.active_outline().id, selection)
-                        .unwrap(),
+                let update = cached
+                    .update(editor, None, viewport, "Test", preview, None)
+                    .unwrap();
+                let actual = apply(&mut tree, update);
+                let mut rebuilt = Accessibility::default();
+                let expected = Tree::new(
                     rebuilt
-                        .selection(editor.active_outline().id, selection)
-                        .unwrap()
+                        .update(editor, None, viewport, "Test", preview, None)
+                        .unwrap(),
+                    true,
                 );
+                assert_eq!(
+                    canonical(actual),
+                    canonical(expected.state()),
+                    "step {step}, repeat {repeat}"
+                );
+                let [actual, expected] =
+                    [(&cached, actual), (&rebuilt, expected.state())].map(|(access, state)| {
+                        let field = state.focus().unwrap();
+                        let selection = field.document_range().to_text_selection();
+                        access
+                            .selection(editor.active_outline().id, selection)
+                            .unwrap()
+                    });
+                assert_eq!(actual, expected);
                 let count = editor
                     .outlines()
                     .iter()
                     .map(|o| o.layouts().count())
                     .sum::<usize>();
-                assert_eq!(cached.paragraphs.len(), count);
+                assert_eq!(
+                    cached
+                        .fields
+                        .iter()
+                        .map(|field| field.paragraphs.len())
+                        .sum::<usize>(),
+                    count
+                );
             }
         };
         compare(&editor, 0);
@@ -1406,6 +1559,72 @@ mod tests {
         }
     }
     #[test]
+    fn scrolling_sends_the_page_and_typing_sends_the_edited_paragraph() {
+        let mut engine = TextEngine::default();
+        let document = TextDocument::new(
+            (0..200)
+                .map(|index| Paragraph::new(format!("paragraph {index}"), Format::default()))
+                .collect(),
+        )
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document, 480.0).unwrap();
+        let mut access = Accessibility::default();
+        let mut tree = None;
+        let mut viewport = Viewport {
+            size: [800, 600],
+            origin: [48.0; 2],
+            scale: 2.0,
+        };
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
+        apply(&mut tree, update);
+        let ids = |update: &TreeUpdate| update.nodes.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+        for (scroll, zoom) in [(-300.0, 1.0), (150.0, 1.25)] {
+            viewport.origin[1] += scroll;
+            viewport.scale *= zoom;
+            let update = access
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap();
+            assert_eq!(ids(&update), [ROOT, PAGE]);
+            apply(&mut tree, update);
+        }
+        let field = access.fields[0].id;
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 150,
+                    offset: 3,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
+        assert_eq!(ids(&update), [field, ROOT, PAGE]);
+        apply(&mut tree, update);
+        editor.insert(&mut engine, "x").unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
+        let paragraph = &access.fields[0].paragraphs[150];
+        assert_eq!(
+            ids(&update),
+            [paragraph.runs[0].id, paragraph.id, field, ROOT, PAGE]
+        );
+        assert_eq!(update.nodes[0].1.value(), Some("parxagraph 150\n"));
+        let state = apply(&mut tree, update);
+        let expected = Tree::new(
+            Accessibility::default()
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap(),
+            true,
+        );
+        assert_eq!(canonical(state), canonical(expected.state()));
+    }
+
+    #[test]
     fn outlines_have_independent_accessibility_identity_and_selection() {
         let mut engine = TextEngine::default();
         let document =
@@ -1422,7 +1641,9 @@ mod tests {
             scale: 2.0,
             origin: [48.0; 2],
         };
-        let update = access.update(&editor, viewport, "Test", None).unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
         let fields: Vec<_> = update
             .nodes
             .iter()
@@ -1439,35 +1660,45 @@ mod tests {
         assert_ne!(fields[0].0, fields[1].0);
         assert_eq!(access.outline_for_node(fields[0].0), Some(first));
         assert_eq!(access.outline_for_node(fields[1].0), Some(second));
-        let tree = accesskit_consumer::Tree::new(update, true);
-        let field = tree.state().focus().unwrap();
+        let mut tree = None;
+        let field = apply(&mut tree, update).focus().unwrap();
         assert_eq!(field.document_range().text(), "annotation 🌳");
         let selection = field.document_range().to_text_selection();
         assert!(access.selection(first, selection).is_err());
         let source_selection = access.selection(second, selection).unwrap();
         editor.select(source_selection).unwrap();
         let preview = access
-            .update(&editor, viewport, "Test", Some((second, [400.0, 50.0])))
+            .update(
+                &editor,
+                None,
+                viewport,
+                "Test",
+                Some((second, [400.0, 50.0])),
+                None,
+            )
             .unwrap();
-        let preview_tree = accesskit_consumer::Tree::new(preview, true);
-        let preview_field = preview_tree.state().focus().unwrap();
+        let preview_field = apply(&mut tree, preview).focus().unwrap();
         let rect = preview_field.document_range().bounding_boxes()[0];
         assert_eq!(rect.x0, 848.0);
         assert_eq!(rect.y0, 148.0);
         assert_eq!(editor.active_outline().origin(), [300.0, 40.0]);
         editor.move_outline(second, [400.0, 50.0]).unwrap();
-        access.update(&editor, viewport, "Test", None).unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
+        apply(&mut tree, update);
         assert_eq!(access.outline_for_node(fields[1].0), Some(second));
         assert!(access.selection(second, selection).is_ok());
         editor.undo(&mut engine).unwrap();
         editor.undo(&mut engine).unwrap();
         editor.undo(&mut engine).unwrap();
-        let update = access.update(&editor, viewport, "Test", None).unwrap();
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
         assert_eq!(
-            update
-                .nodes
+            nodes(apply(&mut tree, update))
                 .iter()
-                .filter(|(_, node)| node.role() == Role::MultilineTextInput)
+                .filter(|node| node.role() == Role::MultilineTextInput)
                 .count(),
             1
         );

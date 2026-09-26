@@ -1,28 +1,14 @@
 use draw::{GlyphRun, Glyphs, RenderError};
 use parley::{
-    Affinity, FontContext, FontFamily, GenericFamily, Layout, LayoutContext, PositionedLayoutItem,
-    StyleProperty, editing::Cursor,
+    FontContext, FontFamily, FontFamilyName, GenericFamily, Layout, LayoutContext,
+    PositionedLayoutItem, StyleProperty, fontique::Blob,
 };
-use std::{collections::HashMap, rc::Rc};
+use std::{borrow::Cow, collections::HashMap, rc::Rc, sync::Arc};
 
 /// A shaped single line of interface text, in logical pixels.
 pub(crate) struct Label {
-    layout: Layout<()>,
+    pub layout: Layout<()>,
     pub size: [f32; 2],
-}
-
-impl Label {
-    /// The caret's left edge before byte `index`.
-    pub fn caret_x(&self, index: usize) -> f32 {
-        Cursor::from_byte_index(&self.layout, index, Affinity::Downstream)
-            .geometry(&self.layout, 1.0)
-            .x0 as f32
-    }
-
-    /// The byte index whose caret position is nearest `x`.
-    pub fn index_at(&self, x: f32) -> usize {
-        Cursor::from_point(&self.layout, x, self.size[1] / 2.0).index()
-    }
 }
 
 /// Labels shaped this frame or the previous one, keyed by their text and size.
@@ -30,6 +16,8 @@ impl Label {
 pub(crate) struct Texts {
     fonts: FontContext,
     context: LayoutContext<()>,
+    /// A family registered in place of the system's interface font.
+    family: Option<String>,
     cache: HashMap<(String, u32), (Rc<Label>, u64)>,
 }
 
@@ -44,9 +32,13 @@ impl Texts {
         let mut builder = self
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily(FontFamily::from(
-            GenericFamily::SystemUi,
-        )));
+        let system = FontFamilyName::Generic(GenericFamily::SystemUi);
+        builder.push_default(StyleProperty::FontFamily(match &self.family {
+            Some(family) => {
+                FontFamily::List(Cow::Owned(vec![FontFamilyName::named(family), system]))
+            }
+            None => FontFamily::Single(system),
+        }));
         builder.push_default(StyleProperty::FontSize(size));
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
@@ -56,23 +48,31 @@ impl Texts {
         label
     }
 
+    /// Shapes labels in the family `files` define, falling back to the system's
+    /// interface font; returns the family's name, or None when the files hold no font.
+    pub fn use_fonts(&mut self, files: impl IntoIterator<Item = Vec<u8>>) -> Option<String> {
+        let collection = &mut self.fonts.collection;
+        let families: Vec<_> = files
+            .into_iter()
+            .flat_map(|file| collection.register_fonts(Blob::new(Arc::new(file)), None))
+            .collect();
+        let family = collection.family_name(families.first()?.0)?.to_owned();
+        self.family = Some(family.clone());
+        self.cache.clear();
+        Some(family)
+    }
+
     pub fn prune(&mut self, frame: u64) {
         self.cache.retain(|_, (_, touched)| *touched + 1 >= frame);
     }
 }
 
-/// A label painted in one colour this frame.
-pub(crate) struct Painted {
-    pub label: Rc<Label>,
-    pub color: [f32; 4],
-}
-
-impl Glyphs for Painted {
+impl Glyphs for Label {
     fn runs(
         &self,
         paint: &mut dyn FnMut(GlyphRun<'_>) -> Result<(), RenderError>,
     ) -> Result<(), RenderError> {
-        for line in self.label.layout.lines() {
+        for line in self.layout.lines() {
             let metrics = line.metrics();
             for item in line.items() {
                 if let PositionedLayoutItem::GlyphRun(run) = item {
@@ -81,7 +81,7 @@ impl Glyphs for Painted {
                         metrics.baseline,
                         0.0,
                         [metrics.block_min_coord, metrics.line_height],
-                        |_| self.color,
+                        |_| None,
                         paint,
                     )?;
                 }

@@ -1,8 +1,13 @@
 use crate::{Axis, Event, Flags, Id, Signal, Spec, Ui, fit, px};
+use draw::edit::{self, Command, Movement};
+use parley::{
+    Affinity,
+    editing::{Cursor, Selection},
+};
 use std::hash::Hash;
 use winit::{
     event::Ime,
-    keyboard::{Key, NamedKey},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::CursorIcon,
 };
 
@@ -14,7 +19,7 @@ pub fn button(ui: &mut Ui, part: impl Hash, text: &str) -> Signal {
         size: [fit(), px(theme.font_size * 2.0)],
         text: Some(text),
         fill: Some(theme.chip),
-        hover_fill: Some(theme.hover),
+        hover_fill: Some(theme.hover()),
         hover_border: Some(theme.accent),
         radius: 4.0,
         pad: [theme.font_size * 0.75, 0.0],
@@ -82,9 +87,9 @@ pub fn scrollbar(
     chosen
 }
 
-/// A single-line field editing `text`, showing `placeholder` while empty. Typing,
-/// Backspace/Delete, Left/Right with Shift to select, Home/End, Command-A and input
-/// method commits edit it; a press places the caret.
+/// A single-line field editing `text`, showing `placeholder` while empty. Presses, drags
+/// and keys select and edit as on the page: a double press selects a word, a triple press
+/// everything, and dragging extends by that unit.
 pub fn text_field(
     ui: &mut Ui,
     id: Id,
@@ -95,94 +100,114 @@ pub fn text_field(
     let signal = ui.signal(id);
     let pad = spec.pad[0];
     let size = ui.theme.font_size;
-    let clicked_at = signal
-        .pressed
-        .then(|| ui.pointer().zip(ui.rect(id)))
-        .flatten()
-        .map(|(pointer, rect)| pointer[0] - rect[0] - pad);
-    let command = ui.modifiers().super_key() || ui.modifiers().control_key();
-    let shift = ui.modifiers().shift_key();
-    let (mut caret, mut mark) = {
-        let (caret, mark) = ui.caret(id);
-        (*caret, *mark)
+    let modifiers = edit_modifiers(ui.modifiers());
+    let pointer = ui
+        .pointer()
+        .zip(ui.rect(id))
+        .map(|(pointer, rect)| pointer[0] - rect[0] - pad)
+        .filter(|_| signal.pressed || signal.dragging);
+    let (mut selection, mut press) = {
+        let (selection, press) = ui.field(id);
+        (*selection, *press)
     };
-    caret = floor_boundary(text, caret);
-    mark = floor_boundary(text, mark);
-    if let Some(x) = clicked_at {
-        let (texts, frame) = ui.texts();
-        caret = texts.label(text, size, frame).index_at(x);
-        mark = caret;
-    }
-    for event in &signal.events {
-        let selection = caret.min(mark)..caret.max(mark);
-        let insert = |text: &mut String, inserted: &str, caret: &mut usize| {
-            text.replace_range(selection.clone(), inserted);
-            *caret = selection.start + inserted.len();
+    let (texts, frame) = ui.texts();
+    let mut label = texts.label(text, size, frame);
+    if let Some(x) = pointer {
+        let layout = &label.layout;
+        let unit = if signal.pressed { signal.unit } else { press.1 };
+        let hit = Cursor::from_point(layout, x, label.size[1] / 2.0);
+        let target = edit::selection_at(layout, hit, x, unit);
+        selection = if signal.pressed {
+            let pressed = if modifiers.shift {
+                Selection::new(selection.anchor(), target.focus())
+            } else {
+                target
+            };
+            press = (pressed, unit);
+            pressed
+        } else {
+            let [anchor, focus] = edit::drag(
+                [press.0.anchor(), press.0.focus()],
+                [target.anchor(), target.focus()],
+                unit,
+                |cursor| cursor.index(),
+            );
+            Selection::new(anchor, focus)
         };
-        match event {
-            Event::Ime(Ime::Commit(committed)) => {
-                insert(text, committed, &mut caret);
-                mark = caret;
-            }
-            Event::Key { key, text: typed } => match key {
-                Key::Named(NamedKey::Backspace | NamedKey::Delete) => {
-                    if selection.is_empty() {
-                        let edge = if matches!(key, Key::Named(NamedKey::Backspace)) {
-                            previous(text, caret)..caret
-                        } else {
-                            caret..next(text, caret)
-                        };
-                        text.replace_range(edge.clone(), "");
-                        caret = edge.start;
-                    } else {
-                        insert(text, "", &mut caret);
+    }
+    selection = selection.refresh(&label.layout);
+    for event in &signal.events {
+        let layout = &label.layout;
+        let (range, inserted) = match event {
+            Event::Ime(Ime::Commit(committed)) => (selection.text_range(), committed.as_str()),
+            Event::Key { key, text: typed } => {
+                let key = edit_key(key);
+                // One line has no break for Control-K to join, nor room for Home and End to scroll.
+                let command = match (Command::from_key(&key, modifiers), &key) {
+                    (Some(Command::Kill), _) => Some(Command::DeleteTo(Movement::LineEnd)),
+                    (None, edit::Key::Named(edit::NamedKey::Home)) => {
+                        Some(Command::Move(Movement::DocumentStart))
                     }
-                    mark = caret;
-                }
-                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => {
-                    let left = matches!(key, Key::Named(NamedKey::ArrowLeft));
-                    caret = match (shift, selection.is_empty(), left) {
-                        (false, false, true) => selection.start,
-                        (false, false, false) => selection.end,
-                        (_, _, true) => previous(text, caret),
-                        (_, _, false) => next(text, caret),
-                    };
-                    if !shift {
-                        mark = caret;
+                    (None, edit::Key::Named(edit::NamedKey::End)) => {
+                        Some(Command::Move(Movement::DocumentEnd))
                     }
-                }
-                Key::Named(NamedKey::Home | NamedKey::End) => {
-                    caret = if matches!(key, Key::Named(NamedKey::Home)) {
-                        0
-                    } else {
-                        text.len()
-                    };
-                    if !shift {
-                        mark = caret;
+                    (command, _) => command,
+                };
+                let collapsed = selection.is_collapsed();
+                match (command, key) {
+                    (Some(Command::Move(movement)), _) => {
+                        selection = edit::step(layout, selection, movement, modifiers.shift);
+                        continue;
                     }
-                }
-                Key::Character(character) if command => {
-                    if character.eq_ignore_ascii_case("a") {
-                        mark = 0;
-                        caret = text.len();
+                    (Some(Command::DeleteTo(movement)), _) if collapsed => (
+                        edit::step(layout, selection, movement, true).text_range(),
+                        "",
+                    ),
+                    (Some(Command::Delete { backward }), _) if collapsed => {
+                        let caret = selection.focus();
+                        let cluster = caret.logical_clusters(layout)[usize::from(!backward)];
+                        (
+                            cluster.map_or(caret.index()..caret.index(), |cluster| {
+                                cluster.text_range()
+                            }),
+                            "",
+                        )
                     }
-                }
-                _ => {
-                    if let Some(typed) = typed.as_deref().filter(|typed| {
-                        !command && !typed.is_empty() && !typed.chars().any(char::is_control)
+                    (Some(_), _) => (selection.text_range(), ""),
+                    (None, edit::Key::Character(character))
+                        if modifiers.command && character.eq_ignore_ascii_case("a") =>
+                    {
+                        selection = Selection::new(
+                            Cursor::from_byte_index(layout, 0, Affinity::Downstream),
+                            Cursor::from_byte_index(layout, usize::MAX, Affinity::Upstream),
+                        );
+                        continue;
+                    }
+                    (None, _) => match typed.as_deref().filter(|typed| {
+                        !modifiers.command
+                            && !modifiers.control
+                            && !typed.is_empty()
+                            && !typed.chars().any(char::is_control)
                     }) {
-                        insert(text, typed, &mut caret);
-                        mark = caret;
-                    }
+                        Some(typed) => (selection.text_range(), typed),
+                        None => continue,
+                    },
                 }
-            },
-            _ => {}
-        }
+            }
+            _ => continue,
+        };
+        text.replace_range(range.clone(), inserted);
+        label = texts.label(text, size, frame);
+        selection = Selection::from_byte_index(
+            &label.layout,
+            range.start + inserted.len(),
+            Affinity::Downstream,
+        );
     }
     {
-        let (stored_caret, stored_mark) = ui.caret(id);
-        *stored_caret = caret;
-        *stored_mark = mark;
+        let (stored, stored_press) = ui.field(id);
+        *stored = selection;
+        *stored_press = press;
     }
     let theme = ui.theme.clone();
     let shown = if text.is_empty() {
@@ -206,43 +231,59 @@ pub fn text_field(
         },
     );
     if signal.focused {
-        let (texts, frame) = ui.texts();
-        let label = texts.label(text, size, frame);
         let line = label.size[1];
-        let [start, end] =
-            [caret.min(mark), caret.max(mark)].map(|index| pad + label.caret_x(index));
         let top = match height.size {
             crate::Size::Pixels(height) => (height - line) / 2.0,
             _ => 0.0,
         };
-        if end > start {
-            ui.mark([start, top, end, top + line], theme.hover);
+        for (rect, _) in selection.geometry(&label.layout) {
+            ui.mark(
+                [pad + rect.x0 as f32, top, pad + rect.x1 as f32, top + line],
+                theme.hover(),
+            );
         }
-        let x = pad + label.caret_x(caret);
+        let x = pad + selection.focus().geometry(&label.layout, 1.0).x0 as f32;
         ui.mark([x, top, x + 1.0, top + line], theme.text);
     }
     ui.close();
     signal
 }
 
-fn floor_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while !text.is_char_boundary(index) {
-        index -= 1;
+/// A winit key in the editing vocabulary text fields and the page share.
+pub fn edit_key(key: &Key) -> edit::Key {
+    use edit::NamedKey as Edit;
+    match key {
+        Key::Character(text) => edit::Key::Character(text.to_string()),
+        Key::Named(named) => edit::Key::Named(match named {
+            NamedKey::Escape => Edit::Escape,
+            NamedKey::Tab => Edit::Tab,
+            NamedKey::Space => Edit::Space,
+            NamedKey::Enter => Edit::Enter,
+            NamedKey::Backspace => Edit::Backspace,
+            NamedKey::Delete => Edit::Delete,
+            NamedKey::ArrowLeft => Edit::ArrowLeft,
+            NamedKey::ArrowRight => Edit::ArrowRight,
+            NamedKey::ArrowUp => Edit::ArrowUp,
+            NamedKey::ArrowDown => Edit::ArrowDown,
+            NamedKey::Home => Edit::Home,
+            NamedKey::End => Edit::End,
+            NamedKey::Alt
+            | NamedKey::AltGraph
+            | NamedKey::Control
+            | NamedKey::Shift
+            | NamedKey::Super
+            | NamedKey::Meta => Edit::Modifier,
+            _ => Edit::Other,
+        }),
+        _ => edit::Key::Named(Edit::Other),
     }
-    index
 }
 
-fn previous(text: &str, index: usize) -> usize {
-    text[..index]
-        .char_indices()
-        .next_back()
-        .map_or(0, |(index, _)| index)
-}
-
-fn next(text: &str, index: usize) -> usize {
-    text[index..]
-        .chars()
-        .next()
-        .map_or(index, |character| index + character.len_utf8())
+pub fn edit_modifiers(modifiers: ModifiersState) -> edit::Modifiers {
+    edit::Modifiers {
+        shift: modifiers.shift_key(),
+        control: modifiers.control_key(),
+        option: modifiers.alt_key(),
+        command: modifiers.super_key(),
+    }
 }

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 107" preserveAspectRatio="none">
+<defs>
+<radialGradient id="glow" cx="120" cy="28" r="1" gradientTransform="translate(120 28) scale(290 80) translate(-120 -28)" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#b2e6f4"/>
+<stop offset=".45" stop-color="#cdeff8"/>
+<stop offset=".8" stop-color="#eef9fc"/>
+<stop offset="1" stop-color="#eef9fc" stop-opacity="0"/>
+</radialGradient>
+<linearGradient id="line" x2="1">
+<stop offset="0" stop-color="#4a9ab4"/>
+<stop offset=".5" stop-color="#a9cdd7"/>
+<stop offset=".77" stop-color="#eef5f8"/>
+<stop offset=".82" stop-color="#eef5f8" stop-opacity="0"/>
+</linearGradient>
+<linearGradient id="glint" x2="1">
+<stop offset="0" stop-color="#c6fbff"/>
+<stop offset=".78" stop-color="#f6feff"/>
+<stop offset=".82" stop-color="#f6feff" stop-opacity="0"/>
+</linearGradient>
+</defs>
+<rect width="780" height="98" fill="url(#glow)"/>
+<rect y="99" width="780" height="7" fill="url(#glint)"/>
+<rect y="100" width="780" height="1" fill="url(#line)"/>
+<rect y="103" width="780" height="2" fill="url(#line)"/>
+</svg>

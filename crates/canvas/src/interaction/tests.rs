@@ -9,6 +9,7 @@ use std::sync::Arc;
 const COLORS: TextColors = TextColors {
     caret: [0.1, 0.3, 0.9, 1.0],
     selection: [0.7, 0.8, 1.0, 1.0],
+    paper: crate::gpu::Paper::WHITE,
 };
 
 /// Paint for a view at `scale` device pixels per point on a display of `display_scale`.
@@ -18,6 +19,7 @@ pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint {
         scale,
         pixel: display_scale / scale,
         colors: COLORS,
+        visible: [f32::NEG_INFINITY, f32::INFINITY],
     }
 }
 
@@ -61,6 +63,7 @@ fn date_buttons_keep_accessibility_identity_and_match_mouse_hits_after_reflow() 
         origin: [-30.0, -50.0],
     };
     let mut access = accessibility::Accessibility::default();
+    let mut tree = None;
     let mut identities = Vec::new();
     for phase in 0..3 {
         if phase == 1 {
@@ -73,19 +76,21 @@ fn date_buttons_keep_accessibility_identity_and_match_mouse_hits_after_reflow() 
                 .change_date(&mut engine, 2, ["Wednesday".into(), "8:40 AM".into()])
                 .unwrap();
         }
-        let mut update = access.update(&editor, viewport, "Header", None).unwrap();
-        access.append_page_fields(&mut update, Some(&scene), &editor, viewport, None);
-        let buttons: Vec<_> = update
-            .nodes
-            .iter()
-            .filter(|(_, node)| node.role() == accesskit::Role::Button)
-            .collect();
+        let update = access
+            .update(&editor, Some(&scene), viewport, "Header", None, None)
+            .unwrap();
+        let buttons: Vec<_> =
+            accessibility::tests::nodes(accessibility::tests::apply(&mut tree, update))
+                .into_iter()
+                .filter(|node| node.role() == accesskit::Role::Button)
+                .collect();
         assert_eq!(buttons.len(), 2);
-        for (index, (id, node)) in buttons.iter().enumerate() {
+        for (index, node) in buttons.iter().enumerate() {
+            let id = node.locate().0;
             let field = [DateField::Date, DateField::Time][index];
-            assert_eq!(access.date_for_node(*id), Some(field));
-            assert!(node.supports_action(accesskit::Action::Click));
-            let rect = node.bounds().unwrap();
+            assert_eq!(access.date_for_node(id), Some(field));
+            assert!(node.data().supports_action(accesskit::Action::Click));
+            let rect = node.bounding_box().unwrap();
             let point = viewport.document_point([
                 ((rect.x0 + rect.x1) * 0.5) as f32,
                 ((rect.y0 + rect.y1) * 0.5) as f32,
@@ -95,15 +100,14 @@ fn date_buttons_keep_accessibility_identity_and_match_mouse_hits_after_reflow() 
                 Some(Hit::Date(field))
             );
             if phase == 0 {
-                identities.push(*id);
+                identities.push(id);
             } else {
-                assert_eq!(*id, identities[index]);
+                assert_eq!(id, identities[index]);
             }
         }
         if phase == 2 {
-            assert_eq!(buttons[1].1.value(), Some("8:40 AM"));
+            assert_eq!(buttons[1].data().value(), Some("8:40 AM"));
         }
-        accesskit_consumer::Tree::new(update, true);
     }
 }
 
@@ -169,12 +173,14 @@ fn title_chrome_selects_text_and_exposes_a_named_editable_field() {
     let update = access
         .update(
             &editor,
+            None,
             Viewport {
                 size: [800, 600],
                 scale: 1.0,
                 origin: [0.0; 2],
             },
             "Header",
+            None,
             None,
         )
         .unwrap();
@@ -214,12 +220,14 @@ fn provisional_lines_share_one_drawn_hit_tested_and_accessible_outline() {
     let update = access
         .update(
             &editor,
+            None,
             Viewport {
                 size: [800, 600],
                 scale: 1.0,
                 origin: [0.0; 2],
             },
             "Test",
+            None,
             None,
         )
         .unwrap();
@@ -264,7 +272,9 @@ fn blank_caret_and_composition_have_accessible_text_without_outline_chrome() {
         scale: 96.0 / 72.0,
         origin: [48.0; 2],
     };
-    let initial = access.update(&editor, viewport, "Page", None).unwrap();
+    let initial = access
+        .update(&editor, None, viewport, "Page", None, None)
+        .unwrap();
     let id = editor.active_outline().id;
     assert_eq!(access.outline_for_node(initial.focus), Some(id));
     let rectangles = |editor: &CanvasEditor| {
@@ -291,16 +301,22 @@ fn blank_caret_and_composition_have_accessible_text_without_outline_chrome() {
             .iter()
             .all(|(_, color)| *color == [0.0, 0.0, 0.0, 1.0] || *color == COLORS.caret)
     );
-    let preedit = access.update(&editor, viewport, "Page", None).unwrap();
+    let preedit = access
+        .update(&editor, None, viewport, "Page", None, None)
+        .unwrap();
     assert_eq!(preedit.focus, initial.focus);
     editor.commit_text(&mut engine, "日本".into()).unwrap();
-    let committed = access.update(&editor, viewport, "Page", None).unwrap();
+    let committed = access
+        .update(&editor, None, viewport, "Page", None, None)
+        .unwrap();
     assert_eq!(committed.focus, initial.focus);
     assert!(rectangles(&editor).len() > 1);
     editor.undo(&mut engine).unwrap();
     assert!(editor.outlines().is_empty());
     assert_eq!(rectangles(&editor).len(), 1);
-    let empty = access.update(&editor, viewport, "Page", None).unwrap();
+    let empty = access
+        .update(&editor, None, viewport, "Page", None, None)
+        .unwrap();
     assert_eq!(empty.focus, committed.focus);
     assert_eq!(access.outline_for_node(committed.focus), Some(id));
     editor.redo(&mut engine).unwrap();
@@ -308,12 +324,16 @@ fn blank_caret_and_composition_have_accessible_text_without_outline_chrome() {
     editor.delete(&mut engine, true).unwrap();
     assert!(editor.outlines().is_empty());
     assert_eq!(rectangles(&editor).len(), 1);
-    let retired = access.update(&editor, viewport, "Page", None).unwrap();
+    let retired = access
+        .update(&editor, None, viewport, "Page", None, None)
+        .unwrap();
     assert_eq!(retired.focus, committed.focus);
     assert_eq!(access.outline_for_node(retired.focus), Some(id));
     editor.undo(&mut engine).unwrap();
     assert!(rectangles(&editor).len() > 1);
-    let restored = access.update(&editor, viewport, "Page", None).unwrap();
+    let restored = access
+        .update(&editor, None, viewport, "Page", None, None)
+        .unwrap();
     assert_eq!(restored.focus, committed.focus);
     editor.redo(&mut engine).unwrap();
     assert_eq!(rectangles(&editor).len(), 1);
@@ -375,6 +395,7 @@ fn imported_page_widgets_and_accessibility_follow_edits() {
     }
     eprintln!("Verified {tag_hits} imported tag-gutter targets");
     let mut access = accessibility::Accessibility::default();
+    let mut tree = None;
     let tags = |editor: &CanvasEditor| {
         page_primitives(
             editor,
@@ -389,9 +410,9 @@ fn imported_page_widgets_and_accessibility_follow_edits() {
             Primitive::Icon {
                 sources,
                 origin,
-                opacity,
+                tint,
                 ..
-            } => Some(((sources, opacity), origin)),
+            } => Some(((sources, tint[3]), origin)),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -410,15 +431,25 @@ fn imported_page_widgets_and_accessibility_follow_edits() {
                     .into(),
             )
             .unwrap();
-        let before = access.update(&editor, viewport, "Test", None).unwrap();
-        let before = accesskit_consumer::Tree::new(before, true);
-        let before = before.state().focus().unwrap().document_range().text();
+        let before = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
+        let before = accessibility::tests::apply(&mut tree, before)
+            .focus()
+            .unwrap()
+            .document_range()
+            .text();
         editor.insert(&mut engine, "CANVAS CHECK ").unwrap();
         {
-            let update = access.update(&editor, viewport, "Test", None).unwrap();
-            let tree = accesskit_consumer::Tree::new(update, true);
+            let update = access
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap();
             assert_eq!(
-                tree.state().focus().unwrap().document_range().text(),
+                accessibility::tests::apply(&mut tree, update)
+                    .focus()
+                    .unwrap()
+                    .document_range()
+                    .text(),
                 format!("CANVAS CHECK {before}")
             );
             let primitives = page_primitives(
@@ -439,10 +470,15 @@ fn imported_page_widgets_and_accessibility_follow_edits() {
         editor.undo(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document(), &original);
         assert_eq!(tags(&editor), original_tags);
-        let update = access.update(&editor, viewport, "Test", None).unwrap();
-        let tree = accesskit_consumer::Tree::new(update, true);
+        let update = access
+            .update(&editor, None, viewport, "Test", None, None)
+            .unwrap();
         assert_eq!(
-            tree.state().focus().unwrap().document_range().text(),
+            accessibility::tests::apply(&mut tree, update)
+                .focus()
+                .unwrap()
+                .document_range()
+                .text(),
             before
         );
     }
@@ -661,34 +697,6 @@ fn picture_handles_resize_as_onenote_does() {
     assert_eq!(image_handle_at(rect, pixel, [600.0, 150.0]), None);
 }
 
-#[test]
-fn grouped_drag_keeps_the_initial_word_when_reversing_direction() {
-    let selection = |start, end| {
-        Selection::from([start, end].map(|offset| crate::document::TextPosition {
-            paragraph: 0,
-            offset,
-        }))
-    };
-    let anchor = selection(6, 10);
-    assert_eq!(
-        drag_selection(anchor, selection(11, 16), SelectionUnit::Word).positions,
-        selection(6, 16).positions
-    );
-    assert_eq!(
-        drag_selection(anchor, selection(0, 5), SelectionUnit::Word).positions,
-        selection(10, 0).positions
-    );
-    assert_eq!(
-        drag_selection(anchor, anchor, SelectionUnit::Word).positions,
-        anchor.positions
-    );
-    let anchor = selection(10, 3);
-    assert_eq!(
-        drag_selection(anchor, selection(7, 7), SelectionUnit::Grapheme).positions,
-        selection(10, 7).positions
-    );
-}
-
 const DEFAULT_MARGIN: [f32; 2] = [36.0, 14.4];
 
 #[test]
@@ -819,6 +827,7 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
             scale: 1.0,
             pixel: 1.0,
             colors: COLORS,
+            visible: [f32::NEG_INFINITY, f32::INFINITY],
         },
         &mut primitives,
     )
@@ -889,6 +898,7 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
             scale: 1.0,
             pixel: 1.0,
             colors: COLORS,
+            visible: [f32::NEG_INFINITY, f32::INFINITY],
         },
         &mut primitives,
     )

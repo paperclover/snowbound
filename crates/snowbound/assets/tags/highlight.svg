@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="layer0" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#b23a64"/>
+      <stop offset="1" stop-color="#8c2248"/>
+    </linearGradient>
+    <linearGradient id="layer1" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7a2a40"/>
+      <stop offset="1" stop-color="#5a1a2c"/>
+    </linearGradient>
+    <linearGradient id="layer2" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff9ec0"/>
+      <stop offset="1" stop-color="#e0487c"/>
+    </linearGradient>
+    <linearGradient id="layer3" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e76b98"/>
+      <stop offset="1" stop-color="#c0305e"/>
+    </linearGradient>
+    <linearGradient id="layer4" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff5f8f"/>
+      <stop offset="1" stop-color="#e0205a"/>
+    </linearGradient>
+  </defs>
+  <path d="M12.31 1.14L14.86 3.69L7.01 11.54L4.46 8.99Z" fill="url(#layer0)"/>
+  <path d="M5.35 7.89L8.11 10.65L4.55 13.04L2.96 11.45Z" fill="url(#layer1)"/>
+  <path d="M12.31 2.13L13.87 3.69L7.01 10.55L5.45 8.99Z" fill="url(#layer2)"/>
+  <path d="M12.31 2.13L13.87 3.69L12.17 5.38L10.62 3.83Z" fill="url(#layer3)"/>
+  <path d="M5.45 8.99L7.01 10.55L4.64 12.14L3.86 11.36Z" fill="url(#layer4)"/>
+</svg>

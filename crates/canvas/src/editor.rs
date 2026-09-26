@@ -1,12 +1,10 @@
 use crate::{
     date::PageDate,
-    document::{DocumentEdit, TextDocument, TextPosition, descendants, edited_nodes, leaves},
+    document::{DocumentEdit, TextDocument, TextPosition, descendants, leaves},
     layout::{LayoutError, TextEngine},
-    outline::{
-        Arrange, OutlineLayout, ParagraphLayout, arrange, indentation, outline_layout,
-        visible_paragraphs,
-    },
+    outline::{Arrange, OutlineLayout, ParagraphLayout, outline_layout, visible_paragraphs},
 };
+use draw::edit::{self, Movement, SelectionUnit};
 use onestore::ExGuid;
 use onestore::page::text::{EditError, Paragraph};
 use onestore::page::{Definition, Outline, Page, PageObject, PageParagraph, Title};
@@ -25,29 +23,6 @@ pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
 pub(crate) mod page;
 mod table;
 pub use page::ReadOnlyObject;
-
-#[derive(Clone, Copy, Debug)]
-pub enum Movement {
-    Left,
-    Right,
-    Up,
-    Down,
-    WordLeft,
-    WordRight,
-    LineStart,
-    LineEnd,
-    ParagraphStart,
-    ParagraphEnd,
-    DocumentStart,
-    DocumentEnd,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelectionUnit {
-    Grapheme,
-    Word,
-    Paragraph,
-}
 
 #[derive(Debug)]
 pub enum EditorError {
@@ -319,19 +294,7 @@ impl TextOutline {
             let text_width = if self.shaped.tables.is_empty() {
                 Some(self.shaped.size[0])
             } else {
-                let roots = self
-                    .document
-                    .nodes()
-                    .iter()
-                    .filter(|node| node.text().is_some())
-                    .map(|node| node.id)
-                    .collect::<BTreeSet<_>>();
-                self.shaped
-                    .paragraphs
-                    .iter()
-                    .filter(|paragraph| roots.contains(&paragraph.id))
-                    .map(|paragraph| paragraph.origin[0] + paragraph.text.shaped.width())
-                    .reduce(f32::max)
+                Some(self.shaped.widths[1]).filter(|width| *width > f32::NEG_INFINITY)
             };
             text_width.map_or(self.shaped.size[0], |width| {
                 (width + 36.0)
@@ -370,13 +333,23 @@ impl TextOutline {
             })
     }
 
+    /// Layouts follow the text leaves minus hidden ones, so an index shared by a leaf and its
+    /// layout needs no search.
     fn visible_index(&self, source: usize) -> Result<usize, EditError> {
         let id = self
             .document
-            .text_nodes()
-            .nth(source)
+            .leaf(source)
             .ok_or(EditError::InvalidRange)?
+            .2
             .id;
+        if self
+            .shaped
+            .paragraphs
+            .get(source)
+            .is_some_and(|paragraph| paragraph.id == id)
+        {
+            return Ok(source);
+        }
         self.shaped
             .paragraphs
             .iter()
@@ -386,6 +359,13 @@ impl TextOutline {
 
     fn source_index(&self, visible: usize) -> usize {
         let id = self.shaped.paragraphs[visible].id;
+        if self
+            .document
+            .leaf(visible)
+            .is_some_and(|(_, _, node)| node.id == id)
+        {
+            return visible;
+        }
         self.document
             .text_nodes()
             .position(|paragraph| paragraph.id == id)
@@ -989,7 +969,7 @@ impl CanvasEditor {
             if !ids.insert(outline_id) {
                 return Err(EditError::InvalidStructure.into());
             }
-            crate::document::validate_nodes(paragraphs, None, &mut ids)?;
+            crate::document::validate_nodes(paragraphs, &mut ids)?;
         }
         Ok(Self {
             outlines,
@@ -1574,8 +1554,7 @@ impl CanvasEditor {
             self.active_outline().visible_index(position.paragraph)?;
             self.active_outline()
                 .document
-                .paragraphs()
-                .nth(position.paragraph)
+                .paragraph(position.paragraph)
                 .ok_or(EditError::InvalidRange)?
                 .byte_offset(position.offset)?;
         }
@@ -1589,12 +1568,7 @@ impl CanvasEditor {
         let paragraph = self
             .active_outline()
             .source_index(self.active_outline().shaped.paragraphs.len() - 1);
-        let last = self
-            .active_outline()
-            .document
-            .paragraphs()
-            .nth(paragraph)
-            .unwrap();
+        let last = self.active_outline().document.paragraph(paragraph).unwrap();
         self.select(
             [
                 TextPosition {
@@ -1632,22 +1606,12 @@ impl CanvasEditor {
         let paragraph = &self.active_outline().shaped.paragraphs[index];
         let layout = &paragraph.text.shaped;
         let point = [x - paragraph.origin[0], y - paragraph.origin[1]];
-        let cursor = paragraph.text.hit_test(point[0], point[1]);
-        let local = match unit {
-            SelectionUnit::Grapheme => cursor.into(),
-            SelectionUnit::Word => {
-                let rect = cursor.geometry(layout, 1.0);
-                ParagraphSelection::word_from_point(
-                    layout,
-                    point[0],
-                    ((rect.y0 + rect.y1) * 0.5) as f32,
-                )
-            }
-            SelectionUnit::Paragraph => ParagraphSelection::new(
-                Cursor::from_byte_index(layout, 0, Affinity::Downstream),
-                Cursor::from_byte_index(layout, usize::MAX, Affinity::Upstream),
-            ),
-        };
+        let local = edit::selection_at(
+            layout,
+            paragraph.text.hit_test(point[0], point[1]),
+            point[0],
+            unit,
+        );
         let mut selection = self.selection();
         for (slot, cursor) in [local.anchor(), local.focus()].into_iter().enumerate() {
             let visible = paragraph.projection.text().utf16_offset(cursor.index())?;
@@ -1665,8 +1629,8 @@ impl CanvasEditor {
             let document = &self.active_outline().document;
             let source = selection.positions[0].paragraph;
             let next = self.active_outline().source_index(index + 1);
-            let (container, local, _) = leaves(document.nodes(), None).nth(source).unwrap();
-            let (next_container, next_local, _) = leaves(document.nodes(), None).nth(next).unwrap();
+            let (container, local, _) = document.leaf(source).unwrap();
+            let (next_container, next_local, _) = document.leaf(next).unwrap();
             if container == next_container && next_local == local + 1 {
                 selection.positions[1] = TextPosition {
                     paragraph: next,
@@ -1767,7 +1731,7 @@ impl CanvasEditor {
             let outline = self.active_outline();
             let current = outline.visible_index(focus.paragraph)?;
             let end = matches!(movement, Movement::ParagraphEnd | Movement::DocumentEnd);
-            let current_end = outline.document.paragraphs().nth(focus.paragraph).unwrap();
+            let current_end = outline.document.paragraph(focus.paragraph).unwrap();
             let current_end = current_end.utf16_offset(current_end.text().len())?;
             let index = match movement {
                 Movement::DocumentStart => 0,
@@ -1779,7 +1743,7 @@ impl CanvasEditor {
                 _ => current,
             };
             let source = outline.source_index(index);
-            let paragraph = outline.document.paragraphs().nth(source).unwrap();
+            let paragraph = outline.document.paragraph(source).unwrap();
             let position = TextPosition {
                 paragraph: source,
                 offset: if end {
@@ -2030,22 +1994,7 @@ impl CanvasEditor {
             } else {
                 cursor.into()
             };
-            let layout = &paragraph.text.shaped;
-            next = match movement {
-                Movement::Left => local.previous_visual(layout, extend),
-                Movement::Right => local.next_visual(layout, extend),
-                Movement::WordLeft => paragraph.text.word_cursor(local.focus(), true).into(),
-                Movement::WordRight => paragraph.text.word_cursor(local.focus(), false).into(),
-                Movement::LineStart => local.line_start(layout, extend),
-                Movement::LineEnd => local.line_end(layout, extend),
-                Movement::Up
-                | Movement::Down
-                | Movement::ParagraphStart
-                | Movement::ParagraphEnd
-                | Movement::DocumentStart
-                | Movement::DocumentEnd => unreachable!(),
-            }
-            .focus();
+            next = edit::step(&paragraph.text.shaped, local, movement, extend).focus();
             if horizontal && next == cursor && (extend || anchor == focus) {
                 let neighbor = if left {
                     index.checked_sub(1)
@@ -2067,7 +2016,7 @@ impl CanvasEditor {
                         line.top + line.height * 0.5,
                     );
                     if matches!(movement, Movement::WordLeft | Movement::WordRight) {
-                        next = paragraph.text.word_cursor(next, left);
+                        next = edit::word_cursor(&paragraph.text.shaped, next, left);
                     }
                 }
             }
@@ -2161,12 +2110,7 @@ impl CanvasEditor {
             .enumerate()
             .filter(|(_, (index, _))| *index >= start.paragraph && *index <= end.paragraph)
         {
-            let source = self
-                .active_outline()
-                .document
-                .paragraphs()
-                .nth(index)
-                .unwrap();
+            let source = self.active_outline().document.paragraph(index).unwrap();
             let first = if index == start.paragraph {
                 paragraph.cursor(start.offset, affinities[0])?
             } else {
@@ -2249,8 +2193,7 @@ impl CanvasEditor {
         let format = self
             .active_outline()
             .document
-            .paragraphs()
-            .nth(start.paragraph)
+            .paragraph(start.paragraph)
             .unwrap()
             .format_at(start.offset)?;
         let replacement = text
@@ -2268,11 +2211,13 @@ impl CanvasEditor {
         let [anchor, focus] = outline.selection.positions;
         let start = anchor.min(focus);
         let end = anchor.max(focus);
-        let (container, local_start, _) = leaves(outline.document.nodes(), None)
-            .nth(start.paragraph)
+        let (container, local_start, _) = outline
+            .document
+            .leaf(start.paragraph)
             .ok_or(EditError::InvalidRange)?;
-        let (end_container, local_end, _) = leaves(outline.document.nodes(), None)
-            .nth(end.paragraph)
+        let (end_container, local_end, _) = outline
+            .document
+            .leaf(end.paragraph)
             .ok_or(EditError::InvalidRange)?;
         if container != end_container {
             return Err(EditError::UnsupportedContent.into());
@@ -2343,12 +2288,10 @@ impl CanvasEditor {
                 }) else {
                     return Ok(false);
                 };
-                let (container, local, current) = leaves(document.nodes(), None)
-                    .nth(focus.paragraph)
+                let (container, local, current) = document
+                    .leaf(focus.paragraph)
                     .ok_or(EditError::InvalidRange)?;
-                let Some((next_container, next_local, next)) =
-                    leaves(document.nodes(), None).nth(neighbor)
-                else {
+                let Some((next_container, next_local, next)) = document.leaf(neighbor) else {
                     return Ok(false);
                 };
                 if container != next_container || local.abs_diff(next_local) != 1 {
@@ -2406,8 +2349,7 @@ impl CanvasEditor {
         let format = self
             .active_outline()
             .document
-            .paragraphs()
-            .nth(caret.paragraph)
+            .paragraph(caret.paragraph)
             .unwrap()
             .format_at(caret.offset)?
             .clone();
@@ -2779,8 +2721,7 @@ impl CanvasEditor {
         let format = self
             .active_outline()
             .document
-            .paragraphs()
-            .nth(range.start.paragraph)
+            .paragraph(range.start.paragraph)
             .unwrap()
             .format_at(range.start.offset)?;
         let replacement = text
@@ -2922,55 +2863,29 @@ impl CanvasEditor {
                 count -= 1;
             }
             if count < outline.document.nodes().len() {
-                let removed = outline.document.nodes().len() - count;
-                outline
-                    .document
-                    .apply(DocumentEdit {
-                        columns: BTreeMap::new(),
-                        container: None,
-                        range: count..outline.document.nodes().len(),
-                        replacement: Vec::new(),
-                    })
-                    .expect("removing a provisional suffix preserves a valid document");
-                outline
+                let edit = DocumentEdit {
+                    columns: BTreeMap::new(),
+                    container: None,
+                    range: count..outline.document.nodes().len(),
+                    replacement: Vec::new(),
+                };
+                let relayout = outline
                     .shaped
-                    .paragraphs
-                    .truncate(outline.shaped.paragraphs.len() - removed);
-                if outline.shaped.tables.is_empty() && outline.shaped.objects.is_empty() {
-                    let (origins, size) = arrange(
-                        outline.shaped.paragraphs.iter(),
-                        outline.wrap_width(),
-                        outline.layout.width_set_by_user == Some(true),
-                    )
-                    .expect("a prefix of the validated layout fits");
-                    for (paragraph, y) in outline.shaped.paragraphs.iter_mut().zip(origins) {
-                        paragraph.origin[1] = y;
-                    }
-                    outline.shaped.size = size;
-                } else {
-                    let cached = outline
-                        .shaped
-                        .paragraphs
-                        .iter()
-                        .chain(outline.shaped.objects.iter().filter_map(|o| o.label()))
-                        .map(|paragraph| (paragraph.id, paragraph))
-                        .collect::<BTreeMap<_, _>>();
-                    let shaped = OutlineLayout::flow(
-                        outline.document.nodes().iter(),
+                    .relayout(
+                        outline.document.nodes(),
+                        &edit,
+                        edit.range.clone(),
                         &outline.indents,
                         outline.wrap_width(),
                         outline.layout.width_set_by_user == Some(true),
-                        0,
-                        None,
-                        &mut |node, width, indents| {
-                            let mut paragraph = cached[&node.id].clone();
-                            paragraph.reset_origin(indentation(node.level, indents, width)?);
-                            Ok(paragraph)
-                        },
+                        &mut |_, _, _| Err(LayoutError::UnsupportedContent),
                     )
-                    .expect("removing a provisional suffix preserves table layout");
-                    outline.shaped = shaped;
-                }
+                    .expect("removing trailing text lays nothing out anew");
+                outline
+                    .document
+                    .apply(edit)
+                    .expect("removing a provisional suffix preserves a valid document");
+                outline.shaped.commit(relayout);
             }
             if outline.document == self.outlines[index].document {
                 self.outlines[index].selection = outline.selection;
@@ -3054,117 +2969,47 @@ impl CanvasEditor {
     ) -> Result<TextChange, EditorError> {
         let outline = self.active_outline();
         outline.document.validate_edit(&edit)?;
-        let width = outline.wrap_width();
-        let (visible, shaped, origins, size, tables, objects) = if !crate::outline::all_text(
-            outline.document.nodes().iter().chain(&edit.replacement),
-        ) {
-            let sources = outline
-                .document
-                .text_nodes()
-                .map(|node| (node.id, node))
-                .collect::<BTreeMap<_, _>>();
-            let existing = outline
-                .shaped
-                .paragraphs
-                .iter()
-                .map(|layout| (layout.id, (sources[&layout.id], layout)))
-                .collect::<BTreeMap<_, _>>();
-            let layout = OutlineLayout::flow(
-                edited_nodes(outline.document.nodes(), None, Some(&edit)),
-                &outline.indents,
-                width,
-                outline.layout.width_set_by_user == Some(true),
-                0,
-                Some(&edit),
-                &mut |node, width, indents| {
-                    let indent = indentation(node.level, indents, width)?;
-                    if let Some((source, cached)) = existing.get(&node.id)
-                        && *source == node
-                        && cached.text.shaped.layout_max_advance() == width - indent
-                        && cached
-                            .markers
-                            .iter()
-                            .all(|(marker, _)| marker.shaped.layout_max_advance() == width)
-                    {
-                        let mut result = (*cached).clone();
-                        result.reset_origin(indent);
-                        return Ok(result);
-                    }
-                    ParagraphLayout::shape(engine, node, width, indents, &self.definitions)
-                },
-            )?;
-            let origins = layout
-                .paragraphs
-                .iter()
-                .map(|p| p.origin[1])
-                .collect::<Vec<_>>();
-            (
-                0..outline.shaped.paragraphs.len(),
-                layout.paragraphs,
-                origins,
-                layout.size,
-                layout.tables,
-                layout.objects,
-            )
-        } else {
-            let visible_start = outline
-                .layouts()
-                .take_while(|(i, _)| *i < edit.range.start)
-                .count();
-            let visible_end = outline
-                .layouts()
-                .take_while(|(i, _)| *i < edit.range.end)
-                .count();
-            if visible_end - visible_start != edit.range.len() {
-                return Err(EditError::UnsupportedContent.into());
+        let range = match edit.container {
+            None => edit.range.clone(),
+            Some(cell) => {
+                let root = outline.document.root(cell)?;
+                root..root + 1
             }
-            let shaped = edit
-                .replacement
-                .iter()
-                .map(|paragraph| {
-                    ParagraphLayout::shape(
-                        engine,
-                        paragraph,
-                        width,
-                        &outline.indents,
-                        &self.definitions,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let (origins, size) = arrange(
-                outline.shaped.paragraphs[..visible_start]
-                    .iter()
-                    .chain(&shaped)
-                    .chain(&outline.shaped.paragraphs[visible_end..]),
-                width,
-                outline.layout.width_set_by_user == Some(true),
-            )?;
-            (
-                visible_start..visible_end,
-                shaped,
-                origins,
-                size,
-                Vec::new(),
-                Vec::new(),
-            )
         };
+        let relayout = outline.shaped.relayout(
+            outline.document.nodes(),
+            &edit,
+            range,
+            &outline.indents,
+            outline.wrap_width(),
+            outline.layout.width_set_by_user == Some(true),
+            &mut |node, width, indents| {
+                ParagraphLayout::shape(engine, node, width, indents, &self.definitions)
+            },
+        )?;
+        let [replaced, ..] = outline.shaped.pieces(relayout.range.clone());
         for position in selection.positions {
-            let (_, _, node) = leaves(outline.document.nodes(), Some(&edit))
-                .nth(position.paragraph)
+            let (node, before) = outline
+                .document
+                .edited_leaf(&edit, position.paragraph)
                 .ok_or(EditError::InvalidRange)?;
             node.text().unwrap().text.byte_offset(position.offset)?;
-            if !outline.shaped.paragraphs[..visible.start]
+            // A paragraph the edit leaves keeps its layout unless that layout is replaced.
+            if !relayout
+                .segment
+                .paragraphs
                 .iter()
-                .chain(&shaped)
-                .chain(&outline.shaped.paragraphs[visible.end..])
                 .any(|paragraph| paragraph.id == node.id)
+                && !before
+                    .and_then(|before| outline.visible_index(before).ok())
+                    .is_some_and(|index| !replaced.contains(&index))
             {
                 return Err(EditError::InvalidRange.into());
             }
         }
         let placements = match positions {
             Some(positions) => positions.to_vec(),
-            None => self.title_flow(size[1])?,
+            None => self.title_flow(relayout.size[1])?,
         };
         let previous_positions = placements
             .iter()
@@ -3193,14 +3038,8 @@ impl CanvasEditor {
             return self.apply(engine, edit, selection, false, positions);
         }
         let outline = self.active_outline_mut();
-        let inverse = outline.document.apply(edit)?;
-        outline.shaped.paragraphs.splice(visible, shaped);
-        outline.shaped.tables = tables;
-        outline.shaped.objects = objects;
-        for (paragraph, y) in outline.shaped.paragraphs.iter_mut().zip(origins) {
-            paragraph.origin[1] = y;
-        }
-        outline.shaped.size = size;
+        let inverse = outline.document.splice(edit);
+        outline.shaped.commit(relayout);
         self.preferred_x = None;
         let previous_selection =
             std::mem::replace(&mut self.active_outline_mut().selection, selection);
@@ -7412,6 +7251,175 @@ mod tests {
             assert_eq!(editor.active_outline().document, text);
         }
         assert!(!editor.redo(&mut engine).unwrap());
+    }
+
+    #[test]
+    fn typing_in_place_matches_a_fresh_layout_for_automatic_and_fixed_widths() {
+        use onestore::page::{Image, ParagraphContent, text::new_id};
+        let mut engine = TextEngine::default();
+        let mut seed = 0x51ed_u64;
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for (text, objects) in [
+            (vec!["x"], false),
+            (vec!["one two", "three", "four five six seven"], false),
+            (vec!["x"], true),
+            (vec!["one two", "three", "four five six seven"], true),
+        ] {
+            let fixed = text.len() > 1;
+            let empty = TextDocument::new(vec![Paragraph::new(String::new(), Format::default())]);
+            let mut editor = CanvasEditor::new(&mut engine, empty.unwrap(), 120.0).unwrap();
+            editor.insert(&mut engine, &text.join("\n")).unwrap();
+            if fixed {
+                editor.resize(&mut engine, 120.0).unwrap();
+            }
+            let table = table_editor(&mut engine).active_outline().document.nodes()[0].clone();
+            let mut picture = table.clone();
+            picture.id = new_id().unwrap();
+            picture.content = ParagraphContent::Image(Image {
+                id: new_id().unwrap(),
+                layout: onestore::document::Layout {
+                    max_width: Some(90.0),
+                    max_height: Some(40.0),
+                    ..Default::default()
+                },
+                size: None,
+                bytes: None,
+                alt: None,
+                background: false,
+            });
+            if objects {
+                let selection = [TextPosition {
+                    paragraph: 0,
+                    offset: 0,
+                }; 2]
+                    .into();
+                editor
+                    .commit(
+                        &mut engine,
+                        DocumentEdit {
+                            columns: BTreeMap::new(),
+                            container: None,
+                            range: 1..1,
+                            replacement: vec![picture.clone(), table],
+                        },
+                        selection,
+                    )
+                    .unwrap();
+            }
+            for step in 0..300 {
+                let outline = editor.active_outline();
+                let paragraph = next(outline.document.paragraphs().count());
+                let text = outline.document.paragraph(paragraph).unwrap();
+                let offset = text.utf16_offset(text.text().len()).unwrap();
+                let position = TextPosition {
+                    paragraph,
+                    offset: next(offset as usize + 1) as u32,
+                };
+                // Paragraphs under a collapsed one hold no caret.
+                let _ = editor.select([position; 2].into());
+                let nodes = editor.active_outline().document.nodes();
+                let root = next(nodes.len());
+                let mut node = nodes[root].clone();
+                let edit = |range, replacement| DocumentEdit {
+                    columns: BTreeMap::new(),
+                    container: None,
+                    range,
+                    replacement,
+                };
+                let edit = match next(14) {
+                    10 => {
+                        node.collapsed = !node.collapsed;
+                        Some(edit(root..root + 1, vec![node]))
+                    }
+                    11 if root > 0 && node.text().is_some() => {
+                        let parent = &nodes[root - 1];
+                        node.parent = Some(parent.id);
+                        node.level = parent.level + 1;
+                        Some(edit(root..root + 1, vec![node]))
+                    }
+                    12 if node.text().is_none() || nodes.len() > 3 => {
+                        Some(edit(root..root + 1, Vec::new()))
+                    }
+                    13 => {
+                        let mut picture = picture.clone();
+                        picture.id = new_id().unwrap();
+                        let ParagraphContent::Image(image) = &mut picture.content else {
+                            unreachable!()
+                        };
+                        image.id = new_id().unwrap();
+                        Some(edit(root..root, vec![picture]))
+                    }
+                    _ => None,
+                };
+                let _ = match (edit, next(10)) {
+                    (Some(edit), _) => {
+                        let start = [TextPosition {
+                            paragraph: 0,
+                            offset: 0,
+                        }; 2];
+                        editor.commit(&mut engine, edit, start.into())
+                    }
+                    (None, 0) => editor.insert(&mut engine, "\n"),
+                    (None, 1 | 2) => editor.delete(&mut engine, next(2) == 0).map(drop),
+                    (None, 3) => editor.undo(&mut engine).map(drop),
+                    (None, _) => editor.insert(&mut engine, ["a", " ", "wide", "W"][next(4)]),
+                };
+                let outline = editor.active_outline();
+                let fresh =
+                    TextOutline::from_outline(&mut engine, &outline.snapshot(), &BTreeMap::new())
+                        .unwrap();
+                let layout = |outline: &TextOutline| {
+                    let shaped = &outline.shaped;
+                    let paragraphs = shaped.paragraphs.iter().map(|paragraph| {
+                        (
+                            paragraph.id,
+                            paragraph.origin,
+                            paragraph
+                                .markers
+                                .iter()
+                                .map(|marker| marker.1)
+                                .collect::<Vec<_>>(),
+                            paragraph
+                                .tags
+                                .iter()
+                                .map(|tag| tag.origin)
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+                    let cells = shaped.tables.iter().flat_map(|table| {
+                        table
+                            .cells
+                            .iter()
+                            .map(|cell| (cell.id, cell.rect, cell.paragraphs.clone()))
+                    });
+                    let objects = shaped.objects.iter().map(|object| {
+                        let label = object.label().map(|label| label.origin);
+                        (object.id, object.rect, object.bottom, label)
+                    });
+                    format!(
+                        "{:?}",
+                        (
+                            shaped.size,
+                            shaped.widths,
+                            outline.bounds(),
+                            paragraphs.collect::<Vec<_>>(),
+                            cells.collect::<Vec<_>>(),
+                            objects.collect::<Vec<_>>(),
+                        )
+                    )
+                };
+                assert_eq!(layout(outline), layout(&fresh), "step {step}");
+            }
+            assert_eq!(
+                editor.active_outline().layout.width_set_by_user,
+                Some(fixed)
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 612 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="fx0" x2="612" gradientUnits="userSpaceOnUse"><stop offset="0.490" stop-color="white"/><stop offset="0.980" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="fy0" x2="0" y2="792" gradientUnits="userSpaceOnUse"><stop offset="0.606" stop-color="white"/><stop offset="0.985" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="across"><rect width="612" height="792" fill="url(#fx0)"/></mask>
+<mask id="down"><rect width="612" height="792" fill="url(#fy0)"/></mask>
+<filter id="blur" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="3"/></filter>
+<g id="pin">
+<path d="M-7-13C-7-17 7-17 7-13L5-3C11 0 12 5 10 7H-10C-12 5-11 0-5-3Z"/>
+<path d="M-.8 7L0 26L.8 7Z" fill="#8f9fc2"/>
+</g>
+</defs>
+<rect x="30" y="33" width="2" height="759" fill="#a2b8e7" mask="url(#down)"/>
+<rect x="30" y="33" width="582" height="2" fill="#a2b8e7" mask="url(#across)"/>
+<g opacity=".75">
+<ellipse cx="44" cy="52" rx="30" ry="14" fill="#c9d4ef" filter="url(#blur)"/>
+<ellipse cx="94" cy="72" rx="26" ry="9" fill="#d7dff3" filter="url(#blur)"/>
+<use href="#pin" fill="#9fb2e3" transform="translate(52 22) rotate(-40) scale(1.2)"/>
+<use href="#pin" fill="#aebfe8" transform="translate(18 55) rotate(-15) scale(1.1)" filter="url(#blur)"/>
+<use href="#pin" fill="#b9c8ec" transform="translate(80 60) rotate(-60)" opacity=".7"/>
+</g>
+</svg>

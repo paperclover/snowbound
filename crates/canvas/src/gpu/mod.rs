@@ -37,6 +37,32 @@ impl Viewport {
     }
 }
 
+/// The page's paper and the ink that content in OneNote's automatic colour draws in,
+/// linear RGBA.
+#[derive(Clone, Copy, Debug)]
+pub struct Paper {
+    pub color: [f32; 4],
+    pub ink: [f32; 4],
+}
+
+impl Paper {
+    pub const WHITE: Self = Self {
+        color: [1.0; 4],
+        ink: [0.0, 0.0, 0.0, 1.0],
+    };
+
+    /// A near-neutral colour OneNote draws on white paper, moved onto this paper: its
+    /// darkness becomes ink and its tint tints the paper.
+    fn shade(&self, light: [f32; 4]) -> [f32; 4] {
+        let ink = 1.0 - (light[0] + light[1] + light[2]) / 3.0;
+        let mut shade = light;
+        for channel in 0..3 {
+            shade[channel] = self.color[channel] * light[channel] + self.ink[channel] * ink;
+        }
+        shade
+    }
+}
+
 impl Glyphs for TextLayout {
     fn runs(
         &self,
@@ -52,7 +78,8 @@ impl Glyphs for TextLayout {
                     bounds.baseline,
                     run.style().brush.rise,
                     [bounds.top, bounds.height],
-                    |brush: &TextBrush| colorref(brush.color),
+                    // A highlight keeps its stored colour, so automatic text on it stays black.
+                    |brush: &TextBrush| brush.color.or(brush.highlight.map(|_| 0)).map(colorref),
                     paint,
                 )?;
             }
@@ -147,14 +174,24 @@ mod tests {
         ];
         let text = TextEngine::default()
             .layout(
-                &Paragraph::new(
-                    "Tagged".into(),
-                    Format {
-                        color: Some(0x000000ff),
-                        underline: Some(true),
-                        ..Format::default()
-                    },
-                ),
+                &Paragraph::from_runs([
+                    (
+                        "Tagged".into(),
+                        Format {
+                            color: Some(0x000000ff),
+                            underline: Some(true),
+                            ..Format::default()
+                        },
+                    ),
+                    (" automatic".into(), Format::default()),
+                    (
+                        " lit".into(),
+                        Format {
+                            highlight: Some(0x0000ffff),
+                            ..Format::default()
+                        },
+                    ),
+                ]),
                 100.0,
             )
             .unwrap();
@@ -165,13 +202,14 @@ mod tests {
                 sources: tag_sources(*icon),
                 origin: [2.0 + 16.0 * index as f32, 2.0],
                 size: crate::outline::ParagraphTag::SIZE,
-                opacity: 1.0,
+                tint: [1.0; 4],
             })
             .collect();
         primitives.push(Primitive::Text {
             text: &text,
             origin: [2.0, 20.0],
             clip: None,
+            ink: [0.0, 1.0, 0.0, 1.0],
         });
         let viewport = Viewport {
             size,
@@ -224,13 +262,28 @@ mod tests {
                 .count();
             assert!(painted > 20, "tag {index} was not painted");
         }
-        let red = (40..64)
-            .flat_map(|y| (4..120).map(move |x| (x, y)))
-            .filter(|(x, y)| {
-                let [r, g, b] = pixel(*x, *y);
-                r > 200 && g < 80 && b < 80
-            })
-            .count();
-        assert!(red > 50, "text colour or underline was not painted");
+        let count = |color: [u8; 3]| {
+            (40..64)
+                .flat_map(|y| (4..size[0]).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    pixel(*x, *y)
+                        .iter()
+                        .zip(color)
+                        .all(|(v, c)| v.abs_diff(c) < 80)
+                })
+                .count()
+        };
+        assert!(
+            count([255, 0, 0]) > 50,
+            "text colour or underline was not painted"
+        );
+        assert!(
+            count([0, 255, 0]) > 50,
+            "automatic text did not paint in the primitive's ink"
+        );
+        assert!(
+            count([0, 0, 0]) > 10,
+            "automatic text on a highlight did not stay black"
+        );
     }
 }

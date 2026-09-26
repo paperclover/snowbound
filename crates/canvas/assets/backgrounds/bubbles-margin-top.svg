@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 114" preserveAspectRatio="none">
+<defs><filter id="glow" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="4"/></filter></defs>
+<g opacity=".85"><g filter="url(#glow)" fill="#d3e4d4"><circle cx="0" cy="0" r="103"/></g><g fill="#d3e4d4" stroke="#9fb8a4"><circle cx="0" cy="0" r="103"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#f2d3d5"><circle cx="125" cy="-33" r="62"/></g><g fill="#f2d3d5" stroke="#c4959a"><circle cx="125" cy="-33" r="62"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#f2d3d5"><circle cx="671" cy="7" r="18"/></g><g fill="#f2d3d5" stroke="#c4959a"><circle cx="671" cy="7" r="18"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#d3e4d4"><circle cx="644" cy="41.5" r="7"/></g><g fill="#d3e4d4" stroke="#9fb8a4"><circle cx="644" cy="41.5" r="7"/></g></g>
+<g opacity=".85"><g filter="url(#glow)" fill="#d3e4d4"><circle cx="668" cy="41.5" r="3.5"/></g><g fill="#d3e4d4" stroke="#9fb8a4"><circle cx="668" cy="41.5" r="3.5"/></g></g>
+</svg>

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 70 626" preserveAspectRatio="none">
+<defs>
+<linearGradient id="sun" x2="0" y2="1">
+<stop offset="0" stop-color="#fee09f"/><stop offset=".23" stop-color="#fecc69"/><stop offset=".5" stop-color="#feb630"/><stop offset=".95" stop-color="#ffc860"/>
+</linearGradient>
+<linearGradient id="ink" x2="0" y1="0" y2="626" gradientUnits="userSpaceOnUse">
+<stop offset=".68" stop-color="#1a1b1f"/><stop offset=".8" stop-color="#9e9e9e"/><stop offset=".88" stop-color="#d4d4d4"/><stop offset=".98" stop-color="#d4d4d4" stop-opacity="0"/>
+</linearGradient>
+<linearGradient id="sky" x2="0" y1="0" y2="626" gradientUnits="userSpaceOnUse">
+<stop offset=".3" stop-color="#c6eaf6"/><stop offset=".64" stop-color="#d9f0f8"/><stop offset=".85" stop-color="#f3fafd"/><stop offset=".97" stop-color="#f3fafd" stop-opacity="0"/>
+</linearGradient>
+</defs>
+<path d="M41 118L64 520V626H18L21 430Z" fill="url(#sky)"/>
+<path d="M44 0H0V440Z" fill="url(#sun)"/>
+<path d="M32 120L38 118L20 440L19 626H0V440Z" fill="url(#ink)"/>
+</svg>

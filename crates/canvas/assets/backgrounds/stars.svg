@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 85 470" preserveAspectRatio="none">
+<defs>
+<g id="star"><path d="M9.4 3.42L1.41 1.41L3.42 9.4L0 2L-3.42 9.4L-1.41 1.41L-9.4 3.42L-2 0L-9.4 -3.42L-1.41 -1.41L-3.42 -9.4L-0 -2L3.42 -9.4L1.41 -1.41L9.4 -3.42L2 -0Z"/><circle r="2.6"/></g>
+<radialGradient id="teal"><stop offset=".05" stop-color="#ffffff"/><stop offset=".35" stop-color="#a8cfd6"/><stop offset="1" stop-color="#5a9fac"/></radialGradient>
+<radialGradient id="orange"><stop offset=".05" stop-color="#ffffff"/><stop offset=".35" stop-color="#fad0b4"/><stop offset="1" stop-color="#f5a46e"/></radialGradient>
+</defs>
+<use href="#star" fill="url(#orange)" transform="translate(29.5 8.5) scale(0.85)"/>
+<use href="#star" fill="url(#teal)" transform="translate(33 51) scale(3.4)"/>
+<use href="#star" fill="url(#teal)" transform="translate(59 97) scale(1.3)"/>
+<use href="#star" fill="url(#orange)" transform="translate(20 105) scale(1.9)"/>
+<use href="#star" fill="url(#orange)" transform="translate(56.5 139.5) scale(2.55)"/>
+<use href="#star" fill="url(#teal)" transform="translate(21 162) scale(1.9)"/>
+<use href="#star" fill="url(#teal)" transform="translate(65 178) scale(0.9)"/>
+<use href="#star" fill="url(#orange)" transform="translate(28.5 200.5) scale(0.85)"/>
+<use href="#star" fill="url(#orange)" transform="translate(62 213) scale(1.6)"/>
+<use href="#star" fill="url(#teal)" transform="translate(35 238) scale(2)"/>
+<use href="#star" fill="url(#teal)" transform="translate(53 265) scale(0.9)"/>
+<use href="#star" fill="url(#orange)" transform="translate(28 274) scale(0.8)"/>
+<use href="#star" fill="url(#teal)" transform="translate(59.5 291.5) scale(0.95)"/>
+<use href="#star" fill="url(#teal)" transform="translate(24 307.5) scale(1.95)"/>
+<use href="#star" fill="url(#orange)" transform="translate(58.5 330) scale(2.6)"/>
+<use href="#star" fill="url(#orange)" transform="translate(23 365) scale(1.9)"/>
+<use href="#star" fill="url(#teal)" transform="translate(61 373) scale(1.3)"/>
+<use href="#star" fill="url(#teal)" transform="translate(35 418.5) scale(3.35)"/>
+<use href="#star" fill="url(#orange)" transform="translate(32 461) scale(0.8)"/>
+</svg>

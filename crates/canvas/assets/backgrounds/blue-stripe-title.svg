@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 814 105" preserveAspectRatio="none">
+<defs>
+<pattern id="pinstripe" width="8" height="4" patternUnits="userSpaceOnUse"><rect width="8" height="2" fill="#ebf0f3"/></pattern>
+<linearGradient id="across" x2="1"><stop offset=".3" stop-color="white"/><stop offset=".8" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="fade"><rect width="814" height="105" fill="url(#across)"/></mask>
+<linearGradient id="bar" x2="1">
+<stop offset="0" stop-color="#2663a8"/>
+<stop offset=".5" stop-color="#8aabd0"/>
+<stop offset=".74" stop-color="#d0dded"/>
+<stop offset=".8" stop-color="#d0dded" stop-opacity="0"/>
+</linearGradient>
+</defs>
+<rect width="814" height="95" fill="url(#pinstripe)" mask="url(#fade)"/>
+<rect y="96" width="814" height="8" fill="url(#bar)"/>
+</svg>

@@ -5,19 +5,21 @@ edition = "2024"
 publish = false
 
 [features]
-gpu = ["dep:draw"]
+gpu = ["draw/render", "dep:resvg", "dep:sha2"]
 # How a page responds to input and presents itself to assistive technology.
 interaction = ["gpu", "dep:accesskit"]
 
 [dependencies]
+draw = { path = "../draw", default-features = false }
 onestore = { path = "../onestore" }
 parley.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 skrifa = "0.44.0"
 
-draw = { path = "../draw", optional = true }
 accesskit = { version = "0.25.0", optional = true }
+resvg = { version = "0.48.1", default-features = false, optional = true }
+sha2 = { version = "0.11", optional = true }
 
 [[bin]]
 name = "layout-probe"

@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 164 641" preserveAspectRatio="none">
+<defs>
+<linearGradient id="down" x2="0" y2="1"><stop offset="0.3" stop-color="white"/><stop offset="0.62" stop-color="white" stop-opacity="0"/></linearGradient><mask id="fade"><rect width="164" height="641" fill="url(#down)"/></mask>
+<linearGradient id="rule" x2="0" y2="1"><stop offset="0.7" stop-color="white"/><stop offset="0.95" stop-color="white" stop-opacity="0"/></linearGradient><mask id="rule-fade"><rect width="164" height="641" fill="url(#rule)"/></mask>
+<radialGradient id="sea" cx=".35" cy=".35" r=".7"><stop offset="0" stop-color="#f2fbfb"/><stop offset=".6" stop-color="#cde9ec"/><stop offset="1" stop-color="#9cc6c9"/></radialGradient>
+<linearGradient id="brass" x2="1"><stop offset="0" stop-color="#b98a3a"/><stop offset=".5" stop-color="#f3d58c"/><stop offset="1" stop-color="#a0752e"/></linearGradient>
+</defs>
+<g mask="url(#fade)">
+<circle cx="15" cy="120" r="115" fill="url(#sea)"/>
+<g fill="#d6e1c4" opacity=".8"><path d="M-10 60C10 50 60 70 50 90C40 100 30 120 10 110C0 90 5 70 20 60Z"/><path d="M50 130C70 120 90 140 80 170C65 180 50 170 48 150Z"/></g>
+<path d="M-70 120A90 90 0 0 0 110 150" fill="none" stroke="#c9b27a" stroke-width="4"/>
+<rect x="9" y="235" width="12" height="40" fill="url(#brass)"/>
+<ellipse cx="15" cy="282" rx="40" ry="10" fill="url(#brass)"/>
+<rect x="71" y="0" width="93" height="641" fill="#ffffff" opacity=".75"/>
+</g>
+<rect x="57" width="14" height="641" fill="#c3cba2" mask="url(#rule-fade)"/>
+<rect x="71" width="1" height="641" fill="#5c682a" mask="url(#rule-fade)"/>
+</svg>

@@ -1,16 +1,15 @@
+mod art;
 mod macos;
 
 use canvas::gpu::page::PageScene;
-use canvas::interaction::{
-    Cursor, Key as PageKey, Modifiers, NamedKey as PageNamedKey, PageView, Request, Response,
-    TextColors, accessibility,
-};
+use canvas::interaction::{Cursor, PageView, Request, Response, TextColors, accessibility};
 use canvas::{
     date::DateField,
     document::TextDocument,
     editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, TextOutline},
     layout::TextEngine,
 };
+use canvas::{gpu::tag_sources, outline::TagIcon};
 use draw::Renderer;
 use onestore::ExGuid;
 use onestore::document::Format;
@@ -22,7 +21,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use ui::{Axis, Flags, Id, Spec, Theme, Ui, fill, fit, px};
+use ui::{Axis, Flags, Id, Shape, Spec, Theme, Ui, children, fill, fit, px};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -33,10 +32,15 @@ use winit::{
     window::{CursorIcon, Window, WindowId},
 };
 
-/// Height of the window's top strip, which holds the traffic lights and section tabs.
-const STRIP: f32 = 38.0;
-/// Room the traffic lights take at the strip's leading edge.
+/// Height of the macOS title bar, which holds the traffic lights.
+const TITLE: f32 = 28.0;
+/// Room the traffic lights take at the title bar's leading edge.
 const LIGHTS: f32 = 78.0;
+const TAB_ROW: f32 = 28.0;
+/// Width of the section colour around the page.
+const FRAME: f32 = 6.0;
+/// macOS rounds windows' corners by 10 pt; the page's corners share their centres.
+const ROUNDING: f32 = 10.0 - FRAME;
 const PAGE_LIST: f32 = 240.0;
 
 #[derive(Debug)]
@@ -48,6 +52,17 @@ enum UserEvent {
     Sync,
     /// Scripted input from `SNOWBOUND_REPLAY`.
     Replay(Replay),
+    /// A page background finished rasterizing on its worker thread.
+    Redraw,
+}
+
+/// Asks the event loop for a frame from any thread.
+struct Redraw(EventLoopProxy<UserEvent>);
+
+impl std::task::Wake for Redraw {
+    fn wake(self: Arc<Self>) {
+        let _ = self.0.send_event(UserEvent::Redraw);
+    }
 }
 
 #[derive(Debug)]
@@ -55,6 +70,9 @@ enum Replay {
     Input(ui::Event),
     /// Paints the next frame into a PNG as well as the window.
     Snapshot(PathBuf),
+    /// A frame during a wait, as a visible window's display would ask for.
+    Tick,
+    Appearance(winit::window::Theme),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -63,46 +81,17 @@ impl From<accesskit_winit::Event> for UserEvent {
     }
 }
 
+/// With `SNOWBOUND_PROFILE` set, prints how long a phase of the frame took since `start`.
+fn lap(phase: &str, start: Instant) {
+    static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *PROFILE.get_or_init(|| std::env::var_os("SNOWBOUND_PROFILE").is_some()) {
+        eprintln!("profile\t{phase}\t{}", start.elapsed().as_micros());
+    }
+}
+
 fn trace_input(event: &impl std::fmt::Debug) {
     if std::env::var_os("SNOWBOUND_TRACE_INPUT").is_some() {
         eprintln!("Input {:?}: {event:?}", std::time::SystemTime::now());
-    }
-}
-
-fn page_key(key: &Key) -> PageKey {
-    match key {
-        Key::Character(text) => PageKey::Character(text.to_string()),
-        Key::Named(named) => PageKey::Named(match named {
-            NamedKey::Escape => PageNamedKey::Escape,
-            NamedKey::Tab => PageNamedKey::Tab,
-            NamedKey::Space => PageNamedKey::Space,
-            NamedKey::Enter => PageNamedKey::Enter,
-            NamedKey::Backspace => PageNamedKey::Backspace,
-            NamedKey::Delete => PageNamedKey::Delete,
-            NamedKey::ArrowLeft => PageNamedKey::ArrowLeft,
-            NamedKey::ArrowRight => PageNamedKey::ArrowRight,
-            NamedKey::ArrowUp => PageNamedKey::ArrowUp,
-            NamedKey::ArrowDown => PageNamedKey::ArrowDown,
-            NamedKey::Home => PageNamedKey::Home,
-            NamedKey::End => PageNamedKey::End,
-            NamedKey::Alt
-            | NamedKey::AltGraph
-            | NamedKey::Control
-            | NamedKey::Shift
-            | NamedKey::Super
-            | NamedKey::Meta => PageNamedKey::Modifier,
-            _ => PageNamedKey::Other,
-        }),
-        _ => PageKey::Named(PageNamedKey::Other),
-    }
-}
-
-fn page_modifiers(modifiers: ModifiersState) -> Modifiers {
-    Modifiers {
-        shift: modifiers.shift_key(),
-        control: modifiers.control_key(),
-        option: modifiers.alt_key(),
-        command: modifiers.super_key(),
     }
 }
 
@@ -123,6 +112,8 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     input: Option<Input>,
     substitutes: Vec<PathBuf>,
+    /// Font files for the interface in place of the system's.
+    interface_font: Vec<Vec<u8>>,
     state: Option<State>,
     startup_error: Option<Box<dyn Error>>,
 }
@@ -156,6 +147,8 @@ struct Tab {
 
 /// The sections the tabs offer.
 struct Library {
+    /// The notebook's folder name, or the section file's.
+    name: String,
     notebook: Option<notebook::session::Notebook>,
     tabs: Vec<Tab>,
     cache: PathBuf,
@@ -220,6 +213,8 @@ enum Command {
 struct State {
     window: Arc<Window>,
     proxy: EventLoopProxy<UserEvent>,
+    /// Asks for a frame when a worker thread finishes something the page shows.
+    redraw: std::task::Waker,
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -230,9 +225,15 @@ struct State {
     session: Option<Session>,
     /// Text filtering the page list.
     filter: String,
+    /// Whether the page list is shown beside the page.
+    pages_open: bool,
+    /// The application's icon at the display's scale, for the title bar.
+    app_icon: Option<draw::RasterImage>,
     commands: Vec<Command>,
     /// The page changed during this frame, to be saved and announced after it.
     changed: bool,
+    /// Only the view scrolled or zoomed during this frame, to be announced after it.
+    moved: bool,
     /// Whether the page last heard it had keyboard focus.
     page_focused: bool,
     window_focused: bool,
@@ -260,6 +261,11 @@ fn page() -> Id {
     Id::ROOT.child("page")
 }
 
+/// The section's colour around the page and its tabs.
+fn frame() -> Id {
+    Id::ROOT.child("frame")
+}
+
 /// The field filtering the page list.
 fn filter() -> Id {
     Id::ROOT.child("filter")
@@ -271,6 +277,7 @@ impl State {
         proxy: EventLoopProxy<UserEvent>,
         input: Input,
         substitutes: &[PathBuf],
+        interface_font: Vec<Vec<u8>>,
     ) -> Result<Self, Box<dyn Error>> {
         let window = Arc::new(
             event_loop.create_window(
@@ -344,6 +351,7 @@ impl State {
             }
             Input::Section { file, title, cache } => {
                 let opened = Library {
+                    name: file_name(file.parent().unwrap_or(&file)),
                     notebook: None,
                     tabs: vec![Tab {
                         name: file
@@ -374,6 +382,7 @@ impl State {
                     return Err(format!("No readable sections in {}", root.display()).into());
                 }
                 let opened = Library {
+                    name: file_name(&root),
                     notebook: Some(notebook),
                     tabs,
                     cache,
@@ -398,10 +407,20 @@ impl State {
         window.set_ime_allowed(true);
         window.request_redraw();
         eprintln!("Canvas GPU: {:?}; scale factor {dpr}", adapter.get_info());
-        let mut ui = Ui::new(Theme::dark());
+        let mut ui = Ui::new(
+            theme(window.theme().unwrap_or(winit::window::Theme::Dark)),
+            macos::double_click_interval(),
+        );
+        if !interface_font.is_empty() {
+            let family = ui
+                .use_fonts(interface_font)
+                .ok_or("The interface font files hold no font")?;
+            eprintln!("Using {family} for the interface");
+        }
         ui.set_focus(Some(page()));
         let state = Self {
             window,
+            redraw: Arc::new(Redraw(proxy.clone())).into(),
             proxy,
             instance,
             surface,
@@ -419,8 +438,11 @@ impl State {
             library,
             session,
             filter: String::new(),
+            pages_open: true,
+            app_icon: macos::app_icon((16.0 * dpr).round() as u32),
             commands: Vec::new(),
             changed: false,
+            moved: false,
             page_focused: true,
             window_focused: true,
             pointer: [0.0; 2],
@@ -442,6 +464,7 @@ impl State {
     /// Builds, lays out and paints one frame, then does what it asked for and asks for the
     /// frame that shows the result.
     fn frame(&mut self) -> Result<(), Box<dyn Error>> {
+        let start = Instant::now();
         let size = self.window.inner_size();
         let scale = self.window.scale_factor() as f32;
         self.ui.begin(
@@ -449,8 +472,10 @@ impl State {
             scale,
             Instant::now(),
         );
-        self.build()?;
+        let (section, open_tab, open_page) = self.build()?;
         self.ui.end();
+        self.edges(section, open_tab, open_page);
+        lap("build", start);
         if let Some(rect) = self.ui.rect(page()) {
             let size = [
                 ((rect[2] - rect[0]) * scale).round() as u32,
@@ -476,6 +501,7 @@ impl State {
             self.window.set_ime_allowed(ime);
         }
         self.draw()?;
+        lap("drawn", start);
         let commands = std::mem::take(&mut self.commands);
         let follow = !commands.is_empty() || self.ui.wants_frame();
         for command in commands {
@@ -483,101 +509,100 @@ impl State {
         }
         if std::mem::take(&mut self.changed) {
             self.after_edit()?;
+        } else if self.moved {
+            self.after_move()?;
         }
-        if follow {
+        self.moved = false;
+        // A covered window shows nothing, so animations wait for it to be uncovered.
+        if follow && !self.occluded {
             self.window.request_redraw();
         }
+        lap("frame", start);
         Ok(())
     }
 
-    fn build(&mut self) -> Result<(), Box<dyn Error>> {
+    /// Builds the frame's boxes and returns the section's colours as they ease, the open
+    /// section tab and the open page's tab, for the edges drawn once they are laid out.
+    fn build(&mut self) -> Result<(ui::Section, Id, Option<Id>), Box<dyn Error>> {
+        let target = self.ui.theme.section(match (&self.library, &self.session) {
+            (Some(library), Some(session)) => section_color(library.tabs[session.tab].color),
+            _ => section_color(None),
+        });
+        let mut ease = |part: &str, color: [f32; 4]| -> [f32; 4] {
+            std::array::from_fn(|channel| {
+                self.ui
+                    .animate(Id::ROOT.child((part, channel)), color[channel])
+            })
+        };
+        let section = ui::Section {
+            frame: [
+                ease("top", target.frame[0]),
+                ease("bottom", target.frame[1]),
+            ],
+            tab: ease("tab", target.tab),
+            edge: ease("edge", target.edge),
+            accent: ease("accent", target.accent),
+        };
+        self.ui.theme.accent = section.accent;
         let theme = self.ui.theme.clone();
-        self.ui.open_as(
-            strip(),
+        self.title_bar(&theme);
+        self.toolbar(&theme)?;
+        self.ui.open(
+            "tabs",
             Spec {
-                flags: Flags::CLICKABLE,
-                size: [fill(), px(STRIP)],
+                size: [fill(), px(TAB_ROW)],
                 fill: Some(theme.strip),
-                pad: [0.0, 8.0],
-                gap: 2.0,
+                pad: [FRAME, 0.0],
                 ..Spec::default()
             },
         );
         self.ui.leaf(
-            "lights",
+            "corner",
             Spec {
-                size: [px(LIGHTS), px(1.0)],
+                size: [px(ROUNDING), px(1.0)],
                 ..Spec::default()
             },
         );
-        match (&self.library, &self.session) {
+        let (clicked, open_tab) = match (&self.library, &self.session) {
             (Some(library), Some(session)) => {
-                for (index, tab) in library.tabs.iter().enumerate() {
-                    let active = index == session.tab;
-                    let id = self.ui.open(
-                        ("tab", index),
-                        Spec {
-                            flags: Flags::CLICKABLE,
-                            size: [fit(), px(STRIP - 8.0)],
-                            text: Some(&tab.name),
-                            color: Some(if active { theme.text } else { theme.text_dim }),
-                            fill: Some(if active { theme.base } else { theme.strip }),
-                            hover_fill: (!active).then_some(theme.chip),
-                            radius: 6.0,
-                            pad: [14.0 + 14.0, 0.0],
-                            center: true,
-                            ..Spec::default()
-                        },
-                    );
-                    let swatch = tab.color.map_or(theme.text_dim, canvas::gpu::colorref);
-                    let middle = (STRIP - 8.0) / 2.0;
-                    self.ui
-                        .mark([12.0, middle - 4.0, 20.0, middle + 4.0], swatch);
-                    self.ui.close();
-                    if self.ui.signal(id).clicked && !active {
-                        self.commands.push(Command::OpenSection(index));
-                    }
-                }
+                let tabs: Vec<_> = library
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.name.as_str(), section_color(tab.color)))
+                    .collect();
+                ui::shell::section_tabs(
+                    &mut self.ui,
+                    "sections",
+                    &tabs,
+                    session.tab,
+                    &section,
+                    TAB_ROW,
+                )
             }
-            _ => {
-                self.ui.leaf(
-                    "tab",
-                    Spec {
-                        size: [fit(), px(STRIP - 8.0)],
-                        text: Some("Temporary page"),
-                        fill: Some(theme.base),
-                        radius: 6.0,
-                        pad: [16.0, 0.0],
-                        ..Spec::default()
-                    },
-                );
-            }
+            _ => ui::shell::section_tabs(
+                &mut self.ui,
+                "sections",
+                &[("Temporary page", section_color(None))],
+                0,
+                &section,
+                TAB_ROW,
+            ),
+        };
+        if let Some(index) = clicked {
+            self.commands.push(Command::OpenSection(index));
         }
-        self.ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
-        if let Some(session) = &self.session {
-            self.ui.leaf(
-                "status",
-                Spec {
-                    size: [fit(), px(STRIP - 8.0)],
-                    text: Some(session.status),
-                    color: Some(theme.text_dim),
-                    pad: [14.0, 0.0],
-                    ..Spec::default()
-                },
-            );
+        if self.session.is_some() {
+            self.page_tools(&theme);
         }
         self.ui.close();
 
-        self.ui.open(
-            "body",
+        self.ui.open_as(
+            frame(),
             Spec {
                 size: [fill(), fill()],
+                fill: Some(section.frame[0]),
+                gradient: Some(section.frame[1]),
+                pad: [FRAME, FRAME],
                 ..Spec::default()
             },
         );
@@ -601,7 +626,7 @@ impl State {
             Spec {
                 flags: Flags::CUSTOM | Flags::FOCUSABLE,
                 size: [fill(), fill()],
-                fill: Some([1.0; 4]),
+                fill: Some(theme.paper),
                 ..Spec::default()
             },
         );
@@ -630,19 +655,371 @@ impl State {
         }
         self.page_events(signal.events)?;
         self.ui.close();
-        if self.session.is_some() {
+        let open_page = self.page_list(&theme, &section);
+        self.ui.close();
+        Ok((section, open_tab, open_page))
+    }
+
+    /// Borders the open section tab and the frame's top, and rounds and borders the page
+    /// together with the open page's tab, joined where they meet.
+    fn edges(&mut self, section: ui::Section, open_tab: Id, open_page: Option<Id>) {
+        let panel = self.ui.rect(frame().child("panel"));
+        let (Some(frame), Some(page)) = (self.ui.rect(frame()), self.ui.rect(page())) else {
+            return;
+        };
+        let [left, top, right, bottom] = page;
+        let tab = open_page
+            .and_then(|id| self.ui.rect(id))
+            .zip(panel)
+            .and_then(|(row, panel)| {
+                let [start, end] = [
+                    row[1].max(panel[1]).max(top),
+                    row[3].min(panel[3]).min(bottom),
+                ];
+                let reach = row[2].min(panel[2]);
+                (reach - right > 2.0 * ROUNDING && end - start > 2.0 * ROUNDING).then(|| {
+                    // A tab too near the page's corner joins it along the edge.
+                    let start = if start < top + 2.0 * ROUNDING {
+                        top
+                    } else {
+                        start
+                    };
+                    let end = if end > bottom - 2.0 * ROUNDING {
+                        bottom
+                    } else {
+                        end
+                    };
+                    [start, end, reach]
+                })
+            });
+        let mut outline = vec![([left, top], ROUNDING)];
+        match tab {
+            Some([start, end, reach]) => {
+                if start > top {
+                    outline.extend([([right, top], ROUNDING), ([right, start], ROUNDING)]);
+                }
+                outline.extend([([reach, start], ROUNDING), ([reach, end], ROUNDING)]);
+                if end < bottom {
+                    outline.extend([([right, end], ROUNDING), ([right, bottom], ROUNDING)]);
+                }
+            }
+            None => outline.extend([([right, top], ROUNDING), ([right, bottom], ROUNDING)]),
+        }
+        outline.push(([left, bottom], ROUNDING));
+        let height = (frame[3] - frame[1]).max(1.0);
+        let paper = self.ui.theme.paper;
+        self.ui.round_corners(&outline, paper, |y| {
+            ui::mix(section.frame[0], section.frame[1], (y - frame[1]) / height)
+        });
+        self.ui.border(&outline, true, section.edge);
+        // The frame's top corners share the page's centres; its top edge breaks where the
+        // open tab stands on it.
+        let [start, end] = [frame[0], frame[2]];
+        let outer = FRAME + ROUNDING;
+        let strip = self.ui.theme.strip;
+        self.ui.round_corners(
+            &[
+                ([start, frame[1]], outer),
+                ([end, frame[1]], outer),
+                ([end, frame[3]], 0.0),
+                ([start, frame[3]], 0.0),
+            ],
+            paper,
+            |_| strip,
+        );
+        let [foot, toe] = self.ui.rect(open_tab).map_or([end; 2], ui::shell::tab_base);
+        for edge in [
+            [
+                ([start, frame[1] + outer], 0.0),
+                ([start, frame[1]], outer),
+                ([foot, frame[1]], 0.0),
+            ],
+            [
+                ([toe, frame[1]], 0.0),
+                ([end, frame[1]], outer),
+                ([end, frame[1] + outer], 0.0),
+            ],
+        ] {
+            self.ui.border(&edge, false, section.edge);
+        }
+    }
+
+    /// The window's title bar beside the traffic lights: the application's icon, the
+    /// notebook's name and the saving status.
+    fn title_bar(&mut self, theme: &Theme) {
+        self.ui.open_as(
+            strip(),
+            Spec {
+                flags: Flags::CLICKABLE,
+                size: [fill(), px(TITLE)],
+                fill: Some(theme.strip),
+                ..Spec::default()
+            },
+        );
+        self.ui.leaf(
+            "lights",
+            Spec {
+                size: [px(LIGHTS), px(1.0)],
+                ..Spec::default()
+            },
+        );
+        self.ui.leaf(
+            "notebook",
+            Spec {
+                size: [fit(), px(TITLE)],
+                image: self.app_icon.as_ref(),
+                text: Some(
+                    self.library
+                        .as_ref()
+                        .map_or("Temporary page", |library| &library.name),
+                ),
+                ..Spec::default()
+            },
+        );
+        self.ui.leaf(
+            "space",
+            Spec {
+                size: [fill(), px(1.0)],
+                ..Spec::default()
+            },
+        );
+        if let Some(session) = &self.session {
             self.ui.leaf(
-                "separator",
+                "status",
                 Spec {
-                    size: [px(1.0), fill()],
-                    fill: Some(theme.separator),
+                    size: [fit(), px(TITLE)],
+                    text: Some(session.status),
+                    color: Some(theme.text_dim),
+                    pad: [12.0, 0.0],
                     ..Spec::default()
                 },
             );
-            self.page_list(&theme);
         }
         self.ui.close();
+    }
+
+    /// Two rows of formatting, tag, insert and zoom buttons, grouped as OneNote's Home
+    /// ribbon groups them.
+    fn toolbar(&mut self, theme: &Theme) -> Result<(), Box<dyn Error>> {
+        let ui = &mut self.ui;
+        let text = theme.text;
+        ui.open(
+            "toolbar",
+            Spec {
+                size: [fill(), children()],
+                fill: Some(theme.strip),
+                pad: [8.0, 3.0],
+                gap: 6.0,
+                ..Spec::default()
+            },
+        );
+        group(ui, "history", |ui| {
+            ui::shell::tool_button(ui, "undo", art::UNDO, text);
+            ui::shell::tool_button(ui, "redo", art::REDO, text);
+        });
+        divider(ui, "history", theme);
+        group(ui, "text", |ui| {
+            row(ui, 0, |ui| {
+                ui::shell::combo(ui, "font", "Calibri", 120.0);
+                ui::shell::combo(ui, "size", "11", 44.0);
+                ui::shell::split_button(ui, "bullets", art::BULLETS, None);
+                ui::shell::split_button(ui, "numbering", art::NUMBERING, None);
+                ui::shell::tool_button(ui, "clear", art::CLEAR_FORMATTING, text);
+            });
+            row(ui, 1, |ui| {
+                for (part, icon) in [
+                    ("bold", art::BOLD),
+                    ("italic", art::ITALIC),
+                    ("underline", art::UNDERLINE),
+                    ("strikethrough", art::STRIKETHROUGH),
+                ] {
+                    ui::shell::tool_button(ui, part, icon, text);
+                }
+                ui::shell::split_button(ui, "script", art::SUBSCRIPT, None);
+                ui::shell::split_button(
+                    ui,
+                    "highlight",
+                    art::HIGHLIGHTER,
+                    Some(draw::srgb(0xff, 0xff, 0x00)),
+                );
+                ui::shell::split_button(
+                    ui,
+                    "color",
+                    art::FONT_COLOR,
+                    Some(draw::srgb(0xe8, 0x3a, 0x30)),
+                );
+                ui::shell::tool_button(ui, "outdent", art::OUTDENT, text);
+                ui::shell::tool_button(ui, "indent", art::INDENT, text);
+                ui::shell::split_button(ui, "align", art::ALIGN_LEFT, None);
+            });
+        });
+        divider(ui, "text", theme);
+        let tags = [
+            tag_sources(TagIcon::CheckBox { checked: false }),
+            art::TAG_STAR,
+            tag_sources(TagIcon::Question),
+            art::TAG_REMEMBER,
+            art::TAG_DEFINITION,
+            art::TAG_HIGHLIGHT,
+            art::TAG_CONTACT,
+            art::TAG_ADDRESS,
+            art::TAG_PHONE,
+        ];
+        group(ui, "tags", |ui| {
+            for (index, tags) in tags.chunks(5).enumerate() {
+                row(ui, index, |ui| {
+                    for (column, icon) in tags.iter().enumerate() {
+                        ui::shell::tool_button(ui, column, icon, [1.0; 4]);
+                    }
+                    if index == 1 {
+                        ui::shell::tool_button(ui, "more", ui::shell::CHEVRON, text);
+                    }
+                });
+            }
+        });
+        divider(ui, "tags", theme);
+        group(ui, "insert", |ui| {
+            row(ui, 0, |ui| {
+                for (part, icon) in [
+                    ("table", art::TABLE),
+                    ("picture", art::PICTURE),
+                    ("file", art::ATTACHMENT),
+                    ("link", art::LINK),
+                ] {
+                    ui::shell::tool_button(ui, part, icon, text);
+                }
+            });
+            row(ui, 1, |ui| {
+                for (part, icon) in [
+                    ("date", art::CALENDAR),
+                    ("time", art::CLOCK),
+                    ("equation", art::EQUATION),
+                ] {
+                    ui::shell::tool_button(ui, part, icon, text);
+                }
+            });
+        });
+        ui.leaf(
+            "space",
+            Spec {
+                size: [fill(), px(1.0)],
+                ..Spec::default()
+            },
+        );
+        let zoom = self.view.zoom();
+        let label = format!("{:.0}%", zoom * 100.0);
+        let mut chosen = None;
+        group(ui, "zoom", |ui| {
+            row(ui, 0, |ui| {
+                if ui::shell::tool_button(ui, "out", art::ZOOM_OUT, text).clicked {
+                    chosen = Some(zoom / 1.1);
+                }
+                let level = ui.leaf(
+                    "level",
+                    Spec {
+                        flags: Flags::CLICKABLE,
+                        size: [px(44.0), px(ui::shell::TOOL)],
+                        text: Some(&label),
+                        hover_fill: Some(theme.hover()),
+                        radius: 4.0,
+                        center: true,
+                        ..Spec::default()
+                    },
+                );
+                if level.clicked {
+                    chosen = Some(1.0);
+                }
+                if ui::shell::tool_button(ui, "in", art::ZOOM_IN, text).clicked {
+                    chosen = Some(zoom * 1.1);
+                }
+            });
+        });
+        ui.close();
+        if let Some(zoom) = chosen {
+            let response = self.view.set_zoom(zoom)?;
+            self.respond(response);
+        }
         Ok(())
+    }
+
+    /// The search box and the page list's buttons, above the list.
+    fn page_tools(&mut self, theme: &Theme) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        self.ui.open(
+            "tools",
+            Spec {
+                size: [px(PAGE_LIST), px(TAB_ROW)],
+                pad: [0.0, (TAB_ROW - ui::shell::TOOL) / 2.0],
+                gap: 3.0,
+                ..Spec::default()
+            },
+        );
+        let focused = self.ui.focused() == Some(filter());
+        self.ui.open(
+            "search",
+            Spec {
+                size: [fill(), px(ui::shell::TOOL)],
+                fill: Some(theme.base),
+                border: Some(if focused { theme.accent } else { theme.chip }),
+                radius: 4.0,
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+        self.ui.leaf(
+            "icon",
+            Spec {
+                size: [fit(), px(ui::shell::TOOL)],
+                icon: Some(art::SEARCH),
+                color: Some(theme.text_dim),
+                ..Spec::default()
+            },
+        );
+        let signal = ui::text_field(
+            &mut self.ui,
+            filter(),
+            &mut self.filter,
+            "Search pages",
+            Spec {
+                size: [fill(), px(ui::shell::TOOL)],
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+        if !self.filter.is_empty()
+            && ui::shell::tool_button(&mut self.ui, "clear", art::CLOSE, theme.text_dim).clicked
+        {
+            self.filter.clear();
+        }
+        self.ui.close();
+        for event in &signal.events {
+            if let ui::Event::Key {
+                key: Key::Named(key @ (NamedKey::Escape | NamedKey::Enter)),
+                ..
+            } = event
+            {
+                let first = matching(&session.pages, &self.filter).next();
+                if *key == NamedKey::Enter
+                    && let Some((space, ..)) = first.filter(|(space, ..)| *space != session.space)
+                {
+                    self.commands.push(Command::OpenPage(*space));
+                }
+                self.filter.clear();
+                self.ui.set_focus(Some(page()));
+            }
+        }
+        ui::shell::tool_button(&mut self.ui, "new", art::NEW_PAGE, theme.text);
+        let toggle = if self.pages_open {
+            art::SIDEBAR_COLLAPSE
+        } else {
+            art::SIDEBAR_EXPAND
+        };
+        if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text).clicked {
+            self.pages_open = !self.pages_open;
+        }
+        self.ui.close();
     }
 
     fn conflict_bar(&mut self, theme: &Theme) {
@@ -680,111 +1057,65 @@ impl State {
         self.ui.close();
     }
 
-    fn page_list(&mut self, theme: &Theme) {
-        let Some(session) = &self.session else {
-            return;
-        };
+    /// The section's pages as tabs down the frame's right side, returning the open page's
+    /// tab, which is the page's colour and joins it.
+    fn page_list(&mut self, theme: &Theme, section: &ui::Section) -> Option<Id> {
+        let session = self.session.as_ref()?;
+        let panel = self.ui.id("panel");
+        let width = self
+            .ui
+            .animate(panel, if self.pages_open { PAGE_LIST } else { 0.0 });
         self.ui.open(
             "panel",
             Spec {
-                axis: Axis::Y,
-                size: [px(PAGE_LIST), fill()],
-                fill: Some(theme.panel),
-                ..Spec::default()
-            },
-        );
-        self.ui.open(
-            "pages",
-            Spec {
                 flags: Flags::SCROLL | Flags::CLIP,
                 axis: Axis::Y,
-                size: [fill(), fill()],
-                pad: [6.0, 6.0],
+                size: [px(width), fill()],
                 gap: 1.0,
                 ..Spec::default()
             },
         );
-        let query = self.filter.to_lowercase();
-        let mut first = None;
-        for (space, title, level) in &session.pages {
-            if !title.to_lowercase().contains(&query) {
-                continue;
-            }
-            first.get_or_insert(*space);
+        let mut open = None;
+        for (space, title, level) in matching(&session.pages, &self.filter) {
             let selected = *space == session.space;
-            let signal = self.ui.leaf(
-                space,
+            let spec = Spec {
+                flags: Flags::CLICKABLE,
+                size: [px(PAGE_LIST), px(26.0)],
+                text: Some(if title.is_empty() {
+                    "Untitled page"
+                } else {
+                    title
+                }),
+                pad: [10.0 + 16.0 * level.saturating_sub(1) as f32, 0.0],
+                ..Spec::default()
+            };
+            let spec = if selected {
+                open = Some(self.ui.id(space));
                 Spec {
-                    flags: Flags::CLICKABLE,
-                    size: [fill(), px(26.0)],
-                    text: Some(if title.is_empty() {
-                        "Untitled page"
+                    color: Some(theme.paper_ink),
+                    fill: Some(theme.paper),
+                    ..spec
+                }
+            } else {
+                Spec {
+                    color: Some(if title.is_empty() {
+                        ui::mix(theme.ink, section.tab, 0.5)
                     } else {
-                        title
+                        theme.ink
                     }),
-                    color: Some(if selected || !title.is_empty() {
-                        theme.text
-                    } else {
-                        theme.text_dim
-                    }),
-                    fill: selected.then_some(theme.accent),
-                    hover_fill: (!selected).then_some(theme.hover),
-                    hover_border: (!selected).then_some(theme.accent),
-                    radius: 4.0,
-                    pad: [10.0 + 16.0 * level.saturating_sub(1) as f32, 0.0],
-                    ..Spec::default()
-                },
-            );
-            if signal.clicked && !selected {
+                    fill: Some(section.tab),
+                    hover_fill: Some(section.frame[0]),
+                    radius: ROUNDING,
+                    shape: Shape::Trailing,
+                    ..spec
+                }
+            };
+            if self.ui.leaf(space, spec).clicked && !selected {
                 self.commands.push(Command::OpenPage(*space));
             }
         }
         self.ui.close();
-        let placeholder = format!("Filter {} pages…", session.pages.len());
-        self.ui.open(
-            "footer",
-            Spec {
-                size: [fill(), px(38.0)],
-                pad: [6.0, 6.0],
-                ..Spec::default()
-            },
-        );
-        let before = self.filter.clone();
-        let signal = ui::text_field(
-            &mut self.ui,
-            filter(),
-            &mut self.filter,
-            &placeholder,
-            Spec {
-                size: [fill(), px(26.0)],
-                fill: Some(theme.base),
-                border: Some(theme.separator),
-                radius: 4.0,
-                pad: [8.0, 0.0],
-                ..Spec::default()
-            },
-        );
-        // The list above was built with the filter as it stood.
-        if self.filter != before {
-            self.window.request_redraw();
-        }
-        for event in &signal.events {
-            if let ui::Event::Key {
-                key: Key::Named(key @ (NamedKey::Escape | NamedKey::Enter)),
-                ..
-            } = event
-            {
-                if *key == NamedKey::Enter
-                    && let Some(space) = first.filter(|space| *space != session.space)
-                {
-                    self.commands.push(Command::OpenPage(space));
-                }
-                self.filter.clear();
-                self.ui.set_focus(Some(page()));
-            }
-        }
-        self.ui.close();
-        self.ui.close();
+        open
     }
 
     /// Hands the page the events routed to its box, in its device pixels.
@@ -822,13 +1153,13 @@ impl State {
                         self.ui.set_focus(Some(filter()));
                         continue;
                     }
-                    self.view.key(&page_key(&key), text.as_deref())?
+                    self.view.key(&ui::edit_key(&key), text.as_deref())?
                 }
                 ui::Event::Ime(Ime::Preedit(text, cursor)) => self.view.compose(text, cursor)?,
                 ui::Event::Ime(Ime::Commit(text)) => self.view.commit_text(text)?,
                 ui::Event::Ime(Ime::Disabled) => self.view.cancel_composition()?,
                 ui::Event::Modifiers(modifiers) => {
-                    self.view.modifiers_changed(page_modifiers(modifiers))?
+                    self.view.modifiers_changed(ui::edit_modifiers(modifiers))?
                 }
             };
             self.respond(response);
@@ -842,6 +1173,7 @@ impl State {
     /// Notes a page change for after the frame and queues what the page asked of the host.
     fn respond(&mut self, response: Response) {
         self.changed |= response.changed;
+        self.moved |= response.moved;
         if let Some(request) = response.request {
             self.commands.push(Command::Page(request));
         }
@@ -892,6 +1224,16 @@ impl State {
 
     /// Follows an edit: the input method's position, accessibility, saving and the title.
     fn after_edit(&mut self) -> Result<(), Box<dyn Error>> {
+        self.after_move()?;
+        let start = Instant::now();
+        self.persist()?;
+        lap("save", start);
+        self.title();
+        Ok(())
+    }
+
+    /// Follows the view moving: the input method's position and accessibility.
+    fn after_move(&mut self) -> Result<(), Box<dyn Error>> {
         let scale = self.ui.scale();
         let corner = self.ui.rect(page()).unwrap_or_default();
         let [x0, y0, x1, y1] = self.view.caret_area()?;
@@ -899,9 +1241,9 @@ impl State {
             PhysicalPosition::new(x0 + corner[0] * scale, y0 + corner[1] * scale),
             PhysicalSize::new(x1 - x0, y1 - y0),
         );
+        let start = Instant::now();
         self.update_accessibility()?;
-        self.persist()?;
-        self.title();
+        lap("accessibility", start);
         Ok(())
     }
 
@@ -1095,20 +1437,13 @@ impl State {
         self.access_adapter.update_if_active(|| {
             match self.accessibility.update(
                 &view.editor,
+                view.scene.as_ref(),
                 viewport,
                 &self.window.title(),
                 view.outline_preview(),
+                view.object_focus().and_then(|focus| focus.read_only()),
             ) {
-                Ok(mut update) => {
-                    self.accessibility.append_page_fields(
-                        &mut update,
-                        view.scene.as_ref(),
-                        &view.editor,
-                        viewport,
-                        view.object_focus().and_then(|focus| focus.read_only()),
-                    );
-                    update
-                }
+                Ok(update) => update,
                 Err(failure) => {
                     error = Some(failure);
                     self.accessibility.deactivate();
@@ -1185,6 +1520,7 @@ impl State {
     }
 
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
+        let start = Instant::now();
         if let Some(path) = self.snapshot.take() {
             self.snapshot(&path)?;
         }
@@ -1222,9 +1558,12 @@ impl State {
                 return Err("Canvas surface validation failed".into());
             }
         };
+        lap("acquire", start);
         self.paint(&frame.texture.create_view(&Default::default()))?;
         self.window.pre_present_notify();
+        let start = Instant::now();
         self.renderer.queue.present(frame);
+        lap("present", start);
         trace_input(&"Present submitted");
         if reconfigure {
             self.surface.configure(&self.renderer.device, &self.config);
@@ -1234,8 +1573,19 @@ impl State {
 
     /// Paints the interface with the page in its box.
     fn paint(&mut self, target: &wgpu::TextureView) -> Result<(), Box<dyn Error>> {
+        let start = Instant::now();
         let [caret, selection] = macos::text_colors();
-        let page_primitives = self.view.primitives(TextColors { caret, selection })?;
+        let paper = canvas::gpu::Paper {
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
+        };
+        self.view.update_backgrounds(paper, &self.redraw);
+        let page_primitives = self.view.primitives(TextColors {
+            caret,
+            selection,
+            paper,
+        })?;
+        lap("page primitives", start);
         let scale = self.ui.scale();
         let corner = self.ui.rect(page()).unwrap_or_default();
         let viewport = self.view.viewport;
@@ -1261,6 +1611,7 @@ impl State {
             })
             .collect();
         trace_input(&("Draw", viewport.origin, viewport.scale));
+        let start = Instant::now();
         self.renderer
             .draw(
                 target,
@@ -1268,7 +1619,9 @@ impl State {
                 self.ui.theme.base,
                 &layers,
             )
-            .map_err(|error| format!("Canvas drawing failed: {error:?}").into())
+            .map_err(|error| format!("Canvas drawing failed: {error:?}"))?;
+        lap("render", start);
+        Ok(())
     }
 
     /// Writes the frame to a PNG, so a covered window can be reviewed.
@@ -1371,6 +1724,76 @@ impl State {
         self.ui.event(event);
         self.window.request_redraw();
     }
+}
+
+fn theme(appearance: winit::window::Theme) -> Theme {
+    match appearance {
+        winit::window::Theme::Dark => Theme::dark(),
+        winit::window::Theme::Light => Theme::light(),
+    }
+}
+
+fn file_name(path: &Path) -> String {
+    path.canonicalize()
+        .ok()
+        .as_deref()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// A section's colour as linear RGBA; sections without one take OneNote's default blue.
+fn section_color(color: Option<u32>) -> [f32; 4] {
+    color.map_or(draw::srgb(0x8a, 0xa8, 0xe4), canvas::gpu::colorref)
+}
+
+/// The pages whose titles contain `filter`, ignoring case.
+fn matching<'a>(
+    pages: &'a [(ExGuid, String, u32)],
+    filter: &str,
+) -> impl Iterator<Item = &'a (ExGuid, String, u32)> {
+    let filter = filter.to_lowercase();
+    pages
+        .iter()
+        .filter(move |(_, title, _)| title.to_lowercase().contains(&filter))
+}
+
+/// A toolbar group's rows, stacked.
+fn group(ui: &mut Ui, part: &str, rows: impl FnOnce(&mut Ui)) {
+    ui.open(
+        part,
+        Spec {
+            axis: Axis::Y,
+            gap: 2.0,
+            ..Spec::default()
+        },
+    );
+    rows(ui);
+    ui.close();
+}
+
+fn row(ui: &mut Ui, part: usize, buttons: impl FnOnce(&mut Ui)) {
+    ui.open(
+        part,
+        Spec {
+            gap: 1.0,
+            ..Spec::default()
+        },
+    );
+    buttons(ui);
+    ui.close();
+}
+
+/// The line between two toolbar groups.
+fn divider(ui: &mut Ui, part: &str, theme: &Theme) {
+    ui.leaf(
+        ("divider", part),
+        Spec {
+            size: [px(1.0), px(2.0 * ui::shell::TOOL + 2.0)],
+            fill: Some(theme.chip),
+            ..Spec::default()
+        },
+    );
 }
 
 /// Section tabs for a notebook's readable top-level sections, in its order.
@@ -1481,11 +1904,19 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::Redraw => {
+                if let Some(state) = &self.state {
+                    state.window.request_redraw();
+                }
+                return;
+            }
             UserEvent::Replay(replay) => {
                 if let Some(state) = &mut self.state {
                     match replay {
                         Replay::Input(event) => state.input(event),
                         Replay::Snapshot(path) => state.snapshot = Some(path),
+                        Replay::Tick => {}
+                        Replay::Appearance(appearance) => state.ui.theme = theme(appearance),
                     }
                     // A covered window gets no redraws, so each step draws its own frame.
                     if let Err(error) = state.frame() {
@@ -1504,7 +1935,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let was_marked = state.view.editor.marked_range().is_some();
         let result = match event.window_event {
-            accesskit_winit::WindowEvent::InitialTreeRequested => state.update_accessibility(),
+            accesskit_winit::WindowEvent::InitialTreeRequested => {
+                state.accessibility.deactivate();
+                state.update_accessibility()
+            }
             accesskit_winit::WindowEvent::ActionRequested(request) => state.access_action(request),
             accesskit_winit::WindowEvent::AccessibilityDeactivated => {
                 state.accessibility.deactivate();
@@ -1528,6 +1962,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.proxy.clone(),
             self.input.take().unwrap(),
             &self.substitutes,
+            std::mem::take(&mut self.interface_font),
         )) {
             Ok(state) => self.state = Some(state),
             Err(error) => {
@@ -1575,8 +2010,13 @@ impl ApplicationHandler<UserEvent> for App {
                     // lets the window show the previous frame at the new size.
                     return state.frame();
                 }
+                WindowEvent::ThemeChanged(appearance) => {
+                    state.ui.theme = theme(appearance);
+                    state.window.request_redraw();
+                }
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                     state.renderer.clear_glyph_cache();
+                    state.app_icon = macos::app_icon((16.0 * scale_factor).round() as u32);
                     let response = state.view.scale_factor_changed(scale_factor as f32)?;
                     state.respond(response);
                     state.window.request_redraw();
@@ -1589,7 +2029,7 @@ impl ApplicationHandler<UserEvent> for App {
                     trace_input(&("Window occluded", occluded));
                     state.occluded = occluded;
                     if !occluded {
-                        state.changed = true;
+                        state.moved = true;
                         state.window.request_redraw();
                     }
                 }
@@ -1654,7 +2094,8 @@ impl ApplicationHandler<UserEvent> for App {
 
 /// Feeds a development script to the window from another thread, one command per line
 /// in logical pixels: `move X Y`, `press`, `release`, `wheel DX DY`, `key NAME`, `type
-/// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS` and `snapshot PNG_PATH`.
+/// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH` and
+/// `appearance light|dark`.
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
     let mut steps = Vec::new();
     for line in script.lines().filter(|line| !line.trim().is_empty()) {
@@ -1702,6 +2143,11 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
             ))),
             "wait" => Err(std::time::Duration::from_millis(rest.parse()?)),
             "snapshot" => Ok(Replay::Snapshot(rest.into())),
+            "appearance" => Ok(Replay::Appearance(match rest {
+                "light" => winit::window::Theme::Light,
+                "dark" => winit::window::Theme::Dark,
+                _ => return Err(format!("Unknown appearance {rest}").into()),
+            })),
             _ => return Err(format!("Unknown replay command: {line}").into()),
         });
     }
@@ -1714,7 +2160,13 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                     }
                     let _ = proxy.send_event(UserEvent::Replay(replay));
                 }
-                Err(duration) => std::thread::sleep(duration),
+                Err(duration) => {
+                    let start = Instant::now();
+                    while start.elapsed() < duration {
+                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        let _ = proxy.send_event(UserEvent::Replay(Replay::Tick));
+                    }
+                }
             }
         }
     });
@@ -1725,6 +2177,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
     let mut positional = Vec::new();
     let mut substitutes = Vec::new();
+    let mut interface_font = Vec::new();
     let mut reference = None;
     let mut editable = false;
     let mut section = None;
@@ -1736,6 +2189,27 @@ fn main() -> Result<(), Box<dyn Error>> {
                 args.next()
                     .ok_or("Provide a font file after --substitute-font.")?,
             ));
+        } else if arg == "--ui-font" {
+            let path = PathBuf::from(
+                args.next()
+                    .ok_or("Provide a font file or folder after --ui-font.")?,
+            );
+            let mut files = if path.is_dir() {
+                std::fs::read_dir(&path)?
+                    .map(|entry| entry.map(|entry| entry.path()))
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                vec![path]
+            };
+            files.retain(|file| {
+                file.extension().is_some_and(|extension| {
+                    matches!(extension.to_str(), Some("otf" | "ttf" | "ttc"))
+                })
+            });
+            files.sort();
+            for file in files {
+                interface_font.push(std::fs::read(file)?);
+            }
         } else if arg == "--notebook" {
             notebook = Some(PathBuf::from(
                 args.next()
@@ -1794,7 +2268,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if positional.len() > 2 {
         return Err(
-            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--substitute-font FONT_FILE]..."
+            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--ui-font FONT_FILE_OR_FOLDER] [--substitute-font FONT_FILE]..."
                 .into(),
         );
     }
@@ -1842,6 +2316,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         proxy: event_loop.create_proxy(),
         input: Some(input),
         substitutes,
+        interface_font,
         state: None,
         startup_error: None,
     };

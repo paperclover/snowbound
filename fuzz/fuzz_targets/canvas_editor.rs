@@ -1,5 +1,6 @@
 #![no_main]
-use canvas::{date::PageDate, document::{TextDocument, TextPosition}, editor::{CanvasEditor, Movement, SelectionUnit, TextOutline}, layout::TextEngine};
+use canvas::{date::PageDate, document::{TextDocument, TextPosition}, editor::{CanvasEditor, TextOutline}, layout::TextEngine};
+use draw::edit::{Movement, SelectionUnit};
 use onestore::page::text::{Paragraph};
 use libfuzzer_sys::fuzz_target;
 use onestore::document::Format;

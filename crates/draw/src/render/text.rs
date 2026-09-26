@@ -21,7 +21,8 @@ pub struct GlyphRun<'a> {
     pub embolden: bool,
     /// Synthesized oblique angle in degrees.
     pub skew: Option<f32>,
-    pub color: [f32; 4],
+    /// `None` paints in the primitive's ink.
+    pub color: Option<[f32; 4]>,
     /// Top and height of the run's line: lines outside the target are skipped, and
     /// colour glyphs shrink to fit.
     pub line: [f32; 2],
@@ -45,7 +46,8 @@ pub struct Decoration {
     pub y: f32,
     pub width: f32,
     pub thickness: f32,
-    pub color: [f32; 4],
+    /// `None` paints in the primitive's ink.
+    pub color: Option<[f32; 4]>,
 }
 
 /// Paints one parley glyph run with its line's baseline moved to `baseline` and its
@@ -55,7 +57,7 @@ pub fn paint_parley_run<B: parley::Brush>(
     baseline: f32,
     rise: f32,
     line: [f32; 2],
-    color: impl Fn(&B) -> [f32; 4],
+    color: impl Fn(&B) -> Option<[f32; 4]>,
     paint: &mut dyn FnMut(GlyphRun<'_>) -> Result<(), RenderError>,
 ) -> Result<(), RenderError> {
     let shaped = run.run();

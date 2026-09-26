@@ -2,6 +2,8 @@ use super::*;
 use std::time::Duration;
 use winit::keyboard::NamedKey;
 
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
 thread_local! {
     static START: Instant = Instant::now();
     static FRAMES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -21,7 +23,7 @@ fn frame(ui: &mut Ui, build: impl FnOnce(&mut Ui)) {
 
 #[test]
 fn fill_yields_to_strict_siblings_along_the_flow() {
-    let mut ui = Ui::new(Theme::dark());
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut ids = Vec::new();
     frame(&mut ui, |ui| {
         ui.open(
@@ -55,7 +57,7 @@ fn fill_yields_to_strict_siblings_along_the_flow() {
 
 #[test]
 fn children_sum_with_gaps_and_padding() {
-    let mut ui = Ui::new(Theme::dark());
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut column = None;
     let mut second = None;
     frame(&mut ui, |ui| {
@@ -107,7 +109,7 @@ fn button_frame(ui: &mut Ui) -> Signal {
 
 #[test]
 fn clicks_use_the_previous_layout_and_hover_animates() {
-    let mut ui = Ui::new(Theme::dark());
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     button_frame(&mut ui);
     let at = Instant::now();
     ui.event(Event::PointerMoved([10.0, 10.0]));
@@ -148,8 +150,27 @@ fn clicks_use_the_previous_layout_and_hover_animates() {
 }
 
 #[test]
+fn hover_fades_its_own_colour_in_over_a_box_without_a_fill() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    button_frame(&mut ui);
+    ui.event(Event::PointerMoved([10.0, 10.0]));
+    button_frame(&mut ui);
+    let fill = ui.display.iter().find_map(|item| match item {
+        Display::Rect { fill, .. } => Some(*fill),
+        _ => None,
+    });
+    let [red, green, blue, alpha] = fill.expect("the hovered button paints");
+    assert_eq!(
+        [red, green, blue],
+        [1.0; 3],
+        "no darker colour on the way in"
+    );
+    assert!(alpha > 0.0 && alpha < 1.0);
+}
+
+#[test]
 fn custom_boxes_receive_their_events_and_a_leave_when_the_pointer_moves_off() {
-    let mut ui = Ui::new(Theme::dark());
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let build = |ui: &mut Ui| {
         let mut signals = Vec::new();
         frame(ui, |ui| {
@@ -225,7 +246,7 @@ fn custom_boxes_receive_their_events_and_a_leave_when_the_pointer_moves_off() {
 
 #[test]
 fn wheel_scrolls_within_the_content_and_clips_children() {
-    let mut ui = Ui::new(Theme::dark());
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut list = None;
     let mut last = None;
     let mut build = |ui: &mut Ui| {
@@ -271,69 +292,192 @@ fn wheel_scrolls_within_the_content_and_clips_children() {
     ));
 }
 
-#[test]
-fn text_fields_edit_with_keys_and_selection() {
-    let mut ui = Ui::new(Theme::dark());
-    let mut text = String::from("café");
-    let build = |ui: &mut Ui, text: &mut String| {
-        let mut signal = Signal::default();
-        frame(ui, |ui| {
-            signal = text_field(
-                ui,
-                Id::ROOT.child("filter"),
-                text,
-                "Filter",
-                Spec {
-                    size: [px(200.0), px(26.0)],
-                    pad: [6.0, 0.0],
-                    ..Spec::default()
-                },
-            );
-        });
-        signal
-    };
-    build(&mut ui, &mut text);
-    let id = Id::ROOT.child("filter");
-    ui.set_focus(Some(id));
-    let key = |named| Event::Key {
+fn field_frame(ui: &mut Ui, text: &mut String) -> Signal {
+    let mut signal = Signal::default();
+    frame(ui, |ui| {
+        signal = text_field(
+            ui,
+            field(),
+            text,
+            "Filter",
+            Spec {
+                size: [px(200.0), px(26.0)],
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+    });
+    signal
+}
+
+fn field() -> Id {
+    Id::ROOT.child("filter")
+}
+
+fn key(named: NamedKey) -> Event {
+    Event::Key {
         key: Key::Named(named),
         text: None,
-    };
-    ui.event(Event::Key {
-        key: Key::Named(NamedKey::End),
-        text: None,
+    }
+}
+
+fn typed(text: &str) -> Event {
+    Event::Key {
+        key: Key::Character(text.into()),
+        text: Some(text.into()),
+    }
+}
+
+/// A focused field holding `text`.
+fn focused_field(text: &str) -> (Ui, String) {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut text = text.to_owned();
+    field_frame(&mut ui, &mut text);
+    ui.set_focus(Some(field()));
+    (ui, text)
+}
+
+/// Moves the pointer over the caret before byte `index` of the field's `text`.
+fn point_to(ui: &mut Ui, text: &str, index: usize) {
+    let size = ui.theme.font_size;
+    let (texts, frame) = ui.texts();
+    let layout = &texts.label(text, size, frame).layout;
+    let x = parley::editing::Cursor::from_byte_index(layout, index, parley::Affinity::Downstream)
+        .geometry(layout, 1.0)
+        .x0 as f32;
+    ui.event(Event::PointerMoved([6.0 + x, 13.0]));
+}
+
+fn press(ui: &mut Ui, at: Instant, pressed: bool) {
+    ui.event(Event::Button {
+        button: MouseButton::Left,
+        pressed,
+        at,
     });
+}
+
+#[test]
+fn text_fields_edit_with_keys_and_selection() {
+    let (mut ui, mut text) = focused_field("café");
+    ui.event(key(NamedKey::End));
     ui.event(key(NamedKey::Backspace));
-    ui.event(Event::Key {
-        key: Key::Character("e".into()),
-        text: Some("e".into()),
-    });
-    build(&mut ui, &mut text);
+    ui.event(typed("e"));
+    field_frame(&mut ui, &mut text);
     assert_eq!(text, "cafe");
     ui.event(Event::Modifiers(ModifiersState::SHIFT));
     ui.event(key(NamedKey::ArrowLeft));
     ui.event(key(NamedKey::ArrowLeft));
-    build(&mut ui, &mut text);
+    field_frame(&mut ui, &mut text);
     ui.event(Event::Modifiers(ModifiersState::empty()));
     ui.event(Event::Ime(Ime::Commit("é".into())));
-    build(&mut ui, &mut text);
+    field_frame(&mut ui, &mut text);
     assert_eq!(text, "caé");
     ui.event(Event::Modifiers(ModifiersState::SUPER));
-    ui.event(Event::Key {
-        key: Key::Character("a".into()),
-        text: Some("a".into()),
-    });
-    build(&mut ui, &mut text);
+    ui.event(typed("a"));
+    field_frame(&mut ui, &mut text);
     ui.event(Event::Modifiers(ModifiersState::empty()));
     ui.event(key(NamedKey::Delete));
-    let signal = build(&mut ui, &mut text);
+    let signal = field_frame(&mut ui, &mut text);
     assert!(signal.focused);
     assert_eq!(text, "");
 }
 
 #[test]
+fn text_fields_move_and_select_by_word() {
+    let (mut ui, mut text) = focused_field("one two three");
+    ui.event(key(NamedKey::End));
+    ui.event(Event::Modifiers(ModifiersState::ALT));
+    ui.event(key(NamedKey::ArrowLeft));
+    ui.event(key(NamedKey::ArrowLeft));
+    field_frame(&mut ui, &mut text);
+    ui.event(Event::Modifiers(
+        ModifiersState::ALT | ModifiersState::SHIFT,
+    ));
+    ui.event(key(NamedKey::ArrowRight));
+    field_frame(&mut ui, &mut text);
+    ui.event(Event::Modifiers(ModifiersState::empty()));
+    ui.event(typed("2"));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "one 2 three");
+}
+
+#[test]
+fn text_fields_delete_by_word_and_line_chords() {
+    let (mut ui, mut text) = focused_field("one two three");
+    ui.event(key(NamedKey::End));
+    ui.event(Event::Modifiers(ModifiersState::ALT));
+    ui.event(key(NamedKey::Backspace));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "one two ");
+    ui.event(Event::Modifiers(ModifiersState::CONTROL));
+    ui.event(typed("b"));
+    ui.event(typed("k"));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "one two");
+    ui.event(Event::Modifiers(ModifiersState::SUPER));
+    ui.event(key(NamedKey::Backspace));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "");
+}
+
+#[test]
+fn text_fields_double_press_selects_a_word_and_drags_by_words() {
+    let (mut ui, mut text) = focused_field("one two three");
+    let at = Instant::now();
+    point_to(&mut ui, &text, 5);
+    press(&mut ui, at, true);
+    press(&mut ui, at, false);
+    field_frame(&mut ui, &mut text);
+    press(&mut ui, at + Duration::from_millis(100), true);
+    field_frame(&mut ui, &mut text);
+    assert_eq!(ui.states[&field()].selection.text_range(), 4..7);
+    point_to(&mut ui, &text, 10);
+    field_frame(&mut ui, &mut text);
+    assert_eq!(ui.states[&field()].selection.text_range(), 4..13);
+    point_to(&mut ui, &text, 1);
+    field_frame(&mut ui, &mut text);
+    press(&mut ui, at + Duration::from_millis(200), false);
+    field_frame(&mut ui, &mut text);
+    let selection = ui.states[&field()].selection;
+    assert_eq!(
+        (selection.anchor().index(), selection.focus().index()),
+        (7, 0),
+        "reversing keeps the pressed word"
+    );
+}
+
+#[test]
+fn text_fields_drag_select_and_shift_press_extends() {
+    let (mut ui, mut text) = focused_field("one two three");
+    let at = Instant::now();
+    point_to(&mut ui, &text, 4);
+    press(&mut ui, at, true);
+    field_frame(&mut ui, &mut text);
+    point_to(&mut ui, &text, 7);
+    field_frame(&mut ui, &mut text);
+    press(&mut ui, at, false);
+    ui.event(Event::Modifiers(ModifiersState::SHIFT));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(ui.states[&field()].selection.text_range(), 4..7);
+    point_to(&mut ui, &text, 13);
+    press(&mut ui, at + Duration::from_secs(1), true);
+    press(&mut ui, at + Duration::from_secs(1), false);
+    field_frame(&mut ui, &mut text);
+    assert_eq!(ui.states[&field()].selection.text_range(), 4..13);
+    ui.event(Event::Modifiers(ModifiersState::empty()));
+    field_frame(&mut ui, &mut text);
+    ui.event(key(NamedKey::ArrowLeft));
+    ui.event(typed("_"));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(
+        text, "one _two three",
+        "Left collapses to the selection's start"
+    );
+}
+
+#[test]
 fn scrollbar_thumbs_track_the_offset_and_drags_reach_both_ends() {
-    let mut ui = Ui::new(Theme::dark());
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut offset = 0.0;
     let build = |ui: &mut Ui, offset: &mut f32| {
         frame(ui, |ui| {

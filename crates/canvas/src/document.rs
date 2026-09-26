@@ -16,6 +16,11 @@ pub struct TextPosition {
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextDocument {
     nodes: Vec<PageParagraph>,
+    /// The paragraph position of each root node's first text leaf, then the paragraph count, so
+    /// a position finds its node by search instead of walking every leaf before it.
+    starts: Vec<usize>,
+    /// Root indices of the tables, so a cell is found without walking every node.
+    tables: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -123,85 +128,98 @@ pub(crate) fn swap_columns(nodes: &mut [PageParagraph], widths: &mut BTreeMap<Ex
     }
 }
 
+/// Identities a node holds itself; paragraphs in its cells hold their own.
+fn owned_ids(node: &PageParagraph) -> impl Iterator<Item = ExGuid> + '_ {
+    let (content, rows) = match &node.content {
+        ParagraphContent::Text(text) => (text.id, &[][..]),
+        ParagraphContent::Image(image) => (image.id, &[][..]),
+        ParagraphContent::Attachment(file) => (file.id, &[][..]),
+        ParagraphContent::Ink(ink) => (ink.id, &[][..]),
+        ParagraphContent::Unsupported(unsupported) => (unsupported.id, &[][..]),
+        ParagraphContent::Table(table) => (table.id, table.rows.as_slice()),
+    };
+    [node.id, content].into_iter().chain(
+        rows.iter()
+            .flat_map(|row| std::iter::once(row.id).chain(row.cells.iter().map(|cell| cell.id))),
+    )
+}
+
 pub(crate) fn validate_nodes(
     nodes: &[PageParagraph],
-    edit: Option<&DocumentEdit>,
     ids: &mut BTreeSet<ExGuid>,
 ) -> Result<(), EditError> {
-    let mut pending = vec![(None, nodes, 0)];
-    while let Some((container, nodes, depth)) = pending.pop() {
+    if nodes.is_empty() {
+        return Err(EditError::InvalidRange);
+    }
+    validate_run(nodes, &[], 0, ids)
+}
+
+/// Validates `nodes`, which follow `earlier` in a container at `depth`, and every container
+/// nested in them; `earlier` is searched only for parents the run lacks.
+fn validate_run(
+    nodes: &[PageParagraph],
+    earlier: &[PageParagraph],
+    depth: usize,
+    ids: &mut BTreeSet<ExGuid>,
+) -> Result<(), EditError> {
+    let mut pending = vec![(nodes, earlier, depth)];
+    while let Some((nodes, earlier, depth)) = pending.pop() {
         if depth > 64 {
             return Err(EditError::InvalidStructure);
         }
-        let mut nodes = edited_nodes(nodes, container, edit).peekable();
-        if nodes.peek().is_none() {
-            return Err(EditError::InvalidRange);
-        }
         let mut parents = BTreeMap::new();
         for node in nodes {
-            if !ids.insert(node.id)
+            let parent = |id| {
+                parents.get(&id).copied().or_else(|| {
+                    earlier
+                        .iter()
+                        .rev()
+                        .find(|node| node.id == id)
+                        .map(|node| node.level)
+                })
+            };
+            if owned_ids(node).any(|id| !ids.insert(id))
                 || node.level == 0
                 || node
                     .parent
-                    .is_some_and(|id| parents.get(&id).is_none_or(|level| *level >= node.level))
+                    .is_some_and(|id| parent(id).is_none_or(|level| level >= node.level))
             {
                 return Err(EditError::InvalidStructure);
             }
             parents.insert(node.id, node.level);
             match &node.content {
-                ParagraphContent::Text(text) => {
-                    if !ids.insert(text.id) {
-                        return Err(EditError::InvalidStructure);
-                    }
-                }
                 ParagraphContent::Image(image) => {
-                    if !ids.insert(image.id) {
-                        return Err(EditError::InvalidStructure);
-                    }
                     crate::outline::image_size(image).ok_or(EditError::UnsupportedContent)?;
                 }
-                ParagraphContent::Attachment(file) => {
-                    if !ids.insert(file.id) {
-                        return Err(EditError::InvalidStructure);
-                    }
-                }
-                ParagraphContent::Ink(ink) => {
-                    if !ids.insert(ink.id) {
-                        return Err(EditError::InvalidStructure);
-                    }
-                }
-                ParagraphContent::Unsupported(unsupported) => {
-                    if !ids.insert(unsupported.id) {
-                        return Err(EditError::InvalidStructure);
-                    }
-                }
                 ParagraphContent::Table(table) => {
-                    if !ids.insert(table.id)
-                        || table.rows.is_empty()
+                    if table.rows.is_empty()
                         || table.columns.is_empty()
                         || table.columns.len() > 255
                         || table
                             .columns
                             .iter()
                             .any(|column| !column.width.is_finite() || column.width < 36.0)
+                        || table
+                            .rows
+                            .iter()
+                            .any(|row| row.cells.len() != table.columns.len())
                     {
                         return Err(EditError::InvalidStructure);
                     }
-                    for row in &table.rows {
-                        if !ids.insert(row.id) || row.cells.len() != table.columns.len() {
-                            return Err(EditError::InvalidStructure);
+                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                        if !cell.unsupported.is_empty() {
+                            return Err(EditError::UnsupportedContent);
                         }
-                        for cell in &row.cells {
-                            if !ids.insert(cell.id) {
-                                return Err(EditError::InvalidStructure);
-                            }
-                            if !cell.unsupported.is_empty() {
-                                return Err(EditError::UnsupportedContent);
-                            }
-                            pending.push((Some(cell.id), cell.paragraphs.as_slice(), depth + 1));
+                        if cell.paragraphs.is_empty() {
+                            return Err(EditError::InvalidRange);
                         }
+                        pending.push((cell.paragraphs.as_slice(), &[][..], depth + 1));
                     }
                 }
+                ParagraphContent::Text(_)
+                | ParagraphContent::Attachment(_)
+                | ParagraphContent::Ink(_)
+                | ParagraphContent::Unsupported(_) => {}
             }
         }
     }
@@ -214,6 +232,15 @@ fn validate_text(nodes: &[PageParagraph]) -> Result<(), EditError> {
         text.utf16_offset(text.text().len())?;
     }
     Ok(())
+}
+
+/// Paragraph positions of each node's first text leaf, counting from `first`.
+fn starts(nodes: &[PageParagraph], first: usize) -> impl Iterator<Item = usize> + '_ {
+    nodes.iter().scan(first, |next, node| {
+        let start = *next;
+        *next += leaves(std::slice::from_ref(node), None).count();
+        Some(start)
+    })
 }
 
 pub(crate) fn validate_flat<'a>(
@@ -235,22 +262,34 @@ pub(crate) fn container_mut(
     nodes: &mut Vec<PageParagraph>,
     id: Option<ExGuid>,
 ) -> Option<&mut Vec<PageParagraph>> {
-    let Some(id) = id else {
-        return Some(nodes);
-    };
+    match id {
+        None => Some(nodes),
+        Some(id) => cell_mut(nodes, id),
+    }
+}
+
+fn cell_mut(nodes: &mut [PageParagraph], id: ExGuid) -> Option<&mut Vec<PageParagraph>> {
     for node in nodes {
         if let ParagraphContent::Table(table) = &mut node.content {
             for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
                 if cell.id == id {
                     return Some(&mut cell.paragraphs);
                 }
-                if let Some(nodes) = container_mut(&mut cell.paragraphs, Some(id)) {
+                if let Some(nodes) = cell_mut(&mut cell.paragraphs, id) {
                     return Some(nodes);
                 }
             }
         }
     }
     None
+}
+
+fn tables(nodes: &[PageParagraph], first: usize) -> impl Iterator<Item = usize> + '_ {
+    nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| matches!(node.content, ParagraphContent::Table(_)))
+        .map(move |(index, _)| first + index)
 }
 
 impl TextDocument {
@@ -264,9 +303,15 @@ impl TextDocument {
     }
 
     pub fn from_nodes(nodes: Vec<PageParagraph>) -> Result<Self, EditError> {
-        validate_nodes(&nodes, None, &mut BTreeSet::new())?;
+        validate_nodes(&nodes, &mut BTreeSet::new())?;
         validate_text(&nodes)?;
-        Ok(Self { nodes })
+        let mut starts = starts(&nodes, 0).collect::<Vec<_>>();
+        starts.push(leaves(&nodes, None).count());
+        Ok(Self {
+            tables: tables(&nodes, 0).collect(),
+            nodes,
+            starts,
+        })
     }
 
     pub fn nodes(&self) -> &[PageParagraph] {
@@ -285,19 +330,90 @@ impl TextDocument {
         self.text_nodes().map(|node| &node.text().unwrap().text)
     }
 
-    pub(crate) fn container(&self, id: Option<ExGuid>) -> Result<&[PageParagraph], EditError> {
-        let Some(id) = id else {
-            return Ok(&self.nodes);
+    /// The text leaf at a paragraph position, with its container and index there.
+    pub(crate) fn leaf(&self, paragraph: usize) -> Option<(Option<ExGuid>, usize, &PageParagraph)> {
+        let root = self
+            .starts
+            .partition_point(|start| *start <= paragraph)
+            .checked_sub(1)?;
+        let node = self.nodes.get(root)?;
+        match node.text() {
+            Some(_) => Some((None, root, node)),
+            None => leaves(std::slice::from_ref(node), None).nth(paragraph - self.starts[root]),
+        }
+    }
+
+    /// The text leaf at a paragraph position once a valid `edit` applies, with the position it
+    /// has now unless the edit supplies it.
+    pub(crate) fn edited_leaf<'a>(
+        &'a self,
+        edit: &'a DocumentEdit,
+        paragraph: usize,
+    ) -> Option<(&'a PageParagraph, Option<usize>)> {
+        let nodes = self.container(edit.container).ok()?;
+        let first = match edit.container {
+            None => self.starts[edit.range.start],
+            Some(cell) => {
+                let root = self.root(cell).ok()?;
+                self.starts[root]
+                    + descendants(std::slice::from_ref(&self.nodes[root]), None)
+                        .take_while(|(container, _, _)| *container != edit.container)
+                        .filter(|(_, _, node)| node.text().is_some())
+                        .count()
+                    + leaves(&nodes[..edit.range.start], None).count()
+            }
         };
-        let mut pending = vec![self.nodes.as_slice()];
-        while let Some(nodes) = pending.pop() {
+        let added = leaves(&edit.replacement, None).count();
+        match paragraph.checked_sub(first) {
+            Some(offset) if offset < added => leaves(&edit.replacement, None)
+                .nth(offset)
+                .map(|(_, _, node)| (node, None)),
+            Some(_) => {
+                let before = paragraph - added + leaves(&nodes[edit.range.clone()], None).count();
+                self.leaf(before).map(|(_, _, node)| (node, Some(before)))
+            }
+            None => self
+                .leaf(paragraph)
+                .map(|(_, _, node)| (node, Some(paragraph))),
+        }
+    }
+
+    /// The root node holding a table cell.
+    pub(crate) fn root(&self, cell: ExGuid) -> Result<usize, EditError> {
+        self.tables
+            .iter()
+            .copied()
+            .find(|&root| {
+                descendants(std::slice::from_ref(&self.nodes[root]), None)
+                    .any(|(container, _, _)| container == Some(cell))
+            })
+            .ok_or(EditError::InvalidRange)
+    }
+
+    pub(crate) fn paragraph(&self, index: usize) -> Option<&Paragraph> {
+        self.leaf(index)
+            .map(|(_, _, node)| &node.text().unwrap().text)
+    }
+
+    pub(crate) fn container(&self, id: Option<ExGuid>) -> Result<&[PageParagraph], EditError> {
+        self.nested_container(id).map(|(nodes, _)| nodes)
+    }
+
+    /// The container's paragraphs and how many tables enclose them.
+    fn nested_container(&self, id: Option<ExGuid>) -> Result<(&[PageParagraph], usize), EditError> {
+        let Some(id) = id else {
+            return Ok((&self.nodes, 0));
+        };
+        let root = self.root(id)?;
+        let mut pending = vec![(std::slice::from_ref(&self.nodes[root]), 0)];
+        while let Some((nodes, depth)) = pending.pop() {
             for node in nodes {
                 if let ParagraphContent::Table(table) = &node.content {
                     for cell in table.rows.iter().flat_map(|row| &row.cells) {
                         if cell.id == id {
-                            return Ok(&cell.paragraphs);
+                            return Ok((&cell.paragraphs, depth + 1));
                         }
-                        pending.push(&cell.paragraphs);
+                        pending.push((&cell.paragraphs, depth + 1));
                     }
                 }
             }
@@ -344,11 +460,11 @@ impl TextDocument {
         if range.start > range.end {
             return Err(EditError::InvalidRange);
         }
-        let (container, start, first) = leaves(&self.nodes, None)
-            .nth(range.start.paragraph)
+        let (container, start, first) = self
+            .leaf(range.start.paragraph)
             .ok_or(EditError::InvalidRange)?;
-        let (end_container, end, last) = leaves(&self.nodes, None)
-            .nth(range.end.paragraph)
+        let (end_container, end, last) = self
+            .leaf(range.end.paragraph)
             .ok_or(EditError::InvalidRange)?;
         if container != end_container {
             return Err(EditError::UnsupportedContent);
@@ -394,12 +510,60 @@ impl TextDocument {
         })
     }
 
+    /// Rejects exactly the edits after which [`validate_nodes`] would reject the document, or
+    /// whose column widths or text are invalid, looking only where the edit can conflict.
     pub(crate) fn validate_edit(&self, edit: &DocumentEdit) -> Result<(), EditError> {
-        let nodes = self.container(edit.container)?;
-        if edit.range.start > edit.range.end || edit.range.end > nodes.len() {
+        let (nodes, depth) = self.nested_container(edit.container)?;
+        if edit.range.start > edit.range.end
+            || edit.range.end > nodes.len()
+            || nodes.len() - edit.range.len() + edit.replacement.len() == 0
+        {
             return Err(EditError::InvalidRange);
         }
-        validate_nodes(&self.nodes, Some(edit), &mut BTreeSet::new())?;
+        let mut ids = BTreeSet::new();
+        validate_run(
+            &edit.replacement,
+            &nodes[..edit.range.start],
+            depth,
+            &mut ids,
+        )?;
+        let removed = &nodes[edit.range.clone()];
+        let levels = edit
+            .replacement
+            .iter()
+            .map(|node| (node.id, node.level))
+            .collect::<BTreeMap<_, _>>();
+        // A later paragraph may name a removed or deepened paragraph as its parent.
+        let moved = removed
+            .iter()
+            .filter_map(|node| {
+                let level = levels.get(&node.id).copied();
+                level
+                    .is_none_or(|level| level > node.level)
+                    .then_some((node.id, level))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if !moved.is_empty()
+            && nodes[edit.range.end..].iter().any(|node| {
+                node.parent
+                    .and_then(|id| moved.get(&id))
+                    .is_some_and(|level| level.is_none_or(|level| level >= node.level))
+            })
+        {
+            return Err(EditError::InvalidStructure);
+        }
+        // Only identities the removed nodes did not hold can collide elsewhere.
+        for (_, _, node) in descendants(removed, None) {
+            for id in owned_ids(node) {
+                ids.remove(&id);
+            }
+        }
+        if !ids.is_empty()
+            && descendants(&self.nodes, None)
+                .any(|(_, _, node)| owned_ids(node).any(|id| ids.contains(&id)))
+        {
+            return Err(EditError::InvalidStructure);
+        }
         if !edit.columns.is_empty() {
             let replaced = descendants(&edit.replacement, None)
                 .filter_map(|(_, _, node)| match &node.content {
@@ -431,23 +595,59 @@ impl TextDocument {
 
     pub(crate) fn apply(&mut self, edit: DocumentEdit) -> Result<DocumentEdit, EditError> {
         self.validate_edit(&edit)?;
-        let end = edit
-            .range
-            .start
-            .checked_add(edit.replacement.len())
-            .ok_or(EditError::TextTooLong)?;
-        let range = edit.range.start..end;
-        let nodes =
-            container_mut(&mut self.nodes, edit.container).ok_or(EditError::InvalidRange)?;
-        let replacement = nodes.splice(edit.range, edit.replacement).collect();
+        Ok(self.splice(edit))
+    }
+
+    /// Applies an edit [`Self::validate_edit`] accepted, returning its inverse.
+    pub(crate) fn splice(&mut self, edit: DocumentEdit) -> DocumentEdit {
+        let range = edit.range.start..edit.range.start + edit.replacement.len();
+        let root = edit.container.map(|cell| {
+            (
+                cell,
+                self.root(cell).expect("a validated edit's cell exists"),
+            )
+        });
+        let nodes = match root {
+            Some((cell, root)) => cell_mut(std::slice::from_mut(&mut self.nodes[root]), cell)
+                .expect("a validated edit's cell exists"),
+            None => &mut self.nodes,
+        };
+        let replacement: Vec<_> = nodes.splice(edit.range.clone(), edit.replacement).collect();
+        let delta = leaves(&nodes[range.clone()], None).count() as isize
+            - leaves(&replacement, None).count() as isize;
+        let after = match root {
+            Some((_, root)) => root + 1,
+            None => {
+                let first = self.starts[range.start];
+                self.starts.splice(
+                    edit.range.clone(),
+                    starts(&self.nodes[range.clone()], first),
+                );
+                let [start, end] = [edit.range.start, edit.range.end]
+                    .map(|index| self.tables.partition_point(|table| *table < index));
+                let added = tables(&self.nodes[range.clone()], range.start).collect::<Vec<_>>();
+                let later = start + added.len();
+                self.tables.splice(start..end, added);
+                for table in &mut self.tables[later..] {
+                    *table =
+                        table.wrapping_add_signed(range.len() as isize - edit.range.len() as isize);
+                }
+                range.end
+            }
+        };
+        if delta != 0 {
+            for start in &mut self.starts[after..] {
+                *start = start.wrapping_add_signed(delta);
+            }
+        }
         let mut columns = edit.columns;
         swap_columns(&mut self.nodes, &mut columns);
-        Ok(DocumentEdit {
+        DocumentEdit {
             container: edit.container,
             range,
             replacement,
             columns,
-        })
+        }
     }
 }
 
@@ -1249,6 +1449,239 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Validates the materialized edited document from scratch.
+    fn full_validation(document: &TextDocument, edit: &DocumentEdit) -> Result<(), EditError> {
+        let mut nodes = document.nodes.clone();
+        let container = container_mut(&mut nodes, edit.container).ok_or(EditError::InvalidRange)?;
+        if edit.range.start > edit.range.end || edit.range.end > container.len() {
+            return Err(EditError::InvalidRange);
+        }
+        container.splice(edit.range.clone(), edit.replacement.iter().cloned());
+        validate_nodes(&nodes, &mut BTreeSet::new())?;
+        let tables = |nodes| {
+            descendants(nodes, None)
+                .filter_map(|(_, _, node)| match &node.content {
+                    ParagraphContent::Table(table) => Some((table.id, table.columns.len())),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let replaced = tables(&edit.replacement);
+        let tables = tables(&nodes);
+        for (id, widths) in &edit.columns {
+            if replaced.contains_key(id)
+                || tables.get(id) != Some(&widths.len())
+                || widths
+                    .iter()
+                    .any(|width| !width.is_finite() || *width < 36.0)
+            {
+                return Err(EditError::InvalidStructure);
+            }
+        }
+        validate_text(&edit.replacement)
+    }
+
+    #[test]
+    fn incremental_validation_matches_full_validation_of_random_edits() {
+        let mut seed = 0x9e37_79b9_u64;
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n.max(1)
+        };
+        let fresh = |text: &str| {
+            node(
+                Paragraph::new(text.into(), Format::default()),
+                Format::default(),
+            )
+            .unwrap()
+        };
+        let mut document = table_document();
+        let [mut accepted, mut rejected] = [0; 2];
+        for step in 0..4000 {
+            let all = descendants(&document.nodes, None)
+                .map(|(_, _, node)| node.clone())
+                .collect::<Vec<_>>();
+            let cells = all
+                .iter()
+                .filter_map(|node| match &node.content {
+                    ParagraphContent::Table(table) => Some(table),
+                    _ => None,
+                })
+                .flat_map(|table| table.rows.iter().flat_map(|row| &row.cells))
+                .map(|cell| Some(cell.id))
+                .collect::<Vec<_>>();
+            let tables = all
+                .iter()
+                .filter_map(|node| match &node.content {
+                    ParagraphContent::Table(table) => Some(table.id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let container = match next(8) {
+                0..4 => None,
+                7 if step % 5 == 0 => Some(new_id().unwrap()),
+                _ => cells.get(next(cells.len())).copied().flatten(),
+            };
+            let nodes = document.container(container).unwrap_or(&[]).to_vec();
+            let start = next(nodes.len() + 2);
+            let range = if next(16) == 0 {
+                start..start.saturating_sub(1)
+            } else {
+                start..(start + next(3)).min(nodes.len() + usize::from(next(8) == 0))
+            };
+            let removed = nodes.get(range.clone()).unwrap_or_default();
+            let prefix = &nodes[..range.start.min(nodes.len())];
+            let suffix = nodes.get(range.end..).unwrap_or_default();
+            let ids =
+                |nodes: &[PageParagraph]| nodes.iter().map(|node| node.id).collect::<Vec<_>>();
+            let parents = [ids(prefix), ids(removed), ids(suffix), ids(&all)].concat();
+            let mut replacement = Vec::new();
+            for _ in 0..next(4) {
+                let mut node = match next(10) {
+                    0..3 if !removed.is_empty() => removed[next(removed.len())].clone(),
+                    3 if !all.is_empty() => all[next(all.len())].clone(),
+                    4 => {
+                        let mut table = table_document().nodes.remove(1);
+                        let ParagraphContent::Table(inner) = &mut table.content else {
+                            unreachable!()
+                        };
+                        match next(6) {
+                            0 => inner.rows[0].cells[0].paragraphs.clear(),
+                            1 => inner.columns[0].width = 35.0,
+                            2 => {
+                                inner.rows[0].cells.pop();
+                            }
+                            3 => {
+                                inner.rows[0].cells[1].paragraphs[0].parent =
+                                    Some(inner.rows[0].cells[0].paragraphs[0].id);
+                            }
+                            _ => {}
+                        }
+                        table
+                    }
+                    _ => fresh("new"),
+                };
+                match next(6) {
+                    0 => node.level = next(4) as u32,
+                    1 => node.level += 1,
+                    2 => {
+                        node.level = 1 + next(4) as u32;
+                        node.parent = (!parents.is_empty()).then(|| parents[next(parents.len())]);
+                    }
+                    3 => node.parent = None,
+                    _ => {}
+                }
+                replacement.push(node);
+            }
+            let mut columns = BTreeMap::new();
+            if next(12) == 0 {
+                let id = tables
+                    .get(next(tables.len() + 1))
+                    .copied()
+                    .unwrap_or_else(|| new_id().unwrap());
+                columns.insert(id, vec![[72.0, 30.0, f32::NAN][next(3)]; 1 + next(3)]);
+            }
+            let edit = if next(4) == 0 {
+                let positions = document.paragraphs().count();
+                let paragraph = next(positions);
+                let offset = document.paragraphs().nth(paragraph).unwrap().text().len() as u32;
+                let start = TextPosition {
+                    paragraph,
+                    offset: next(offset as usize + 1) as u32,
+                };
+                let end = TextPosition {
+                    paragraph: paragraph + usize::from(paragraph + 1 < positions && next(2) == 0),
+                    offset: 0,
+                };
+                let texts = vec![Paragraph::new("typed".into(), Format::default()); 1 + next(2)];
+                match document.replace(start..end.max(start), texts) {
+                    Ok(edit) => edit,
+                    Err(_) => continue,
+                }
+            } else {
+                DocumentEdit {
+                    container,
+                    range,
+                    replacement,
+                    columns,
+                }
+            };
+            let expected = full_validation(&document, &edit);
+            assert_eq!(
+                document.validate_edit(&edit).is_ok(),
+                expected.is_ok(),
+                "step {step}: {expected:?} for {edit:#?}"
+            );
+            if expected.is_ok() {
+                accepted += 1;
+                let edited = leaves(&document.nodes, Some(&edit)).collect::<Vec<_>>();
+                let supplied = descendants(&edit.replacement, None)
+                    .map(|(_, _, node)| node.id)
+                    .collect::<BTreeSet<_>>();
+                for paragraph in 0..=edited.len() {
+                    let leaf = document.edited_leaf(&edit, paragraph);
+                    assert_eq!(
+                        leaf.map(|(node, _)| node),
+                        edited.get(paragraph).map(|(_, _, node)| *node)
+                    );
+                    if let Some((node, before)) = leaf {
+                        assert_eq!(before.is_none(), supplied.contains(&node.id));
+                        assert!(
+                            before.is_none_or(|before| document.leaf(before).unwrap().2 == node)
+                        );
+                    }
+                }
+                document.apply(edit).unwrap();
+                assert_eq!(
+                    document,
+                    TextDocument::from_nodes(document.nodes.clone()).unwrap()
+                );
+                let walked = leaves(&document.nodes, None).collect::<Vec<_>>();
+                for paragraph in 0..=walked.len() {
+                    assert_eq!(document.leaf(paragraph), walked.get(paragraph).copied());
+                }
+            } else {
+                rejected += 1;
+            }
+        }
+        assert!(accepted > 500 && rejected > 500, "{accepted} {rejected}");
+        let nest = |mut node, depth| {
+            for _ in 0..depth {
+                let mut table = table_document().nodes.remove(1);
+                let ParagraphContent::Table(inner) = &mut table.content else {
+                    unreachable!()
+                };
+                inner.rows[0].cells[0].paragraphs = vec![node];
+                node = table;
+            }
+            node
+        };
+        let document = TextDocument::from_nodes(vec![nest(fresh("leaf"), 64)]).unwrap();
+        let (innermost, _, _) = leaves(&document.nodes, None)
+            .find(|(_, _, node)| node.text().unwrap().text.text() == "leaf")
+            .unwrap();
+        for (container, depth, valid) in [
+            (innermost, 0, true),
+            (innermost, 1, false),
+            (None, 64, true),
+            (None, 65, false),
+        ] {
+            let edit = DocumentEdit {
+                container,
+                range: 0..0,
+                replacement: vec![nest(fresh("deep"), depth)],
+                columns: BTreeMap::new(),
+            };
+            assert_eq!(
+                document.validate_edit(&edit).is_ok(),
+                full_validation(&document, &edit).is_ok()
+            );
+            assert_eq!(document.validate_edit(&edit).is_ok(), valid);
         }
     }
 

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 38 792" preserveAspectRatio="none">
+<defs>
+<linearGradient id="shade" x2="1"><stop offset=".65" stop-color="#c5cfe1"/><stop offset="1" stop-color="#7e8eb2"/></linearGradient>
+<linearGradient id="block-fade" x2="0" y2="1"><stop offset=".48" stop-color="white"/><stop offset=".76" stop-color="white" stop-opacity="0"/></linearGradient>
+<linearGradient id="line-fade" x2="0" y2="1"><stop offset=".42" stop-color="white"/><stop offset=".61" stop-color="white" stop-opacity="0"/></linearGradient>
+<mask id="block"><rect width="38" height="792" fill="url(#block-fade)"/></mask>
+<mask id="lines"><rect width="38" height="792" fill="url(#line-fade)"/></mask>
+</defs>
+<rect width="26" height="792" fill="url(#shade)" mask="url(#block)"/>
+<path d="M0 4.50H26M0 13.55H26M0 22.60H26M0 31.65H26M0 40.70H26M0 49.75H26M0 58.80H26M0 67.85H26M0 76.90H26M0 85.95H26M0 95.00H26M0 104.05H26M0 113.10H26M0 122.15H26M0 131.20H26M0 140.25H26M0 149.30H26M0 158.35H26M0 167.40H26M0 176.45H26M0 185.50H26M0 194.55H26M0 203.60H26M0 212.65H26M0 221.70H26M0 230.75H26M0 239.80H26M0 248.85H26M0 257.90H26M0 266.95H26M0 276.00H26M0 285.05H26M0 294.10H26M0 303.15H26M0 312.20H26M0 321.25H26M0 330.30H26M0 339.35H26M0 348.40H26M0 357.45H26M0 366.50H26M0 375.55H26M0 384.60H26M0 393.65H26M0 402.70H26M0 411.75H26M0 420.80H26M0 429.85H26M0 438.90H26M0 447.95H26M0 457.00H26M0 466.05H26M0 475.10H26" stroke="#203e72" mask="url(#lines)"/>
+</svg>

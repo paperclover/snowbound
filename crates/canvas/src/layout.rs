@@ -30,7 +30,8 @@ const SUBSCRIPT_DROP: f32 = 0.08;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextBrush {
-    pub color: u32,
+    /// COLORREF, or `None` for OneNote's automatic colour, which follows the paper.
+    pub color: Option<u32>,
     pub highlight: Option<u32>,
     /// Points the run draws above the line's baseline: positive for a superscript,
     /// negative for a subscript. Line metrics and hit-testing keep the baseline.
@@ -191,9 +192,9 @@ impl TextEngine {
                 StyleProperty::Brush(TextBrush {
                     // Links take OneNote's blue unless given a colour of their own.
                     color: match format.color {
-                        Some(color) if color != 0xff000000 => color,
-                        _ if link => 0x00ff0000,
-                        _ => 0,
+                        Some(color) if color != 0xff000000 => Some(color),
+                        _ if link => Some(0x00ff0000),
+                        _ => None,
                     },
                     highlight: format.highlight.filter(|color| *color != 0xff000000),
                     rise,
@@ -396,59 +397,6 @@ impl TextLayout {
 
     pub fn cursor(&self, byte: usize, affinity: Affinity) -> Cursor {
         Cursor::from_byte_index(&self.shaped, byte, affinity)
-    }
-
-    pub(crate) fn word_cursor(&self, cursor: Cursor, backward: bool) -> Cursor {
-        let mut current = cursor;
-        let mut visited = BTreeSet::new();
-        loop {
-            if !visited.insert((current.index(), current.affinity() == Affinity::Upstream)) {
-                // Parley visual cursors can cycle at soft-wrapped bidi boundaries.
-                let [left, right] = cursor.visual_clusters(&self.shaped);
-                let rtl = if backward {
-                    left.or(right)
-                } else {
-                    right.or(left)
-                }
-                .is_some_and(|cluster| cluster.is_rtl());
-                return if backward != rtl {
-                    cursor.previous_logical_word(&self.shaped)
-                } else {
-                    cursor.next_logical_word(&self.shaped)
-                };
-            }
-            let next = if backward {
-                current.previous_visual(&self.shaped)
-            } else {
-                current.next_visual(&self.shaped)
-            };
-            if next == current {
-                return current;
-            }
-            current = next;
-            let [Some(left), Some(right)] = current.visual_clusters(&self.shaped) else {
-                return current;
-            };
-            let boundary = if left.is_rtl() {
-                left.is_word_boundary()
-                    && if backward {
-                        left.is_space_or_nbsp()
-                            || (right.is_word_boundary() && !right.is_space_or_nbsp())
-                    } else {
-                        !left.is_space_or_nbsp()
-                    }
-            } else {
-                right.is_word_boundary()
-                    && if backward {
-                        !right.is_space_or_nbsp()
-                    } else {
-                        !left.is_space_or_nbsp()
-                    }
-            };
-            if boundary {
-                return current;
-            }
-        }
     }
 
     pub fn hit_test(&self, x: f32, y: f32) -> Cursor {
@@ -664,7 +612,14 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(runs, [(0, false), (0x00ff_0000, true), (0x0000_00ff, true)]);
+        assert_eq!(
+            runs,
+            [
+                (None, false),
+                (Some(0x00ff_0000), true),
+                (Some(0x0000_00ff), true)
+            ]
+        );
     }
 
     #[test]

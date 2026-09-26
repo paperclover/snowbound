@@ -97,7 +97,6 @@ impl ReadOnlyObject {
                 onestore::document::Format {
                     font: Some("Arial".into()),
                     font_size: Some(11.0),
-                    color: Some(0x005d554e),
                     ..Default::default()
                 },
             ),

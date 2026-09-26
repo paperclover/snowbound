@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 17 608" preserveAspectRatio="none">
+<defs>
+<linearGradient id="red" x2="0" y1="1" y2="45" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#f7d8db"/><stop offset=".45" stop-color="#e02433"/><stop offset=".85" stop-color="#eb868c"/><stop offset="1" stop-color="#f6d6d8"/>
+</linearGradient>
+<linearGradient id="black" x2="0" y1="64" y2="606" gradientUnits="userSpaceOnUse">
+<stop offset="0" stop-color="#a3a3a3"/><stop offset=".06" stop-color="#080808"/><stop offset=".12" stop-color="#8a8a8a"/><stop offset=".14" stop-color="#909090"/><stop offset=".6" stop-color="#b8b8b8"/><stop offset=".9" stop-color="#ececec"/><stop offset="1" stop-color="#ececec" stop-opacity="0"/>
+</linearGradient>
+</defs>
+<rect width="7" y="1" height="44" fill="url(#red)"/>
+<rect x="9" y="1" width="1.6" height="44" fill="url(#red)"/>
+<rect x="13" y="1" width="1" height="44" fill="url(#red)"/>
+<rect width="7" y="64" height="542" fill="url(#black)"/>
+<rect x="9" y="64" width="1.6" height="542" fill="url(#black)"/>
+<rect x="13" y="64" width="1" height="542" fill="url(#black)"/>
+</svg>
