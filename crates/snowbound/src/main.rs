@@ -1106,20 +1106,21 @@ impl State {
                     space,
                     Spec {
                         size: [px(PAGE_LIST), px(26.0)],
-                        pad: [6.0, 0.0],
                         ..Spec::default()
                     },
                 );
                 let spec = Spec {
-                    size: [fill(), px(26.0)],
+                    flags: Flags::CLICKABLE | Flags::FLOAT,
+                    size: [px(PAGE_LIST - 3.0 - 6.0), px(26.0)],
+                    position: [3.0, 0.0],
                     color: Some(if title.is_empty() {
                         ui::mix(theme.ink, section.tab, 0.5)
                     } else {
                         theme.ink
                     }),
                     fill: Some(section.tab),
-                    hover_fill: Some(ui::mix(section.tab, theme.ink, 0.12)),
-                    radius: 13.0,
+                    hover_fill: Some(ui::mix(section.tab, section.accent, 0.3)),
+                    radius: ROUNDING,
                     ..spec
                 };
                 let clicked = self.ui.leaf("pill", spec).clicked;
