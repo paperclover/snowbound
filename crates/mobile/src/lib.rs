@@ -14,7 +14,12 @@ use canvas::{
     layout::TextEngine,
 };
 use draw::edit::{Key, NamedKey, SelectionUnit};
-use onestore::{RevisionIndex, Store, document::Document, page::Page};
+use onestore::{
+    ExGuid, RevisionIndex, Store,
+    document::Document,
+    op::{Edit, Op},
+    page::Page,
+};
 use parley::{Affinity, BoundingBox};
 use std::{
     error::Error,
@@ -40,7 +45,8 @@ const COLORS: TextColors = TextColors {
 };
 
 pub struct Section {
-    pages: Vec<Page>,
+    /// Each page with the object space holding it.
+    pages: Vec<(ExGuid, Page)>,
     titles: Vec<CString>,
 }
 
@@ -52,11 +58,11 @@ impl Section {
         let pages = document
             .pages()?
             .into_iter()
-            .map(|(space, id)| Page::from_revision(document.active(space)?, id))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
+            .map(|(space, id)| Ok((space, Page::from_revision(document.active(space)?, id)?)))
+            .collect::<std::result::Result<Vec<_>, onestore::Error>>()?;
         let titles = pages
             .iter()
-            .map(|page| CString::new(page.title.replace('\0', "")))
+            .map(|(_, page)| CString::new(page.title.replace('\0', "")))
             .collect::<std::result::Result<_, _>>()?;
         Ok(Self { pages, titles })
     }
@@ -74,6 +80,8 @@ impl Wake for Frame {
 
 pub struct View {
     page: PageView,
+    /// The object space of the page shown, which its edits name.
+    space: ExGuid,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     renderer: draw::Renderer,
@@ -89,7 +97,12 @@ fn moved(response: Response) -> bool {
 }
 
 impl View {
-    fn new(layer: *mut c_void, page: Page, size: [f32; 2], scale: f32) -> Result<Self> {
+    fn new(
+        layer: *mut c_void,
+        (space, page): (ExGuid, Page),
+        size: [f32; 2],
+        scale: f32,
+    ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         // SAFETY: the host passes a live CAMetalLayer that outlives the view.
         let surface = unsafe {
@@ -122,11 +135,33 @@ impl View {
                 scale,
                 Duration::from_millis(350),
             ),
+            space,
             surface,
             config,
             renderer,
             frame: Arc::default(),
         })
+    }
+
+    /// What the page took since the last call as one edit, or none when it took nothing.
+    fn edit(&mut self) -> Result<Option<Edit>> {
+        let ops = self.page.editor.take_ops()?;
+        if ops.is_empty() {
+            return Ok(None);
+        }
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        Ok(Some(Edit {
+            // FILETIME: 100 ns ticks since 1601.
+            at: (unix.as_secs() + 11_644_473_600) * 10_000_000
+                + u64::from(unix.subsec_nanos() / 100),
+            ops: ops
+                .into_iter()
+                .map(|op| Op::Page {
+                    space: self.space,
+                    op,
+                })
+                .collect(),
+        }))
     }
 
     /// Device pixels per host point.
@@ -515,8 +550,19 @@ pub extern "C" fn sb_text(view: &View, start: u32, end: u32) -> *mut c_char {
         .map_or(std::ptr::null_mut(), CString::into_raw)
 }
 
+/// The edit the page took since the last call, as `onestore::op::Edit` JSON for the
+/// section to apply, freed with `sb_string_free`; null when it took none or cannot be
+/// stored, in which case the page should be opened again.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_edit(view: &mut View) -> *mut c_char {
+    report(view.edit())
+        .flatten()
+        .and_then(|edit| CString::new(serde_json::to_string(&edit).ok()?).ok())
+        .map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
 /// # Safety
-/// `text` came from `sb_text` and is not used again.
+/// `text` came from `sb_text` or `sb_view_edit` and is not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sb_string_free(text: *mut c_char) {
     drop(unsafe { CString::from_raw(text) });

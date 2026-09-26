@@ -532,6 +532,11 @@ impl Diff {
             PageOp::Link { text, .. } | PageOp::Equation { text, .. } => {
                 require(self.region(*text)?.is_none())?;
             }
+            PageOp::Date { fields, .. } => {
+                for (text, _) in fields.iter() {
+                    require(self.region(*text)?.is_none())?;
+                }
+            }
             PageOp::Split {
                 text, at, right, ..
             } => {

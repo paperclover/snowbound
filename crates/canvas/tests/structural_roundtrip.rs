@@ -1,7 +1,7 @@
-//! Every structural edit the editor makes saves through the page writer and rereads as the
-//! model it saved: random Enter, Backspace, Delete, Tab, Shift+Tab, list and paste edits, alone
-//! and several to a save, on every outline of the probe section and of any sections named in
-//! `CANVAS_SWEEP_SECTIONS` (`:`-separated paths).
+//! Every structural edit the editor makes saves, through the page writer and as the ops the
+//! editor recorded, and rereads as the model it saved: random Enter, Backspace, Delete, Tab,
+//! Shift+Tab, list and paste edits, alone and several to a save, on every outline of the probe
+//! section and of any sections named in `CANVAS_SWEEP_SECTIONS` (`:`-separated paths).
 
 use canvas::{
     document::TextPosition,
@@ -9,7 +9,7 @@ use canvas::{
     layout::TextEngine,
 };
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    Arena, ExGuid, PreparedEdit, RevisionIndex, Section, Store,
     document::Document,
     page::{Outline, Page, PageObject, PageParagraph, ParagraphContent},
 };
@@ -334,26 +334,43 @@ fn sweep(path: &Path, random: &mut Random, engine: &mut TextEngine, tally: &mut 
                     )
                     .unwrap();
                 }
+                // An untitled page's title follows its first line as the writer stores it.
+                let rereads = |reread: &Page| {
+                    Page {
+                        title: after.title.clone(),
+                        ..reread.clone()
+                    } == after
+                };
+                let arena = Arena::default();
+                let mut stored = Section::open(&arena, section.clone()).unwrap();
+                let edit = onestore::op::Edit {
+                    at: 133_000_000_000_000_000,
+                    ops: editor
+                        .take_ops()
+                        .unwrap()
+                        .into_iter()
+                        .map(|op| onestore::op::Op::Page { space, op })
+                        .collect(),
+                };
+                let ops = match stored.apply("Sweep", &edit) {
+                    Err(error) => Some(format!("ops: {error}")),
+                    Ok(()) => {
+                        let reread = stored.page(space).unwrap();
+                        (!rereads(&reread)).then(|| format!("ops: {}", difference(&after, &reread)))
+                    }
+                };
                 let failure = match PreparedEdit::page(&section, space, &after, "Sweep") {
                     Err(error) => Some(error.message.to_owned()),
                     Ok(saved) => match pages(saved.as_bytes())
                         .into_iter()
                         .find(|(id, _)| *id == space)
                     {
-                        // An untitled page's title follows its first line as the writer stores it.
-                        Some((_, reread))
-                            if Page {
-                                title: after.title.clone(),
-                                ..reread.clone()
-                            } == after =>
-                        {
-                            None
-                        }
+                        Some((_, reread)) if rereads(&reread) => None,
                         Some((_, reread)) => Some(difference(&after, &reread)),
                         None => Some("the page does not reread".into()),
                     },
                 };
-                if let Some(failure) = failure {
+                for failure in failure.into_iter().chain(ops) {
                     tally.failures.entry(failure).or_default().push(format!(
                         "{plan:?} on {:?} in {}",
                         page.title,

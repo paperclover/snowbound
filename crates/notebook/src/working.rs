@@ -44,8 +44,9 @@ pub(crate) enum Request {
     Pages {
         reply: Reply<Vec<(ExGuid, String, u32)>>,
     },
-    Image {
-        reply: Reply<Vec<u8>>,
+    /// Answers once the edits before it are written.
+    Flush {
+        reply: Reply<()>,
     },
     /// Seals the open batch, when no sealed batch waits for publication, recording the
     /// attempt to publish it.
@@ -62,7 +63,14 @@ pub(crate) enum Request {
     Reopen {
         reply: Reply<()>,
     },
+    /// From the thread that rebuilt the section: hand it the requests.
+    Handover(mpsc::SyncSender<Takeover>),
+    /// From the thread that rebuilt nothing: carry on with the section as it is.
+    Resume,
 }
+
+/// The request channel and the requests held while the section was rebuilt.
+type Takeover = (mpsc::Receiver<Request>, VecDeque<Request>);
 
 /// A sealed batch: the transaction publishing it, or none when its edits changed nothing.
 pub(crate) struct Sealed {
@@ -71,7 +79,7 @@ pub(crate) struct Sealed {
 }
 
 /// A conflict's resolution: the batch it holds and every later edit drop their ops on
-/// `space`; `Mine` first rewrites the rebased page to the local one (or to `page`).
+/// `space`; `Mine` first rewrites the rebased page to `page`, the local one unless given.
 pub(crate) struct Resolve {
     pub first: u64,
     pub space: ExGuid,
@@ -98,34 +106,88 @@ impl Request {
             Self::Save { reply, .. } => reply(Err(error())),
             Self::Page { reply, .. } => reply(Err(error())),
             Self::Pages { reply } => reply(Err(error())),
-            Self::Image { reply } => reply(Err(error())),
+            Self::Flush { reply } => reply(Err(error())),
             Self::Seal { reply } => reply(Err(error())),
             Self::Rebase { reply, .. } => reply(Err(error())),
             Self::Reopen { reply } => reply(Err(error())),
+            Self::Handover(_) | Self::Resume => {}
         }
     }
 }
 
 type Worker = Arc<Mutex<Weak<Signal>>>;
 
+/// The section thread as the replica sees it. Rereading the section after the queue was
+/// replaced (a rebase, a released attempt) happens on a new thread while the current one
+/// keeps answering page reads from the section as it was; the new thread then takes the
+/// requests over, so reads never wait for a rebuild.
+pub(crate) struct Thread {
+    connection: Arc<Mutex<Connection>>,
+    worker: Worker,
+    /// Taken when the replica drops, which ends every section thread.
+    sender: Mutex<Option<mpsc::Sender<Request>>>,
+    threads: Mutex<Vec<thread::JoinHandle<()>>>,
+}
+
+impl Thread {
+    pub(crate) fn send(&self, request: Request) -> Result<()> {
+        self.sender
+            .lock()
+            .ok()
+            .and_then(|sender| sender.as_ref()?.send(request).ok())
+            .ok_or_else(|| io::Error::other("The section thread stopped").into())
+    }
+
+    /// Ends the section threads and waits for them, so the cache is released.
+    pub(crate) fn stop(&self) {
+        if let Ok(mut sender) = self.sender.lock() {
+            sender.take();
+        }
+        while let Some(thread) = self
+            .threads
+            .lock()
+            .ok()
+            .and_then(|mut threads| threads.pop())
+        {
+            let _ = thread.join();
+        }
+    }
+
+    fn start(self: &Arc<Self>, run: impl FnOnce(Arc<Self>) + Send + 'static) -> Result<()> {
+        let shared = Arc::clone(self);
+        let thread = thread::Builder::new()
+            .name("onestore-section".into())
+            .spawn(move || run(shared))?;
+        self.threads
+            .lock()
+            .map_err(|_| io::Error::other("The section thread panicked"))?
+            .push(thread);
+        Ok(())
+    }
+}
+
 /// Starts the section thread once the queue opens.
 pub(crate) fn spawn(
     connection: Arc<Mutex<Connection>>,
     worker: Worker,
-) -> Result<(mpsc::Sender<Request>, thread::JoinHandle<()>, ExGuid)> {
-    let (sender, receiver) = mpsc::channel();
+) -> Result<(Arc<Thread>, ExGuid)> {
+    let (sender, requests) = mpsc::channel();
+    let shared = Arc::new(Thread {
+        connection,
+        worker,
+        sender: Mutex::new(Some(sender)),
+        threads: Mutex::new(Vec::new()),
+    });
     let (ready, opened) = mpsc::sync_channel(1);
-    let thread = thread::Builder::new()
-        .name("onestore-section".into())
-        .spawn(move || run(&connection, &worker, &receiver, ready))?;
+    shared.start(move |shared| run(shared, requests, VecDeque::new(), Some(ready)))?;
     match opened.recv() {
-        Ok(Ok(root)) => Ok((sender, thread, root)),
+        Ok(Ok(root)) => Ok((shared, root)),
         Ok(Err(error)) => {
-            let _ = thread.join();
+            shared.stop();
             Err(error)
         }
         Err(_) => {
-            let _ = thread.join();
+            shared.stop();
             Err(io::Error::other("The section thread panicked").into())
         }
     }
@@ -134,28 +196,24 @@ pub(crate) fn spawn(
 enum Next {
     Stop,
     Reopen,
+    Handover(mpsc::SyncSender<Takeover>, VecDeque<Request>),
 }
 
 fn run(
-    connection: &Mutex<Connection>,
-    worker: &Worker,
-    requests: &mpsc::Receiver<Request>,
-    ready: mpsc::SyncSender<Result<ExGuid>>,
+    shared: Arc<Thread>,
+    requests: mpsc::Receiver<Request>,
+    mut backlog: VecDeque<Request>,
+    mut ready: Option<mpsc::SyncSender<Result<ExGuid>>>,
 ) {
-    let mut ready = Some(ready);
-    let mut backlog = VecDeque::new();
     loop {
         let arena = Arena::default();
-        let working = match Working::open(&arena, connection) {
+        let working = match Working::open(&arena, &shared.connection) {
             Ok(working) => working,
             Err(error) => {
-                let message = error.to_string();
                 if let Some(ready) = ready.take() {
                     let _ = ready.send(Err(error));
-                    return;
-                }
-                for request in backlog.drain(..).chain(requests.iter()) {
-                    request.fail(&message);
+                } else {
+                    fail(error, backlog, requests);
                 }
                 return;
             }
@@ -163,9 +221,75 @@ fn run(
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(working.section.root()));
         }
-        match working.serve(connection, worker, requests, &mut backlog) {
+        match working.serve(&shared, &requests, &mut backlog) {
             Next::Stop => return,
             Next::Reopen => {}
+            Next::Handover(to, held) => {
+                let _ = to.send((requests, held));
+                return;
+            }
+        }
+    }
+}
+
+/// Answers every request with `error` until the replica drops.
+fn fail(error: crate::Error, backlog: VecDeque<Request>, requests: mpsc::Receiver<Request>) {
+    let message = error.to_string();
+    for request in backlog.into_iter().chain(requests.iter()) {
+        request.fail(&message);
+    }
+}
+
+/// What a rebuilding thread does before it rereads the section.
+enum Job {
+    Rebase {
+        image: Option<Vec<u8>>,
+        resolve: Option<Resolve>,
+        reply: Reply<Rebased>,
+    },
+    Reopen {
+        reply: Reply<()>,
+    },
+}
+
+/// Runs `job`, rereads the section and takes the requests over from the thread that
+/// started it; a rebase that found a conflict changed nothing that thread serves.
+fn build(shared: Arc<Thread>, job: Job, signal: mpsc::Sender<Request>) {
+    let answer: Box<dyn FnOnce() + Send> = match job {
+        Job::Reopen { reply } => Box::new(move || reply(Ok(()))),
+        Job::Rebase {
+            image,
+            resolve,
+            reply,
+        } => match rebase(&shared.connection, image, resolve) {
+            Ok(applied @ Rebased::Applied { .. }) => Box::new(move || reply(Ok(applied))),
+            other => {
+                reply(other);
+                let _ = signal.send(Request::Resume);
+                return;
+            }
+        },
+    };
+    let arena = Arena::default();
+    let opened = Working::open(&arena, &shared.connection);
+    let (to, from) = mpsc::sync_channel(1);
+    if signal.send(Request::Handover(to)).is_err() {
+        return;
+    }
+    drop(signal);
+    answer();
+    let Ok((requests, mut backlog)) = from.recv() else {
+        return;
+    };
+    let working = match opened {
+        Ok(working) => working,
+        Err(error) => return fail(error, backlog, requests),
+    };
+    match working.serve(&shared, &requests, &mut backlog) {
+        Next::Stop => {}
+        Next::Reopen => run(shared, requests, backlog, None),
+        Next::Handover(to, held) => {
+            let _ = to.send((requests, held));
         }
     }
 }
@@ -214,11 +338,14 @@ impl<'a> Working<'a> {
 
     fn serve(
         mut self,
-        connection: &Mutex<Connection>,
-        worker: &Worker,
+        shared: &Arc<Thread>,
         requests: &mpsc::Receiver<Request>,
         backlog: &mut VecDeque<Request>,
     ) -> Next {
+        let (connection, worker) = (&*shared.connection, &shared.worker);
+        // While another thread rebuilds the section, reads answer from this one and every
+        // other request waits for the rebuilt section.
+        let mut held: Option<VecDeque<Request>> = None;
         loop {
             let first = match backlog.pop_front() {
                 Some(request) => request,
@@ -231,7 +358,28 @@ impl<'a> Working<'a> {
             burst.extend(backlog.drain(..));
             burst.extend(requests.try_iter());
             let mut accepted = Vec::new();
-            while let Some(request) = burst.pop_front() {
+            // Requests that write the queue beyond the burst's edits run after its reads.
+            let mut later = VecDeque::new();
+            while let Some(request) = burst.pop_front().or_else(|| later.pop_front()) {
+                if let Some(waiting) = &mut held {
+                    match request {
+                        Request::Page { space, reply } => {
+                            reply(self.section.page(space).map_err(Into::into))
+                        }
+                        Request::Pages { reply } => reply(self.section.pages().map_err(Into::into)),
+                        Request::Handover(to) => {
+                            let mut waiting = held.take().unwrap_or_default();
+                            waiting.extend(burst.drain(..).chain(later.drain(..)));
+                            return Next::Handover(to, waiting);
+                        }
+                        Request::Resume => {
+                            let waiting = held.take().unwrap_or_default();
+                            burst = waiting.into_iter().chain(burst.drain(..)).collect();
+                        }
+                        other => waiting.push_back(other),
+                    }
+                    continue;
+                }
                 let reopen = match request {
                     Request::Apply {
                         author,
@@ -326,16 +474,20 @@ impl<'a> Working<'a> {
                         reply(self.section.pages().map_err(Into::into));
                         false
                     }
-                    Request::Image { reply } => {
-                        if self.flush(connection, worker, &mut accepted) {
-                            reply(lock(connection).and_then(|connection| image(&connection)));
-                            false
+                    request @ (Request::Flush { .. } | Request::Seal { .. })
+                        if !burst.is_empty() =>
+                    {
+                        later.push_back(request);
+                        false
+                    }
+                    Request::Flush { reply } => {
+                        let written = self.flush(connection, worker, &mut accepted);
+                        reply(if written {
+                            Ok(())
                         } else {
-                            reply(Err(
-                                io::Error::other("The queue could not be written").into()
-                            ));
-                            true
-                        }
+                            Err(io::Error::other("The queue could not be written").into())
+                        });
+                        !written
                     }
                     Request::Seal { reply } => {
                         if !self.flush(connection, worker, &mut accepted) {
@@ -352,29 +504,61 @@ impl<'a> Working<'a> {
                     }
                     Request::Rebase {
                         image,
-                        resolve,
+                        mut resolve,
                         reply,
                     } => {
-                        if !self.flush(connection, worker, &mut accepted) {
-                            reply(Err(
-                                io::Error::other("The queue could not be written").into()
-                            ));
-                            true
-                        } else {
-                            let rebased = self.rebase(connection, image, resolve);
-                            let reopen = !matches!(rebased, Ok(Rebased::Conflict { .. }));
-                            reply(rebased);
-                            reopen
+                        let written = self.flush(connection, worker, &mut accepted);
+                        // The page a `Mine` resolution keeps is read here, before the
+                        // rebuild; the root space lists pages and holds none.
+                        let root = self.section.root();
+                        let kept = match &mut resolve {
+                            Some(Resolve {
+                                keep: Resolution::Mine,
+                                page: page @ None,
+                                space,
+                                ..
+                            }) if *space != root => {
+                                self.section.page(*space).map(|local| *page = Some(local))
+                            }
+                            _ => Ok(()),
+                        };
+                        match (written, kept) {
+                            (true, Ok(())) => {
+                                held = self
+                                    .rebuild(
+                                        shared,
+                                        Job::Rebase {
+                                            image,
+                                            resolve,
+                                            reply,
+                                        },
+                                    )
+                                    .then(VecDeque::new);
+                                false
+                            }
+                            (_, Err(error)) => {
+                                reply(Err(error.into()));
+                                !written
+                            }
+                            (false, _) => {
+                                reply(Err(
+                                    io::Error::other("The queue could not be written").into()
+                                ));
+                                true
+                            }
                         }
                     }
                     Request::Reopen { reply } => {
                         self.flush(connection, worker, &mut accepted);
-                        reply(Ok(()));
-                        true
+                        held = self
+                            .rebuild(shared, Job::Reopen { reply })
+                            .then(VecDeque::new);
+                        false
                     }
+                    Request::Handover(_) | Request::Resume => false,
                 };
                 if reopen {
-                    backlog.extend(burst);
+                    backlog.extend(burst.drain(..).chain(later.drain(..)));
                     return Next::Reopen;
                 }
             }
@@ -382,6 +566,30 @@ impl<'a> Working<'a> {
                 return Next::Reopen;
             }
         }
+    }
+
+    /// Starts a thread that runs `job` and rereads the section; false when the replica is
+    /// stopping, which answers the job's request.
+    fn rebuild(&self, shared: &Arc<Thread>, job: Job) -> bool {
+        let signal = shared
+            .sender
+            .lock()
+            .ok()
+            .and_then(|sender| sender.as_ref().cloned());
+        let Some(signal) = signal else {
+            match job {
+                Job::Rebase { reply, .. } => {
+                    reply(Err(io::Error::other("The section thread stopped").into()))
+                }
+                Job::Reopen { reply } => {
+                    reply(Err(io::Error::other("The section thread stopped").into()))
+                }
+            }
+            return false;
+        };
+        shared
+            .start(move |shared| build(shared, job, signal))
+            .is_ok()
     }
 
     /// Applies an edit, keeping it to be written with the burst. A refused edit is answered
@@ -536,150 +744,145 @@ impl<'a> Working<'a> {
         self.touched.clear();
         Ok(Some(Sealed { batch, transaction }))
     }
+}
 
-    /// Replays every queued edit on `image`, keeping it as the base when all apply.
-    fn rebase(
-        &mut self,
-        connection: &Mutex<Connection>,
-        image: Option<Vec<u8>>,
-        resolve: Option<Resolve>,
-    ) -> Result<Rebased> {
-        let (base_image, image, edits) = {
-            let connection = lock(connection)?;
-            if connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM batches WHERE attempted=1)",
-                [],
-                |row| row.get::<_, bool>(0),
-            )? {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "An uncertain attempt is never rebased",
-                )
-                .into());
+/// Replays every queued edit on `image`, keeping it as the base when all apply.
+fn rebase(
+    connection: &Mutex<Connection>,
+    image: Option<Vec<u8>>,
+    resolve: Option<Resolve>,
+) -> Result<Rebased> {
+    let (base_image, image, edits) = {
+        let connection = lock(connection)?;
+        if connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM batches WHERE attempted=1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "An uncertain attempt is never rebased",
+            )
+            .into());
+        }
+        let base_image = base::read(&connection, base::Image::Base)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
+        })?;
+        let image = match image {
+            Some(image) => image,
+            None => {
+                base::read(&connection, base::Image::Remote)?.unwrap_or_else(|| base_image.clone())
             }
-            let base_image = base::read(&connection, base::Image::Base)?.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
-            })?;
-            let image = match image {
-                Some(image) => image,
-                None => base::read(&connection, base::Image::Remote)?
-                    .unwrap_or_else(|| base_image.clone()),
-            };
-            (base_image, image, queue::load(&connection, None)?)
         };
-        // The page the local edits leave, which `Mine` rewrites the remote page to; the
-        // root space lists pages and holds none.
-        let target = match &resolve {
-            Some(Resolve {
-                keep: Resolution::Mine,
-                page: None,
-                space,
-                ..
-            }) if *space != self.section.root() => Some(self.section.page(*space)?),
-            Some(Resolve { page, .. }) => page.clone(),
-            None => None,
-        };
-        let old_arena = Arena::default();
-        let mut old = Section::open(&old_arena, base_image.clone())?;
-        let before: BTreeMap<ExGuid, ExGuid> = old.revisions().collect();
-        let mut after: BTreeMap<ExGuid, ExGuid>;
-        // Pages the remote already holds as the local edits leave them: their ops are done.
-        let mut converged = BTreeSet::new();
-        let outcome = loop {
-            let arena = Arena::default();
-            let mut new = Section::open(&arena, image.clone())?;
-            if old.root() != new.root() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Remote snapshot belongs to another document",
-                )
-                .into());
-            }
-            after = new.revisions().collect();
-            let outcome = merge::rebase(
-                &mut old,
-                &mut new,
-                &edits,
-                &converged,
-                resolve.as_ref().map(|resolve| merge::Resolving {
-                    first: resolve.first,
-                    space: resolve.space,
-                    mine: resolve.keep == Resolution::Mine,
-                    target: target.as_ref(),
-                }),
+        (base_image, image, queue::load(&connection, None)?)
+    };
+    let old_arena = Arena::default();
+    let mut old = Section::open(&old_arena, base_image.clone())?;
+    let before: BTreeMap<ExGuid, ExGuid> = old.revisions().collect();
+    let mut after: BTreeMap<ExGuid, ExGuid>;
+    // Pages the remote already holds as the local edits leave them: their ops are done.
+    let mut converged = BTreeSet::new();
+    let outcome = loop {
+        let arena = Arena::default();
+        let mut new = Section::open(&arena, image.clone())?;
+        if old.root() != new.root() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Remote snapshot belongs to another document",
+            )
+            .into());
+        }
+        after = new.revisions().collect();
+        let outcome = merge::rebase(
+            &mut old,
+            &mut new,
+            &edits,
+            &converged,
+            resolve.as_ref().map(|resolve| merge::Resolving {
+                first: resolve.first,
+                space: resolve.space,
+                mine: resolve.keep == Resolution::Mine,
+                target: resolve.page.as_ref(),
+            }),
+        )?;
+        if let merge::Outcome::Conflict { space, .. } = &outcome
+            && !converged.contains(space)
+            && let Some(local) = local_page(connection, *space)?
+            && Section::open(&Arena::default(), image.clone())?
+                .page(*space)
+                .is_ok_and(|remote| remote == local)
+        {
+            converged.insert(*space);
+            continue;
+        }
+        break outcome;
+    };
+    let mut connection = lock(connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let rebased = match outcome {
+        merge::Outcome::Conflict { id, space, kind } => {
+            transaction.execute("UPDATE batches SET conflict=NULL, space=NULL", [])?;
+            transaction.execute(
+                "UPDATE batches SET conflict=?1, space=?2 WHERE id=(SELECT batch FROM edits WHERE id=?3)",
+                params![kind as i64, space.to_string(), signed(id)?],
             )?;
-            if let merge::Outcome::Conflict { space, .. } = &outcome
-                && !converged.contains(space)
-                && let Ok(local) = self.section.page(*space)
-                && Section::open(&Arena::default(), image.clone())?
-                    .page(*space)
-                    .is_ok_and(|remote| remote == local)
-            {
-                converged.insert(*space);
-                continue;
-            }
-            break outcome;
-        };
-        let mut connection = lock(connection)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let rebased = match outcome {
-            merge::Outcome::Conflict { id, space, kind } => {
-                transaction.execute("UPDATE batches SET conflict=NULL, space=NULL", [])?;
-                transaction.execute(
-                    "UPDATE batches SET conflict=?1, space=?2 WHERE id=(SELECT batch FROM edits WHERE id=?3)",
-                    params![kind as i64, space.to_string(), signed(id)?],
-                )?;
-                if image == base_image {
-                    base::clear(&transaction, base::Image::Remote)?;
-                } else {
-                    base::write(&transaction, base::Image::Remote, &image)?;
-                }
-                // A conflict is reported under its batch's newest edit.
-                let id = crate::unsigned(transaction.query_row(
-                    "SELECT max(id) FROM edits WHERE batch=(SELECT batch FROM edits WHERE id=?1)",
-                    [signed(id)?],
-                    |row| row.get(0),
-                )?)?;
-                Rebased::Conflict { id, space, kind }
-            }
-            merge::Outcome::Applied(rewritten) => {
-                base::write(&transaction, base::Image::Base, &image)?;
+            if image == base_image {
                 base::clear(&transaction, base::Image::Remote)?;
-                transaction.execute("INSERT INTO batches DEFAULT VALUES", [])?;
-                let batch = transaction.last_insert_rowid();
-                transaction.execute("UPDATE edits SET batch=?1", [batch])?;
-                transaction.execute("DELETE FROM batches WHERE id<>?1", [batch])?;
-                for (id, edit) in rewritten {
-                    queue::rewrite(&transaction, id, &edit)?;
-                }
-                if transaction
-                    .query_row("SELECT count(*) FROM edits", [], |row| row.get::<_, i64>(0))?
-                    == 0
-                {
-                    transaction.execute("DELETE FROM batches", [])?;
-                }
-                queue::collect(&transaction)?;
-                let mut changed: BTreeSet<ExGuid> = before
-                    .iter()
-                    .filter(|(space, rid)| after.get(space) != Some(rid))
-                    .map(|(space, _)| *space)
-                    .chain(
-                        after
-                            .keys()
-                            .filter(|space| !before.contains_key(space))
-                            .copied(),
-                    )
-                    .collect();
-                changed.extend(resolve.as_ref().map(|resolve| resolve.space));
-                changed.extend(converged);
-                Rebased::Applied {
-                    changed: changed.into_iter().collect(),
-                }
+            } else {
+                base::write(&transaction, base::Image::Remote, &image)?;
             }
-        };
-        transaction.commit()?;
-        Ok(rebased)
-    }
+            // A conflict is reported under its batch's newest edit.
+            let id = crate::unsigned(transaction.query_row(
+                "SELECT max(id) FROM edits WHERE batch=(SELECT batch FROM edits WHERE id=?1)",
+                [signed(id)?],
+                |row| row.get(0),
+            )?)?;
+            Rebased::Conflict { id, space, kind }
+        }
+        merge::Outcome::Applied(rewritten) => {
+            base::write(&transaction, base::Image::Base, &image)?;
+            base::clear(&transaction, base::Image::Remote)?;
+            transaction.execute("INSERT INTO batches DEFAULT VALUES", [])?;
+            let batch = transaction.last_insert_rowid();
+            transaction.execute("UPDATE edits SET batch=?1", [batch])?;
+            transaction.execute("DELETE FROM batches WHERE id<>?1", [batch])?;
+            for (id, edit) in rewritten {
+                queue::rewrite(&transaction, id, &edit)?;
+            }
+            if transaction
+                .query_row("SELECT count(*) FROM edits", [], |row| row.get::<_, i64>(0))?
+                == 0
+            {
+                transaction.execute("DELETE FROM batches", [])?;
+            }
+            queue::collect(&transaction)?;
+            let mut changed: BTreeSet<ExGuid> = before
+                .iter()
+                .filter(|(space, rid)| after.get(space) != Some(rid))
+                .map(|(space, _)| *space)
+                .chain(
+                    after
+                        .keys()
+                        .filter(|space| !before.contains_key(space))
+                        .copied(),
+                )
+                .collect();
+            changed.extend(resolve.as_ref().map(|resolve| resolve.space));
+            changed.extend(converged);
+            Rebased::Applied {
+                changed: changed.into_iter().collect(),
+            }
+        }
+    };
+    transaction.commit()?;
+    Ok(rebased)
+}
+
+/// A page as the queued edits leave it, read from the cache: O(section).
+fn local_page(connection: &Mutex<Connection>, space: ExGuid) -> Result<Option<Page>> {
+    let arena = Arena::default();
+    let (section, ..) = replay(&arena, &*lock(connection)?)?;
+    Ok(section.page(space).ok())
 }
 
 enum Stale {

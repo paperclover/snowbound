@@ -198,14 +198,13 @@ impl Library {
     }
 }
 
-/// The open section and the stored model the editor's page was loaded from.
+/// The open section and the page the editor shows.
 struct Session {
     section: notebook::session::Section,
     tab: usize,
     /// Spaces, titles and outline levels in section order.
     pages: Vec<(ExGuid, String, u32)>,
     space: ExGuid,
-    before: Page,
     status: &'static str,
     /// The editor's page has an unreviewed conflict with another machine's change.
     conflict: bool,
@@ -222,21 +221,20 @@ impl Session {
     fn refresh_conflict(&mut self) -> Result<(), Box<dyn Error>> {
         self.conflict = self
             .section
-            .conflicts()?
-            .iter()
-            .any(|(edit, _)| edit.space == self.space);
+            .conflict()?
+            .is_some_and(|conflict| conflict.space == self.space);
         Ok(())
     }
 }
 
-/// A section or page read on a loader thread.
+/// What a loader thread opened: a section, or another page of the open one.
 enum Loaded {
-    Section(Session),
-    Page { space: ExGuid, page: Page },
+    Section(Box<Session>),
+    Page(ExGuid),
 }
 
-/// A loader thread's request number and what it read.
-type Read = (u64, Result<Loaded, String>);
+/// A loader thread's request number, what it opened and the page it read.
+type Read = (u64, Result<(Loaded, Page), String>);
 
 /// The newest page read, laid out and waiting for the pictures it shows first, so it
 /// never appears without them.
@@ -289,6 +287,9 @@ struct State {
     changed: bool,
     /// Only the view scrolled or zoomed during this frame, to be announced after it.
     moved: bool,
+    /// The stored page changed elsewhere while marked text was pending; it is shown once
+    /// the composition ends.
+    stale: bool,
     /// Whether the page last heard it had keyboard focus.
     page_focused: bool,
     /// The pointer in logical pixels, for window drags from the strip.
@@ -425,8 +426,8 @@ impl State {
                     .ok_or_else(|| format!("No page titled {title:?} in {}", file.display()))?
                     .0;
                 library = Some(Arc::new(opened));
-                let opened = read_session(section, 0, Some(space))?;
-                let (scene, editor) = PageScene::from_page(opened.before.clone(), &mut engine)?;
+                let (opened, page) = read_session(section, 0, Some(space))?;
+                let (scene, editor) = PageScene::from_page(page, &mut engine)?;
                 session = Some(opened);
                 (editor, Some((scene, [0.0; 2])))
             }
@@ -444,8 +445,8 @@ impl State {
                 };
                 let section = opened.open(0, proxy.clone())?;
                 library = Some(Arc::new(opened));
-                let opened = read_session(section, 0, None)?;
-                let (scene, editor) = PageScene::from_page(opened.before.clone(), &mut engine)?;
+                let (opened, page) = read_session(section, 0, None)?;
+                let (scene, editor) = PageScene::from_page(page, &mut engine)?;
                 session = Some(opened);
                 (editor, Some((scene, [0.0; 2])))
             }
@@ -511,6 +512,7 @@ impl State {
             commands: Vec::new(),
             changed: false,
             moved: false,
+            stale: false,
             page_focused: true,
             pointer: [0.0; 2],
             strip_press: None,
@@ -587,6 +589,9 @@ impl State {
             self.after_move()?;
         }
         self.moved = false;
+        if self.stale {
+            self.refresh()?;
+        }
         // A covered window shows nothing, so animations wait for it to be uncovered.
         if follow && !self.occluded {
             self.window.request_redraw();
@@ -1483,18 +1488,14 @@ impl State {
                 let proxy = self.proxy.clone();
                 self.load(move || {
                     let section = library.open(tab, proxy)?;
-                    Ok(Loaded::Section(read_session(section, tab, None)?))
+                    let (session, page) = read_session(section, tab, None)?;
+                    Ok((Loaded::Section(Box::new(session)), page))
                 });
             }
             Command::OpenPage(space) => {
                 let session = self.session.as_ref().ok_or("No section is open")?;
                 let replica = Arc::clone(session.section.replica());
-                self.load(move || {
-                    Ok(Loaded::Page {
-                        space,
-                        page: replica.page(space)?,
-                    })
-                });
+                self.load(move || Ok((Loaded::Page(space), replica.page(space)?)));
             }
             Command::Resolve { keep_mine } => self.resolve_conflict(keep_mine)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
@@ -1512,7 +1513,10 @@ impl State {
 
     /// Runs `read` on a thread of its own; `open_loaded` shows what it read unless a newer
     /// read was asked for meanwhile.
-    fn load(&mut self, read: impl FnOnce() -> Result<Loaded, Box<dyn Error>> + Send + 'static) {
+    fn load(
+        &mut self,
+        read: impl FnOnce() -> Result<(Loaded, Page), Box<dyn Error>> + Send + 'static,
+    ) {
         self.loading += 1;
         let (id, sender, redraw) = (self.loading, self.loads.0.clone(), self.redraw.clone());
         std::thread::spawn(move || {
@@ -1528,12 +1532,8 @@ impl State {
             if id != self.loading {
                 continue;
             }
-            let loaded = loaded?;
-            let page = match &loaded {
-                Loaded::Section(session) => &session.before,
-                Loaded::Page { page, .. } => page,
-            };
-            let (scene, editor) = PageScene::from_page(page.clone(), &mut self.view.engine)?;
+            let (loaded, page) = loaded?;
+            let (scene, editor) = PageScene::from_page(page, &mut self.view.engine)?;
             self.opening = Some(Opening {
                 loaded,
                 scene: (scene, [0.0; 2]),
@@ -1556,15 +1556,16 @@ impl State {
             self.opening = Some(opening);
             return Ok(());
         }
+        // The page shown so far keeps what was typed while the next one loaded.
+        self.persist()?;
         match opening.loaded {
             Loaded::Section(session) => {
-                self.session = Some(session);
+                self.session = Some(*session);
                 self.filter.clear();
             }
-            Loaded::Page { space, page } => {
+            Loaded::Page(space) => {
                 let session = self.session.as_mut().ok_or("No section is open")?;
                 session.space = space;
-                session.before = page;
                 session.refresh_conflict()?;
             }
         }
@@ -1663,103 +1664,130 @@ impl State {
         Ok(())
     }
 
-    /// Saves the edited page to the section's replica; a page changed underneath the
-    /// editor is reloaded in place of the edit.
+    /// Hands the section the ops the editor recorded since the last call, as one edit; the
+    /// section thread stores it.
     fn persist(&mut self) -> Result<(), Box<dyn Error>> {
+        let ops = match self.view.editor.take_ops() {
+            Ok(ops) => ops,
+            Err(error) => return self.refused(&error.to_string()),
+        };
         let Some(session) = &mut self.session else {
             return Ok(());
         };
-        let after = self.view.editor.page()?;
-        if after == session.before {
+        if ops.is_empty() {
             return Ok(());
         }
-        if let Some(entry) = session
-            .pages
-            .iter_mut()
-            .find(|(space, ..)| *space == session.space)
-        {
-            entry.1.clone_from(&after.title);
-        }
-        // Queued saves chain: each one's `after` is the next one's `before`.
-        let before = std::mem::replace(&mut session.before, after.clone());
-        session
-            .section
-            .queue_save(session.space, before, after, "snowbound")?;
+        let space = session.space;
+        session.section.apply(
+            "snowbound",
+            onestore::op::Edit {
+                at: filetime(),
+                ops: ops
+                    .into_iter()
+                    .map(|op| onestore::op::Op::Page { space, op })
+                    .collect(),
+            },
+        )?;
+        session.status = "Saving";
         Ok(())
     }
 
-    /// Replaces the editor with the page currently stored in the section.
-    fn reload(&mut self) -> Result<(), Box<dyn Error>> {
-        let Some(session) = &mut self.session else {
+    /// Shows the page as stored after a change made elsewhere, in place: the caret,
+    /// selection, scroll and drawn pictures stay. Waits for marked text to end.
+    fn refresh(&mut self) -> Result<(), Box<dyn Error>> {
+        if self.view.editor.marked_range().is_some() {
+            self.stale = true;
+            return Ok(());
+        }
+        self.stale = false;
+        self.persist()?;
+        let Some(session) = &self.session else {
             return Ok(());
         };
         let page = session.section.page(session.space)?;
-        let (scene, editor) = PageScene::from_page(page.clone(), &mut self.view.engine)?;
-        session.before = page;
-        self.view.replace(editor, Some((scene, [0.0; 2])));
+        let response = self.view.refresh(page)?;
+        self.respond(response);
         self.title();
-        self.update_accessibility()?;
         self.window.request_redraw();
         Ok(())
     }
 
-    /// Reviews the oldest conflict on this page: `keep_mine` publishes the editor's page
-    /// over the remote change, otherwise the remote page replaces the editor's.
+    /// An edit the section could not store: the page returns to what is stored, and the
+    /// text the editor showed goes on the clipboard so nothing typed is lost unannounced.
+    fn refused(&mut self, error: &str) -> Result<(), Box<dyn Error>> {
+        eprintln!("Saving failed: {error}");
+        self.clipboard.set_text(page_text(&self.view.editor))?;
+        // What the editor recorded since builds on the refused edit.
+        let _ = self.view.editor.take_ops();
+        self.view.editor.cancel_composition(&mut self.view.engine)?;
+        macos::clear_marked_text(&self.window);
+        if let Some(session) = &mut self.session {
+            session.status = "Not saving";
+        }
+        self.refresh()?;
+        macos::change_not_saved();
+        Ok(())
+    }
+
+    /// Ends the conflict on this page: `keep_mine` publishes the local page over the remote
+    /// change, otherwise the remote page replaces it.
     fn resolve_conflict(&mut self, keep_mine: bool) -> Result<(), Box<dyn Error>> {
+        self.persist()?;
         let Some(session) = &mut self.session else {
             return Ok(());
         };
-        let Some((edit, _)) = session
+        let Some(conflict) = session
             .section
-            .conflicts()?
-            .into_iter()
-            .find(|(edit, _)| edit.space == session.space)
+            .conflict()?
+            .filter(|conflict| conflict.space == session.space)
         else {
             return Ok(());
         };
-        let reviewed = if keep_mine {
-            self.view.editor.page()?
+        let resolution = if keep_mine {
+            notebook::Resolution::Mine
         } else {
-            session.section.remote_page(session.space)?
+            notebook::Resolution::Theirs
         };
-        session.section.review(edit.id, &reviewed)?;
+        session.section.resolve(conflict.id, resolution)?;
         session.status = "Saving";
         session.refresh_conflict()?;
         if keep_mine {
-            session.before = session.section.page(session.space)?;
             self.window.request_redraw();
             Ok(())
         } else {
-            self.reload()
+            self.refresh()
         }
     }
 
-    /// Applies what the synchronization thread reported since the last poll.
+    /// Applies what the section reported since the last poll.
     fn synced(&mut self) -> Result<(), Box<dyn Error>> {
         let Some(session) = &mut self.session else {
             return Ok(());
         };
         let shown = (session.status, session.conflict);
-        let mut refreshed = false;
-        let mut stale = false;
+        let mut listed = false;
+        let mut changed = false;
+        let mut rejected = None;
         let mut conflicted = session.conflict;
-        for (space, outcome) in session.section.saved() {
-            match outcome {
-                Ok(notebook::session::Save::Queued(_)) => session.status = "Saving",
-                Ok(notebook::session::Save::Unchanged) => {}
-                Ok(notebook::session::Save::Stale) => stale |= space == session.space,
-                Err(error) => {
-                    eprintln!("Saving failed: {error}");
-                    session.status = "Not saving";
-                }
-            }
-        }
         for event in session.section.events() {
             use notebook::session::Event;
             session.status = match event {
                 Event::Refreshed => {
-                    refreshed = true;
+                    listed = true;
                     continue;
+                }
+                Event::Changed(spaces) => {
+                    listed = true;
+                    changed |= spaces.contains(&session.space);
+                    continue;
+                }
+                Event::Rejected { spaces, error } => {
+                    if spaces.contains(&session.space) {
+                        rejected = Some(error);
+                    } else {
+                        eprintln!("Saving failed: {error}");
+                    }
+                    "Not saving"
                 }
                 Event::Attempt {
                     status: notebook::EditStatus::Published { .. },
@@ -1780,15 +1808,15 @@ impl State {
                 }
             };
         }
-        // Reading the queue waits on the save thread, so only a conflict shown or reported
-        // sends the frame thread there.
+        // Reading the queue waits on the section thread, so only a conflict shown or
+        // reported sends the frame thread there.
         if conflicted {
             session.refresh_conflict()?;
         }
-        if refreshed || shown != (session.status, session.conflict) {
+        if listed || changed || shown != (session.status, session.conflict) {
             self.window.request_redraw();
         }
-        if refreshed {
+        if listed {
             session.pages = session.section.pages()?;
             if !session
                 .pages
@@ -1797,13 +1825,13 @@ impl State {
             {
                 let first = session.pages.first().ok_or("The section has no pages")?.0;
                 self.commands.push(Command::OpenPage(first));
-            } else if !session.section.saving()
-                && session.section.page(session.space)? != session.before
-            {
-                self.reload()?;
+                return Ok(());
             }
-        } else if stale {
-            self.reload()?;
+        }
+        if let Some(error) = rejected {
+            self.refused(&error)?;
+        } else if changed {
+            self.refresh()?;
         }
         Ok(())
     }
@@ -2206,29 +2234,65 @@ fn tabs(notebook: &notebook::session::Notebook) -> Vec<Tab> {
         .collect()
 }
 
-/// The session for `section` showing `space`, or its first page.
+/// The session for `section` showing `space`, or its first page, and that page.
 fn read_session(
     section: notebook::session::Section,
     tab: usize,
     space: Option<ExGuid>,
-) -> Result<Session, Box<dyn Error>> {
+) -> Result<(Session, Page), Box<dyn Error>> {
     let pages = section.pages()?;
     let space = match space {
         Some(space) => space,
         None => pages.first().ok_or("The section has no pages")?.0,
     };
-    let before = section.page(space)?;
+    let page = section.page(space)?;
     let mut session = Session {
         section,
         tab,
         pages,
         space,
-        before,
         status: "",
         conflict: false,
     };
     session.refresh_conflict()?;
-    Ok(session)
+    Ok((session, page))
+}
+
+/// The text the editor shows, outline by outline, without hidden field codes.
+fn page_text(editor: &CanvasEditor) -> String {
+    editor
+        .visible_outlines()
+        .chain(editor.caret_outline())
+        .map(|outline| {
+            outline
+                .document()
+                .paragraphs()
+                .map(|paragraph| {
+                    let mut start = 0;
+                    paragraph
+                        .spans()
+                        .iter()
+                        .filter_map(|span| {
+                            let run = &paragraph.text()[start..span.end];
+                            start = span.end;
+                            (span.format.hidden != Some(true)).then_some(run)
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// FILETIME now: when an edit happened, which its modification times record.
+fn filetime() -> u64 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100)
 }
 
 impl App {
@@ -2715,4 +2779,200 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
     event_loop.run_app(&mut app)?;
     app.startup_error.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas::document::TextPosition;
+
+    /// The ops an editing session records reach the section through `apply` and read back
+    /// as the editor's page.
+    #[test]
+    fn recorded_ops_reach_the_section() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory = std::env::temp_dir().join(format!("snowbound-ops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(directory.join("cache")).unwrap();
+        let file = directory.join("section.one");
+        std::fs::copy(
+            root.join("corpus/paragraph-edit/before/notebook/synthetic.one"),
+            &file,
+        )
+        .unwrap();
+        let section =
+            notebook::session::Section::open(&file, directory.join("cache"), || {}).unwrap();
+        let mut engine = TextEngine::default();
+        for (space, ..) in section.pages().unwrap().into_iter().take(3) {
+            let mut editor =
+                CanvasEditor::from_page(section.page(space).unwrap(), &mut engine).unwrap();
+            let outline = editor.outlines().iter().find(|o| !o.title).unwrap().id;
+            editor.focus_outline(outline).unwrap();
+            let at = |paragraph, offset| [TextPosition { paragraph, offset }; 2].into();
+            editor.select(at(0, 0)).unwrap();
+            editor.insert(&mut engine, "Typed ").unwrap();
+            editor.enter(&mut engine, false).unwrap();
+            editor.delete(&mut engine, true).unwrap();
+            editor.undo(&mut engine).unwrap();
+            let ops = editor.take_ops().unwrap();
+            section
+                .apply(
+                    "Test",
+                    onestore::op::Edit {
+                        at: filetime(),
+                        ops: ops
+                            .into_iter()
+                            .map(|op| onestore::op::Op::Page { space, op })
+                            .collect(),
+                    },
+                )
+                .unwrap();
+            let (stored, model) = (section.page(space).unwrap(), editor.page().unwrap());
+            assert_eq!(
+                Page {
+                    title: model.title.clone(),
+                    ..stored
+                },
+                model
+            );
+        }
+        assert!(
+            !section
+                .events()
+                .iter()
+                .any(|event| matches!(event, notebook::session::Event::Rejected { .. }))
+        );
+        section.close().unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    use notebook::session::{Event, Section};
+
+    /// Edits `editor` made, as one edit of `space`.
+    fn edit(editor: &mut CanvasEditor, space: ExGuid) -> onestore::op::Edit {
+        onestore::op::Edit {
+            at: filetime(),
+            ops: editor
+                .take_ops()
+                .unwrap()
+                .into_iter()
+                .map(|op| onestore::op::Op::Page { space, op })
+                .collect(),
+        }
+    }
+
+    /// Polls `section`, keeping what it reports in `seen`, until `done` holds of an event.
+    fn wait(section: &Section, seen: &mut Vec<Event>, done: impl Fn(&Event) -> bool) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(120);
+        loop {
+            let events = section.events();
+            let finished = events.iter().any(&done);
+            seen.extend(events);
+            if finished {
+                return;
+            }
+            assert!(Instant::now() < deadline, "no such event: {seen:?}");
+            section.wake();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn published(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::Attempt {
+                status: notebook::EditStatus::Published { .. },
+                ..
+            }
+        )
+    }
+
+    /// Publishing this machine's edits never reports the page it edits as changed, which
+    /// would reload the editor under the caret; another writer's edit does, and the editor
+    /// takes it in place with the caret where it was.
+    #[test]
+    fn only_another_writer_changes_the_open_page() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let directory =
+            std::env::temp_dir().join(format!("snowbound-changed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let file = directory.join("section.one");
+        std::fs::copy(
+            root.join("corpus/paragraph-edit/before/notebook/synthetic.one"),
+            &file,
+        )
+        .unwrap();
+        let ours = Section::open(&file, directory.join("ours"), || {}).unwrap();
+        let space = ours.pages().unwrap()[0].0;
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::from_page(ours.page(space).unwrap(), &mut engine).unwrap();
+        let outline = editor.outlines().iter().find(|o| !o.title).unwrap().id;
+        editor.focus_outline(outline).unwrap();
+        let at = |paragraph, offset| [TextPosition { paragraph, offset }; 2].into();
+        editor.select(at(0, 0)).unwrap();
+        let mut seen = Vec::new();
+        for text in ["One ", "two ", "three "] {
+            editor.insert(&mut engine, text).unwrap();
+            ours.apply("Ours", edit(&mut editor, space)).unwrap();
+            wait(&ours, &mut seen, published);
+        }
+        editor.enter(&mut engine, false).unwrap();
+        editor.delete(&mut engine, true).unwrap();
+        ours.apply("Ours", edit(&mut editor, space)).unwrap();
+        wait(&ours, &mut seen, published);
+        for _ in 0..3 {
+            ours.wake();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            seen.extend(ours.events());
+        }
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::Changed(spaces) if spaces.contains(&space))),
+            "{seen:?}"
+        );
+
+        let theirs = Section::open(&file, directory.join("theirs"), || {}).unwrap();
+        let mut other = CanvasEditor::from_page(theirs.page(space).unwrap(), &mut engine).unwrap();
+        other.focus_outline(outline).unwrap();
+        let last = other.active_outline().document().paragraphs().count() - 1;
+        let end = other
+            .active_outline()
+            .document()
+            .paragraphs()
+            .last()
+            .unwrap()
+            .text()
+            .encode_utf16()
+            .count() as u32;
+        other.select(at(last, end)).unwrap();
+        other.insert(&mut engine, " and theirs").unwrap();
+        theirs.apply("Theirs", edit(&mut other, space)).unwrap();
+        wait(&theirs, &mut Vec::new(), published);
+        wait(
+            &ours,
+            &mut seen,
+            |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)),
+        );
+
+        let (shown, selection) = (editor.active_outline().id, editor.selection());
+        editor
+            .refresh(ours.page(space).unwrap(), &mut engine)
+            .unwrap();
+        assert_eq!(
+            (editor.active_outline().id, editor.selection()),
+            (shown, selection)
+        );
+        assert!(
+            editor
+                .active_outline()
+                .document()
+                .paragraphs()
+                .any(|paragraph| paragraph.text().ends_with(" and theirs"))
+        );
+        ours.close().unwrap();
+        theirs.close().unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 }

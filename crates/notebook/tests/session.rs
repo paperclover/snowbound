@@ -115,7 +115,12 @@ fn a_section_opens_through_its_replica_and_a_save_reaches_the_file_and_survives_
     };
     assert_same(section.page(space).unwrap(), &after);
     published(&section, id);
-    assert!(notified.load(Ordering::SeqCst) > 0);
+    // The worker reports the step after writing its receipt.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while notified.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the host was not woken");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     assert_same(stored_page(&file, space), &after);
     assert!(matches!(
         section.status(id).unwrap(),

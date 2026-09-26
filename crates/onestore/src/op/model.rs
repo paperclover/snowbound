@@ -203,6 +203,29 @@ fn text_holder(page: &Page, text: ExGuid) -> Option<(Path, usize)> {
     })
 }
 
+/// The text of the title's date and time fields, in order.
+pub(crate) fn date_fields(page: &Page) -> Vec<&TextObject> {
+    page.objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Title(title) => {
+                let date = title.date?;
+                title.outlines.iter().find(|outline| outline.id == date)
+            }
+            _ => None,
+        })
+        .flat_map(|outline| outline.paragraphs.iter().filter_map(PageParagraph::text))
+        .collect()
+}
+
+/// Text object `text` wherever the page holds it.
+pub(crate) fn paragraph_text(page: &Page, text: ExGuid) -> Option<&TextObject> {
+    lists(page).into_iter().find_map(|(_, _, list)| {
+        list.iter()
+            .find_map(|paragraph| paragraph.text().filter(|object| object.id == text))
+    })
+}
+
 fn text_mut(page: &mut Page, text: ExGuid) -> Result<&mut TextObject, Error> {
     let (path, index) = text_holder(page, text).ok_or_else(|| invalid("Text is not on the page"))?;
     Ok(list_at(page, &path)[index].text_mut().unwrap())
@@ -547,7 +570,7 @@ fn automatic(page: &mut Page) {
 }
 
 /// Applies `op` to `page` as reading the page back after `Section::apply` would show it.
-pub(crate) fn apply(page: &mut Page, op: &PageOp) -> Result<(), Error> {
+pub fn apply(page: &mut Page, op: &PageOp) -> Result<(), Error> {
     interpret(page, op)?;
     // A page lists the definitions its paragraphs reference.
     let mut referenced = BTreeSet::new();
@@ -569,6 +592,17 @@ pub(crate) fn apply(page: &mut Page, op: &PageOp) -> Result<(), Error> {
 
 fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
     match op {
+        PageOp::Date { created, fields } => {
+            for (text, shown) in fields {
+                if !date_fields(page).iter().any(|field| field.id == *text) {
+                    return Err(invalid("Select the title's date or time"));
+                }
+                let object = text_mut(page, *text)?;
+                let format = object.text.spans()[0].format.clone();
+                object.text = Paragraph::new(shown.clone(), format);
+            }
+            page.created = Some(*created);
+        }
         PageOp::Text { text, range, with } => {
             let object = text_mut(page, *text)?;
             object.text = replace_text(&object.text, range.clone(), with)?;

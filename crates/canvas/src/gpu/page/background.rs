@@ -330,6 +330,11 @@ struct Variant {
 }
 
 impl Background {
+    /// Whether both recreate the same template picture at the same size.
+    pub fn same(&self, other: &Self) -> bool {
+        self.svg == other.svg && self.size == other.size
+    }
+
     pub fn recognise(picture: &onestore::page::Image) -> Option<Self> {
         let digest: String = Sha256::digest(picture.bytes.as_deref()?)
             .iter()

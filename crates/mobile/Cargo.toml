@@ -15,3 +15,4 @@ onestore = { path = "../onestore" }
 wgpu.workspace = true
 parley.workspace = true
 pollster = "0.4"
+serde_json = "1"

@@ -326,6 +326,28 @@ impl<'a> Writer<'_, 'a> {
                 self.target(*text)?;
                 self.write(|page| content::equation_changes(page, *text, math))
             }
+            PageOp::Date { created, fields } => {
+                for (text, shown) in fields {
+                    self.target(*text)?;
+                    if shown.contains(['\0', '\n', '\r', '\u{fffc}']) {
+                        return Err(OpError::Unsupported("Use a date as one line of text").into());
+                    }
+                    self.write(|page| crate::edit::field_changes(page, *text, shown))?;
+                }
+                self.write(|page| {
+                    let metadata = page
+                        .view
+                        .roots
+                        .get(&2)
+                        .filter(|id| matches!(page.view.nodes[id].kind, Kind::Metadata { .. }))
+                        .ok_or_else(|| invalid("The page has no metadata to date"))?;
+                    let mut object = crate::write::PropertyObject::from_object(
+                        &page.live.revision.objects[metadata],
+                    )?;
+                    object.set(&[(0x18001c65, &created.to_le_bytes())])?;
+                    Ok(BTreeMap::from([(*metadata, object)]))
+                })
+            }
             PageOp::Insert {
                 container,
                 before,

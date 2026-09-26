@@ -22,6 +22,9 @@ pub(crate) mod table;
 mod tests;
 
 pub use lower::{lower, lower_page};
+/// `op` applied to `page`, the model of what the section holds: the page `Section::apply`
+/// leaves, as reading it back shows it.
+pub use model::apply as predict;
 
 /// Property identifiers with their encoded values.
 pub(crate) type Values = Vec<(u32, Vec<u8>)>;
@@ -71,6 +74,12 @@ pub enum PageOp {
     },
     /// Rewrites an equation's linear text and spans whole.
     Equation { text: ExGuid, math: Paragraph },
+    /// The page's date: its creation time, FILETIME, and the text each of the title's date
+    /// and time fields shows for it, as OneNote 2010 writes both when the date changes.
+    Date {
+        created: u64,
+        fields: Vec<(ExGuid, String)>,
+    },
     /// Inserts paragraphs before a direct child of `container`, or last. Children follow
     /// their parents in `paragraphs`; levels are absolute. Text keeps its spans' formats;
     /// lists, tags, styles and collapse state are set by their own ops.

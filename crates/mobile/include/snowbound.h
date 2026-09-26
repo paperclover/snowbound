@@ -22,6 +22,7 @@ void sb_view_content(View *view, float bounds[4]);
 void sb_view_set_transform(View *view, float zoom, float x, float y);
 bool sb_view_tap(View *view, float x, float y);
 bool sb_view_in_active_text(const View *view, float x, float y);
+char *sb_view_edit(View *view);
 
 uint32_t sb_text_length(const View *view);
 char *sb_text(const View *view, uint32_t start, uint32_t end);

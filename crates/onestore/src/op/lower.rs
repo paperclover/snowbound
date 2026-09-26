@@ -236,8 +236,8 @@ pub(crate) fn validate(
     old: &View<'_>,
     new: &View<'_>,
 ) -> Result<(), Error> {
-    if after.created != before.created || after.margin_origin != before.margin_origin {
-        return Err(invalid("Page creation time and margins cannot be edited"));
+    if after.margin_origin != before.margin_origin {
+        return Err(invalid("Page margins cannot be edited"));
     }
     for (id, definition) in &after.definitions {
         if before
@@ -806,6 +806,7 @@ impl Lowering {
         self.delete(old, new, &consumed)?;
         self.levels(new)?;
         self.equations(new)?;
+        self.date(before, after)?;
         self.text(new)?;
         self.styles(after, new)?;
         self.lists(after, new)?;
@@ -832,7 +833,10 @@ impl Lowering {
             for paragraph in document {
                 if old.paragraphs.contains_key(&paragraph.id) {
                     left = paragraph.text().is_some().then_some(paragraph.id);
-                } else if let Some(left) = left {
+                } else if let Some(left) = left
+                    // A new cell arrives with its paragraphs.
+                    && old.children.contains_key(&root(new, paragraph.id))
+                {
                     let container = new.container[&paragraph.id];
                     let at = new.children[&container]
                         .iter()
@@ -1540,6 +1544,24 @@ impl Lowering {
             }
         }
         Ok(())
+    }
+
+    /// The page's date, with every date and time field of the title showing it.
+    fn date(&mut self, before: &Page, after: &Page) -> Result<(), Error> {
+        let fields: Vec<(ExGuid, String)> = model::date_fields(after)
+            .into_iter()
+            .map(|text| (text.id, text.text.text().to_owned()))
+            .collect();
+        let shown = fields.iter().all(|(id, shown)| {
+            model::paragraph_text(&self.current, *id).is_some_and(|text| text.text.text() == shown)
+        });
+        if before.created == after.created && shown {
+            return Ok(());
+        }
+        let created = after
+            .created
+            .ok_or_else(|| invalid("A page date cannot be removed"))?;
+        self.emit(PageOp::Date { created, fields })
     }
 
     fn text(&mut self, new: &View<'_>) -> Result<(), Error> {

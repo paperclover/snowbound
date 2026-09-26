@@ -241,6 +241,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             inputDelegate?.textWillChange(self)
         }
         let changed = change()
+        dropEdits()
         if external {
             inputDelegate?.textDidChange(self)
             inputDelegate?.selectionDidChange(self)
@@ -249,6 +250,13 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             sync()
             revealCaret()
         }
+    }
+
+    /// Takes the edit the page recorded, so its ops do not pile up; the host drops it
+    /// until it holds a notebook session that stores edits.
+    private func dropEdits() {
+        guard let handle, let edit = sb_view_edit(handle) else { return }
+        sb_string_free(edit)
     }
 
     private func revealCaret() {
@@ -354,6 +362,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     func unmarkText() {
         guard let handle else { return }
         sb_unmark(handle)
+        dropEdits()
         dirty = true
     }
 

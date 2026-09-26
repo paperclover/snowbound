@@ -16,7 +16,6 @@ use std::{
     io,
     path::Path,
     sync::{Arc, Mutex, MutexGuard, mpsc},
-    thread::JoinHandle,
     time::Duration,
 };
 
@@ -97,8 +96,7 @@ pub enum Resolution {
 /// exclusive connection retains ownership between local transactions.
 pub struct Replica {
     connection: Arc<Mutex<Connection>>,
-    working: Option<mpsc::Sender<working::Request>>,
-    thread: Option<JoinHandle<()>>,
+    section: Arc<working::Thread>,
     synchronization: Mutex<()>,
     worker: Arc<Mutex<std::sync::Weak<worker::Signal>>>,
     /// The section's root object space, which names the document.
@@ -182,11 +180,10 @@ impl Replica {
     fn start(connection: Connection) -> Result<Self> {
         let connection = Arc::new(Mutex::new(connection));
         let worker = Arc::new(Mutex::new(std::sync::Weak::new()));
-        let (sender, thread, root) = working::spawn(Arc::clone(&connection), Arc::clone(&worker))?;
+        let (section, root) = working::spawn(Arc::clone(&connection), Arc::clone(&worker))?;
         Ok(Self {
             connection,
-            working: Some(sender),
-            thread: Some(thread),
+            section,
             synchronization: Mutex::new(()),
             worker,
             root,
@@ -199,10 +196,7 @@ impl Replica {
 
     /// Hands `request` to the section thread.
     fn send(&self, request: working::Request) -> Result<()> {
-        self.working
-            .as_ref()
-            .and_then(|working| working.send(request).ok())
-            .ok_or_else(|| io::Error::other("The section thread stopped").into())
+        self.section.send(request)
     }
 
     /// Asks the section thread and waits for its answer.
@@ -257,7 +251,8 @@ impl Replica {
     /// The section image the queued edits leave, the unsealed ones sealed as one more
     /// revision whose identities differ per call: O(section), for tests and diagnostics.
     pub fn snapshot(&self) -> Result<Vec<u8>> {
-        self.ask(|reply| working::Request::Image { reply })
+        self.ask(|reply| working::Request::Flush { reply })?;
+        working::image(&*self.lock()?)
     }
 
     /// The section file's identity, which internal links name as `section-id`.
@@ -279,10 +274,7 @@ impl Replica {
 
 impl Drop for Replica {
     fn drop(&mut self) {
-        drop(self.working.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.section.stop();
     }
 }
 

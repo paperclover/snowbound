@@ -7,6 +7,7 @@ use crate::{
 use draw::edit::{self, Movement, SelectionUnit};
 use onestore::ExGuid;
 use onestore::document::{Format, Kind};
+use onestore::op::PageOp;
 use onestore::page::text::{EditError, Paragraph};
 use onestore::page::{
     Definition, Outline, Page, PageObject, PageParagraph, ParagraphContent, Title,
@@ -26,6 +27,7 @@ pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
 #[cfg(test)]
 mod evidence;
 mod format;
+mod ops;
 pub(crate) mod page;
 mod table;
 pub use format::{Alignment, FormatState, Formatting, NoteTag, Toggle};
@@ -92,6 +94,12 @@ pub struct CanvasEditor {
     preferred_x: Option<f32>,
     /// Formatting chosen at a caret for the text typed there next, until an edit.
     pending: Option<(ExGuid, TextPosition, onestore::document::Format)>,
+    /// What `take_ops` hands over next.
+    ops: Result<Vec<PageOp>, onestore::Error>,
+    /// The page as stored when the editor last read it and the ops `take_ops` handed out
+    /// since, which `refresh` compares a changed stored page with; none once the editor
+    /// holds an edit that could not be stored.
+    stored: Option<(Page, Vec<PageOp>)>,
 }
 
 /// Imported page state the editable content does not carry.
@@ -660,10 +668,13 @@ impl CanvasEditor {
             composition: None,
             preferred_x: None,
             pending: None,
+            ops: Ok(Vec::new()),
+            stored: None,
         })
     }
 
     pub fn from_page(mut page: Page, engine: &mut TextEngine) -> Result<Self, EditorError> {
+        let stored = page.clone();
         let page::Import {
             objects,
             mut outlines,
@@ -706,7 +717,173 @@ impl CanvasEditor {
         if !editor.object_layouts().all(|(id, _)| ids.insert(id)) {
             return Err(EditError::InvalidStructure.into());
         }
+        editor.stored = Some((stored, Vec::new()));
         Ok(editor)
+    }
+
+    /// Shows `page`, the stored page after a change made elsewhere. What the change did not
+    /// reach stays as it is, history included: the page as stored before it (as last read,
+    /// with the ops handed out since) is compared with `page`; outlines the change reached
+    /// show anew with the caret and selection kept by paragraph identity, and history entries
+    /// editing them are dropped. False when the change reached nothing shown. Marked text
+    /// must be committed or cancelled first.
+    pub fn refresh(&mut self, page: Page, engine: &mut TextEngine) -> Result<bool, EditorError> {
+        let known = self.stored.take().and_then(|(mut stored, sent)| {
+            sent.iter()
+                .try_for_each(|op| onestore::op::predict(&mut stored, op))
+                .ok()
+                .map(|()| stored)
+        });
+        // Without that, the editor's page stands in, which storage may normalize apart.
+        let known = match known {
+            Some(known) => known,
+            None => self.page()?,
+        };
+        self.stored = Some((page.clone(), Vec::new()));
+        if known == page {
+            return Ok(false);
+        }
+        fn outlines(page: &Page) -> BTreeMap<ExGuid, &Outline> {
+            page.objects
+                .iter()
+                .flat_map(|object| match object {
+                    PageObject::Outline(outline) => std::slice::from_ref(outline),
+                    PageObject::Title(title) => title.outlines.as_slice(),
+                    _ => &[],
+                })
+                .map(|outline| (outline.id, outline))
+                .collect()
+        }
+        let (before, after) = (outlines(&known), outlines(&page));
+        let changed: BTreeSet<ExGuid> = before
+            .keys()
+            .chain(after.keys())
+            .filter(|id| before.get(id) != after.get(id))
+            .copied()
+            .collect();
+        // Everything but outline content: the page's objects, geometry and date.
+        let frame = |page: &Page| {
+            let hollow = |outline: &Outline| Outline {
+                id: outline.id,
+                title: false,
+                min_width: None,
+                layout: Default::default(),
+                indents: Vec::new(),
+                paragraphs: Vec::new(),
+                unsupported: Vec::new(),
+            };
+            let objects: Vec<PageObject> = page
+                .objects
+                .iter()
+                .map(|object| match object {
+                    PageObject::Outline(outline) => PageObject::Outline(hollow(outline)),
+                    PageObject::Title(title) => PageObject::Title(Title {
+                        id: title.id,
+                        date: title.date,
+                        layout: title.layout.clone(),
+                        outlines: title.outlines.iter().map(hollow).collect(),
+                    }),
+                    object => object.clone(),
+                })
+                .collect();
+            (page.created, page.margin_origin, objects)
+        };
+        let objects_changed = frame(&known) != frame(&page);
+        let date_changed = known.created != page.created
+            || self
+                .date
+                .as_ref()
+                .is_some_and(|date| changed.contains(&date.source().id));
+        let mut fresh = Self::from_page(page, engine)?;
+        let shown = self.active_outline();
+        let (id, selection) = (shown.id, shown.selection);
+        let reached = changed.contains(&id);
+        let document = reached.then(|| shown.document.clone());
+        let mut own: BTreeMap<ExGuid, TextOutline> = std::mem::take(&mut self.outlines)
+            .into_iter()
+            .map(|outline| (outline.id, outline))
+            .collect();
+        for outline in &mut fresh.outlines {
+            if !changed.contains(&outline.id)
+                && let Some(kept) = own.remove(&outline.id)
+            {
+                *outline = kept;
+            }
+        }
+        let position = fresh.outlines.iter().position(|outline| outline.id == id);
+        match (
+            std::mem::replace(&mut self.active, Focus::Outline(0)),
+            position,
+        ) {
+            (Focus::Caret { outline, index }, _) => {
+                fresh.active = Focus::Caret {
+                    outline,
+                    index: index.min(fresh.outlines.len()),
+                };
+            }
+            (Focus::Draft { outline, .. }, Some(index)) if !reached => {
+                fresh.active = Focus::Draft { index, outline };
+            }
+            (_, Some(index)) if !reached => fresh.active = Focus::Outline(index),
+            (_, Some(index)) => {
+                fresh.active = Focus::Outline(index);
+                let document = document.expect("a reached outline's document was kept");
+                let mapped = Selection {
+                    positions: selection.positions.map(|position| {
+                        follow(&document, &fresh.outlines[index].document, position)
+                    }),
+                    affinities: selection.affinities,
+                };
+                let _ = fresh.select(mapped);
+                self.pending = self.pending.take().filter(|(_, at, _)| {
+                    follow(&document, &fresh.active_outline().document, *at) == *at
+                });
+            }
+            (_, None) => self.pending = None,
+        }
+        if !date_changed {
+            fresh.date = self.date.take();
+        }
+        if !objects_changed {
+            fresh.objects = std::mem::take(&mut self.objects);
+        }
+        for (id, definition) in std::mem::take(&mut self.definitions) {
+            fresh.definitions.entry(id).or_insert(definition);
+        }
+        // Undoing an outline's creation focuses the outline focused before, if it is there.
+        let gone = |focus: &RestoreFocus| matches!(focus, RestoreFocus::Outline(id) if !fresh.outlines.iter().any(|o| o.id == *id));
+        let reaches = |history: &History| match history {
+            History::Date(_) => date_changed,
+            History::Image { .. } | History::Picture { .. } => objects_changed,
+            History::Draft { outlines, .. } => changed.contains(&outlines[0].id),
+            History::Text { outline, change } => {
+                changed.contains(outline)
+                    || change
+                        .positions
+                        .iter()
+                        .any(|placement| objects_changed || changed.contains(&placement.id))
+            }
+            History::Position { outline, .. } | History::Layout { outline, .. } => {
+                changed.contains(outline)
+            }
+            History::Remove { outline, focus } => changed.contains(outline) || gone(focus),
+            History::Insert { outline, focus, .. } => changed.contains(&outline.id) || gone(focus),
+            History::Restore { source, focus, .. } => changed.contains(&source.id) || gone(focus),
+        };
+        fresh.undo = std::mem::take(&mut self.undo)
+            .into_iter()
+            .filter(|history| !reaches(history))
+            .collect();
+        fresh.redo = std::mem::take(&mut self.redo)
+            .into_iter()
+            .filter(|history| !reaches(history))
+            .collect();
+        fresh.pending = self.pending.take();
+        fresh.preferred_x = self.preferred_x;
+        fresh.ops = std::mem::replace(&mut self.ops, Ok(Vec::new()));
+        fresh.stored = self.stored.take();
+        *self = fresh;
+        Ok(true)
     }
 
     /// Rebuilds the stored page, restoring the title areas and read-only objects import split up.
@@ -781,18 +958,7 @@ impl CanvasEditor {
                 .iter()
                 .flat_map(|outline| descendants(&outline.paragraphs, None))
             {
-                let content_tags = match &node.content {
-                    ParagraphContent::Text(text) => text.tags.as_slice(),
-                    ParagraphContent::Table(table) => table.tags.as_slice(),
-                    _ => &[],
-                };
-                referenced.extend(node.lists.iter().copied().chain(node.style));
-                referenced.extend(
-                    node.tags
-                        .iter()
-                        .chain(content_tags)
-                        .filter_map(|tag| tag.definition),
-                );
+                referenced.extend(ops::references(node));
             }
         }
         let mut definitions = self.definitions.clone();
@@ -1027,6 +1193,8 @@ impl CanvasEditor {
             composition: None,
             preferred_x: None,
             pending: None,
+            ops: Ok(Vec::new()),
+            stored: None,
         })
     }
 
@@ -1055,6 +1223,7 @@ impl CanvasEditor {
         self.undo
             .push(History::Date(Box::new(self.date.replace(updated).unwrap())));
         self.redo.clear();
+        self.record(Ok(self.date_ops()));
         Ok(true)
     }
 
@@ -1261,6 +1430,7 @@ impl CanvasEditor {
         self.redo.clear();
         self.active = Focus::Outline(self.outlines.len());
         self.outlines.push(outline);
+        self.record(self.outline_ops(id, None));
         self.preferred_x = None;
         Ok(id)
     }
@@ -1301,13 +1471,18 @@ impl CanvasEditor {
             .position(|outline| outline.id == id)
             .unwrap();
         let layout = &mut self.outlines[index].layout;
+        let previous = [layout.x, layout.y];
         self.undo.push(History::Position {
             outline: id,
-            position: [layout.x, layout.y],
+            position: previous,
         });
         self.redo.clear();
         layout.x = Some(position[0]);
         layout.y = Some(position[1]);
+        self.record(self.placement_ops(&Placement {
+            id,
+            position: previous,
+        }));
         self.active = Focus::Outline(index);
         self.preferred_x = None;
         Ok(())
@@ -1429,6 +1604,8 @@ impl CanvasEditor {
             layout: previous,
         });
         self.redo.clear();
+        let image = self.image(id).unwrap();
+        self.record(Ok(ops::picture_layout(image)));
         Ok(())
     }
 
@@ -1531,6 +1708,7 @@ impl CanvasEditor {
             image: Some(Box::new(image)),
         });
         self.redo.clear();
+        self.record(Ok(vec![PageOp::Delete { object: id }]));
         Ok(())
     }
 
@@ -1559,6 +1737,11 @@ impl CanvasEditor {
         let id = resized.id;
         *self.active_outline_mut() = resized;
         if self.caret_outline().is_none() {
+            self.record(ops::layout_ops(
+                id,
+                &previous,
+                &self.active_outline().layout,
+            ));
             self.undo.push(History::Layout {
                 outline: id,
                 layout: previous,
@@ -2669,7 +2852,11 @@ impl CanvasEditor {
             return Err((history, EditError::InvalidRange.into()));
         }
         let inverse = match history {
-            History::Date(date) => History::Date(Box::new(self.date.replace(*date).unwrap())),
+            History::Date(date) => {
+                let shown = self.date.replace(*date).unwrap();
+                self.record(Ok(self.date_ops()));
+                History::Date(Box::new(shown))
+            }
             History::Draft {
                 outlines,
                 index,
@@ -2700,13 +2887,12 @@ impl CanvasEditor {
                     None
                 };
                 let outline = outlines[usize::from(!restore_caret)].clone();
-                if self
+                let id = outline.id;
+                let stored = self
                     .outlines
                     .get(index)
-                    .is_some_and(|item| item.id == outline.id)
-                {
-                    self.outlines.remove(index);
-                }
+                    .is_some_and(|item| item.id == id)
+                    .then(|| self.outlines.remove(index));
                 self.active = if outline.is_empty() {
                     Focus::Caret {
                         outline: Box::new(outline),
@@ -2722,6 +2908,7 @@ impl CanvasEditor {
                         None => Focus::Outline(index),
                     }
                 };
+                self.record(self.outline_ops(id, stored.as_ref()));
                 History::Draft {
                     outlines,
                     index,
@@ -2750,6 +2937,7 @@ impl CanvasEditor {
                         return Err((History::Text { outline, change }, error));
                     }
                 };
+                self.record(self.change_ops(&self.outlines[index], &inverse));
                 History::Text {
                     outline,
                     change: Box::new(inverse),
@@ -2762,13 +2950,17 @@ impl CanvasEditor {
                     .position(|item| item.id == outline)
                     .unwrap();
                 let layout = &mut self.outlines[index].layout;
-                let inverse = History::Position {
-                    outline,
-                    position: [layout.x, layout.y],
-                };
+                let previous = [layout.x, layout.y];
                 [layout.x, layout.y] = position;
                 self.active = Focus::Outline(index);
-                inverse
+                self.record(self.placement_ops(&Placement {
+                    id: outline,
+                    position: previous,
+                }));
+                History::Position {
+                    outline,
+                    position: previous,
+                }
             }
             History::Layout { outline, layout } => {
                 let index = self
@@ -2793,25 +2985,46 @@ impl CanvasEditor {
                     };
                 resized.selection = self.outlines[index].selection;
                 self.outlines[index] = resized;
+                self.record(ops::layout_ops(
+                    outline,
+                    &previous,
+                    &self.outlines[index].layout,
+                ));
                 self.active = Focus::Outline(index);
                 History::Layout {
                     outline,
                     layout: previous,
                 }
             }
-            History::Image { image, layout } => History::Image {
-                image,
-                layout: std::mem::replace(&mut self.image_mut(image).unwrap().layout, layout),
-            },
+            History::Image { image, layout } => {
+                let previous =
+                    std::mem::replace(&mut self.image_mut(image).unwrap().layout, layout);
+                self.record(Ok(ops::picture_layout(self.image(image).unwrap())));
+                History::Image {
+                    image,
+                    layout: previous,
+                }
+            }
             History::Picture { index, image } => History::Picture {
                 index,
                 image: match image {
                     Some(image) => {
                         self.objects.insert(index, page::Content::Image(*image));
+                        let page::Content::Image(image) = &self.objects[index] else {
+                            unreachable!()
+                        };
+                        let ops = vec![PageOp::Add {
+                            object: PageObject::Image(image.clone()),
+                            before: self.successor(image.id),
+                        }];
+                        self.record(Ok(ops));
                         None
                     }
                     None => match self.objects.remove(index) {
-                        page::Content::Image(image) => Some(Box::new(image)),
+                        page::Content::Image(image) => {
+                            self.record(Ok(vec![PageOp::Delete { object: image.id }]));
+                            Some(Box::new(image))
+                        }
                         _ => unreachable!(),
                     },
                 },
@@ -2847,6 +3060,7 @@ impl CanvasEditor {
                     }
                 };
                 let outline = Box::new(self.outlines.remove(index));
+                self.record(Ok(vec![PageOp::Delete { object: outline.id }]));
                 self.active = next_focus;
                 History::Insert {
                     index,
@@ -2892,6 +3106,7 @@ impl CanvasEditor {
             } => {
                 let id = outline.id;
                 self.outlines.insert(index, *outline);
+                self.record(self.outline_ops(id, None));
                 self.active = Focus::Outline(index);
                 History::Remove { outline: id, focus }
             }
@@ -3152,6 +3367,7 @@ impl CanvasEditor {
             } else {
                 self.outlines[index] = *outline;
             }
+            self.record(self.outline_ops(versions[0].id, Some(&versions[0])));
             self.undo.push(History::Draft {
                 outlines: versions,
                 index,
@@ -3173,8 +3389,9 @@ impl CanvasEditor {
             };
             let mut source = outline.snapshot();
             source.paragraphs = change.edit.replacement;
+            let id = outline.id;
             self.undo.push(History::Remove {
-                outline: outline.id,
+                outline: id,
                 focus: RestoreFocus::Caret {
                     source: Box::new(source),
                     selection: change.selection,
@@ -3182,11 +3399,13 @@ impl CanvasEditor {
                 },
             });
             self.outlines.insert(index, *outline);
+            self.record(self.outline_ops(id, None));
         } else if self.active_outline().is_empty() && !self.active_outline().title {
             let Focus::Outline(index) = self.active else {
                 unreachable!()
             };
             let outline = self.outlines.remove(index);
+            self.record(Ok(vec![PageOp::Delete { object: outline.id }]));
             debug_assert_eq!(change.edit.range, 0..1);
             let mut source = outline.snapshot();
             source.paragraphs = change.edit.replacement;
@@ -3205,6 +3424,7 @@ impl CanvasEditor {
                 index,
             };
         } else {
+            self.record(self.change_ops(self.active_outline(), &change));
             self.undo.push(History::Text {
                 outline: self.active_outline().id,
                 change: Box::new(change),
@@ -3309,6 +3529,59 @@ impl CanvasEditor {
             positions: previous_positions,
         })
     }
+}
+
+/// Where `position` in `old` lies in `new`, the same outline changed elsewhere: in the same
+/// paragraph, past what changed in its text when it lies after it; at the start of the
+/// paragraph now at its place when that one is gone.
+fn follow(old: &TextDocument, new: &TextDocument, position: TextPosition) -> TextPosition {
+    let found = old.leaf(position.paragraph).and_then(|(_, _, node)| {
+        let paragraph = new
+            .text_nodes()
+            .position(|candidate| candidate.id == node.id)?;
+        Some((paragraph, node, new.leaf(paragraph)?.2))
+    });
+    let Some((paragraph, before, after)) = found else {
+        let count = new.text_nodes().count();
+        return TextPosition {
+            paragraph: position.paragraph.min(count.saturating_sub(1)),
+            offset: 0,
+        };
+    };
+    let units = |text: &str| text.encode_utf16().count() as u32;
+    let (a, b) = (
+        before.text().unwrap().text.text(),
+        after.text().unwrap().text.text(),
+    );
+    let prefix = units(
+        &a[..a
+            .char_indices()
+            .zip(b.chars())
+            .find(|((_, x), y)| x != y)
+            .map_or(a.len().min(b.len()), |((at, _), _)| at)],
+    );
+    let suffix = a
+        .chars()
+        .rev()
+        .zip(b.chars().rev())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x.len_utf16() as u32)
+        .scan(0, |sum, units| {
+            *sum += units;
+            Some(*sum)
+        })
+        .take_while(|sum| prefix + sum <= units(a).min(units(b)))
+        .last()
+        .unwrap_or(0);
+    let (old_length, new_length) = (units(a), units(b));
+    let offset = if position.offset <= prefix {
+        position.offset
+    } else if position.offset >= old_length - suffix {
+        new_length - (old_length - position.offset)
+    } else {
+        new_length - suffix
+    };
+    TextPosition { paragraph, offset }
 }
 
 fn inserted_position(
@@ -8359,5 +8632,66 @@ mod tests {
         assert!(edited.starts_with("Edited "));
         assert_eq!(body_text(&reread, body).as_deref(), Some(edited.as_str()));
         assert_ne!(body_text(&source, body).as_deref(), Some(edited.as_str()));
+    }
+
+    /// A page changed elsewhere shows in place: the caret keeps its paragraph and moves
+    /// past text inserted before it; history goes, unless nothing changed.
+    #[test]
+    fn a_refresh_keeps_the_caret_by_identity() {
+        let mut engine = TextEngine::default();
+        let lines =
+            ["Hello world", "Second"].map(|line| Paragraph::new(line.into(), Format::default()));
+        let document = TextDocument::new(lines.to_vec()).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document, 400.0).unwrap();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 1,
+                    offset: 3,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, "x").unwrap();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 8,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        let _ = editor.take_ops();
+        let page = editor.page().unwrap();
+        assert!(!editor.refresh(page.clone(), &mut engine).unwrap());
+        assert!(!editor.undo.is_empty(), "an unchanged page keeps history");
+
+        let mut remote = page;
+        let PageObject::Outline(outline) = &mut remote.objects[0] else {
+            unreachable!()
+        };
+        for (paragraph, text) in outline
+            .paragraphs
+            .iter_mut()
+            .zip(["Hey, Hello world", "Other"])
+        {
+            paragraph.text_mut().unwrap().text = Paragraph::new(text.into(), Format::default());
+        }
+        let (shown, affinities) = (editor.active_outline().id, editor.selection().affinities);
+        assert!(editor.refresh(remote, &mut engine).unwrap());
+        assert_eq!(editor.active_outline().id, shown);
+        assert_eq!(
+            editor.selection(),
+            Selection {
+                positions: [TextPosition {
+                    paragraph: 0,
+                    offset: 13
+                }; 2],
+                affinities,
+            }
+        );
+        assert!(editor.undo.is_empty());
+        assert_eq!(editor.take_ops().unwrap(), []);
     }
 }

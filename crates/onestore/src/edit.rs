@@ -54,13 +54,70 @@ pub(crate) fn text_changes(
     range: Range<u32>,
     replacement: &str,
 ) -> Result<Changes, Error> {
+    rewrite(active, object, range, replacement, false)
+}
+
+/// The title's date or time field showing `text`, as OneNote 2010 rewrites both when a
+/// page's date changes: the field's element takes the change time as its creation time.
+pub(crate) fn field_changes(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    text: &str,
+) -> Result<Changes, Error> {
+    let length = crate::page::text_of(&active.view, &active.parents, object)?
+        .text()
+        .encode_utf16()
+        .count();
+    let mut changes = rewrite(active, object, 0..length as u32, text, true)?;
+    let [element] = active
+        .parents
+        .get(&object)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    else {
+        return Err(Error {
+            offset: 0,
+            message: "Select a date field belonging to one element",
+        });
+    };
+    // OneNote 2010 dates the field's element and outline and leaves the title and page
+    // above them as they were.
+    let outline = active
+        .parents
+        .get(element)
+        .and_then(|parents| parents.first())
+        .copied();
+    changes.retain(|id, _| *id == object || id == element || Some(*id) == outline);
+    let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+    let element = match changes.entry(*element) {
+        std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+        std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+            crate::write::PropertyObject::from_object(&active.live.revision.objects[element])?,
+        ),
+    };
+    element.set(&[(0x14001d09, &modified)])?;
+    Ok(changes)
+}
+
+fn rewrite(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    range: Range<u32>,
+    replacement: &str,
+    field: bool,
+) -> Result<Changes, Error> {
     let invalid = |message| Error { offset: 0, message };
     let raw = &active.live.revision;
     if !active.live.is_reachable(object) {
         return Err(invalid("Object is not reachable in the active revision"));
     }
     let revision = &active.view;
-    let parents = active.editable_parents(object)?;
+    // Generated fields are read-only to ordinary edits; only a date change rewrites them.
+    let parents = if field {
+        &active.parents
+    } else {
+        active.editable_parents(object)?
+    };
     let node = revision
         .nodes
         .get(&object)
@@ -74,10 +131,12 @@ pub(crate) fn text_changes(
     else {
         return Err(invalid("Select a rich-text object"));
     };
-    if *boilerplate {
-        return Err(invalid(
-            "Generated title fields cannot be edited as ordinary text",
-        ));
+    if *boilerplate != field {
+        return Err(invalid(if field {
+            "Select the title's date or time"
+        } else {
+            "Generated title fields cannot be edited as ordinary text"
+        }));
     }
     let selected = runs
         .iter()
@@ -103,7 +162,7 @@ pub(crate) fn text_changes(
     let properties = PropertySets::parse(blob)?;
     if properties.sets[0]
         .iter()
-        .any(|p| p.id == 0x88001cde || p.id == 0x24003458)
+        .any(|p| (p.id == 0x88001cde && !field) || p.id == 0x24003458)
     {
         return Err(invalid(
             "This text object is read-only or contains associated run data",

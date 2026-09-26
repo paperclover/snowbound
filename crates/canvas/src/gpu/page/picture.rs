@@ -31,6 +31,11 @@ pub(super) struct Picture {
 
 impl Picture {
     /// Reads the size from the picture's header; None when the renderer cannot decode it.
+    /// Whether both show the same stored bytes.
+    pub fn same(&self, other: &Self) -> bool {
+        self.bytes == other.bytes
+    }
+
     pub fn new(bytes: &Arc<[u8]>) -> Option<Self> {
         Some(Self {
             native: RasterImage::measure(bytes).ok()?,

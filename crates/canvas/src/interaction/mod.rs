@@ -257,6 +257,21 @@ impl PageView {
         self.object_focus = None;
     }
 
+    /// Shows the stored page after a change made elsewhere in place of the one shown,
+    /// keeping the scroll, the caret and selection, and the pictures already drawn. Marked
+    /// text must be committed or cancelled first.
+    pub fn refresh(&mut self, page: onestore::page::Page) -> Result<Response> {
+        if !self.editor.refresh(page, &mut self.engine)? {
+            return Ok(Response::default());
+        }
+        if let Some((scene, _)) = &mut self.scene {
+            scene.refresh(&mut self.editor, &mut self.engine)?;
+        }
+        self.drag = None;
+        self.object_focus = None;
+        self.moved()
+    }
+
     /// Shows another page as OneNote opens one, keeping the zoom.
     pub fn open(&mut self, editor: CanvasEditor, scene: Option<(PageScene, [f32; 2])>) {
         self.replace(editor, scene);

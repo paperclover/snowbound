@@ -458,6 +458,20 @@ pub fn discard_changes() -> bool {
     }
 }
 
+/// Tells the user an edit could not be stored and where their text went.
+pub fn change_not_saved() {
+    let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
+    // The alert and its strings stay on AppKit's main thread for the modal call.
+    unsafe {
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str("Change not saved"));
+        alert.setInformativeText(&NSString::from_str(
+            "The page now shows what was last saved. Your text is on the clipboard to paste back.",
+        ));
+        alert.runModal();
+    }
+}
+
 /// End AppKit preedit after a canvas action commits or cancels the composition.
 pub fn clear_marked_text(window: &Window) {
     MainThreadMarker::new().expect("Text input belongs to the main thread");

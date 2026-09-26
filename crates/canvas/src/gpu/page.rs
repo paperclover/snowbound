@@ -213,6 +213,33 @@ impl PageScene {
         Ok((scene, editor))
     }
 
+    /// Follows `editor` after it refreshed from storage, keeping the rasters of pictures
+    /// whose bytes did not change so they do not blink.
+    pub fn refresh(
+        &mut self,
+        editor: &mut CanvasEditor,
+        engine: &mut TextEngine,
+    ) -> Result<(), SceneError> {
+        let mut scene = Self::pictures(&editor.objects, Some(editor))?;
+        for (id, picture) in &mut scene.pictures {
+            if let Some(shown) = self.pictures.remove(id)
+                && shown.same(picture)
+            {
+                *picture = shown;
+            }
+        }
+        for (id, art) in &mut scene.backgrounds {
+            if let Some(shown) = self.backgrounds.remove(id)
+                && shown.same(art)
+            {
+                *art = shown;
+            }
+        }
+        scene.mark_unavailable(&mut editor.objects, engine)?;
+        *self = scene;
+        Ok(())
+    }
+
     /// Turns page pictures the renderer cannot decode into placeholders; their stored data
     /// is kept.
     fn mark_unavailable(

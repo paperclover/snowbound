@@ -38,6 +38,10 @@ assert_eq!(reopened.pending()?.last().map(|edit| edit.id), Some(id));
 # }
 ```
 
+Page reads never wait for the sync thread: a rebase or reread of the queue runs on a
+new thread while the current one keeps answering `page` and `pages` from the section as
+it was, then hands its requests over; edits sent meanwhile apply to the rebuilt section.
+
 Share one `Replica` between threads. Keep the cache on a local filesystem: the
 connection holds exclusive ownership between transactions, and a second open fails
 busy. No network wait occurs in a local edit. After a database error the section

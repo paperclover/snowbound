@@ -2148,3 +2148,101 @@ fn op_gate_candidate() {
     std::fs::write(directory.join("expected-count.txt"), count.to_string()).unwrap();
     println!("{} imported pages, {edits} lowered edits, {count} pages", imported.len());
 }
+
+/// OneNote 2010's own date change (`corpus/page-date/native`, COM `UpdatePageContent`
+/// with a new `dateTime`): the page's second page, "Changed date", took it; "Kept date"
+/// did not.
+const DATED: &[u8] = include_bytes!("../../../../corpus/page-date/native/notebook/pictures.one");
+
+/// The objects of `space`'s active revision that differ from its previous one, by jcid.
+fn changed_jcids(image: &[u8], space: ExGuid) -> Vec<u32> {
+    let store = Store::parse(image).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let active = index.active(space).unwrap();
+    let previous = index.spaces[&space].revisions[&active].dependency.unwrap();
+    let (old, new) = (
+        index.resolve(space, previous).unwrap(),
+        index.resolve(space, active).unwrap(),
+    );
+    let mut jcids: Vec<u32> = new
+        .objects
+        .iter()
+        .filter(|(id, object)| {
+            old.objects.get(id).is_none_or(|old| {
+                format!("{:?}", old.data) != format!("{:?}", object.data)
+            })
+        })
+        .map(|(_, object)| object.jcid)
+        .collect();
+    jcids.sort();
+    jcids
+}
+
+/// The title's date and time fields of `page`, by text object.
+fn date_fields(page: &Page) -> Vec<(ExGuid, String)> {
+    model::date_fields(page)
+        .into_iter()
+        .map(|text| (text.id, text.text.text().to_owned()))
+        .collect()
+}
+
+/// FILETIME of 2025-07-04 16:45 UTC, which a Pacific clock shows as 9:45 AM.
+const DATED_AT: u64 = 133_961_211_000_000_000;
+
+/// The `Date` op writes what OneNote writes for a new page date: the metadata's creation
+/// time, the date and time field text, and the modification times above them.
+#[test]
+fn a_page_date_stores_what_onenote_stores() {
+    let spaces = pages(DATED);
+    let title = |space: &ExGuid| read(DATED, *space).title;
+    let kept = *spaces.iter().find(|space| title(space) == "Kept date").unwrap();
+    let changed = *spaces.iter().find(|space| title(space) == "Changed date").unwrap();
+    let native = changed_jcids(DATED, changed);
+    assert_eq!(native, [0x20030, 0x6000c, 0x6000d, 0x6000d, 0x6000e, 0x6000e]);
+
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, DATED.to_vec()).unwrap();
+    let before = section.page(kept).unwrap();
+    // The date field precedes the time field.
+    let fields: Vec<(ExGuid, String)> = date_fields(&before)
+        .into_iter()
+        .zip(["Friday, July 04, 2025", "9:45 AM"])
+        .map(|((id, _), shown)| (id, shown.to_owned()))
+        .collect();
+    assert_eq!(fields.len(), 2);
+    let op = PageOp::Date {
+        created: DATED_AT,
+        fields: fields.clone(),
+    };
+    let mut predicted = before.clone();
+    model::apply(&mut predicted, &op).unwrap();
+    section
+        .apply("Author", &Edit { at: AT, ops: vec![Op::Page { space: kept, op }] })
+        .unwrap();
+    section.seal().unwrap();
+    let image = section.image();
+    let stored = read(&image, kept);
+    assert_eq!(stored.created, Some(DATED_AT));
+    assert_eq!(date_fields(&stored), fields);
+    assert_eq!(stored, predicted);
+    assert_eq!(changed_jcids(&image, kept), native);
+    let store = Store::parse(&image).unwrap();
+    RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
+
+    // The whole-page lowering reaches the same page through the same op.
+    let mut after = before.clone();
+    after.created = Some(DATED_AT);
+    model::apply(&mut after, &PageOp::Date { created: DATED_AT, fields }).unwrap();
+    assert!(matches!(&lower_page(&before, &after).unwrap()[..], [PageOp::Date { .. }]));
+
+    if let Some(directory) = std::env::var_os("ONESTORE_PAGE_DATE_EXPORT") {
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join("pictures.one"), &image).unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/page-date/native/notebook/Open Notebook.onetoc2"),
+            directory.join("Open Notebook.onetoc2"),
+        )
+        .unwrap();
+    }
+}

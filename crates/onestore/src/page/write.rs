@@ -142,6 +142,9 @@ impl<'a> Lowering<'a> {
         let old = View::new(before, false)?;
         let new = View::new(after, false)?;
         validate(before, after, &old, &new)?;
+        if after.created != before.created {
+            return Err(invalid("Page creation time cannot be edited"));
+        }
         for id in new.outlines.keys().chain(new.paragraphs.keys()) {
             if !old.outlines.contains_key(id)
                 && !old.paragraphs.contains_key(id)
