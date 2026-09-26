@@ -209,6 +209,8 @@ fn surviving_page_revision_alone_does_not_confirm_section_publication() {
     // Replacing only the revision identity models maintenance retiring the section proof.
     let at = positions[0] + 4;
     server.visible[at] ^= 0x40;
+    // A rewrite publishes a new file version (MS-ONESTORE 2.3.1).
+    server.visible[212] ^= 1;
     let store = Store::parse(&server.visible).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     index.validate_current().unwrap();

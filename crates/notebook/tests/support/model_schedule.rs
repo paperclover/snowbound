@@ -5,7 +5,7 @@ use crate::model_ops::{self, AUTHOR};
 use crate::server::{Fault, Server};
 use notebook::{EditStatus, Operation, Remote, Replica};
 use onestore::{
-    CommitError, ExGuid, PreparedEdit, RevisionIndex, Store,
+    CommitError, ExGuid, PreparedEdit, RevisionIndex, Store, Transaction,
     document::Document,
     page::{Outline, Page, PageObject},
 };
@@ -140,20 +140,23 @@ impl Remote for Session<'_> {
         self.server.read()
     }
 
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         assert!(!self.retired, "a retired attempt was replayed");
         self.publications += 1;
         assert_eq!(self.publications, 1);
         let Some((_, Operation::Page(intent))) = &self.intent else {
             panic!("the schedule queues page saves only")
         };
-        if model_ops::page_of(&self.server.visible, SOURCE.1) == intent.before {
+        let mut image = self.server.visible.clone();
+        if transaction.apply(&mut image).is_ok()
+            && model_ops::page_of(&self.server.visible, SOURCE.1) == intent.before
+        {
             assert_eq!(
-                shape(&model_ops::page_of(edit.as_bytes(), SOURCE.1)),
+                shape(&model_ops::page_of(&image, SOURCE.1)),
                 shape(&intent.after)
             );
         }
-        self.server.publish(edit)
+        self.server.publish(transaction)
     }
 
     fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {

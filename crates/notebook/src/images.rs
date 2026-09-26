@@ -3,6 +3,7 @@
 //! instead of the section.
 
 use crate::Result;
+use onestore::Stamp;
 use rusqlite::{Connection, params};
 use std::io;
 
@@ -91,13 +92,39 @@ pub(crate) fn working_length(connection: &Connection) -> Result<u64> {
         "SELECT length(base), substr(working, 1, 8) FROM replica WHERE id=1",
         [],
         |row| {
-            let header: Vec<u8> = row.get(1)?;
-            Ok(match header.first_chunk::<8>() {
+            // SQLite's substr of an empty blob is NULL.
+            let header: Option<Vec<u8>> = row.get(1)?;
+            Ok(match header.as_deref().and_then(<[u8]>::first_chunk::<8>) {
                 Some(length) => u64::from_le_bytes(*length),
                 None => row.get::<_, i64>(0)? as u64,
             })
         },
     )?)
+}
+
+/// Whether no edit is queued and the working image is the base image, without reading
+/// either image.
+pub(crate) fn settled(connection: &Connection) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT length(working) = 0 AND NOT EXISTS (SELECT 1 FROM edits) FROM replica WHERE id=1",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// The base image's stamp, without reading the image.
+pub(crate) fn stamp(connection: &Connection) -> Result<Stamp> {
+    let (header, length): (Vec<u8>, i64) = connection.query_row(
+        "SELECT substr(base, 1, 1024), length(base) FROM replica WHERE id=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(Stamp {
+        header: header
+            .try_into()
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Damaged base image"))?,
+        length: u64::try_from(length).map_err(io::Error::other)?,
+    })
 }
 
 pub(crate) fn working(connection: &Connection) -> Result<Vec<u8>> {

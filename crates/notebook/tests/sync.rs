@@ -1,7 +1,7 @@
 //! Replica protocol: durable receipts, retired attempts, conflict review and contention.
 
 use notebook::{ConflictKind, EditStatus, Error, Remote, Replica};
-use onestore::{CommitError, CommitState, ExGuid, PreparedEdit, page::Page};
+use onestore::{CommitError, CommitState, ExGuid, Transaction, page::Page};
 use std::{io, ops::Range};
 
 #[path = "support/server.rs"]
@@ -23,6 +23,51 @@ fn save(cache: &Replica, text: ExGuid, range: Range<u32>, replacement: &str) -> 
         model_ops::replace_text(page, text, range, replacement)
     })
     .unwrap()
+}
+
+#[test]
+fn an_unchanged_stamp_publishes_and_settles_without_reading_the_remote() {
+    struct Counted {
+        server: Server,
+        reads: usize,
+    }
+    impl Remote for Counted {
+        fn read(&mut self) -> io::Result<Vec<u8>> {
+            self.reads += 1;
+            self.server.read()
+        }
+        fn stamp(&mut self) -> io::Result<Option<onestore::Stamp>> {
+            self.server.stamp()
+        }
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+            self.server.publish(transaction)
+        }
+        fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
+            self.server.confirm(snapshot)
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let source = onestore::create_section("stamp.one", "Original", "Fixture").unwrap();
+    let (sid, object, _) = text(&source);
+    let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
+    let id = save(&cache, object, 0..0, "Local ").unwrap();
+    let mut remote = Counted {
+        server: Server::new(&source),
+        reads: 0,
+    };
+    assert!(matches!(
+        cache.sync_once(&mut remote).unwrap(),
+        Some((published, EditStatus::Published { .. })) if published == id
+    ));
+    assert_eq!(cache.sync_once(&mut remote).unwrap(), None);
+    assert_eq!(remote.reads, 0);
+    // Another writer's commit moves the header, so the next step reads the file.
+    let native =
+        onestore::replace_text(&remote.server.visible, sid, object, 0..0, "Native ").unwrap();
+    remote.server.visible.clone_from(&native);
+    assert_eq!(cache.sync_once(&mut remote).unwrap(), None);
+    assert_eq!(remote.reads, 1);
+    assert_eq!(cache.snapshot().unwrap(), native);
 }
 
 #[test]
@@ -417,9 +462,9 @@ fn twelve_local_editors_progress_during_remote_reads_publication_and_confirmatio
             self.wait("read");
             self.server.read()
         }
-        fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             self.wait("publish");
-            self.server.publish(edit)
+            self.server.publish(transaction)
         }
         fn confirm(&mut self, source: &[u8]) -> Result<(), CommitError> {
             self.wait("confirm");
@@ -768,8 +813,8 @@ fn remote_changes_after_review_cannot_be_overwritten_by_the_reviewed_page() {
             }
             Ok(snapshot)
         }
-        fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-            self.server.publish(edit)
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+            self.server.publish(transaction)
         }
         fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
             self.server.confirm(snapshot)

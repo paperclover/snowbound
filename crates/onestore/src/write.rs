@@ -1,7 +1,8 @@
 use crate::{
-    Chunk, Error, ExGuid, FileType, ObjectData, PropertySets, Reference, RevisionIndex, Store,
-    Value,
-    store::{crc, transaction_crc},
+    Chunk, Error, ExGuid, FileType, Node, ObjectData, PropertySets, Reference, RevisionIndex,
+    Store, Value,
+    bytes::Cursor,
+    store::{Fragment, ListTail, StoreState, crc, transaction_crc},
 };
 
 use std::{
@@ -14,12 +15,25 @@ mod tests;
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[cfg(test)]
+thread_local! {
+    /// When set, `fresh_guid` counts from it instead of drawing randomness, so tests can
+    /// compare builds byte for byte.
+    pub(crate) static GUIDS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
 pub(crate) fn fresh_guid() -> Result<[u8; 16]> {
     let mut guid = [0; 16];
     getrandom::fill(&mut guid).map_err(|_| Error {
         offset: 0,
         message: "System random source failed",
     })?;
+    #[cfg(test)]
+    if let Some(next) = GUIDS.get() {
+        GUIDS.set(Some(next + 1));
+        guid[..8].copy_from_slice(&next.to_le_bytes());
+        guid[8..].copy_from_slice(&0x5eed_u64.to_le_bytes());
+    }
     guid[7] = (guid[7] & 0x0f) | 0x40;
     guid[8] = (guid[8] & 0x3f) | 0x80;
     Ok(guid)
@@ -74,9 +88,14 @@ pub(crate) fn append(data: &mut Vec<u8>, bytes: &[u8]) -> Result<Chunk> {
 }
 
 pub(crate) fn append_list(data: &mut Vec<u8>, id: u32, nodes: &[Vec<u8>]) -> Result<Chunk> {
+    append(data, &fragment(id, 0, nodes))
+}
+
+/// The file-node list fragment `sequence` of list `id`, holding `nodes` and no successor.
+fn fragment(id: u32, sequence: u32, nodes: &[Vec<u8>]) -> Vec<u8> {
     let mut bytes = 0xa4567ab1f5f7f4c4_u64.to_le_bytes().to_vec();
     bytes.extend_from_slice(&id.to_le_bytes());
-    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&sequence.to_le_bytes());
     for node in nodes {
         bytes.extend_from_slice(node);
     }
@@ -84,10 +103,10 @@ pub(crate) fn append_list(data: &mut Vec<u8>, id: u32, nodes: &[Vec<u8>]) -> Res
     bytes.extend_from_slice(&u64::MAX.to_le_bytes());
     bytes.extend_from_slice(&0_u32.to_le_bytes());
     bytes.extend_from_slice(&0x8bc215c38233ba4b_u64.to_le_bytes());
-    append(data, &bytes)
+    bytes
 }
 
-fn compact(id: ExGuid, table: &BTreeMap<u32, [u8; 16]>) -> Result<[u8; 4]> {
+pub(crate) fn compact(id: ExGuid, table: &BTreeMap<u32, [u8; 16]>) -> Result<[u8; 4]> {
     let index = table
         .iter()
         .find_map(|(index, guid)| (*guid == id.guid).then_some(*index))
@@ -376,6 +395,56 @@ pub(crate) fn patched(
         );
     }
     Ok(changed)
+}
+
+/// Whether `after` stores as `before` does: the same type and bytes, naming the same
+/// identities. Stored tables keep only the entries an object names, so those decide.
+pub(crate) fn unchanged(before: &crate::Object<'_>, after: &crate::Object<'_>) -> Result<bool> {
+    if before.jcid != after.jcid || before.data != after.data {
+        return Ok(false);
+    }
+    let entries = match after.data {
+        ObjectData::Properties(bytes) => table_entries(bytes)?,
+        _ => Vec::new(),
+    };
+    Ok(entries
+        .iter()
+        .all(|entry| before.global_ids.get(entry) == after.global_ids.get(entry)))
+}
+
+/// `object` as a replacement a revision stores under `id`.
+pub(crate) fn replacement(id: ExGuid, object: &crate::Object<'_>) -> Result<PropertyObject> {
+    let mut replacement = match object.data {
+        ObjectData::Properties(_) => PropertyObject::from_object(object)?,
+        ObjectData::File {
+            reference,
+            extension,
+        } => {
+            let text = |bytes: &[u8]| {
+                String::from_utf16(
+                    &bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|_| Error {
+                    offset: 0,
+                    message: "Invalid UTF-16 file-data declaration",
+                })
+            };
+            let mut replacement = PropertyObject::file(id, &text(reference)?, &text(extension)?)?;
+            replacement.jcid = object.jcid;
+            replacement
+        }
+        ObjectData::Encrypted(_) => {
+            return Err(Error {
+                offset: 0,
+                message: "Page edits only produce property objects",
+            });
+        }
+    };
+    replacement.reference(id)?;
+    Ok(replacement)
 }
 
 /// The object type OneNote gives embedded picture payload declarations; embedded files
@@ -784,6 +853,7 @@ fn used_entries<'o>(
 }
 
 /// A space's revision as appending a revision and reading it back leaves it.
+#[derive(Clone)]
 pub(crate) struct LiveRevision<'a> {
     pub revision: crate::ResolvedRevision<'a>,
     /// Incoming references of each object reachable from the roots; a root counts once.
@@ -792,7 +862,7 @@ pub(crate) struct LiveRevision<'a> {
     /// objects alias.
     readonly: BTreeMap<u32, BTreeMap<&'a [u8], BTreeSet<ExGuid>>>,
     /// Revisions in the dependency chain, counted to 512; zero before the first.
-    depth: usize,
+    pub depth: usize,
 }
 
 impl<'a> LiveRevision<'a> {
@@ -1230,39 +1300,6 @@ fn update(
     }
 }
 
-fn append_fragment(
-    source: &[u8],
-    output: &mut Vec<u8>,
-    list: &crate::NodeList,
-    nodes: &[Vec<u8>],
-) -> Result<(u32, usize)> {
-    let last_fragment = *list.fragments.last().unwrap();
-    let list_start = usize::try_from(last_fragment.offset).unwrap();
-    let list_id = u32::from_le_bytes(source[list_start + 8..list_start + 12].try_into().unwrap());
-    let chunk = append_list(output, list_id, nodes)?;
-    let start = usize::try_from(chunk.offset).unwrap();
-    let sequence = u32::try_from(list.fragments.len()).map_err(|_| Error {
-        offset: list_start,
-        message: "File-node fragment sequences are exhausted",
-    })?;
-    output[start + 12..start + 16].copy_from_slice(&sequence.to_le_bytes());
-    let last_node = list.nodes.last().unwrap();
-    let node_header = u32::from_le_bytes(
-        source[last_node.offset..last_node.offset + 4]
-            .try_into()
-            .unwrap(),
-    );
-    let nodes_end = last_node.offset + usize::try_from((node_header >> 10) & 0x1fff).unwrap();
-    let tail = list_start + usize::try_from(last_fragment.length).unwrap() - 20;
-    if tail - nodes_end >= 4 {
-        output[nodes_end..nodes_end + 4].copy_from_slice(&node(0xff, None, &[])?);
-    }
-    output[tail..tail + 8].copy_from_slice(&chunk.offset.to_le_bytes());
-    output[tail + 8..tail + 12].copy_from_slice(&(chunk.length as u32).to_le_bytes());
-
-    Ok((list_id, list.nodes.len() + nodes.len()))
-}
-
 pub(crate) fn write_revisions(
     source: &[u8],
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
@@ -1372,36 +1409,7 @@ pub(crate) fn build_on(
         None => index.resolve(space, rid),
     };
     let changes = edit(index)?;
-    // Room for the revision, so appending does not double the image.
-    let mut output = Vec::with_capacity(source.len() + source.len() / 16 + (1 << 16));
-    output.extend_from_slice(source);
-    // Native files reserve 1 KiB per transaction-log fragment; a fragment that ends the file
-    // keeps that room before the first new chunk.
-    let tail = store.transaction_fragments.last().unwrap().chunk;
-    let reserved = usize::try_from(tail.offset + tail.length.max(1024) + 32).unwrap();
-    if usize::try_from(tail.offset + tail.length)
-        .unwrap()
-        .next_multiple_of(8)
-        >= output.len()
-    {
-        output.resize(reserved, 0);
-    }
-    let mut maximum = store
-        .transaction_fragments
-        .iter()
-        .flat_map(|fragment| fragment.entries.chunks_exact(8))
-        .map(|entry| u32::from_le_bytes(entry[..4].try_into().unwrap()))
-        .max()
-        .unwrap();
-    let mut allocate_list = || {
-        maximum = maximum.checked_add(1).ok_or(Error {
-            offset: 0,
-            message: "File-node list identities are exhausted",
-        })?;
-        Ok::<_, Error>(maximum)
-    };
-    let mut counts = Vec::new();
-    let mut root_nodes = Vec::new();
+    let mut appending = Appending::new(store.state()?);
     for (space, change) in changes {
         let new_space = matches!(change, RevisionEdit::Create { .. });
         let current = (ExGuid::default(), 1_u32);
@@ -1457,18 +1465,19 @@ pub(crate) fn build_on(
                 )
             }
         };
-        let existing: BTreeSet<ExGuid> = revision.objects.keys().copied().collect();
         let depth = rid.map_or(0, |rid| chain_depth(index, space, rid));
         let mut live = LiveRevision::new(revision, depth)?;
         let replacements = live.prepare(replacements, is_section)?;
         if replacements.is_empty() {
             continue;
         }
-        let Commit {
-            checkpoint,
-            changed,
-            ..
-        } = live.commit(
+        let replaced: BTreeSet<ExGuid> = replacements.keys().copied().collect();
+        let created = replaced
+            .iter()
+            .filter(|id| !live.revision.objects.contains_key(id))
+            .copied()
+            .collect();
+        let commit = live.commit(
             replacements
                 .iter()
                 .map(|(id, replacement)| {
@@ -1480,12 +1489,224 @@ pub(crate) fn build_on(
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
+        // A dependent revision inherits its key, as OneNote writes it.
+        let key = if protection.is_some() && commit.checkpoint {
+            Some(
+                index
+                    .spaces
+                    .get(&space)
+                    .and_then(|space| {
+                        space.revisions.values().find_map(|revision| {
+                            revision.nodes.first().filter(|node| node.id == 0x7c)
+                        })
+                    })
+                    .ok_or(Error {
+                        offset: 0,
+                        message: "Protected revisions continue a protected object space",
+                    })?,
+            )
+        } else {
+            None
+        };
+        appending.revision(
+            &Sealing {
+                space,
+                previous: rid,
+                new_space,
+                label,
+                live: &live,
+                commit: &commit,
+                replaced: &replaced,
+                created: &created,
+            },
+            &[(0, source)],
+            protection,
+            key,
+        )?;
+    }
+    appending.payloads(payloads, protection)?;
+    Ok(match appending.finish()? {
+        Some((transaction, _)) => {
+            let mut output = source.to_vec();
+            transaction.apply(&mut output)?;
+            output
+        }
+        None => source.to_vec(),
+    })
+}
+
+/// A space's revision as `LiveRevision::commit` left it, ready to append.
+pub(crate) struct Sealing<'r, 'a> {
+    pub space: ExGuid,
+    /// The revision it depends on unless it is a checkpoint; none for a new space or label.
+    pub previous: Option<ExGuid>,
+    pub new_space: bool,
+    /// The context and role it is current under.
+    pub label: (ExGuid, u32),
+    pub live: &'r LiveRevision<'a>,
+    pub commit: &'r Commit,
+    /// Objects whose bytes the revision stores rather than referencing stored bytes.
+    pub replaced: &'r BTreeSet<ExGuid>,
+    /// Replaced objects the space did not hold before.
+    pub created: &'r BTreeSet<ExGuid>,
+}
+
+/// The chunk `bytes` occupies in a store whose bytes `segments` hold at their offsets.
+fn located(segments: &[(u64, &[u8])], bytes: &[u8]) -> Result<Chunk> {
+    let address = bytes.as_ptr().addr();
+    segments
+        .iter()
+        .find_map(|(offset, segment)| {
+            let start = address.checked_sub(segment.as_ptr().addr())?;
+            (start + bytes.len() <= segment.len()).then(|| Chunk {
+                offset: offset + start as u64,
+                length: bytes.len() as u64,
+            })
+        })
+        .ok_or(Error {
+            offset: 0,
+            message: "Stored object data lies outside the store",
+        })
+}
+
+/// A transaction under construction: bytes appended at the end of a store and patches
+/// inside it, advancing `state` as its lists grow.
+pub(crate) struct Appending {
+    pub state: StoreState,
+    base: crate::Stamp,
+    append: Vec<u8>,
+    patches: Vec<(u64, Vec<u8>)>,
+    /// File-node counts of the lists this transaction writes, as log entries.
+    counts: Vec<(u32, usize)>,
+    /// Nodes the root list gains: new object spaces and the file-data store.
+    root_nodes: Vec<Vec<u8>>,
+}
+
+impl Appending {
+    pub(crate) fn new(state: StoreState) -> Self {
+        let base = state.stamp.clone();
+        let mut append = Vec::with_capacity(1 << 16);
+        // Native files reserve 1 KiB per transaction-log fragment; a fragment that ends the
+        // file keeps that room before the first new chunk.
+        let (tail, _) = state.log;
+        if (tail.offset + tail.length).next_multiple_of(8) >= base.length {
+            let reserved = tail.offset + tail.length.max(1024) + 32;
+            append.resize(reserved.saturating_sub(base.length) as usize, 0);
+        }
+        Self {
+            state,
+            base,
+            append,
+            patches: Vec::new(),
+            counts: Vec::new(),
+            root_nodes: Vec::new(),
+        }
+    }
+
+    fn end(&self) -> u64 {
+        self.base.length + self.append.len() as u64
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<Chunk> {
+        let length = u64::from(u32::try_from(bytes.len()).map_err(|_| Error {
+            offset: 0,
+            message: "Chunk exceeds the encoded length limit",
+        })?);
+        let padding = self.end().next_multiple_of(8) - self.end();
+        self.append.resize(self.append.len() + padding as usize, 0);
+        let offset = self.end();
+        self.append.extend_from_slice(bytes);
+        Ok(Chunk { offset, length })
+    }
+
+    /// Writes `bytes` at a file offset: into the appended bytes, or as a patch.
+    fn write(&mut self, offset: u64, bytes: &[u8]) {
+        match offset.checked_sub(self.base.length) {
+            Some(at) => {
+                let at = at as usize;
+                self.append[at..at + bytes.len()].copy_from_slice(bytes);
+            }
+            None => self.patches.push((offset, bytes.to_vec())),
+        }
+    }
+
+    fn allocate_list(&mut self) -> Result<u32> {
+        self.state.max_list = self.state.max_list.checked_add(1).ok_or(Error {
+            offset: 0,
+            message: "File-node list identities are exhausted",
+        })?;
+        Ok(self.state.max_list)
+    }
+
+    /// Appends `nodes` as a new list.
+    fn list(&mut self, nodes: &[Vec<u8>]) -> Result<(Chunk, ListTail)> {
+        let id = self.allocate_list()?;
+        let chunk = self.append(&fragment(id, 0, nodes))?;
+        self.counts.push((id, nodes.len()));
+        Ok((
+            chunk,
+            ListTail {
+                id,
+                fragments: 1,
+                last: chunk,
+                nodes: nodes.len(),
+                end: chunk.offset + 16 + nodes.iter().map(Vec::len).sum::<usize>() as u64,
+            },
+        ))
+    }
+
+    /// Appends `nodes` to the list ending at `tail` as its next fragment.
+    fn extend(&mut self, tail: &mut ListTail, nodes: &[Vec<u8>]) -> Result<()> {
+        let chunk = self.append(&fragment(tail.id, tail.fragments, nodes))?;
+        let next = tail.last.offset + tail.last.length - 20;
+        if next - tail.end >= 4 {
+            self.write(tail.end, &node(0xff, None, &[])?);
+        }
+        let mut reference = chunk.offset.to_le_bytes().to_vec();
+        reference.extend_from_slice(&(chunk.length as u32).to_le_bytes());
+        self.write(next, &reference);
+        *tail = ListTail {
+            id: tail.id,
+            fragments: tail.fragments.checked_add(1).ok_or(Error {
+                offset: 0,
+                message: "File-node fragment sequences are exhausted",
+            })?,
+            last: chunk,
+            nodes: tail.nodes + nodes.len(),
+            end: chunk.offset + 16 + nodes.iter().map(Vec::len).sum::<usize>() as u64,
+        };
+        self.counts.push((tail.id, tail.nodes));
+        Ok(())
+    }
+
+    /// Appends a space's next revision: its manifest, object groups and new data. Returns the
+    /// revision's identity and where it stored each replaced object's bytes.
+    pub(crate) fn revision(
+        &mut self,
+        sealing: &Sealing<'_, '_>,
+        segments: &[(u64, &[u8])],
+        protection: Option<&dyn Protection>,
+        key: Option<&crate::Node<'_>>,
+    ) -> Result<(ExGuid, Vec<(ExGuid, Chunk)>)> {
+        let is_section = self.state.file_type == FileType::Section;
+        let Sealing {
+            space,
+            label,
+            live,
+            commit,
+            ..
+        } = *sealing;
         let revision = &live.revision;
-        let selected: Vec<_> = revision
-            .objects
-            .iter()
-            .filter(|(id, _)| checkpoint || changed.contains(id))
-            .collect();
+        let checkpoint = commit.checkpoint;
+        let selected: Vec<(&ExGuid, &crate::Object<'_>)> = if checkpoint {
+            revision.objects.iter().collect()
+        } else {
+            commit
+                .changed
+                .iter()
+                .map(|id| (id, &revision.objects[id]))
+                .collect()
+        };
         // A table-of-contents manifest has one global id table (sections group objects,
         // each group with its own table); OneNote resolves every node against it.
         let toc_table = if is_section {
@@ -1535,7 +1756,10 @@ pub(crate) fn build_on(
         if checkpoint {
             ExGuid::default()
         } else {
-            rid.unwrap()
+            sealing.previous.ok_or(Error {
+                offset: 0,
+                message: "A dependent revision needs the revision it follows",
+            })?
         }
         .encode(&mut start);
         if !is_section {
@@ -1548,7 +1772,7 @@ pub(crate) fn build_on(
             label.0.encode(&mut start);
         }
         let mut manifest = Vec::new();
-        if new_space {
+        if sealing.new_space {
             let mut payload = Vec::new();
             space.encode(&mut payload);
             payload.extend_from_slice(&0_u32.to_le_bytes());
@@ -1563,23 +1787,14 @@ pub(crate) fn build_on(
             None,
             &start,
         )?);
-        // A dependent revision inherits its key, as OneNote writes it.
         if protection.is_some() && checkpoint {
-            let key = index
-                .spaces
-                .get(&space)
-                .and_then(|space| {
-                    space
-                        .revisions
-                        .values()
-                        .find_map(|revision| revision.nodes.first().filter(|node| node.id == 0x7c))
-                })
-                .ok_or(Error {
-                    offset: 0,
-                    message: "Protected revisions continue a protected object space",
-                })?;
+            let key = key.ok_or(Error {
+                offset: 0,
+                message: "Protected revisions continue a protected object space",
+            })?;
             manifest.push(node(0x7c, key.reference, key.payload)?);
         }
+        let mut stored = Vec::new();
         for (table, objects) in groups {
             let mut payload = Vec::new();
             let mut group = if is_section {
@@ -1651,33 +1866,31 @@ pub(crate) fn build_on(
                                     }
                                 }
                             }
-                            append(&mut output, &mapped)?
-                        } else if replacements.contains_key(&id) {
-                            match protection {
+                            self.append(&mapped)?
+                        } else if sealing.replaced.contains(&id) {
+                            let chunk = match protection {
                                 Some(protection) => {
-                                    append(&mut output, &protection.seal_property(bytes)?)?
+                                    self.append(&protection.seal_property(bytes)?)?
                                 }
-                                None => append(&mut output, bytes)?,
-                            }
-                        } else {
-                            let stored = match protection {
-                                Some(protection) => protection.stored(bytes).ok_or(Error {
-                                    offset: 0,
-                                    message: "Protected object has no stored form",
-                                })?,
-                                None => bytes,
+                                None => self.append(bytes)?,
                             };
-                            Chunk {
-                                offset: u64::try_from(
-                                    stored.as_ptr().addr() - source.as_ptr().addr(),
-                                )
-                                .unwrap(),
-                                length: u64::try_from(stored.len()).unwrap(),
-                            }
+                            stored.push((id, chunk));
+                            chunk
+                        } else {
+                            located(
+                                segments,
+                                match protection {
+                                    Some(protection) => protection.stored(bytes).ok_or(Error {
+                                        offset: 0,
+                                        message: "Protected object has no stored form",
+                                    })?,
+                                    None => bytes,
+                                },
+                            )?
                         };
                         // A table-of-contents object is declared when the revision is a
                         // checkpoint or the object is new, and revised otherwise.
-                        let declared = checkpoint || !existing.contains(&id);
+                        let declared = checkpoint || sealing.created.contains(&id);
                         if is_section {
                             declaration.extend_from_slice(&object.jcid.to_le_bytes());
                             declaration.push(flags);
@@ -1720,9 +1933,7 @@ pub(crate) fn build_on(
             }
             if is_section {
                 group.push(node(0xb8, None, &[])?);
-                let group_id = allocate_list()?;
-                let chunk = append_list(&mut output, group_id, &group)?;
-                counts.push((group_id, group.len()));
+                let (chunk, _) = self.list(&group)?;
                 manifest.push(node(0xb0, Some(Reference::NodeList(chunk)), &payload)?);
                 let mut overrides = vec![0; 8];
                 overrides.extend_from_slice(&(!override_crc).to_le_bytes());
@@ -1751,198 +1962,575 @@ pub(crate) fn build_on(
             }
         }
         manifest.push(node(0x1c, None, &[])?);
-        if new_space {
-            let list_id = allocate_list()?;
-            let chunk = append_list(&mut output, list_id, &manifest)?;
-            counts.push((list_id, manifest.len()));
+        if sealing.new_space {
+            let (chunk, tail) = self.list(&manifest)?;
             let mut payload = Vec::new();
             space.encode(&mut payload);
-            let nodes = vec![
+            let (chunk, _) = self.list(&[
                 node(0xc, None, &payload)?,
                 node(0x10, Some(Reference::NodeList(chunk)), &[])?,
-            ];
-            let list_id = allocate_list()?;
-            let chunk = append_list(&mut output, list_id, &nodes)?;
-            counts.push((list_id, nodes.len()));
-            root_nodes.push(node(8, Some(Reference::NodeList(chunk)), &payload)?);
+            ])?;
+            self.root_nodes
+                .push(node(8, Some(Reference::NodeList(chunk)), &payload)?);
+            self.state.spaces.insert(space, tail);
         } else {
-            let root = store.list(store.header.root)?;
-            let space_node = root
-                .nodes
-                .iter()
-                .find(|node| node.id == 8 && node.fields(store).exguid() == Ok(space))
-                .ok_or(Error {
-                    offset: 0,
-                    message: "Object space is absent from the root list",
-                })?;
-            let space_list = space_node.referenced_list(store)?;
-            let revision_node = space_list.iter().rfind(|node| node.id == 0x10).unwrap();
-            let Some(Reference::NodeList(manifest_reference)) = revision_node.reference else {
-                unreachable!()
-            };
-            let revision_list = store.list(manifest_reference)?;
-            counts.push(append_fragment(
-                source,
-                &mut output,
-                revision_list,
-                &manifest,
-            )?);
-        }
-    }
-    let mut data_nodes = Vec::new();
-    for (guid, payload) in payloads {
-        if !is_section {
-            return Err(Error {
+            let mut tail = *self.state.spaces.get(&space).ok_or(Error {
                 offset: 0,
-                message: "Embedded payloads require a section file",
-            });
+                message: "Object space is absent from the root list",
+            })?;
+            self.extend(&mut tail, &manifest)?;
+            self.state.spaces.insert(space, tail);
         }
-        let mut blob = vec![
-            0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
-            0x9e, 0xac,
-        ];
-        let sealed = protection.map(|protection| protection.seal_file(payload));
-        let payload = sealed.as_deref().unwrap_or(*payload);
-        blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-        blob.extend_from_slice(&[0; 12]);
-        blob.extend_from_slice(payload);
-        blob.resize(blob.len().next_multiple_of(8), 0);
-        blob.extend_from_slice(&[
-            0x22, 0xa7, 0xfb, 0x71, 0x79, 0x0f, 0x0b, 0x4a, 0xbb, 0x13, 0x89, 0x92, 0x56, 0x42,
-            0x6b, 0x24,
-        ]);
-        let chunk = append(&mut output, &blob)?;
-        data_nodes.push(node(0x94, Some(Reference::Data(chunk)), guid)?);
-    }
-    if !data_nodes.is_empty() {
-        // Payload declarations live in the file-data store list the root list references.
-        let root = store.list(store.header.root)?;
-        match root.nodes.iter().find(|node| node.id == 0x90) {
-            Some(reference) => {
-                let Some(Reference::NodeList(chunk)) = reference.reference else {
-                    return Err(Error {
-                        offset: reference.offset,
-                        message: "File-data store reference lacks a list",
-                    });
-                };
-                counts.push(append_fragment(
-                    source,
-                    &mut output,
-                    store.list(chunk)?,
-                    &data_nodes,
-                )?);
-            }
-            None => {
-                let list_id = allocate_list()?;
-                let chunk = append_list(&mut output, list_id, &data_nodes)?;
-                counts.push((list_id, data_nodes.len()));
-                root_nodes.push(node(0x90, Some(Reference::NodeList(chunk)), &[])?);
-            }
-        }
-    }
-    if !root_nodes.is_empty() {
-        counts.push(append_fragment(
-            source,
-            &mut output,
-            store.list(store.header.root)?,
-            &root_nodes,
-        )?);
-    }
-    if counts.is_empty() {
-        return Ok(source.to_vec());
+        Ok((new_rid, stored))
     }
 
-    let transactions = store.header.transaction_count.checked_add(1).ok_or(Error {
-        offset: 96,
-        message: "Transaction counter is exhausted",
-    })?;
-    let changed_bytes = store.header.transaction_count ^ transactions;
-    let commit_byte = (31 - changed_bytes.leading_zeros()) / 8;
-    let ceiling = transactions | ((1_u32 << (commit_byte * 8)) - 1);
-    let mut entries = Vec::new();
-    for (id, count) in counts {
-        entries.extend_from_slice(&id.to_le_bytes());
-        entries.extend_from_slice(
-            &u32::try_from(count)
-                .map_err(|_| Error {
+    /// Embeds payloads as file-data store objects referenced from the root file node list
+    /// under their identities, as OneNote embeds pictures and attachments.
+    pub(crate) fn payloads(
+        &mut self,
+        payloads: &[([u8; 16], &[u8])],
+        protection: Option<&dyn Protection>,
+    ) -> Result<()> {
+        let mut data_nodes = Vec::new();
+        for (guid, payload) in payloads {
+            if self.state.file_type != FileType::Section {
+                return Err(Error {
                     offset: 0,
-                    message: "File-node count exceeds the format limit",
-                })?
-                .to_le_bytes(),
-        );
-    }
-    let mut checksum = if is_section { u32::MAX } else { 0 };
-    for fragment in &store.transaction_fragments {
-        checksum = transaction_crc(
-            checksum,
-            fragment.entries,
-            store.header.file_type,
-            fragment.entries.len() + 20 > fragment.chunk.length as usize,
-        );
-    }
-    let last_log = store.transaction_fragments.last().unwrap();
-    let mut crc_used = last_log.entries.len();
-    let mut crc_capacity = (last_log.chunk.length as usize - 12) & !7;
-    let mut advance_crc = |checksum, entry: &[u8]| {
-        if crc_used == crc_capacity {
-            crc_used = 0;
-            crc_capacity = 1008;
+                    message: "Embedded payloads require a section file",
+                });
+            }
+            let mut blob = vec![
+                0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
+                0x9e, 0xac,
+            ];
+            let sealed = protection.map(|protection| protection.seal_file(payload));
+            let payload = sealed.as_deref().unwrap_or(*payload);
+            blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            blob.extend_from_slice(&[0; 12]);
+            blob.extend_from_slice(payload);
+            blob.resize(blob.len().next_multiple_of(8), 0);
+            blob.extend_from_slice(&[
+                0x22, 0xa7, 0xfb, 0x71, 0x79, 0x0f, 0x0b, 0x4a, 0xbb, 0x13, 0x89, 0x92, 0x56, 0x42,
+                0x6b, 0x24,
+            ]);
+            let chunk = self.append(&blob)?;
+            data_nodes.push(node(0x94, Some(Reference::Data(chunk)), guid)?);
         }
-        crc_used += 8;
-        transaction_crc(
-            checksum,
-            entry,
-            store.header.file_type,
-            crc_used == crc_capacity,
-        )
-    };
-    for entry in entries.chunks_exact(8) {
-        checksum = advance_crc(checksum, entry);
+        if data_nodes.is_empty() {
+            return Ok(());
+        }
+        // Payload declarations live in the file-data store list the root list references.
+        match self.state.files {
+            Some(mut tail) => {
+                self.extend(&mut tail, &data_nodes)?;
+                self.state.files = Some(tail);
+            }
+            None => {
+                let (chunk, tail) = self.list(&data_nodes)?;
+                self.state.files = Some(tail);
+                self.root_nodes
+                    .push(node(0x90, Some(Reference::NodeList(chunk)), &[])?);
+            }
+        }
+        Ok(())
     }
-    for _ in transactions..=ceiling {
-        let sentinel_crc = if is_section { !checksum } else { checksum };
-        entries.extend_from_slice(&1_u32.to_le_bytes());
-        entries.extend_from_slice(&sentinel_crc.to_le_bytes());
-        checksum = advance_crc(checksum, &entries[entries.len() - 8..]);
-    }
-    let mut log_chunk = last_log.chunk;
-    let mut used = last_log.entries.len();
-    let mut remaining = entries.as_slice();
-    while !remaining.is_empty() {
-        let capacity = usize::try_from(log_chunk.length)
-            .unwrap()
-            .checked_sub(12)
-            .map(|size| size & !7)
-            .filter(|capacity| *capacity >= used)
+
+    /// The transaction committing what was appended, and the state it leaves; none when
+    /// nothing was.
+    pub(crate) fn finish(mut self) -> Result<Option<(crate::Transaction, StoreState)>> {
+        if !self.root_nodes.is_empty() {
+            let nodes = std::mem::take(&mut self.root_nodes);
+            let mut root = self.state.root;
+            self.extend(&mut root, &nodes)?;
+            self.state.root = root;
+        }
+        if self.counts.is_empty() {
+            return Ok(None);
+        }
+        let file_type = self.state.file_type;
+        let is_section = file_type == FileType::Section;
+        let mut header = self.base.header;
+        let count = u32::from_le_bytes(header[96..100].try_into().unwrap());
+        let transactions = count.checked_add(1).ok_or(Error {
+            offset: 96,
+            message: "Transaction counter is exhausted",
+        })?;
+        let changed_bytes = count ^ transactions;
+        let commit_byte = (31 - changed_bytes.leading_zeros()) / 8;
+        let ceiling = transactions | ((1_u32 << (commit_byte * 8)) - 1);
+        let mut entries = Vec::new();
+        for (id, count) in std::mem::take(&mut self.counts) {
+            entries.extend_from_slice(&id.to_le_bytes());
+            entries.extend_from_slice(
+                &u32::try_from(count)
+                    .map_err(|_| Error {
+                        offset: 0,
+                        message: "File-node count exceeds the format limit",
+                    })?
+                    .to_le_bytes(),
+            );
+        }
+        let (mut log_chunk, mut used) = self.state.log;
+        let mut checksum = self.state.log_crc;
+        let mut crc_used = used;
+        let mut crc_capacity = (log_chunk.length as usize - 12) & !7;
+        let mut advance_crc = |checksum, entry: &[u8]| {
+            if crc_used == crc_capacity {
+                crc_used = 0;
+                crc_capacity = 1008;
+            }
+            crc_used += 8;
+            transaction_crc(checksum, entry, file_type, crc_used == crc_capacity)
+        };
+        for entry in entries.chunks_exact(8) {
+            checksum = advance_crc(checksum, entry);
+        }
+        // Past a counter carry, sentinels up to the ceiling follow the one that commits; the
+        // next transaction's entries overwrite them, as a reader counting sentinels expects.
+        let committed = entries.len() + 8;
+        let mut committed_crc = None;
+        for _ in transactions..=ceiling {
+            let sentinel_crc = if is_section { !checksum } else { checksum };
+            entries.extend_from_slice(&1_u32.to_le_bytes());
+            entries.extend_from_slice(&sentinel_crc.to_le_bytes());
+            checksum = advance_crc(checksum, &entries[entries.len() - 8..]);
+            committed_crc.get_or_insert(checksum);
+        }
+        let mut log = self.state.log;
+        let mut remaining = entries.as_slice();
+        while !remaining.is_empty() {
+            let capacity = usize::try_from(log_chunk.length)
+                .unwrap()
+                .checked_sub(12)
+                .map(|size| size & !7)
+                .filter(|capacity| *capacity >= used)
+                .ok_or(Error {
+                    offset: usize::try_from(log_chunk.offset).unwrap(),
+                    message: "Transaction fragment has no room for continuation",
+                })?;
+            let size = remaining.len().min(capacity - used);
+            self.write(log_chunk.offset + used as u64, &remaining[..size]);
+            let written = entries.len() - remaining.len();
+            if (written + 1..=written + size).contains(&committed) {
+                log = (log_chunk, used + committed - written);
+            }
+            used += size;
+            remaining = &remaining[size..];
+            if !remaining.is_empty() {
+                let mut fragment = vec![0; 1024];
+                fragment[1008..1016].copy_from_slice(&u64::MAX.to_le_bytes());
+                let next = self.append(&fragment)?;
+                let mut reference = next.offset.to_le_bytes().to_vec();
+                reference.extend_from_slice(&(next.length as u32).to_le_bytes());
+                self.write(log_chunk.offset + capacity as u64, &reference);
+                log_chunk = next;
+                used = 0;
+            }
+        }
+        let length = self.end();
+        header[96..100].copy_from_slice(&transactions.to_le_bytes());
+        header[196..204].copy_from_slice(&length.to_le_bytes());
+        header[212..228].copy_from_slice(&fresh_guid()?);
+        header[236..252].copy_from_slice(&fresh_guid()?);
+        let generation = u64::from_le_bytes(header[228..236].try_into().unwrap())
+            .checked_add(1)
             .ok_or(Error {
-                offset: usize::try_from(log_chunk.offset).unwrap(),
-                message: "Transaction fragment has no room for continuation",
+                offset: 228,
+                message: "File generation counter is exhausted",
             })?;
-        let offset = usize::try_from(log_chunk.offset).unwrap();
-        let size = remaining.len().min(capacity - used);
-        output[offset + used..offset + used + size].copy_from_slice(&remaining[..size]);
-        remaining = &remaining[size..];
-        if !remaining.is_empty() {
-            let mut fragment = vec![0; 1024];
-            fragment[1008..1016].copy_from_slice(&u64::MAX.to_le_bytes());
-            let next = append(&mut output, &fragment)?;
-            output[offset + capacity..offset + capacity + 8]
-                .copy_from_slice(&next.offset.to_le_bytes());
-            output[offset + capacity + 8..offset + capacity + 12]
-                .copy_from_slice(&(next.length as u32).to_le_bytes());
-            log_chunk = next;
-            used = 0;
+        header[228..236].copy_from_slice(&generation.to_le_bytes());
+        self.state.stamp = crate::Stamp { header, length };
+        self.state.log = log;
+        self.state.log_crc = committed_crc.unwrap();
+        Ok(Some((
+            crate::Transaction {
+                base: self.base,
+                append: self.append,
+                patches: self.patches,
+                header,
+            },
+            self.state,
+        )))
+    }
+}
+
+/// The `required` nodes of fragment `sequence` of list `id`, which `bytes` at `at` hold and
+/// which ends its list.
+fn nodes(
+    bytes: &[u8],
+    at: Chunk,
+    id: u32,
+    sequence: u32,
+    required: usize,
+) -> Result<Vec<Node<'_>>> {
+    let fragment = Fragment::parse(bytes, at.offset as usize)?;
+    if fragment.id != id || fragment.sequence != sequence || !fragment.next.absent() {
+        return Err(Error {
+            offset: at.offset as usize,
+            message: "An appended fragment has the wrong list, sequence or successor",
+        });
+    }
+    let mut nodes = Vec::new();
+    fragment.nodes(required, &mut nodes, |_| Ok(()))?;
+    if nodes.len() != required {
+        return Err(Error {
+            offset: at.offset as usize,
+            message: "An appended fragment lacks logged nodes",
+        });
+    }
+    Ok(nodes)
+}
+
+/// A revision `Appending::revision` wrote, as `check_transaction` expects to read it back.
+pub(crate) struct Written<'r, 'a> {
+    pub space: ExGuid,
+    pub rid: ExGuid,
+    pub previous: Option<ExGuid>,
+    pub live: &'r LiveRevision<'a>,
+    pub commit: &'r Commit,
+}
+
+/// Reads back what `transaction` appends to the section `before` describes, whose bytes
+/// `segments` hold, and checks it stores `revisions` and `payloads` as `after` expects:
+/// fragments link and decode to the logged counts under the logged checksum; each declared
+/// object parses, names identities its group's table holds and objects reachable after its
+/// revision, carries its incremental reference count and, if read-only, its MD5; roots stay
+/// unless a space is new. Validates nothing the transaction leaves as it was.
+pub(crate) fn check_transaction(
+    before: &StoreState,
+    after: &StoreState,
+    transaction: &crate::Transaction,
+    segments: &[(u64, &[u8])],
+    revisions: &[Written<'_, '_>],
+    payloads: &[([u8; 16], &[u8])],
+) -> Result<()> {
+    let wrong = |message| Error { offset: 0, message };
+    let base = transaction.base.length;
+    // A chunk's bytes with this transaction's writes: nothing read here is patched earlier.
+    let read = |chunk: Chunk| -> Result<Vec<u8>> {
+        let (start, end) = (chunk.offset, chunk.offset + chunk.length);
+        let mut bytes = if start >= base {
+            transaction
+                .append
+                .get((start - base) as usize..(end - base) as usize)
+                .ok_or(wrong("An appended chunk lies outside the transaction"))?
+                .to_vec()
+        } else {
+            let (offset, segment) = segments
+                .iter()
+                .rfind(|(offset, _)| *offset <= start)
+                .ok_or(wrong("A chunk lies outside the store"))?;
+            segment
+                .get((start - offset) as usize..(end - offset) as usize)
+                .ok_or(wrong("A chunk lies outside the store"))?
+                .to_vec()
+        };
+        for (offset, patch) in &transaction.patches {
+            let (from, to) = (start.max(*offset), end.min(offset + patch.len() as u64));
+            if from < to {
+                bytes[(from - start) as usize..(to - start) as usize]
+                    .copy_from_slice(&patch[(from - offset) as usize..(to - offset) as usize]);
+            }
+        }
+        Ok(bytes)
+    };
+    let header = &transaction.header;
+    let count = |header: &[u8; 1024]| u32::from_le_bytes(header[96..100].try_into().unwrap());
+    if *header != after.stamp.header
+        || count(header) != count(&before.stamp.header) + 1
+        || u64::from_le_bytes(header[196..204].try_into().unwrap()) != after.stamp.length
+        || after.stamp.length != base + transaction.append.len() as u64
+    {
+        return Err(wrong("The transaction header does not commit its bytes"));
+    }
+
+    // The log: entries from where it ended, through the sentinel that commits them.
+    let mut counts = BTreeMap::new();
+    let (mut chunk, mut used) = before.log;
+    let mut checksum = before.log_crc;
+    loop {
+        let capacity = (chunk.length as usize - 12) & !7;
+        let bytes = read(chunk)?;
+        if used == capacity {
+            let next = u64::from_le_bytes(bytes[capacity..capacity + 8].try_into().unwrap());
+            let length = u32::from_le_bytes(bytes[capacity + 8..capacity + 12].try_into().unwrap());
+            (chunk, used) = (
+                Chunk {
+                    offset: next,
+                    length: u64::from(length),
+                },
+                0,
+            );
+            continue;
+        }
+        let entry = &bytes[used..used + 8];
+        used += 8;
+        let id = u32::from_le_bytes(entry[..4].try_into().unwrap());
+        let value = u32::from_le_bytes(entry[4..].try_into().unwrap());
+        if id == 1 {
+            if value != !checksum {
+                return Err(wrong("The transaction log checksum does not match"));
+            }
+            checksum = transaction_crc(checksum, entry, FileType::Section, used == capacity);
+            break;
+        }
+        checksum = transaction_crc(checksum, entry, FileType::Section, used == capacity);
+        counts.insert(id, value as usize);
+    }
+    if (chunk, used) != after.log || checksum != after.log_crc {
+        return Err(wrong("The transaction log ends elsewhere than its state"));
+    }
+
+    // Nodes a list gained: the fragment `after` ends with, linked from where `before` ended.
+    let gained = |before: Option<&ListTail>, after: &ListTail| -> Result<Vec<u8>> {
+        if counts.get(&after.id) != Some(&after.nodes) {
+            return Err(wrong("A list's nodes disagree with the transaction log"));
+        }
+        if let Some(before) = before {
+            let previous = read(before.last)?;
+            if Fragment::parse(&previous, before.last.offset as usize)?.next != after.last
+                || after.fragments != before.fragments + 1
+                || after.id != before.id
+            {
+                return Err(wrong("An appended fragment is not linked to its list"));
+            }
+        }
+        read(after.last)
+    };
+    for written in revisions {
+        let Written {
+            space,
+            rid,
+            live,
+            commit,
+            ..
+        } = *written;
+        let old = before.spaces.get(&space);
+        let new = after
+            .spaces
+            .get(&space)
+            .ok_or(wrong("A sealed space has no list"))?;
+        let bytes = gained(old, new)?;
+        let manifest = nodes(
+            &bytes,
+            new.last,
+            new.id,
+            old.map_or(0, |old| old.fragments),
+            new.nodes - old.map_or(0, |old| old.nodes),
+        )?;
+        let mut manifest = manifest.iter();
+        let mut next = || {
+            manifest
+                .next()
+                .ok_or(wrong("A revision manifest is truncated"))
+        };
+        let mut node = next()?;
+        if old.is_none() {
+            let mut c = Cursor {
+                bytes: node.payload,
+                offset: node.offset,
+            };
+            if node.id != 0x14 || c.exguid()? != space {
+                return Err(wrong("A new space's revision list names another space"));
+            }
+            node = next()?;
+        }
+        let mut c = Cursor {
+            bytes: node.payload,
+            offset: node.offset,
+        };
+        let dependency = if commit.checkpoint {
+            ExGuid::default()
+        } else {
+            written
+                .previous
+                .ok_or(wrong("A dependent revision follows none"))?
+        };
+        if node.id != 0x1e
+            || c.exguid()? != rid
+            || c.exguid()? != dependency
+            || c.read::<4>()? != 1_u32.to_le_bytes()
+            || c.read::<2>()? != [0, 0]
+        {
+            return Err(wrong(
+                "A revision starts with the wrong identity or dependency",
+            ));
+        }
+        let mut declared = BTreeSet::new();
+        let mut roots = BTreeMap::new();
+        loop {
+            let node = next()?;
+            match node.id {
+                0xb0 => {
+                    let Some(Reference::NodeList(at)) = node.reference else {
+                        return Err(wrong("An object group lacks its list"));
+                    };
+                    let bytes = read(at)?;
+                    let id = Fragment::parse(&bytes, at.offset as usize)?.id;
+                    let required = *counts
+                        .get(&id)
+                        .ok_or(wrong("An object group is not logged"))?;
+                    let group = nodes(&bytes, at, id, 0, required)?;
+                    let mut table = BTreeMap::new();
+                    let mut override_crc = u32::MAX;
+                    for item in &group {
+                        let mut c = Cursor {
+                            bytes: item.payload,
+                            offset: item.offset,
+                        };
+                        match item.id {
+                            0xb4 | 0x22 | 0x28 | 0xb8 => {}
+                            0x24 => {
+                                table.insert(u32::from_le_bytes(c.read()?), c.read::<16>()?);
+                            }
+                            0xa5 | 0xc5 | 0x73 => {
+                                let id = c.compact(&table)?;
+                                let object = live
+                                    .revision
+                                    .objects
+                                    .get(&id)
+                                    .ok_or(wrong("A revision declares an unknown object"))?;
+                                let jcid = u32::from_le_bytes(c.read()?);
+                                let flags = if item.id == 0x73 {
+                                    None
+                                } else {
+                                    Some(c.read::<1>()?[0])
+                                };
+                                let count = u32::from_le_bytes(c.read()?);
+                                if !declared.insert(id)
+                                    || jcid != object.jcid
+                                    || count != object.reference_count
+                                {
+                                    return Err(wrong(
+                                        "A declaration disagrees with its object or its count",
+                                    ));
+                                }
+                                override_crc =
+                                    crc(override_crc, &count.to_le_bytes(), FileType::Section);
+                                if item.id == 0x73 {
+                                    continue;
+                                }
+                                let Some(Reference::Data(at)) = item.reference else {
+                                    return Err(wrong("An object declaration lacks its data"));
+                                };
+                                let data = read(at)?;
+                                let stored = crate::Object {
+                                    jcid,
+                                    reference_count: count,
+                                    data: ObjectData::Properties(&data),
+                                    global_ids: Arc::new(table.clone()),
+                                };
+                                let references = stored.references()?;
+                                let expected = u8::from(!references.objects.is_empty())
+                                    | (u8::from(
+                                        !references.object_spaces.is_empty()
+                                            || !references.contexts.is_empty(),
+                                    ) << 1);
+                                if object.data != ObjectData::Properties(&data)
+                                    || flags != Some(expected)
+                                    || (item.id == 0xc5) != (jcid & 0x100000 != 0)
+                                    || (item.id == 0xc5 && c.read::<16>()? != md5::compute(&data).0)
+                                {
+                                    return Err(wrong(
+                                        "An object's stored bytes differ from its revision",
+                                    ));
+                                }
+                                if live.is_reachable(id)
+                                    && !references
+                                        .objects
+                                        .iter()
+                                        .all(|target| live.is_reachable(*target))
+                                {
+                                    return Err(wrong(
+                                        "An object references one its revision cannot reach",
+                                    ));
+                                }
+                            }
+                            _ => return Err(wrong("Unexpected node in an object group")),
+                        }
+                    }
+                    let node = next()?;
+                    let mut c = Cursor {
+                        bytes: node.payload,
+                        offset: node.offset,
+                    };
+                    if node.id != 0x84
+                        || c.read::<8>()? != [0; 8]
+                        || u32::from_le_bytes(c.read()?) != !override_crc
+                    {
+                        return Err(wrong("An object group's count overrides do not match"));
+                    }
+                }
+                0x5a => {
+                    let mut c = Cursor {
+                        bytes: node.payload,
+                        offset: node.offset,
+                    };
+                    let id = c.exguid()?;
+                    roots.insert(u32::from_le_bytes(c.read()?), id);
+                }
+                0x1c => break,
+                _ => return Err(wrong("Unexpected node in a revision manifest")),
+            }
+        }
+        let expected: BTreeSet<ExGuid> = if commit.checkpoint {
+            live.revision.objects.keys().copied().collect()
+        } else {
+            commit.changed.clone()
+        };
+        if declared != expected
+            || (commit.checkpoint && roots != live.revision.roots)
+            || (!commit.checkpoint && !roots.is_empty())
+        {
+            return Err(wrong(
+                "A revision declares other objects or roots than it changed",
+            ));
         }
     }
-    output[96..100].copy_from_slice(&transactions.to_le_bytes());
-    let length = u64::try_from(output.len()).unwrap();
-    output[196..204].copy_from_slice(&length.to_le_bytes());
-    output[212..228].copy_from_slice(&fresh_guid()?);
-    output[236..252].copy_from_slice(&fresh_guid()?);
-    let generation = store.header.generation.checked_add(1).ok_or(Error {
-        offset: 228,
-        message: "File generation counter is exhausted",
-    })?;
-    output[228..236].copy_from_slice(&generation.to_le_bytes());
-    Ok(output)
+
+    if after.root.nodes != before.root.nodes {
+        let bytes = gained(Some(&before.root), &after.root)?;
+        let added = nodes(
+            &bytes,
+            after.root.last,
+            after.root.id,
+            before.root.fragments,
+            after.root.nodes - before.root.nodes,
+        )?;
+        let created = revisions
+            .iter()
+            .filter(|written| !before.spaces.contains_key(&written.space))
+            .count();
+        let spaces = added.iter().filter(|node| node.id == 8).count();
+        if spaces != created || added.iter().any(|node| !matches!(node.id, 8 | 0x90)) {
+            return Err(wrong(
+                "The root list gains other nodes than new spaces declare",
+            ));
+        }
+    }
+    if !payloads.is_empty() {
+        let files = after
+            .files
+            .as_ref()
+            .ok_or(wrong("Embedded payloads have no store"))?;
+        let bytes = gained(before.files.as_ref(), files)?;
+        let declared = nodes(
+            &bytes,
+            files.last,
+            files.id,
+            before.files.map_or(0, |files| files.fragments),
+            payloads.len(),
+        )?;
+        for ((guid, payload), node) in payloads.iter().zip(&declared) {
+            let Some(Reference::Data(at)) = node.reference else {
+                return Err(wrong("A payload declaration lacks its data"));
+            };
+            let data = read(at)?;
+            let blob = crate::files::payload(&data, at.offset as usize);
+            if node.id != 0x94 || node.payload != guid || blob.ok() != Some(*payload) {
+                return Err(wrong("An embedded payload differs from its declaration"));
+            }
+        }
+    }
+    Ok(())
 }

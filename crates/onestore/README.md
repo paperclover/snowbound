@@ -64,10 +64,13 @@ harness also accepts `--client-profile release`.
 | `OutlineEdit`, `PreparedEdit::outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
 | `PreparedEdit::page` | Publish an edited `page::Page` as one revision per changed space: text, character and paragraph formatting, hyperlinks (external and, via `page::link`, to pages, paragraphs and sections), bullets and numbering, note tags, table rows, columns, cell shading and indents, nested tables, inserted pictures (in paragraphs or on the page) and attachments, picture position, size and description, a stored attachment's shown name, source path and icon size, paragraph styles on new paragraphs, ink drawings and handwriting (strokes added and erased), equations (built from `page::Math` trees), paragraph insertion/split/join/move/deletion, outline insertion/deletion/position/width and saved collapse state, lowered onto the typed writers with the model's identities |
 | `TreeEdit`, `PreparedEdit::tree` | Move or delete a subtree on one page, normalize surviving containers, and replace an emptied table cell's paragraph atomically |
-| `PreparedEdit::commit`, `PreparedEdit::commit_file` | Publish the exact prepared image under caller-held exclusion or the conservative filesystem adapter |
+| `Transaction`, `Stamp`, `PreparedEdit::transaction` | The bytes a commit writes (appended data, in-place list-tail and log patches, header) and the header and length it requires unchanged; `commit` under caller-held exclusion, `commit_file` under the conservative filesystem adapter, `apply` to the base image in memory; serializable for queues |
+| `Arena`, `Section` | Keep a section parsed across edits: `open` validates an image once; `seal` appends one revision per changed space as a `Transaction` on `stamp`, checking only what it appends; `replay` applies a queued transaction; `image` and `page` read the result |
+| `op::{Edit, Op, PageOp, TableEdit, SectionOp}`, `Section::apply` | Object-level edits (text, formatting, links, equations, paragraph insertion/split/join/move/deletion/levels, outlines, lists, tags, styles, paragraph formatting, tables, pictures, attachments, ink, page creation/import/moves/removal) applied whole or not to a kept-open section with emitter-chosen identities, UTF-16 ranges and the edit's time; refusals name the target, identity or structure at fault |
+| `op::lower`, `op::lower_page`, `Section::apply_page` | The ops turning a range of paragraphs, or a whole page model, into another, computed from the models alone |
 | `read_file` | Read a snapshot under whole-file exclusion |
 | `read_snapshot` | Read a validated snapshot through fresh positioned I/O while the caller excludes maintenance |
-| `commit_file_property` | Lock, compare the source snapshot, append and flush, then publish the revision |
+| `commit_file_property` | Lock, check the source snapshot's stamp, append and flush, then publish the revision |
 | `CommitIo`, `commit_property_bytes` | Supply another storage backend with equivalent exclusion and ordered durability |
 
 Scalar edits accept encoded values and require the caller to maintain MS-ONE
@@ -212,7 +215,7 @@ with optional explicit IDs when conflict copies contain identical text.
 ## Commit behavior
 
 ```text
-exclusive lock → exact snapshot comparison
+exclusive lock → header and length check
               → append data                 → flush
               → prepare header metadata     → flush
               → publish transaction counter → flush
@@ -220,7 +223,9 @@ exclusive lock → exact snapshot comparison
               → notify cached readers       → flush → unlock
 ```
 
-Stale snapshots fail before writing. Live readers must use equivalent exclusion.
+Stale snapshots fail before writing: every committed transaction and placement rewrites
+the header (MS-ONESTORE 2.3.1), so the body is never compared. Live readers must use
+equivalent exclusion.
 Native conflict creation can still expose cross-space references before their
 targets are saved; such snapshots must be rejected and reread while synchronization
 proceeds. `read_file` and `commit_file_property` serialize within the process because

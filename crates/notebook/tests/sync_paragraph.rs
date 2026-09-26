@@ -97,7 +97,9 @@ fn split_paragraph(page: &mut Page, text: ExGuid, offset: u32) {
 }
 
 /// Joins the paragraph carrying `right` into the one carrying `left`; an empty left text
-/// object is replaced by a non-empty right one, which is the identity OneNote keeps.
+/// object is replaced by a non-empty right one, which is the identity OneNote keeps. The
+/// right paragraph's children keep their depth, under the left paragraph or the nearest of
+/// its ancestors above them.
 fn join_paragraphs(page: &mut Page, left: ExGuid, right: ExGuid) {
     locate_in(page, left, |list, first| {
         let second = at(list, right).expect("the joined paragraphs share a container");
@@ -115,9 +117,17 @@ fn join_paragraphs(page: &mut Page, left: ExGuid, right: ExGuid) {
         }
         target.text = joined;
         list.remove(second);
+        let nesting: std::collections::BTreeMap<_, _> =
+            list.iter().map(|p| (p.id, (p.level, p.parent))).collect();
         for paragraph in list {
             if paragraph.parent == Some(orphaned) {
-                paragraph.parent = Some(parent);
+                let mut adopter = Some(parent);
+                while let Some(id) = adopter
+                    && nesting[&id].0 >= paragraph.level
+                {
+                    adopter = nesting[&id].1;
+                }
+                paragraph.parent = adopter;
             }
         }
     });

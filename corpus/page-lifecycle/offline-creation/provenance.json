@@ -1,6 +1,6 @@
 {
   "run": {
-    "notebook": "/Users/clo/dev/one/evidence/m10/offline-page-candidate",
+    "notebook": "/Users/clo/dev/one/evidence/titles/offline-creation",
     "expected_pages": 13,
     "author": null,
     "author_timeout_seconds": 600,
@@ -18,8 +18,8 @@
     }
   },
   "machine": {
-    "name": "m6-cc15a5ee",
-    "hostname": "ONE-M6-CC15A5EE"
+    "name": "m6-4d84f1a7",
+    "hostname": "ONE-M6-4D84F1A7"
   },
   "teardown": {
     "absent": true

@@ -219,6 +219,176 @@ pub struct NodeList<'a> {
     pub nodes: Vec<Node<'a>>,
 }
 
+/// A file-node list fragment (MS-ONESTORE 2.4.1) before its nodes are decoded.
+pub(crate) struct Fragment<'a> {
+    pub id: u32,
+    pub sequence: u32,
+    pub next: Chunk,
+    body: Cursor<'a>,
+}
+
+impl<'a> Fragment<'a> {
+    /// The fragment `bytes`, which start at file offset `offset`.
+    pub(crate) fn parse(bytes: &'a [u8], offset: usize) -> Result<Self> {
+        if bytes.len() < 36 {
+            return Err(Error {
+                offset,
+                message: "Truncated file-node fragment",
+            });
+        }
+        let mut c = Cursor { bytes, offset };
+        if u64::from_le_bytes(c.read()?) != 0xa4567ab1f5f7f4c4 {
+            return Err(Error {
+                offset,
+                message: "Incorrect file-node fragment signature",
+            });
+        }
+        let id = u32::from_le_bytes(c.read()?);
+        let sequence = u32::from_le_bytes(c.read()?);
+        let end = offset + bytes.len();
+        let mut tail = Cursor {
+            bytes: &bytes[bytes.len() - 20..],
+            offset: end - 20,
+        };
+        let next = tail.chunk()?;
+        if u64::from_le_bytes(tail.read()?) != 0x8bc215c38233ba4b {
+            return Err(Error {
+                offset: end - 8,
+                message: "Incorrect file-node fragment footer",
+            });
+        }
+        Ok(Self {
+            id,
+            sequence,
+            next,
+            body: Cursor {
+                bytes: &bytes[16..bytes.len() - 20],
+                offset: offset + 16,
+            },
+        })
+    }
+
+    /// Decodes nodes into `nodes` until it holds `required` or the fragment ends; `data`
+    /// checks each data reference.
+    pub(crate) fn nodes(
+        self,
+        required: usize,
+        nodes: &mut Vec<Node<'a>>,
+        data: impl Fn(Chunk) -> Result<()>,
+    ) -> Result<()> {
+        let mut c = self.body;
+        while nodes.len() < required && c.bytes.len() >= 4 {
+            let offset = c.offset;
+            let raw = u32::from_le_bytes(c.read()?);
+            let size = usize::try_from((raw >> 10) & 0x1fff).unwrap();
+            if size < 4 {
+                return Err(Error {
+                    offset,
+                    message: "File node is shorter than its header",
+                });
+            }
+            let id = u16::try_from(raw & 0x3ff).unwrap();
+            let body = c.take(size - 4)?;
+            if id == 0xff {
+                break;
+            }
+            let mut fields = Cursor {
+                bytes: body,
+                offset: offset + 4,
+            };
+            let reference = match (raw >> 27) & 0xf {
+                0 => None,
+                base @ (1 | 2) => {
+                    let (stp, nil, shift) = match (raw >> 23) & 3 {
+                        0 => (u64::from_le_bytes(fields.read()?), u64::MAX, 0),
+                        1 => (
+                            u64::from(u32::from_le_bytes(fields.read()?)),
+                            u64::from(u32::MAX),
+                            0,
+                        ),
+                        2 => (
+                            u64::from(u16::from_le_bytes(fields.read()?)),
+                            u64::from(u16::MAX),
+                            3,
+                        ),
+                        3 => (
+                            u64::from(u32::from_le_bytes(fields.read()?)),
+                            u64::from(u32::MAX),
+                            3,
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let cb = match (raw >> 25) & 3 {
+                        0 => u64::from(u32::from_le_bytes(fields.read()?)),
+                        1 => u64::from_le_bytes(fields.read()?),
+                        2 => u64::from(fields.read::<1>()?[0]) * 8,
+                        3 => u64::from(u16::from_le_bytes(fields.read()?)) * 8,
+                        _ => unreachable!(),
+                    };
+                    let reference = Chunk {
+                        offset: if cb == 0 && stp == nil {
+                            u64::MAX
+                        } else {
+                            stp << shift
+                        },
+                        length: cb,
+                    };
+                    if base == 1 {
+                        if !reference.absent() {
+                            data(reference)?;
+                        }
+                        Some(Reference::Data(reference))
+                    } else {
+                        Some(Reference::NodeList(reference))
+                    }
+                }
+                _ => {
+                    return Err(Error {
+                        offset,
+                        message: "Unsupported file-node base type",
+                    });
+                }
+            };
+            nodes.push(Node {
+                id,
+                offset,
+                payload: fields.bytes,
+                reference,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Where a store's next transaction appends, as its committed transactions leave it.
+#[derive(Clone, Debug)]
+pub(crate) struct StoreState {
+    pub stamp: crate::Stamp,
+    pub file_type: FileType,
+    /// The last transaction-log fragment and the entry bytes it holds.
+    pub log: (Chunk, usize),
+    /// The log's checksum through its last entry.
+    pub log_crc: u32,
+    /// The highest file-node list identity the log names.
+    pub max_list: u32,
+    pub root: ListTail,
+    /// The file-data store list, once one exists.
+    pub files: Option<ListTail>,
+    /// Each object space's revision manifest list.
+    pub spaces: BTreeMap<crate::ExGuid, ListTail>,
+}
+
+/// The last fragment of a file-node list, where appending continues.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ListTail {
+    pub id: u32,
+    pub fragments: u32,
+    pub last: Chunk,
+    pub nodes: usize,
+    /// The file offset past the list's last node.
+    pub end: u64,
+}
+
 #[derive(Debug)]
 pub(crate) struct TransactionFragment<'a> {
     pub chunk: Chunk,
@@ -357,26 +527,9 @@ impl<'a> Store<'a> {
             loop {
                 let range = chunk.range(data)?;
                 claim(&mut occupied, range.clone())?;
-                if range.len() < 36 {
-                    return Err(Error {
-                        offset: range.start,
-                        message: "Truncated file-node fragment",
-                    });
-                }
-                let mut c = Cursor {
-                    bytes: &data[range.clone()],
-                    offset: range.start,
-                };
-                if u64::from_le_bytes(c.read()?) != 0xa4567ab1f5f7f4c4 {
-                    return Err(Error {
-                        offset: range.start,
-                        message: "Incorrect file-node fragment signature",
-                    });
-                }
-                let id = u32::from_le_bytes(c.read()?);
-                let sequence = u32::from_le_bytes(c.read()?);
-                if usize::try_from(sequence).ok() != Some(fragments.len())
-                    || list_id.is_some_and(|previous| id != previous)
+                let fragment = Fragment::parse(&data[range.clone()], range.start)?;
+                if usize::try_from(fragment.sequence).ok() != Some(fragments.len())
+                    || list_id.is_some_and(|previous| fragment.id != previous)
                 {
                     return Err(Error {
                         offset: range.start + 8,
@@ -384,13 +537,13 @@ impl<'a> Store<'a> {
                     });
                 }
                 if list_id.is_none() {
-                    if !list_ids.insert(id) {
+                    if !list_ids.insert(fragment.id) {
                         return Err(Error {
                             offset: range.start + 8,
                             message: "Duplicate file-node list identity",
                         });
                     }
-                    required = usize::try_from(*counts.get(&id).ok_or(Error {
+                    required = usize::try_from(*counts.get(&fragment.id).ok_or(Error {
                         offset: range.start + 8,
                         message: "File-node list is absent from the transaction log",
                     })?)
@@ -398,99 +551,12 @@ impl<'a> Store<'a> {
                         offset: range.start + 8,
                         message: "File-node count exceeds address space",
                     })?;
-                    list_id = Some(id);
+                    list_id = Some(fragment.id);
                 }
-                let mut tail = Cursor {
-                    bytes: &data[range.end - 20..range.end],
-                    offset: range.end - 20,
-                };
-                let next = tail.chunk()?;
-                if u64::from_le_bytes(tail.read()?) != 0x8bc215c38233ba4b {
-                    return Err(Error {
-                        offset: range.end - 8,
-                        message: "Incorrect file-node fragment footer",
-                    });
-                }
-                c.bytes = &data[range.start + 16..range.end - 20];
-                while nodes.len() < required && c.bytes.len() >= 4 {
-                    let offset = c.offset;
-                    let raw = u32::from_le_bytes(c.read()?);
-                    let size = usize::try_from((raw >> 10) & 0x1fff).unwrap();
-                    if size < 4 {
-                        return Err(Error {
-                            offset,
-                            message: "File node is shorter than its header",
-                        });
-                    }
-                    let id = u16::try_from(raw & 0x3ff).unwrap();
-                    let body = c.take(size - 4)?;
-                    if id == 0xff {
-                        break;
-                    }
-                    let mut fields = Cursor {
-                        bytes: body,
-                        offset: offset + 4,
-                    };
-                    let reference = match (raw >> 27) & 0xf {
-                        0 => None,
-                        base @ (1 | 2) => {
-                            let (stp, nil, shift) = match (raw >> 23) & 3 {
-                                0 => (u64::from_le_bytes(fields.read()?), u64::MAX, 0),
-                                1 => (
-                                    u64::from(u32::from_le_bytes(fields.read()?)),
-                                    u64::from(u32::MAX),
-                                    0,
-                                ),
-                                2 => (
-                                    u64::from(u16::from_le_bytes(fields.read()?)),
-                                    u64::from(u16::MAX),
-                                    3,
-                                ),
-                                3 => (
-                                    u64::from(u32::from_le_bytes(fields.read()?)),
-                                    u64::from(u32::MAX),
-                                    3,
-                                ),
-                                _ => unreachable!(),
-                            };
-                            let cb = match (raw >> 25) & 3 {
-                                0 => u64::from(u32::from_le_bytes(fields.read()?)),
-                                1 => u64::from_le_bytes(fields.read()?),
-                                2 => u64::from(fields.read::<1>()?[0]) * 8,
-                                3 => u64::from(u16::from_le_bytes(fields.read()?)) * 8,
-                                _ => unreachable!(),
-                            };
-                            let reference = Chunk {
-                                offset: if cb == 0 && stp == nil {
-                                    u64::MAX
-                                } else {
-                                    stp << shift
-                                },
-                                length: cb,
-                            };
-                            if base == 1 {
-                                if !reference.absent() {
-                                    reference.range(data)?;
-                                }
-                                Some(Reference::Data(reference))
-                            } else {
-                                Some(Reference::NodeList(reference))
-                            }
-                        }
-                        _ => {
-                            return Err(Error {
-                                offset,
-                                message: "Unsupported file-node base type",
-                            });
-                        }
-                    };
-                    nodes.push(Node {
-                        id,
-                        offset,
-                        payload: fields.bytes,
-                        reference,
-                    });
-                }
+                let next = fragment.next;
+                fragment.nodes(required, &mut nodes, |reference| {
+                    reference.range(data).map(drop)
+                })?;
                 fragments.push(chunk);
                 if nodes.len() == required {
                     break;
@@ -514,6 +580,90 @@ impl<'a> Store<'a> {
             header,
             lists,
             checksum_mismatches,
+        })
+    }
+
+    /// Where the next transaction appends.
+    pub(crate) fn state(&self) -> Result<StoreState> {
+        let file_type = self.header.file_type;
+        let mut log_crc = if file_type == FileType::Section {
+            u32::MAX
+        } else {
+            0
+        };
+        for fragment in &self.transaction_fragments {
+            log_crc = transaction_crc(
+                log_crc,
+                fragment.entries,
+                file_type,
+                fragment.entries.len() + 20 > fragment.chunk.length as usize,
+            );
+        }
+        let last = self.transaction_fragments.last().unwrap();
+        let root = self.list(self.header.root)?;
+        let files = match root.nodes.iter().find(|node| node.id == 0x90) {
+            Some(node) => {
+                let Some(Reference::NodeList(chunk)) = node.reference else {
+                    return Err(Error {
+                        offset: node.offset,
+                        message: "File-data store reference lacks a list",
+                    });
+                };
+                Some(self.tail(chunk)?)
+            }
+            None => None,
+        };
+        let mut spaces = BTreeMap::new();
+        for node in root.nodes.iter().filter(|node| node.id == 8) {
+            let revisions = node
+                .referenced_list(self)?
+                .iter()
+                .rfind(|node| node.id == 0x10);
+            if let Some(Node {
+                reference: Some(Reference::NodeList(chunk)),
+                ..
+            }) = revisions
+            {
+                spaces.insert(node.fields(self).exguid()?, self.tail(*chunk)?);
+            }
+        }
+        Ok(StoreState {
+            stamp: crate::Stamp::of(self.data)?,
+            file_type,
+            log: (last.chunk, last.entries.len()),
+            log_crc,
+            max_list: self
+                .transaction_fragments
+                .iter()
+                .flat_map(|fragment| fragment.entries.chunks_exact(8))
+                .map(|entry| u32::from_le_bytes(entry[..4].try_into().unwrap()))
+                .max()
+                .unwrap(),
+            root: self.tail(self.header.root)?,
+            files,
+            spaces,
+        })
+    }
+
+    fn tail(&self, chunk: Chunk) -> Result<ListTail> {
+        let list = self.list(chunk)?;
+        let last = *list.fragments.last().unwrap();
+        let start = usize::try_from(last.offset).unwrap();
+        let node = list.nodes.last().ok_or(Error {
+            offset: start,
+            message: "Cannot append to an empty file-node list",
+        })?;
+        let header =
+            u32::from_le_bytes(self.data[node.offset..node.offset + 4].try_into().unwrap());
+        Ok(ListTail {
+            id: u32::from_le_bytes(self.data[start + 8..start + 12].try_into().unwrap()),
+            fragments: u32::try_from(list.fragments.len()).map_err(|_| Error {
+                offset: start,
+                message: "File-node fragment sequences are exhausted",
+            })?,
+            last,
+            nodes: list.nodes.len(),
+            end: (node.offset + usize::try_from((header >> 10) & 0x1fff).unwrap()) as u64,
         })
     }
 

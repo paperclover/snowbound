@@ -16,9 +16,11 @@ class PageCreationTest(unittest.TestCase):
         compare(fixture / 'candidate', fixture / 'cold')
 
     def test_created_pages_and_both_writers_survive_native_cold_reopens(self):
-        for source, capture in [('candidate', 'cold'), ('native/notebook', 'native/cold'), ('followup', 'followup/cold')]:
+        for source, capture in [('candidate', 'cold'), ('native/notebook', 'native/cold')]:
             with self.subTest(source=source):
                 compare(FIXTURE / source, FIXTURE / capture)
+        # OneNote refreshes the renamed titles' stale section metadata copies.
+        self.assertEqual(compare(FIXTURE / 'followup', FIXTURE / 'followup/cold', refresh_metadata=True), 2)
 
     def test_duplicate_titles_keep_distinct_pages_through_native_and_rust_edits(self):
         with TemporaryDirectory() as temporary:

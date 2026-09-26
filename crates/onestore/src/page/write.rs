@@ -1,36 +1,27 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
 //! the typed writers, whose revisions accumulate in memory, then squashing them into one
-//! revision per space.
+//! revision per space. `PreparedEdit::page` keeps it until the op path replaces it.
 
-use super::{
-    Attachment, Image, Ink, Math, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table,
-};
+use super::{Image, Ink, Outline, Page, PageObject, PageParagraph, ParagraphContent};
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
-    RevisionIndex, Store, TextAttribute, TreeEdit, Value,
+    RevisionIndex, Store, TreeEdit, Value,
     active::{ActivePage, Changes},
-    document::{Format, Kind, Tag},
+    document::Kind,
+    op::{
+        content::{self, AttachmentIds},
+        levels,
+        lower::{View, collect_containers, kept_set, text_edit, validate},
+        properties,
+        table::{self, Structure},
+    },
     write::{PropertyObject, RevisionEdit},
 };
 use bumpalo::Bump;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Range,
-};
-
-/// Property identifiers with their encoded values.
-type Values = Vec<(u32, Vec<u8>)>;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
-}
-
-/// A native measurement array: a count byte, `header - 1` reserved bytes, then each value
-/// in inches.
-/// The `<ifndf>{GUID}` form a file-data declaration uses to name a payload in the file-data store.
-fn payload_reference(guid: [u8; 16]) -> String {
-    let id = ExGuid { guid, n: 0 }.to_string();
-    format!("<ifndf>{}", id.split(',').next().unwrap())
 }
 
 fn page_images(page: &Page) -> impl Iterator<Item = (ExGuid, &Image)> {
@@ -45,292 +36,6 @@ fn page_ink(page: &Page) -> impl Iterator<Item = (ExGuid, &Ink)> {
         PageObject::Ink(ink) => Some((ink.id, ink)),
         _ => None,
     })
-}
-
-/// The compact child references a page object holds.
-fn page_children(object: &PropertyObject) -> Result<Vec<u8>, Error> {
-    let properties = crate::PropertySets::parse(&object.bytes)?;
-    match properties.sets[0]
-        .iter()
-        .find(|p| p.id == 0x24001c20)
-        .map(|p| &p.value)
-    {
-        Some(crate::Value::References { compact_ids, .. }) => Ok(compact_ids.to_vec()),
-        None => Ok(Vec::new()),
-        _ => Err(invalid("The page has an invalid child list")),
-    }
-}
-
-/// Creates stroke objects (numbered from `first`) and one drawing-attribute object per
-/// distinct pen; returns the compact references for the data node's stroke list.
-fn write_strokes(
-    changed: &mut BTreeMap<ExGuid, PropertyObject>,
-    data_object: &mut PropertyObject,
-    strokes: &[(ExGuid, &super::InkStroke)],
-    first: usize,
-    filetime: u64,
-) -> Result<Vec<u8>, Error> {
-    let mut styles: Vec<(InkPen, ExGuid)> = Vec::new();
-    let mut references = Vec::new();
-    for (offset, (stroke_id, stroke)) in strokes.iter().enumerate() {
-        let pen = InkPen::of(stroke);
-        let style = match styles.iter().find(|(known, _)| *known == pen) {
-            Some((_, id)) => *id,
-            None => {
-                let id = ExGuid {
-                    guid: crate::write::fresh_guid()?,
-                    n: 1,
-                };
-                let mut style = PropertyObject {
-                    jcid: 0x120048,
-                    bytes: crate::create::properties(&pen.values())?,
-                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                };
-                style.reference(id)?;
-                changed.insert(id, style);
-                styles.push((pen, id));
-                id
-            }
-        };
-        let mut object = PropertyObject {
-            jcid: 0x20047,
-            bytes: crate::create::properties(&stroke_values(
-                stroke,
-                (first + offset) as u32 + 1,
-                filetime,
-            )?)?,
-            global_ids: std::sync::Arc::new(BTreeMap::from([(0, stroke_id.guid)])),
-        };
-        object.reference(*stroke_id)?;
-        let style_reference = object.reference(style)?;
-        object.set(&[(0x20003409, &style_reference)])?;
-        changed.insert(*stroke_id, object);
-        references.extend(data_object.reference(*stroke_id)?);
-    }
-    Ok(references)
-}
-
-/// The drawing attributes OneNote shares between strokes drawn with the same pen.
-#[derive(PartialEq)]
-struct InkPen {
-    width: u32,
-    height: u32,
-    color: Option<u32>,
-    transparency: Option<u8>,
-    pen_tip: Option<u8>,
-}
-
-impl InkPen {
-    fn of(stroke: &super::InkStroke) -> Self {
-        Self {
-            width: (stroke.width * 2540.0 / 72.0).to_bits(),
-            height: (stroke.height * 2540.0 / 72.0).to_bits(),
-            color: stroke.color,
-            transparency: stroke.transparency,
-            pen_tip: stroke.pen_tip,
-        }
-    }
-
-    fn values(&self) -> Values {
-        let mut values: Values = vec![
-            (0x1c00340a, super::ink::DIMENSIONS.to_vec()),
-            (0x1400340c, self.height.to_le_bytes().to_vec()),
-            (0x1400340d, self.width.to_le_bytes().to_vec()),
-        ];
-        if let Some(color) = self.color {
-            values.push((0x1400340f, color.to_le_bytes().to_vec()));
-        }
-        if let Some(transparency) = self.transparency {
-            values.push((0x0c003414, vec![transparency]));
-        }
-        if let Some(tip) = self.pen_tip {
-            values.push((0x0c003412, vec![tip]));
-        }
-        values
-    }
-}
-
-fn stroke_values(stroke: &super::InkStroke, index: u32, filetime: u64) -> Result<Values, Error> {
-    if stroke.points.is_empty() {
-        return Err(invalid("A stroke needs at least one point"));
-    }
-    if stroke
-        .points
-        .iter()
-        .any(|p| !p[0].is_finite() || !p[1].is_finite())
-        || !(stroke.width.is_finite() && stroke.height.is_finite())
-        || stroke.width <= 0.0
-        || stroke.height <= 0.0
-    {
-        return Err(invalid(
-            "Stroke points and pen size must be finite and positive",
-        ));
-    }
-    let left = stroke
-        .points
-        .iter()
-        .map(|p| p[0])
-        .fold(f32::INFINITY, f32::min);
-    let top = stroke
-        .points
-        .iter()
-        .map(|p| p[1])
-        .fold(f32::INFINITY, f32::min);
-    let mut origin = ((left - stroke.width / 2.0) / 36.0).to_le_bytes().to_vec();
-    origin.extend_from_slice(&((top - stroke.height / 2.0) / 36.0).to_le_bytes());
-    Ok(vec![
-        (0x1c00340b, stroke.packet()),
-        (0x14003419, index.to_le_bytes().to_vec()),
-        (0x1000341b, 0x409_u16.to_le_bytes().to_vec()),
-        (0x0c00341c, vec![0]),
-        (0x1c00341a, crate::write::fresh_guid()?.to_vec()),
-        (0x1c00341d, filetime.to_le_bytes().to_vec()),
-        (0x1c00345b, origin),
-    ])
-}
-
-/// The character-style properties a span format sets; paragraph-level fields stay on the
-/// paragraph style.
-fn style_values(format: &crate::document::Format) -> Values {
-    let mut values = Values::new();
-    for (id, flag) in [
-        (0x08001c04, format.bold),
-        (0x08001c05, format.italic),
-        (0x08001c06, format.underline),
-        (0x08001c07, format.strike),
-        (0x08001c08, format.superscript),
-        (0x08001c09, format.subscript),
-        (0x08001e16, format.hidden),
-        (0x08001e14, format.hyperlink),
-        (0x08001e19, format.hyperlink_label),
-        (0x08003401, format.math),
-        (0x08001e22, format.embedded_object),
-    ] {
-        if let Some(flag) = flag {
-            values.push((id | (u32::from(flag) << 31), Vec::new()));
-        }
-    }
-    if let Some(font) = &format.font {
-        values.push((0x1c001c0a, crate::create::string(font)));
-    }
-    if let Some(size) = format.font_size {
-        values.push((
-            0x10001c0b,
-            ((size * 2.0).round() as u16).to_le_bytes().to_vec(),
-        ));
-    }
-    if let Some(color) = format.color {
-        values.push((0x14001c0c, color.to_le_bytes().to_vec()));
-    }
-    if let Some(highlight) = format.highlight {
-        values.push((0x14001c0d, highlight.to_le_bytes().to_vec()));
-    }
-    if let Some(language) = format.language {
-        values.push((0x14001c3b, language.to_le_bytes().to_vec()));
-    }
-    values
-}
-
-fn picture_fixed_fields(stored: &Image, image: &Image) -> Result<(), Error> {
-    if stored.id != image.id
-        || stored.bytes != image.bytes
-        || stored.size != image.size
-        || stored.background != image.background
-    {
-        return Err(invalid(
-            "A stored picture keeps its payload, intrinsic size and background state",
-        ));
-    }
-    Ok(())
-}
-
-/// Position and displayed-size properties that take `layout` from `stored`, and the ones
-/// to remove.
-fn layout_values(
-    stored: &crate::document::Layout,
-    layout: &crate::document::Layout,
-) -> Result<(Values, Vec<u32>), Error> {
-    let mut values = Values::new();
-    let mut removed = Vec::new();
-    if (layout.x, layout.y) != (stored.x, stored.y) {
-        let (Some(x), Some(y)) = (layout.x, layout.y) else {
-            return Err(invalid("A picture position needs both coordinates"));
-        };
-        if !(x.is_finite() && y.is_finite()) {
-            return Err(invalid("A picture position must be finite"));
-        }
-        values.push((0x14001c14, (x / 36.0).to_le_bytes().to_vec()));
-        values.push((0x14001c15, (y / 36.0).to_le_bytes().to_vec()));
-    }
-    if (
-        layout.max_width,
-        layout.max_height,
-        layout.width_set_by_user,
-    ) != (
-        stored.max_width,
-        stored.max_height,
-        stored.width_set_by_user,
-    ) {
-        match (layout.max_width, layout.max_height) {
-            (Some(width), Some(height)) => {
-                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-                    return Err(invalid("Picture size must be positive"));
-                }
-                values.push((0x14001c1b, (width / 36.0).to_le_bytes().to_vec()));
-                values.push((0x14001c1c, (height / 36.0).to_le_bytes().to_vec()));
-                let user_set = u32::from(layout.width_set_by_user == Some(true));
-                values.push((0x08001cbd | (user_set << 31), Vec::new()));
-            }
-            (None, None) => removed.extend([0x14001c1b, 0x14001c1c, 0x08001cbd]),
-            _ => return Err(invalid("A picture size needs both dimensions")),
-        }
-    }
-    if layout.reserved_width != stored.reserved_width {
-        return Err(invalid("A picture has no reserved width"));
-    }
-    Ok((values, removed))
-}
-
-fn measurement_bytes(values: &[f32], header: usize) -> Result<Vec<u8>, Error> {
-    let count = u8::try_from(values.len())
-        .map_err(|_| invalid("A measurement array exceeds the document range"))?;
-    let mut bytes = vec![0u8; header];
-    bytes[0] = count;
-    for value in values {
-        if !value.is_finite() {
-            return Err(invalid("A measurement must be finite"));
-        }
-        bytes.extend_from_slice(&(value / 36.0).to_le_bytes());
-    }
-    Ok(bytes)
-}
-
-/// Every row carries one cell per column and widths are usable.
-fn validate_table(table: &Table) -> Result<(), Error> {
-    if table.rows.is_empty() || table.columns.is_empty() {
-        return Err(invalid("A table needs at least one row and one column"));
-    }
-    if table
-        .columns
-        .iter()
-        .any(|c| !c.width.is_finite() || c.width < 36.0)
-    {
-        return Err(invalid("Table columns are at least 36 points wide"));
-    }
-    for row in &table.rows {
-        if row.cells.len() != table.columns.len() {
-            return Err(invalid("Every table row has one cell per column"));
-        }
-        for cell in &row.cells {
-            // An emptied cell keeps a replacement paragraph, as the tree writer provides.
-            for paragraph in &cell.paragraphs {
-                if let ParagraphContent::Table(nested) = &paragraph.content {
-                    validate_table(nested)?;
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn write_page(
@@ -372,93 +77,6 @@ pub(crate) fn write_page(
         &lowering.alias,
         None,
     )
-}
-
-/// Direct children of every container, in model order, plus lookups by identity.
-struct View<'a> {
-    page: &'a Page,
-    outlines: BTreeMap<ExGuid, &'a Outline>,
-    /// Outlines owned by a title object rather than the page.
-    title_outlines: BTreeSet<ExGuid>,
-    paragraphs: BTreeMap<ExGuid, &'a PageParagraph>,
-    children: BTreeMap<ExGuid, Vec<ExGuid>>,
-    container: BTreeMap<ExGuid, ExGuid>,
-    page_children: Vec<ExGuid>,
-}
-
-impl<'a> View<'a> {
-    fn new(page: &'a Page) -> Result<Self, Error> {
-        let mut view = Self {
-            page,
-            outlines: BTreeMap::new(),
-            title_outlines: BTreeSet::new(),
-            paragraphs: BTreeMap::new(),
-            children: BTreeMap::new(),
-            container: BTreeMap::new(),
-            page_children: Vec::new(),
-        };
-        for object in &page.objects {
-            view.page_children.push(object.id());
-            match object {
-                PageObject::Outline(outline) => view.outline(outline)?,
-                PageObject::Title(title) => {
-                    for outline in &title.outlines {
-                        view.title_outlines.insert(outline.id);
-                        view.outline(outline)?;
-                    }
-                }
-                PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {}
-            }
-        }
-        Ok(view)
-    }
-
-    fn outline(&mut self, outline: &'a Outline) -> Result<(), Error> {
-        if self.outlines.insert(outline.id, outline).is_some() {
-            return Err(invalid("The page model repeats an outline identity"));
-        }
-        self.children.entry(outline.id).or_default();
-        self.paragraphs_of(outline.id, &outline.paragraphs)
-    }
-
-    fn paragraphs_of(&mut self, root: ExGuid, list: &'a [PageParagraph]) -> Result<(), Error> {
-        for paragraph in list {
-            let container = paragraph.parent.unwrap_or(root);
-            if paragraph
-                .parent
-                .is_some_and(|parent| !self.paragraphs.contains_key(&parent))
-            {
-                return Err(invalid(
-                    "A paragraph's parent must precede it in its container",
-                ));
-            }
-            if self.paragraphs.insert(paragraph.id, paragraph).is_some() {
-                return Err(invalid("The page model repeats a paragraph identity"));
-            }
-            self.children
-                .entry(container)
-                .or_default()
-                .push(paragraph.id);
-            self.children.entry(paragraph.id).or_default();
-            self.container.insert(paragraph.id, container);
-            if let ParagraphContent::Table(table) = &paragraph.content {
-                for row in &table.rows {
-                    for cell in &row.cells {
-                        if self.children.contains_key(&cell.id) {
-                            return Err(invalid("The page model repeats a cell identity"));
-                        }
-                        self.children.entry(cell.id).or_default();
-                        self.paragraphs_of(cell.id, &cell.paragraphs)?;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn text(&self, paragraph: ExGuid) -> Option<&'a super::TextObject> {
-        self.paragraphs.get(&paragraph).and_then(|p| p.text())
-    }
 }
 
 struct Lowering<'a> {
@@ -521,30 +139,9 @@ impl<'a> Lowering<'a> {
     }
 
     fn run(&mut self, before: &Page, after: &Page) -> Result<(), Error> {
-        if after.created != before.created || after.margin_origin != before.margin_origin {
-            return Err(invalid("Page creation time and margins cannot be edited"));
-        }
-        for (id, definition) in &after.definitions {
-            if before
-                .definitions
-                .get(id)
-                .is_some_and(|stored| stored != definition)
-                && !matches!(
-                    definition.kind,
-                    Kind::List { .. } | Kind::TagDefinition { .. }
-                )
-            {
-                return Err(invalid("Style definitions cannot be edited"));
-            }
-        }
-        let old = View::new(before)?;
-        let new = View::new(after)?;
-        for paragraph in new.paragraphs.values() {
-            if let ParagraphContent::Table(table) = &paragraph.content {
-                validate_table(table)?;
-            }
-        }
-        self.check_fixed_objects(before, after, &old, &new)?;
+        let old = View::new(before, false)?;
+        let new = View::new(after, false)?;
+        validate(before, after, &old, &new)?;
         for id in new.outlines.keys().chain(new.paragraphs.keys()) {
             if !old.outlines.contains_key(id)
                 && !old.paragraphs.contains_key(id)
@@ -567,9 +164,12 @@ impl<'a> Lowering<'a> {
             .collect();
         self.insert_outlines(&old, &new, &mut placed, &mut page_order)?;
         let mut consumed = BTreeSet::new();
+        self.ungroup(&old, &new)?;
         self.split_and_join(&old, &new, &mut placed, &mut consumed)?;
         self.place(&old, &new, &placed, &page_order)?;
         self.delete(&old, &new, &consumed)?;
+        self.edit_levels(&new)?;
+        self.edit_text_identities(&new)?;
         self.edit_equations(&new)?;
         self.edit_text(&new)?;
         self.edit_paragraph_styles(&old, &new, after)?;
@@ -578,123 +178,6 @@ impl<'a> Lowering<'a> {
         self.edit_paragraph_formatting(&new)?;
         self.edit_formatting(&new)?;
         self.edit_layout(&old, &new)?;
-        Ok(())
-    }
-
-    fn check_fixed_objects(
-        &self,
-        before: &Page,
-        after: &Page,
-        old: &View<'_>,
-        new: &View<'_>,
-    ) -> Result<(), Error> {
-        let fixed = |page: &Page| -> Vec<String> {
-            page.objects
-                .iter()
-                .filter_map(|object| match object {
-                    PageObject::Unsupported(unsupported) => Some(format!("{unsupported:?}")),
-                    PageObject::Title(title) => Some(format!(
-                        "{:?} {:?} {:?} {:?}",
-                        title.id,
-                        title.date,
-                        title.layout,
-                        title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()
-                    )),
-                    PageObject::Outline(_) | PageObject::Image(_) | PageObject::Ink(_) => None,
-                })
-                .collect()
-        };
-        let mut before_fixed = fixed(before);
-        let mut after_fixed = fixed(after);
-        before_fixed.sort();
-        after_fixed.sort();
-        if before_fixed != after_fixed {
-            return Err(invalid(
-                "Titles and unsupported objects cannot be edited through the page model",
-            ));
-        }
-        for (id, outline) in &new.outlines {
-            if outline.paragraphs.is_empty() {
-                return Err(invalid(
-                    "An outline needs a paragraph; remove the outline instead",
-                ));
-            }
-            let Some(previous) = old.outlines.get(id) else {
-                continue;
-            };
-            let same = outline.title == previous.title
-                && outline.min_width == previous.min_width
-                && outline.indents == previous.indents
-                && outline.unsupported == previous.unsupported
-                && (!new.title_outlines.contains(id) || outline.layout == previous.layout);
-            if !same {
-                return Err(invalid(
-                    "Outline roles, indentation tables and title geometry cannot be edited",
-                ));
-            }
-        }
-        for (id, paragraph) in &new.paragraphs {
-            let Some(previous) = old.paragraphs.get(id) else {
-                continue;
-            };
-            if paragraph.media != previous.media {
-                return Err(invalid("Recording annotations cannot be edited"));
-            }
-            let same = paragraph.style == previous.style && paragraph.format == previous.format;
-            if !same {
-                return Err(invalid(
-                    "Paragraph styles and paragraph formatting cannot be edited",
-                ));
-            }
-            match (&paragraph.content, &previous.content) {
-                (ParagraphContent::Text(text), ParagraphContent::Text(previous)) => {
-                    if text.date_field != previous.date_field {
-                        return Err(invalid("Text fields cannot be edited"));
-                    }
-                }
-                (ParagraphContent::Table(table), ParagraphContent::Table(previous)) => {
-                    if table.id != previous.id
-                        || table.layout != previous.layout
-                        || table.tags != previous.tags
-                    {
-                        return Err(invalid("Table identity, layout and tags cannot be edited"));
-                    }
-                    let unchanged_cells =
-                        table.rows.iter().flat_map(|row| &row.cells).all(|cell| {
-                            previous
-                                .rows
-                                .iter()
-                                .flat_map(|row| &row.cells)
-                                .find(|before| before.id == cell.id)
-                                .is_none_or(|before| {
-                                    cell.layout == before.layout
-                                        && cell.unsupported == before.unsupported
-                                })
-                        });
-                    if !unchanged_cells {
-                        return Err(invalid("Cell layout cannot be edited"));
-                    }
-                }
-                (ParagraphContent::Unsupported(a), ParagraphContent::Unsupported(b)) if a == b => {}
-                (ParagraphContent::Ink(a), ParagraphContent::Ink(b)) => {
-                    if a.id != b.id {
-                        return Err(invalid("Ink identity cannot change"));
-                    }
-                }
-                (ParagraphContent::Image(a), ParagraphContent::Image(b)) => {
-                    picture_fixed_fields(a, b)?;
-                    if (a.layout.x, a.layout.y) != (b.layout.x, b.layout.y) {
-                        return Err(invalid("A paragraph picture has no position of its own"));
-                    }
-                }
-                (ParagraphContent::Attachment(a), ParagraphContent::Attachment(b)) => {
-                    if a.id != b.id {
-                        return Err(invalid("Attachment identity cannot change"));
-                    }
-                }
-                _ => return Err(invalid("Paragraph content type cannot change")),
-            }
-        }
         Ok(())
     }
 
@@ -758,6 +241,10 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
+    /// Splits and joins stored paragraphs as OneNote's Enter, Backspace and Delete do. A new
+    /// styled paragraph that is no exact split starts as Enter at the end of the nearest stored
+    /// paragraph that allows one, taking its properties as OneNote's new paragraphs do; later
+    /// passes place it and give it its text.
     fn split_and_join(
         &mut self,
         old: &View<'_>,
@@ -765,65 +252,98 @@ impl<'a> Lowering<'a> {
         placed: &mut BTreeMap<ExGuid, Vec<ExGuid>>,
         consumed: &mut BTreeSet<ExGuid>,
     ) -> Result<(), Error> {
-        for (container, children) in &new.children {
-            if !old.children.contains_key(container) {
+        // A new paragraph may be split from the stored paragraph nearest before it, whatever
+        // placement or pasted paragraphs the same save adds between them.
+        let mut splits = Vec::new();
+        for document in new.documents() {
+            let mut left = None;
+            for paragraph in document {
+                if old.paragraphs.contains_key(&paragraph.id) {
+                    left = paragraph.text().is_some().then_some(paragraph.id);
+                } else if let Some(left) = left {
+                    let container = new.container[&paragraph.id];
+                    let at = new.children[&container]
+                        .iter()
+                        .position(|id| *id == paragraph.id);
+                    splits.push(((container, at), left, paragraph.id));
+                }
+            }
+        }
+        splits.sort();
+        let mut split = BTreeSet::new();
+        for (_, left, right) in splits {
+            let (Some(previous), Some(after), Some(next)) =
+                (old.text(left), new.text(left), new.text(right))
+            else {
+                continue;
+            };
+            if split.contains(&left)
+                || after.id != previous.id
+                || new.paragraphs[&right].style != old.paragraphs[&left].style
+            {
                 continue;
             }
-            for pair in children.windows(2) {
-                let [left, right] = [pair[0], pair[1]];
-                let (Some(previous), Some(after), Some(next)) =
-                    (old.text(left), new.text(left), new.text(right))
-                else {
-                    continue;
-                };
-                if old.paragraphs.contains_key(&right)
-                    || old.container.get(&left) != Some(container)
-                    || !new.children[&left].is_empty()
-                    || new.children[&right] != old.children[&left]
-                    || after.id != previous.id
-                    || new.paragraphs[&right].style != old.paragraphs[&left].style
+            let Ok(offset) = after.text.utf16_offset(after.text.text().len()) else {
+                continue;
+            };
+            // Splitting at the end only differs from appending a paragraph by the copied
+            // paragraph style; without one, an appended empty paragraph is an insertion.
+            if offset == previous.text.utf16_offset(previous.text.text().len())?
+                && new.paragraphs[&right].style.is_none()
+            {
+                continue;
+            }
+            let Ok(head) = previous.text.slice(0..offset) else {
+                continue;
+            };
+            let Ok(tail) = previous.text.slice(
+                offset
+                    ..previous
+                        .text
+                        .utf16_offset(previous.text.text().len())
+                        .unwrap_or(0),
+            ) else {
+                continue;
+            };
+            // An emptied side takes the writer's insertion style, so only its text must agree.
+            let same = |expected: &super::Paragraph, actual: &super::Paragraph| {
+                expected.text() == actual.text()
+                    && (expected.text().is_empty() || expected == actual)
+            };
+            if !same(&head, &after.text) || !same(&tail, &next.text) {
+                continue;
+            }
+            let edit = ParagraphSplit::new(previous.id, offset, self.author)?;
+            if self.split(&edit, left, right, old, new, placed)? {
+                split.insert(left);
+            }
+        }
+        for document in new.documents() {
+            for (at, paragraph) in document.iter().enumerate() {
+                if old.paragraphs.contains_key(&paragraph.id)
+                    || self.alias.contains_key(&paragraph.id)
+                    || paragraph.style.is_none()
+                    || paragraph.text().is_none()
                 {
                     continue;
                 }
-                let Ok(offset) = after.text.utf16_offset(after.text.text().len()) else {
-                    continue;
+                let stored = |candidate: &&&PageParagraph| {
+                    old.paragraphs.contains_key(&candidate.id) && candidate.text().is_some()
                 };
-                // Splitting at the end only differs from appending a paragraph by the copied
-                // paragraph style; without one, an appended empty paragraph is an insertion.
-                if offset == previous.text.utf16_offset(previous.text.text().len())?
-                    && new.paragraphs[&right].style.is_none()
-                {
-                    continue;
+                let before = document[..at].iter().rev().filter(stored);
+                for template in before.chain(document[at + 1..].iter().filter(stored)) {
+                    let text = self.active.view.nodes[&template.id].content[0];
+                    let Kind::RichText { text: content, .. } = &self.active.view.nodes[&text].kind
+                    else {
+                        continue;
+                    };
+                    let end = u32::try_from(content.encode_utf16().count())
+                        .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
+                    let edit = ParagraphSplit::new(text, end, self.author)?;
+                    if self.split(&edit, template.id, paragraph.id, old, new, placed)? {
+                        break;
+                    }
                 }
-                let Ok(head) = previous.text.slice(0..offset) else {
-                    continue;
-                };
-                let Ok(tail) = previous.text.slice(
-                    offset
-                        ..previous
-                            .text
-                            .utf16_offset(previous.text.text().len())
-                            .unwrap_or(0),
-                ) else {
-                    continue;
-                };
-                // An emptied side takes the writer's insertion style, so only its text must agree.
-                let same = |expected: &super::Paragraph, actual: &super::Paragraph| {
-                    expected.text() == actual.text()
-                        && (expected.text().is_empty() || expected == actual)
-                };
-                if !same(&head, &after.text) || !same(&tail, &next.text) {
-                    continue;
-                }
-                let split = ParagraphSplit::new(previous.id, offset, self.author)?;
-                self.write(|active| split.changes(active))?;
-                self.alias.insert(right, split.object());
-                self.alias.insert(next.id, split.text_object());
-                let list = placed.get_mut(container).unwrap();
-                let at = list.iter().position(|id| *id == left).unwrap();
-                list.insert(at + 1, right);
-                placed.insert(right, placed[&left].clone());
-                placed.insert(left, Vec::new());
             }
         }
         for (container, children) in &old.children {
@@ -856,18 +376,63 @@ impl<'a> Lowering<'a> {
                         previous.id
                     }
                 {
-                    return Err(invalid(
-                        "A joined paragraph keeps the left text identity unless the left text was empty",
-                    ));
+                    continue;
                 }
                 let join = ParagraphJoin::new(previous.id, removed.id, self.author)?;
-                self.write(|active| join.changes(active))?;
+                let Ok(changes) = join.changes(&self.active) else {
+                    continue;
+                };
+                self.write(|_| Ok(changes))?;
                 consumed.insert(right);
                 placed.get_mut(container).unwrap().retain(|id| *id != right);
                 placed.remove(&right);
             }
         }
         Ok(())
+    }
+
+    /// Stores `edit` of model paragraph `left` as model paragraph `right`, unless the split
+    /// cannot be made there.
+    fn split(
+        &mut self,
+        edit: &ParagraphSplit,
+        left: ExGuid,
+        right: ExGuid,
+        old: &View<'_>,
+        new: &View<'_>,
+        placed: &mut BTreeMap<ExGuid, Vec<ExGuid>>,
+    ) -> Result<bool, Error> {
+        let Ok(changes) = edit.changes(&self.active) else {
+            return Ok(false);
+        };
+        self.write(|_| Ok(changes))?;
+        self.alias.insert(right, edit.object());
+        // A text object a join moved into the paragraph is taken over after placement.
+        if let Some(text) = new.text(right)
+            && !self.active.live.revision.objects.contains_key(&text.id)
+        {
+            self.alias.insert(text.id, edit.text_object());
+        }
+        // The split copies the left paragraph's list nodes in order; a list the model shares
+        // with a stored paragraph stays that paragraph's.
+        if new.paragraphs[&right].lists.len() == old.paragraphs[&left].lists.len() {
+            for (n, list) in (5..).zip(&new.paragraphs[&right].lists) {
+                if !self.active.live.revision.objects.contains_key(list) {
+                    let guid = edit.object().guid;
+                    self.alias.insert(*list, ExGuid { guid, n });
+                }
+            }
+        }
+        // An earlier split may have carried the left paragraph to its tail.
+        let list = placed
+            .values_mut()
+            .find(|list| list.contains(&left))
+            .unwrap();
+        let at = list.iter().position(|id| *id == left).unwrap();
+        list.insert(at + 1, right);
+        placed.insert(right, placed[&left].clone());
+        placed.insert(left, Vec::new());
+        Ok(true)
     }
 
     fn place(
@@ -957,9 +522,10 @@ impl<'a> Lowering<'a> {
             if pending.is_empty() {
                 break;
             }
-            let (ready, waiting): (Vec<ExGuid>, Vec<ExGuid>) = pending
-                .into_iter()
-                .partition(|container| self.alias.contains_key(container));
+            let (ready, waiting): (Vec<ExGuid>, Vec<ExGuid>) =
+                pending.into_iter().partition(|container| {
+                    self.alias.contains_key(container) || old.children.contains_key(container)
+                });
             if ready.is_empty() {
                 return Err(invalid("Table content has no table to hold it"));
             }
@@ -981,18 +547,12 @@ impl<'a> Lowering<'a> {
             let ParagraphContent::Attachment(attachment) = &paragraph.content else {
                 continue;
             };
-            let name = attachment.filename.as_str();
-            if name.is_empty() || name.contains(['\0', '/', '\\']) {
-                return Err(invalid(
-                    "An attachment needs a file name without path separators",
-                ));
-            }
             if let Some(previous) = old.paragraphs.get(paragraph_id) {
                 let ParagraphContent::Attachment(stored) = &previous.content else {
                     return Err(invalid("Paragraph content type cannot change"));
                 };
                 if stored != attachment {
-                    self.edit_attachment(stored, attachment)?;
+                    self.write(|active| content::attachment_edit_changes(active, stored, attachment))?;
                 }
                 continue;
             }
@@ -1002,89 +562,32 @@ impl<'a> Lowering<'a> {
             let Some(bytes) = &attachment.bytes else {
                 return Err(invalid("A new attachment needs its payload"));
             };
-            let extension = name
-                .rfind('.')
-                .filter(|dot| *dot > 0)
-                .map(|dot| &name[dot..])
-                .unwrap_or("");
-            let attachment_id = self.allocate(attachment.id)?;
-            let file_id = ExGuid {
-                guid: crate::write::fresh_guid()?,
-                n: 1,
+            let ids = AttachmentIds {
+                object: self.allocate(attachment.id)?,
+                file: ExGuid {
+                    guid: crate::write::fresh_guid()?,
+                    n: 1,
+                },
+                payload: crate::write::fresh_guid()?,
+                preview: match &attachment.preview {
+                    Some(_) => {
+                        let payload = crate::write::fresh_guid()?;
+                        let icon = ExGuid {
+                            guid: crate::write::fresh_guid()?,
+                            n: 1,
+                        };
+                        Some((payload, icon))
+                    }
+                    None => None,
+                },
             };
-            let payload_guid = crate::write::fresh_guid()?;
-            let reference = payload_reference(payload_guid);
-            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-            let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
-            if let Some([width, height]) = attachment.size {
-                if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-                    return Err(invalid("Attachment icon size must be positive"));
-                }
-                values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
-                values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
-            }
-            values.push((0x14001c3b, 0x409_u32.to_le_bytes().to_vec()));
-            values.push((0x10001cfe, 0x409_u16.to_le_bytes().to_vec()));
-            values.push((0x1c001dcf, vec![0; 32]));
-            values.push((
-                0x1c001d61,
-                [16u32, 1, 0, 0, 0]
-                    .iter()
-                    .flat_map(|v| v.to_le_bytes())
-                    .collect(),
-            ));
-            values.push((0x14001c3e, 1u32.to_le_bytes().to_vec()));
-            values.push((0x14001c84, 1u32.to_le_bytes().to_vec()));
-            values.push((0x1c001c22, crate::create::string(name)));
-            values.push((0x1c001d9c, crate::create::string(name)));
-            if let Some(path) = &attachment.source_path {
-                values.push((0x1c001d9d, crate::create::string(path)));
+            let mut payloads: Vec<([u8; 16], &[u8])> = vec![(ids.payload, bytes)];
+            if let (Some((payload, _)), Some(icon)) = (ids.preview, &attachment.preview) {
+                payloads.push((payload, icon));
             }
             let holder = self.id(*paragraph_id);
-            let mut payloads: Vec<([u8; 16], &[u8])> = vec![(payload_guid, bytes)];
-            let mut preview = None;
-            if let Some(icon) = &attachment.preview {
-                if !icon.starts_with(&[0x89, b'P', b'N', b'G']) {
-                    return Err(invalid("An attachment preview is a PNG icon"));
-                }
-                let guid = crate::write::fresh_guid()?;
-                payloads.push((guid, icon));
-                preview = Some((
-                    ExGuid {
-                        guid: crate::write::fresh_guid()?,
-                        n: 1,
-                    },
-                    payload_reference(guid),
-                ));
-            }
             self.write_with(&payloads, |active| {
-                let raw = &active.live.revision;
-                let mut changed = BTreeMap::new();
-                let mut file = PropertyObject::file(file_id, &reference, extension)?;
-                file.jcid = 0x80036;
-                changed.insert(file_id, file);
-                let mut node = PropertyObject {
-                    jcid: 0x60035,
-                    bytes: crate::create::properties(&values)?,
-                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, attachment_id.guid)])),
-                };
-                node.reference(attachment_id)?;
-                let container = node.reference(file_id)?;
-                node.set(&[(0x20001d9b, &container)])?;
-                if let Some((icon_id, icon_reference)) = &preview {
-                    changed.insert(
-                        *icon_id,
-                        PropertyObject::file(*icon_id, icon_reference, ".png")?,
-                    );
-                    let icon = node.reference(*icon_id)?;
-                    node.set(&[(0x20001c3f, &icon)])?;
-                }
-                changed.insert(attachment_id, node);
-                let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                let content = object.reference(attachment_id)?;
-                object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                changed.insert(holder, object);
-                Ok(changed)
+                content::attachment_changes(active, attachment, &ids, holder)
             })?;
         }
         Ok(())
@@ -1183,15 +686,6 @@ impl<'a> Lowering<'a> {
     /// child (or a paragraph holds as content), its data node listing stroke objects, each
     /// stroke's packet and half-inch origin, and one drawing-attribute object per distinct pen.
     fn insert_ink(&mut self, ink: &Ink, holder: Option<ExGuid>) -> Result<(), Error> {
-        if !ink.groups.is_empty() {
-            return Err(invalid("New ink holds strokes, not nested groups"));
-        }
-        if ink.strokes.is_empty() {
-            return Err(invalid("New ink needs at least one stroke"));
-        }
-        if ink.layout != Default::default() {
-            return Err(invalid("Ink positions come from its strokes"));
-        }
         let container = self.allocate(ink.id)?;
         let data = ExGuid {
             guid: crate::write::fresh_guid()?,
@@ -1201,50 +695,7 @@ impl<'a> Lowering<'a> {
         for stroke in &ink.strokes {
             strokes.push((self.allocate(stroke.id)?, stroke));
         }
-        let (modified, filetime) = crate::create::current_timestamps()?;
-        let modified = modified.to_le_bytes();
-        let page = self.page;
-        self.write(|active| {
-            let raw = &active.live.revision;
-            let mut changed = BTreeMap::new();
-            let mut data_object = PropertyObject {
-                jcid: 0x2003b,
-                bytes: crate::create::properties(&[])?,
-                global_ids: std::sync::Arc::new(BTreeMap::from([(0, data.guid)])),
-            };
-            data_object.reference(data)?;
-            let references = write_strokes(&mut changed, &mut data_object, &strokes, 0, filetime)?;
-            data_object.set(&[(0x24003416, &references)])?;
-            changed.insert(data, data_object);
-            let mut object = PropertyObject {
-                jcid: 0x60014,
-                bytes: crate::create::properties(&[
-                    (0x14001d7a, modified.to_vec()),
-                    (0x14001d4e, 1u32.to_le_bytes().to_vec()),
-                ])?,
-                global_ids: std::sync::Arc::new(BTreeMap::from([(0, container.guid)])),
-            };
-            object.reference(container)?;
-            let data_reference = object.reference(data)?;
-            object.set(&[(0x20003415, &data_reference)])?;
-            changed.insert(container, object);
-            match holder {
-                Some(holder) => {
-                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                    let content = object.reference(container)?;
-                    object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                    changed.insert(holder, object);
-                }
-                None => {
-                    let mut object = PropertyObject::from_object(&raw.objects[&page])?;
-                    let mut children = page_children(&object)?;
-                    children.extend(object.reference(container)?);
-                    object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
-                    changed.insert(page, object);
-                }
-            }
-            Ok(changed)
-        })
+        self.write(|active| content::ink_changes(active, ink, container, data, &strokes, holder))
     }
 
     /// Rewrites a drawing's stroke list: stored strokes stay as they are (OneNote erases whole
@@ -1266,42 +717,7 @@ impl<'a> Lowering<'a> {
             }
         }
         let container = self.id(ink.id);
-        let data = match self
-            .active
-            .view
-            .nodes
-            .get(&container)
-            .map(|node| &node.kind)
-        {
-            Some(crate::document::Kind::Ink {
-                data: Some(data), ..
-            }) => *data,
-            _ => return Err(invalid("Stored ink has no stroke data to rewrite")),
-        };
-        let (modified, filetime) = crate::create::current_timestamps()?;
-        let modified = modified.to_le_bytes();
-        self.write(|active| {
-            let raw = &active.live.revision;
-            let mut changed = BTreeMap::new();
-            let mut data_object = PropertyObject::from_object(&raw.objects[&data])?;
-            let mut references = Vec::new();
-            for id in &kept {
-                references.extend(data_object.reference(*id)?);
-            }
-            references.extend(write_strokes(
-                &mut changed,
-                &mut data_object,
-                &added,
-                kept.len(),
-                filetime,
-            )?);
-            data_object.set(&[(0x24003416, &references)])?;
-            changed.insert(data, data_object);
-            let mut object = PropertyObject::from_object(&raw.objects[&container])?;
-            object.set(&[(0x14001d7a, &modified)])?;
-            changed.insert(container, object);
-            Ok(changed)
-        })
+        self.write(|active| content::strokes_changes(active, container, &kept, &added))
     }
 
     /// Gives a new picture what OneNote stores for an inserted one: the payload embedded
@@ -1312,158 +728,29 @@ impl<'a> Lowering<'a> {
         let Some(bytes) = &image.bytes else {
             return Err(invalid("A new picture needs its payload"));
         };
-        let extension = match bytes.as_ref() {
-            [0x89, b'P', b'N', b'G', ..] => ".png",
-            [0xff, 0xd8, 0xff, ..] => ".jpg",
-            [b'G', b'I', b'F', b'8', ..] => ".gif",
-            [b'B', b'M', ..] => ".bmp",
-            _ => return Err(invalid("Choose a PNG, JPEG, GIF or BMP picture")),
-        };
         let image_id = self.allocate(image.id)?;
         let file_id = ExGuid {
             guid: crate::write::fresh_guid()?,
             n: 1,
         };
         let payload_guid = crate::write::fresh_guid()?;
-        let reference = payload_reference(payload_guid);
-        let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-        let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
-        if let Some([width, height]) = image.size {
-            if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-                return Err(invalid("Picture size must be positive"));
-            }
-            values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
-            values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
-        }
-        values.extend(layout_values(&Default::default(), &image.layout)?.0);
-        if let Some(alt) = &image.alt {
-            values.push((0x1c001e58, crate::create::string(alt)));
-        }
-        if image.background {
-            values.push((0x08001d13 | (1 << 31), Vec::new()));
-        }
-        values.push((0x08001d85, Vec::new()));
-        let page = self.page;
         let payload: &[u8] = bytes;
         self.write_with(&[(payload_guid, payload)], |active| {
-            let raw = &active.live.revision;
-            let mut changed = BTreeMap::new();
-            let file = PropertyObject::file(file_id, &reference, extension)?;
-            changed.insert(file_id, file);
-            let mut picture = PropertyObject {
-                jcid: 0x60011,
-                bytes: crate::create::properties(&values)?,
-                global_ids: std::sync::Arc::new(BTreeMap::from([(0, image_id.guid)])),
-            };
-            picture.reference(image_id)?;
-            let container = picture.reference(file_id)?;
-            picture.set(&[(0x20001c3f, &container)])?;
-            changed.insert(image_id, picture);
-            match holder {
-                Some(holder) => {
-                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                    let content = object.reference(image_id)?;
-                    object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                    changed.insert(holder, object);
-                }
-                None => {
-                    let mut object = PropertyObject::from_object(&raw.objects[&page])?;
-                    let mut children = page_children(&object)?;
-                    children.extend(object.reference(image_id)?);
-                    object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
-                    changed.insert(page, object);
-                }
-            }
-            Ok(changed)
-        })
-    }
-
-    /// Writes a moved, resized or described picture the way OneNote stores one: the
-    /// position, the layout width and height with the user flag and the description on
-    /// the picture object, leaving the intrinsic size alone.
-    /// A stored attachment keeps its payload and preview; its shown name, recorded source
-    /// path and icon size change in place, as OneNote's rename does.
-    fn edit_attachment(
-        &mut self,
-        stored: &Attachment,
-        attachment: &Attachment,
-    ) -> Result<(), Error> {
-        let mut values: Values = vec![(
-            0x14001d7a,
-            crate::create::current_timestamps()?
-                .0
-                .to_le_bytes()
-                .to_vec(),
-        )];
-        if attachment.recording != stored.recording {
-            return Err(invalid("A recording stays the recording OneNote captured"));
-        }
-        let mut removed = Vec::new();
-        if attachment.filename != stored.filename {
-            let name = crate::create::string(&attachment.filename);
-            values.push((0x1c001c22, name.clone()));
-            values.push((0x1c001d9c, name));
-        }
-        if attachment.source_path != stored.source_path {
-            match &attachment.source_path {
-                Some(path) => values.push((0x1c001d9d, crate::create::string(path))),
-                None => removed.push(0x1c001d9d),
-            }
-        }
-        if attachment.size != stored.size {
-            match attachment.size {
-                Some([width, height]) => {
-                    if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
-                        return Err(invalid("Attachment icon size must be positive"));
-                    }
-                    values.push((0x140034cd, (width / 36.0).to_le_bytes().to_vec()));
-                    values.push((0x140034ce, (height / 36.0).to_le_bytes().to_vec()));
-                }
-                None => removed.extend([0x140034cd, 0x140034ce]),
-            }
-        }
-        let object = self.id(attachment.id);
-        self.write(|active| {
-            let raw = &active.live.revision;
-            let mut node = PropertyObject::from_object(&raw.objects[&object])?;
-            node.remove(&removed)?;
-            let values: Vec<(u32, &[u8])> = values
-                .iter()
-                .map(|(id, bytes)| (*id, bytes.as_slice()))
-                .collect();
-            node.set(&values)?;
-            Ok(BTreeMap::from([(object, node)]))
+            content::picture_changes(active, image, image_id, file_id, payload_guid, holder)
         })
     }
 
     fn edit_image(&mut self, stored: &Image, image: &Image) -> Result<(), Error> {
-        picture_fixed_fields(stored, image)?;
-        let mut values: Values = vec![(
-            0x14001d7a,
-            crate::create::current_timestamps()?
-                .0
-                .to_le_bytes()
-                .to_vec(),
-        )];
-        let (layout, mut removed) = layout_values(&stored.layout, &image.layout)?;
-        values.extend(layout);
-        if image.alt != stored.alt {
-            match &image.alt {
-                Some(alt) => values.push((0x1c001e58, crate::create::string(alt))),
-                None => removed.push(0x1c001e58),
-            }
-        }
+        content::picture_fixed_fields(stored, image)?;
         let object = self.id(image.id);
         self.write(|active| {
-            let raw = &active.live.revision;
-            let mut picture = PropertyObject::from_object(&raw.objects[&object])?;
-            picture.remove(&removed)?;
-            let values: Vec<(u32, &[u8])> = values
-                .iter()
-                .map(|(id, bytes)| (*id, bytes.as_slice()))
-                .collect();
-            picture.set(&values)?;
-            Ok(BTreeMap::from([(object, picture)]))
+            content::picture_edit_changes(
+                active,
+                object,
+                (&stored.layout, &stored.alt),
+                &image.layout,
+                &image.alt,
+            )
         })
     }
 
@@ -1528,7 +815,9 @@ impl<'a> Lowering<'a> {
                         Insertion::paragraph(self.id(*container), anchor, text, self.author)?;
                     self.write(|active| insertion.changes(active))?;
                     self.alias.insert(*id, insertion.object());
-                    if let Some(text_id) = text_id {
+                    if let Some(text_id) =
+                        text_id.filter(|id| !self.active.live.revision.objects.contains_key(id))
+                    {
                         self.alias.insert(text_id, insertion.text_object());
                     }
                 } else if !kept.contains(id) {
@@ -1542,12 +831,7 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// Creates tables, rows and cells the model added, rebuilds every table's row and cell
-    /// order to the model's, and writes the column widths, locks and border flag. Native
-    /// rows and cells are plain containers; a cell carries its indent array and the flags
-    /// every native cell has.
-    /// Shading (the documented `CellShadingColor`, which OneNote 2010 stores but neither
-    /// renders nor accepts through its COM schema) and indents change in place on a cell.
+    /// Changes the shading and indents of stored cells in place.
     fn edit_cells(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
         let stored: BTreeMap<ExGuid, &super::TableCell> = old
             .paragraphs
@@ -1570,46 +854,25 @@ impl<'a> Lowering<'a> {
                 if (cell.shading, &cell.indents) == (previous.shading, &previous.indents) {
                     continue;
                 }
-                let mut values: Values = vec![(
-                    0x14001d7a,
-                    crate::create::current_timestamps()?
-                        .0
-                        .to_le_bytes()
-                        .to_vec(),
-                )];
-                let mut removed = Vec::new();
-                if cell.shading != previous.shading {
-                    match cell.shading {
-                        Some(shading) => values.push((0x14001e26, shading.to_le_bytes().to_vec())),
-                        None => removed.push(0x14001e26),
-                    }
-                }
-                if cell.indents != previous.indents {
-                    if cell.indents.is_empty() {
-                        removed.push(0x1c001c12);
-                    } else {
-                        values.push((0x1c001c12, measurement_bytes(&cell.indents, 4)?));
-                    }
-                }
                 let object = self.id(cell.id);
                 self.write(|active| {
-                    let raw = &active.live.revision;
-                    let mut object_properties = PropertyObject::from_object(&raw.objects[&object])?;
-                    object_properties.remove(&removed)?;
-                    let values: Vec<(u32, &[u8])> = values
-                        .iter()
-                        .map(|(id, bytes)| (*id, bytes.as_slice()))
-                        .collect();
-                    object_properties.set(&values)?;
-                    Ok(BTreeMap::from([(object, object_properties)]))
+                    table::cell_changes(
+                        active,
+                        object,
+                        (previous.shading, &previous.indents),
+                        cell.shading,
+                        &cell.indents,
+                    )
                 })?;
             }
         }
         Ok(())
     }
 
+    /// Creates tables, rows and cells the model added, rebuilds every table's row and cell
+    /// order to the model's, and writes the column widths, locks and border flag.
     fn edit_table_structure(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
-        let old_tables: BTreeMap<ExGuid, &Table> = old
+        let old_tables: BTreeMap<ExGuid, &super::Table> = old
             .paragraphs
             .values()
             .filter_map(|p| match &p.content {
@@ -1642,8 +905,6 @@ impl<'a> Lowering<'a> {
             if unchanged {
                 continue;
             }
-            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-            let mut created: Vec<(ExGuid, u32, Values)> = Vec::new();
             let table_id = if previous.is_some() {
                 self.id(table.id)
             } else {
@@ -1662,13 +923,22 @@ impl<'a> Lowering<'a> {
                 .unwrap_or_default();
             let template = previous
                 .and_then(|p| p.rows.first())
-                .and_then(|r| r.cells.first());
-            let mut rows = Vec::new();
+                .and_then(|r| r.cells.first())
+                .map(|cell| cell.indents.as_slice());
+            let mut structure = Structure {
+                rows: Vec::new(),
+                new_rows: BTreeSet::new(),
+                new_cells: BTreeMap::new(),
+                columns: &table.columns,
+                borders: table.borders,
+            };
             for row in &table.rows {
                 let row_id = if existing_rows.contains(&row.id) {
                     self.id(row.id)
                 } else {
-                    self.allocate(row.id)?
+                    let written = self.allocate(row.id)?;
+                    structure.new_rows.insert(written);
+                    written
                 };
                 let mut cells = Vec::new();
                 for cell in &row.cells {
@@ -1676,116 +946,18 @@ impl<'a> Lowering<'a> {
                         self.id(cell.id)
                     } else {
                         let written = self.allocate(cell.id)?;
-                        let indents = if cell.indents.is_empty() {
-                            template.map(|t| t.indents.clone()).unwrap_or_default()
-                        } else {
-                            cell.indents.clone()
-                        };
-                        let mut values: Values = vec![
-                            (0x14001d7a, modified.to_vec()),
-                            (0x0c001c13, vec![0]),
-                            (0x0c001c03, vec![1]),
-                            (0x88001c91, Vec::new()),
-                        ];
-                        if !indents.is_empty() {
-                            values.push((0x1c001c12, measurement_bytes(&indents, 4)?));
-                        }
-                        if let Some(shading) = cell.shading {
-                            values.push((0x14001e26, shading.to_le_bytes().to_vec()));
-                        }
-                        created.push((written, 0x60024, values));
+                        structure.new_cells.insert(
+                            written,
+                            (table::cell_indents(&cell.indents, template), cell.shading),
+                        );
                         written
                     };
                     cells.push(cell_id);
                 }
-                if !existing_rows.contains(&row.id) {
-                    created.push((row_id, 0x60023, vec![(0x14001d7a, modified.to_vec())]));
-                }
-                rows.push((row_id, cells));
+                structure.rows.push((row_id, cells));
             }
-            let mut table_values: Values = vec![
-                (0x14001d7a, modified.to_vec()),
-                (0x14001d57, (table.rows.len() as u32).to_le_bytes().to_vec()),
-                (
-                    0x14001d58,
-                    (table.columns.len() as u32).to_le_bytes().to_vec(),
-                ),
-                (
-                    0x1c001d66,
-                    measurement_bytes(
-                        &table.columns.iter().map(|c| c.width).collect::<Vec<_>>(),
-                        1,
-                    )?,
-                ),
-            ];
-            let mut locks = vec![table.columns.len() as u8];
-            locks.extend(vec![0u8; table.columns.len().div_ceil(8)]);
-            for (i, column) in table.columns.iter().enumerate() {
-                if column.locked {
-                    locks[1 + i / 8] |= 1 << (i % 8);
-                }
-            }
-            table_values.push((0x1c001d7d, locks));
-            table_values.push((
-                0x08001d5e | (u32::from(table.borders.unwrap_or(true)) << 31),
-                Vec::new(),
-            ));
-            if previous.is_none() {
-                table_values.push((0x14001c3e, 1u32.to_le_bytes().to_vec()));
-                table_values.push((0x14001c84, 1u32.to_le_bytes().to_vec()));
-                created.push((table_id, 0x60022, Vec::new()));
-            }
-            let holder = self.id(*paragraph_id);
-            let is_new = previous.is_none();
-            self.write(|active| {
-                let raw = &active.live.revision;
-                let mut changed: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
-                for (id, jcid, values) in &created {
-                    let mut node = PropertyObject {
-                        jcid: *jcid,
-                        bytes: crate::create::properties(values)?,
-                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                    };
-                    node.reference(*id)?;
-                    changed.insert(*id, node);
-                }
-                let mut row_refs = Vec::new();
-                for (row_id, cells) in &rows {
-                    let mut row = match changed.remove(row_id) {
-                        Some(row) => row,
-                        None => PropertyObject::from_object(&raw.objects[row_id])?,
-                    };
-                    let mut cell_refs = Vec::new();
-                    for cell in cells {
-                        cell_refs.extend_from_slice(&row.reference(*cell)?);
-                    }
-                    row.set(&[(0x24001c20, &cell_refs), (0x14001d7a, &modified)])?;
-                    changed.insert(*row_id, row);
-                }
-                let mut table_object = match changed.remove(&table_id) {
-                    Some(object) => object,
-                    None => PropertyObject::from_object(&raw.objects[&table_id])?,
-                };
-                for (row_id, _) in &rows {
-                    row_refs.extend_from_slice(&table_object.reference(*row_id)?);
-                }
-                table_object.remove(&[0x1c001d7d, 0x08001d5e])?;
-                table_object.set(
-                    &table_values
-                        .iter()
-                        .map(|(id, bytes)| (*id, bytes.as_slice()))
-                        .collect::<Vec<_>>(),
-                )?;
-                table_object.set(&[(0x24001c20, &row_refs)])?;
-                changed.insert(table_id, table_object);
-                if is_new {
-                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                    let reference = object.reference(table_id)?;
-                    object.set(&[(0x24001c1f, &reference), (0x14001d7a, &modified)])?;
-                    changed.insert(holder, object);
-                }
-                Ok(changed)
-            })?;
+            let holder = previous.is_none().then(|| self.id(*paragraph_id));
+            self.write(|active| table::table_changes(active, table_id, holder, &structure))?;
         }
         Ok(())
     }
@@ -1804,11 +976,10 @@ impl<'a> Lowering<'a> {
             }
             let mut ancestor = old.container[id];
             let mut covered = false;
-            loop {
+            // A surviving ancestor is placed where the model says, carrying this paragraph along.
+            while !new.paragraphs.contains_key(&ancestor) {
                 if removed_outline(ancestor)
-                    || (old.paragraphs.contains_key(&ancestor)
-                        && !new.paragraphs.contains_key(&ancestor)
-                        && !consumed.contains(&ancestor))
+                    || (old.paragraphs.contains_key(&ancestor) && !consumed.contains(&ancestor))
                     || (old.children.contains_key(&ancestor)
                         && !old.paragraphs.contains_key(&ancestor)
                         && !old.outlines.contains_key(&ancestor)
@@ -1853,120 +1024,116 @@ impl<'a> Lowering<'a> {
         Ok(())
     }
 
-    /// Rewrites every equation paragraph whose stored text object differs from the model, the
-    /// way OneNote stores an equation: the linear text, one run per span with a style
-    /// carrying the span's format, the run-data array naming each run's inline object, and
-    /// the math language marker on the text object.
+    /// Rewrites every equation paragraph whose stored text object differs from the model.
     fn edit_equations(&mut self, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
-        let current = View::new(&current)?;
+        let current = View::new(&current, false)?;
         for (id, paragraph) in &new.paragraphs {
             let Some(text) = paragraph.text() else {
                 continue;
             };
-            if !Math::is_equation(&text.text) {
+            let stored = current.text(self.id(*id));
+            // Deleting an equation leaves no math in the model, but its stored runs are still math.
+            if !super::Math::is_equation(&text.text)
+                && !stored.is_some_and(|stored| super::Math::is_equation(&stored.text))
+            {
                 continue;
             }
-            let stored = current
-                .text(self.id(*id))
+            let stored = stored
                 .ok_or_else(|| invalid("An equation paragraph is missing after placement"))?;
             if stored.text == text.text {
                 continue;
             }
             let object = stored.id;
-            if text.text.text().contains('\u{fffc}') {
-                return Err(invalid("Equations cannot hold embedded objects"));
-            }
-            let encoded: Vec<u8> = text
-                .text
-                .text()
-                .encode_utf16()
-                .chain([0])
-                .flat_map(u16::to_le_bytes)
-                .collect();
-            let mut ends = Vec::new();
-            let mut styles: Vec<Values> = Vec::new();
-            let mut sets = Vec::new();
-            let all_math = text
-                .text
-                .spans()
+            self.write(|active| content::equation_changes(active, object, &text.text))?;
+        }
+        Ok(())
+    }
+
+    /// Lifts the paragraphs of outline groups into their container wherever this save changes
+    /// the container's children or their depths, for placement to see them; `edit_levels`
+    /// groups them again.
+    fn ungroup(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
+        for (container, children) in &old.children {
+            let Some(after) = new.children.get(container) else {
+                continue;
+            };
+            let grouped = self.active.view.nodes[container]
+                .children
                 .iter()
-                .all(|s| s.format.math == Some(true));
-            for span in text.text.spans() {
-                ends.extend(text.text.utf16_offset(span.end)?.to_le_bytes());
-                styles.push(style_values(&span.format));
-                sets.push(match &span.format.math_object {
-                    Some(object) => {
-                        let mut set = vec![(0x1400344f, object.kind.to_le_bytes().to_vec())];
-                        if let Some(count) = object.arguments {
-                            set.push((0x14003450, count.to_le_bytes().to_vec()));
-                        }
-                        if let Some(columns) = object.columns {
-                            set.push((0x0c003451, vec![columns]));
-                        }
-                        for (id, symbol) in [0x10003453, 0x10003454, 0x10003455]
-                            .into_iter()
-                            .zip(&object.symbols)
-                        {
-                            let unit = u16::try_from(u32::from(*symbol))
-                                .map_err(|_| invalid("Math symbols are single UTF-16 units"))?;
-                            set.push((id, unit.to_le_bytes().to_vec()));
-                        }
-                        set
-                    }
-                    None => Vec::new(),
-                });
+                .any(|id| matches!(self.active.view.nodes[id].kind, Kind::OutlineGroup));
+            if !grouped
+                || (after == children
+                    && old.depths(*container, children) == new.depths(*container, after))
+            {
+                continue;
             }
-            ends.truncate(ends.len() - 4);
-            let has_objects = sets.iter().any(|set| !set.is_empty());
-            let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+            let object = *container;
+            self.write(|active| levels::ungroup_changes(active, object))?;
+        }
+        Ok(())
+    }
+
+    /// Indents each container's children to the depths the model gives them.
+    fn edit_levels(&mut self, new: &View<'_>) -> Result<(), Error> {
+        let current = self.current()?;
+        let stored = View::new(&current, false)?;
+        for (container, children) in &new.children {
+            let depths = new
+                .depths(*container, children)
+                .ok_or_else(|| invalid("A paragraph lies no deeper than its parent"))?;
+            let object = self.id(*container);
+            let written: Vec<ExGuid> = children.iter().map(|id| self.id(*id)).collect();
+            if children.is_empty() || stored.depths(object, &written) == Some(depths.clone()) {
+                continue;
+            }
+            let is_cell =
+                !new.paragraphs.contains_key(container) && !new.outlines.contains_key(container);
+            let (level, runs) = levels::runs(&written, &depths, is_cell)?;
+            self.write(|active| levels::regroup_changes(active, object, level, &runs))?;
+        }
+        Ok(())
+    }
+
+    /// Gives a paragraph the text object its model names when a split and a join in one save
+    /// moved text between paragraphs: a stored object is taken over, as OneNote moves a lower
+    /// paragraph's text into an emptied upper one; a new one starts as a copy of the text
+    /// the paragraph holds.
+    fn edit_text_identities(&mut self, new: &View<'_>) -> Result<(), Error> {
+        for (id, paragraph) in &new.paragraphs {
+            let Some(text) = paragraph.text() else {
+                continue;
+            };
+            let object = self.id(*id);
+            let stored = self.active.view.nodes[&object].content[0];
+            if stored == self.id(text.id) {
+                continue;
+            }
+            let target = if self.active.live.revision.objects.contains_key(&text.id) {
+                text.id
+            } else {
+                self.allocate(text.id)?
+            };
+            let unstyled = paragraph.style.is_none();
             self.write(|active| {
+                let parents = active.editable_parents(object)?;
+                let modified = crate::create::current_timestamps()?.0.to_le_bytes();
                 let raw = &active.live.revision;
                 let mut changed = BTreeMap::new();
-                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                let mut references = Vec::new();
-                let mut created: Vec<(Values, ExGuid)> = Vec::new();
-                for values in &styles {
-                    let id = match created.iter().find(|(known, _)| known == values) {
-                        Some((_, id)) => *id,
-                        None => {
-                            let id = ExGuid {
-                                guid: crate::write::fresh_guid()?,
-                                n: 1,
-                            };
-                            let mut style = PropertyObject {
-                                jcid: 0x12004d,
-                                bytes: crate::create::properties(values)?,
-                                global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                            };
-                            style.reference(id)?;
-                            changed.insert(id, style);
-                            created.push((values.clone(), id));
-                            id
-                        }
-                    };
-                    references.extend(target.reference(id)?);
+                if !raw.objects.contains_key(&target) {
+                    let mut copy = PropertyObject::from_object(&raw.objects[&stored])?;
+                    copy.remove(&[0x1c001c98, 0x14001c99])?;
+                    if unstyled {
+                        copy.remove(&[0x2000342c])?;
+                    }
+                    copy.reference(target)?;
+                    changed.insert(target, copy);
                 }
-                target.remove(&[0x1c003498, 0x40003499])?;
-                target.set(&[
-                    (0x1c001c22, &encoded),
-                    (0x1c001e12, &ends),
-                    (0x24001e13, &references),
-                    (0x14001d7a, &modified),
-                ])?;
-                if has_objects {
-                    target.set_sets(0x40003499, 0x44000811, &sets)?;
-                }
-                if all_math {
-                    // The flags and language marker OneNote's equation editor leaves on
-                    // every equation text object.
-                    target.set(&[
-                        (0x10001cfe, &0x7f_u16.to_le_bytes()),
-                        (0x14001c3e, &1u32.to_le_bytes()),
-                        (0x14001c84, &1u32.to_le_bytes()),
-                    ])?;
-                }
-                changed.insert(object, target);
+                let mut holder = PropertyObject::from_object(&raw.objects[&object])?;
+                let reference = holder.reference(target)?;
+                holder.set(&[(0x24001c1f, &reference), (0x14001d7a, &modified)])?;
+                changed.insert(object, holder);
+                crate::formatting::touch_ancestors(raw, parents, object, &modified, &mut changed)?;
                 Ok(changed)
             })?;
         }
@@ -1975,7 +1142,7 @@ impl<'a> Lowering<'a> {
 
     fn edit_text(&mut self, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
-        let current = View::new(&current)?;
+        let current = View::new(&current, false)?;
         for (id, paragraph) in &new.paragraphs {
             let Some(text) = paragraph.text() else {
                 continue;
@@ -2003,7 +1170,7 @@ impl<'a> Lowering<'a> {
     /// nodes belong to one paragraph, and a dropped reference leaves the node unreferenced.
     fn edit_lists(&mut self, after: &Page, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
-        let stored = View::new(&current)?;
+        let stored = View::new(&current, false)?;
         let mut owners: BTreeMap<ExGuid, ExGuid> = BTreeMap::new();
         for (id, paragraph) in &stored.paragraphs {
             for list in &paragraph.lists {
@@ -2022,7 +1189,8 @@ impl<'a> Lowering<'a> {
                     .iter()
                     .zip(&previous.lists)
                     .all(|(model, node)| {
-                        after.definitions.get(model) == current.definitions.get(node)
+                        self.id(*model) == *node
+                            && after.definitions.get(model) == current.definitions.get(node)
                     });
             if same {
                 continue;
@@ -2032,12 +1200,14 @@ impl<'a> Lowering<'a> {
                 // Writer-allocated identities keep a nonzero sequence number so the node's
                 // compact identity is never the null identity; squash renames them to the
                 // model's. A copy for a second owner keeps its allocated identity.
-                let node_id = match owners.get(list) {
-                    Some(owner) if *owner == image_id => *list,
+                let node_id = match owners.get(&self.id(*list)) {
+                    Some(owner) if *owner == image_id => self.id(*list),
                     Some(_) => ExGuid {
                         guid: crate::write::fresh_guid()?,
                         n: 1,
                     },
+                    // A node its paragraph let go of in this save serves the model again.
+                    None if self.active.live.revision.objects.contains_key(list) => *list,
                     None => {
                         let written = ExGuid {
                             guid: crate::write::fresh_guid()?,
@@ -2051,113 +1221,10 @@ impl<'a> Lowering<'a> {
                     .definitions
                     .get(list)
                     .ok_or_else(|| invalid("A paragraph references a missing list definition"))?;
-                let Kind::List {
-                    font,
-                    format,
-                    restart,
-                    bullet,
-                } = &definition.kind
-                else {
-                    return Err(invalid("A paragraph list must reference a list definition"));
-                };
-                if bullet.is_some() && (format.is_none() || font.is_none()) {
-                    return Err(invalid("A bullet definition names its glyph and font"));
-                }
-                let mut values: Values = Vec::new();
-                if let Some(format) = format {
-                    let units: Vec<u16> = format.encode_utf16().collect();
-                    let count = u16::try_from(units.len())
-                        .map_err(|_| invalid("List format exceeds the document range"))?;
-                    let mut bytes = count.to_le_bytes().to_vec();
-                    bytes.extend(units.iter().flat_map(|unit| unit.to_le_bytes()));
-                    values.push((0x1c001c1a, bytes));
-                }
-                if let Some(font) = font {
-                    values.push((0x1c001c52, crate::create::string(font)));
-                }
-                if let Some(restart) = restart {
-                    values.push((0x14001cb7, restart.to_le_bytes().to_vec()));
-                }
-                if let Some(bullet) = bullet {
-                    values.push((0x10001d0e, bullet.to_le_bytes().to_vec()));
-                    // Every native bullet node carries this cleared flag alongside its index.
-                    values.push((0x0c001cc0, vec![0]));
-                }
-                let style = &definition.format;
-                if let Some(font) = &style.font {
-                    values.push((0x1c001c0a, crate::create::string(font)));
-                }
-                if let Some(size) = style.font_size {
-                    let half = (size * 2.0).round();
-                    if !(0.0..=f32::from(u16::MAX)).contains(&half) {
-                        return Err(invalid("List font size is outside the document range"));
-                    }
-                    values.push((0x10001c0b, (half as u16).to_le_bytes().to_vec()));
-                }
-                if let Some(color) = style.color {
-                    values.push((0x14001c0c, color.to_le_bytes().to_vec()));
-                }
-                if let Some(language) = style.language {
-                    values.push((0x14001c3b, language.to_le_bytes().to_vec()));
-                }
-                for (flag, id) in [(style.bold, 0x08001c04), (style.italic, 0x08001c05)] {
-                    if let Some(flag) = flag {
-                        values.push((id | (u32::from(flag) << 31), Vec::new()));
-                    }
-                }
-                nodes.push((node_id, values));
+                nodes.push((node_id, properties::list_values(definition)?));
             }
             let object = self.id(*id);
-            self.write(|active| {
-                let parents = active.editable_parents(object)?;
-                let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-                let raw = &active.live.revision;
-                let mut changed = BTreeMap::new();
-                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                let mut references = Vec::new();
-                for (list, values) in &nodes {
-                    let mut node = match raw.objects.get(list) {
-                        Some(existing) => {
-                            if existing.jcid != 0x60012 {
-                                return Err(invalid(
-                                    "A list definition identity belongs to another object",
-                                ));
-                            }
-                            let mut node = PropertyObject::from_object(existing)?;
-                            node.remove(&[
-                                0x1c001c1a, 0x1c001c52, 0x14001cb7, 0x10001d0e, 0x0c001cc0,
-                                0x1c001c0a, 0x10001c0b, 0x14001c0c, 0x14001c3b, 0x08001c04,
-                                0x08001c05,
-                            ])?;
-                            node
-                        }
-                        None => PropertyObject {
-                            jcid: 0x60012,
-                            bytes: crate::create::properties(&[])?,
-                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, list.guid)])),
-                        },
-                    };
-                    node.set(
-                        &values
-                            .iter()
-                            .map(|(id, bytes)| (*id, bytes.as_slice()))
-                            .collect::<Vec<_>>(),
-                    )?;
-                    node.set(&[(0x14001d7a, &modified)])?;
-                    node.reference(*list)?;
-                    references.extend_from_slice(&target.reference(*list)?);
-                    changed.insert(*list, node);
-                }
-                if references.is_empty() {
-                    target.remove(&[0x24001c26])?;
-                } else {
-                    target.set(&[(0x24001c26, &references)])?;
-                }
-                target.set(&[(0x14001d7a, &modified)])?;
-                changed.insert(object, target);
-                crate::formatting::touch_ancestors(raw, parents, object, &modified, &mut changed)?;
-                Ok(changed)
-            })?;
+            self.write(|active| properties::list_changes(active, object, &nodes))?;
         }
         Ok(())
     }
@@ -2166,23 +1233,8 @@ impl<'a> Lowering<'a> {
     /// the stored ones. A tag definition new to the section becomes a definition object
     /// carrying the model's identity after squash.
     fn edit_tags(&mut self, after: &Page, new: &View<'_>) -> Result<(), Error> {
-        fn same(a: &[Tag], b: &[Tag]) -> bool {
-            let key = |t: &Tag| {
-                (
-                    t.definition,
-                    t.action_type,
-                    t.status,
-                    t.created,
-                    t.completed,
-                    t.start,
-                    t.due,
-                    t.task_id,
-                )
-            };
-            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| key(x) == key(y))
-        }
         let current = self.current()?;
-        let stored = View::new(&current)?;
+        let stored = View::new(&current, false)?;
         for (id, paragraph) in &new.paragraphs {
             let image_id = self.id(*id);
             let previous = stored
@@ -2194,28 +1246,15 @@ impl<'a> Lowering<'a> {
                 targets.push((self.id(text.id), &text.tags, &before.tags));
             }
             for (object, tags, stored_tags) in targets {
-                if same(tags, stored_tags) {
+                if crate::op::lower::same_tags(tags, stored_tags) {
                     continue;
                 }
-                let mut definitions: Vec<(ExGuid, Option<Values>)> = Vec::new();
-                let mut sets: Vec<(usize, Values)> = Vec::new();
-                let mut action_types = BTreeSet::new();
+                let mut entries = Vec::new();
                 for tag in tags {
                     let definition = tag
                         .definition
                         .ok_or_else(|| invalid("A note tag names its definition"))?;
-                    let action_type = if tag.status & 4 != 0 {
-                        tag.action_type
-                    } else {
-                        match after.definitions.get(&definition).map(|d| &d.kind) {
-                            Some(Kind::TagDefinition { action_type, .. }) => *action_type,
-                            _ => return Err(invalid("A note tag must reference a tag definition")),
-                        }
-                    };
-                    if !action_types.insert(action_type.unwrap_or(0)) {
-                        return Err(invalid("An element holds one note tag per action type"));
-                    }
-                    let known = current.definitions.contains_key(&definition)
+                    let known = self.active.live.revision.objects.contains_key(&definition)
                         || self.alias.contains_key(&definition);
                     let written = if known {
                         self.id(definition)
@@ -2227,107 +1266,9 @@ impl<'a> Lowering<'a> {
                         self.alias.insert(definition, allocated);
                         allocated
                     };
-                    let index = match definitions.iter().position(|(id, _)| *id == written) {
-                        Some(index) => index,
-                        None => {
-                            let values = if known {
-                                None
-                            } else {
-                                let Some(model) = after.definitions.get(&definition) else {
-                                    return Err(invalid(
-                                        "A note tag references a missing tag definition",
-                                    ));
-                                };
-                                let Kind::TagDefinition {
-                                    label,
-                                    action_type,
-                                    shape,
-                                    color,
-                                    highlight,
-                                } = &model.kind
-                                else {
-                                    return Err(invalid(
-                                        "A note tag must reference a tag definition",
-                                    ));
-                                };
-                                let mut values: Values = vec![
-                                    (0x0c003473, vec![0]),
-                                    (0x10003463, action_type.unwrap_or(0).to_le_bytes().to_vec()),
-                                    (0x10003464, shape.unwrap_or(0).to_le_bytes().to_vec()),
-                                    (0x14003467, 0u32.to_le_bytes().to_vec()),
-                                ];
-                                if let Some(label) = label {
-                                    values.push((0x1c003468, crate::create::string(label)));
-                                }
-                                if let Some(color) = color {
-                                    values.push((0x14003466, color.to_le_bytes().to_vec()));
-                                }
-                                if let Some(highlight) = highlight {
-                                    values.push((0x14003465, highlight.to_le_bytes().to_vec()));
-                                }
-                                Some(values)
-                            };
-                            definitions.push((written, values));
-                            definitions.len() - 1
-                        }
-                    };
-                    let mut fields: Values = Vec::new();
-                    if let Some(action_type) = tag.action_type {
-                        fields.push((0x10003463, action_type.to_le_bytes().to_vec()));
-                    }
-                    for (id, value) in [
-                        (0x1400346e, tag.created),
-                        (0x1400346f, tag.completed),
-                        (0x1400346a, tag.start),
-                        (0x1400346b, tag.due),
-                    ] {
-                        if let Some(value) = value {
-                            fields.push((id, value.to_le_bytes().to_vec()));
-                        }
-                    }
-                    fields.push((0x10003470, tag.status.to_le_bytes().to_vec()));
-                    if let Some(task) = tag.task_id {
-                        fields.push((0x1c003469, task.to_vec()));
-                    }
-                    sets.push((index, fields));
+                    entries.push((written, tag, after.definitions.get(&definition)));
                 }
-                self.write(|active| {
-                    let parents = active.editable_parents(object)?;
-                    let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-                    let raw = &active.live.revision;
-                    let mut changed = BTreeMap::new();
-                    for (id, values) in &definitions {
-                        let Some(values) = values else {
-                            continue;
-                        };
-                        let mut node = PropertyObject {
-                            jcid: 0x120043,
-                            bytes: crate::create::properties(values)?,
-                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                        };
-                        node.reference(*id)?;
-                        changed.insert(*id, node);
-                    }
-                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                    let mut encoded = Vec::new();
-                    for (index, fields) in &sets {
-                        let reference = target.reference(definitions[*index].0)?;
-                        let mut set = vec![(0x20003488, reference.to_vec())];
-                        set.extend(fields.iter().cloned());
-                        encoded.push(set);
-                    }
-                    target.set_sets(0x40003489, 0x44000811, &encoded)?;
-                    target.set(&[(0x14001d7a, &modified)])?;
-                    changed.insert(object, target);
-                    crate::formatting::touch_ancestors(
-                        raw,
-                        parents,
-                        object,
-                        &modified,
-                        &mut changed,
-                    )?;
-                    Ok(changed)
-                })?;
+                self.write(|active| properties::tag_changes(active, object, &entries))?;
             }
         }
         Ok(())
@@ -2342,7 +1283,6 @@ impl<'a> Lowering<'a> {
         new: &View<'_>,
         after: &Page,
     ) -> Result<(), Error> {
-        let current = self.current()?;
         for (id, paragraph) in &new.paragraphs {
             let Some(definition) = paragraph.style else {
                 continue;
@@ -2357,7 +1297,7 @@ impl<'a> Lowering<'a> {
             let Some(text) = paragraph.text() else {
                 return Err(invalid("Only text paragraphs take a paragraph style"));
             };
-            let known = current.definitions.contains_key(&definition)
+            let known = self.active.live.revision.objects.contains_key(&definition)
                 || self.alias.contains_key(&definition);
             let style_id = if known {
                 self.id(definition)
@@ -2369,59 +1309,16 @@ impl<'a> Lowering<'a> {
                 self.alias.insert(definition, allocated);
                 allocated
             };
-            let values = if known {
-                None
-            } else {
-                let Some(model) = after.definitions.get(&definition) else {
-                    return Err(invalid("A paragraph references a missing style definition"));
-                };
-                let Kind::Style { name } = &model.kind else {
-                    return Err(invalid("A paragraph style must be a style definition"));
-                };
-                let mut values = style_values(&model.format);
-                if let Some(name) = name {
-                    values.push((0x1c00345a, crate::create::string(name)));
-                }
-                if let Some(alignment) = model.format.alignment {
-                    values.push((0x0c003477, vec![alignment]));
-                }
-                for (property, value) in [
-                    (0x1400342e, model.format.space_before),
-                    (0x1400342f, model.format.space_after),
-                    (0x14003430, model.format.line_spacing),
-                ] {
-                    if let Some(points) = value {
-                        values.push((property, (points / 36.0).to_le_bytes().to_vec()));
-                    }
-                }
-                Some(values)
-            };
             let object = self.id(text.id);
-            self.write(|active| {
-                let raw = &active.live.revision;
-                let mut changed = BTreeMap::new();
-                if let Some(values) = &values {
-                    let mut node = PropertyObject {
-                        jcid: 0x12004d,
-                        bytes: crate::create::properties(values)?,
-                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, style_id.guid)])),
-                    };
-                    node.reference(style_id)?;
-                    changed.insert(style_id, node);
-                }
-                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                let reference = target.reference(style_id)?;
-                target.set(&[(0x2000342c, &reference)])?;
-                changed.insert(object, target);
-                Ok(changed)
-            })?;
+            let definition = after.definitions.get(&definition);
+            self.write(|active| properties::style_changes(active, object, style_id, definition))?;
         }
         Ok(())
     }
 
     fn edit_paragraph_formatting(&mut self, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
-        let current = View::new(&current)?;
+        let current = View::new(&current, false)?;
         for (id, paragraph) in &new.paragraphs {
             let Some(text) = paragraph.text() else {
                 continue;
@@ -2429,51 +1326,7 @@ impl<'a> Lowering<'a> {
             let stored = current
                 .text(self.id(*id))
                 .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
-            let mut values: Vec<(u32, Vec<u8>)> = Vec::new();
-            macro_rules! field {
-                ($field:ident, $value:ident, $encode:block) => {
-                    let $value = format_in(&text.text, 0)?.$field.unwrap_or_default();
-                    if text
-                        .text
-                        .spans()
-                        .iter()
-                        .all(|span| span.format.$field.unwrap_or_default() == $value)
-                        && stored
-                            .text
-                            .spans()
-                            .iter()
-                            .any(|span| span.format.$field.unwrap_or_default() != $value)
-                    {
-                        values.push($encode);
-                    }
-                };
-            }
-            field!(alignment, value, {
-                if value > 2 {
-                    return Err(invalid("Paragraph alignment must be left, center or right"));
-                }
-                (0x0c003477, vec![value])
-            });
-            field!(rtl, value, {
-                (0x08003476 | (u32::from(value) << 31), Vec::new())
-            });
-            macro_rules! spacing {
-                ($field:ident, $property:expr) => {
-                    field!($field, value, {
-                        let stored = value / 36.0;
-                        if !stored.is_finite() || !(0.0..=27777.777).contains(&stored) {
-                            return Err(invalid("Paragraph spacing is outside the document range"));
-                        }
-                        ($property, stored.to_le_bytes().to_vec())
-                    });
-                };
-            }
-            spacing!(space_before, 0x1400342e);
-            spacing!(space_after, 0x1400342f);
-            spacing!(line_spacing, 0x14003430);
-            field!(language, value, {
-                (0x14001c3b, value.to_le_bytes().to_vec())
-            });
+            let values = crate::op::lower::paragraph_change(&stored.text, &text.text)?;
             if values.is_empty() {
                 continue;
             }
@@ -2483,48 +1336,14 @@ impl<'a> Lowering<'a> {
                 ));
             }
             let object = stored.id;
-            self.write(|active| {
-                let parents = active.editable_parents(object)?;
-                let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-                let raw = &active.live.revision;
-                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                target.set(
-                    &values
-                        .iter()
-                        .map(|(id, bytes)| (*id, bytes.as_slice()))
-                        .collect::<Vec<_>>(),
-                )?;
-                if let Some((_, alignment)) = values.iter().find(|(id, _)| *id == 0x0c003477) {
-                    for property in [0x14001c3e, 0x14001c84] {
-                        let fields = PropertySets::parse(&target.bytes)?;
-                        let previous = fields.sets[0]
-                            .iter()
-                            .find(|field| field.id == property)
-                            .map(|field| match field.value {
-                                Value::Bytes(bytes) => bytes
-                                    .try_into()
-                                    .map(u32::from_le_bytes)
-                                    .map_err(|_| invalid("Invalid paragraph layout alignment")),
-                                _ => Err(invalid("Invalid paragraph layout alignment")),
-                            })
-                            .transpose()?
-                            .unwrap_or(0);
-                        let value = (previous & !7) | (u32::from(alignment[0]) + 1);
-                        target.set(&[(property, &value.to_le_bytes())])?;
-                    }
-                }
-                target.set(&[(0x14001d7a, &modified)])?;
-                let mut changed = BTreeMap::from([(object, target)]);
-                crate::formatting::touch_ancestors(raw, parents, object, &modified, &mut changed)?;
-                Ok(changed)
-            })?;
+            self.write(|active| properties::paragraph_format_changes(active, object, &values))?;
         }
         Ok(())
     }
 
     fn edit_formatting(&mut self, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
-        let current = View::new(&current)?;
+        let current = View::new(&current, false)?;
         for (id, paragraph) in &new.paragraphs {
             let Some(text) = paragraph.text() else {
                 continue;
@@ -2536,56 +1355,10 @@ impl<'a> Lowering<'a> {
                 return Err(invalid("Text edits did not converge on the model"));
             }
             let fresh = self.alias.contains_key(&text.id);
-            let mut boundaries = BTreeSet::new();
-            for paragraph in [&stored.text, &text.text] {
-                for span in paragraph.spans() {
-                    boundaries.insert(paragraph.utf16_offset(span.end)?);
-                }
-            }
-            boundaries.insert(0);
-            let boundaries: Vec<u32> = boundaries.into_iter().collect();
-            let mut pending: Option<(Range<u32>, Vec<TextAttribute>)> = None;
-            let mut edits = Vec::new();
-            for window in boundaries.windows(2) {
-                let (start, end) = (window[0], window[1]);
-                if start == end {
-                    continue;
-                }
-                let attributes = attributes(
-                    format_in(&stored.text, start)?,
-                    format_in(&text.text, start)?,
-                    fresh,
-                )?;
-                match &mut pending {
-                    Some((range, previous)) if *previous == attributes && range.end == start => {
-                        range.end = end;
-                    }
-                    _ => {
-                        if let Some(edit) = pending.take() {
-                            edits.push(edit);
-                        }
-                        pending = Some((start..end, attributes));
-                    }
-                }
-            }
-            edits.extend(pending);
-            if text.text.text().is_empty() {
-                let attributes = attributes(
-                    format_in(&stored.text, 0)?,
-                    format_in(&text.text, 0)?,
-                    fresh,
-                )?;
-                if !attributes.is_empty() {
-                    edits.push((0..0, attributes));
-                }
-            }
-            for (range, attributes) in edits {
-                if attributes.is_empty() {
-                    continue;
-                }
+            for (range, set, clear) in crate::op::lower::format_edits(&stored.text, &text.text, fresh)? {
                 let object = stored.id;
                 self.write(|active| {
-                    crate::formatting::format_changes(active, object, range, &attributes)
+                    crate::formatting::format_changes(active, object, range, &set, &clear)
                 })?;
             }
         }
@@ -2594,7 +1367,7 @@ impl<'a> Lowering<'a> {
 
     fn edit_layout(&mut self, old: &View<'_>, new: &View<'_>) -> Result<(), Error> {
         let current = self.current()?;
-        let current = View::new(&current)?;
+        let current = View::new(&current, false)?;
         for (id, paragraph) in &new.paragraphs {
             let stored = current
                 .paragraphs
@@ -2621,7 +1394,7 @@ impl<'a> Lowering<'a> {
                 && !outline.indents.is_empty()
                 && outline.indents != stored.indents
             {
-                let indents = measurement_bytes(&outline.indents, 4)?;
+                let indents = content::measurement_bytes(&outline.indents, 4)?;
                 self.write(|active| {
                     let raw = &active.live.revision;
                     let mut node = PropertyObject::from_object(&raw.objects[&object])?;
@@ -2652,217 +1425,6 @@ impl<'a> Lowering<'a> {
         }
         Ok(())
     }
-}
-
-fn collect_containers(list: &[PageParagraph], out: &mut Vec<ExGuid>) {
-    for paragraph in list {
-        out.push(paragraph.id);
-        if let ParagraphContent::Table(table) = &paragraph.content {
-            for row in &table.rows {
-                for cell in &row.cells {
-                    out.push(cell.id);
-                    collect_containers(&cell.paragraphs, out);
-                }
-            }
-        }
-    }
-}
-
-/// Identities that keep their stored position: a longest increasing run of survivors,
-/// always including immovable ones. `after` may contain identities absent from `before`.
-fn kept_set(
-    before: &[ExGuid],
-    after: &[ExGuid],
-    movable: impl Fn(ExGuid) -> bool,
-) -> Result<BTreeSet<ExGuid>, Error> {
-    let position: BTreeMap<ExGuid, usize> =
-        after.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-    let sequence: Vec<(ExGuid, usize)> = before
-        .iter()
-        .filter_map(|id| position.get(id).map(|at| (*id, *at)))
-        .collect();
-    let fixed: Vec<usize> = sequence
-        .iter()
-        .filter(|(id, _)| !movable(*id))
-        .map(|(_, at)| *at)
-        .collect();
-    if fixed.windows(2).any(|w| w[0] > w[1]) {
-        return Err(invalid(
-            "Images and unsupported objects cannot be reordered",
-        ));
-    }
-    if sequence.windows(2).all(|pair| pair[0].1 < pair[1].1) {
-        return Ok(sequence.into_iter().map(|(id, _)| id).collect());
-    }
-    // Longest increasing subsequence over `after` positions, forced through immovable items.
-    let n = sequence.len();
-    let mut best = vec![1usize; n];
-    let mut previous = vec![usize::MAX; n];
-    for i in 0..n {
-        let (id, at) = sequence[i];
-        let mandatory_before = sequence[..i]
-            .iter()
-            .filter(|(other, _)| !movable(*other))
-            .map(|(_, at)| *at)
-            .max();
-        if movable(id) && mandatory_before.is_some_and(|m| m > at) {
-            best[i] = 0;
-            continue;
-        }
-        let mandatory_after = sequence[i + 1..]
-            .iter()
-            .filter(|(other, _)| !movable(*other))
-            .map(|(_, at)| *at)
-            .min();
-        if movable(id) && mandatory_after.is_some_and(|m| m < at) {
-            best[i] = 0;
-            continue;
-        }
-        for j in 0..i {
-            if best[j] > 0 && sequence[j].1 < at && best[j] + 1 > best[i] {
-                best[i] = best[j] + 1;
-                previous[i] = j;
-            }
-        }
-    }
-    let mut kept = BTreeSet::new();
-    if let Some((mut i, _)) = best
-        .iter()
-        .enumerate()
-        .max_by_key(|(i, b)| (**b, usize::MAX - i))
-        && best[i] > 0
-    {
-        loop {
-            kept.insert(sequence[i].0);
-            if previous[i] == usize::MAX {
-                break;
-            }
-            i = previous[i];
-        }
-    }
-    for (id, _) in &sequence {
-        if !movable(*id) && !kept.contains(id) {
-            return Err(invalid(
-                "Images and unsupported objects cannot be reordered",
-            ));
-        }
-    }
-    Ok(kept)
-}
-
-/// The format of the span containing the UTF-16 position `at` (the last span at the end).
-fn format_in(paragraph: &super::Paragraph, at: u32) -> Result<&Format, Error> {
-    let byte = paragraph.byte_offset(at)?;
-    let spans = paragraph.spans();
-    let index = spans
-        .partition_point(|span| span.end <= byte)
-        .min(spans.len() - 1);
-    Ok(&spans[index].format)
-}
-
-/// The smallest UTF-16 range whose replacement turns `before` into `after`.
-fn text_edit(before: &str, after: &str) -> Result<(Range<u32>, String), Error> {
-    let prefix = before
-        .char_indices()
-        .zip(after.chars())
-        .take_while(|((_, a), b)| a == b)
-        .map(|((i, a), _)| i + a.len_utf8())
-        .last()
-        .unwrap_or(0);
-    let suffix = before[prefix..]
-        .chars()
-        .rev()
-        .zip(after[prefix..].chars().rev())
-        .take_while(|(a, b)| a == b)
-        .map(|(a, _)| a.len_utf8())
-        .sum::<usize>();
-    let units = |s: &str| -> Result<u32, Error> {
-        u32::try_from(s.encode_utf16().count())
-            .map_err(|_| invalid("Text exceeds UTF-16 offset range"))
-    };
-    let start = units(&before[..prefix])?;
-    let end = start + units(&before[prefix..before.len() - suffix])?;
-    Ok((start..end, after[prefix..after.len() - suffix].to_owned()))
-}
-
-/// Explicit attributes turning `current` into `target`; unsupported differences are errors.
-/// A `fresh` text object was inserted by this edit, so an unspecified target value keeps
-/// the insertion's default instead of demanding an inherited value the image cannot restore.
-/// Language tags are retained as stored because the model has no way to author them.
-fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<TextAttribute>, Error> {
-    let mut out = Vec::new();
-    let inherited = || invalid("Inherited character formatting cannot be restored");
-    // An absent flag and an explicit false are the same formatting.
-    macro_rules! boolean {
-        ($field:ident, $variant:ident) => {
-            if current.$field.unwrap_or(false) != target.$field.unwrap_or(false) {
-                out.push(TextAttribute::$variant(target.$field.unwrap_or(false)));
-            }
-        };
-    }
-    boolean!(bold, Bold);
-    boolean!(italic, Italic);
-    boolean!(underline, Underline);
-    boolean!(strike, Strike);
-    boolean!(superscript, Superscript);
-    boolean!(subscript, Subscript);
-    boolean!(hidden, Hidden);
-    boolean!(hyperlink, Hyperlink);
-    boolean!(hyperlink_label, HyperlinkLabel);
-    if current.font != target.font {
-        match &target.font {
-            Some(font) => out.push(TextAttribute::Font(font.clone())),
-            None if fresh => {}
-            None => return Err(inherited()),
-        }
-    }
-    if current.font_size != target.font_size {
-        match target.font_size {
-            Some(size) => out.push(TextAttribute::FontSize(size)),
-            None if fresh => {}
-            None => return Err(inherited()),
-        }
-    }
-    let color =
-        |value: u32| (value != 0xff000000).then(|| value.to_le_bytes()[..3].try_into().unwrap());
-    if current.color != target.color {
-        match target.color {
-            Some(value) => out.push(TextAttribute::Color(color(value))),
-            None if fresh => {}
-            None => return Err(inherited()),
-        }
-    }
-    if current.highlight != target.highlight {
-        match target.highlight {
-            Some(value) => out.push(TextAttribute::Highlight(color(value))),
-            None if fresh => {}
-            None => return Err(inherited()),
-        }
-    }
-    if current.language != target.language {
-        match target.language {
-            Some(language) => out.push(TextAttribute::Language(language)),
-            None if fresh => {}
-            None => return Err(inherited()),
-        }
-    }
-    // An absent value and its stored default are the same formatting.
-    let flag = |a: Option<bool>, b: Option<bool>| a.unwrap_or(false) == b.unwrap_or(false);
-    let points = |a: Option<f32>, b: Option<f32>| a.unwrap_or(0.0) == b.unwrap_or(0.0);
-    let same_rest = flag(current.math, target.math)
-        && flag(current.embedded_object, target.embedded_object)
-        && current.alignment.unwrap_or(0) == target.alignment.unwrap_or(0)
-        && flag(current.rtl, target.rtl)
-        && points(current.space_before, target.space_before)
-        && points(current.space_after, target.space_after)
-        && points(current.line_spacing, target.line_spacing)
-        && points(current.list_spacing, target.list_spacing);
-    if !same_rest {
-        return Err(invalid(
-            "Fields and paragraph spacing cannot be edited through the page model",
-        ));
-    }
-    Ok(out)
 }
 
 /// Payload identities the file-data store of `store` declares, in order.
@@ -3002,7 +1564,10 @@ fn remap(object: &mut PropertyObject, rename: &BTreeMap<ExGuid, ExGuid>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::{PageParagraph, Paragraph, TextObject, text::new_id};
+    use crate::{
+        document::Format,
+        page::{PageParagraph, Paragraph, TextObject, text::new_id},
+    };
 
     /// A new page in a new section and the page with `count` paragraphs added in an outline.
     fn generated(count: usize) -> (Vec<u8>, ExGuid, Page) {

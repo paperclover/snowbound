@@ -1,5 +1,6 @@
 use crate::{
     Chunk, Error, ExGuid, FileType, PropertySets, Reference, RevisionIndex, Store,
+    op::content::{NATIVE_INDENTS, measurement_bytes},
     store::crc,
     write::{append, append_list, fresh_guid, node},
 };
@@ -22,6 +23,20 @@ pub(crate) fn default_text_style() -> Vec<(u32, Vec<u8>)> {
         (0x1c001c0a, string("Calibri")),
         (0x10001c0b, 22_u16.to_le_bytes().to_vec()),
     ]
+}
+
+/// The page margins MS-ONE requires on every page, in half inches, as OneNote 2010 sets them
+/// on the pages it creates.
+pub(crate) fn page_margins() -> Vec<(u32, Vec<u8>)> {
+    [
+        (0x14001c4c, 1.0_f32),
+        (0x14001c4d, 1.0),
+        (0x14001c4e, 2.0),
+        (0x14001c4f, 2.0),
+    ]
+    .into_iter()
+    .map(|(id, value)| (id, value.to_le_bytes().to_vec()))
+    .collect()
 }
 
 pub(crate) fn properties(values: &[(u32, Vec<u8>)]) -> Result<Vec<u8>> {
@@ -110,14 +125,38 @@ pub(crate) fn placement(ancestor: [u8; 16], name: &str) -> [u8; 20] {
     bytes
 }
 
+thread_local! {
+    /// The FILETIME `at` gives writers in place of the system clock.
+    static CLOCK: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` with the writers' clock reading `filetime`, as an op's modification time.
+pub(crate) fn at<T>(filetime: u64, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CLOCK.set(self.0);
+        }
+    }
+    let _restore = Restore(CLOCK.replace(Some(filetime)));
+    f()
+}
+
+/// Seconds since 1980 as OneNote's Time32, and FILETIME, of the writers' clock.
 pub(crate) fn current_timestamps() -> Result<(u32, u64)> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| Error {
+    let now = match CLOCK.get() {
+        Some(filetime) => (filetime / 10_000_000).checked_sub(11644473600).ok_or(Error {
             offset: 0,
-            message: "System time precedes the Unix epoch",
-        })?
-        .as_secs();
+            message: "An edit time precedes the Unix epoch",
+        })?,
+        None => SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error {
+                offset: 0,
+                message: "System time precedes the Unix epoch",
+            })?
+            .as_secs(),
+    };
     let modified = now
         .checked_sub(315532800)
         .and_then(|time| u32::try_from(time).ok())
@@ -205,12 +244,16 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
                 NewObject {
                     id: 22,
                     jcid: 0x6000b,
-                    properties: vec![
-                        last_modified(),
-                        (0x24001c20, id(23)),
-                        (0x1c001d75, string(author)),
-                        (0x1c001d3c, string(crate::edit::automatic_title(text))),
-                    ],
+                    properties: [
+                        vec![
+                            last_modified(),
+                            (0x24001c20, id(23)),
+                            (0x1c001d75, string(author)),
+                            (0x1c001d3c, string(crate::edit::automatic_title(text))),
+                        ],
+                        page_margins(),
+                    ]
+                    .concat(),
                 },
                 NewObject {
                     id: 23,
@@ -219,7 +262,7 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
                         last_modified(),
                         (0x24001c20, id(24)),
                         (0x0c001c03, vec![1]),
-                        (0x1c001c12, vec![1, 0, 0, 0, 0, 0, 0, 0]),
+                        (0x1c001c12, measurement_bytes(&NATIVE_INDENTS, 4)?),
                         (0x14001c14, 1_f32.to_le_bytes().to_vec()),
                         (0x14001c15, 1_f32.to_le_bytes().to_vec()),
                         (0x14001c1b, 13_f32.to_le_bytes().to_vec()),

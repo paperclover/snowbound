@@ -94,6 +94,13 @@ fn referenced(page: &Page) -> std::collections::BTreeSet<ExGuid> {
     out
 }
 
+/// A new cell without its own or a sibling's indentation table takes OneNote's.
+fn with_native_indents(table: &mut Table) {
+    for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+        cell.indents = vec![18.0, 0.0, 27.0, 27.0];
+    }
+}
+
 fn assert_same(written: &[u8], space: ExGuid, expected: &Page) -> Page {
     let stored = page_in(written, space);
     let mut expected = expected.clone();
@@ -224,6 +231,9 @@ fn cell_shading_and_indents_change_in_place() {
     assert_eq!(cell.shading, None);
     cell.shading = Some(0x0000ffff);
     let original_indents = cell.indents.clone();
+    cell.indents.clear();
+    assert!(PreparedEdit::page(TREES, space, &after, AUTHOR).is_err());
+    let cell = &mut table_mut(&mut after).rows[0].cells[0];
     cell.indents = vec![18.0, 0.0, 27.0, 27.0];
     let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
     let stored = assert_same(written.as_bytes(), space, &after);
@@ -277,6 +287,15 @@ fn a_table_nests_inside_a_cell_and_is_removed_again() {
         .paragraphs
         .push(holder);
     let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
+    let ParagraphContent::Table(nested) = &mut table_mut(&mut after).rows[0].cells[1]
+        .paragraphs
+        .last_mut()
+        .unwrap()
+        .content
+    else {
+        panic!()
+    };
+    with_native_indents(nested);
     let stored = assert_same(written.as_bytes(), space, &after);
     if let Some(directory) = std::env::var_os("ONESTORE_NESTED_TABLE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
@@ -376,6 +395,7 @@ fn a_new_table_is_created_on_a_fresh_page() {
     body_paragraphs(&mut after).push(holder);
     body_paragraphs(&mut after).push(cell_paragraph(&template, "After the table"));
     let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
+    with_native_indents(table_mut(&mut after));
     assert_same(written.as_bytes(), space, &after);
     if let Some(directory) = std::env::var_os("ONESTORE_TABLE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);

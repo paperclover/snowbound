@@ -117,12 +117,8 @@ fn joins_match_native_graphs_tags_and_inherited_character_styles() {
             let intent = ParagraphJoin::new(left, right, "Join author").unwrap();
             let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
             assert_eq!(intent, restored);
-            let edited = PreparedEdit::join(source, *sid, &restored);
-            if name == "Split before hyperlink" {
-                assert!(edited.is_err());
-                continue;
-            }
-            let edited = edited.unwrap_or_else(|error| panic!("{name}: {error}"));
+            let edited = PreparedEdit::join(source, *sid, &restored)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
             let current_store = Store::parse(edited.as_bytes()).unwrap();
             assert_eq!(
                 current_store.header.transaction_count,
@@ -296,6 +292,9 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
     let store = Store::parse(SOURCE).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
+    let native_store = Store::parse(JOIN_FIXTURES[0].0).unwrap();
+    let native_index = RevisionIndex::parse(&native_store).unwrap();
+    let native_document = Document::parse(&native_index).unwrap();
     for case in manifest["cases"].as_array().unwrap() {
         let text: ExGuid = serde_json::from_value(case["original_text"].clone()).unwrap();
         let paragraph: ExGuid = serde_json::from_value(case["original_paragraph"].clone()).unwrap();
@@ -326,8 +325,18 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
             let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
             assert_eq!(intent, restored);
             let edited = PreparedEdit::split(SOURCE, *sid, &restored);
-            if case["case"] == "Split before hyperlink" {
-                assert!(edited.is_err());
+            // OneNote 2010 splits before or after a hyperlink and ignores Enter inside one.
+            let link = |at: usize| {
+                expected
+                    .get(at)
+                    .is_some_and(|(_, style)| style["hyperlink"] == true)
+            };
+            if position > 0
+                && link(position - 1)
+                && link(position)
+                && expected[position].0 != '\u{fddf}'
+            {
+                assert!(edited.is_err(), "{} at {offset}", case["case"]);
                 continue;
             }
             let edited =
@@ -380,6 +389,23 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
                 "{} suffix at {offset}",
                 case["case"]
             );
+            if case["offset_utf16"] == *offset {
+                let native = &native_document.spaces[sid];
+                let native = &native.revisions[&native.contexts[&ExGuid::default()]];
+                let new_text = serde_json::from_value(case["new_text"].clone()).unwrap();
+                assert_eq!(
+                    characters(after, text),
+                    characters(native, text),
+                    "{}",
+                    case["case"]
+                );
+                assert_eq!(
+                    characters(after, intent.text_object()),
+                    characters(native, new_text),
+                    "{}",
+                    case["case"]
+                );
+            }
             let mut children = parent_node.children.clone();
             children.insert(
                 children.iter().position(|id| *id == paragraph).unwrap() + 1,
@@ -511,9 +537,6 @@ fn export_native_paragraph_splits() {
     let mut source = SOURCE.to_vec();
     let mut written = Vec::new();
     for case in manifest["cases"].as_array().unwrap() {
-        if case["case"] == "Split before hyperlink" {
-            continue;
-        }
         let text: ExGuid = serde_json::from_value(case["original_text"].clone()).unwrap();
         let store = Store::parse(&source).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
@@ -621,9 +644,6 @@ fn export_native_paragraph_joins() {
         let mut source = source.to_vec();
         let mut manifest = Vec::new();
         for (name, left, right) in cases {
-            if name == "Split before hyperlink" {
-                continue;
-            }
             let sid = *document
                 .spaces
                 .iter()

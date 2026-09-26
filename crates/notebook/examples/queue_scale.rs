@@ -1,6 +1,6 @@
 use notebook::{EditStatus, Remote, Replica};
 use onestore::{
-    CommitError, PageCreation, PreparedEdit, RevisionIndex, Store,
+    CommitError, PageCreation, PreparedEdit, RevisionIndex, Store, Transaction,
     document::Document,
     page::{Page, PageObject, Paragraph, text::Edit},
 };
@@ -12,8 +12,8 @@ impl Remote for FileRemote {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         onestore::read_file(&self.0)
     }
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-        edit.commit_file(&self.0)
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+        transaction.commit_file(&self.0)
     }
     fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
         onestore::confirm_file_snapshot(&self.0, snapshot)

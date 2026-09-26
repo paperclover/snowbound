@@ -1,6 +1,7 @@
 use onestore::{
     ExGuid, Insertion, PageCreation, PreparedEdit, RevisionIndex, Store,
     document::{Document, Kind},
+    page::{Page, PageObject},
 };
 
 #[path = "support/current.rs"]
@@ -135,6 +136,78 @@ fn created_pages_support_title_edits_and_body_insertion() {
             assert_eq!(title.as_deref(), Some("Renamed"));
         }
     }
+}
+
+/// OneNote 2010 draws level-1 text 27 pt inside an outline whose table stops at entry 0.
+#[test]
+fn created_body_outlines_carry_the_indentation_table_onenote_writes() {
+    let source = onestore::create_section("pages.one", "Original", "Author").unwrap();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (space, page) = document.pages().unwrap()[0];
+    let [first] = document.active(space).unwrap().nodes[&page].children[..] else {
+        panic!()
+    };
+    let insertion = Insertion::outline(page, 72.0, 144.0, "Second", "Author").unwrap();
+    let written = PreparedEdit::insert(&source, space, &insertion).unwrap();
+    let store = Store::parse(written.as_bytes()).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let view = document.active(space).unwrap();
+    for outline in [first, insertion.object()] {
+        let Kind::Outline { indents } = &view.nodes[&outline].kind else {
+            panic!()
+        };
+        assert_eq!(indents, &[18.0, 0.0, 27.0, 27.0]);
+    }
+}
+
+#[test]
+fn a_created_title_outline_is_stored_and_read_as_onenote_stores_it() {
+    let source = onestore::create_section("pages.one", "Original", "Author").unwrap();
+    let intent = PageCreation::new(None, Some("Title"), "Author").unwrap();
+    let prepared = PreparedEdit::create_page(&source, &intent).unwrap();
+    let store = Store::parse(prepared.as_bytes()).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let view = document.active(intent.space()).unwrap();
+    let [title] = view.nodes[&intent.object()].structure[..] else {
+        panic!()
+    };
+    let [outline] = view.nodes[&title].children[..] else {
+        panic!()
+    };
+    let [paragraph] = view.nodes[&outline].children[..] else {
+        panic!()
+    };
+    let Kind::Outline { indents } = &view.nodes[&outline].kind else {
+        panic!()
+    };
+    assert_eq!(indents, &[18.0, 0.0, 27.0, 27.0]);
+    let flags = |id| -> Vec<u32> {
+        view.nodes[&id].extra[0]
+            .iter()
+            .map(|field| field.id)
+            .filter(|id| id >> 24 == 0x88)
+            .collect()
+    };
+    assert_eq!(
+        flags(outline),
+        [0x88001cf9, 0x88001cb2, 0x88001cb4, 0x88001c91, 0x88001cff]
+    );
+    assert_eq!(flags(paragraph), [0x88001cb2, 0x88001cb4]);
+    let page = Page::from_space(&document, intent.space()).unwrap();
+    let [PageObject::Title(title)] = &page.objects[..] else {
+        panic!()
+    };
+    let [outline] = &title.outlines[..] else {
+        panic!()
+    };
+    assert!(outline.title);
+    assert_eq!(outline.indents, [18.0, 0.0, 27.0, 27.0]);
+    assert_eq!(outline.min_width, Some(162.0));
+    assert_eq!(outline.layout.max_height, Some(21.6));
 }
 
 #[test]

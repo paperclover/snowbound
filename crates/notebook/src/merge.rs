@@ -257,6 +257,18 @@ fn merge_paragraphs(
     }
     // Child order per container: the remote order with our repositioned paragraphs re-placed.
     let (bc, oc, tc) = (children(base), children(ours), children(theirs));
+    // A paragraph we added after one they gave new children would sit after or among those
+    // children; Enter splitting a paragraph carries its children below, so neither is assumed.
+    for pair in oc.values().flat_map(|list| list.windows(2)) {
+        if b.contains_key(&pair[0])
+            && !b.contains_key(&pair[1])
+            && tc
+                .get(&Some(pair[0]))
+                .is_some_and(|children| children.iter().any(|id| !b.contains_key(id)))
+        {
+            return None;
+        }
+    }
     let mut order: BTreeMap<Option<ExGuid>, Vec<ExGuid>> = BTreeMap::new();
     let containers: BTreeSet<Option<ExGuid>> = bc
         .keys()
@@ -459,6 +471,10 @@ fn merge_text(
         return None;
     }
     let mapped = crate::rebase::rebase(b, theirs.text(), start..end)?;
+    // Text they reformatted is not ours to replace, nor to move as a split would.
+    if start < end && theirs.slice(mapped.clone()).ok()? != base.slice(start..end).ok()? {
+        return None;
+    }
     let mut merged = theirs.clone();
     merged
         .apply(Edit {

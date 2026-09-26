@@ -186,7 +186,9 @@ fn interrupted_multi_space_publication_never_exposes_a_partial_nesting() {
             write_limit,
             random: 1951,
         };
-        crate::commit::commit_bytes(&mut complete, SOURCE, &written).unwrap();
+        crate::commit::Transaction::between(SOURCE, &written)
+            .commit(&mut complete)
+            .unwrap();
         assert_eq!(complete.durable, written);
         for fail_at in 1..=complete.operation {
             let mut interrupted = disk::Disk {
@@ -197,7 +199,9 @@ fn interrupted_multi_space_publication_never_exposes_a_partial_nesting() {
                 write_limit,
                 random: 1951 + fail_at as u64,
             };
-            crate::commit::commit_bytes(&mut interrupted, SOURCE, &written).unwrap_err();
+            crate::commit::Transaction::between(SOURCE, &written)
+                .commit(&mut interrupted)
+                .unwrap_err();
             let observed = current::current(&interrupted.durable);
             assert!(
                 observed == old || observed == new,
@@ -286,7 +290,9 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
                 write_limit: 4096,
                 random: 1952,
             };
-            crate::commit::commit_bytes(&mut complete, &source, &written).unwrap();
+            crate::commit::Transaction::between(&source, &written)
+                .commit(&mut complete)
+                .unwrap();
             for fail_at in 1..=complete.operation {
                 let mut interrupted = disk::Disk {
                     visible: source.clone(),
@@ -296,7 +302,9 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
                     write_limit: 4096,
                     random: 1952 + fail_at as u64,
                 };
-                crate::commit::commit_bytes(&mut interrupted, &source, &written).unwrap_err();
+                crate::commit::Transaction::between(&source, &written)
+                    .commit(&mut interrupted)
+                    .unwrap_err();
                 let observed = current::current(&interrupted.durable);
                 assert!(observed == old || observed == new, "{step}:{fail_at}");
             }

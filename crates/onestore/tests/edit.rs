@@ -210,7 +210,7 @@ fn confirming_visible_text_requires_flush_without_another_revision() {
 }
 
 #[test]
-fn confirmation_rejects_changed_or_truncated_physical_tail_before_any_write() {
+fn confirmation_rejects_a_changed_header_or_length_before_any_write() {
     let (sid, oid) = target(SOURCE);
     let mut source = SOURCE.to_vec();
     source.resize(3 * 1024 * 1024 + 131, 0);
@@ -223,7 +223,7 @@ fn confirmation_rejects_changed_or_truncated_physical_tail_before_any_write() {
     if let trace::Event::Write(offset, bytes) = &disk.events[0] {
         panic!("Confirmation wrote {} bytes at {offset}", bytes.len());
     }
-    for changed in [65535, 65536, 1048575, 1048576, 2097152, source.len() - 1] {
+    for changed in [96, 128, 212, 1023] {
         disk.bytes.clone_from(&source);
         disk.bytes[changed] ^= 1;
         disk.events.clear();
@@ -232,9 +232,18 @@ fn confirmation_rejects_changed_or_truncated_physical_tail_before_any_write() {
         assert_eq!(error.error.kind(), std::io::ErrorKind::ResourceBusy);
         assert!(disk.events.is_empty());
     }
+    // Committed content changes only with the header, so the body is never compared.
+    for changed in [1024, 1048576, source.len() - 1] {
+        disk.bytes.clone_from(&source);
+        disk.bytes[changed] ^= 1;
+        disk.events.clear();
+        onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap();
+        assert!(matches!(disk.events[..], [trace::Event::Flush]));
+    }
     for length in [source.len() - 1, source.len() + 1] {
         disk.bytes.clone_from(&source);
         disk.bytes.resize(length, 0);
+        disk.events.clear();
         let error = onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap_err();
         assert_eq!(error.state, CommitState::NotCommitted);
         assert!(disk.events.is_empty());

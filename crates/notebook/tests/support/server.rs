@@ -3,7 +3,7 @@
 
 use notebook::Remote;
 use onestore::{
-    CommitError, CommitIo, CommitState, ExGuid, PreparedEdit, RevisionIndex, Store,
+    CommitError, CommitIo, CommitState, ExGuid, RevisionIndex, Stamp, Store, Transaction,
     document::{Document, Kind},
 };
 use std::io;
@@ -75,7 +75,10 @@ impl Remote for Server {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         Ok(self.visible.clone())
     }
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+        Ok(Stamp::of(&self.visible).ok())
+    }
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         self.publications += 1;
         let fault = std::mem::take(&mut self.fault);
         match fault {
@@ -85,7 +88,7 @@ impl Remote for Server {
             _ => {}
         }
         let old = self.durable.clone();
-        edit.commit(self)?;
+        transaction.commit(self)?;
         match fault {
             Fault::UnknownAfter => {
                 self.durable = old;

@@ -28,7 +28,8 @@ when regenerating the corpus.
 
 `rust-split` retains twelve `ParagraphSplit` outputs, their cold native captures,
 and a second native session typing into four empty boundary paragraphs. The
-hyperlink case stays unchanged because this operation rejects fields. The Rust
+hyperlink case has no output: the operation rejected fields when this row was
+captured, and the writer now splits before a link as OneNote does. The Rust
 test `export_native_paragraph_splits` generates candidate notebooks; its output
 directory comes from `ONESTORE_PARAGRAPH_OUTPUT`. Native character/style comparisons
 use both the keyboard-generated controls and the Rust-written notebooks. Empty

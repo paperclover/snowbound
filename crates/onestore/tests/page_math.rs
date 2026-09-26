@@ -328,3 +328,42 @@ fn equations_are_written_and_read_back() {
         .unwrap();
     }
 }
+
+/// Backspacing through inline math leaves plain text in the model, but the stored text object
+/// still holds the math runs, which the ordinary text edit refuses.
+#[test]
+fn a_paragraph_emptied_of_its_inline_math_saves() {
+    let store = Store::parse(NATIVE).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (space, before) = document
+        .pages()
+        .unwrap()
+        .into_iter()
+        .map(|(space, _)| (space, Page::from_space(&document, space).unwrap()))
+        .find(|(_, page)| page.title == "Equation controls")
+        .unwrap();
+    let mut after = before.clone();
+    let text = after
+        .objects
+        .iter_mut()
+        .filter_map(|object| match object {
+            PageObject::Outline(outline) => Some(outline),
+            _ => None,
+        })
+        .flat_map(|outline| &mut outline.paragraphs)
+        .filter_map(|paragraph| match &mut paragraph.content {
+            onestore::page::ParagraphContent::Text(text) => Some(text),
+            _ => None,
+        })
+        .find(|text| text.text.text() == "Inline 𝛼+𝛽")
+        .unwrap();
+    let plain = text.text.spans()[0].format.clone();
+    assert_ne!(plain.math, Some(true));
+    text.text = onestore::page::Paragraph::new(String::new(), plain);
+    let written = onestore::PreparedEdit::page(NATIVE, space, &after, "Author").unwrap();
+    let store = Store::parse(written.as_bytes()).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    assert_eq!(Page::from_space(&document, space).unwrap(), after);
+}

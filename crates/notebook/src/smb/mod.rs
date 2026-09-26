@@ -218,6 +218,7 @@ impl Client {
         Ok(File {
             client: self,
             id: Some(response.file_id),
+            length: response.end_of_file,
         })
     }
 
@@ -374,13 +375,36 @@ impl Client {
         })
     }
 
-    /// Publishes a prepared edit using the same native writer coordination as text commits.
-    pub fn commit_prepared(
+    /// Publishes a transaction using the same native writer coordination as text commits.
+    pub fn commit_transaction(
         &self,
         path: &str,
-        edit: &onestore::PreparedEdit<'_>,
+        transaction: &onestore::Transaction,
     ) -> Result<(), CommitError> {
-        self.commit(path, |file| edit.commit(file))
+        self.commit(path, |file| transaction.commit(file))
+    }
+
+    /// The header and length of a revision store, read without writer coordination or path
+    /// identity checks: a change detector for polling, never a snapshot to edit.
+    pub fn stamp(&self, path: &str) -> io::Result<onestore::Stamp> {
+        let mut file = self.open(path, false)?;
+        let mut header = [0; 1024];
+        let mut read = 0;
+        let result = loop {
+            match file.read_at(read as u64, &mut header[read..]) {
+                Ok(0) => break Err(io::ErrorKind::UnexpectedEof.into()),
+                Ok(count) => read += count,
+                Err(error) => break Err(error),
+            }
+            if read == header.len() {
+                break Ok(());
+            }
+        };
+        let length = file.length;
+        let closed = file.close();
+        result?;
+        closed?;
+        Ok(onestore::Stamp { header, length })
     }
 
     /// Confirms an observed snapshot's durability under native writer coordination.
@@ -419,6 +443,8 @@ impl Drop for Client {
 struct File<'a> {
     client: &'a Client,
     id: Option<FileId>,
+    /// The end of file when opened.
+    length: u64,
 }
 impl File<'_> {
     fn coordinate(self, path: &str, write: bool) -> io::Result<Self> {

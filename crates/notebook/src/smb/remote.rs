@@ -1,6 +1,6 @@
 use super::Client;
 use crate::Remote;
-use onestore::{CommitError, PreparedEdit};
+use onestore::{CommitError, Stamp, Transaction};
 use std::io;
 
 /// Binds every reconciliation operation to one share-relative file and read limit.
@@ -26,8 +26,12 @@ impl Remote for SmbRemote {
         self.client.read(&self.path, self.limit)
     }
 
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-        self.client.commit_prepared(&self.path, edit)
+    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+        self.client.stamp(&self.path).map(Some)
+    }
+
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+        self.client.commit_transaction(&self.path, transaction)
     }
 
     fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {

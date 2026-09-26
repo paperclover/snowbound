@@ -5,8 +5,8 @@ use crate::{
     ConflictKind, EditStatus, Error, PendingEdit, Remote, Replica, Result, SyncWorker, discover,
 };
 use onestore::{
-    CommitError, ExGuid, PageCreation, PreparedEdit, RevisionIndex, Store, document::Document,
-    page::Page,
+    CommitError, ExGuid, PageCreation, PreparedEdit, RevisionIndex, Stamp, Store, Transaction,
+    document::Document, page::Page,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -15,6 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     thread::{self, JoinHandle},
@@ -227,7 +228,9 @@ impl Storage for Share {
     }
 
     fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()> {
-        Ok(self.client.commit_prepared(&self.path(path), edit)?)
+        Ok(self
+            .client
+            .commit_transaction(&self.path(path), &edit.transaction())?)
     }
 
     fn set_property(
@@ -760,6 +763,8 @@ pub struct Section {
     events: Receiver<Event>,
     saves: Option<Sender<PageSave>>,
     saved: Receiver<(ExGuid, std::result::Result<Save, String>)>,
+    /// Saves queued and not yet reported.
+    unsaved: Arc<AtomicUsize>,
     saver: Option<JoinHandle<()>>,
 }
 
@@ -850,12 +855,15 @@ impl Section {
             }
         };
         let (saves, requests) = mpsc::channel();
+        let unsaved = Arc::new(AtomicUsize::new(0));
         let saver = {
             let (replica, signal) = (Arc::clone(&replica), signal.clone());
+            let unsaved = Arc::clone(&unsaved);
             thread::Builder::new()
                 .name("onestore-save".into())
                 .spawn(move || {
-                    save_pages(&replica, &requests, |outcome| {
+                    save_pages(&replica, &requests, |outcome, count| {
+                        unsaved.fetch_sub(count, Ordering::Release);
                         if saved_sender.send(outcome).is_ok() {
                             signal();
                         }
@@ -889,6 +897,7 @@ impl Section {
             events,
             saves: Some(saves),
             saved,
+            unsaved,
             saver: Some(saver),
         })
     }
@@ -930,10 +939,7 @@ impl Section {
     }
 
     pub fn page(&self, space: ExGuid) -> Result<Page> {
-        let snapshot = self.replica.snapshot()?;
-        let store = Store::parse(&snapshot)?;
-        let index = RevisionIndex::parse(&store)?;
-        Ok(Page::from_space(&Document::parse(&index)?, space)?)
+        self.replica.page(space)
     }
 
     /// Copies a page (usually from another section) to the end of this section as a
@@ -999,10 +1005,16 @@ impl Section {
             after,
             author: author.to_owned(),
         };
+        self.unsaved.fetch_add(1, Ordering::Relaxed);
         self.saves
             .as_ref()
             .and_then(|saves| saves.send(save).ok())
             .ok_or_else(|| io::Error::other("The save thread stopped").into())
+    }
+
+    /// Whether a queued save has yet to report, so the stored page may trail the editor's.
+    pub fn saving(&self) -> bool {
+        self.unsaved.load(Ordering::Acquire) > 0
     }
 
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
@@ -1017,13 +1029,13 @@ impl Section {
     /// attempt, or a conflict awaiting review.
     pub fn queue(&self) -> Result<Vec<QueuedEdit>> {
         self.replica
-            .pending()?
+            .queued()?
             .into_iter()
-            .map(|edit| {
+            .map(|(id, space)| {
                 Ok(QueuedEdit {
-                    id: edit.id,
-                    space: edit.space,
-                    status: self.replica.status(edit.id)?.unwrap_or(EditStatus::Pending),
+                    id,
+                    space,
+                    status: self.replica.status(id)?.unwrap_or(EditStatus::Pending),
                 })
             })
             .collect()
@@ -1094,7 +1106,8 @@ impl Section {
         }
     }
 
-    pub fn replica(&self) -> &Replica {
+    /// The replica, which other threads may read pages from while the section is open.
+    pub fn replica(&self) -> &Arc<Replica> {
         &self.replica
     }
 
@@ -1160,7 +1173,7 @@ fn save(
 fn save_pages(
     replica: &Replica,
     requests: &Receiver<PageSave>,
-    report: impl Fn((ExGuid, std::result::Result<Save, String>)),
+    report: impl Fn((ExGuid, std::result::Result<Save, String>), usize),
 ) {
     let mut queue = VecDeque::new();
     // The last save's page and the working image it left.
@@ -1174,11 +1187,13 @@ fn save_pages(
         }
         queue.extend(requests.try_iter());
         let mut request = queue.pop_front().unwrap();
+        let mut count = 1;
         while let Some(next) = queue.front()
             && (next.space, &next.before, &next.author)
                 == (request.space, &request.after, &request.author)
         {
             request.after = queue.pop_front().unwrap().after;
+            count += 1;
         }
         let known = last
             .take()
@@ -1200,7 +1215,7 @@ fn save_pages(
             }
             Err(error) => Err(error.to_string()),
         };
-        report((request.space, save));
+        report((request.space, save), count);
     }
 }
 
@@ -1212,8 +1227,19 @@ impl Remote for FileRemote {
         onestore::read_file(&self.0)
     }
 
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> std::result::Result<(), CommitError> {
-        edit.commit_file(&self.0)
+    /// Read without the whole-file lock, which would block OneNote's readers: a change
+    /// detector, never a snapshot to edit.
+    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+        use std::io::Read;
+        let mut file = std::fs::File::open(&self.0)?;
+        let mut header = [0; 1024];
+        file.read_exact(&mut header)?;
+        let length = file.metadata()?.len();
+        Ok(Some(Stamp { header, length }))
+    }
+
+    fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError> {
+        transaction.commit_file(&self.0)
     }
 
     fn confirm(&mut self, snapshot: &[u8]) -> std::result::Result<(), CommitError> {

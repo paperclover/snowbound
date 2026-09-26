@@ -271,7 +271,7 @@ fn a_native_refresh_removing_the_reference_rejects_an_inflight_download() {
         fn read(&mut self) -> io::Result<Vec<u8>> {
             fs::read("../../corpus/native-external-assets/native/synthetic.one")
         }
-        fn publish(&mut self, _: &onestore::PreparedEdit<'_>) -> Result<(), onestore::CommitError> {
+        fn publish(&mut self, _: &onestore::Transaction) -> Result<(), onestore::CommitError> {
             panic!("Unexpected publication")
         }
         fn confirm(&mut self, _: &[u8]) -> Result<(), onestore::CommitError> {

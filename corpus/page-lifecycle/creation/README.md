@@ -14,7 +14,8 @@ The retained `provenance.json` records the native capture inputs and clone remov
 After building workspace examples, run `python -m unittest discover -s tools
 -p test_page_creation.py -v`. It compares native XML content and character formats,
 ordered identities, and complete active object graphs across each cold reopen.
-These thirteen-page comparisons need no graph normalization.
+Only `followup/cold` differs: OneNote refreshes the section's cached copies of the
+two renamed titles, which the Rust title edit leaves stale.
 
 Export fresh Rust candidates by setting each variable to a new output directory:
 

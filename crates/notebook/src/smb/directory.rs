@@ -38,6 +38,7 @@ impl Client {
         let file = File {
             client: self,
             id: Some(response.file_id),
+            length: response.end_of_file,
         };
         let mut entries = BTreeMap::new();
         loop {

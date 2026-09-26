@@ -14,7 +14,7 @@ from document_model import EXPORTER, ordered_pages, view
 compare_document = runpy.run_path(str(Path(__file__).with_name('verify-document.py')))['compare']
 
 
-def compare(source, capture, *, refresh_metadata_levels=False):
+def compare(source, capture, *, refresh_metadata=False):
     files = list(source.glob('*.one'))
     assert len(files) == 1
     with TemporaryDirectory() as temporary:
@@ -53,13 +53,12 @@ def compare(source, capture, *, refresh_metadata_levels=False):
                     series = expected[series_id]
                     existing = [p for p in series['extra'][0] if p['id'] == 0x24003442]
                     added = [p for p in observed['nodes'][series_id]['extra'][0] if p['id'] == 0x24003442]
-                    if existing and refresh_metadata_levels:
+                    if existing and refresh_metadata:
                         for copy in existing[0]['value']['Objects']:
-                            cached = expected[copy]['kind']
-                            assert cached['type'] == 'Metadata'
-                            level = metadata[copy][1]['kind']['level']
-                            refreshed += cached['level'] != level
-                            cached['level'] = level
+                            assert expected[copy]['kind']['type'] == 'Metadata'
+                            current = metadata[copy][1]['kind']
+                            refreshed += expected[copy]['kind'] != current
+                            expected[copy]['kind'] = current
                     if existing or not added:
                         continue
                     copies = []
@@ -75,7 +74,7 @@ def compare(source, capture, *, refresh_metadata_levels=False):
                     series['extra'][0].append(added[0])
             assert original['roots'] == observed['roots']
             assert expected == observed['nodes'], sid
-        print(f'Passed: {len(pages)} ordered pages and preserved active graphs; {filled} missing section metadata copies filled natively; {refreshed} section metadata levels refreshed')
+        print(f'Passed: {len(pages)} ordered pages and preserved active graphs; {filled} missing section metadata copies filled natively; {refreshed} section metadata copies refreshed')
         return refreshed
 
 

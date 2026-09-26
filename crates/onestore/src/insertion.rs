@@ -3,6 +3,7 @@ use crate::{
     active::{ActivePage, Changes},
     create::{current_timestamps, default_text_style, properties, string},
     document::Kind,
+    op::content::{NATIVE_INDENTS, measurement_bytes},
     write::{PropertyObject, fresh_guid},
 };
 use serde::{Deserialize, Serialize};
@@ -195,6 +196,36 @@ impl Insertion {
     }
 
     pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
+        let paragraph = ExGuid {
+            guid: self.guid,
+            n: if matches!(self.placement, Placement::Outline { .. }) {
+                3
+            } else {
+                1
+            },
+        };
+        let changes = self.changes_as(active, self.object(), paragraph, self.text_object())?;
+        let raw = &active.live.revision;
+        if changes
+            .keys()
+            .any(|id| id.guid == self.guid && raw.objects.contains_key(id))
+        {
+            return Err(invalid(
+                "An insertion identity is already present; reconcile the existing edit",
+            ));
+        }
+        Ok(changes)
+    }
+
+    /// `changes` creating the outline or paragraph `object`, the paragraph `paragraph` and its
+    /// text `text` under those identities.
+    pub(crate) fn changes_as(
+        &self,
+        active: &ActivePage<'_>,
+        object: ExGuid,
+        paragraph: ExGuid,
+        text: ExGuid,
+    ) -> Result<Changes, Error> {
         let [page] = active.pages.as_slice() else {
             return Err(invalid("Insertion requires a single active page"));
         };
@@ -247,42 +278,54 @@ impl Insertion {
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
         let modified = current_timestamps()?.0.to_le_bytes();
-        let paragraph_n = if matches!(self.placement, Placement::Outline { .. }) {
-            3
-        } else {
-            1
-        };
-        let table = Arc::new(BTreeMap::from([(0, self.guid)]));
-        let reference = |n: u32| n.to_le_bytes().to_vec();
+        let (author, default) = (
+            ExGuid {
+                guid: self.guid,
+                n: 4,
+            },
+            ExGuid {
+                guid: self.guid,
+                n: 5,
+            },
+        );
+        let mut table = BTreeMap::from([(0, self.guid)]);
+        for id in [object, paragraph, text] {
+            if !table.values().any(|guid| *guid == id.guid) {
+                table.insert(table.len() as u32, id.guid);
+            }
+        }
+        let table = Arc::new(table);
+        let reference =
+            |id: ExGuid| crate::write::compact(id, &table).map(|compact| compact.to_vec());
         let mut new = BTreeMap::new();
-        for (n, jcid, values) in [
+        for (id, jcid, values) in [
             (
-                paragraph_n,
+                paragraph,
                 0x6000d,
                 vec![
                     (0x14001d7a, modified.to_vec()),
                     (0x14001d09, self.created.to_le_bytes().to_vec()),
                     (0x0c001c03, vec![1]),
-                    (0x24001c1f, reference(2)),
-                    (0x20001d78, reference(4)),
-                    (0x20001d79, reference(4)),
+                    (0x24001c1f, reference(text)?),
+                    (0x20001d78, reference(author)?),
+                    (0x20001d79, reference(author)?),
                 ],
             ),
             (
-                2,
+                text,
                 0x6000e,
                 vec![
                     (0x14001d7a, modified.to_vec()),
                     (0x1c001c22, string(&self.text)),
-                    (0x24001e13, reference(5)),
+                    (0x24001e13, reference(default)?),
                     (0x10001cfe, 0x409_u16.to_le_bytes().to_vec()),
                 ],
             ),
-            (4, 0x120001, vec![(0x1c001d75, string(&self.author))]),
-            (5, 0x12004d, default_text_style()),
+            (author, 0x120001, vec![(0x1c001d75, string(&self.author))]),
+            (default, 0x12004d, default_text_style()),
         ] {
             new.insert(
-                ExGuid { guid: self.guid, n },
+                id,
                 PropertyObject {
                     jcid,
                     bytes: properties(&values)?,
@@ -291,10 +334,6 @@ impl Insertion {
             );
         }
         if !self.formats.is_empty() {
-            let default = ExGuid {
-                guid: self.guid,
-                n: 5,
-            };
             let mut segments = Vec::new();
             let mut end = 0;
             for span in &self.formats {
@@ -329,7 +368,7 @@ impl Insertion {
             if !segments.iter().any(|(_, id)| *id == default) {
                 new.remove(&default);
             }
-            let target = new.get_mut(&self.text_object()).unwrap();
+            let target = new.get_mut(&text).unwrap();
             let mut references = Vec::new();
             let mut ends = Vec::new();
             for (end, id) in segments {
@@ -340,16 +379,17 @@ impl Insertion {
             target.set(&[(0x24001e13, &references), (0x1c001e12, &ends)])?;
         }
         if let Placement::Outline { x, y } = self.placement {
+            let children = reference(paragraph)?;
             new.insert(
-                self.object(),
+                object,
                 PropertyObject {
                     jcid: 0x6000c,
                     global_ids: table,
                     bytes: properties(&[
                         (0x14001d7a, modified.to_vec()),
-                        (0x24001c20, reference(3)),
+                        (0x24001c20, children),
                         (0x0c001c03, vec![1]),
-                        (0x1c001c12, vec![1, 0, 0, 0, 0, 0, 0, 0]),
+                        (0x1c001c12, measurement_bytes(&NATIVE_INDENTS, 4)?),
                         (0x14001c14, (x / 36.0).to_le_bytes().to_vec()),
                         (0x14001c15, (y / 36.0).to_le_bytes().to_vec()),
                         (0x14001c1b, 13_f32.to_le_bytes().to_vec()),
@@ -359,16 +399,11 @@ impl Insertion {
             );
         }
         let raw = &active.live.revision;
-        if new.keys().any(|id| raw.objects.contains_key(id)) {
-            return Err(invalid(
-                "An insertion identity is already present; reconcile the existing edit",
-            ));
-        }
         // Drop the overlay before moving the property bytes it borrows.
         let title = {
             let mut overlay = BTreeMap::new();
             let mut parent = view.nodes[&self.parent].clone();
-            parent.children.insert(position, self.object());
+            parent.children.insert(position, object);
             overlay.insert(self.parent, parent);
             for (id, object) in &new {
                 overlay.insert(
@@ -397,7 +432,7 @@ impl Insertion {
             None => Vec::new(),
             _ => return Err(invalid("The parent has an invalid child list")),
         };
-        let child = parent.reference(self.object())?;
+        let child = parent.reference(object)?;
         if position > ids.len() / 4 {
             return Err(invalid("The parent has an invalid child list"));
         }

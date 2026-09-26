@@ -1,7 +1,7 @@
 use crate::{RevisionIndex, Store};
 use std::io;
 
-fn read_exact(
+pub(crate) fn read_exact(
     read: &mut impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
     mut offset: u64,
     mut output: &mut [u8],

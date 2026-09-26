@@ -1,8 +1,8 @@
 {
   "cold": {
-    "capture": "evidence/m10/page-create-cold",
+    "capture": "evidence/titles/cold-creation",
     "run": {
-      "notebook": "/Users/clo/dev/one/evidence/m10/page-create-candidate",
+      "notebook": "/Users/clo/dev/one/evidence/titles/creation",
       "expected_pages": 13,
       "author": null,
       "author_timeout_seconds": 600,
@@ -20,17 +20,17 @@
       }
     },
     "machine": {
-      "name": "m6-4b25125e",
-      "hostname": "ONE-M6-4B25125E"
+      "name": "m6-5472ef31",
+      "hostname": "ONE-M6-5472EF31"
     },
     "teardown": {
       "absent": true
     }
   },
   "native": {
-    "capture": "evidence/m10/page-create-native-edit",
+    "capture": "evidence/titles/native",
     "run": {
-      "notebook": "/Users/clo/dev/one/evidence/m10/page-create-cold/notebook",
+      "notebook": "/Users/clo/dev/one/evidence/titles/native-in",
       "expected_pages": 13,
       "author": "tools/native/created-pages.ps1",
       "author_timeout_seconds": 600,
@@ -49,17 +49,17 @@
       }
     },
     "machine": {
-      "name": "m6-71dafa89",
-      "hostname": "ONE-M6-71DAFA89"
+      "name": "m6-ba7e55f4",
+      "hostname": "ONE-M6-BA7E55F4"
     },
     "teardown": {
       "absent": true
     }
   },
   "native/cold": {
-    "capture": "evidence/m10/page-create-native-edit-cold",
+    "capture": "evidence/titles/native-cold",
     "run": {
-      "notebook": "/Users/clo/dev/one/evidence/m10/page-create-native-edit/notebook",
+      "notebook": "/Users/clo/dev/one/evidence/titles/native/notebook",
       "expected_pages": 13,
       "author": null,
       "author_timeout_seconds": 600,
@@ -77,17 +77,17 @@
       }
     },
     "machine": {
-      "name": "m6-eabc83c1",
-      "hostname": "ONE-M6-EABC83C1"
+      "name": "m6-426eea56",
+      "hostname": "ONE-M6-426EEA56"
     },
     "teardown": {
       "absent": true
     }
   },
   "followup/cold": {
-    "capture": "evidence/m10/page-create-rust-followup-cold",
+    "capture": "evidence/titles/followup-cold",
     "run": {
-      "notebook": "/Users/clo/dev/one/evidence/m10/page-create-rust-followup",
+      "notebook": "/Users/clo/dev/one/evidence/titles/followup",
       "expected_pages": 13,
       "author": null,
       "author_timeout_seconds": 600,
@@ -105,8 +105,8 @@
       }
     },
     "machine": {
-      "name": "m6-5a91d9d1",
-      "hostname": "ONE-M6-5A91D9D1"
+      "name": "m6-44be46f3",
+      "hostname": "ONE-M6-44BE46F3"
     },
     "teardown": {
       "absent": true

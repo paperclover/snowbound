@@ -126,6 +126,17 @@ impl OutlineEdit {
             }
         }
         if matches!(self, Self::Position { .. }) {
+            // OneNote gives a page its margin origin when an outline on it first moves.
+            let page = changed.get_mut(page).unwrap();
+            if !crate::PropertySets::parse(&page.bytes)?.sets[0]
+                .iter()
+                .any(|field| field.id == 0x14001d0f)
+            {
+                page.set(&[
+                    (0x14001d0f, &1.0_f32.to_le_bytes()),
+                    (0x14001d10, &0.4_f32.to_le_bytes()),
+                ])?;
+            }
             update_title(active, view.clone(), &mut changed)?;
         }
         Ok(changed)

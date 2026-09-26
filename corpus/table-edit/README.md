@@ -23,8 +23,8 @@ two-row table with locked 72 pt column and visible borders. `nested/cold` is
 its cold read with both tables.
 
 Native rows and cells are plain containers; the writer creates them with the
-modification time, the indent array copied from a sibling cell, and the flags
-every native cell carries, rebuilds each table's row and cell order to the
+modification time, the indent array copied from a sibling cell (OneNote's
+default without one), and the flags every native cell carries, rebuilds each table's row and cell order to the
 model's, and writes the column count, widths, locks and border flag. New
 tables start as an empty paragraph whose content the structure pass replaces.
 An emptied cell keeps a replacement paragraph, as the tree writer provides.

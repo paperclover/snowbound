@@ -1,20 +1,27 @@
 use crate::{
-    Error, ExGuid, Object, RevisionIndex, Store,
-    document::{Document, Element, Revision, Space},
+    Error, ExGuid, FileType, Object, RevisionIndex, Store,
+    document::{Document, Element, Kind, Revision, Space},
     write::{Commit, LiveRevision, PropertyObject, chain_depth, declared, differing},
 };
 use bumpalo::Bump;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 type Result<T> = std::result::Result<T, Error>;
 
 /// Objects a writer stores in one revision of a page space.
 pub(crate) type Changes = BTreeMap<ExGuid, PropertyObject>;
 
+/// Payloads a store holds, by identity.
+pub(crate) type Files<'a> = std::rc::Rc<dyn Fn([u8; 16]) -> Result<&'a [u8]> + 'a>;
+
 /// A page space's active revision with the views its writers read, kept as appending
 /// their revisions and parsing the result would leave it.
+#[derive(Clone)]
 pub(crate) struct ActivePage<'a> {
-    store: &'a Store<'a>,
+    files: Files<'a>,
     pub pages: Vec<ExGuid>,
     pub live: LiveRevision<'a>,
     /// Elements of the reachable objects.
@@ -42,6 +49,28 @@ impl<'a> ActivePage<'a> {
             })?;
         let rid = index.active(space)?;
         let live = LiveRevision::new(index.resolve(space, rid)?, chain_depth(index, space, rid))?;
+        let store: &'a Store<'a> = index.store;
+        Self::viewed(std::rc::Rc::new(|guid| store.file_data(guid)), pages, live, view)
+    }
+
+    /// The page space `live` holds, whose stored payloads `files` reads.
+    pub(crate) fn open(
+        space: ExGuid,
+        live: LiveRevision<'a>,
+        file_type: FileType,
+        files: Files<'a>,
+    ) -> Result<Self> {
+        let (view, _) = Revision::parse(space, &live.revision, file_type, &mut |guid| files(guid))?;
+        let pages = manifest_pages(&view);
+        Self::viewed(files, pages, live, view)
+    }
+
+    fn viewed(
+        files: Files<'a>,
+        pages: Vec<ExGuid>,
+        live: LiveRevision<'a>,
+        view: Revision<'a>,
+    ) -> Result<Self> {
         let parents = view.parents(&pages)?;
         let titles = view
             .nodes
@@ -50,7 +79,7 @@ impl<'a> ActivePage<'a> {
             .map(|(id, _)| *id)
             .collect();
         Ok(Self {
-            store: index.store,
+            files,
             pages,
             live,
             view,
@@ -65,13 +94,13 @@ impl<'a> ActivePage<'a> {
     where
         'a: 'o,
     {
-        Element::parse_with(object, self.store, &mut |guid| match self
+        Element::parse_with(object, FileType::Section, &mut |guid| match self
             .payloads
             .iter()
             .find(|(id, _)| *id == guid)
         {
             Some((_, payload)) => Ok(*payload),
-            None => self.store.file_data(guid),
+            None => (self.files)(guid),
         })
     }
 
@@ -108,12 +137,23 @@ impl<'a> ActivePage<'a> {
         payloads: &[([u8; 16], &[u8])],
         changes: Changes,
     ) -> Result<bool> {
+        Ok(self.store(arena, payloads, changes)?.is_some())
+    }
+
+    /// `write`, returning the objects whose content, reachability or reference count may
+    /// have moved; none when it stores nothing.
+    pub(crate) fn store(
+        &mut self,
+        arena: &'a Bump,
+        payloads: &[([u8; 16], &[u8])],
+        changes: Changes,
+    ) -> Result<Option<BTreeSet<ExGuid>>> {
         let changes = self.live.prepare(changes, true)?;
         for (guid, payload) in payloads {
             self.payloads.push((*guid, arena.alloc_slice_copy(payload)));
         }
         if changes.is_empty() {
-            return Ok(!payloads.is_empty());
+            return Ok((!payloads.is_empty()).then(BTreeSet::new));
         }
         let mut objects = Vec::new();
         for (id, change) in changes {
@@ -132,8 +172,49 @@ impl<'a> ActivePage<'a> {
         } else {
             self.live.settle(changed)?;
         }
-        self.refresh(&replaced, touched)?;
-        Ok(true)
+        self.refresh(&replaced, touched.clone())?;
+        Ok(Some(touched))
+    }
+
+    /// Takes the stored form of `ids` from `file`, the revision a seal appended, where the
+    /// revisions written here since the previous seal left them otherwise: a seal groups
+    /// tables and aliases read-only objects across all of them at once.
+    pub(crate) fn adopt(
+        &mut self,
+        file: &LiveRevision<'a>,
+        ids: impl IntoIterator<Item = ExGuid>,
+    ) -> Result<()> {
+        let mut replacements = Vec::new();
+        for id in ids {
+            let Some(stored) = file.revision.objects.get(&id) else {
+                continue;
+            };
+            match self.live.revision.objects.get_mut(&id) {
+                Some(object) if object.jcid == stored.jcid && object.data == stored.data => {
+                    object.global_ids = Arc::clone(&stored.global_ids);
+                    object.reference_count = stored.reference_count;
+                }
+                _ if file.is_reachable(id) => replacements.push((id, stored.clone())),
+                // Nothing reads an object the file leaves unreachable.
+                _ => {}
+            }
+        }
+        if !replacements.is_empty() {
+            let replaced = replacements.iter().map(|(id, _)| *id).collect();
+            let Commit { touched, .. } = self.live.commit(replacements)?;
+            for id in &touched {
+                if let (Some(object), Some(stored)) = (
+                    self.live.revision.objects.get_mut(id),
+                    file.revision.objects.get(id),
+                ) {
+                    object.global_ids = Arc::clone(&stored.global_ids);
+                    object.reference_count = stored.reference_count;
+                }
+            }
+            self.refresh(&replaced, touched)?;
+        }
+        self.live.depth = file.depth;
+        Ok(())
     }
 
     /// Brings the view, parents and titles up to date with the revision for the objects a
@@ -215,6 +296,24 @@ impl<'a> ActivePage<'a> {
     }
 }
 
+/// The pages a page space's manifest lists.
+pub(crate) fn manifest_pages(view: &Revision<'_>) -> Vec<ExGuid> {
+    match view.roots.get(&1).and_then(|id| view.nodes.get(id)) {
+        Some(manifest) if matches!(manifest.kind, Kind::Manifest { .. }) => manifest
+            .content
+            .iter()
+            .filter(|id| {
+                matches!(
+                    view.nodes.get(id).map(|node| &node.kind),
+                    Some(Kind::Page { .. })
+                )
+            })
+            .copied()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn edges<'n>(node: &'n Element<'_>) -> impl Iterator<Item = ExGuid> + 'n {
     node.children
         .iter()
@@ -245,9 +344,78 @@ pub(crate) fn write(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{Insertion, ParagraphSplit, TextAttribute, TreeEdit, document::Kind};
+
+    /// A seeded source of the typed writers' changes: insertions, moves, deletions, splits
+    /// and formatting of what a page holds.
+    pub(crate) struct Writes(pub u64);
+
+    impl Writes {
+        fn pick(&mut self, count: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as usize % count.max(1)
+        }
+
+        pub(crate) fn next(&mut self, active: &ActivePage<'_>) -> Result<Changes> {
+            let nodes = &active.view.nodes;
+            let listed = |kind: fn(&Kind<'_>) -> bool| -> Vec<ExGuid> {
+                nodes
+                    .iter()
+                    .filter(|(id, node)| kind(&node.kind) && active.parents.contains_key(id))
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+            let paragraphs = listed(|kind| matches!(kind, Kind::Paragraph { .. }));
+            let containers = listed(|kind| {
+                matches!(
+                    kind,
+                    Kind::Paragraph { .. } | Kind::Outline { .. } | Kind::Cell { .. }
+                )
+            });
+            let texts = listed(|kind| matches!(kind, Kind::RichText { .. }));
+            let unavailable = Error {
+                offset: 0,
+                message: "The page has nothing to edit",
+            };
+            let paragraph = *paragraphs
+                .get(self.pick(paragraphs.len()))
+                .ok_or(unavailable)?;
+            let container = *containers
+                .get(self.pick(containers.len()))
+                .ok_or(unavailable)?;
+            let anchor = nodes[&container].children.get(self.pick(4)).copied();
+            let text = *texts.get(self.pick(texts.len())).ok_or(unavailable)?;
+            let words = ["", "a", "Two words", "東京 🦀", "longer text here"];
+            let word = words[self.pick(words.len())];
+            match self.pick(8) {
+                0..=3 => Insertion::paragraph(container, anchor, word, "Author")
+                    .and_then(|insertion| insertion.changes(active)),
+                4 => TreeEdit::move_to(paragraph, container, anchor, "Author")
+                    .and_then(|edit| edit.changes(active)),
+                5 => TreeEdit::delete(paragraph, "Author").and_then(|edit| edit.changes(active)),
+                6 => {
+                    let at = self.pick(3) as u32;
+                    ParagraphSplit::new(text, at, "Author").and_then(|split| split.changes(active))
+                }
+                _ => {
+                    let end = self.pick(2) as u32;
+                    let bold = self.pick(2) == 0;
+                    crate::formatting::format_changes(
+                        active,
+                        text,
+                        0..end,
+                        &[TextAttribute::Bold(bold)],
+                        &[],
+                    )
+                }
+            }
+        }
+    }
 
     /// `active` equals the page `image` stores, views included.
     fn assert_stores(active: &ActivePage<'_>, image: &[u8], space: ExGuid) {
@@ -288,51 +456,9 @@ mod tests {
         let (space, _) = Document::parse(&index).unwrap().pages().unwrap()[0];
         let arena = Bump::new();
         let mut active = ActivePage::parse(&index, space).unwrap();
-        let mut seed = 7_u64;
-        let mut pick = |count: usize| {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (seed >> 33) as usize % count.max(1)
-        };
+        let mut writes = Writes(7);
         for step in 0..steps {
-            let nodes = &active.view.nodes;
-            let listed = |kind: fn(&Kind<'_>) -> bool| -> Vec<ExGuid> {
-                nodes
-                    .iter()
-                    .filter(|(id, node)| kind(&node.kind) && active.parents.contains_key(id))
-                    .map(|(id, _)| *id)
-                    .collect()
-            };
-            let paragraphs = listed(|kind| matches!(kind, Kind::Paragraph { .. }));
-            let containers = listed(|kind| {
-                matches!(
-                    kind,
-                    Kind::Paragraph { .. } | Kind::Outline { .. } | Kind::Cell { .. }
-                )
-            });
-            let texts = listed(|kind| matches!(kind, Kind::RichText { .. }));
-            let paragraph = paragraphs[pick(paragraphs.len())];
-            let container = containers[pick(containers.len())];
-            let anchor = nodes[&container].children.get(pick(4)).copied();
-            let text = texts[pick(texts.len())];
-            let words = ["", "a", "Two words", "東京 🦀", "longer text here"];
-            let word = words[pick(words.len())];
-            let changes = match pick(8) {
-                0..=3 => Insertion::paragraph(container, anchor, word, "Author")
-                    .and_then(|insertion| insertion.changes(&active)),
-                4 => TreeEdit::move_to(paragraph, container, anchor, "Author")
-                    .and_then(|edit| edit.changes(&active)),
-                5 => TreeEdit::delete(paragraph, "Author").and_then(|edit| edit.changes(&active)),
-                6 => ParagraphSplit::new(text, pick(3) as u32, "Author")
-                    .and_then(|split| split.changes(&active)),
-                _ => crate::formatting::format_changes(
-                    &active,
-                    text,
-                    0..pick(2) as u32,
-                    &[TextAttribute::Bold(pick(2) == 0)],
-                ),
-            };
+            let changes = writes.next(&active);
             let Ok(changes) = changes else {
                 continue;
             };

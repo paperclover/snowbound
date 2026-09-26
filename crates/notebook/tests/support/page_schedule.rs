@@ -1,7 +1,7 @@
 use crate::disk;
 use notebook::{EditStatus, Operation, Remote, Replica};
 use onestore::{
-    CommitError, ExGuid, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store,
+    CommitError, ExGuid, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store, Transaction,
     document::{Document, Format, Kind, Layout},
     page::{
         Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
@@ -125,7 +125,9 @@ impl Remote for Session<'_> {
         Ok(self.disk.visible.clone())
     }
 
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+        let mut image = self.disk.visible.clone();
+        transaction.apply(&mut image).unwrap();
         let mut expected = pages(&self.disk.visible);
         match self.operation.unwrap() {
             Operation::CreatePage(page) => expected.push((page.space(), page.object(), 1)),
@@ -144,7 +146,7 @@ impl Remote for Session<'_> {
             }
             Operation::Page(intent) => {
                 let body = body_text(&intent.after);
-                let store = Store::parse(edit.as_bytes()).unwrap();
+                let store = Store::parse(&image).unwrap();
                 let index = RevisionIndex::parse(&store).unwrap();
                 let document = Document::parse(&index).unwrap();
                 let matching: Vec<_> = document
@@ -160,10 +162,10 @@ impl Remote for Session<'_> {
             }
             _ => panic!(),
         }
-        assert_eq!(pages(edit.as_bytes()), expected);
+        assert_eq!(pages(&image), expected);
         let old = current::current(&self.disk.durable);
-        let new = current::current(edit.as_bytes());
-        let result = edit.commit(self.disk);
+        let new = current::current(&image);
+        let result = transaction.commit(self.disk);
         let observed = current::current(&self.disk.durable);
         assert!(observed == old || observed == new);
         if result.is_ok() {

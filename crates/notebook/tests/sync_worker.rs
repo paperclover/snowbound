@@ -2,7 +2,7 @@
 
 use notebook::{ConflictKind, EditStatus, Error, Remote, Replica};
 use onestore::{
-    CommitError, CommitState, ExGuid, PreparedEdit, RevisionIndex, Store, document::Document,
+    CommitError, CommitState, ExGuid, RevisionIndex, Store, Transaction, document::Document,
 };
 use std::io;
 
@@ -25,8 +25,11 @@ impl Remote for Shared {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         self.0.lock().unwrap().read()
     }
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-        self.0.lock().unwrap().publish(edit)
+    fn stamp(&mut self) -> io::Result<Option<onestore::Stamp>> {
+        self.0.lock().unwrap().stamp()
+    }
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+        self.0.lock().unwrap().publish(transaction)
     }
     fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
         self.0.lock().unwrap().confirm(snapshot)
@@ -72,8 +75,8 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
             }
             self.shared.read()
         }
-        fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-            self.shared.publish(edit)
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+            self.shared.publish(transaction)
         }
         fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
             self.shared.confirm(snapshot)
@@ -235,10 +238,10 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
         fn read(&mut self) -> io::Result<Vec<u8>> {
             self.shared.read()
         }
-        fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             self.entered.send(()).unwrap();
             self.resume.recv_timeout(Duration::from_secs(5)).unwrap();
-            self.shared.publish(edit)
+            self.shared.publish(transaction)
         }
         fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
             self.shared.confirm(snapshot)
@@ -580,7 +583,7 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
                 _ => self.server.read(),
             }
         }
-        fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             self.writes += 1;
             match self.writes {
                 1 | 2 => Err(CommitError {
@@ -592,7 +595,7 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
                     }
                     .into(),
                 }),
-                _ => self.server.publish(edit),
+                _ => self.server.publish(transaction),
             }
         }
         fn confirm(&mut self, source: &[u8]) -> Result<(), CommitError> {
@@ -638,7 +641,7 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
         fn read(&mut self) -> io::Result<Vec<u8>> {
             self.0.read()
         }
-        fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             let server = &mut self.0;
             if server.publications == 0 {
                 server.publications += 1;
@@ -647,7 +650,7 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
                     error: io::ErrorKind::ResourceBusy.into(),
                 });
             }
-            server.publish(edit)
+            server.publish(transaction)
         }
         fn confirm(&mut self, source: &[u8]) -> Result<(), CommitError> {
             self.0.confirm(source)

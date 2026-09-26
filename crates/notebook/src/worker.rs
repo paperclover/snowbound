@@ -60,7 +60,8 @@ impl Drop for SyncWorker {
 
 impl Replica {
     /// Starts one worker, reconnecting through `connect` after transport failures.
-    /// Local edits wake it; `interval` controls idle polling and transport retries.
+    /// Local edits wake it; `interval` controls idle polling and transport retries. While
+    /// nothing is queued, a remote whose `stamp` holds is not read again.
     /// Contended operations returning `NotCommitted` also back off by up to one second.
     /// `observe` runs on the worker after each attempt, including connection errors.
     /// Cache/document errors stop the worker; inspect them through `observe` or `stop`.
@@ -99,12 +100,22 @@ impl Replica {
         let thread = thread::Builder::new()
             .name("onestore-sync".into())
             .spawn(move || {
-                let mut remote = None;
+                let mut remote: Option<R> = None;
                 let jitter = RandomState::new();
                 let mut contention = 0_u32;
+                // The first attempt always runs, so `observe` hears once that the remote is
+                // reachable.
+                let mut attempted = false;
                 while !worker_signal.stopped.load(Ordering::Acquire) {
                     let result = match remote.as_mut() {
-                        Some(remote) => replica.sync_once(remote),
+                        Some(remote) => {
+                            if attempted && replica.settled(remote).unwrap_or(false) {
+                                let _ = receiver.recv_timeout(interval);
+                                continue;
+                            }
+                            attempted = true;
+                            replica.sync_once(remote)
+                        }
                         None => match connect() {
                             Ok(connected) => {
                                 remote = Some(connected);

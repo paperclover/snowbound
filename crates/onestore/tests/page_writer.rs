@@ -621,8 +621,10 @@ fn unsupported_model_edits_are_rejected_before_writing() {
     assert!(PreparedEdit::page(TREES, space, &page, "a\0b").is_err());
 }
 
+/// Unset run values stay unset; only the language, which MS-ONE requires on every run, comes
+/// from the insertion.
 #[test]
-fn a_new_paragraph_with_unspecified_formatting_takes_the_insertion_default() {
+fn a_new_paragraph_with_unspecified_formatting_rereads_with_only_the_required_language() {
     let (space, mut page) = page_by_title(OUTLINES, "Move leaf down");
     let text = onestore::page::TextObject {
         id: new_id().unwrap(),
@@ -662,7 +664,14 @@ fn a_new_paragraph_with_unspecified_formatting_takes_the_insertion_default() {
         .unwrap();
     assert_eq!(read_back.text.text(), "Plain 東京");
     let format = read_back.text.format_at(0).unwrap();
-    assert!(format.font.is_some() && format.font_size.is_some());
+    assert!(format.language.is_some());
+    assert_eq!(
+        format,
+        &onestore::document::Format {
+            language: format.language,
+            ..Default::default()
+        }
+    );
     assert_eq!(
         PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
             .unwrap()

@@ -5,7 +5,7 @@
 
 use crate::{
     Error, ExGuid, FileDataReference, IdStream, Object, ObjectData, Property, PropertySets,
-    RevisionIndex, Store, Value, bytes::Cursor,
+    RevisionIndex, Value, bytes::Cursor,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,6 +97,13 @@ macro_rules! format_fields {
             /// Explicit false values override inherited true values.
             pub fn inherit(&self, parent: &Self) -> Self {
                 Self { $($field: self.$field.as_ref().or(parent.$field.as_ref()).cloned()),* }
+            }
+
+            /// The values `self` sets that `parent` does not already give.
+            pub fn over(&self, parent: &Self) -> Self {
+                Self {
+                    $($field: self.$field.as_ref().filter(|value| parent.$field.as_ref() != Some(*value)).cloned()),*
+                }
             }
         }
     };
@@ -272,6 +279,98 @@ impl Revision<'_> {
             return Err(invalid("Text runs do not cover the text"));
         }
         Ok(resolved)
+    }
+}
+
+impl<'a> Revision<'a> {
+    /// The elements reachable in `revision` of `space`, and the (space, context) pairs they
+    /// reference.
+    pub(crate) fn parse(
+        space: ExGuid,
+        revision: &crate::ResolvedRevision<'a>,
+        file_type: crate::FileType,
+        file_data: &mut impl FnMut([u8; 16]) -> Result<&'a [u8]>,
+    ) -> Result<(Self, Vec<(ExGuid, ExGuid)>)> {
+        let mut reachable = BTreeSet::new();
+        let mut objects: Vec<_> = revision.roots.values().copied().collect();
+        let mut encrypted = false;
+        while let Some(oid) = objects.pop() {
+            if !reachable.insert(oid) {
+                continue;
+            }
+            let object = revision
+                .objects
+                .get(&oid)
+                .ok_or_else(|| invalid("Document object has no declaration"))?;
+            if matches!(object.data, ObjectData::Encrypted(_)) {
+                encrypted = true;
+            } else {
+                objects.extend(object.references()?.objects);
+            }
+        }
+        if !encrypted {
+            revision.reachable()?;
+        }
+        let mut referenced = Vec::new();
+        let mut nodes = BTreeMap::new();
+        for oid in reachable {
+            let object = &revision.objects[&oid];
+            if !matches!(object.data, ObjectData::Encrypted(_)) {
+                let refs = object.references()?;
+                referenced.extend(
+                    refs.object_spaces
+                        .into_iter()
+                        .map(|sid| (sid, ExGuid::default())),
+                );
+                referenced.extend(refs.contexts.into_iter().map(|context| (space, context)));
+            }
+            nodes.insert(oid, Element::parse_with(object, file_type, file_data)?);
+        }
+        for node in nodes.values() {
+            if let Kind::RichText {
+                runs,
+                paragraph_style,
+                ..
+            } = &node.kind
+            {
+                for target in paragraph_style
+                    .iter()
+                    .chain(runs.iter().filter_map(|r| r.format.as_ref()))
+                {
+                    if !matches!(nodes.get(target).map(|n| &n.kind), Some(Kind::Style { .. })) {
+                        return Err(invalid("Text formatting does not reference a style"));
+                    }
+                }
+            }
+            let mut tag_types = BTreeSet::new();
+            for tag in &node.tags {
+                let action_type = if tag.status & 4 != 0 {
+                    tag.action_type
+                } else {
+                    match tag
+                        .definition
+                        .and_then(|id| nodes.get(&id))
+                        .map(|n| &n.kind)
+                    {
+                        Some(Kind::TagDefinition { action_type, .. }) => *action_type,
+                        _ => {
+                            return Err(invalid("Note tag does not reference a tag definition"));
+                        }
+                    }
+                }
+                .ok_or_else(|| invalid("Note tag has no action type"))?;
+                if !tag_types.insert(action_type) {
+                    return Err(invalid("Repeated note tag action type"));
+                }
+            }
+        }
+        Ok((
+            Self {
+                roots: revision.roots.clone(),
+                nodes,
+            },
+            referenced,
+        ))
     }
 }
 
@@ -807,91 +906,14 @@ impl<'a> Document<'a> {
             if space.revisions.contains_key(&rid) {
                 continue;
             }
-            let revision = resolve(id, rid)?;
-            let mut reachable = BTreeSet::new();
-            let mut objects: Vec<_> = revision.roots.values().copied().collect();
-            let mut encrypted = false;
-            while let Some(oid) = objects.pop() {
-                if !reachable.insert(oid) {
-                    continue;
-                }
-                let object = revision
-                    .objects
-                    .get(&oid)
-                    .ok_or_else(|| invalid("Document object has no declaration"))?;
-                if matches!(object.data, ObjectData::Encrypted(_)) {
-                    encrypted = true;
-                } else {
-                    objects.extend(object.references()?.objects);
-                }
-            }
-            if !encrypted {
-                revision.reachable()?;
-            }
-            let mut nodes = BTreeMap::new();
-            for oid in reachable {
-                let object = &revision.objects[&oid];
-                if !matches!(object.data, ObjectData::Encrypted(_)) {
-                    let refs = object.references()?;
-                    pending.extend(
-                        refs.object_spaces
-                            .into_iter()
-                            .map(|sid| (sid, ExGuid::default())),
-                    );
-                    pending.extend(refs.contexts.into_iter().map(|context| (id, context)));
-                }
-                nodes.insert(
-                    oid,
-                    Element::parse_with(object, index.store, &mut file_data)?,
-                );
-            }
-            for node in nodes.values() {
-                if let Kind::RichText {
-                    runs,
-                    paragraph_style,
-                    ..
-                } = &node.kind
-                {
-                    for target in paragraph_style
-                        .iter()
-                        .chain(runs.iter().filter_map(|r| r.format.as_ref()))
-                    {
-                        if !matches!(nodes.get(target).map(|n| &n.kind), Some(Kind::Style { .. })) {
-                            return Err(invalid("Text formatting does not reference a style"));
-                        }
-                    }
-                }
-                let mut tag_types = BTreeSet::new();
-                for tag in &node.tags {
-                    let action_type = if tag.status & 4 != 0 {
-                        tag.action_type
-                    } else {
-                        match tag
-                            .definition
-                            .and_then(|id| nodes.get(&id))
-                            .map(|n| &n.kind)
-                        {
-                            Some(Kind::TagDefinition { action_type, .. }) => *action_type,
-                            _ => {
-                                return Err(invalid(
-                                    "Note tag does not reference a tag definition",
-                                ));
-                            }
-                        }
-                    }
-                    .ok_or_else(|| invalid("Note tag has no action type"))?;
-                    if !tag_types.insert(action_type) {
-                        return Err(invalid("Repeated note tag action type"));
-                    }
-                }
-            }
-            space.revisions.insert(
-                rid,
-                Revision {
-                    roots: revision.roots,
-                    nodes,
-                },
-            );
+            let (revision, referenced) = Revision::parse(
+                id,
+                &resolve(id, rid)?,
+                index.store.header.file_type,
+                &mut file_data,
+            )?;
+            pending.extend(referenced);
+            space.revisions.insert(rid, revision);
         }
         for space in spaces.values() {
             for node in space.revisions.values().flat_map(|r| r.nodes.values()) {
@@ -931,7 +953,7 @@ impl<'a> Document<'a> {
 impl<'a> Element<'a> {
     pub(crate) fn parse_with(
         object: &Object<'a>,
-        store: &Store<'a>,
+        file_type: crate::FileType,
         file_data: &mut impl FnMut([u8; 16]) -> Result<&'a [u8]>,
     ) -> Result<Self> {
         let empty = |kind| Self {
@@ -1311,7 +1333,7 @@ impl<'a> Element<'a> {
                 color: f.u32(0x14003466)?,
                 highlight: f.u32(0x14003465)?,
             },
-            0x20001 if store.header.file_type == crate::FileType::TableOfContents => Kind::Toc {
+            0x20001 if file_type == crate::FileType::TableOfContents => Kind::Toc {
                 entries: f.refs(0x24001cf6, IdStream::Objects)?,
                 filename: f.text(0x1c001d6b)?,
                 identity: f.fixed(0x1c001d94)?,

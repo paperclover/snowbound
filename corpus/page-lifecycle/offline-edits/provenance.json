@@ -633,7 +633,7 @@
   },
   "twelve-clients": {
     "run": {
-      "notebook": "/private/tmp/m33/page-clients2/candidate",
+      "notebook": "/Users/clo/dev/one/evidence/titles/twelve-clients",
       "expected_pages": 37,
       "author": null,
       "author_timeout_seconds": 600,
@@ -651,18 +651,24 @@
       }
     },
     "machine": {
-      "name": "m6-16c2e4d4",
-      "hostname": "ONE-M6-16C2E4D4"
+      "name": "m6-8eabb42e",
+      "hostname": "ONE-M6-8EABB42E"
     },
     "teardown": {
       "absent": true
     },
     "source": [
       {
+        "path": "manifest.json",
+        "bytes": 292907,
+        "sha256": "fea1d64b22da84d023d4c9014175f8e92a13acba099c7a1a3f8eae30d6c6407f",
+        "mtime_ns": 1790404395466294564
+      },
+      {
         "path": "pages.one",
-        "bytes": 155344,
-        "sha256": "623ade8b5ee6fc837ae63d5293791039ecd17da9cb8bc5e243ea20cadf37958c",
-        "mtime_ns": 1789124063040528117
+        "bytes": 152360,
+        "sha256": "302b6d2d31bc8f539a2217aed3391973678576b0aea1ce82c6e21760d6402e14",
+        "mtime_ns": 1790404395457867619
       }
     ]
   },

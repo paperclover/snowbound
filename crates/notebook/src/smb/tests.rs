@@ -120,6 +120,7 @@ fn create(client: &Client, path: &str, bytes: &[u8]) {
     let mut file = File {
         client,
         id: Some(response.file_id),
+        length: response.end_of_file,
     };
     let mut offset = 0;
     while offset < bytes.len() {
@@ -342,6 +343,53 @@ fn live_coordination() {
         "{}",
         serde_json::json!({"path":path,"readers":12,"committed_while_readers_held":true,"fresh_reads":12,"stale_snapshot_rejected":true,"replaced_handle_rejected":true,"retirement_releases_locks":true,"unpublished_tail_recovered":true,"drop_inside_runtime":true})
     );
+}
+
+/// Polling reads only the header, even while maintenance excludes snapshot readers, and a
+/// transaction commits against the header it was built on.
+#[test]
+#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
+fn live_stamp_and_transaction() {
+    let poller = client();
+    let source = onestore::create_section("stamp.one", "Stamped", "Author").unwrap();
+    let path = format!(
+        "stamp-{}.one",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    create(&poller, &path, &source);
+    assert_eq!(
+        poller.stamp(&path).unwrap(),
+        onestore::Stamp::of(&source).unwrap()
+    );
+    let maintenance = client();
+    let guard = maintenance.open(&path, false).unwrap();
+    guard.lock(0xfffffffb, 0x12).unwrap();
+    assert_eq!(
+        poller.read(&path, 1 << 20).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        poller.stamp(&path).unwrap(),
+        onestore::Stamp::of(&source).unwrap()
+    );
+    guard.close().unwrap();
+    let (sid, oid, _) = text(&source);
+    let edit = onestore::PreparedEdit::text(&source, sid, oid, 0..0, "Changed ").unwrap();
+    let transaction = edit.transaction();
+    poller.commit_transaction(&path, &transaction).unwrap();
+    assert_eq!(
+        poller.stamp(&path).unwrap(),
+        onestore::Stamp::of(edit.as_bytes()).unwrap()
+    );
+    assert_eq!(poller.read(&path, 1 << 20).unwrap(), edit.as_bytes());
+    let stale = poller.commit_transaction(&path, &transaction).unwrap_err();
+    assert_eq!(stale.state, CommitState::NotCommitted);
+    assert_eq!(stale.error.kind(), io::ErrorKind::ResourceBusy);
+    assert_eq!(poller.read(&path, 1 << 20).unwrap(), edit.as_bytes());
+    poller.delete(&path).unwrap();
 }
 
 #[test]

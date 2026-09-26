@@ -255,12 +255,56 @@ impl Replica {
         images::working(&connection)
     }
 
+    /// The page in `space` as the working image stores it.
+    pub fn page(&self, space: ExGuid) -> Result<Page> {
+        let snapshot = self.snapshot()?;
+        let store = Store::parse(&snapshot)?;
+        let index = RevisionIndex::parse(&store)?;
+        Ok(Page::from_space(&Document::parse(&index)?, space)?)
+    }
+
+    /// Whether no edit is queued and the remote still has the last observed image's stamp,
+    /// reading neither image; the cache is not locked during remote I/O.
+    pub(crate) fn settled(&self, remote: &mut impl Remote) -> Result<bool> {
+        let lock = || {
+            self.connection
+                .lock()
+                .map_err(|_| io::Error::other("Cache owner panicked"))
+        };
+        if !images::settled(&*lock()?)? {
+            return Ok(false);
+        }
+        let Some(stamp) = remote.stamp().map_err(Error::RemoteIo)? else {
+            return Ok(false);
+        };
+        Ok(images::stamp(&*lock()?)? == stamp)
+    }
+
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| io::Error::other("Cache owner panicked"))?;
         pending(&connection)
+    }
+
+    /// Identities and page spaces of the pending edits, oldest first, without reading their
+    /// operations.
+    pub(crate) fn queued(&self) -> Result<Vec<(u64, ExGuid)>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::Error::other("Cache owner panicked"))?;
+        let mut query = connection.prepare("SELECT id, space FROM edits ORDER BY id")?;
+        let mut rows = query.query([])?;
+        let mut edits = Vec::new();
+        while let Some(row) = rows.next()? {
+            edits.push((
+                u64::try_from(row.get::<_, i64>(0)?).map_err(io::Error::other)?,
+                row.get::<_, String>(1)?.parse()?,
+            ));
+        }
+        Ok(edits)
     }
 
     /// Durably queues an edited page model using the supplied local snapshot.

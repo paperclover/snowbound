@@ -383,22 +383,20 @@ impl<'a> PreparedEdit<'a> {
         &self.written
     }
 
-    /// Publishes these prepared bytes after comparing the entire original snapshot.
-    /// The caller must retain OneNote-compatible exclusion through the returned outcome.
-    pub fn commit(&self, io: &mut impl CommitIo) -> Result<(), CommitError> {
-        commit_bytes(io, self.source, &self.written)
+    /// The bytes publishing this edit writes, against its snapshot's stamp.
+    pub fn transaction(&self) -> Transaction {
+        Transaction::between(self.source, &self.written)
     }
 
-    /// Publishes these exact bytes through the conservative whole-file filesystem adapter.
-    /// A changed source returns ResourceBusy; an uncertain outcome must be reconciled before replay.
+    /// `Transaction::commit` of this edit.
+    pub fn commit(&self, io: &mut impl CommitIo) -> Result<(), CommitError> {
+        self.transaction().commit(io)
+    }
+
+    /// `Transaction::commit_file` of this edit.
     #[cfg(any(unix, windows))]
     pub fn commit_file(&self, path: impl AsRef<Path>) -> Result<(), CommitError> {
-        let mut io = FileIo::open(path, true).map_err(|error| CommitError {
-            state: CommitState::NotCommitted,
-            error,
-        })?;
-        let result = self.commit(&mut io);
-        io.finish(result)
+        self.transaction().commit_file(path)
     }
 }
 
@@ -413,7 +411,7 @@ pub fn confirm_file_snapshot(path: impl AsRef<Path>, source: &[u8]) -> Result<()
     io.finish(result)
 }
 
-/// Compares and flushes a snapshot, then refreshes its header version metadata.
+/// Checks and flushes a snapshot's stamp, then refreshes its header version metadata.
 /// No revision is added; reread before using the snapshot for another physical commit.
 /// The caller must hold OneNote-compatible exclusion and independently establish which
 /// intents the snapshot contains. A successful read alone is not a durable acknowledgement.
@@ -429,7 +427,7 @@ pub fn confirm_snapshot(io: &mut impl CommitIo, source: &[u8]) -> Result<(), Com
         version[..16].copy_from_slice(&crate::write::fresh_guid().map_err(io::Error::other)?);
         version[16..24].copy_from_slice(&generation.to_le_bytes());
         version[24..].copy_from_slice(&crate::write::fresh_guid().map_err(io::Error::other)?);
-        compare_snapshot(io, source)?;
+        Stamp::of(source).map_err(io::Error::other)?.check(io)?;
         state = CommitState::Unknown;
         io.flush()?;
         write_all(io, 212, &version)?;
@@ -474,12 +472,12 @@ impl std::error::Error for CommitError {
     }
 }
 
-fn write_all(io: &mut impl CommitIo, mut offset: usize, mut bytes: &[u8]) -> io::Result<()> {
+fn write_all(io: &mut impl CommitIo, mut offset: u64, mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
-        match io.write_at(offset as u64, bytes) {
+        match io.write_at(offset, bytes) {
             Ok(0) => return Err(io::Error::from(ErrorKind::WriteZero)),
             Ok(count) if count <= bytes.len() => {
-                offset += count;
+                offset += count as u64;
                 bytes = &bytes[count..];
             }
             Ok(_) => {
@@ -512,85 +510,203 @@ pub fn commit_property_bytes(
                 error: io::Error::new(ErrorKind::InvalidData, error),
             }
         })?;
-    commit_bytes(io, source, &written)
+    Transaction::between(source, &written).commit(io)
 }
 
-fn compare_snapshot(io: &mut impl CommitIo, source: &[u8]) -> io::Result<()> {
-    let capacity = source.len().clamp(1, 1024 * 1024);
-    let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(capacity)
-        .map_err(io::Error::other)?;
-    buffer.resize(capacity, 0);
-    let mut offset = 0;
-    while offset < source.len() {
-        let size = buffer.len().min(source.len() - offset);
-        let count = match io.read_at(offset as u64, &mut buffer[..size]) {
-            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            result => result?,
-        };
-        if count == 0 {
-            return Err(io::Error::from(ErrorKind::UnexpectedEof));
-        }
-        if count > size || buffer[..count] != source[offset..offset + count] {
+/// What a commit requires unchanged since its snapshot: the header, which every committed
+/// transaction and every placement rewrites (MS-ONESTORE 2.3.1 `guidFileVersion`), and the
+/// length appends start from. Equal stamps name the same committed image.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    pub header: [u8; 1024],
+    pub length: u64,
+}
+
+impl Stamp {
+    pub fn of(image: &[u8]) -> Result<Self, crate::Error> {
+        Ok(Self {
+            header: image.first_chunk().copied().ok_or(crate::Error {
+                offset: 0,
+                message: "Truncated revision-store header",
+            })?,
+            length: image.len() as u64,
+        })
+    }
+
+    /// Reads the header and probes the length, without reading the body.
+    fn check(&self, io: &mut impl CommitIo) -> io::Result<()> {
+        let mut header = [0; 1024];
+        crate::snapshot::read_exact(
+            &mut |offset, output| io.read_at(offset, output),
+            0,
+            &mut header,
+        )?;
+        if header != self.header {
             return Err(io::Error::new(
                 ErrorKind::ResourceBusy,
-                "The locked file differs from the edit snapshot",
+                "The file header changed after the edit snapshot",
             ));
         }
-        offset += count;
+        let last = self.length.checked_sub(1).ok_or(ErrorKind::InvalidInput)?;
+        let mut tail = [0; 2];
+        let count = loop {
+            match io.read_at(last, &mut tail) {
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                result => break result?,
+            }
+        };
+        if count != 1 {
+            return Err(io::Error::new(
+                ErrorKind::ResourceBusy,
+                "The file length changed after the edit snapshot",
+            ));
+        }
+        Ok(())
     }
-    if io.read_at(source.len() as u64, &mut buffer[..1])? != 0 {
-        return Err(io::Error::new(
-            ErrorKind::ResourceBusy,
-            "The locked file grew after the edit snapshot",
-        ));
-    }
-    Ok(())
 }
 
-pub(crate) fn commit_bytes(
-    io: &mut impl CommitIo,
-    source: &[u8],
-    written: &[u8],
-) -> Result<(), CommitError> {
-    let mut state = CommitState::NotCommitted;
-    let result = (|| -> io::Result<()> {
-        compare_snapshot(io, source)?;
-        if written == source {
-            state = CommitState::Unknown;
-            io.flush()?;
-            return Ok(());
+/// One change to a revision store as the bytes committing it writes: `append` at the base
+/// length, `patches` inside the base's data area (list tails and the transaction log), and
+/// the header that publishes them.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(into = "Wire", try_from = "Wire")]
+pub struct Transaction {
+    pub(crate) base: Stamp,
+    pub(crate) append: Vec<u8>,
+    pub(crate) patches: Vec<(u64, Vec<u8>)>,
+    pub(crate) header: [u8; 1024],
+}
+
+/// A transaction as serialized: headers as byte strings, since serde stops at 32-byte arrays.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Wire {
+    base: Vec<u8>,
+    length: u64,
+    append: Vec<u8>,
+    patches: Vec<(u64, Vec<u8>)>,
+    header: Vec<u8>,
+}
+
+impl From<Transaction> for Wire {
+    fn from(transaction: Transaction) -> Self {
+        Self {
+            base: transaction.base.header.to_vec(),
+            length: transaction.base.length,
+            append: transaction.append,
+            patches: transaction.patches,
+            header: transaction.header.to_vec(),
         }
-        write_all(io, source.len(), &written[source.len()..])?;
+    }
+}
+
+impl TryFrom<Wire> for Transaction {
+    type Error = &'static str;
+
+    fn try_from(wire: Wire) -> Result<Self, Self::Error> {
+        let header = |bytes: Vec<u8>| {
+            <[u8; 1024]>::try_from(bytes).map_err(|_| "A transaction header is 1024 bytes")
+        };
+        Ok(Self {
+            base: Stamp {
+                header: header(wire.base)?,
+                length: wire.length,
+            },
+            append: wire.append,
+            patches: wire.patches,
+            header: header(wire.header)?,
+        })
+    }
+}
+
+impl Transaction {
+    /// The transaction turning `source`, a parsed image, into `written`, which extends it.
+    pub(crate) fn between(source: &[u8], written: &[u8]) -> Self {
+        let differs = |at: &usize| source[*at] != written[*at];
+        let mut patches = Vec::new();
         let mut offset = 1024;
-        while offset < source.len() {
-            if source[offset] == written[offset] {
-                offset += 1;
-                continue;
+        while let Some(start) = (offset..source.len()).find(differs) {
+            let mut end = start + 1;
+            // Equal gaps shorter than a write request's overhead join the patch.
+            while let Some(next) = (end..source.len().min(end + 64)).find(differs) {
+                end = next + 1;
             }
-            let start = offset;
-            while offset < source.len() && source[offset] != written[offset] {
-                offset += 1;
-            }
-            write_all(io, start, &written[start..offset])?;
+            patches.push((start as u64, written[start..end].to_vec()));
+            offset = end;
         }
-        io.flush()?;
-        write_all(io, 100, &written[100..212])?;
-        write_all(io, 252, &written[252..1024])?;
-        io.flush()?;
-        let highest = (96..100).rfind(|at| source[*at] != written[*at]).unwrap();
-        state = CommitState::Unknown;
-        write_all(io, highest, &written[highest..highest + 1])?;
-        io.flush()?;
-        if highest > 96 {
-            write_all(io, 96, &written[96..highest])?;
-            io.flush()?;
+        Self {
+            base: Stamp {
+                header: *source.first_chunk().unwrap(),
+                length: source.len() as u64,
+            },
+            append: written[source.len()..].to_vec(),
+            patches,
+            header: *written.first_chunk().unwrap(),
         }
-        // Native readers cache the version GUID without rechecking the transaction count.
-        write_all(io, 212, &written[212..252])?;
-        io.flush()?;
+    }
+
+    /// Writes this transaction into its base image, as a successful commit leaves the file.
+    pub fn apply(&self, image: &mut Vec<u8>) -> Result<(), crate::Error> {
+        if Stamp::of(image)? != self.base {
+            return Err(crate::Error {
+                offset: 0,
+                message: "The image is not this transaction's base",
+            });
+        }
+        image.extend_from_slice(&self.append);
+        for (offset, bytes) in &self.patches {
+            let offset = *offset as usize;
+            image[offset..offset + bytes.len()].copy_from_slice(bytes);
+        }
+        image[..1024].copy_from_slice(&self.header);
         Ok(())
-    })();
-    result.map_err(|error| CommitError { state, error })
+    }
+
+    /// Publishes under caller-held OneNote-compatible exclusion, provided the file still has
+    /// the base stamp; otherwise returns ResourceBusy without writing. Appended data and
+    /// patches are flushed before the header, and the transaction count commits them
+    /// (MS-ONESTORE 2.3.3). Flush must make preceding writes durable before later ones.
+    pub fn commit(&self, io: &mut impl CommitIo) -> Result<(), CommitError> {
+        let mut state = CommitState::NotCommitted;
+        let result = (|| -> io::Result<()> {
+            self.base.check(io)?;
+            if self.append.is_empty() && self.patches.is_empty() && self.header == self.base.header
+            {
+                state = CommitState::Unknown;
+                return io.flush();
+            }
+            write_all(io, self.base.length, &self.append)?;
+            for (offset, bytes) in &self.patches {
+                write_all(io, *offset, bytes)?;
+            }
+            io.flush()?;
+            write_all(io, 100, &self.header[100..212])?;
+            write_all(io, 252, &self.header[252..])?;
+            io.flush()?;
+            state = CommitState::Unknown;
+            // At a counter carry the highest changed byte commits; the lower ones follow.
+            if let Some(highest) = (96..100).rfind(|at| self.base.header[*at] != self.header[*at]) {
+                write_all(io, highest as u64, &self.header[highest..highest + 1])?;
+                io.flush()?;
+                if highest > 96 {
+                    write_all(io, 96, &self.header[96..highest])?;
+                    io.flush()?;
+                }
+            }
+            // Native readers cache the version GUID without rechecking the transaction count.
+            write_all(io, 212, &self.header[212..252])?;
+            io.flush()
+        })();
+        result.map_err(|error| CommitError { state, error })
+    }
+
+    /// `commit` under the conservative filesystem adapter's whole-file exclusion.
+    #[cfg(any(unix, windows))]
+    pub fn commit_file(&self, path: impl AsRef<Path>) -> Result<(), CommitError> {
+        let mut io = FileIo::open(path, true).map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error,
+        })?;
+        let result = self.commit(&mut io);
+        io.finish(result)
+    }
 }

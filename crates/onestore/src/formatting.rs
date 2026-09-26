@@ -12,6 +12,9 @@ use std::{
     sync::Arc,
 };
 
+/// The font sizes OneNote accepts, in points; sizes are written in half points.
+pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 6.0..=130.0;
+
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
@@ -43,6 +46,8 @@ pub enum TextAttribute {
     Hyperlink(bool),
     /// The run is a hyperlink's visible label or field code rather than surrounding text.
     HyperlinkLabel(bool),
+    /// Only false: equation text is written whole through the page model.
+    Math(bool),
 }
 
 impl TextAttribute {
@@ -58,6 +63,10 @@ impl TextAttribute {
             Self::Hidden(value) => boolean(0x08001e16, *value),
             Self::Hyperlink(value) => boolean(0x08001e14, *value),
             Self::HyperlinkLabel(value) => boolean(0x08001e19, *value),
+            Self::Math(true) => {
+                return Err(invalid("Equations are written through the page model"));
+            }
+            Self::Math(false) => boolean(0x08003401, false),
             Self::Font(font) => {
                 if font.is_empty() || font.contains('\0') {
                     return Err(invalid("Font names must be nonempty and contain no NUL"));
@@ -66,7 +75,7 @@ impl TextAttribute {
             }
             Self::FontSize(points) => {
                 if !points.is_finite()
-                    || !(6.0..=130.0).contains(points)
+                    || !FONT_SIZES.contains(points)
                     || (points * 2.0).fract() != 0.0
                 {
                     return Err(invalid(
@@ -99,23 +108,29 @@ pub(crate) fn format_text(
     attributes: &[TextAttribute],
 ) -> Result<Vec<u8>, Error> {
     crate::active::write(source, space, |active| {
-        format_changes(active, object, range, attributes)
+        format_changes(active, object, range, attributes, &[])
     })
 }
 
-/// `format_text` on an active page.
+/// `format_text` on an active page, also removing the `cleared` properties from the range's
+/// run styles so the text inherits them.
 pub(crate) fn format_changes(
     active: &ActivePage<'_>,
     object: ExGuid,
     range: Range<u32>,
     attributes: &[TextAttribute],
+    cleared: &[crate::op::TextProperty],
 ) -> Result<Changes, Error> {
-    if attributes.is_empty() || range.start > range.end {
+    let cleared: Vec<u32> = cleared.iter().map(|property| property.id()).collect();
+    if (attributes.is_empty() && cleared.is_empty()) || range.start > range.end {
         return Err(invalid(
             "Select a text range and at least one formatting attribute",
         ));
     }
-    let values = attribute_values(attributes)?;
+    let values = match attributes {
+        [] => Vec::new(),
+        attributes => attribute_values(attributes)?,
+    };
     let view = &active.view;
     let parents = active.editable_parents(object)?;
     let node = &view.nodes[&object];
@@ -217,6 +232,7 @@ pub(crate) fn format_changes(
             };
             if selected {
                 style.set(&changes)?;
+                style.remove(&cleared)?;
             }
             if let Some(id) = previous
                 .filter(|id| raw.objects[id].data == crate::ObjectData::Properties(&style.bytes))

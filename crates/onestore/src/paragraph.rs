@@ -85,6 +85,34 @@ impl ParagraphSplit {
     }
 
     pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
+        let lists = (5..256)
+            .map(|n| ExGuid {
+                guid: self.guid,
+                n,
+            })
+            .collect::<Vec<_>>();
+        let changes = self.changes_as(active, self.object(), self.text_object(), &lists)?;
+        let raw = &active.live.revision;
+        if changes
+            .keys()
+            .any(|id| id.guid == self.guid && raw.objects.contains_key(id))
+        {
+            return Err(invalid(
+                "A split identity already exists; reconcile the existing edit",
+            ));
+        }
+        Ok(changes)
+    }
+
+    /// `changes` creating the right paragraph `paragraph` with text `right`, and a copy of
+    /// the left paragraph's list nodes under `lists`, in order.
+    pub(crate) fn changes_as(
+        &self,
+        active: &ActivePage<'_>,
+        paragraph_id: ExGuid,
+        right_text: ExGuid,
+        list_ids: &[ExGuid],
+    ) -> Result<Changes, Error> {
         let [_] = active.pages.as_slice() else {
             return Err(invalid("Splitting requires a single active page"));
         };
@@ -136,10 +164,32 @@ impl ParagraphSplit {
         }
         let raw = &active.live.revision;
         let (text, runs) = ordinary_text(view, raw, self.text)?;
+        let resolved = view.text_runs(self.text)?;
+        let link = |at: usize| {
+            resolved
+                .get(at)
+                .is_some_and(|run| run.format.hyperlink == Some(true))
+        };
+        if let Some(after) = runs
+            .iter()
+            .position(|run| run.start < self.offset && self.offset < run.end)
+        {
+            if link(after) {
+                return Err(invalid("A split cannot divide a hyperlink"));
+            }
+        } else if let Some(after) = runs
+            .iter()
+            .position(|run| run.start == self.offset && self.offset > 0)
+            && link(after - 1)
+            && link(after)
+            && !resolved[after].text.starts_with('\u{fddf}')
+        {
+            return Err(invalid("A split cannot divide a hyperlink"));
+        }
         let node = &view.nodes[&self.text];
         let length = u32::try_from(text.encode_utf16().count())
             .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
-        if self.offset > length || lists.len() > 251 {
+        if self.offset > length || lists.len() > 251 || lists.len() > list_ids.len() {
             return Err(invalid(
                 "Choose a position within the paragraph and at most 251 list levels",
             ));
@@ -153,9 +203,14 @@ impl ParagraphSplit {
             n: 4,
         };
         let typing = runs.last().and_then(|run| run.format).unwrap_or(normal_id);
+        // Enter at the start leaves the emptied upper paragraph the first run's style, as
+        // OneNote does (`evidence/structural-edits/xml/c2s-*`).
+        let leading = runs.first().and_then(|run| run.format);
         let modified = current_timestamps()?.0.to_le_bytes();
         let mut changed = BTreeMap::new();
-        if (self.offset == 0 && !text.is_empty()) || runs.iter().any(|run| run.format.is_none()) {
+        if (self.offset == 0 && !text.is_empty() && leading.is_none())
+            || runs.iter().any(|run| run.format.is_none())
+        {
             changed.insert(
                 normal_id,
                 PropertyObject {
@@ -169,15 +224,22 @@ impl ParagraphSplit {
             &raw.objects[&self.text],
             node,
             0..self.offset,
-            if text.is_empty() { typing } else { normal_id },
+            if text.is_empty() {
+                typing
+            } else if self.offset == 0 {
+                leading.unwrap_or(normal_id)
+            } else {
+                normal_id
+            },
         )?;
         let mut suffix = fragment(&raw.objects[&self.text], node, self.offset..length, typing)?;
         prefix.set(&[(0x14001d7a, &modified)])?;
-        suffix.remove(&[0x40003489])?;
+        // Note tags and the recording link stay with the original text.
+        suffix.remove(&[0x40003489, 0x1c001c98, 0x14001c99])?;
         suffix.set(&[(0x14001d7a, &modified)])?;
-        suffix.reference(self.text_object())?;
+        suffix.reference(right_text)?;
         changed.insert(self.text, prefix);
-        changed.insert(self.text_object(), suffix);
+        changed.insert(right_text, suffix);
         changed.insert(
             author_id,
             PropertyObject {
@@ -187,7 +249,8 @@ impl ParagraphSplit {
             },
         );
         let mut right = PropertyObject::from_object(&raw.objects[paragraph])?;
-        let content = right.reference(self.text_object())?;
+        right.reference(paragraph_id)?;
+        let content = right.reference(right_text)?;
         let author = right.reference(author_id)?;
         right.set(&[
             (0x24001c1f, &content),
@@ -202,10 +265,7 @@ impl ParagraphSplit {
                 if !matches!(view.nodes[old].kind, Kind::List { .. }) {
                     return Err(invalid("The paragraph list is unavailable"));
                 }
-                let id = ExGuid {
-                    guid: self.guid,
-                    n: 5 + u32::try_from(i).unwrap(),
-                };
+                let id = list_ids[i];
                 let mut list = PropertyObject::from_object(&raw.objects[old])?;
                 list.remove(&[0x14001cb7])?;
                 list.reference(id)?;
@@ -214,7 +274,7 @@ impl ParagraphSplit {
             }
             right.set(&[(0x24001c26, &references)])?;
         }
-        changed.insert(self.object(), right);
+        changed.insert(paragraph_id, right);
         let mut original = PropertyObject::from_object(&raw.objects[paragraph])?;
         original.remove(&[0x24001c20])?;
         let author = original.reference(author_id)?;
@@ -225,19 +285,11 @@ impl ParagraphSplit {
         for child in &view.nodes[parent].children {
             children.extend_from_slice(&parent_object.reference(*child)?);
             if child == paragraph {
-                children.extend_from_slice(&parent_object.reference(self.object())?);
+                children.extend_from_slice(&parent_object.reference(paragraph_id)?);
             }
         }
         parent_object.set(&[(0x24001c20, &children)])?;
         changed.insert(*parent, parent_object);
-        if changed
-            .keys()
-            .any(|id| id.guid == self.guid && raw.objects.contains_key(id))
-        {
-            return Err(invalid(
-                "A split identity already exists; reconcile the existing edit",
-            ));
-        }
         for id in ancestors {
             let object = match changed.entry(id) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -311,6 +363,9 @@ fn fragment(
     Ok(object)
 }
 
+/// A text object's text and runs, unless it holds what a split or join cannot divide or
+/// merge: generated title text, equations, embedded objects or per-run data. Hyperlink
+/// fields are ordinary runs; a recording link belongs to the text object.
 fn ordinary_text<'a>(
     view: &'a crate::document::Revision<'_>,
     raw: &crate::ResolvedRevision<'_>,
@@ -326,23 +381,15 @@ fn ordinary_text<'a>(
     else {
         return Err(invalid("Select ordinary paragraph text"));
     };
-    if *boilerplate || !node.media_ids.is_empty() || node.media_time_ms.is_some() {
-        return Err(invalid(
-            "Generated or recording-linked text cannot be split or joined",
-        ));
+    if *boilerplate {
+        return Err(invalid("Generated text cannot be split or joined"));
     }
     for run in view.text_runs(id)? {
-        if [
-            run.format.hidden,
-            run.format.hyperlink,
-            run.format.math,
-            run.format.embedded_object,
-        ]
-        .contains(&Some(true))
-            || run.text.contains(['\u{fffc}', '\u{fddf}'])
+        if [run.format.math, run.format.embedded_object].contains(&Some(true))
+            || run.text.contains('\u{fffc}')
         {
             return Err(invalid(
-                "This paragraph contains a field or embedded object that cannot be split or joined",
+                "This paragraph contains an equation or embedded object that cannot be split or joined",
             ));
         }
     }

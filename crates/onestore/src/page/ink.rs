@@ -50,7 +50,7 @@ pub struct InkStroke {
 }
 
 impl Ink {
-    pub(super) fn read(
+    pub(crate) fn read(
         revision: &Revision<'_>,
         id: ExGuid,
         node: &crate::document::Element<'_>,

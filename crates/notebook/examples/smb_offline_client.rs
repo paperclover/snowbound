@@ -4,7 +4,7 @@ mod concurrent;
 use notebook::smb::{Client, Credentials};
 use notebook::{EditStatus, Error, Remote, Replica, SmbRemote};
 use onestore::{
-    CommitError, CommitState, ExGuid, PreparedEdit, RevisionIndex, Store, page::Paragraph,
+    CommitError, CommitState, ExGuid, RevisionIndex, Store, Transaction, page::Paragraph,
 };
 use serde_json::json;
 use std::{
@@ -56,6 +56,8 @@ enum Pause {
 struct Traced<R> {
     remote: R,
     before: Option<(String, Option<DocumentView>)>,
+    /// The last image read, which publications apply to.
+    read: Vec<u8>,
     pause: Option<Pause>,
     documents: bool,
 }
@@ -75,15 +77,21 @@ impl<R: Remote> Remote for Traced<R> {
             json!({"event":"read", "started_us":started, "finished_us":now(), "text":observed.text, "documents":documents.as_ref().map(|view| &view.texts), "document_graph":documents.as_ref().map(|view| &view.graph)})
         );
         self.before = Some((observed.text, documents));
+        self.read.clone_from(&bytes);
         Ok(bytes)
     }
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
-        let after = view(edit.as_bytes()).map_err(|error| CommitError {
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+        let mut image = self.read.clone();
+        transaction.apply(&mut image).map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error: io::Error::other(error.to_string()),
+        })?;
+        let after = view(&image).map_err(|error| CommitError {
             state: CommitState::NotCommitted,
             error: io::Error::other(error.to_string()),
         })?;
         let documents = if self.documents {
-            Some(document_view(edit.as_bytes()).map_err(|error| CommitError {
+            Some(document_view(&image).map_err(|error| CommitError {
                 state: CommitState::NotCommitted,
                 error: io::Error::other(error),
             })?)
@@ -151,7 +159,7 @@ impl<R: Remote> Remote for Traced<R> {
             }
         }
         let started = now();
-        let result = self.remote.publish(edit);
+        let result = self.remote.publish(transaction);
         let finished = now();
         println!(
             "{}",
@@ -399,7 +407,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let worker = cache.start_sync(Duration::from_millis(50), move || {
         let client = Client::connect(&address, &share, Credentials::default(), Duration::from_secs(5))?;
         println!("{}", json!({"event":"transport_connected", "at_us":now()}));
-        Ok(Traced { remote: SmbRemote::new(client, &path, 256 * 1024 * 1024), before:None, pause:pause.clone(), documents })
+        Ok(Traced { remote: SmbRemote::new(client, &path, 256 * 1024 * 1024), before:None, read:Vec::new(), pause:pause.clone(), documents })
     }, move |result| {
         if let Err(error) = result {
             println!("{}", json!({"event":"sync_error", "error":error.to_string(), "at_us":now()}));

@@ -1,10 +1,10 @@
 {
   "generator": "crates/onestore/tests/page_movement.rs::repeated_nesting_retains_series_history_across_revision_checkpoints",
   "edits": 520,
-  "capture": "evidence/m10/page-edit-stress-cold-01",
+  "capture": "evidence/titles/cold-stress",
   "machine": {
-    "name": "m6-40a088ec",
-    "hostname": "ONE-M6-40A088EC"
+    "name": "m6-02a94b20",
+    "hostname": "ONE-M6-02A94B20"
   },
   "teardown": {
     "absent": true
@@ -12,9 +12,9 @@
   "source": [
     {
       "path": "movement.one",
-      "bytes": 2635536,
-      "sha256": "77dbec39ca25558b596b477d57117416f23ee133519f5179d7ebf1a33b38c248",
-      "mtime_ns": 1788936082839470214
+      "bytes": 959216,
+      "sha256": "e2948ff3d01839a2c6a7908633739e97c4ebbe28e584c105bb1166669508758f",
+      "mtime_ns": 1790404366792422729
     }
   ]
 }

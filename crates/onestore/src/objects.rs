@@ -19,7 +19,7 @@ pub enum ObjectData<'a> {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Object<'a> {
     pub jcid: u32,
     pub reference_count: u32,
@@ -27,7 +27,7 @@ pub struct Object<'a> {
     pub global_ids: Arc<GlobalIds>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvedRevision<'a> {
     pub roots: BTreeMap<u32, ExGuid>,
     pub objects: BTreeMap<ExGuid, Object<'a>>,

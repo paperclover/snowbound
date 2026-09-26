@@ -131,42 +131,47 @@ impl<'a> Store<'a> {
             offset: 0,
             message: "File-data object is not declared",
         })?;
-        let mut c = Cursor {
-            bytes: self.chunk_data(chunk)?,
-            offset: usize::try_from(chunk.offset).unwrap(),
-        };
-        if c.read::<16>()?
-            != [
-                0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
-                0x9e, 0xac,
-            ]
-        {
-            return Err(Error {
-                offset: c.offset - 16,
-                message: "Invalid file-data object header",
-            });
-        }
-        let length = usize::try_from(u64::from_le_bytes(c.read()?)).map_err(|_| Error {
-            offset: c.offset - 8,
-            message: "File-data length exceeds address space",
-        })?;
-        c.take(12)?;
-        let bytes = c.take(length)?;
-        // The object length is aligned; its position in the file need not be.
-        let padding = (8 - (36 + length) % 8) % 8;
-        c.take(padding)?;
-        if c.read::<16>()?
-            != [
-                0x22, 0xa7, 0xfb, 0x71, 0x79, 0x0f, 0x0b, 0x4a, 0xbb, 0x13, 0x89, 0x92, 0x56, 0x42,
-                0x6b, 0x24,
-            ]
-            || !c.bytes.is_empty()
-        {
-            return Err(Error {
-                offset: c.offset - 16,
-                message: "Invalid file-data object footer or length",
-            });
-        }
-        Ok(bytes)
+        payload(
+            self.chunk_data(chunk)?,
+            usize::try_from(chunk.offset).unwrap(),
+        )
     }
+}
+
+/// The payload of a file-data store object, whose bytes start at file offset `offset`.
+pub(crate) fn payload(bytes: &[u8], offset: usize) -> Result<&[u8], Error> {
+    let mut c = Cursor { bytes, offset };
+    if c.read::<16>()?
+        != [
+            0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
+            0x9e, 0xac,
+        ]
+    {
+        return Err(Error {
+            offset: c.offset - 16,
+            message: "Invalid file-data object header",
+        });
+    }
+    let length = usize::try_from(u64::from_le_bytes(c.read()?)).map_err(|_| Error {
+        offset: c.offset - 8,
+        message: "File-data length exceeds address space",
+    })?;
+    c.take(12)?;
+    let bytes = c.take(length)?;
+    // The object length is aligned; its position in the file need not be.
+    let padding = (8 - (36 + length) % 8) % 8;
+    c.take(padding)?;
+    if c.read::<16>()?
+        != [
+            0x22, 0xa7, 0xfb, 0x71, 0x79, 0x0f, 0x0b, 0x4a, 0xbb, 0x13, 0x89, 0x92, 0x56, 0x42,
+            0x6b, 0x24,
+        ]
+        || !c.bytes.is_empty()
+    {
+        return Err(Error {
+            offset: c.offset - 16,
+            message: "Invalid file-data object footer or length",
+        });
+    }
+    Ok(bytes)
 }

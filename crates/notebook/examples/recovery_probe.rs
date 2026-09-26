@@ -4,7 +4,7 @@ mod support {
 use support::view::view;
 
 use notebook::{EditStatus, Remote, Replica};
-use onestore::{CommitError, CommitIo, PreparedEdit};
+use onestore::{CommitError, CommitIo, Transaction};
 use serde_json::json;
 use std::{
     env,
@@ -67,9 +67,9 @@ impl Remote for Disk {
         phase("read-after");
         result
     }
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> Result<(), CommitError> {
+    fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         phase("publish-before");
-        let result = edit.commit(self);
+        let result = transaction.commit(self);
         phase("publish-after");
         result
     }

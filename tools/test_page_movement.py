@@ -111,7 +111,7 @@ class PageMovementTest(unittest.TestCase):
                         with self.assertRaises(AssertionError):
                             compare(fixture / 'notebook', fixture / 'cold')
                     refreshed = compare(fixture / 'notebook', fixture / 'cold',
-                                        refresh_metadata_levels=phase == '02-promoted-parent')
+                                        refresh_metadata=phase == '02-promoted-parent')
                     self.assertEqual(refreshed, int(phase == '02-promoted-parent'))
                     output = temporary / phase
                     subprocess.run([EXPORTER, fixture / 'notebook/Lifecycle.one', output], check=True)

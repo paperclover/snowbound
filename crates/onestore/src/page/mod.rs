@@ -209,7 +209,7 @@ impl PartialEq for Attachment {
 }
 
 impl Attachment {
-    fn read(
+    pub(crate) fn read(
         revision: &Revision<'_>,
         id: ExGuid,
         node: &crate::document::Element<'_>,
@@ -320,7 +320,7 @@ impl PartialEq for Image {
 }
 
 impl Image {
-    fn read(
+    pub(crate) fn read(
         revision: &Revision<'_>,
         id: ExGuid,
         node: &crate::document::Element<'_>,
@@ -556,9 +556,11 @@ impl Page {
                     })?))
                 })
                 .transpose()?,
+            // OneNote 2010 snaps to, and on the first move writes, (36, 14.4) when unset: 1.0
+            // and 0.4 half inches, read as stored ones are.
             margin_origin: [
-                margin_origin_x.unwrap_or(0.0),
-                margin_origin_y.unwrap_or(0.0),
+                margin_origin_x.unwrap_or(1.0_f32 * 36.0),
+                margin_origin_y.unwrap_or(0.4_f32 * 36.0),
             ],
             objects: Vec::new(),
             definitions: BTreeMap::new(),
@@ -633,8 +635,8 @@ impl Page {
                     };
                     let mut outline = Outline {
                         id,
-                        // OneNote flags the outline and its paragraph; `PageCreation` flags only
-                        // the paragraph, and OneNote still shows that outline as the title.
+                        // OneNote flags the outline and its paragraph, and still shows an outline
+                        // whose paragraph alone is flagged as the title.
                         title: title_text(node)
                             || node
                                 .children
@@ -680,6 +682,94 @@ impl Page {
         }
         Ok(page)
     }
+}
+
+/// The format `container` passes to its children, as reading its page inherits it.
+fn inherited_by(
+    revision: &Revision<'_>,
+    parents: &BTreeMap<ExGuid, Vec<ExGuid>>,
+    container: ExGuid,
+) -> Result<Format, Error> {
+    let invalid = |message| Error { offset: 0, message };
+    let node = revision
+        .nodes
+        .get(&container)
+        .ok_or_else(|| invalid("Missing canvas outline object"))?;
+    let parent = || -> Result<ExGuid, Error> {
+        match parents.get(&container).map(Vec::as_slice) {
+            Some([parent]) => Ok(*parent),
+            _ => Err(invalid("Page content must have one parent")),
+        }
+    };
+    Ok(match &node.kind {
+        Kind::Outline { .. } => node.format.clone(),
+        Kind::OutlineGroup => node
+            .format
+            .inherit(&inherited_by(revision, parents, parent()?)?),
+        Kind::Paragraph {
+            paragraph_style, ..
+        } => {
+            let style = match paragraph_style {
+                Some(id) => revision.nodes.get(id).map(|n| n.format.clone()).unwrap_or_default(),
+                None => Format::default(),
+            };
+            node.format
+                .inherit(&style)
+                .inherit(&inherited_by(revision, parents, parent()?)?)
+        }
+        Kind::Cell { .. } => {
+            let row = parent()?;
+            let [table] = parents.get(&row).map(Vec::as_slice).unwrap_or_default() else {
+                return Err(invalid("A table row must have one table"));
+            };
+            let [holder] = parents.get(table).map(Vec::as_slice).unwrap_or_default() else {
+                return Err(invalid("A table must have one paragraph"));
+            };
+            node.format.inherit(
+                &revision.nodes[table]
+                    .format
+                    .inherit(&inherited_by(revision, parents, *holder)?),
+            )
+        }
+        _ => Format::default(),
+    })
+}
+
+/// The text of rich-text object `text` as its page model shows it, read from its ancestors
+/// alone.
+pub(crate) fn text_of(
+    revision: &Revision<'_>,
+    parents: &BTreeMap<ExGuid, Vec<ExGuid>>,
+    text: ExGuid,
+) -> Result<Paragraph, Error> {
+    let invalid = |message| Error { offset: 0, message };
+    let [paragraph] = parents.get(&text).map(Vec::as_slice).unwrap_or_default() else {
+        return Err(invalid("Select text belonging to one paragraph"));
+    };
+    let format = inherited_by(revision, parents, *paragraph)?;
+    let node = revision
+        .nodes
+        .get(&text)
+        .ok_or_else(|| invalid("Missing text object"))?;
+    let Kind::RichText {
+        paragraph_style, ..
+    } = &node.kind
+    else {
+        return Err(invalid("Select a rich-text object"));
+    };
+    let runs = revision.text_runs(text)?;
+    Ok(if runs.is_empty() {
+        let style = match paragraph_style {
+            Some(id) => revision.nodes.get(id).map(|n| n.format.clone()).unwrap_or_default(),
+            None => Format::default(),
+        };
+        Paragraph::new(String::new(), node.format.inherit(&style).inherit(&format))
+    } else {
+        Paragraph::from_runs(
+            runs.into_iter()
+                .map(|run| (run.text.to_owned(), run.format.inherit(&format))),
+        )
+    })
 }
 
 fn read_paragraphs(

@@ -1,5 +1,5 @@
 use super::*;
-use onestore::{CommitError, CommitState};
+use onestore::{CommitError, CommitState, Stamp, Transaction};
 use rusqlite::OptionalExtension;
 use std::{
     collections::BTreeMap,
@@ -7,10 +7,16 @@ use std::{
 };
 
 /// A single remote file with fresh reads and native-compatible guarded publication.
-/// Errors retain publication state; confirmation compares, flushes, and notifies cached readers.
+/// Errors retain publication state; confirmation checks the stamp, flushes, and notifies
+/// cached readers.
 pub trait Remote {
     fn read(&mut self) -> io::Result<Vec<u8>>;
-    fn publish(&mut self, edit: &PreparedEdit<'_>) -> std::result::Result<(), CommitError>;
+    /// The file's stamp without reading its body, when the remote can tell. While it is the
+    /// last observed image's, synchronization neither reads nor revalidates the file.
+    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+        Ok(None)
+    }
+    fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError>;
     fn confirm(&mut self, snapshot: &[u8]) -> std::result::Result<(), CommitError>;
 }
 
@@ -78,13 +84,14 @@ impl Replica {
             }
         }
         let _step = Step(self);
-        let snapshot = remote.read().map_err(Error::RemoteIo)?;
-        // An unchanged remote is the base image, validated when it was stored.
-        let identity = if snapshot == self.remote_snapshot()? {
-            None
-        } else {
-            Some(validate(&snapshot)?)
+        let base = self.remote_snapshot()?;
+        let changed = match remote.stamp().map_err(Error::RemoteIo)? {
+            Some(stamp) if stamp == Stamp::of(&base)? => None,
+            _ => Some(remote.read().map_err(Error::RemoteIo)?).filter(|read| *read != base),
         };
+        // An unchanged remote is the base image, validated when it was stored.
+        let identity = changed.as_deref().map(validate).transpose()?;
+        let snapshot = changed.unwrap_or(base);
         let (intent, attempted) = {
             let mut connection = self
                 .connection
@@ -92,6 +99,9 @@ impl Replica {
                 .map_err(|_| io::Error::other("Cache owner panicked"))?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if identity.is_none() && images::settled(&transaction)? {
+                return Ok(None);
+            }
             let (base, working) = images::both(&transaction)?;
             if let Some(identity) = identity
                 && RevisionIndex::parse(&Store::parse(&base)?)?.root != identity
@@ -267,7 +277,7 @@ impl Replica {
             )?;
             transaction.commit()?;
         }
-        match remote.publish(&prepared) {
+        match remote.publish(&prepared.transaction()) {
             Ok(()) => {}
             Err(error) if error.state == CommitState::NotCommitted => {
                 let connection = self

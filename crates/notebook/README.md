@@ -188,6 +188,9 @@ object space, which survives the tested native compaction that replaces the file
 An `Arc<Replica>` can own one background worker. Supply a connection factory, poll
 interval and observer; successful publications drain immediately, durable local
 edits wake the worker, and `wake()` requests an immediate reachability retry.
+While nothing is queued, a remote whose `Remote::stamp` (its header and length, read
+without coordination) equals the last observed image's is not read again; publishing
+against an unchanged stamp needs no read either.
 Transport failures discard the old connection and retry through the factory;
 Read contention and `NotCommitted` operations with `WouldBlock` or `ResourceBusy`
 reuse the connection. Contended `NotCommitted` operations use randomized backoff,
@@ -383,6 +386,7 @@ experimental Rust API with native interoperability evidence in the repository's
 [Milestone 9](../../evidence/MILESTONE9.md).
 
 ```no_run
+# #[cfg(feature = "smb")] {
 use notebook::smb::{Client, Credentials};
 use std::time::Duration;
 
@@ -396,6 +400,7 @@ let snapshot = client.read("Personal/Video.one", 64 * 1024 * 1024)?;
 let store = onestore::Store::parse(&snapshot)?;
 let revisions = onestore::RevisionIndex::parse(&store)?;
 let document = onestore::document::Document::parse(&revisions)?;
+# }
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -404,8 +409,9 @@ snapshot. Call from a background thread outside a Tokio runtime. Use identities
 from the document and the same snapshot with `Client::commit_text` or
 `Client::commit_property_bytes`; their errors retain `onestore::CommitState`.
 `PreparedEdit::page` separates preparation from I/O: inspect the immutable image
-and persist the intended revision identity before `Client::commit_prepared`.
-`Client::confirm_snapshot` compares and flushes an observed image, then refreshes
+and persist the intended revision identity before `Client::commit_transaction` publishes
+its `transaction()`. `Client::stamp` reads a file's header and length without coordination,
+for polling. `Client::confirm_snapshot` checks and flushes an observed image's stamp, then refreshes
 its header version metadata without adding a revision. The caller must first
 establish which intents that image contains and reread before another commit.
 
