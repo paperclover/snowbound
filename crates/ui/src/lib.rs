@@ -248,6 +248,9 @@ pub struct Spec<'a> {
     pub anchor: Option<Anchor>,
     /// How transparent the box and its contents are, from 0 to 1.
     pub fade: f32,
+    /// The colour `fade` blends the box and its contents into instead, so boxes fading
+    /// over one another never add up.
+    pub fade_into: Option<[f32; 4]>,
 }
 
 /// Input the host forwards; positions and wheel distances are logical pixels.
@@ -329,6 +332,7 @@ struct Built {
     anchor: Option<Anchor>,
     /// The opacity of the box and its contents; a popup's rises as it opens.
     alpha: f32,
+    fade_into: Option<[f32; 4]>,
     /// Rectangles relative to the box, painted over its fill.
     marks: Vec<([f32; 4], [f32; 4])>,
     computed: [f32; 2],
@@ -420,9 +424,15 @@ enum Display {
 }
 
 impl Display {
-    /// Multiplies the item's opacity by `alpha`.
-    fn fade(&mut self, alpha: f32) {
-        let fade = |color: &mut [f32; 4]| color[3] *= alpha;
+    /// Multiplies the item's opacity by `alpha`, or blends it that far into `into`.
+    fn fade(&mut self, alpha: f32, into: Option<[f32; 4]>) {
+        let fade = |color: &mut [f32; 4]| match into {
+            Some(into) => {
+                let [red, green, blue, _] = mix(into, *color, alpha);
+                *color = [red, green, blue, color[3]];
+            }
+            None => color[3] *= alpha,
+        };
         match self {
             Display::Rect {
                 fill,
@@ -1098,10 +1108,12 @@ impl Ui {
         if inner_clip != clip {
             self.display.push(Display::Clip(clip));
         }
-        let alpha = self.nodes[index].alpha;
+        let Built {
+            alpha, fade_into, ..
+        } = self.nodes[index];
         if alpha < 1.0 {
             for item in &mut self.display[start..] {
-                item.fade(alpha);
+                item.fade(alpha, fade_into);
             }
         }
     }
@@ -1280,6 +1292,7 @@ impl Built {
             cursor: spec.cursor,
             anchor: spec.anchor,
             alpha: 1.0 - spec.fade,
+            fade_into: spec.fade_into,
             marks: Vec::new(),
             computed: [0.0; 2],
             relative: [0.0; 2],

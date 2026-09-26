@@ -195,6 +195,7 @@ fn choose(
             id.child("rows"),
             Spec {
                 size: [fill(), px(view)],
+                fill: Some(theme.popup),
                 ..Spec::default()
             },
             list,

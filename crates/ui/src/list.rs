@@ -1,6 +1,7 @@
 //! A virtualized list of equal rows keyed by their items: only rows in view are built,
-//! rows move to where their items go without passing over one another, and the view holds
-//! its place on the selection while items arrive and leave above it.
+//! rows slide to where their items go, rows leaving fold into the seam their gap closes on
+//! and rows arriving unfold out of it, and the view holds its place on the selection while
+//! items arrive and leave above it.
 
 use crate::{Axis, Event, Flags, HALF_LIFE, Id, Size, Spec, Ui, fill, mix, px, scrollbar};
 use std::collections::{HashMap, HashSet};
@@ -8,7 +9,7 @@ use winit::keyboard::NamedKey;
 
 /// Room beside a scrolling list's rows for its scrollbar.
 pub(crate) const GUTTER: f32 = 12.0;
-/// Seconds a row takes to reach its new place: half leaving where it was, half arriving.
+/// Seconds rows take to reach their new places.
 const DURATION: f32 = 0.15;
 
 /// Items a list shows, in order.
@@ -41,8 +42,8 @@ pub struct List<'a, R> {
     pub hover_selects: bool,
 }
 
-/// A row to build: its item's key, its index while listed or None as it fades out after
-/// leaving, and whether it is selected.
+/// A row to build: its item's key, its index while listed or None as it folds away after
+/// its item left or moved, and whether it is selected.
 pub struct Row {
     pub key: u64,
     pub index: Option<usize>,
@@ -58,8 +59,6 @@ pub(crate) struct State {
     shown: Vec<Shown>,
     /// The selection last frame, so a new one scrolls into view.
     selected: Option<u64>,
-    /// How far the furthest sliding row was from its place last frame.
-    slack: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -67,72 +66,58 @@ struct Shown {
     key: u64,
     /// Where its row lies, from the top of the view.
     place: f64,
+    /// None for a row folding away after its item left or moved.
     index: Option<usize>,
     motion: Option<Motion>,
+    /// Where it was drawn from the top of the view, and how strongly.
+    drawn: f64,
+    alpha: f32,
 }
 
-impl Shown {
-    /// Where the row is drawn from the top of the view, and its opacity.
-    fn drawn(&self, reach: f64, slack: f64) -> (f64, f32) {
-        self.motion.map_or((self.place, 1.0), |motion| {
-            let (offset, alpha) = motion.at(reach, slack);
-            (self.place + offset, alpha)
-        })
-    }
-}
-
-/// A row's way to its place after the items change, between offsets from the place.
 #[derive(Clone, Copy)]
 struct Motion {
-    from: f64,
-    to: f64,
-    /// Its opacity as it set out.
-    alpha: f32,
-    style: Style,
     elapsed: f32,
+    way: Way,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Style {
-    /// A move keeping its order with the rows around: waits out those leaving, then slides.
-    Slide,
-    /// Fades out setting off towards the midpoint and in arriving from it, unseen where
-    /// it passes other rows.
-    Cross,
-    /// Fades in arriving from the middle of the rows entering with it.
-    Enter,
-    /// Fades out setting off towards the middle of the rows leaving with it.
-    Leave,
+#[derive(Clone, Copy)]
+enum Way {
+    /// Slides to its place from this offset.
+    Slide(f64),
+    Fold(Fold),
 }
 
-impl Motion {
-    /// Its offset and opacity; beyond `reach` of both ends it cannot be seen, so its text
-    /// never meets a neighbour's, nor arriving while a row sliding is `slack` from its place.
-    fn at(self, reach: f64, slack: f64) -> (f64, f32) {
-        let t = (self.elapsed / DURATION).min(1.0);
-        let [first, second] = [(2.0 * t).min(1.0), (2.0 * t - 1.0).max(0.0)];
-        let out = |x: f32| 1.0 - (1.0 - x).powi(3);
-        let inward = |x: f32| x.powi(3);
-        let leave = self.alpha * (1.0 - out(first));
-        let (travel, fade) = match self.style {
-            Style::Slide => (out(second), 1.0),
-            Style::Cross => (
-                0.5 * inward(first) + 0.5 * out(second),
-                if t < 0.5 { leave } else { inward(second) },
-            ),
-            Style::Enter => (out(second), inward(second)),
-            Style::Leave => (inward(first), leave),
-        };
-        let offset = self.from + (self.to - self.from) * f64::from(travel);
-        let near = (offset - self.from).abs().min((offset - self.to).abs());
-        let seen = |distance: f64| (1.0 - distance / reach).clamp(0.0, 1.0) as f32;
-        let alpha = match self.style {
-            Style::Slide => 1.0,
-            Style::Enter => fade.min(seen(near)) * seen(slack),
-            Style::Cross if t >= 0.5 => fade.min(seen(near)) * seen(slack),
-            _ => fade.min(seen(near)),
-        };
-        (offset, alpha)
+/// A row folding into the gap its run leaves between two rows, or unfolding out of the
+/// gap its run opens, squeezed among the run and blending into the background as the gap
+/// narrows.
+#[derive(Clone, Copy)]
+struct Fold {
+    /// The gap's edges as it starts and ends, as offsets from the row's place.
+    start: [f64; 2],
+    end: [f64; 2],
+    /// The row's position in its run, and the run's length.
+    at: usize,
+    of: usize,
+    /// How strongly it was drawn as it set out.
+    alpha: f32,
+}
+
+impl Fold {
+    /// Where the row is drawn and how strongly, `progress` of the way through, never over
+    /// the `solid` rows drawn at these tops, in order. Its text keeps inside the gap, gone
+    /// before the gap is too narrow to hold it clear of the rows either side.
+    fn at(&self, place: f64, progress: f64, height: f64, solid: &[f64]) -> (f64, f32) {
+        let [top, bottom] = [0, 1]
+            .map(|side| place + self.start[side] + (self.end[side] - self.start[side]) * progress);
+        let below = solid.partition_point(|y| y + height / 2.0 <= (top + bottom) / 2.0);
+        let top = below
+            .checked_sub(1)
+            .map_or(top, |above| top.max(solid[above] + height));
+        let bottom = solid.get(below).map_or(bottom, |y| bottom.min(*y));
+        let share = (bottom - top).max(0.0) / self.of as f64;
+        let y = top + (self.at as f64 + 0.5) * share - height / 2.0;
+        let room = (2.0 * share / height - 1.0).clamp(0.0, 1.0) as f32;
+        (y, room * self.alpha)
     }
 }
 
@@ -201,7 +186,7 @@ pub fn list<R: Rows>(
         }
     }
     let mut clicked = None;
-    for shown in &state.shown {
+    for shown in state.shown.iter().filter(|shown| shown.index.is_some()) {
         let signal = ui.signal(id.child(shown.key));
         let Some(index) = rows.find(shown.key).filter(|index| rows.selectable(*index)) else {
             continue;
@@ -263,25 +248,21 @@ pub fn list<R: Rows>(
     let scroll = state.scroll;
     let step = scroll - anchored;
 
-    let reach = height / 6.0;
     let dt = ui.dt;
     let tick = |motion: Motion| {
         let elapsed = motion.elapsed + dt;
         (elapsed < DURATION).then_some(Motion { elapsed, ..motion })
     };
-    // Rows built last frame, drawn in the view as anchored.
-    let before: HashMap<u64, Shown> = state
-        .shown
-        .iter()
-        .map(|shown| (shown.key, *shown))
-        .collect();
-    let listed: Vec<&Shown> = state
+    let progress = |motion: &Motion| 1.0 - (1.0 - f64::from(motion.elapsed / DURATION)).powi(3);
+    let listed: Vec<Shown> = state
         .shown
         .iter()
         .filter(|shown| shown.index.is_some())
+        .copied()
         .collect();
-    // The most rows staying listed that keep their order slide; the rest would pass over
-    // them, so cross unseen.
+    let before: HashMap<u64, Shown> = listed.iter().map(|shown| (shown.key, *shown)).collect();
+    // The most rows that stay in their order slide; the rest would pass over them, so fold
+    // away and unfold where they go, as do rows moving while partly folded.
     let order: Vec<(u64, usize)> = listed
         .iter()
         .filter_map(|shown| Some((shown.key, rows.find(shown.key)?)))
@@ -299,81 +280,91 @@ pub fn list<R: Rows>(
     }
     let kept: HashSet<u64> = std::iter::successors(tails.last().copied(), |at| previous[*at])
         .map(|at| order[at].0)
+        .filter(|key| before[key].alpha >= 1.0)
         .collect();
-    let arrive = |index: usize| {
+
+    let settled = |index: usize| {
         let key = rows.key(index);
         let was = top(index) - anchored;
         let motion = before.get(&key).and_then(|old| {
-            if old.index.is_some() && (old.place - was).abs() < 0.5 {
-                return old.motion.and_then(tick);
-            }
-            let (drawn, alpha) = old.drawn(reach, state.slack);
-            let from = drawn - was;
-            let style = if alpha < 1.0 || !kept.contains(&key) {
-                Style::Cross
+            if (old.place - was).abs() < 0.5 {
+                old.motion.and_then(tick)
             } else {
-                Style::Slide
-            };
-            tick(Motion {
-                from,
-                to: 0.0,
-                alpha,
-                style,
-                elapsed: 0.0,
-            })
+                tick(Motion {
+                    elapsed: 0.0,
+                    way: Way::Slide(old.drawn - was),
+                })
+            }
         });
         Shown {
             key,
             place: top(index) - scroll,
             index: Some(index),
             motion,
+            drawn: 0.0,
+            alpha: 1.0,
         }
     };
-    // Rows newly where the view already was, rather than scrolled into it, enter.
-    let entering = |index: usize| {
+    // Rows arriving where the view already was, rather than scrolled into it, unfold.
+    let arriving = |index: usize| {
+        let key = rows.key(index);
         let was = top(index) - anchored;
-        !fresh && !before.contains_key(&rows.key(index)) && was + height > 0.0 && was < view
+        match before.get(&key) {
+            Some(old) => (old.place - was).abs() >= 0.5 && !kept.contains(&key),
+            None => !fresh && was + height > 0.0 && was < view,
+        }
     };
     let in_view = row_at(scroll)..(row_at(scroll + view) + 1).min(len);
     let mut shown = Vec::new();
     let mut index = in_view.start;
     while index < in_view.end {
-        if !entering(index) {
-            shown.push(arrive(index));
+        if !arriving(index) {
+            shown.push(settled(index));
             index += 1;
             continue;
         }
         let end = (index..in_view.end)
-            .find(|index| !entering(*index))
+            .find(|index| !arriving(*index))
             .unwrap_or(in_view.end);
-        let middle = (top(index) + top(end - 1)) / 2.0;
-        shown.extend((index..end).map(|index| Shown {
-            key: rows.key(index),
-            place: top(index) - scroll,
-            index: Some(index),
-            motion: tick(Motion {
-                from: middle - top(index),
-                to: 0.0,
-                alpha: 0.0,
-                style: Style::Enter,
-                elapsed: 0.0,
-            }),
+        let [above, below] = [index.checked_sub(1), (end < len).then_some(end)]
+            .map(|side| side.map(|side| rows.key(side)));
+        let [first, last] = [top(index), top(end - 1) + height].map(|y| y - anchored);
+        // The seam opens where the rows either side were drawn, or mid-run with neither.
+        let seam = above
+            .and_then(|key| Some(before.get(&key)?.drawn + height))
+            .or_else(|| below.and_then(|key| Some(before.get(&key)?.drawn)))
+            .unwrap_or((first + last) / 2.0);
+        shown.extend((index..end).map(|at| {
+            let was = top(at) - anchored;
+            Shown {
+                motion: tick(Motion {
+                    elapsed: 0.0,
+                    way: Way::Fold(Fold {
+                        start: [seam - was; 2],
+                        end: [first - was, last - was],
+                        at: at - index,
+                        of: end - index,
+                        alpha: 1.0,
+                    }),
+                }),
+                ..settled(at)
+            }
         }));
         index = end;
     }
     for old in &listed {
-        if let Some(index) = rows.find(old.key).filter(|index| !in_view.contains(index)) {
-            let moving = arrive(index);
-            let drawn = moving.drawn(reach, state.slack).0;
-            if drawn + height > 0.0 && drawn < view {
-                shown.push(moving);
-            }
+        if let Some(index) = rows
+            .find(old.key)
+            .filter(|index| !in_view.contains(index) && kept.contains(&old.key))
+        {
+            shown.push(settled(index));
         }
     }
-    let mut leaving: Vec<Shown> = state
+    // Rows already folding away carry on; runs of rows gone or moving out of order start.
+    let mut folding: Vec<Shown> = state
         .shown
         .iter()
-        .filter(|shown| shown.index.is_none() && rows.find(shown.key).is_none())
+        .filter(|shown| shown.index.is_none())
         .filter_map(|shown| {
             Some(Shown {
                 place: shown.place - step,
@@ -382,40 +373,94 @@ pub fn list<R: Rows>(
             })
         })
         .collect();
-    let gone = |shown: &&Shown| rows.find(shown.key).is_none();
-    for run in listed.chunk_by(|a, b| gone(a) == gone(b)) {
-        if !gone(&run[0]) {
+    let staying = |shown: &Shown| {
+        kept.contains(&shown.key)
+            || rows
+                .find(shown.key)
+                .is_some_and(|index| (top(index) - anchored - shown.place).abs() < 0.5)
+    };
+    let mut at = 0;
+    for run in listed.chunk_by(|a, b| staying(a) == staying(b)) {
+        let start = at;
+        at += run.len();
+        if staying(&run[0]) {
             continue;
         }
-        let drawn: Vec<_> = run
-            .iter()
-            .map(|shown| shown.drawn(reach, state.slack))
-            .collect();
-        let middle = (drawn[0].0 + drawn[drawn.len() - 1].0) / 2.0;
-        leaving.extend(run.iter().zip(drawn).map(|(shown, (y, alpha))| Shown {
-            key: shown.key,
-            place: y - step,
+        let above = start.checked_sub(1).map(|side| listed[side].key);
+        let below = listed.get(at).map(|side| side.key);
+        let [first, last] = [run[0].drawn, run[run.len() - 1].drawn + height];
+        // The seam the gap closes on: where the row below or above it now lies.
+        let seam = below
+            .and_then(|key| Some(top(rows.find(key)?) - anchored))
+            .or_else(|| above.and_then(|key| Some(top(rows.find(key)?) + height - anchored)))
+            .unwrap_or(first);
+        folding.extend(run.iter().enumerate().map(|(at, old)| Shown {
+            key: old.key,
+            place: old.drawn - step,
             index: None,
             motion: tick(Motion {
-                from: 0.0,
-                to: middle - y,
-                alpha,
-                style: Style::Leave,
                 elapsed: 0.0,
+                way: Way::Fold(Fold {
+                    start: [first - old.drawn, last - old.drawn],
+                    end: [seam - old.drawn; 2],
+                    at,
+                    of: run.len(),
+                    alpha: old.alpha,
+                }),
             }),
+            drawn: 0.0,
+            alpha: 0.0,
         }));
     }
-    shown.sort_by(|a, b| a.place.total_cmp(&b.place));
-    let slack = shown
+
+    // Rows sliding or still are drawn first, as folds are bounded by them.
+    for shown in &mut shown {
+        if let Some(Motion {
+            way: Way::Slide(from),
+            ..
+        }) = shown.motion
+        {
+            shown.drawn = shown.place + from * (1.0 - progress(&shown.motion.unwrap()));
+        } else {
+            shown.drawn = shown.place;
+        }
+    }
+    let mut solid: Vec<f64> = shown
         .iter()
-        .filter_map(|shown| shown.motion.filter(|motion| motion.style == Style::Slide))
-        .map(|motion| motion.at(reach, 0.0).0.abs())
-        .fold(0.0, f64::max);
+        .filter(|shown| {
+            !matches!(
+                shown.motion,
+                Some(Motion {
+                    way: Way::Fold(_),
+                    ..
+                })
+            )
+        })
+        .map(|shown| shown.drawn)
+        .collect();
+    solid.sort_by(f64::total_cmp);
+    for shown in shown.iter_mut().chain(&mut folding) {
+        if let Some(
+            motion @ Motion {
+                way: Way::Fold(fold),
+                ..
+            },
+        ) = shown.motion
+        {
+            (shown.drawn, shown.alpha) = fold.at(shown.place, progress(&motion), height, &solid);
+        }
+    }
+    shown.retain(|shown| {
+        shown.drawn + height > 0.0 && shown.drawn < view
+            || shown.index.is_some_and(|index| in_view.contains(&index))
+    });
+    shown.sort_by(|a, b| a.place.total_cmp(&b.place));
     ui.animating |= state.scroll != state.target
-        || !leaving.is_empty()
+        || !folding.is_empty()
         || shown.iter().any(|shown| shown.motion.is_some());
 
     let theme = ui.theme.clone();
+    let background = spec.fill.unwrap_or(theme.base);
     ui.open_as(
         id,
         Spec {
@@ -428,22 +473,25 @@ pub fn list<R: Rows>(
         Some(rect) if most > 0.0 => px(rect[2] - rect[0] - GUTTER),
         _ => fill(),
     };
-    for shown in leaving.iter().chain(&shown) {
+    // Rows folding away paint beneath the rest, and blend into the list rather than fade,
+    // so those squeezed together never add up.
+    for shown in folding.iter().chain(&shown) {
         let flags = match shown.index {
             Some(index) if rows.selectable(index) => Flags::FLOAT | Flags::CLICKABLE,
             _ => Flags::FLOAT,
         };
-        let (y, alpha) = shown.drawn(reach, slack);
-        ui.open(
-            shown.key,
-            Spec {
-                flags,
-                size: [width, px(row)],
-                position: [0.0, y as f32],
-                fade: 1.0 - alpha,
-                ..Spec::default()
-            },
-        );
+        let row_spec = Spec {
+            flags,
+            size: [width, px(row)],
+            position: [0.0, shown.drawn as f32],
+            fade: 1.0 - shown.alpha,
+            fade_into: Some(background),
+            ..Spec::default()
+        };
+        match shown.index {
+            Some(_) => ui.open(shown.key, row_spec),
+            None => ui.open(("folding", shown.key), row_spec),
+        };
         build(
             ui,
             Row {
@@ -468,10 +516,9 @@ pub fn list<R: Rows>(
         state.target = state.scroll;
     }
     ui.close();
-    shown.extend(leaving);
+    shown.extend(folding);
     shown.sort_by(|a, b| a.place.total_cmp(&b.place));
     state.shown = shown;
-    state.slack = slack;
     ui.lists.insert(id, state);
     clicked
 }

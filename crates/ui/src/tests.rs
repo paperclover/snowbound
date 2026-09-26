@@ -1027,45 +1027,52 @@ fn alpha(ui: &Ui, key: u64) -> Option<f32> {
         .map(|node| node.alpha)
 }
 
+fn folding(ui: &Ui, key: u64) -> Option<f32> {
+    let id = list_id().child(("folding", key));
+    ui.nodes
+        .iter()
+        .find(|node| node.id == id)
+        .map(|node| node.alpha)
+}
+
 #[test]
-fn rows_keeping_their_order_slide_and_the_rest_fade_through() {
+fn rows_slide_while_the_rest_fold_away_and_unfold_at_once() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut selected = None;
     let rows = Keyed::new(0..20);
     settle_list(&mut ui, &rows, &mut selected);
     let rows = Keyed::new([5, 0, 1, 2, 3, 100, 6, 7, 8, 9, 10, 11]);
     list_frame(&mut ui, &rows, &mut selected, &[]);
-    let crossing = row_top(&ui, 5).unwrap();
-    assert!(crossing < 5.0 * LIST_ROW && crossing > 4.5 * LIST_ROW);
-    assert!(alpha(&ui, 5).unwrap() < 1.0, "fading as it sets off");
-    assert_eq!(row_top(&ui, 0), Some(0.0), "sliding waits for rows leaving");
-    assert!(alpha(&ui, 4).unwrap() < 1.0);
-    assert_eq!(alpha(&ui, 100), Some(0.0), "entering waits too");
-    for _ in 0..4 {
-        list_frame(&mut ui, &rows, &mut selected, &[]);
-    }
-    assert_eq!(alpha(&ui, 5), Some(0.0), "unseen half-way");
-    assert_eq!(alpha(&ui, 4), Some(0.0));
     let sliding = row_top(&ui, 0).unwrap();
-    assert!(sliding > 0.0 && sliding < LIST_ROW);
-    assert_eq!(
-        alpha(&ui, 100),
-        Some(0.0),
-        "entering waits for rows sliding"
+    assert!(
+        sliding > 0.0 && sliding < LIST_ROW,
+        "sliding at once: {sliding}"
     );
-    for _ in 0..5 {
+    for key in [4, 5] {
+        let alpha = folding(&ui, key).unwrap();
+        assert!(alpha > 0.0 && alpha < 1.0, "{key} folds where it was");
+    }
+    assert!(row_top(&ui, 5).unwrap() < 0.0, "out of the seam at the top");
+    list_frame(&mut ui, &rows, &mut selected, &[]);
+    list_frame(&mut ui, &rows, &mut selected, &[]);
+    for key in [5, 100] {
+        let alpha = alpha(&ui, key).unwrap();
+        assert!(alpha > 0.0 && alpha < 1.0, "{key} unfolds where it goes");
+    }
+    for _ in 0..7 {
         list_frame(&mut ui, &rows, &mut selected, &[]);
     }
     assert_eq!(row_top(&ui, 5), Some(0.0), "there in about 150 ms");
     assert_eq!(row_top(&ui, 0), Some(LIST_ROW));
+    assert_eq!(row_top(&ui, 100), Some(5.0 * LIST_ROW));
     assert_eq!(alpha(&ui, 100), Some(1.0));
-    assert_eq!(alpha(&ui, 4), None);
-    list_frame(&mut ui, &rows, &mut selected, &[]);
+    assert_eq!((folding(&ui, 4), folding(&ui, 5)), (None, None));
     assert!(!ui.wants_frame());
 }
 
 /// Two rows whose text is drawn over each other: their labels, centred in each row, meet
-/// within the view while both can be seen.
+/// within the view while both can be seen and one is fully drawn. Rows folding together,
+/// both blended into the background, may meet.
 fn text_overlaps(ui: &mut Ui) -> Option<String> {
     let text = ui.measure("Ag")[1];
     let list = ui.nodes.iter().position(|node| node.id == list_id())?;
@@ -1086,7 +1093,7 @@ fn text_overlaps(ui: &mut Ui) -> Option<String> {
     rows.iter().enumerate().find_map(|(at, a)| {
         rows[at + 1..]
             .iter()
-            .find(|b| a.0 < b.1 && b.0 < a.1)
+            .find(|b| a.0 < b.1 && b.0 < a.1 && a.2.max(b.2) >= 1.0)
             .map(|b| format!("{a:?} over {b:?}"))
     })
 }
