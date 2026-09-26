@@ -20,8 +20,10 @@ use std::{
 
 pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
 
+mod format;
 pub(crate) mod page;
 mod table;
+pub use format::{Alignment, FormatState, Formatting, NoteTag, Toggle};
 pub use page::ReadOnlyObject;
 
 #[derive(Debug)]
@@ -83,6 +85,8 @@ pub struct CanvasEditor {
     redo: Vec<History>,
     composition: Option<Composition>,
     preferred_x: Option<f32>,
+    /// Formatting chosen at a caret for the text typed there next, until an edit.
+    pending: Option<(ExGuid, TextPosition, onestore::document::Format)>,
 }
 
 /// Imported page state the editable content does not carry.
@@ -164,8 +168,15 @@ impl TextOutline {
             fixed_width,
             0,
             None,
-            &mut |paragraph, width, indents| {
-                ParagraphLayout::shape(engine, paragraph, width, indents, &BTreeMap::new())
+            &mut |paragraph, previous, width, indents| {
+                ParagraphLayout::shape(
+                    engine,
+                    paragraph,
+                    previous,
+                    width,
+                    indents,
+                    &BTreeMap::new(),
+                )
             },
         )?;
         Ok(Self {
@@ -645,6 +656,7 @@ impl CanvasEditor {
             redo: Vec::new(),
             composition: None,
             preferred_x: None,
+            pending: None,
         })
     }
 
@@ -982,6 +994,7 @@ impl CanvasEditor {
             redo: Vec::new(),
             composition: None,
             preferred_x: None,
+            pending: None,
         })
     }
 
@@ -1069,8 +1082,9 @@ impl CanvasEditor {
         Ok(())
     }
 
-    fn blank_paragraph(&self, base: &PageParagraph) -> Result<PageParagraph, EditError> {
-        let format = match base.style {
+    /// The format a paragraph style gives text, which clearing formatting returns to.
+    fn style_format(&self, style: Option<ExGuid>) -> Result<onestore::document::Format, EditError> {
+        Ok(match style {
             Some(id) => self
                 .definitions
                 .get(&id)
@@ -1081,7 +1095,11 @@ impl CanvasEditor {
                 .format
                 .clone(),
             None => Default::default(),
-        };
+        })
+    }
+
+    fn blank_paragraph(&self, base: &PageParagraph) -> Result<PageParagraph, EditError> {
+        let format = self.style_format(base.style)?;
         let mut node =
             crate::document::node(Paragraph::new(String::new(), format.clone()), format)?;
         node.level = base.level;
@@ -1529,8 +1547,15 @@ impl CanvasEditor {
             true,
             0,
             None,
-            &mut |paragraph, width, indents| {
-                ParagraphLayout::shape(engine, paragraph, width, indents, &self.definitions)
+            &mut |paragraph, previous, width, indents| {
+                ParagraphLayout::shape(
+                    engine,
+                    paragraph,
+                    previous,
+                    width,
+                    indents,
+                    &self.definitions,
+                )
             },
         )?;
         let mut layout = outline.layout.clone();
@@ -2190,12 +2215,7 @@ impl CanvasEditor {
     pub fn insert(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
         let start = self.active_outline().selection.positions[0]
             .min(self.active_outline().selection.positions[1]);
-        let format = self
-            .active_outline()
-            .document
-            .paragraph(start.paragraph)
-            .unwrap()
-            .format_at(start.offset)?;
+        let format = self.typing_format(start)?;
         let replacement = text
             .split('\n')
             .map(|line| Paragraph::new(line.to_owned(), format.clone()))
@@ -2225,9 +2245,13 @@ impl CanvasEditor {
         let range = local_start
             ..local_end + usize::from(end.offset != 0 || start.paragraph == end.paragraph);
         let nodes = outline.document.container(container)?;
-        crate::document::validate_flat(nodes.iter().enumerate().filter_map(|(index, node)| {
-            (range.contains(&index) || node.text().is_some()).then_some(node)
-        }))?;
+        // Lists and tags move with their paragraphs; parent links and collapsed children would not.
+        if nodes.iter().enumerate().any(|(index, node)| {
+            (range.contains(&index) || node.text().is_some())
+                && (node.parent.is_some() || node.collapsed)
+        }) {
+            return Err(EditError::UnsupportedContent.into());
+        }
         let nodes = &nodes[range.clone()];
         if outdent && nodes.iter().all(|node| node.level == 1) {
             return Ok(false);
@@ -2409,6 +2433,7 @@ impl CanvasEditor {
         engine: &mut TextEngine,
         history: History,
     ) -> Result<History, (History, EditorError)> {
+        self.pending = None;
         let valid = match &history {
             History::Date(date) => self
                 .date
@@ -2718,12 +2743,7 @@ impl CanvasEditor {
                 .try_into()
                 .map_err(|_| EditError::TextTooLong)?,
         )?;
-        let format = self
-            .active_outline()
-            .document
-            .paragraph(range.start.paragraph)
-            .unwrap()
-            .format_at(range.start.offset)?;
+        let format = self.typing_format(range.start)?;
         let replacement = text
             .split('\n')
             .map(|part| Paragraph::new(part.to_owned(), format.clone()))
@@ -2821,6 +2841,7 @@ impl CanvasEditor {
     }
 
     fn record_change(&mut self, change: TextChange) {
+        self.pending = None;
         if let Focus::Draft { index, .. } = self.active {
             let Focus::Draft { mut outline, .. } =
                 std::mem::replace(&mut self.active, Focus::Outline(index))
@@ -2878,7 +2899,7 @@ impl CanvasEditor {
                         &outline.indents,
                         outline.wrap_width(),
                         outline.layout.width_set_by_user == Some(true),
-                        &mut |_, _, _| Err(LayoutError::UnsupportedContent),
+                        &mut |_, _, _, _| Err(LayoutError::UnsupportedContent),
                     )
                     .expect("removing trailing text lays nothing out anew");
                 outline
@@ -2983,8 +3004,8 @@ impl CanvasEditor {
             &outline.indents,
             outline.wrap_width(),
             outline.layout.width_set_by_user == Some(true),
-            &mut |node, width, indents| {
-                ParagraphLayout::shape(engine, node, width, indents, &self.definitions)
+            &mut |node, previous, width, indents| {
+                ParagraphLayout::shape(engine, node, previous, width, indents, &self.definitions)
             },
         )?;
         let [replaced, ..] = outline.shaped.pieces(relayout.range.clone());

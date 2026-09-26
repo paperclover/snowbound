@@ -14,7 +14,7 @@ mod tests;
 use crate::gpu::{Paper, Viewport, page::PageScene};
 use crate::{
     date::DateField,
-    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, Selection, TextOutline},
+    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, Formatting, Selection, TextOutline},
     layout::TextEngine,
 };
 use draw::{
@@ -857,6 +857,16 @@ impl PageView {
             return Ok(Response::default());
         }
         self.editor.cancel_composition(&mut self.engine)?;
+        self.edited()
+    }
+
+    /// A toolbar command, ignored like other edits while an input method composes or an object
+    /// holds focus.
+    pub fn format(&mut self, command: Formatting) -> Result<Response> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok(Response::default());
+        }
+        self.editor.format(&mut self.engine, command)?;
         self.edited()
     }
 

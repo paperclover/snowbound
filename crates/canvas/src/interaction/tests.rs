@@ -1622,3 +1622,34 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
     let caret = view.editor.caret_outline().unwrap().origin();
     assert_eq!(caret, snap_to_grid([400.0, 293.0], [36.0, 14.4]));
 }
+
+#[test]
+fn toolbar_commands_wait_for_composition_and_object_focus() {
+    use crate::editor::{Formatting, Toggle};
+    let mut engine = TextEngine::default();
+    let editor = CanvasEditor::new(
+        &mut engine,
+        TextDocument::new(vec![Paragraph::new("text".into(), Format::default())]).unwrap(),
+        240.0,
+    )
+    .unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        None,
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    let bold = Formatting::Toggle(Toggle::Bold);
+    view.editor.select_all().unwrap();
+    let _ = view.compose("に".into(), None).unwrap();
+    assert_eq!(view.format(bold.clone()).unwrap(), Response::default());
+    let _ = view.cancel_composition().unwrap();
+    view.editor.select_all().unwrap();
+    view.set_object_focus(Some(ObjectFocus::ReadOnly(0)));
+    assert_eq!(view.format(bold.clone()).unwrap(), Response::default());
+    view.set_object_focus(None);
+    assert!(view.format(bold).unwrap().changed);
+    assert_eq!(view.editor.format_state().unwrap().toggles, [Toggle::Bold]);
+}
