@@ -6,6 +6,8 @@ macro_rules! art {
     };
 }
 
+pub const ALIGN_CENTER: &[&str] = art!("icons/align-center");
+pub const ALIGN_RIGHT: &[&str] = art!("icons/align-right");
 pub const ALIGN_LEFT: &[&str] = art!("icons/align-left");
 pub const ATTACHMENT: &[&str] = art!("icons/attachment");
 pub const BOLD: &[&str] = art!("icons/bold");
@@ -30,6 +32,7 @@ pub const SIDEBAR_COLLAPSE: &[&str] = art!("icons/sidebar-collapse");
 pub const SIDEBAR_EXPAND: &[&str] = art!("icons/sidebar-expand");
 pub const STRIKETHROUGH: &[&str] = art!("icons/strikethrough");
 pub const SUBSCRIPT: &[&str] = art!("icons/subscript");
+pub const SUPERSCRIPT: &[&str] = art!("icons/superscript");
 pub const TABLE: &[&str] = art!("icons/table");
 pub const UNDERLINE: &[&str] = art!("icons/underline");
 pub const UNDO: &[&str] = art!("icons/undo");

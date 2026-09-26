@@ -100,12 +100,14 @@ fn lean(height: f32) -> f32 {
     (height - 2.0) / 2.0
 }
 
-/// A square button showing `icon` tinted by `tint`; artwork in its own colours takes white.
+/// A square button showing `icon` tinted by `tint`, lit while `on`; artwork in its own
+/// colours takes white.
 pub fn tool_button(
     ui: &mut Ui,
     part: impl Hash,
     icon: &'static [&'static str],
     tint: [f32; 4],
+    on: bool,
 ) -> Signal {
     let hover = ui.theme.hover();
     ui.leaf(
@@ -115,6 +117,7 @@ pub fn tool_button(
             size: [px(TOOL), px(TOOL)],
             icon: Some(icon),
             color: Some(tint),
+            fill: on.then_some(hover),
             hover_fill: Some(hover),
             radius: 4.0,
             center: true,
@@ -123,13 +126,15 @@ pub fn tool_button(
     )
 }
 
-/// A button showing `icon` with a menu arrow beside it, and optionally the colour it
-/// applies as a bar under the icon. Returns the button's and the arrow's signals.
+/// A button showing `icon`, lit while `on`, with a menu arrow beside it, and optionally
+/// the colour it applies as a bar under the icon. Returns the button's and the arrow's
+/// signals.
 pub fn split_button(
     ui: &mut Ui,
     part: impl Hash,
     icon: &'static [&'static str],
     bar: Option<[f32; 4]>,
+    on: bool,
 ) -> [Signal; 2] {
     let theme = ui.theme.clone();
     ui.open(
@@ -146,6 +151,7 @@ pub fn split_button(
             size: [px(TOOL), px(TOOL)],
             icon: Some(icon),
             color: Some(theme.text),
+            fill: on.then(|| theme.hover()),
             hover_fill: Some(theme.hover()),
             radius: 4.0,
             center: true,

@@ -343,6 +343,7 @@ impl Scene {
             "color",
             art!("icons/font-color"),
             Some(draw::srgb(0xe8, 0x3a, 0x30)),
+            false,
         );
         ui.close();
         ui.close();

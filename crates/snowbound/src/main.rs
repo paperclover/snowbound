@@ -9,7 +9,10 @@ use canvas::{
     editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, TextOutline},
     layout::TextEngine,
 };
-use canvas::{gpu::tag_sources, outline::TagIcon};
+use canvas::{
+    gpu::{colorref, tag_sources},
+    outline::TagIcon,
+};
 use draw::Renderer;
 use onestore::ExGuid;
 use onestore::document::Format;
@@ -42,6 +45,22 @@ const FRAME: f32 = 6.0;
 /// macOS rounds windows' corners by 10 pt; the page's corners share their centres.
 const ROUNDING: f32 = 10.0 - FRAME;
 const PAGE_LIST: f32 = 240.0;
+/// Font sizes the size box offers, OneNote's list in points.
+const SIZES: [f32; 17] = [
+    8.0, 9.0, 10.0, 10.5, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 36.0, 48.0,
+    72.0,
+];
+/// OneNote's highlight colours, COLORREF.
+const HIGHLIGHTS: &[u32] = &[
+    0x00ffff, 0x00ff00, 0xffff00, 0xff00ff, 0xff0000, 0x0000ff, 0x800000, 0x808000, 0x008000,
+    0x800080, 0x000080, 0x008080, 0x808080, 0xc0c0c0, 0x000000,
+];
+/// Office's theme and standard font colours, COLORREF.
+const FONT_COLORS: [u32; 20] = [
+    0xffffff, 0x000000, 0xe1ecee, 0x7d491f, 0xbd814f, 0x4d50c0, 0x59bb9b, 0xa26480, 0xc6ac4b,
+    0x4696f7, 0x0000c0, 0x0000ff, 0x00c0ff, 0x00ffff, 0x50d092, 0x50b000, 0xf0b000, 0xc07000,
+    0x602000, 0xa03070,
+];
 /// Height of a page tab's row, whose tab leaves `ROW_GAP` below it so tabs stand apart
 /// while the gaps still take the pointer.
 const ROW: f32 = 29.0;
@@ -235,6 +254,8 @@ struct State {
     filter: String,
     /// Whether the page list is shown beside the page.
     pages_open: bool,
+    /// Installed font families, for the font box; listing them is slow.
+    fonts: Vec<String>,
     /// The application's icon at the display's scale, for the title bar.
     app_icon: Option<draw::RasterImage>,
     commands: Vec<Command>,
@@ -426,6 +447,14 @@ impl State {
             eprintln!("Using {family} for the interface");
         }
         ui.set_focus(Some(page()));
+        let mut fonts: Vec<String> = engine
+            .fonts
+            .collection
+            .family_names()
+            .map(String::from)
+            .collect();
+        fonts.sort_unstable_by_key(|name| name.to_lowercase());
+        fonts.dedup();
         let state = Self {
             window,
             redraw: Arc::new(Redraw(proxy.clone())).into(),
@@ -447,6 +476,7 @@ impl State {
             session,
             filter: String::new(),
             pages_open: true,
+            fonts,
             app_icon: macos::app_icon((16.0 * dpr).round() as u32),
             commands: Vec::new(),
             changed: false,
@@ -813,8 +843,27 @@ impl State {
     /// Two rows of formatting, tag, insert and zoom buttons, grouped as OneNote's Home
     /// ribbon groups them.
     fn toolbar(&mut self, theme: &Theme) -> Result<(), Box<dyn Error>> {
+        use canvas::editor::{Alignment, FormatState, Formatting, NoteTag, Toggle};
+        // A focused picture has no text to show a format for.
+        let state = self
+            .view
+            .editor
+            .format_state()
+            .unwrap_or_else(|_| FormatState {
+                toggles: Vec::new(),
+                font: None,
+                font_size: None,
+                alignment: None,
+                bullets: false,
+                numbering: false,
+                tags: Vec::new(),
+            });
+        let fonts = &self.fonts;
         let ui = &mut self.ui;
         let text = theme.text;
+        let on = |toggle| state.toggles.contains(&toggle);
+        let mut command = None;
+        let mut history = None;
         ui.open(
             "toolbar",
             Spec {
@@ -826,65 +875,232 @@ impl State {
             },
         );
         group(ui, "history", |ui| {
-            ui::shell::tool_button(ui, "undo", art::UNDO, text);
-            ui::shell::tool_button(ui, "redo", art::REDO, text);
+            if ui::shell::tool_button(ui, "undo", art::UNDO, text, false).clicked {
+                history = Some(true);
+            }
+            if ui::shell::tool_button(ui, "redo", art::REDO, text, false).clicked {
+                history = Some(false);
+            }
         });
         divider(ui, "history", theme);
+        let popup = |name: &str| Id::ROOT.child(("popup", name));
+        let font = state.font.clone().unwrap_or_default();
+        let size = state
+            .font_size
+            .map_or(String::new(), |size| format!("{size}"));
         group(ui, "text", |ui| {
             row(ui, 0, |ui| {
-                ui::shell::combo(ui, "font", "Calibri", 120.0);
-                ui::shell::combo(ui, "size", "11", 44.0);
-                ui::shell::split_button(ui, "bullets", art::BULLETS, None);
-                ui::shell::split_button(ui, "numbering", art::NUMBERING, None);
-                ui::shell::tool_button(ui, "clear", art::CLEAR_FORMATTING, text);
+                let combo = ui.id("font");
+                if ui::shell::combo(ui, "font", &font, 120.0).clicked {
+                    ui.open_popup(popup("font"));
+                }
+                let items: Vec<_> = fonts
+                    .iter()
+                    .map(|name| ui::popup::Item {
+                        text: name,
+                        checked: *name == font,
+                        ..Default::default()
+                    })
+                    .collect();
+                let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
+                if let Some(index) = ui::popup::menu(ui, popup("font"), anchor, &items, Some(&font))
+                {
+                    command = Some(Formatting::Font(fonts[index].clone()));
+                }
+                let combo = ui.id("size");
+                if ui::shell::combo(ui, "size", &size, 44.0).clicked {
+                    ui.open_popup(popup("size"));
+                }
+                let labels = SIZES.map(|size| format!("{size}"));
+                let items: Vec<_> = labels
+                    .iter()
+                    .map(|label| ui::popup::Item {
+                        text: label,
+                        checked: *label == size,
+                        ..Default::default()
+                    })
+                    .collect();
+                let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
+                if let Some(index) = ui::popup::menu(ui, popup("size"), anchor, &items, Some(&size))
+                {
+                    command = Some(Formatting::FontSize(SIZES[index]));
+                }
+                let bullets =
+                    ui::shell::split_button(ui, "bullets", art::BULLETS, None, state.bullets);
+                let numbering =
+                    ui::shell::split_button(ui, "numbering", art::NUMBERING, None, state.numbering);
+                if bullets.iter().any(|signal| signal.clicked) {
+                    command = Some(Formatting::Bullets);
+                }
+                if numbering.iter().any(|signal| signal.clicked) {
+                    command = Some(Formatting::Numbering);
+                }
+                if ui::shell::tool_button(ui, "clear", art::CLEAR_FORMATTING, text, false).clicked {
+                    command = Some(Formatting::Clear);
+                }
             });
             row(ui, 1, |ui| {
-                for (part, icon) in [
-                    ("bold", art::BOLD),
-                    ("italic", art::ITALIC),
-                    ("underline", art::UNDERLINE),
-                    ("strikethrough", art::STRIKETHROUGH),
+                for (part, icon, toggle) in [
+                    ("bold", art::BOLD, Toggle::Bold),
+                    ("italic", art::ITALIC, Toggle::Italic),
+                    ("underline", art::UNDERLINE, Toggle::Underline),
+                    ("strikethrough", art::STRIKETHROUGH, Toggle::Strikethrough),
                 ] {
-                    ui::shell::tool_button(ui, part, icon, text);
+                    if ui::shell::tool_button(ui, part, icon, text, on(toggle)).clicked {
+                        command = Some(Formatting::Toggle(toggle));
+                    }
                 }
-                ui::shell::split_button(ui, "script", art::SUBSCRIPT, None);
-                ui::shell::split_button(
+                let script = ui.id("script");
+                let superscript = on(Toggle::Superscript);
+                let [button, menu] = ui::shell::split_button(
                     ui,
-                    "highlight",
-                    art::HIGHLIGHTER,
-                    Some(draw::srgb(0xff, 0xff, 0x00)),
+                    "script",
+                    if superscript {
+                        art::SUPERSCRIPT
+                    } else {
+                        art::SUBSCRIPT
+                    },
+                    None,
+                    on(Toggle::Subscript) || superscript,
                 );
-                ui::shell::split_button(
-                    ui,
-                    "color",
-                    art::FONT_COLOR,
-                    Some(draw::srgb(0xe8, 0x3a, 0x30)),
-                );
-                ui::shell::tool_button(ui, "outdent", art::OUTDENT, text);
-                ui::shell::tool_button(ui, "indent", art::INDENT, text);
-                ui::shell::split_button(ui, "align", art::ALIGN_LEFT, None);
+                if button.clicked {
+                    command = Some(Formatting::Toggle(if superscript {
+                        Toggle::Superscript
+                    } else {
+                        Toggle::Subscript
+                    }));
+                }
+                if menu.clicked {
+                    ui.open_popup(popup("script"));
+                }
+                let items = [
+                    ui::popup::Item {
+                        text: "Subscript",
+                        icon: Some(art::SUBSCRIPT),
+                        shortcut: "⌘=",
+                        checked: on(Toggle::Subscript),
+                        ..Default::default()
+                    },
+                    ui::popup::Item {
+                        text: "Superscript",
+                        icon: Some(art::SUPERSCRIPT),
+                        shortcut: "⇧⌘=",
+                        checked: superscript,
+                        ..Default::default()
+                    },
+                ];
+                let anchor = ui::Anchor::Below(ui.rect(script).unwrap_or_default());
+                if let Some(index) = ui::popup::menu(ui, popup("script"), anchor, &items, None) {
+                    command = Some(Formatting::Toggle(
+                        [Toggle::Subscript, Toggle::Superscript][index],
+                    ));
+                }
+                for (part, icon, swatches, columns, none, default) in [
+                    (
+                        "highlight",
+                        art::HIGHLIGHTER,
+                        HIGHLIGHTS,
+                        5,
+                        "No colour",
+                        0x00ffff,
+                    ),
+                    (
+                        "color",
+                        art::FONT_COLOR,
+                        &FONT_COLORS[..],
+                        10,
+                        "Automatic",
+                        0x3a3ae8,
+                    ),
+                ] {
+                    let split = ui.id(part);
+                    let [button, menu] =
+                        ui::shell::split_button(ui, part, icon, Some(colorref(default)), false);
+                    let paint = |color| {
+                        if part == "highlight" {
+                            Formatting::Highlight(color)
+                        } else {
+                            Formatting::Color(color)
+                        }
+                    };
+                    if button.clicked {
+                        command = Some(paint(Some(default)));
+                    }
+                    if menu.clicked {
+                        ui.open_popup(popup(part));
+                    }
+                    let colors: Vec<_> = swatches.iter().map(|color| colorref(*color)).collect();
+                    let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
+                    if let Some(chosen) =
+                        ui::popup::colors(ui, popup(part), anchor, none, &colors, columns)
+                    {
+                        command = Some(paint(chosen.and_then(|chosen| {
+                            swatches
+                                .iter()
+                                .zip(&colors)
+                                .find(|(_, color)| **color == chosen)
+                                .map(|(stored, _)| *stored)
+                        })));
+                    }
+                }
+                if ui::shell::tool_button(ui, "outdent", art::OUTDENT, text, false).clicked {
+                    command = Some(Formatting::Outdent);
+                }
+                if ui::shell::tool_button(ui, "indent", art::INDENT, text, false).clicked {
+                    command = Some(Formatting::Indent);
+                }
+                let align = ui.id("align");
+                let alignments = [
+                    (Alignment::Left, "Align left", art::ALIGN_LEFT),
+                    (Alignment::Center, "Centre", art::ALIGN_CENTER),
+                    (Alignment::Right, "Align right", art::ALIGN_RIGHT),
+                ];
+                let current = alignments
+                    .iter()
+                    .find(|(alignment, ..)| Some(*alignment) == state.alignment)
+                    .unwrap_or(&alignments[0]);
+                let [button, menu] = ui::shell::split_button(ui, "align", current.2, None, false);
+                if button.clicked || menu.clicked {
+                    ui.open_popup(popup("align"));
+                }
+                let items = alignments.map(|(alignment, name, icon)| ui::popup::Item {
+                    text: name,
+                    icon: Some(icon),
+                    checked: Some(alignment) == state.alignment,
+                    ..Default::default()
+                });
+                let anchor = ui::Anchor::Below(ui.rect(align).unwrap_or_default());
+                if let Some(index) = ui::popup::menu(ui, popup("align"), anchor, &items, None) {
+                    command = Some(Formatting::Align(alignments[index].0));
+                }
             });
         });
         divider(ui, "text", theme);
-        let tags = [
-            tag_sources(TagIcon::CheckBox { checked: false }),
-            art::TAG_STAR,
-            tag_sources(TagIcon::Question),
-            art::TAG_REMEMBER,
-            art::TAG_DEFINITION,
-            art::TAG_HIGHLIGHT,
-            art::TAG_CONTACT,
-            art::TAG_ADDRESS,
-            art::TAG_PHONE,
+        let tags: [(&[&str], Option<NoteTag>); 9] = [
+            (
+                tag_sources(TagIcon::CheckBox { checked: false }),
+                Some(NoteTag::ToDo),
+            ),
+            (art::TAG_STAR, None),
+            (tag_sources(TagIcon::Question), Some(NoteTag::Question)),
+            (art::TAG_REMEMBER, None),
+            (art::TAG_DEFINITION, None),
+            (art::TAG_HIGHLIGHT, None),
+            (art::TAG_CONTACT, None),
+            (art::TAG_ADDRESS, None),
+            (art::TAG_PHONE, None),
         ];
         group(ui, "tags", |ui| {
             for (index, tags) in tags.chunks(5).enumerate() {
                 row(ui, index, |ui| {
-                    for (column, icon) in tags.iter().enumerate() {
-                        ui::shell::tool_button(ui, column, icon, [1.0; 4]);
+                    for (column, (icon, tag)) in tags.iter().enumerate() {
+                        let lit = tag.is_some_and(|tag| state.tags.contains(&tag));
+                        if ui::shell::tool_button(ui, column, icon, [1.0; 4], lit).clicked {
+                            command = tag.map(Formatting::Tag);
+                        }
                     }
                     if index == 1 {
-                        ui::shell::tool_button(ui, "more", ui::shell::CHEVRON, text);
+                        ui::shell::tool_button(ui, "more", ui::shell::CHEVRON, text, false);
                     }
                 });
             }
@@ -898,7 +1114,7 @@ impl State {
                     ("file", art::ATTACHMENT),
                     ("link", art::LINK),
                 ] {
-                    ui::shell::tool_button(ui, part, icon, text);
+                    ui::shell::tool_button(ui, part, icon, text, false);
                 }
             });
             row(ui, 1, |ui| {
@@ -907,7 +1123,7 @@ impl State {
                     ("time", art::CLOCK),
                     ("equation", art::EQUATION),
                 ] {
-                    ui::shell::tool_button(ui, part, icon, text);
+                    ui::shell::tool_button(ui, part, icon, text, false);
                 }
             });
         });
@@ -923,7 +1139,7 @@ impl State {
         let mut chosen = None;
         group(ui, "zoom", |ui| {
             row(ui, 0, |ui| {
-                if ui::shell::tool_button(ui, "out", art::ZOOM_OUT, text).clicked {
+                if ui::shell::tool_button(ui, "out", art::ZOOM_OUT, text, false).clicked {
                     chosen = Some(zoom / 1.1);
                 }
                 let level = ui.leaf(
@@ -941,7 +1157,7 @@ impl State {
                 if level.clicked {
                     chosen = Some(1.0);
                 }
-                if ui::shell::tool_button(ui, "in", art::ZOOM_IN, text).clicked {
+                if ui::shell::tool_button(ui, "in", art::ZOOM_IN, text, false).clicked {
                     chosen = Some(zoom * 1.1);
                 }
             });
@@ -950,6 +1166,19 @@ impl State {
         if let Some(zoom) = chosen {
             let response = self.view.set_zoom(zoom)?;
             self.respond(response);
+        }
+        if let Some(command) = command {
+            let response = self.view.format(command)?;
+            self.respond(response);
+        }
+        if let Some(undo) = history {
+            let view = &mut self.view;
+            let done = if undo {
+                view.editor.undo(&mut view.engine)?
+            } else {
+                view.editor.redo(&mut view.engine)?
+            };
+            self.changed |= done;
         }
         Ok(())
     }
@@ -1001,7 +1230,8 @@ impl State {
             },
         );
         if !self.filter.is_empty()
-            && ui::shell::tool_button(&mut self.ui, "clear", art::CLOSE, theme.text_dim).clicked
+            && ui::shell::tool_button(&mut self.ui, "clear", art::CLOSE, theme.text_dim, false)
+                .clicked
         {
             self.filter.clear();
         }
@@ -1022,13 +1252,13 @@ impl State {
                 self.ui.set_focus(Some(page()));
             }
         }
-        ui::shell::tool_button(&mut self.ui, "new", art::NEW_PAGE, theme.text);
+        ui::shell::tool_button(&mut self.ui, "new", art::NEW_PAGE, theme.text, false);
         let toggle = if self.pages_open {
             art::SIDEBAR_COLLAPSE
         } else {
             art::SIDEBAR_EXPAND
         };
-        if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text).clicked {
+        if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text, false).clicked {
             self.pages_open = !self.pages_open;
         }
         self.ui.close();
