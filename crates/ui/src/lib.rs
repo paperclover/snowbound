@@ -40,8 +40,6 @@ const HALF_LIFE: f32 = 0.03;
 /// falls; a popup's, floating higher, spreads and falls further.
 const SHADOW: [f32; 2] = [3.0, 0.0];
 const POPUP_SHADOW: [f32; 2] = [12.0, 4.0];
-/// How far a popup slides in from its anchor as it fades in.
-const SLIDE: f32 = 6.0;
 /// Logical size of a box's icon, and its distance from the label.
 const ICON: f32 = 16.0;
 const ICON_GAP: f32 = 6.0;
@@ -182,9 +180,8 @@ pub enum Anchor {
 
 impl Anchor {
     /// Where a popup `size` long on `axis` starts in a window `room` long: past the
-    /// anchor on the axis it opens along, level with it otherwise, `slide` nearer to it
-    /// along the way it opens.
-    fn place(self, axis: usize, size: f32, room: f32, slide: f32) -> f32 {
+    /// anchor on the axis it opens along, level with it otherwise.
+    fn place(self, axis: usize, size: f32, room: f32) -> f32 {
         let (rect, along) = match self {
             Anchor::Below(rect) => (rect, Some(1)),
             Anchor::Right(rect) => (rect, Some(0)),
@@ -192,15 +189,15 @@ impl Anchor {
             Anchor::Point([x, y]) => ([x, y, x, y], Some(1)),
         };
         let [low, high] = [rect[axis], rect[axis + 2]];
-        let (first, second, slide) = if along == Some(axis) {
-            (high, low - size, slide)
+        let (first, second) = if along == Some(axis) {
+            (high, low - size)
         } else {
-            (low, high - size, 0.0)
+            (low, high - size)
         };
         if first + size <= room {
-            first - slide
+            first
         } else if second >= 0.0 {
-            second + slide
+            second
         } else {
             first.min(room - size).max(0.0)
         }
@@ -215,6 +212,8 @@ pub struct Spec<'a> {
     /// The axis its children flow along.
     pub axis: Axis,
     pub text: Option<&'a str>,
+    /// The family the label is shaped in, where it has the glyphs; the interface's otherwise.
+    pub font: Option<&'a str>,
     /// The label's colour; the theme's text colour otherwise.
     pub color: Option<[f32; 4]>,
     pub fill: Option<[f32; 4]>,
@@ -334,7 +333,7 @@ struct Built {
     alpha: f32,
     fade_into: Option<[f32; 4]>,
     /// Rectangles relative to the box, painted over its fill.
-    marks: Vec<([f32; 4], [f32; 4])>,
+    marks: Vec<([f32; 4], [f32; 4], f32)>,
     computed: [f32; 2],
     relative: [f32; 2],
     rect: [f32; 4],
@@ -453,6 +452,9 @@ impl Display {
 
 pub struct Ui {
     pub theme: Theme,
+    /// Whether the window has keyboard focus; without it a field hides its caret and dims
+    /// its selection.
+    pub window_focused: bool,
     frame: u64,
     now: Instant,
     scale: f32,
@@ -479,7 +481,13 @@ pub struct Ui {
     modifiers: ModifiersState,
     clicks: Clicks,
     display: Vec<Display>,
+    /// Where the popups' painting starts in `display`, for edges drawn beneath them.
+    popups_painted: usize,
     animating: bool,
+    /// The field showing a caret, when its blink started and the frame it last showed.
+    caret: Option<(Id, Instant, u64)>,
+    /// When the next timed change is due, such as a caret's blink.
+    wake: Option<Instant>,
 }
 
 impl Ui {
@@ -487,6 +495,7 @@ impl Ui {
     pub fn new(theme: Theme, double_click: Duration) -> Self {
         Self {
             theme,
+            window_focused: true,
             frame: 0,
             now: Instant::now(),
             scale: 1.0,
@@ -509,7 +518,10 @@ impl Ui {
             modifiers: ModifiersState::empty(),
             clicks: Clicks::new(double_click),
             display: Vec::new(),
+            popups_painted: 0,
             animating: false,
+            caret: None,
+            wake: None,
         }
     }
 
@@ -521,6 +533,11 @@ impl Ui {
     /// Whether queued input or animation needs another frame.
     pub fn wants_frame(&self) -> bool {
         self.animating || !self.queue.is_empty()
+    }
+
+    /// When a timed change, such as a caret's blink, next needs a frame.
+    pub fn wake_at(&self) -> Option<Instant> {
+        self.wake
     }
 
     pub fn scale(&self) -> f32 {
@@ -591,6 +608,7 @@ impl Ui {
         self.stack.push(0);
         self.signals.clear();
         self.moved = false;
+        self.wake = None;
         for event in std::mem::take(&mut self.queue) {
             self.route(event);
         }
@@ -766,9 +784,7 @@ impl Ui {
             highlight: None,
         });
         self.focus = Some(id);
-        let state = self.states.entry(id).or_default();
-        state.touched = self.frame;
-        state.tween = Some([0.0, 1.0]);
+        self.states.entry(id).or_default().touched = self.frame;
     }
 
     pub fn popup_open(&self, id: Id) -> bool {
@@ -839,7 +855,7 @@ impl Ui {
     pub fn open_as(&mut self, id: Id, spec: Spec<'_>) -> Id {
         let label = spec
             .text
-            .map(|text| self.texts.label(text, self.theme.font_size, self.frame));
+            .map(|text| self.texts.label(text, self.theme.font_size, spec.font, self.frame));
         // Popups hang from the root, outside the clips and flow of where they are built.
         let parent = if spec.anchor.is_some() {
             0
@@ -847,15 +863,9 @@ impl Ui {
             *self.stack.last().unwrap()
         };
         let index = self.nodes.len();
-        let state = self.states.entry(id).or_default();
-        state.touched = self.frame;
-        let reveal = match spec.anchor {
-            Some(Anchor::Point(_)) | None => 1.0,
-            Some(_) => state.tween.map_or(1.0, |tween| tween[0]),
-        };
-        let mut built = Built::new(id, parent, spec, label, self.theme.text);
-        built.alpha *= reveal;
-        self.nodes.push(built);
+        self.states.entry(id).or_default().touched = self.frame;
+        self.nodes
+            .push(Built::new(id, parent, spec, label, self.theme.text));
         self.nodes[parent].children.push(index);
         self.stack.push(index);
         id
@@ -892,14 +902,31 @@ impl Ui {
     /// The size of `text` as a label, in logical pixels.
     pub fn measure(&mut self, text: &str) -> [f32; 2] {
         self.texts
-            .label(text, self.theme.font_size, self.frame)
+            .label(text, self.theme.font_size, None, self.frame)
             .size
     }
 
-    /// Paints `color` over the current box at `rect`, relative to its corner.
-    pub fn mark(&mut self, rect: [f32; 4], color: [f32; 4]) {
+    /// Paints `color` over the current box at `rect`, relative to its corner, with corners
+    /// of `radius`.
+    pub fn mark(&mut self, rect: [f32; 4], color: [f32; 4], radius: f32) {
         let index = *self.stack.last().unwrap();
-        self.nodes[index].marks.push((rect, color));
+        self.nodes[index].marks.push((rect, color, radius));
+    }
+
+    /// The caret opacity of field `id` this frame, restarting its blink when `moved` or
+    /// when it was not shown the frame before.
+    pub(crate) fn blink(&mut self, id: Id, moved: bool) -> f32 {
+        let start = match self.caret {
+            Some((shown, start, frame)) if shown == id && frame + 1 == self.frame && !moved => {
+                start
+            }
+            _ => self.now,
+        };
+        self.caret = Some((id, start, self.frame));
+        let (opacity, hold) = draw::edit::caret_blink(self.now.saturating_duration_since(start));
+        let due = self.now + hold;
+        self.wake = Some(self.wake.map_or(due, |wake| wake.min(due)));
+        opacity
     }
 
     /// How the user acted on the box this frame; a box's routed events are taken once.
@@ -940,6 +967,7 @@ impl Ui {
         self.display.clear();
         self.hits.clear();
         self.paint(0, None);
+        self.popups_painted = self.display.len();
         let beneath = self.hits.len();
         for index in self.nodes[0].children.clone() {
             if self.nodes[index].anchor.is_some() {
@@ -1025,7 +1053,7 @@ impl Ui {
                 });
             }
         }
-        for (mark, color) in &node.marks {
+        for (mark, color, radius) in &node.marks {
             self.display.push(Display::Rect {
                 rect: [
                     rect[0] + mark[0],
@@ -1036,7 +1064,7 @@ impl Ui {
                 fill: *color,
                 shade: None,
                 border: None,
-                radius: 0.0,
+                radius: *radius,
             });
         }
         let inner = [

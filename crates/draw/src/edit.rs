@@ -183,6 +183,69 @@ impl Clicks {
     }
 }
 
+/// The caret's width in logical pixels, as AppKit's insertion indicator draws it.
+pub const CARET_WIDTH: f32 = 2.0;
+
+/// The caret's opacity `since` it last moved, and how long that opacity holds. As AppKit's
+/// insertion indicator: solid for 650 ms, then 350 ms off and 650 ms on, each phase
+/// opening with a fade in four 37.5 ms steps.
+pub fn caret_blink(since: Duration) -> (f32, Duration) {
+    const STEP: u64 = 37_500;
+    const ON: u64 = 650_000;
+    const OFF: u64 = 350_000;
+    let micros = u64::try_from(since.as_micros()).unwrap_or(u64::MAX);
+    let Some(cycle) = micros.checked_sub(ON) else {
+        return (1.0, Duration::from_micros(ON + STEP - micros));
+    };
+    let (into, length, fading_in) = match cycle % (ON + OFF) {
+        phase if phase < OFF => (phase, OFF, false),
+        phase => (phase - OFF, ON, true),
+    };
+    let step = into / STEP;
+    // A settled phase holds into the next one's first step, which shows the same.
+    let (faded, hold) = if step < 4 {
+        (step as f32 / 4.0, STEP * (step + 1) - into)
+    } else {
+        (1.0, length - into + STEP)
+    };
+    (
+        if fading_in { faded } else { 1.0 - faded },
+        Duration::from_micros(hold),
+    )
+}
+
+/// `caret`, linear RGBA, with the alpha that shows it at `opacity` over `backdrop` as bright
+/// as AppKit's layers do, which blend in sRGB rather than linear light.
+pub fn caret_color(caret: [f32; 4], backdrop: [f32; 4], opacity: f32) -> [f32; 4] {
+    let encode = |value: f32| {
+        if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    let decode = |value: f32| {
+        if value <= 0.040_45 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = |[red, green, blue]: [f32; 3]| 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    let [under, over] = [backdrop, caret].map(|color| [color[0], color[1], color[2]]);
+    let shown: [f32; 3] = std::array::from_fn(|channel| {
+        let [under, over] = [under[channel], over[channel]].map(encode);
+        decode(under + opacity * (over - under))
+    });
+    let span = luminance(over) - luminance(under);
+    let alpha = if span.abs() < 1e-4 {
+        opacity
+    } else {
+        ((luminance(shown) - luminance(under)) / span).clamp(0.0, 1.0)
+    };
+    [caret[0], caret[1], caret[2], caret[3] * alpha]
+}
+
 /// The selection a drag makes from the selection its press made to the one under the
 /// pointer, both by `unit`, ordered by `position`. Words and paragraphs stay whole, so
 /// the press's selection stays covered when the drag reverses past it.
@@ -453,5 +516,46 @@ mod tests {
             0..0,
             "extending keeps the anchor"
         );
+    }
+
+    #[test]
+    fn caret_fades_as_bright_as_appkit_s_srgb_blend() {
+        let linear = |value: f32| ((value / 255.0 + 0.055) / 1.055).powf(2.4);
+        let pink = [248.0, 79.0, 158.0].map(linear);
+        let pink = [pink[0], pink[1], pink[2], 1.0];
+        let white = [1.0; 4];
+        assert_eq!(caret_color(pink, white, 1.0)[3], 1.0);
+        assert_eq!(caret_color(pink, white, 0.0)[3], 0.0);
+        // Half the caret over white blends to sRGB green 167; TextEdit measures 170.
+        let alpha = caret_color(pink, white, 0.5)[3];
+        let green = 1.0 + alpha * (pink[1] - 1.0);
+        assert!((green - linear(167.5)).abs() < 0.02, "{alpha}");
+    }
+
+    #[test]
+    fn caret_blinks_on_appkit_s_timing() {
+        let at = |millis: f64| {
+            let (opacity, hold) = caret_blink(Duration::from_secs_f64(millis / 1000.0));
+            (opacity, hold.as_secs_f64() * 1000.0)
+        };
+        let close = |(opacity, hold): (f32, f64), expected: (f32, f64)| {
+            assert_eq!(opacity, expected.0);
+            assert!((hold - expected.1).abs() < 0.01, "{hold} ms, not {}", expected.1);
+        };
+        close(at(0.0), (1.0, 687.5));
+        close(at(687.5), (0.75, 37.5));
+        close(at(760.0), (0.5, 2.5));
+        close(at(800.0), (0.0, 237.5));
+        close(at(1037.5), (0.25, 37.5));
+        close(at(1150.0), (1.0, 537.5));
+        close(at(1687.5), (0.75, 37.5));
+        let mut changes = 0;
+        let mut previous = at(1000.0).0;
+        for millis in 1001..2001 {
+            let opacity = at(f64::from(millis)).0;
+            changes += usize::from(opacity != previous);
+            previous = opacity;
+        }
+        assert_eq!(changes, 8, "four fade steps each way per second");
     }
 }

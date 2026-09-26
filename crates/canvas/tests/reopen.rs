@@ -1,6 +1,9 @@
 #![cfg(feature = "gpu")]
 
-use canvas::{gpu::page::PageScene, layout::TextEngine};
+use canvas::{
+    gpu::{Paper, page::PageScene},
+    layout::TextEngine,
+};
 use onestore::{
     ExGuid, PageCreation, PreparedEdit, RevisionIndex, Store,
     document::Document,
@@ -149,7 +152,8 @@ fn undecodable_pictures_show_placeholders_and_keep_their_data() {
             _ => None,
         })
         .unwrap();
-    let (scene, editor) = PageScene::from_page(page.clone(), &mut engine).unwrap();
+    let (mut scene, editor) = PageScene::from_page(page.clone(), &mut engine).unwrap();
+    scene.settle(Some(&editor), 1.0, Paper::WHITE);
     assert!(scene.image(picture).is_none());
     assert_eq!(editor.page().unwrap(), page);
 
@@ -158,7 +162,8 @@ fn undecodable_pictures_show_placeholders_and_keep_their_data() {
         .into_iter()
         .find(|page| page.title == "Image tiff")
         .unwrap();
-    let (scene, _) = PageScene::from_page(page.clone(), &mut engine).unwrap();
+    let (mut scene, editor) = PageScene::from_page(page.clone(), &mut engine).unwrap();
+    scene.settle(Some(&editor), 1.0, Paper::WHITE);
     let PageObject::Image(tiff) = page
         .objects
         .iter_mut()

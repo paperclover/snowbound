@@ -11,6 +11,11 @@ pub struct Theme {
     /// The window's title bar, toolbar and tab row.
     pub strip: [f32; 4],
     pub accent: [f32; 4],
+    /// The text caret, and selected text's fill with and without keyboard focus; the
+    /// platform's own where it has them.
+    pub caret: [f32; 4],
+    pub selection: [f32; 4],
+    pub inactive_selection: [f32; 4],
     pub text: [f32; 4],
     pub text_dim: [f32; 4],
     /// Text on section colours.
@@ -59,6 +64,9 @@ impl Theme {
             panel: srgb(0x1f, 0x22, 0x23),
             strip: srgb(0x27, 0x2a, 0x2b),
             accent: srgb(0x00, 0x79, 0xa6),
+            caret: srgb(0x00, 0x7a, 0xff),
+            selection: srgb(0x3f, 0x63, 0x8b),
+            inactive_selection: srgb(0x46, 0x46, 0x46),
             text: srgb(0xdd, 0xde, 0xe0),
             text_dim: srgb(0x6b, 0x70, 0x78),
             ink: srgb(0xe8, 0xe9, 0xeb),
@@ -83,6 +91,9 @@ impl Theme {
             panel: srgb(0xf4, 0xf5, 0xf7),
             strip: srgb(0xeb, 0xed, 0xf0),
             accent: srgb(0x00, 0x79, 0xa6),
+            caret: srgb(0x00, 0x7a, 0xff),
+            selection: srgb(0xb3, 0xd7, 0xff),
+            inactive_selection: srgb(0xdc, 0xdc, 0xdc),
             text: srgb(0x1f, 0x23, 0x28),
             text_dim: srgb(0x7b, 0x82, 0x8c),
             ink: srgb(0x1d, 0x1e, 0x20),
@@ -100,7 +111,7 @@ impl Theme {
         }
     }
 
-    /// Hovered controls and selected text: the accent over the base.
+    /// Hovered controls: the accent over the base.
     pub fn hover(&self) -> [f32; 4] {
         crate::mix(self.base, self.accent, 0.35)
     }

@@ -15,7 +15,7 @@ const COLORS: TextColors = TextColors {
 /// Paint for a view at `scale` device pixels per point on a display of `display_scale`.
 pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint {
     Paint {
-        show_caret,
+        caret: f32::from(u8::from(show_caret)),
         scale,
         pixel: display_scale / scale,
         colors: COLORS,
@@ -823,7 +823,7 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
         editor.active_outline(),
         [24.0, 48.0],
         Paint {
-            show_caret: false,
+            caret: 0.0,
             scale: 1.0,
             pixel: 1.0,
             colors: COLORS,
@@ -894,7 +894,7 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
         editor.active_outline(),
         [24.0, 48.0],
         Paint {
-            show_caret: false,
+            caret: 0.0,
             scale: 1.0,
             pixel: 1.0,
             colors: COLORS,
@@ -1522,6 +1522,49 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
     (view, id)
 }
 
+#[test]
+fn a_page_outline_emptied_by_backspace_still_draws() {
+    let mut engine = TextEngine::default();
+    let objects = [[36.0, 36.0], [36.0, 200.0]]
+        .map(|origin| {
+            let document =
+                TextDocument::new(vec![Paragraph::new("Delete me".into(), Default::default())])
+                    .unwrap();
+            let outline = TextOutline::new(&mut engine, document, 240.0, origin).unwrap();
+            onestore::page::PageObject::Outline(outline.snapshot())
+        })
+        .into();
+    let page = Page {
+        title: String::new(),
+        identity: None,
+        created: None,
+        margin_origin: [36.0, 14.4],
+        definitions: Default::default(),
+        objects,
+    };
+    let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+    let other = editor.outlines()[1].id;
+    let mut view = PageView::new(
+        editor,
+        engine,
+        Some((scene, [0.0; 2])),
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    view.editor.select_all().unwrap();
+    assert!(
+        view.key(&Key::Named(NamedKey::Backspace), None)
+            .unwrap()
+            .changed
+    );
+    assert!(view.editor.caret_outline().is_some());
+    view.primitives(COLORS).unwrap();
+    view.editor.focus_outline(other).unwrap();
+    assert_eq!(view.editor.outlines().len(), 1);
+    view.primitives(COLORS).unwrap();
+}
+
 fn click(view: &mut PageView, point: [f32; 2], now: Instant) {
     let _ = view.pointer_moved(point).unwrap();
     assert!(view.pointer_pressed(now).unwrap().changed);
@@ -1652,4 +1695,192 @@ fn toolbar_commands_wait_for_composition_and_object_focus() {
     view.set_object_focus(None);
     assert!(view.format(bold).unwrap().changed);
     assert_eq!(view.editor.format_state().unwrap().toggles, [Toggle::Bold]);
+}
+
+#[test]
+fn outline_chrome_grows_left_to_contain_its_tag_column() {
+    use crate::editor::{Formatting, NoteTag};
+    let mut engine = TextEngine::default();
+    let outline = TextOutline::new(
+        &mut engine,
+        TextDocument::new(vec![
+            Paragraph::new("Plain one".into(), Format::default()),
+            Paragraph::new("Plain two".into(), Format::default()),
+        ])
+        .unwrap(),
+        468.0,
+        [288.0, 36.0],
+    )
+    .unwrap();
+    let mut editor =
+        CanvasEditor::from_text_outlines(vec![outline], Default::default(), None).unwrap();
+    // OneNote 2010 at 100%: the border sits 15 px left of the text, plus 16 px per tag slot,
+    // and the text and right border stay put.
+    let pixel = 0.75;
+    let (plain, _) = outline_chrome(editor.active_outline(), pixel);
+    let check = |editor: &CanvasEditor, slots: f32| {
+        let outline = editor.active_outline();
+        let (frame, _) = outline_chrome(outline, pixel);
+        assert_eq!(outline.origin()[0], 288.0);
+        assert!(((288.0 - frame[0]) / pixel - (15.0 + 16.0 * slots)).abs() < 0.01);
+        assert_eq!(frame[2], plain[2]);
+        let shaped = outline.shaped();
+        for (_, paragraph) in outline.layouts() {
+            for tag in &paragraph.tags {
+                let x = outline.origin()[0] + shaped.tag_column_offset() + tag.origin[0];
+                let y = outline.origin()[1] + paragraph.origin[1] + tag.origin[1];
+                let size = crate::outline::ParagraphTag::SIZE;
+                assert!(frame[0] < x && x + size < frame[2], "{frame:?} {x}");
+                assert!(frame[1] < y && y + size < frame[3], "{frame:?} {y}");
+                // OneNote 2010 shows an arrow over a check box, which a click toggles.
+                let hit = page_hit_test(editor, None, [x + 1.0, y + 1.0], pixel);
+                if matches!(tag.icon, crate::outline::TagIcon::CheckBox { .. }) {
+                    assert_eq!(
+                        hit,
+                        Some(Hit::Check {
+                            outline: outline.id,
+                            paragraph: paragraph.id,
+                        })
+                    );
+                } else {
+                    assert!(matches!(hit, Some(Hit::Text { .. })));
+                }
+            }
+        }
+    };
+    check(&editor, 0.0);
+    editor
+        .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+        .unwrap();
+    check(&editor, 1.0);
+    editor
+        .format(&mut engine, Formatting::Tag(NoteTag::Question))
+        .unwrap();
+    check(&editor, 2.0);
+    editor
+        .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+        .unwrap();
+    editor
+        .format(&mut engine, Formatting::Tag(NoteTag::Question))
+        .unwrap();
+    check(&editor, 0.0);
+}
+
+#[test]
+fn a_click_on_a_check_box_toggles_it_under_an_arrow() {
+    use crate::editor::{Formatting, NoteTag};
+    let mut engine = TextEngine::default();
+    let outline = TextOutline::new(
+        &mut engine,
+        TextDocument::new(vec![Paragraph::new("Task".into(), Format::default())]).unwrap(),
+        468.0,
+        [288.0, 36.0],
+    )
+    .unwrap();
+    let mut editor =
+        CanvasEditor::from_text_outlines(vec![outline], Default::default(), None).unwrap();
+    editor
+        .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+        .unwrap();
+    let outline = editor.active_outline();
+    let (_, paragraph) = outline.layouts().next().unwrap();
+    let tag = &paragraph.tags[0];
+    let centre = [
+        outline.origin()[0] + outline.shaped().tag_column_offset() + tag.origin[0] + tag.size / 2.0,
+        outline.origin()[1] + paragraph.origin[1] + tag.origin[1] + tag.size / 2.0,
+    ];
+    let mut view = PageView::new(
+        editor,
+        engine,
+        None,
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    let device = [0, 1].map(|axis| centre[axis] * view.viewport.scale + view.viewport.origin[axis]);
+    let _ = view.pointer_moved(device).unwrap();
+    assert_eq!(view.cursor(), Cursor::Default);
+    let status = |view: &PageView| {
+        view.editor.active_outline().document().nodes()[0]
+            .text()
+            .unwrap()
+            .tags[0]
+            .status
+    };
+    assert!(view.pointer_pressed(Instant::now()).unwrap().changed);
+    let _ = view.pointer_released().unwrap();
+    assert_eq!(status(&view), 1);
+    let _ = view.pointer_moved([device[0] + 40.0, device[1]]).unwrap();
+    assert_eq!(view.cursor(), Cursor::Text);
+}
+
+/// OneNote 2010 moves an outline by the drag from its stored position and snaps it to the
+/// nearest 18 pt step from the page's margin origin, (36, 14.4) until one is stored.
+#[test]
+fn a_dragged_outline_snaps_to_the_margin_grid_as_onenote_stores_it() {
+    let margin = [36.0, 14.4];
+    for (stored, drag, expected) in [
+        ([72.0, 72.0], [15.0, 0.0], [90.0, 68.4]),
+        ([90.0, 68.4], [5.25, 15.0], [90.0, 86.4]),
+        ([0.0, 8.0], [30.0, 0.0], [36.0, 14.4]),
+    ] {
+        let point = [stored[0] + drag[0], stored[1] + drag[1]];
+        let snapped = snap_to_grid(point, margin);
+        assert!(
+            (0..2).all(|axis| (snapped[axis] - expected[axis]).abs() < 1e-4),
+            "{snapped:?} {expected:?}"
+        );
+    }
+}
+
+/// OneNote 2010 at 75 to 150% opens a page scrolled fully left and up: 11 px beyond 7.5 pt
+/// left of text, a list marker, 0.75 pt into a tag's slot, or 6 pt above an outline, never
+/// right of or below the page origin; then down until the caret's outline clears the bottom.
+#[test]
+fn a_page_opens_where_onenote_places_the_view() {
+    use crate::editor::{Formatting, NoteTag};
+    let open = |origin: [f32; 2], tag: bool| {
+        let mut engine = TextEngine::default();
+        let outline = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Plain".into(), Format::default())]).unwrap(),
+            468.0,
+            origin,
+        )
+        .unwrap();
+        let mut editor =
+            CanvasEditor::from_text_outlines(vec![outline], Default::default(), None).unwrap();
+        if tag {
+            editor
+                .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+                .unwrap();
+        }
+        let reached = reach(editor.active_outline());
+        let view = PageView::new(
+            editor,
+            engine,
+            None,
+            [800, 600],
+            1.0,
+            Duration::from_millis(500),
+        );
+        (reached, view.viewport.origin)
+    };
+    // Native at 100%: page origin 21 px right and 20 px down, 74 and 60 px, 37 px and 0.
+    for (origin, tag, reached, placed) in [
+        ([0.0, 0.0], false, [-7.5, -6.0], [21.0, 19.0]),
+        ([-40.0, -30.0], false, [-47.5, -36.0], [74.33, 59.0]),
+        ([0.0, 40.0], true, [-19.5, 34.0], [37.0, 0.0]),
+        ([72.0, 72.0], false, [64.5, 66.0], [0.0, 0.0]),
+    ] {
+        let (actual, view) = open(origin, tag);
+        assert_eq!(actual, reached);
+        assert!(
+            (0..2).all(|axis| (view[axis] - placed[axis]).abs() < 0.01),
+            "{origin:?} {view:?}"
+        );
+    }
+    // Content far down scrolls into view, 9 pt and 9 px above the bottom.
+    let (_, view) = open([50.0, 900.0], false);
+    assert!(view[1] < -600.0);
 }

@@ -7,13 +7,14 @@ publish = false
 [features]
 default = ["render"]
 # The wgpu renderer; `edit` needs only parley.
-render = ["dep:bytemuck", "dep:image", "dep:roxmltree", "dep:swash", "dep:wgpu"]
+render = ["dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:swash", "dep:wgpu"]
 
 [dependencies]
 parley.workspace = true
 
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "tiff"], optional = true }
+linebender_resource_handle = { version = "0.1.1", optional = true }
 roxmltree = { version = "0.21", optional = true }
 swash = { version = "0.2.10", optional = true }
 wgpu = { workspace = true, optional = true }

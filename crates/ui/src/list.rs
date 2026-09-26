@@ -7,10 +7,12 @@ use crate::{Axis, Event, Flags, HALF_LIFE, Id, Size, Spec, Ui, fill, mix, px, sc
 use std::collections::{HashMap, HashSet};
 use winit::keyboard::NamedKey;
 
+/// How far rows fade out under a scrolled list's edges.
+const EDGE: f64 = 10.0;
 /// Room beside a scrolling list's rows for its scrollbar.
 pub(crate) const GUTTER: f32 = 12.0;
 /// Seconds rows take to reach their new places.
-const DURATION: f32 = 0.15;
+const DURATION: f32 = 0.25;
 
 /// Items a list shows, in order.
 pub trait Rows {
@@ -502,6 +504,27 @@ pub fn list<R: Rows>(
         );
         ui.close();
     }
+    // Rows fade out under the list's edges rather than end at a cut.
+    let clear = [background[0], background[1], background[2], 0.0];
+    let edges = [
+        (scroll > 0.0, 0.0, [background, clear]),
+        (scroll < most, view - EDGE, [clear, background]),
+    ];
+    for (index, (shown, at, [top, bottom])) in edges.into_iter().enumerate() {
+        if shown {
+            ui.leaf(
+                ("edge", index),
+                Spec {
+                    flags: Flags::FLOAT,
+                    size: [width, px(EDGE as f32)],
+                    position: [0.0, at as f32],
+                    fill: Some(top),
+                    gradient: Some(bottom),
+                    ..Spec::default()
+                },
+            );
+        }
+    }
     let thumb = mix(theme.text_dim, theme.chip, 0.5);
     if let Some(offset) = scrollbar(
         ui,
@@ -512,6 +535,12 @@ pub fn list<R: Rows>(
         view as f32,
         thumb,
     ) {
+        // Rows keep their places relative to the new offset, or next frame's hold on the
+        // first row showing would scroll straight back.
+        let step = f64::from(offset) - scroll;
+        for shown in shown.iter_mut().chain(&mut folding) {
+            shown.place -= step;
+        }
         state.scroll = f64::from(offset);
         state.target = state.scroll;
     }

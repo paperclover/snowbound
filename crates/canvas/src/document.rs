@@ -234,6 +234,39 @@ fn validate_text(nodes: &[PageParagraph]) -> Result<(), EditError> {
     Ok(())
 }
 
+/// Whether UTF-16 `offset` lies inside a hyperlink field, which OneNote has not been seen
+/// splitting between paragraphs.
+fn divides_link(text: &Paragraph, offset: u32) -> Result<bool, EditError> {
+    let at = text.byte_offset(offset)?;
+    let link = |byte: usize| {
+        text.spans()
+            .iter()
+            .find(|span| byte < span.end)
+            .is_some_and(|span| span.format.hyperlink == Some(true))
+    };
+    Ok(at > 0 && link(at - 1) && link(at) && !text.text()[at..].starts_with('\u{fddf}'))
+}
+
+/// Whether a split or join keeping `first` up to UTF-16 `start` and `last` from `end` on meets
+/// an equation or embedded object at the seam or carries one to another paragraph: their run
+/// data belongs to the whole paragraph, and OneNote has not been seen dividing them.
+fn moves_object(first: &Paragraph, start: u32, last: &Paragraph, end: u32) -> Result<bool, EditError> {
+    let object = |text: &Paragraph, span: usize| {
+        let format = &text.spans()[span].format;
+        [format.math, format.embedded_object].contains(&Some(true))
+    };
+    let (before, after) = (first.byte_offset(start)?, last.byte_offset(end)?);
+    Ok(first.text()[..before].ends_with('\u{fffc}')
+        || last.text()[after..].contains('\u{fffc}')
+        || before > 0
+            && first
+                .spans()
+                .iter()
+                .position(|span| before - 1 < span.end)
+                .is_some_and(|span| object(first, span))
+        || (0..last.spans().len()).any(|span| last.spans()[span].end > after && object(last, span)))
+}
+
 /// Paragraph positions of each node's first text leaf, counting from `first`.
 fn starts(nodes: &[PageParagraph], first: usize) -> impl Iterator<Item = usize> + '_ {
     nodes.iter().scan(first, |next, node| {
@@ -610,8 +643,18 @@ impl TextDocument {
             return Err(EditError::UnsupportedContent);
         }
         let nodes = self.container(container)?;
-        let mut prefix = first.text().unwrap().text.slice(0..range.start.offset)?;
+        let first_text = &first.text().unwrap().text;
         let last_text = &last.text().unwrap().text;
+        let split = replacement.len() > 1;
+        if (split || start != end)
+            && (moves_object(first_text, range.start.offset, last_text, range.end.offset)?
+                || split
+                    && (divides_link(first_text, range.start.offset)?
+                        || divides_link(last_text, range.end.offset)?))
+        {
+            return Err(EditError::UnsupportedContent);
+        }
+        let mut prefix = first_text.slice(0..range.start.offset)?;
         let suffix =
             last_text.slice(range.end.offset..last_text.utf16_offset(last_text.text().len())?)?;
         let mut replacement = replacement.into_iter();
@@ -666,28 +709,70 @@ impl TextDocument {
 
     /// Appends text leaf `lower`'s text to `upper`'s, keeping the upper paragraph's properties
     /// and giving it the lower one's children; None unless nothing but `upper`'s hidden subtree
-    /// lies between them in one container.
+    /// lies between them in one container. The lower text keeps its look under `base`, the
+    /// upper paragraph's style: as OneNote stores it, a flag it leaves unset becomes false and
+    /// an unset colour automatic where the style sets them. An emptied upper paragraph takes
+    /// the lower text whole.
     pub(crate) fn join(
         &self,
         upper: usize,
         lower: usize,
+        base: &Format,
     ) -> Result<Option<DocumentEdit>, EditError> {
         let (container, first, top) = self.leaf(upper).ok_or(EditError::InvalidRange)?;
         let (end_container, last, bottom) = self.leaf(lower).ok_or(EditError::InvalidRange)?;
         let nodes = self.container(container)?;
+        let (above, below) = (&top.text().unwrap().text, &bottom.text().unwrap().text);
         if container != end_container
             || last <= first
             || last > first + 1 && !(top.collapsed && subtree_end(nodes, first) == last)
+            || moves_object(above, above.utf16_offset(above.text().len())?, below, 0)?
         {
             return Ok(None);
         }
         let mut head = top.clone();
         let text = head.text_mut().unwrap();
-        // OneNote moves the lower text object into an emptied upper paragraph.
-        if text.text.text().is_empty() {
-            text.id = bottom.text().unwrap().id;
+        if above.text().is_empty() {
+            // OneNote moves the lower text object, with its style and any recording link, into
+            // an emptied upper paragraph, which keeps its own note tags.
+            let tags = std::mem::take(&mut text.tags);
+            *text = bottom.text().unwrap().clone();
+            text.tags = tags;
+            head.style = bottom.style;
+            head.media.clone_from(&bottom.media);
+        } else {
+            let automatic = |color: Option<u32>| color.map(|_| 0xff000000);
+            let reset = Format {
+                bold: base.bold.map(|_| false),
+                italic: base.italic.map(|_| false),
+                underline: base.underline.map(|_| false),
+                strike: base.strike.map(|_| false),
+                superscript: base.superscript.map(|_| false),
+                subscript: base.subscript.map(|_| false),
+                hidden: base.hidden.map(|_| false),
+                hyperlink: base.hyperlink.map(|_| false),
+                math: base.math.map(|_| false),
+                color: automatic(base.color),
+                highlight: automatic(base.highlight),
+                ..Format::default()
+            };
+            // The joined text lies in the upper paragraph, whose spacing and alignment it takes.
+            let paragraph = &above.spans()[0].format;
+            let mut start = 0;
+            text.text.append(Paragraph::from_runs(below.spans().iter().map(|span| {
+                let run = below.text()[start..span.end].to_owned();
+                start = span.end;
+                let format = Format {
+                    alignment: paragraph.alignment,
+                    space_before: paragraph.space_before,
+                    space_after: paragraph.space_after,
+                    line_spacing: paragraph.line_spacing,
+                    list_spacing: paragraph.list_spacing,
+                    ..span.format.inherit(&reset)
+                };
+                (run, format)
+            })))?;
         }
-        text.text.append(bottom.text().unwrap().text.clone())?;
         let moves = BTreeMap::from([(bottom.id, &head)]);
         let adopted = adopt(nodes, last + 1, &moves, BTreeMap::new())?;
         Ok(Some(DocumentEdit {

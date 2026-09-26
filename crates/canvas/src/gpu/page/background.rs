@@ -1,12 +1,12 @@
 //! OneNote 2010's page template art, recognised by the SHA-256 of the embedded picture and
 //! painted from vector recreations that suit the paper.
 
+use super::{SETTLE, Slot, density, queue};
 use crate::gpu::Paper;
 use draw::RasterImage;
 use resvg::{tiny_skia, usvg};
 use sha2::{Digest, Sha256};
 use std::{
-    sync::{Arc, Mutex, OnceLock, Weak, mpsc},
     task::Waker,
     time::{Duration, Instant},
 };
@@ -311,8 +311,6 @@ const TEMPLATES: &[(&str, &str)] = &[
 /// A raster holds at most this many bytes; page-sized art stops sharpening past about 2.9
 /// device pixels per point.
 const MAX_RASTER_BYTES: f32 = 16.0 * 1024.0 * 1024.0;
-/// How long the zoom must hold before art is rasterized again for it.
-const SETTLE: Duration = Duration::from_millis(150);
 
 /// Template art standing in for a page's background picture.
 pub(super) struct Background {
@@ -328,18 +326,7 @@ struct Variant {
     /// The raster painted and its device pixels per point.
     shown: Option<(RasterImage, f32)>,
     /// The one raster being made and its device pixels per point; replacing it abandons it.
-    pending: Option<(Arc<Mutex<Option<RasterImage>>>, f32)>,
-}
-
-/// Art rasterized on the worker thread, into `slot` unless its scene has let it go.
-struct Job {
-    svg: &'static str,
-    /// The dark paper to recolour for; light paper takes the art as drawn.
-    dark: Option<Paper>,
-    size: [u32; 2],
-    start: Instant,
-    slot: Weak<Mutex<Option<RasterImage>>>,
-    waker: Waker,
+    pending: Option<(Slot<RasterImage>, f32)>,
 }
 
 impl Background {
@@ -375,8 +362,7 @@ impl Background {
     pub fn update(&mut self, paper: Paper, scale: f32, waker: &Waker) -> bool {
         let dark = dark(paper);
         let [width, height] = self.size.map(|side| side.max(1.0));
-        let density = 2_f32
-            .powf((scale.max(0.25).log2() * 2.0).ceil() / 2.0)
+        let density = density(scale)
             .min((MAX_RASTER_BYTES / (4.0 * width * height)).sqrt())
             .min(4096.0 / width.max(height));
         let variant = &mut self.variants[usize::from(dark)];
@@ -394,22 +380,16 @@ impl Background {
         if shown != Some(density)
             && variant.pending.as_ref().map(|(_, made)| *made) != Some(density)
         {
-            let slot = Arc::default();
-            worker()
-                .send(Job {
-                    svg: self.svg,
-                    dark: dark.then_some(paper),
-                    size: [width, height].map(|side| (side * density).round().max(1.0) as u32),
-                    start: Instant::now()
-                        + if shown.is_some() {
-                            SETTLE
-                        } else {
-                            Duration::ZERO
-                        },
-                    slot: Arc::downgrade(&slot),
-                    waker: waker.clone(),
-                })
-                .expect("The background worker outlives its jobs");
+            let svg = self.svg;
+            let paper = dark.then_some(paper);
+            let size = [width, height].map(|side| (side * density).round().max(1.0) as u32);
+            let start = Instant::now()
+                + if shown.is_some() {
+                    SETTLE
+                } else {
+                    Duration::ZERO
+                };
+            let slot = queue(start, waker, move || rasterize(svg, paper, size));
             variant.pending = Some((slot, density));
         }
         shown == Some(density)
@@ -417,32 +397,9 @@ impl Background {
 }
 
 fn dark(paper: Paper) -> bool {
-    let [lightness, ..] = oklab(paper.color);
-    let [ink, ..] = oklab(paper.ink);
+    let [lightness, ..] = draw::oklab(paper.color);
+    let [ink, ..] = draw::oklab(paper.ink);
     ink > lightness
-}
-
-/// The process's one background rasterizer, started on first use.
-fn worker() -> &'static mpsc::Sender<Job> {
-    static WORKER: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
-    WORKER.get_or_init(|| {
-        let (sender, jobs) = mpsc::channel::<Job>();
-        std::thread::Builder::new()
-            .name("template backgrounds".into())
-            .spawn(move || {
-                for job in jobs {
-                    std::thread::sleep(job.start.saturating_duration_since(Instant::now()));
-                    let Some(slot) = job.slot.upgrade() else {
-                        continue;
-                    };
-                    let image = rasterize(job.svg, job.dark, job.size);
-                    *slot.lock().unwrap() = Some(image);
-                    job.waker.wake();
-                }
-            })
-            .expect("The background worker starts");
-        sender
-    })
 }
 
 fn rasterize(svg: &str, dark: Option<Paper>, [width, height]: [u32; 2]) -> RasterImage {
@@ -479,8 +436,8 @@ fn parse(svg: &str) -> usvg::Tree {
 /// the paper towards its ink, easing off so the art stays behind the text, and hue and
 /// chroma carry over. Keywords, such as a mask's `white`, stay as they are.
 fn onto(svg: &str, paper: Paper) -> String {
-    let [lightness, a, b] = oklab(paper.color);
-    let [ink, ..] = oklab(paper.ink);
+    let [lightness, a, b] = draw::oklab(paper.color);
+    let [ink, ..] = draw::oklab(paper.ink);
     let mut pieces = svg.split('#');
     let mut recoloured = pieces.next().unwrap_or_default().to_owned();
     for piece in pieces {
@@ -494,9 +451,9 @@ fn onto(svg: &str, paper: Paper) -> String {
             continue;
         };
         let [_, red, green, blue] = color.to_be_bytes();
-        let [l, ca, cb] = oklab(draw::srgb(red, green, blue));
+        let [l, ca, cb] = draw::oklab(draw::srgb(red, green, blue));
         let turned = lightness + 0.7 * (1.0 - l).max(0.0).sqrt() * (ink - lightness);
-        let [red, green, blue] = linear([turned, a + ca, b + cb]).map(|value| {
+        let [red, green, blue] = draw::from_oklab([turned, a + ca, b + cb]).map(|value| {
             let encoded = if value <= 0.003_130_8 {
                 value * 12.92
             } else {
@@ -510,36 +467,6 @@ fn onto(svg: &str, paper: Paper) -> String {
     recoloured
 }
 
-/// OKLab lightness and opponent axes of linear RGB.
-fn oklab([red, green, blue, _]: [f32; 4]) -> [f32; 3] {
-    let [l, m, s] = [
-        [0.412_221_46, 0.536_332_55, 0.051_445_995],
-        [0.211_903_5, 0.680_699_5, 0.107_396_96],
-        [0.088_302_46, 0.281_718_85, 0.629_978_7],
-    ]
-    .map(|[r, g, b]| (r * red + g * green + b * blue).cbrt());
-    [
-        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
-        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
-        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
-    ]
-}
-
-/// Linear RGB of OKLab, clipped to the sRGB gamut.
-fn linear([lightness, a, b]: [f32; 3]) -> [f32; 3] {
-    let [l, m, s] = [
-        lightness + 0.396_337_78 * a + 0.215_803_76 * b,
-        lightness - 0.105_561_346 * a - 0.063_854_17 * b,
-        lightness - 0.089_484_18 * a - 1.291_485_5 * b,
-    ]
-    .map(|value| value.powi(3));
-    [
-        [4.076_741_7, -3.307_711_6, 0.230_969_94],
-        [-1.268_438, 2.609_757_4, -0.341_319_38],
-        [-0.004_196_086_3, -0.703_418_6, 1.707_614_7],
-    ]
-    .map(|[x, y, z]| (x * l + y * m + z * s).clamp(0.0, 1.0))
-}
 
 #[cfg(test)]
 mod tests {
@@ -550,7 +477,7 @@ mod tests {
         document::Layout,
         page::{Image, Page, PageObject},
     };
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, sync::Arc};
 
     const DARK: Paper = Paper {
         color: [0.0137, 0.0144, 0.0159, 1.0],
@@ -713,7 +640,7 @@ mod tests {
             .unwrap();
         assert!(before.is_empty(), "the paper shows until the raster lands");
         drop(before);
-        settle(|| scene.update_backgrounds(DARK, 1.0, Waker::noop()));
+        scene.settle(None, 1.0, DARK);
         let mut primitives = Vec::new();
         scene
             .append_primitives(&mut primitives, [0.0; 2], DARK)

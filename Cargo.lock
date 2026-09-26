@@ -735,6 +735,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "image",
+ "linebender_resource_handle",
  "parley",
  "png",
  "pollster",
@@ -1548,6 +1549,18 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mobile"
+version = "0.1.0"
+dependencies = [
+ "canvas",
+ "draw",
+ "onestore",
+ "parley",
+ "pollster",
+ "wgpu",
 ]
 
 [[package]]

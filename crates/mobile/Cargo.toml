@@ -1,0 +1,17 @@
+[package]
+name = "mobile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A C surface over a canvas page for native mobile shells; see resources/ios-port.md.
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+canvas = { path = "../canvas", features = ["interaction"] }
+draw = { path = "../draw" }
+onestore = { path = "../onestore" }
+wgpu.workspace = true
+parley.workspace = true
+pollster = "0.4"

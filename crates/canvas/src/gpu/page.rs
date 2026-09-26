@@ -1,4 +1,5 @@
 mod background;
+mod picture;
 
 use super::{Paper, colorref};
 use crate::editor::ReadOnlyObject;
@@ -9,16 +10,66 @@ use crate::{
     layout::{LayoutError, TextEngine},
 };
 use background::Background;
-use draw::{Primitive, RasterImage, RenderError};
+use draw::Primitive;
 use onestore::page::Page;
-use std::fmt;
+use picture::Picture;
+use std::{
+    fmt,
+    sync::{Arc, Mutex, OnceLock, mpsc},
+    task::Waker,
+    time::{Duration, Instant},
+};
 
 /// Retained drawing data in the source page's coordinate system.
 pub struct PageScene {
     reference: Option<Vec<Content>>,
-    images: std::collections::BTreeMap<onestore::ExGuid, RasterImage>,
+    /// Pictures and file icons, by the identity of the object that shows them.
+    pictures: std::collections::BTreeMap<onestore::ExGuid, Picture>,
     /// Background pictures from OneNote's page templates, painted from their recreations.
     backgrounds: std::collections::BTreeMap<onestore::ExGuid, Background>,
+}
+
+/// How long the zoom must hold before a raster is made again for it.
+const SETTLE: Duration = Duration::from_millis(150);
+
+/// Where work done off the frame thread lands while its requester keeps it.
+type Slot<T> = Arc<Mutex<Option<T>>>;
+
+/// Runs `work` on the scenes' one raster thread once `start` has passed, unless the slot
+/// returned has been dropped by then; the result lands in the slot and wakes `waker`.
+fn queue<T: Send + 'static>(
+    start: Instant,
+    waker: &Waker,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Slot<T> {
+    static WORKER: OnceLock<mpsc::Sender<Box<dyn FnOnce() + Send>>> = OnceLock::new();
+    let slot = Slot::default();
+    let requester = Arc::downgrade(&slot);
+    let waker = waker.clone();
+    WORKER
+        .get_or_init(|| {
+            let (sender, jobs) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+            std::thread::Builder::new()
+                .name("page pictures".into())
+                .spawn(move || jobs.into_iter().for_each(|job| job()))
+                .expect("The picture thread starts");
+            sender
+        })
+        .send(Box::new(move || {
+            std::thread::sleep(start.saturating_duration_since(Instant::now()));
+            if let Some(slot) = requester.upgrade() {
+                *slot.lock().unwrap() = Some(work());
+                waker.wake();
+            }
+        }))
+        .expect("The picture thread outlives its jobs");
+    slot
+}
+
+/// Device pixels per point a raster is made at for `scale`: the next half power of two,
+/// so zooming makes rasters again in steps.
+fn density(scale: f32) -> f32 {
+    2_f32.powf((scale.max(0.25).log2() * 2.0).ceil() / 2.0)
 }
 
 #[derive(Debug, PartialEq)]
@@ -106,7 +157,6 @@ pub enum SceneError {
     Layout(LayoutError),
     Editor(EditorError),
     MissingOutline,
-    Image(RenderError),
     MissingImage,
     InvalidGeometry,
 }
@@ -117,7 +167,6 @@ impl fmt::Display for SceneError {
             Self::Layout(error) => error.fmt(f),
             Self::Editor(error) => error.fmt(f),
             Self::MissingOutline => f.write_str("An editable outline is missing from this page."),
-            Self::Image(error) => write!(f, "Image rendering failed: {error:?}"),
             Self::MissingImage => f.write_str("An image is missing its data or dimensions."),
             Self::InvalidGeometry => {
                 f.write_str("The page contains invalid object dimensions or positions.")
@@ -146,7 +195,7 @@ impl PageScene {
         let mut objects = crate::editor::page::build(&mut page, engine, false)
             .map_err(SceneError::from)?
             .objects;
-        let pictures = Self::decode_images(&objects, None)?;
+        let pictures = Self::pictures(&objects, None)?;
         pictures.mark_unavailable(&mut objects, engine)?;
         Ok(Self {
             reference: Some(objects),
@@ -159,12 +208,13 @@ impl PageScene {
         engine: &mut TextEngine,
     ) -> Result<(Self, CanvasEditor), SceneError> {
         let mut editor = CanvasEditor::from_page(page, engine).map_err(SceneError::from)?;
-        let scene = Self::decode_images(&editor.objects, Some(&editor))?;
+        let scene = Self::pictures(&editor.objects, Some(&editor))?;
         scene.mark_unavailable(&mut editor.objects, engine)?;
         Ok((scene, editor))
     }
 
-    /// Turns page pictures that did not decode into placeholders; their stored data is kept.
+    /// Turns page pictures the renderer cannot decode into placeholders; their stored data
+    /// is kept.
     fn mark_unavailable(
         &self,
         objects: &mut Vec<Content>,
@@ -174,7 +224,7 @@ impl PageScene {
             .into_iter()
             .map(|object| match object {
                 Content::Image(source)
-                    if !self.images.contains_key(&source.id)
+                    if !self.pictures.contains_key(&source.id)
                         && !self.backgrounds.contains_key(&source.id) =>
                 {
                     Content::unavailable(onestore::page::PageObject::Image(source), engine)
@@ -185,24 +235,21 @@ impl PageScene {
         Ok(())
     }
 
-    /// Decodes every picture the page draws, page-level ones and those inside outlines,
-    /// except the template backgrounds it recognises; one without decodable data is left out.
-    fn decode_images(
-        objects: &[Content],
-        editor: Option<&CanvasEditor>,
-    ) -> Result<Self, SceneError> {
+    /// Every picture the page draws, page-level ones and those inside outlines, except the
+    /// template backgrounds it recognises; one the renderer cannot decode is left out.
+    fn pictures(objects: &[Content], editor: Option<&CanvasEditor>) -> Result<Self, SceneError> {
         fn nested<'a>(
             nodes: &'a [onestore::page::PageParagraph],
-            payloads: &mut Vec<(onestore::ExGuid, Option<&'a [u8]>)>,
+            payloads: &mut Vec<(onestore::ExGuid, Option<&'a Arc<[u8]>>)>,
         ) {
             for node in nodes {
                 match &node.content {
                     onestore::page::ParagraphContent::Image(image) => {
-                        payloads.push((image.id, image.bytes.as_deref()))
+                        payloads.push((image.id, image.bytes.as_ref()))
                     }
                     // A file without the icon OneNote rendered for it keeps an empty slot.
                     onestore::page::ParagraphContent::Attachment(file) => {
-                        if let Some(icon) = file.preview.as_deref() {
+                        if let Some(icon) = file.preview.as_ref() {
                             payloads.push((file.id, Some(icon)))
                         }
                     }
@@ -225,7 +272,7 @@ impl PageScene {
                     {
                         backgrounds.insert(source.id, art);
                     } else {
-                        payloads.push((source.id, source.bytes.as_deref()))
+                        payloads.push((source.id, source.bytes.as_ref()))
                     }
                 }
                 Content::Outline { source, .. } => nested(&source.paragraphs, &mut payloads),
@@ -239,46 +286,112 @@ impl PageScene {
                 Content::Date { .. } | Content::Ink(_) | Content::ReadOnly(_) => {}
             }
         }
-        let mut images = std::collections::BTreeMap::new();
-        let mut bytes = 0_u64;
+        let mut pictures = std::collections::BTreeMap::new();
         for (id, encoded) in payloads {
-            let Some(image) = encoded.and_then(|encoded| RasterImage::decode(encoded).ok()) else {
+            let Some(picture) = encoded.and_then(Picture::new) else {
                 continue;
             };
-            bytes += image.pixels().len() as u64;
-            if bytes > draw::MAX_IMAGE_BYTES {
-                return Err(SceneError::Image(RenderError::ImageBudget));
-            }
-            if images.insert(id, image).is_some() {
+            if pictures.insert(id, picture).is_some() {
                 return Err(SceneError::InvalidGeometry);
             }
         }
         Ok(Self {
             reference: None,
-            images,
+            pictures,
             backgrounds,
         })
     }
 
-    pub fn image(&self, id: onestore::ExGuid) -> Option<&RasterImage> {
-        self.images.get(&id)
-    }
-
-    /// Brings template backgrounds to `paper` at `scale` device pixels per point, rasterizing
-    /// off this thread; `waker` is woken when a raster lands and the page should be drawn
-    /// again. Call before collecting each frame's primitives. True once every background
-    /// shows its raster for this paper and scale.
-    pub fn update_backgrounds(
+    /// Brings template backgrounds to `paper` and the pictures near `view`, a rectangle in
+    /// scene coordinates, to `scale` device pixels per point, rasterizing and decoding off
+    /// this thread; `waker` is woken when one lands and the page should be drawn again.
+    /// Call before collecting each frame's primitives. True once everything in view shows
+    /// its raster for this paper and scale.
+    pub fn update_pictures(
         &mut self,
-        paper: Paper,
+        editor: Option<&CanvasEditor>,
+        view: [f32; 4],
         scale: f32,
-        waker: &std::task::Waker,
+        paper: Paper,
+        waker: &Waker,
     ) -> bool {
         let mut settled = true;
         for art in self.backgrounds.values_mut() {
             settled &= art.update(paper, scale, waker);
         }
-        settled
+        let rects = self.picture_rects(editor);
+        picture::update(&mut self.pictures, rects, view, scale, waker) && settled
+    }
+
+    /// Waits until the whole page shows its rasters for `paper` at `scale`, for drawing it
+    /// offscreen.
+    pub fn settle(&mut self, editor: Option<&CanvasEditor>, scale: f32, paper: Paper) {
+        let everything = [
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::INFINITY,
+        ];
+        while !self.update_pictures(editor, everything, scale, paper, Waker::noop()) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The raster a picture or file icon shows, once decoded.
+    pub fn image(&self, id: onestore::ExGuid) -> Option<&draw::RasterImage> {
+        self.pictures.get(&id)?.image()
+    }
+
+    /// Where pictures and file icons sit, in scene coordinates.
+    fn picture_rects(&self, editor: Option<&CanvasEditor>) -> Vec<(onestore::ExGuid, [f32; 4])> {
+        fn outline(
+            layout: &crate::outline::OutlineLayout,
+            [x, y]: [f32; 2],
+            rects: &mut Vec<(onestore::ExGuid, [f32; 4])>,
+        ) {
+            rects.extend(layout.objects.iter().map(|object| {
+                let [x0, y0, x1, y1] = object.rect;
+                (object.id, [x0 + x, y0 + y, x1 + x, y1 + y])
+            }));
+        }
+        let mut rects = Vec::new();
+        for content in self.objects(editor).into_iter().flatten() {
+            match content {
+                Content::Image(source) => {
+                    let [x, y] = [
+                        source.layout.x.unwrap_or(0.0),
+                        source.layout.y.unwrap_or(0.0),
+                    ];
+                    if let (Some(width), Some(height)) =
+                        (source.layout.max_width, source.layout.max_height)
+                    {
+                        rects.push((source.id, [x, y, x + width, y + height]));
+                    }
+                }
+                Content::Outline {
+                    source,
+                    layout,
+                    below_title,
+                } => {
+                    let origin = [
+                        source.layout.x.unwrap_or(0.0),
+                        source.layout.y.unwrap_or(0.0),
+                    ];
+                    if let Ok(origin) = outline_origin(origin, *below_title, editor) {
+                        outline(layout, origin, &mut rects);
+                    }
+                }
+                Content::Editable(id) => {
+                    if let Some(editable) =
+                        editor.and_then(|editor| editor.visible_outlines().find(|o| o.id == *id))
+                    {
+                        outline(editable.shaped(), editable.origin(), &mut rects);
+                    }
+                }
+                Content::Date { .. } | Content::Ink(_) | Content::ReadOnly(_) => {}
+            }
+        }
+        rects
     }
 
     /// Pictures, files and handwriting inside an outline whose origin is `origin`.
@@ -302,7 +415,8 @@ impl PageScene {
                     y1 + origin[1],
                 ],
             };
-            if let Some(image) = self.images.get(&object.id) {
+            let picture = self.pictures.get(&object.id);
+            if let Some(image) = picture.and_then(Picture::image) {
                 primitives.push(Primitive::Image { image, rect });
             }
             match &object.kind {
@@ -312,7 +426,7 @@ impl PageScene {
                 crate::outline::ObjectKind::Unsupported(_) => {
                     append_placeholder(rect, paper, primitives)
                 }
-                crate::outline::ObjectKind::Picture if !self.images.contains_key(&object.id) => {
+                crate::outline::ObjectKind::Picture if picture.is_none_or(Picture::failed) => {
                     append_placeholder(rect, paper, primitives)
                 }
                 crate::outline::ObjectKind::Picture | crate::outline::ObjectKind::File(_) => {}
@@ -588,21 +702,35 @@ impl PageScene {
             let object_origin = [origin[0] + offset[0], origin[1] + offset[1]];
             match content {
                 Content::Image(source) => {
+                    // The paper shows until the worker's raster lands.
                     let (image, [width, height]) = match self.backgrounds.get(&source.id) {
-                        // The paper shows until the worker's raster lands.
-                        Some(art) => match art.image(paper) {
-                            Some(image) => (image, art.size),
-                            None => continue,
-                        },
-                        None => (
-                            self.images
+                        Some(art) => (art.image(paper), art.size),
+                        None => {
+                            let picture = self
+                                .pictures
                                 .get(&source.id)
-                                .ok_or(SceneError::MissingImage)?,
-                            [
+                                .ok_or(SceneError::MissingImage)?;
+                            let size = [
                                 source.layout.max_width.ok_or(SceneError::MissingImage)?,
                                 source.layout.max_height.ok_or(SceneError::MissingImage)?,
-                            ],
-                        ),
+                            ];
+                            if picture.failed() {
+                                append_placeholder(
+                                    [
+                                        object_origin[0],
+                                        object_origin[1],
+                                        object_origin[0] + size[0],
+                                        object_origin[1] + size[1],
+                                    ],
+                                    paper,
+                                    primitives,
+                                );
+                            }
+                            (picture.image(), size)
+                        }
+                    };
+                    let Some(image) = image else {
+                        continue;
                     };
                     primitives.push(Primitive::Image {
                         image,
@@ -632,7 +760,7 @@ impl PageScene {
                     };
                     outline.append_table_primitives(primitives, object_origin, paper);
                     let everything = [f32::NEG_INFINITY, f32::INFINITY];
-                    outline.append_background_primitives(primitives, object_origin, everything);
+                    outline.append_background_primitives(primitives, object_origin, everything, paper);
                     self.append_outline_objects(outline, object_origin, None, paper, primitives);
                     for (index, paragraph) in outline.visible(everything) {
                         outline.append_paragraph_primitives(
@@ -671,12 +799,14 @@ impl crate::outline::OutlineLayout {
             })
     }
 
-    /// Highlights behind the paragraphs `visible` finds between outline-local `rows`.
+    /// Highlights behind the paragraphs `visible` finds between outline-local `rows`. A black
+    /// highlight paints in the paper's ink, censoring the automatic text on it in any theme.
     pub fn append_background_primitives(
         &self,
         primitives: &mut Vec<Primitive<'_>>,
         origin: [f32; 2],
         rows: [f32; 2],
+        paper: Paper,
     ) {
         for (index, paragraph) in self.visible(rows) {
             for (mut rect, color) in paragraph.text.backgrounds() {
@@ -697,7 +827,11 @@ impl crate::outline::OutlineLayout {
                         rect.x1 as f32 + origin[0],
                         rect.y1 as f32 + origin[1],
                     ],
-                    color: colorref(color),
+                    color: if color == 0 {
+                        paper.ink
+                    } else {
+                        colorref(color)
+                    },
                 });
             }
         }
@@ -786,7 +920,7 @@ impl crate::outline::OutlineLayout {
                     origin[0] + self.tag_column_offset() + tag.origin[0],
                     y + tag.origin[1],
                 ],
-                size: crate::outline::ParagraphTag::SIZE,
+                size: tag.size,
                 tint: [1.0, 1.0, 1.0, if tag.disabled { 0.45 } else { 1.0 }],
             });
         }
@@ -1253,7 +1387,8 @@ mod tests {
                     background,
                 }));
             }
-            let (scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();
+            let (mut scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();
+            scene.settle(Some(&editor), 1.0, Paper::WHITE);
             let images = |editor: &CanvasEditor| {
                 let mut primitives = Vec::new();
                 scene
@@ -1749,8 +1884,10 @@ mod tests {
             ],
         };
         let mut engine = TextEngine::default();
-        let reference = PageScene::new(page(), &mut engine).unwrap();
-        let (scene, mut editor) = PageScene::from_page(page(), &mut engine).unwrap();
+        let mut reference = PageScene::new(page(), &mut engine).unwrap();
+        let (mut scene, mut editor) = PageScene::from_page(page(), &mut engine).unwrap();
+        reference.settle(None, 1.0, Paper::WHITE);
+        scene.settle(Some(&editor), 1.0, Paper::WHITE);
         let mut reference_primitives = Vec::new();
         reference
             .append_primitives(&mut reference_primitives, [0.0; 2], Paper::WHITE)
@@ -1975,7 +2112,8 @@ mod tests {
             })],
         };
         let mut engine = TextEngine::default();
-        let scene = PageScene::new(page(3.0), &mut engine).unwrap();
+        let mut scene = PageScene::new(page(3.0), &mut engine).unwrap();
+        scene.settle(None, 1.0, Paper::WHITE);
         for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
             assert!(matches!(
                 PageScene::new(page(invalid), &mut engine),
@@ -2046,7 +2184,8 @@ mod tests {
             objects: vec![PageObject::Image(background), PageObject::Image(picture)],
         };
         let mut engine = TextEngine::default();
-        let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+        let (mut scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+        scene.settle(Some(&editor), 1.0, Paper::WHITE);
         let hit = |x| scene.hit_test::<()>([x, 10.0], Some(&editor), |_| None);
         assert_eq!(hit(60.0), Some(SceneHit::Image(id)));
         assert_eq!(hit(10.0), None);
@@ -2069,5 +2208,101 @@ mod tests {
             })
             .collect();
         assert_eq!(rects, [[0.0, 0.0, 100.0, 100.0], [70.0, 5.0, 120.0, 55.0]]);
+    }
+
+    #[test]
+    fn pictures_past_the_budget_open_decode_in_view_and_keep_their_bytes() {
+        let side = 1024;
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, side, side);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[40, 90, 160, 255].repeat((side * side) as usize))
+                .unwrap();
+        }
+        let bytes: Arc<[u8]> = Arc::from(bytes);
+        let pictures: Vec<_> = (0..20)
+            .map(|index| Image {
+                size: None,
+                id: onestore::page::text::new_id().unwrap(),
+                layout: Layout {
+                    x: Some(0.0),
+                    y: Some(index as f32 * 600.0),
+                    max_width: Some(512.0),
+                    max_height: Some(512.0),
+                    ..Default::default()
+                },
+                bytes: Some(Arc::clone(&bytes)),
+                alt: None,
+                background: false,
+            })
+            .collect();
+        assert!(20 * u64::from(side * side) * 4 > draw::MAX_IMAGE_BYTES);
+        let page = Page {
+            identity: None,
+            created: None,
+            title: String::new(),
+            margin_origin: [0.0; 2],
+            definitions: BTreeMap::new(),
+            objects: pictures.iter().cloned().map(PageObject::Image).collect(),
+        };
+        let mut engine = TextEngine::default();
+        let (mut scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+        let kept = |scene: &PageScene| -> u64 {
+            let shown = scene.pictures.values().filter_map(Picture::image);
+            shown.map(|image| image.pixels().len() as u64).sum()
+        };
+        let shown = |scene: &PageScene, index: usize| {
+            scene.image(pictures[index].id).map(|image| image.size())
+        };
+        let settle = |scene: &mut PageScene, view: [f32; 4]| {
+            let give_up = Instant::now() + Duration::from_secs(20);
+            while !scene.update_pictures(Some(&editor), view, 2.0, Paper::WHITE, Waker::noop()) {
+                assert!(
+                    Instant::now() < give_up,
+                    "the pictures in view never landed"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert!(kept(scene) <= picture::BUDGET, "{}", kept(scene));
+        };
+        for top in (0..20).map(|index| index as f32 * 600.0) {
+            let view = [0.0, top, 600.0, top + 1200.0];
+            settle(&mut scene, view);
+            let index = (top / 600.0) as usize;
+            assert_eq!(shown(&scene, index), Some([side; 2]));
+            let mut primitives = Vec::new();
+            scene
+                .append_primitives_with::<SceneError>(
+                    &mut primitives,
+                    [0.0; 2],
+                    Some(&editor),
+                    None,
+                    Paper::WHITE,
+                    |_, _, _| Ok(()),
+                )
+                .unwrap();
+            assert!(primitives.iter().any(|primitive| matches!(
+                primitive,
+                Primitive::Image { rect, .. } if rect[1] == top
+            )));
+        }
+        assert_eq!(shown(&scene, 0), None, "the first picture was let go");
+        // Every picture in view at once shrinks to fit rather than failing the frame.
+        settle(&mut scene, [0.0, 0.0, 600.0, 12_000.0]);
+        for index in 0..20 {
+            let [width, height] = shown(&scene, index).unwrap();
+            assert!(width < side && width == height, "{width}×{height}");
+        }
+        for object in editor.page().unwrap().objects {
+            let PageObject::Image(picture) = object else {
+                panic!()
+            };
+            assert!(Arc::ptr_eq(picture.bytes.as_ref().unwrap(), &bytes));
+        }
     }
 }

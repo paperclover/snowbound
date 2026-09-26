@@ -161,7 +161,7 @@ pub fn split_button(
     if let Some(color) = bar {
         // The icon leaves its lowest three units for the bar.
         let top = (TOOL - 16.0) / 2.0;
-        ui.mark([top, top + 13.0, top + 16.0, top + 16.0], color);
+        ui.mark([top, top + 13.0, top + 16.0, top + 16.0], color, 0.0);
     }
     ui.close();
     let menu = ui.leaf(
@@ -220,6 +220,12 @@ pub fn combo(ui: &mut Ui, part: impl Hash, text: &str, width: f32) -> Signal {
 }
 
 impl Ui {
+    /// Paints `item` over the frame's boxes but under its popups.
+    fn beneath_popups(&mut self, item: Display) {
+        self.display.insert(self.popups_painted, item);
+        self.popups_painted += 1;
+    }
+
     /// Draws a 1 px border along `points`, each with the radius its corner rounds by,
     /// joining the last back to the first when `closed`. Called between `end` and
     /// `layers`, it paints over the frame's boxes where they were just laid out.
@@ -239,14 +245,14 @@ impl Ui {
             let to = corners[next]
                 .as_ref()
                 .map_or(points[next].0, |corner| corner.start);
-            self.display.push(Display::Segment { from, to, color });
+            self.beneath_popups(Display::Segment { from, to, color });
         }
         for corner in corners.into_iter().flatten() {
             let start = [
                 corner.start[0] - corner.point[0],
                 corner.start[1] - corner.point[1],
             ];
-            self.display.push(Display::Path {
+            self.beneath_popups(Display::Path {
                 data: format!("M{} {}{}", start[0], start[1], corner.curve(corner.point)),
                 origin: corner.point,
                 style: PathStyle::Stroke(1.0),
@@ -273,7 +279,7 @@ impl Ui {
                 corner.start[0] - corner.point[0],
                 corner.start[1] - corner.point[1],
             ];
-            self.display.push(Display::Path {
+            self.beneath_popups(Display::Path {
                 data: format!(
                     "M{} {}{}L0 0Z",
                     start[0],

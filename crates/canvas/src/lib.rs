@@ -1,5 +1,6 @@
 pub mod document;
 pub mod editor;
+pub mod language;
 pub mod layout;
 pub mod math;
 pub mod outline;

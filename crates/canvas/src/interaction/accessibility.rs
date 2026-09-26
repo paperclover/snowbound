@@ -1711,4 +1711,39 @@ pub(super) mod tests {
         assert!(access.selection(second, selection).is_err());
         assert_eq!(access.outline_for_node(fields[0].0), Some(first));
     }
+
+    #[test]
+    fn the_end_of_a_wrapped_rtl_word_stays_on_its_line() {
+        let mut engine = TextEngine::default();
+        let text = "Fictitious: café, 東京, مرحبا";
+        let end = text.encode_utf16().count() as u32;
+        let mut wrapped = false;
+        for width in [60.0, 90.0, 120.0, 480.0] {
+            let document =
+                TextDocument::new(vec![Paragraph::new(text.into(), Format::default())]).unwrap();
+            let mut editor = CanvasEditor::new(&mut engine, document, width).unwrap();
+            let caret = |editor: &mut CanvasEditor, offset| {
+                let position = TextPosition {
+                    paragraph: 0,
+                    offset,
+                };
+                editor.select([position; 2].into()).unwrap();
+                editor.caret(0.0).unwrap()
+            };
+            let inside = caret(&mut editor, end - 2);
+            let first = caret(&mut editor, 0);
+            wrapped |= inside.y0 > first.y0;
+            assert_eq!(caret(&mut editor, end).y0, inside.y0, "width {width}");
+            editor.select_all().unwrap();
+            let viewport = Viewport {
+                size: [800, 600],
+                origin: [0.0; 2],
+                scale: 1.0,
+            };
+            Accessibility::default()
+                .update(&editor, None, viewport, "Test", None, None)
+                .unwrap();
+        }
+        assert!(wrapped);
+    }
 }

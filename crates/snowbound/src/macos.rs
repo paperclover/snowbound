@@ -58,6 +58,33 @@ unsafe extern "C" fn insert_text(view: &AnyObject, _: Sel, text: &AnyObject, ran
     }
 }
 
+fn ns_window(window: &Window) -> Retained<AnyObject> {
+    let RawWindowHandle::AppKit(handle) =
+        window.window_handle().expect("Live AppKit window").as_raw()
+    else {
+        unreachable!()
+    };
+    unsafe {
+        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
+        msg_send_id![view, window]
+    }
+}
+
+/// Zooms the window once the current event is handled: AppKit's zoom animation runs its
+/// own loop, and started from inside winit's handler it would hold every resize until the
+/// end, stretching the last frame instead of drawing each step.
+pub fn zoom(window: &Window) {
+    let window = ns_window(window);
+    unsafe {
+        let _: () = msg_send![
+            &window,
+            performSelector: sel!(zoom:),
+            withObject: std::ptr::null::<AnyObject>(),
+            afterDelay: 0.0f64
+        ];
+    }
+}
+
 /// Install before AccessKit subclasses the same view, preserving its restoration chain.
 pub fn install_text_input(window: &Window) {
     MainThreadMarker::new().expect("Text input belongs to the main thread");
@@ -261,6 +288,17 @@ pub fn configure_presentation(surface: &wgpu::Surface<'_>) {
     }
 }
 
+/// Commits a frame presented with the transaction: winit redraws after Core Animation's
+/// commit observer, so otherwise the frame waits for the next event. A live resize leaves
+/// the commit to AppKit, which pairs the frame with the window's new size.
+pub fn commit_presentation(window: &Window) {
+    let resizing: bool = unsafe { msg_send![&ns_window(window), inLiveResize] };
+    if !resizing {
+        let class = AnyClass::get("CATransaction").expect("QuartzCore is linked");
+        let _: () = unsafe { msg_send![class, flush] };
+    }
+}
+
 /// The application's icon as the Dock shows it, `pixels` square.
 pub fn app_icon(pixels: u32) -> Option<draw::RasterImage> {
     let side = pixels as usize;
@@ -311,12 +349,22 @@ pub fn app_icon(pixels: u32) -> Option<draw::RasterImage> {
     draw::RasterImage::new([pixels; 2], rgba).ok()
 }
 
-pub fn text_colors() -> [[f32; 4]; 2] {
+/// The insertion point's colour and selected text's fill with and without keyboard focus,
+/// linear RGBA, in `window`'s appearance.
+pub fn text_colors(window: &Window) -> [[f32; 4]; 3] {
+    let class = AnyClass::get("NSAppearance").expect("AppKit is linked");
     unsafe {
+        let appearance: Retained<AnyObject> =
+            msg_send_id![&ns_window(window), effectiveAppearance];
+        // System colours resolve in the thread's appearance, which outside drawing does
+        // not follow the window's.
+        let previous: Option<Retained<AnyObject>> = msg_send_id![class, currentAppearance];
+        let _: () = msg_send![class, setCurrentAppearance: &*appearance];
         let space = NSColorSpace::sRGBColorSpace();
-        [
+        let colors = [
             NSColor::textInsertionPointColor(),
             NSColor::selectedTextBackgroundColor(),
+            NSColor::unemphasizedSelectedTextBackgroundColor(),
         ]
         .map(|color| {
             let color = color
@@ -336,7 +384,9 @@ pub fn text_colors() -> [[f32; 4]; 2] {
                 }
             });
             [r, g, b, color.alphaComponent() as f32]
-        })
+        });
+        let _: () = msg_send![class, setCurrentAppearance: previous.as_deref()];
+        colors
     }
 }
 
@@ -423,5 +473,30 @@ pub fn clear_marked_text(window: &Window) {
         if marked {
             let _: () = msg_send![view, unmarkText];
         }
+    }
+}
+
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn TISCopyCurrentKeyboardInputSource() -> *mut AnyObject;
+    fn TISGetInputSourceProperty<'a>(
+        source: &'a AnyObject,
+        key: &NSString,
+    ) -> Option<&'a AnyObject>;
+    static kTISPropertyInputSourceLanguages: &'static NSString;
+}
+
+/// The current keyboard input source's primary language as a BCP-47 tag, empty if it has none.
+pub fn input_language() -> String {
+    MainThreadMarker::new().expect("Text Input Sources belong to the main thread");
+    // Input sources are CFTypes, released as Objective-C objects; languages is an NSArray.
+    unsafe {
+        let Some(source) = Retained::from_raw(TISCopyCurrentKeyboardInputSource()) else {
+            return String::new();
+        };
+        let language: Option<Retained<NSString>> =
+            TISGetInputSourceProperty(&source, kTISPropertyInputSourceLanguages)
+                .and_then(|languages| msg_send_id![languages, firstObject]);
+        language.map_or_else(String::new, |language| language.to_string())
     }
 }

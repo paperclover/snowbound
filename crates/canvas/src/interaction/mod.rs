@@ -101,11 +101,11 @@ pub struct TextColors {
     pub paper: Paper,
 }
 
-/// How to paint an outline: whether the caret is in its blink-on phase, the view scale,
-/// document points per device pixel, and the text colours.
+/// How to paint an outline: the caret's opacity, the view scale, document points per
+/// logical pixel, and the text colours.
 #[derive(Clone, Copy)]
 struct Paint {
-    show_caret: bool,
+    caret: f32,
     scale: f32,
     pixel: f32,
     colors: TextColors,
@@ -186,13 +186,33 @@ pub struct PageView {
     object_focus: Option<ObjectFocus>,
     modifiers: Modifiers,
     focused: bool,
-    caret: bool,
-    blink_at: Instant,
+    /// The caret's opacity in its blink.
+    caret: f32,
+    /// When the caret last moved, which restarts its blink.
+    blink_from: Instant,
 }
+
+/// Room, in OneNote pixels, the view leaves beyond content it scrolls to.
+const PAD: f32 = 11.0;
 
 /// Where a page's origin sits in a view that has not scrolled, in device pixels.
 fn home(display_scale: f32) -> [f32; 2] {
     [48.0 * display_scale; 2]
+}
+
+/// Brings `scene`, drawn at `offset` in the view, to what `viewport` shows.
+fn update_pictures(
+    scene: &mut PageScene,
+    [x, y]: [f32; 2],
+    editor: &CanvasEditor,
+    viewport: Viewport,
+    paper: Paper,
+    waker: &std::task::Waker,
+) -> bool {
+    let [x0, y0] = viewport.document_point([0.0; 2]);
+    let [x1, y1] = viewport.document_point(viewport.size.map(|side| side as f32));
+    let view = [x0 - x, y0 - y, x1 - x, y1 - y];
+    scene.update_pictures(Some(editor), view, viewport.scale, paper, waker)
 }
 
 impl PageView {
@@ -205,7 +225,7 @@ impl PageView {
         display_scale: f32,
         double_click: Duration,
     ) -> Self {
-        Self {
+        let mut view = Self {
             editor,
             engine,
             scene,
@@ -222,9 +242,11 @@ impl PageView {
             object_focus: None,
             modifiers: Modifiers::default(),
             focused: true,
-            caret: true,
-            blink_at: Instant::now() + Duration::from_millis(500),
-        }
+            caret: 1.0,
+            blink_from: Instant::now(),
+        };
+        view.place_opened();
+        view
     }
 
     /// Shows a page reloaded from storage in place of the edited one.
@@ -235,11 +257,28 @@ impl PageView {
         self.object_focus = None;
     }
 
-    /// Shows another page from its top-left corner, keeping the zoom.
+    /// Shows another page as OneNote opens one, keeping the zoom.
     pub fn open(&mut self, editor: CanvasEditor, scene: Option<(PageScene, [f32; 2])>) {
         self.replace(editor, scene);
-        self.viewport.origin = home(self.display_scale);
-        self.scroll().clamp(&mut self.viewport);
+        self.place_opened();
+    }
+
+    /// OneNote 2010 opens a page scrolled fully left and up, then down just far enough to
+    /// show the caret's outline 9 pt and 9 px above the view's bottom.
+    fn place_opened(&mut self) {
+        let scroll = self.scroll();
+        self.viewport.origin = scroll.min.map(|offset| -offset);
+        let outline = self.editor.active_outline();
+        let offset = self
+            .scene
+            .as_ref()
+            .filter(|_| self.editor.has_page_outline(outline.id))
+            .map_or(0.0, |(_, offset)| offset[1]);
+        let bottom = (outline.bounds().y1 as f32 + offset + 9.0) * self.viewport.scale
+            + 9.0 * self.display_scale
+            + self.viewport.origin[1];
+        self.viewport.origin[1] -= (bottom - self.viewport.size[1] as f32).max(0.0);
+        scroll.clamp(&mut self.viewport);
     }
 
     pub fn modifiers(&self) -> Modifiers {
@@ -364,8 +403,8 @@ impl PageView {
     /// Keeps the view in bounds and restarts the caret blink after a change.
     fn changed(&mut self) -> Result<Response> {
         self.scroll().clamp(&mut self.viewport);
-        self.caret = true;
-        self.blink_at = Instant::now() + Duration::from_millis(500);
+        self.caret = 1.0;
+        self.blink_from = Instant::now();
         Ok(Response::changed())
     }
 
@@ -492,9 +531,10 @@ impl PageView {
                     .filter(|_| self.editor.has_page_outline(outline.id))
                     .map(|(_, offset)| *offset)
                     .unwrap_or([0.0; 2]);
+                let [left, top] = reach(outline);
                 [
-                    rect.x0 as f32 + offset[0],
-                    rect.y0 as f32 + offset[1],
+                    left + offset[0],
+                    top + offset[1],
                     rect.x1 as f32 + offset[0],
                     rect.y1 as f32 + offset[1],
                 ]
@@ -509,7 +549,11 @@ impl PageView {
                 ]
             })
         });
-        scroll::Scroll::new(self.viewport, editable.chain(fixed))
+        scroll::Scroll::new(
+            self.viewport,
+            PAD * self.display_scale,
+            editable.chain(fixed),
+        )
     }
 
     /// Scrolls the view's corner `offset` device pixels from the page origin along `axis`,
@@ -519,13 +563,29 @@ impl PageView {
         self.moved()
     }
 
-    /// Brings the page's template backgrounds to `paper` and the current zoom before a
-    /// frame's primitives; `waker` is woken off the main thread when the view should be
-    /// drawn again because a background raster landed.
-    pub fn update_backgrounds(&mut self, paper: Paper, waker: &std::task::Waker) {
-        if let Some((scene, _)) = &mut self.scene {
-            scene.update_backgrounds(paper, self.viewport.scale, waker);
+    /// Brings the page's template backgrounds to `paper` and its pictures to the view and
+    /// zoom before a frame's primitives; `waker` is woken off the main thread when the view
+    /// should be drawn again because a raster landed.
+    pub fn update_pictures(&mut self, paper: Paper, waker: &std::task::Waker) {
+        if let Some((scene, offset)) = &mut self.scene {
+            update_pictures(scene, *offset, &self.editor, self.viewport, paper, waker);
         }
+    }
+
+    /// `update_pictures` for a page `open` is about to show at `offset`; true once the
+    /// pictures it would show at first are drawn.
+    pub fn prepare(
+        &self,
+        (scene, offset): &mut (PageScene, [f32; 2]),
+        editor: &CanvasEditor,
+        paper: Paper,
+        waker: &std::task::Waker,
+    ) -> bool {
+        let viewport = Viewport {
+            origin: home(self.display_scale),
+            ..self.viewport
+        };
+        update_pictures(scene, *offset, editor, viewport, paper, waker)
     }
 
     /// Everything to draw this frame.
@@ -565,12 +625,15 @@ impl PageView {
             preview,
             self.object_focus,
             Paint {
-                show_caret: self.caret
-                    && self.focused
+                caret: if self.focused
                     && !matches!(
                         self.drag,
                         Some(Drag::Outline { .. } | Drag::Resize { .. } | Drag::Image { .. })
-                    ),
+                    ) {
+                    self.caret
+                } else {
+                    0.0
+                },
                 scale: self.viewport.scale,
                 pixel: self.pixel(),
                 colors,
@@ -589,7 +652,7 @@ impl PageView {
             (Some(Drag::Resize { .. }), _) | (None, Some(Hit::Resize { .. })) => Cursor::EwResize,
             (Some(Drag::Outline { .. }), _) | (None, Some(Hit::Handle { .. })) => Cursor::Move,
             (None, Some(Hit::Date(_))) => Cursor::Pointer,
-            (None, Some(Hit::ReadOnly(_))) => Cursor::Default,
+            (None, Some(Hit::ReadOnly(_) | Hit::Check { .. })) => Cursor::Default,
             _ => Cursor::Text,
         }
     }
@@ -600,12 +663,10 @@ impl PageView {
         if !(self.focused && self.object_focus.is_none() && anchor == focus) {
             return (false, None);
         }
-        let repaint = now >= self.blink_at;
-        if repaint {
-            self.caret = !self.caret;
-            self.blink_at = now + Duration::from_millis(500);
-        }
-        (repaint, Some(self.blink_at))
+        let (caret, hold) = edit::caret_blink(now.saturating_duration_since(self.blink_from));
+        let repaint = caret != self.caret;
+        self.caret = caret;
+        (repaint, Some(now + hold))
     }
 
     /// `size` in device pixels.
@@ -710,6 +771,13 @@ impl PageView {
                 return Ok(Response::request(Request::EditDate(field)));
             }
             Some(Hit::ReadOnly(index)) => self.set_object_focus(Some(ObjectFocus::ReadOnly(index))),
+            Some(Hit::Check { outline, paragraph }) => {
+                self.set_object_focus(None);
+                self.drag = None;
+                self.editor
+                    .click_check(&mut self.engine, outline, paragraph)?;
+                return self.changed();
+            }
             Some(Hit::Image { id, handle }) => {
                 self.set_object_focus(Some(ObjectFocus::Image(id)));
                 self.drag = Some(Drag::Image {
@@ -828,12 +896,12 @@ impl PageView {
         self.edited()
     }
 
-    /// Clipboard text; see [`CanvasEditor::paste`].
-    pub fn paste(&mut self, text: &str) -> Result<Response> {
+    /// Clipboard text in `language`, an LCID; see [`CanvasEditor::paste`].
+    pub fn paste(&mut self, text: &str, language: u32) -> Result<Response> {
         if !self.accepts_text() {
             return Ok(Response::default());
         }
-        self.editor.paste(&mut self.engine, text)?;
+        self.editor.paste(&mut self.engine, text, language)?;
         self.edited()
     }
 
@@ -905,6 +973,9 @@ impl PageView {
             option,
             command,
         } = self.modifiers;
+        if key == &Key::Named(NamedKey::Modifier) {
+            return Ok(Response::default());
+        }
         if let Some(ObjectFocus::Image(id)) = self.object_focus
             && matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete))
         {
@@ -946,9 +1017,6 @@ impl PageView {
             self.drag,
             Some(Drag::Outline { .. } | Drag::Resize { .. } | Drag::Image { .. })
         ) {
-            if key == &Key::Named(NamedKey::Modifier) {
-                return Ok(Response::default());
-            }
             self.drag = None;
             if key == &Key::Named(NamedKey::Escape) {
                 return self.changed();
@@ -1148,6 +1216,11 @@ pub enum Hit {
         grab: [f32; 2],
     },
     ReadOnly(usize),
+    /// A check box tag on paragraph `paragraph`.
+    Check {
+        outline: onestore::ExGuid,
+        paragraph: onestore::ExGuid,
+    },
     /// `handle` is [0, 0] on the picture and a direction on the selected picture's handles.
     Image {
         id: onestore::ExGuid,
@@ -1211,6 +1284,23 @@ pub fn page_hit_test(
                     ],
                 });
             }
+            let shaped = outline.shaped();
+            let [left, top] = outline.origin();
+            let check = shaped.paragraphs.iter().find(|paragraph| {
+                paragraph.tags.iter().any(|tag| {
+                    let tag_x = left + shaped.tag_column_offset() + tag.origin[0];
+                    let tag_y = top + paragraph.origin[1] + tag.origin[1];
+                    matches!(tag.icon, crate::outline::TagIcon::CheckBox { .. })
+                        && (tag_x..=tag_x + tag.size).contains(&x)
+                        && (tag_y..=tag_y + tag.size).contains(&y)
+                })
+            });
+            if let Some(paragraph) = check {
+                return Some(Hit::Check {
+                    outline: outline.id,
+                    paragraph: paragraph.id,
+                });
+            }
             let text = outline.bounds();
             if !(text.x0..=text.x1).contains(&f64::from(x))
                 || !(text.y0..=text.y1).contains(&f64::from(y))
@@ -1229,17 +1319,7 @@ pub fn page_hit_test(
                 handle: [0, 0],
             });
         }
-        if (x >= bounds[0] && x <= bounds[2] && y >= body_top && y <= bounds[3])
-            || outline.layouts().any(|(_, paragraph)| {
-                paragraph.tags.iter().any(|tag| {
-                    let origin = outline.origin();
-                    let x = origin[0] + outline.shaped().tag_column_offset() + tag.origin[0];
-                    let y = origin[1] + paragraph.origin[1] + tag.origin[1];
-                    let size = crate::outline::ParagraphTag::SIZE;
-                    (x..=x + size).contains(&local[0]) && (y..=y + size).contains(&local[1])
-                })
-            })
-        {
+        if x >= bounds[0] && x <= bounds[2] && y >= body_top && y <= bounds[3] {
             return Some(Hit::Text {
                 id: outline.id,
                 point: [
@@ -1290,10 +1370,10 @@ fn page_primitives<'a>(
 ) -> Result<Vec<Primitive<'a>>> {
     let mut primitives = Vec::new();
     let draw_outline = |id, offset: [f32; 2], primitives: &mut Vec<_>| {
-        let outline = editor
-            .visible_outlines()
-            .find(|outline| outline.id == id)
-            .ok_or(crate::gpu::page::SceneError::MissingOutline)?;
+        // An emptied page outline leaves the editor but keeps its paint slot for undo.
+        let Some(outline) = editor.visible_outlines().find(|outline| outline.id == id) else {
+            return Ok(());
+        };
         let outline = match preview {
             Some(PointerFeedback::Resize(resized)) if resized.id == outline.id => resized,
             _ => outline,
@@ -1310,6 +1390,7 @@ fn page_primitives<'a>(
                 outline,
                 [origin[0] + offset[0], origin[1] + offset[1]],
                 paint.pixel,
+                paint.colors.paper,
                 primitives,
             );
         }
@@ -1531,6 +1612,29 @@ fn append_image_chrome(rect: [f32; 4], pixel: f32, primitives: &mut Vec<Primitiv
     }
 }
 
+/// How far left and up OneNote 2010 scrolls to show an outline: 7.5 pt past its text, to
+/// its list markers, 0.75 pt into its tag column's first slot, and 6 pt above it.
+fn reach(outline: &TextOutline) -> [f32; 2] {
+    let shaped = outline.shaped();
+    let column = shaped.tag_column_offset();
+    let left = shaped
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| {
+            let markers = paragraph.markers.iter().map(|(_, [x, _])| *x);
+            let tags = paragraph
+                .tags
+                .iter()
+                .map(move |tag| tag.origin[0] + column + 0.75);
+            std::iter::once(paragraph.origin[0] - 7.5)
+                .chain(markers)
+                .chain(tags)
+        })
+        .fold(-7.5, f32::min);
+    let [x, y] = outline.origin();
+    [x + left, y - 6.0]
+}
+
 fn snap_to_grid(point: [f32; 2], margin: [f32; 2]) -> [f32; 2] {
     std::array::from_fn(|axis| {
         let offset = margin[axis];
@@ -1563,9 +1667,23 @@ fn outline_chrome(outline: &TextOutline, pixel: f32) -> ([f32; 4], f32) {
             body_top,
         );
     }
+    // OneNote widens the box leftward to hold the tag column and list markers; text and right
+    // edge stay.
+    let shaped = outline.shaped();
+    let column = shaped.tag_column_offset() + crate::outline::ParagraphTag::INSET
+        - crate::outline::ParagraphTag::SIZE;
+    let left = shaped
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| {
+            let tags = paragraph.tags.iter().map(|tag| tag.origin[0] + column);
+            let markers = paragraph.markers.iter().map(|(_, [x, _])| x + 7.5);
+            tags.chain(markers)
+        })
+        .fold(0.0, f32::min);
     (
         [
-            bounds.x0 as f32 - 7.5 - inset,
+            bounds.x0 as f32 + left - 7.5 - inset,
             body_top - HANDLE_HEIGHT,
             bounds.x1 as f32 + inset,
             bounds.y1 as f32 + HANDLE_HEIGHT + inset,
@@ -1578,6 +1696,7 @@ fn append_outline_chrome(
     outline: &TextOutline,
     origin: [f32; 2],
     pixel: f32,
+    paper: crate::gpu::Paper,
     primitives: &mut Vec<Primitive<'_>>,
 ) {
     let [x, y] = origin;
@@ -1595,7 +1714,7 @@ fn append_outline_chrome(
             rect: [left, top, right, bottom],
             radius: [6.0 * pixel, (bottom - top) * 0.5],
             stroke: Some(Stroke::Dashed(pixel)),
-            color: crate::gpu::colorref(0x007f7f7f),
+            color: paper.shade(crate::gpu::colorref(0x007f7f7f)),
         });
         return;
     }
@@ -1603,19 +1722,19 @@ fn append_outline_chrome(
         rect: [left, top, right, body_top],
         radius: [3.0 * pixel; 2],
         stroke: None,
-        color: crate::gpu::colorref(0x00e8ebed),
+        color: paper.shade(crate::gpu::colorref(0x00e8ebed)),
     });
     primitives.push(Primitive::RoundedRect {
         rect: [right - 9.0 * pixel, top, right, body_top],
         radius: [3.0 * pixel; 2],
         stroke: None,
-        color: crate::gpu::colorref(0x00e5dee7),
+        color: paper.shade(crate::gpu::colorref(0x00e5dee7)),
     });
     primitives.push(Primitive::RoundedRect {
         rect: [left, top, right, bottom],
         radius: [3.0 * pixel; 2],
         stroke: Some(Stroke::Solid(pixel)),
-        color: crate::gpu::colorref(0x00d9cfd8),
+        color: paper.shade(crate::gpu::colorref(0x00d9cfd8)),
     });
     let middle = (top + body_top) * 0.5;
     for offset in [-3.0, 0.0, 3.0] {
@@ -1629,7 +1748,7 @@ fn append_outline_chrome(
             ],
             radius: [pixel * 0.5; 2],
             stroke: None,
-            color: crate::gpu::colorref(0x00b4a5b4),
+            color: paper.shade(crate::gpu::colorref(0x00b4a5b4)),
         });
     }
     for column in [0.0, 1.0, 2.0] {
@@ -1640,7 +1759,7 @@ fn append_outline_chrome(
         ] {
             primitives.push(Primitive::Rect {
                 rect: [x, middle - half, x + pixel, middle + half],
-                color: crate::gpu::colorref(0x00b4a5b4),
+                color: paper.shade(crate::gpu::colorref(0x00b4a5b4)),
             });
         }
     }
@@ -1655,7 +1774,7 @@ fn append_outline<'a>(
 ) -> Result<()> {
     let [x, y] = origin;
     let Paint {
-        show_caret,
+        caret,
         scale,
         pixel,
         colors,
@@ -1667,7 +1786,7 @@ fn append_outline<'a>(
         .append_table_primitives(primitives, origin, colors.paper);
     outline
         .shaped()
-        .append_background_primitives(primitives, origin, rows);
+        .append_background_primitives(primitives, origin, rows, colors.paper);
     if let Some(editor) = editor {
         for rect in editor.selection_rects()? {
             primitives.push(Primitive::Rect {
@@ -1703,18 +1822,21 @@ fn append_outline<'a>(
             });
         }
         let [anchor, focus] = editor.selection().positions;
-        if show_caret && anchor == focus {
-            let rect = editor.caret(2.0 * pixel)?;
+        if caret > 0.0 && anchor == focus {
+            // AppKit centres the caret on the insertion point.
+            let rect = editor.caret(0.0)?;
+            let half = edit::CARET_WIDTH / 2.0 * pixel;
+            let middle = rect.x0 as f32 + x;
             primitives.push(Primitive::RoundedRect {
                 rect: [
-                    rect.x0 as f32 + x,
+                    middle - half,
                     rect.y0 as f32 + y,
-                    rect.x1 as f32 + x,
+                    middle + half,
                     rect.y1 as f32 + y,
                 ],
-                radius: [pixel; 2],
+                radius: [half; 2],
                 stroke: None,
-                color: colors.caret,
+                color: edit::caret_color(colors.caret, colors.paper.color, caret),
             });
         }
     }

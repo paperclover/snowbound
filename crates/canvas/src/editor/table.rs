@@ -311,8 +311,15 @@ impl CanvasEditor {
         };
         let (replacement, next) = if exit {
             table.rows.pop();
-            let first = self.blank_paragraph(source)?;
-            let second = self.blank_paragraph(source)?;
+            let blank = || {
+                Ok::<_, EditError>(PageParagraph {
+                    parent: location.node.parent,
+                    level: location.node.level,
+                    format: location.node.format.clone(),
+                    ..self.blank_paragraph(source)?
+                })
+            };
+            let (first, second) = (blank()?, blank()?);
             (
                 vec![wrapper, first, second],
                 TextPosition {

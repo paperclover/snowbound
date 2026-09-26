@@ -560,36 +560,7 @@ impl CanvasEditor {
                     }
                 });
             }
-            Formatting::Check => {
-                let checkable = |tag: &Tag| {
-                    matches!(
-                        self.tag_kind(tag),
-                        Some(Kind::TagDefinition {
-                            shape: Some(CHECKBOX),
-                            ..
-                        })
-                    )
-                };
-                let checked = covered(&replacement, ends)
-                    .flat_map(|(node, _)| tags(node))
-                    .filter(|tag| checkable(tag))
-                    .all(|tag| tag.status & 1 != 0);
-                let completed = if checked { Some(0) } else { time32() };
-                leaves_mut(&mut replacement, &mut |node| {
-                    if ranges.remove(&node.id).is_none() {
-                        return;
-                    }
-                    let ParagraphContent::Text(text) = &mut node.content else {
-                        unreachable!()
-                    };
-                    for tag in node.tags.iter_mut().chain(&mut text.tags) {
-                        if checkable(tag) && (tag.status & 1 != 0) == checked {
-                            tag.status ^= 1;
-                            tag.completed = completed;
-                        }
-                    }
-                });
-            }
+            Formatting::Check => self.check(&mut replacement, ranges, ends),
             Formatting::Toggle(_)
             | Formatting::Font(_)
             | Formatting::FontSize(_)
@@ -665,6 +636,84 @@ impl CanvasEditor {
             },
             selection,
         )
+    }
+}
+
+impl CanvasEditor {
+    /// A click on a check box tag: checks the check boxes of paragraph `id` in outline
+    /// `outline`, or clears them once all are checked, as one undo step that keeps the
+    /// selection.
+    pub fn click_check(
+        &mut self,
+        engine: &mut TextEngine,
+        outline: ExGuid,
+        id: ExGuid,
+    ) -> Result<(), EditorError> {
+        self.focus_outline(outline)?;
+        let outline = self.active_outline();
+        let document = &outline.document;
+        let paragraph = leaves(document.nodes(), None)
+            .position(|(_, _, node)| node.id == id)
+            .ok_or(EditError::InvalidRange)?;
+        let at = TextPosition {
+            paragraph,
+            offset: 0,
+        };
+        let (container, range, ends) = selected(document, [at; 2].into())?;
+        let mut replacement = document.container(container)?[range.clone()].to_vec();
+        let ranges = covered(&replacement, ends)
+            .map(|(node, range)| (node.id, range))
+            .collect();
+        self.check(&mut replacement, ranges, ends);
+        let selection = outline.selection;
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range,
+                replacement,
+            },
+            selection,
+        )
+    }
+
+    /// Checks the check boxes of the `covered` paragraphs, or clears them once all are
+    /// checked; OneNote keeps a cleared box's completion time as zero.
+    fn check(
+        &self,
+        replacement: &mut [PageParagraph],
+        mut covered: BTreeMap<ExGuid, Range<usize>>,
+        ends: Ends,
+    ) {
+        let checkable = |tag: &Tag| {
+            matches!(
+                self.tag_kind(tag),
+                Some(Kind::TagDefinition {
+                    shape: Some(CHECKBOX),
+                    ..
+                })
+            )
+        };
+        let checked = self::covered(replacement, ends)
+            .flat_map(|(node, _)| tags(node))
+            .filter(|tag| checkable(tag))
+            .all(|tag| tag.status & 1 != 0);
+        let completed = if checked { Some(0) } else { time32() };
+        leaves_mut(replacement, &mut |node| {
+            if covered.remove(&node.id).is_none() {
+                return;
+            }
+            let ParagraphContent::Text(text) = &mut node.content else {
+                unreachable!()
+            };
+            for tag in node.tags.iter_mut().chain(&mut text.tags) {
+                if checkable(tag) && (tag.status & 1 != 0) == checked {
+                    tag.status ^= 1;
+                    tag.completed = completed;
+                }
+            }
+        });
     }
 }
 
@@ -1208,6 +1257,38 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// OneNote 2010 checks a clicked To Do box (status 1, completion time now) and clears it
+    /// (status 0, completion time kept as zero) without moving the caret.
+    #[test]
+    fn clicking_a_check_box_checks_and_clears_it_as_one_step() {
+        let mut engine = TextEngine::default();
+        let mut editor = plain(&mut engine, &["task", "other"]);
+        editor.select([at(0, 0), at(1, 5)].into()).unwrap();
+        editor
+            .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+            .unwrap();
+        editor.select([at(1, 2); 2].into()).unwrap();
+        let outline = editor.active_outline().id;
+        let task = editor.active_outline().document.nodes()[0].id;
+        let selection = editor.selection();
+        editor.click_check(&mut engine, outline, task).unwrap();
+        assert_eq!(editor.selection(), selection);
+        assert_eq!(text_tags(&editor, 0), [("To Do".into(), 1, true)]);
+        assert_eq!(text_tags(&editor, 1), [("To Do".into(), 0, true)]);
+        let tag = |editor: &CanvasEditor| {
+            editor.active_outline().document.nodes()[0]
+                .text()
+                .unwrap()
+                .tags[0]
+                .clone()
+        };
+        assert!(tag(&editor).completed.is_some_and(|time| time > 0));
+        editor.click_check(&mut engine, outline, task).unwrap();
+        assert_eq!((tag(&editor).status, tag(&editor).completed), (0, Some(0)));
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(tag(&editor).status, 1);
     }
 
     #[test]

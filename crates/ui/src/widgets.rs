@@ -110,8 +110,9 @@ pub fn text_field(
         let (selection, press) = ui.field(id);
         (*selection, *press)
     };
+    let before = [selection.anchor(), selection.focus()];
     let (texts, frame) = ui.texts();
-    let mut label = texts.label(text, size, frame);
+    let mut label = texts.label(text, size, None, frame);
     if let Some(x) = pointer {
         let layout = &label.layout;
         let unit = if signal.pressed { signal.unit } else { press.1 };
@@ -197,13 +198,14 @@ pub fn text_field(
             _ => continue,
         };
         text.replace_range(range.clone(), inserted);
-        label = texts.label(text, size, frame);
+        label = texts.label(text, size, None, frame);
         selection = Selection::from_byte_index(
             &label.layout,
             range.start + inserted.len(),
             Affinity::Downstream,
         );
     }
+    let moved = signal.pressed || before != [selection.anchor(), selection.focus()];
     {
         let (stored, stored_press) = ui.field(id);
         *stored = selection;
@@ -216,6 +218,7 @@ pub fn text_field(
         text.as_str()
     };
     let height = spec.size[1];
+    let backdrop = spec.fill.unwrap_or(theme.base);
     ui.open_as(
         id,
         Spec {
@@ -236,14 +239,28 @@ pub fn text_field(
             crate::Size::Pixels(height) => (height - line) / 2.0,
             _ => 0.0,
         };
+        let fill = if ui.window_focused {
+            theme.selection
+        } else {
+            theme.inactive_selection
+        };
         for (rect, _) in selection.geometry(&label.layout) {
             ui.mark(
                 [pad + rect.x0 as f32, top, pad + rect.x1 as f32, top + line],
-                theme.hover(),
+                fill,
+                0.0,
             );
         }
-        let x = pad + selection.focus().geometry(&label.layout, 1.0).x0 as f32;
-        ui.mark([x, top, x + 1.0, top + line], theme.text);
+        if ui.window_focused && selection.is_collapsed() {
+            let opacity = ui.blink(id, moved);
+            let x = pad + selection.focus().geometry(&label.layout, 0.0).x0 as f32;
+            let half = edit::CARET_WIDTH / 2.0;
+            ui.mark(
+                [x - half, top, x + half, top + line],
+                edit::caret_color(theme.caret, backdrop, opacity),
+                half,
+            );
+        }
     }
     ui.close();
     signal

@@ -79,8 +79,7 @@ pub(crate) fn solve(nodes: &mut [Built], states: &HashMap<Id, State>, scale: f32
             let mut cursor = nodes[index].pad[axis];
             for child in nodes[index].children.clone() {
                 nodes[child].relative[axis] = if let Some(anchor) = nodes[child].anchor {
-                    let slide = (1.0 - nodes[child].alpha) * crate::SLIDE;
-                    anchor.place(axis, nodes[child].computed[axis], window, slide)
+                    anchor.place(axis, nodes[child].computed[axis], window)
                 } else if nodes[child].flags.contains(Flags::FLOAT) {
                     nodes[child].position[axis]
                 } else if along(&nodes[index], axis) {

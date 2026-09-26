@@ -207,7 +207,7 @@ enum Key {
     Tab,
     ShiftTab,
     Type(&'static str),
-    Paste(&'static str),
+    Paste(&'static str, u32),
     Bullets,
 }
 
@@ -238,7 +238,7 @@ fn press(editor: &mut CanvasEditor, engine: &mut TextEngine, key: Key) {
         Key::Tab => editor.tab(engine, false).unwrap(),
         Key::ShiftTab => editor.tab(engine, true).unwrap(),
         Key::Type(text) => editor.insert(engine, text).unwrap(),
-        Key::Paste(text) => editor.paste(engine, text).unwrap(),
+        Key::Paste(text, language) => editor.paste(engine, text, language).unwrap(),
         Key::Bullets => editor.format(engine, Formatting::Bullets).unwrap(),
     }
 }
@@ -565,11 +565,12 @@ fn pasted_lines_are_plain_paragraphs_between_the_halves() {
             &mut engine,
             &target(kind),
             (1, Offset::Back(4)),
-            &[(Key::Paste(text), &format!("c7-{kind}-1"))],
+            &[(Key::Paste(text, 1033), &format!("c7-{kind}-1"))],
         );
         let document = &editor.active_outline().document;
         let format = Format {
             bold: None,
+            language: Some(1033),
             ..calibri(11.0, false)
         };
         assert_eq!(document.paragraph(2).unwrap().spans()[0].format, format);
@@ -586,8 +587,62 @@ fn pasted_lines_are_plain_paragraphs_between_the_halves() {
         &mut engine,
         "  L1 [] [] qs0 Above\n    L2 [] [num:1.] qs0 First\n    L2 [] [num:2.] qs0 Second",
         (1, Offset::Back(1)),
-        &[(Key::Paste("Line one\r\nLine two"), "c7-num2-1")],
+        &[(Key::Paste("Line one\r\nLine two", 1033), "c7-num2-1")],
     );
+}
+
+/// OneNote 2010 typing and pasting into a French run: typed text stays French, pasted text,
+/// one line or several, takes the clipboard's language (en-US in the captures).
+#[test]
+fn pasted_text_takes_the_clipboard_language_and_typed_text_the_runs() {
+    let mut engine = TextEngine::default();
+    let (fr, en, de) = (Some(1036), Some(1033), Some(1031));
+    let french = Format {
+        language: fr,
+        ..calibri(11.0, false)
+    };
+    for (key, languages) in [
+        (Key::Type("Typed"), vec![fr]),
+        (Key::Paste("Pasted", 1033), vec![fr, en, fr]),
+        (
+            Key::Paste("Line one\r\nLine two", 1033),
+            vec![fr, en, en, fr],
+        ),
+        (Key::Paste("Pasted", 1031), vec![fr, de, fr]),
+        (
+            Key::Paste("Line one\r\nLine two", 1031),
+            vec![fr, de, de, fr],
+        ),
+    ] {
+        let mut editor = open(&mut engine, "  L1 [] [] qs0 Target text");
+        editor
+            .select(
+                [0, 11]
+                    .map(|offset| TextPosition {
+                        paragraph: 0,
+                        offset,
+                    })
+                    .into(),
+            )
+            .unwrap();
+        editor
+            .replace(
+                &mut engine,
+                vec![Paragraph::new("Target text".into(), french.clone())],
+            )
+            .unwrap();
+        place(&mut editor, (0, Offset::Back(4)));
+        press(&mut editor, &mut engine, key);
+        let document = &editor.active_outline().document;
+        let paragraphs = (0..).map_while(|paragraph| document.paragraph(paragraph));
+        assert_eq!(
+            paragraphs
+                .flat_map(|paragraph| paragraph.spans())
+                .map(|span| span.format.language)
+                .collect::<Vec<_>>(),
+            languages
+        );
+    }
 }
 
 #[test]

@@ -323,6 +323,7 @@ fn frame_cost() {
             }
             let input = start.elapsed();
             let start = Instant::now();
+            view.update_pictures(colors.paper, std::task::Waker::noop());
             let primitives = view.primitives(colors).unwrap();
             let built = start.elapsed();
             let start = Instant::now();

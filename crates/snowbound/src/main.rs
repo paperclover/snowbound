@@ -21,7 +21,7 @@ use onestore::page::text::Paragraph;
 use std::{
     error::Error,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, mpsc},
     time::Instant,
 };
 use ui::{Axis, Flags, Id, Spec, Theme, Ui, children, fill, fit, px};
@@ -229,6 +229,27 @@ impl Session {
     }
 }
 
+/// A section or page read on a loader thread.
+enum Loaded {
+    Section(Session),
+    Page { space: ExGuid, page: Page },
+}
+
+/// A loader thread's request number and what it read.
+type Read = (u64, Result<Loaded, String>);
+
+/// The newest page read, laid out and waiting for the pictures it shows first, so it
+/// never appears without them.
+struct Opening {
+    loaded: Loaded,
+    scene: (PageScene, [f32; 2]),
+    editor: CanvasEditor,
+    since: Instant,
+}
+
+/// How long an opening page waits for its pictures before showing without them.
+const HOLD: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Work the interface asked for, done after the frame is built.
 enum Command {
     OpenSection(usize),
@@ -240,6 +261,11 @@ enum Command {
 struct State {
     window: Arc<Window>,
     proxy: EventLoopProxy<UserEvent>,
+    /// Results of reads done off the frame thread, by request number.
+    loads: (mpsc::Sender<Read>, mpsc::Receiver<Read>),
+    /// The newest read requested; older ones are dropped when they finish.
+    loading: u64,
+    opening: Option<Opening>,
     /// Asks for a frame when a worker thread finishes something the page shows.
     redraw: std::task::Waker,
     instance: wgpu::Instance,
@@ -248,7 +274,7 @@ struct State {
     renderer: Renderer,
     ui: Ui,
     view: PageView,
-    library: Option<Library>,
+    library: Option<Arc<Library>>,
     session: Option<Session>,
     /// Text filtering the page list.
     filter: String,
@@ -265,7 +291,6 @@ struct State {
     moved: bool,
     /// Whether the page last heard it had keyboard focus.
     page_focused: bool,
-    window_focused: bool,
     /// The pointer in logical pixels, for window drags from the strip.
     pointer: [f32; 2],
     /// When the strip was last pressed, to zoom on a double click.
@@ -399,9 +424,10 @@ impl State {
                     .find(|(_, candidate, _)| *candidate == title)
                     .ok_or_else(|| format!("No page titled {title:?} in {}", file.display()))?
                     .0;
-                library = Some(opened);
-                let (scene, editor) =
-                    open_session(section, 0, Some(space), &mut engine, &mut session)?;
+                library = Some(Arc::new(opened));
+                let opened = read_session(section, 0, Some(space))?;
+                let (scene, editor) = PageScene::from_page(opened.before.clone(), &mut engine)?;
+                session = Some(opened);
                 (editor, Some((scene, [0.0; 2])))
             }
             Input::Notebook { root, cache } => {
@@ -417,8 +443,10 @@ impl State {
                     cache,
                 };
                 let section = opened.open(0, proxy.clone())?;
-                library = Some(opened);
-                let (scene, editor) = open_session(section, 0, None, &mut engine, &mut session)?;
+                library = Some(Arc::new(opened));
+                let opened = read_session(section, 0, None)?;
+                let (scene, editor) = PageScene::from_page(opened.before.clone(), &mut engine)?;
+                session = Some(opened);
                 (editor, Some((scene, [0.0; 2])))
             }
         };
@@ -451,6 +479,8 @@ impl State {
             .fonts
             .collection
             .family_names()
+            // Dot-named families are the system's private ones, hidden from font menus.
+            .filter(|name| !name.starts_with('.'))
             .map(String::from)
             .collect();
         fonts.sort_unstable_by_key(|name| name.to_lowercase());
@@ -482,7 +512,6 @@ impl State {
             changed: false,
             moved: false,
             page_focused: true,
-            window_focused: true,
             pointer: [0.0; 2],
             strip_press: None,
             snapshot: None,
@@ -492,6 +521,9 @@ impl State {
             occluded: false,
             ime_allowed: true,
             clipboard: arboard::Clipboard::new()?,
+            loads: mpsc::channel(),
+            loading: 0,
+            opening: None,
             access_adapter,
             accessibility: accessibility::Accessibility::default(),
         };
@@ -503,6 +535,10 @@ impl State {
     /// frame that shows the result.
     fn frame(&mut self) -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
+        if let Err(error) = self.open_loaded() {
+            eprintln!("{error}");
+        }
+        lap("open", start);
         let size = self.window.inner_size();
         let scale = self.window.scale_factor() as f32;
         self.ui.begin(
@@ -541,7 +577,7 @@ impl State {
         self.draw()?;
         lap("drawn", start);
         let commands = std::mem::take(&mut self.commands);
-        let follow = !commands.is_empty() || self.ui.wants_frame();
+        let follow = !commands.is_empty() || self.ui.wants_frame() || self.opening.is_some();
         for command in commands {
             self.apply(command)?;
         }
@@ -582,6 +618,11 @@ impl State {
             accent: ease("accent", target.accent),
         };
         self.ui.theme.accent = section.accent;
+        [
+            self.ui.theme.caret,
+            self.ui.theme.selection,
+            self.ui.theme.inactive_selection,
+        ] = macos::text_colors(&self.window);
         let theme = self.ui.theme.clone();
         self.title_bar(&theme);
         self.toolbar(&theme)?;
@@ -685,7 +726,7 @@ impl State {
         }
         self.ui.close();
         let signal = self.ui.signal(page());
-        let focused = self.window_focused && self.ui.focused() == Some(page());
+        let focused = self.ui.window_focused && self.ui.focused() == Some(page());
         if focused != self.page_focused {
             self.page_focused = focused;
             let response = self.view.focus_changed(focused)?;
@@ -891,27 +932,38 @@ impl State {
         group(ui, "text", |ui| {
             row(ui, 0, |ui| {
                 let combo = ui.id("font");
-                if ui::shell::combo(ui, "font", &font, 120.0).clicked {
+                if ui::shell::combo(ui, "font", &font, 120.0).pressed {
                     ui.open_popup(popup("font"));
                 }
                 let items: Vec<_> = fonts
                     .iter()
                     .map(|name| ui::popup::Item {
                         text: name,
+                        font: Some(name),
                         checked: *name == font,
                         ..Default::default()
                     })
                     .collect();
                 let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
-                if let Some(index) = ui::popup::menu(ui, popup("font"), anchor, &items, Some(&font))
+                if let Some(index) = ui::popup::menu(ui, popup("font"), anchor, &items, Some("Font"))
                 {
                     command = Some(Formatting::Font(fonts[index].clone()));
                 }
                 let combo = ui.id("size");
-                if ui::shell::combo(ui, "size", &size, 44.0).clicked {
+                if ui::shell::combo(ui, "size", &size, 44.0).pressed {
                     ui.open_popup(popup("size"));
                 }
-                let labels = SIZES.map(|size| format!("{size}"));
+                // A size typed in the field joins the list, in half points as stored.
+                let mut sizes = SIZES.to_vec();
+                if let Some(typed) = ui::popup::query(ui, popup("size"))
+                    .and_then(|query| query.trim().parse::<f32>().ok())
+                    .map(|typed| (typed * 2.0).round() / 2.0)
+                    .filter(|typed| onestore::FONT_SIZES.contains(typed) && !sizes.contains(typed))
+                {
+                    let at = sizes.partition_point(|size| *size < typed);
+                    sizes.insert(at, typed);
+                }
+                let labels: Vec<_> = sizes.iter().map(|size| format!("{size}")).collect();
                 let items: Vec<_> = labels
                     .iter()
                     .map(|label| ui::popup::Item {
@@ -923,7 +975,7 @@ impl State {
                 let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
                 if let Some(index) = ui::popup::menu(ui, popup("size"), anchor, &items, Some(&size))
                 {
-                    command = Some(Formatting::FontSize(SIZES[index]));
+                    command = Some(Formatting::FontSize(sizes[index]));
                 }
                 let bullets =
                     ui::shell::split_button(ui, "bullets", art::BULLETS, None, state.bullets);
@@ -970,7 +1022,7 @@ impl State {
                         Toggle::Subscript
                     }));
                 }
-                if menu.clicked {
+                if menu.pressed {
                     ui.open_popup(popup("script"));
                 }
                 let items = [
@@ -1026,7 +1078,7 @@ impl State {
                     if button.clicked {
                         command = Some(paint(Some(default)));
                     }
-                    if menu.clicked {
+                    if menu.pressed {
                         ui.open_popup(popup(part));
                     }
                     let colors: Vec<_> = swatches.iter().map(|color| colorref(*color)).collect();
@@ -1060,7 +1112,7 @@ impl State {
                     .find(|(alignment, ..)| Some(*alignment) == state.alignment)
                     .unwrap_or(&alignments[0]);
                 let [button, menu] = ui::shell::split_button(ui, "align", current.2, None, false);
-                if button.clicked || menu.clicked {
+                if button.pressed || menu.pressed {
                     ui.open_popup(popup("align"));
                 }
                 let items = alignments.map(|(alignment, name, icon)| ui::popup::Item {
@@ -1350,6 +1402,8 @@ impl State {
                     hover_fill: Some(ui::mix(section.tab, section.accent, 0.3)),
                     radius: ROUNDING,
                     inset: [PILL_MARGIN, 0.0, 6.0, ROW_GAP],
+                    // The label keeps its place as the tab opens and closes.
+                    pad: [spec.pad[0] - PILL_MARGIN, 0.0],
                     ..spec
                 }
             };
@@ -1425,35 +1479,97 @@ impl State {
     fn apply(&mut self, command: Command) -> Result<(), Box<dyn Error>> {
         match command {
             Command::OpenSection(tab) => {
-                let library = self.library.as_ref().ok_or("No sections to open")?;
-                let section = library.open(tab, self.proxy.clone())?;
-                let (scene, editor) =
-                    open_session(section, tab, None, &mut self.view.engine, &mut self.session)?;
-                self.view.open(editor, Some((scene, [0.0; 2])));
-                self.filter.clear();
-                self.opened()?;
+                let library = Arc::clone(self.library.as_ref().ok_or("No sections to open")?);
+                let proxy = self.proxy.clone();
+                self.load(move || {
+                    let section = library.open(tab, proxy)?;
+                    Ok(Loaded::Section(read_session(section, tab, None)?))
+                });
             }
             Command::OpenPage(space) => {
-                let session = self.session.as_mut().ok_or("No section is open")?;
-                let page = session.section.page(space)?;
-                let (scene, editor) = PageScene::from_page(page.clone(), &mut self.view.engine)?;
-                session.space = space;
-                session.before = page;
-                session.refresh_conflict()?;
-                self.view.open(editor, Some((scene, [0.0; 2])));
-                self.opened()?;
+                let session = self.session.as_ref().ok_or("No section is open")?;
+                let replica = Arc::clone(session.section.replica());
+                self.load(move || {
+                    Ok(Loaded::Page {
+                        space,
+                        page: replica.page(space)?,
+                    })
+                });
             }
             Command::Resolve { keep_mine } => self.resolve_conflict(keep_mine)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
             Command::Page(Request::Copy(text)) => self.clipboard.set_text(text)?,
             Command::Page(Request::Paste) => {
                 let text = self.clipboard.get_text()?;
-                let response = self.view.paste(&text)?;
+                let language = canvas::language::lcid(&macos::input_language());
+                let response = self.view.paste(&text, language)?;
                 self.respond(response);
             }
             Command::Page(Request::CharacterPalette) => macos::show_character_palette(),
         }
         Ok(())
+    }
+
+    /// Runs `read` on a thread of its own; `open_loaded` shows what it read unless a newer
+    /// read was asked for meanwhile.
+    fn load(&mut self, read: impl FnOnce() -> Result<Loaded, Box<dyn Error>> + Send + 'static) {
+        self.loading += 1;
+        let (id, sender, redraw) = (self.loading, self.loads.0.clone(), self.redraw.clone());
+        std::thread::spawn(move || {
+            let _ = sender.send((id, read().map_err(|error| error.to_string())));
+            redraw.wake();
+        });
+    }
+
+    /// Lays out the newest page read, and shows it once the pictures it shows first are
+    /// drawn, or after `HOLD`.
+    fn open_loaded(&mut self) -> Result<(), Box<dyn Error>> {
+        for (id, loaded) in self.loads.1.try_iter() {
+            if id != self.loading {
+                continue;
+            }
+            let loaded = loaded?;
+            let page = match &loaded {
+                Loaded::Section(session) => &session.before,
+                Loaded::Page { page, .. } => page,
+            };
+            let (scene, editor) = PageScene::from_page(page.clone(), &mut self.view.engine)?;
+            self.opening = Some(Opening {
+                loaded,
+                scene: (scene, [0.0; 2]),
+                editor,
+                since: Instant::now(),
+            });
+        }
+        let Some(mut opening) = self.opening.take() else {
+            return Ok(());
+        };
+        let paper = canvas::gpu::Paper {
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
+        };
+        if !self
+            .view
+            .prepare(&mut opening.scene, &opening.editor, paper, &self.redraw)
+            && opening.since.elapsed() < HOLD
+        {
+            self.opening = Some(opening);
+            return Ok(());
+        }
+        match opening.loaded {
+            Loaded::Section(session) => {
+                self.session = Some(session);
+                self.filter.clear();
+            }
+            Loaded::Page { space, page } => {
+                let session = self.session.as_mut().ok_or("No section is open")?;
+                session.space = space;
+                session.before = page;
+                session.refresh_conflict()?;
+            }
+        }
+        self.view.open(opening.editor, Some(opening.scene));
+        self.opened()
     }
 
     /// Follows a page shown in place of another.
@@ -1465,14 +1581,15 @@ impl State {
         Ok(())
     }
 
-    /// Follows an edit: the input method's position, accessibility, saving and the title.
+    /// Follows an edit: saving, the title, then the input method's position and accessibility,
+    /// whose failures must not cost the edit.
     fn after_edit(&mut self) -> Result<(), Box<dyn Error>> {
-        self.after_move()?;
         let start = Instant::now();
-        self.persist()?;
+        let saved = self.persist();
         lap("save", start);
         self.title();
-        Ok(())
+        self.after_move()?;
+        saved
     }
 
     /// Follows the view moving: the input method's position and accessibility.
@@ -1625,6 +1742,7 @@ impl State {
         let shown = (session.status, session.conflict);
         let mut refreshed = false;
         let mut stale = false;
+        let mut conflicted = session.conflict;
         for (space, outcome) in session.section.saved() {
             match outcome {
                 Ok(notebook::session::Save::Queued(_)) => session.status = "Saving",
@@ -1650,7 +1768,10 @@ impl State {
                 Event::Attempt {
                     status: notebook::EditStatus::Conflict(_),
                     ..
-                } => "Conflict",
+                } => {
+                    conflicted = true;
+                    "Conflict"
+                }
                 Event::Attempt { .. } => "Saving",
                 Event::Unreachable(_) => "Offline",
                 Event::Failed(error) => {
@@ -1659,7 +1780,11 @@ impl State {
                 }
             };
         }
-        session.refresh_conflict()?;
+        // Reading the queue waits on the save thread, so only a conflict shown or reported
+        // sends the frame thread there.
+        if conflicted {
+            session.refresh_conflict()?;
+        }
         if refreshed || shown != (session.status, session.conflict) {
             self.window.request_redraw();
         }
@@ -1672,7 +1797,9 @@ impl State {
             {
                 let first = session.pages.first().ok_or("The section has no pages")?.0;
                 self.commands.push(Command::OpenPage(first));
-            } else if session.section.page(session.space)? != session.before {
+            } else if !session.section.saving()
+                && session.section.page(session.space)? != session.before
+            {
                 self.reload()?;
             }
         } else if stale {
@@ -1817,6 +1944,7 @@ impl State {
         self.window.pre_present_notify();
         let start = Instant::now();
         self.renderer.queue.present(frame);
+        macos::commit_presentation(&self.window);
         lap("present", start);
         trace_input(&"Present submitted");
         if reconfigure {
@@ -1828,15 +1956,19 @@ impl State {
     /// Paints the interface with the page in its box.
     fn paint(&mut self, target: &wgpu::TextureView) -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
-        let [caret, selection] = macos::text_colors();
         let paper = canvas::gpu::Paper {
             color: self.ui.theme.paper,
             ink: self.ui.theme.paper_ink,
         };
-        self.view.update_backgrounds(paper, &self.redraw);
+        self.view.update_pictures(paper, &self.redraw);
+        let theme = &self.ui.theme;
         let page_primitives = self.view.primitives(TextColors {
-            caret,
-            selection,
+            caret: theme.caret,
+            selection: if self.page_focused {
+                theme.selection
+            } else {
+                theme.inactive_selection
+            },
             paper,
         })?;
         lap("page primitives", start);
@@ -1851,6 +1983,7 @@ impl State {
                     scale,
                     origin: [0.0; 2],
                     clip: clip.map(|clip| clip.map(|value| value * scale)),
+                    backdrop: None,
                     primitives,
                 },
                 ui::Layer::Custom { rect, .. } => draw::Layer {
@@ -1860,6 +1993,7 @@ impl State {
                         viewport.origin[1] + corner[1] * scale,
                     ],
                     clip: Some(rect.map(|value| value * scale)),
+                    backdrop: Some(self.ui.theme.paper),
                     primitives: &page_primitives,
                 },
             })
@@ -1969,7 +2103,7 @@ impl State {
             });
             self.strip_press = (!double).then_some(at);
             if double {
-                self.window.set_maximized(!self.window.is_maximized());
+                macos::zoom(&self.window);
             } else {
                 let _ = self.window.drag_window();
             }
@@ -2072,23 +2206,19 @@ fn tabs(notebook: &notebook::session::Notebook) -> Vec<Tab> {
         .collect()
 }
 
-/// Makes `section` the open one showing `space`, or its first page, and returns the
-/// page's scene and editor.
-fn open_session(
+/// The session for `section` showing `space`, or its first page.
+fn read_session(
     section: notebook::session::Section,
     tab: usize,
     space: Option<ExGuid>,
-    engine: &mut TextEngine,
-    session: &mut Option<Session>,
-) -> Result<(PageScene, CanvasEditor), Box<dyn Error>> {
+) -> Result<Session, Box<dyn Error>> {
     let pages = section.pages()?;
     let space = match space {
         Some(space) => space,
         None => pages.first().ok_or("The section has no pages")?.0,
     };
     let before = section.page(space)?;
-    let (scene, editor) = PageScene::from_page(before.clone(), engine)?;
-    let mut opened = Session {
+    let mut session = Session {
         section,
         tab,
         pages,
@@ -2097,9 +2227,8 @@ fn open_session(
         status: "",
         conflict: false,
     };
-    opened.refresh_conflict()?;
-    *session = Some(opened);
-    Ok((scene, editor))
+    session.refresh_conflict()?;
+    Ok(session)
 }
 
 impl App {
@@ -2170,7 +2299,10 @@ impl ApplicationHandler<UserEvent> for App {
                         Replay::Input(event) => state.input(event),
                         Replay::Snapshot(path) => state.snapshot = Some(path),
                         Replay::Tick => {}
-                        Replay::Appearance(appearance) => state.ui.theme = theme(appearance),
+                        Replay::Appearance(appearance) => {
+                            state.window.set_theme(Some(appearance));
+                            state.ui.theme = theme(appearance);
+                        }
                     }
                     // A covered window gets no redraws, so each step draws its own frame.
                     if let Err(error) = state.frame() {
@@ -2276,7 +2408,7 @@ impl ApplicationHandler<UserEvent> for App {
                     state.window.request_redraw();
                 }
                 WindowEvent::Focused(focused) => {
-                    state.window_focused = focused;
+                    state.ui.window_focused = focused;
                     state.window.request_redraw();
                 }
                 WindowEvent::Occluded(occluded) => {
@@ -2334,14 +2466,21 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(state) = &mut self.state else {
             return;
         };
-        let (repaint, next) = if state.occluded {
-            (false, None)
-        } else {
-            state.view.blink(Instant::now())
-        };
-        if repaint {
+        if state.occluded {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        let now = Instant::now();
+        let (repaint, blink) = state.view.blink(now);
+        // A due interface change waits on the frame that shows it, which sets the next.
+        let wake = state.ui.wake_at();
+        if repaint || wake.is_some_and(|wake| wake <= now) {
             state.window.request_redraw();
         }
+        let next = [blink, wake.filter(|wake| *wake > now)]
+            .into_iter()
+            .flatten()
+            .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }

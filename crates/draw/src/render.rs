@@ -5,6 +5,7 @@ pub use text::{Decoration, Glyph, GlyphRun, Glyphs, paint_parley_run};
 
 use bytemuck::{Pod, Zeroable};
 use image::ImageDecoder;
+use linebender_resource_handle::WeakBlob;
 use parley::fontique::Blob;
 use std::{
     collections::{HashMap, HashSet},
@@ -22,6 +23,8 @@ const MAX_VERTICES: usize = 65_536;
 /// Decoded bytes of all images one frame may paint.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
+/// Decoded bytes one picture may take before `RasterImage::decode` shrinks it.
+const MAX_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct RasterImage {
@@ -29,39 +32,84 @@ pub struct RasterImage {
     pixels: Blob<u8>,
 }
 
+/// A PNG, JPEG, GIF or TIFF decoder for `encoded`, refusing pictures past the decode limits.
+fn decoder(encoded: &[u8]) -> Result<impl ImageDecoder + '_, RenderError> {
+    if encoded.len() as u64 > MAX_DECODE_BYTES {
+        return Err(RenderError::ImageBudget);
+    }
+    let format = image::guess_format(encoded).map_err(RenderError::ImageDecode)?;
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(encoded), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16_384);
+    limits.max_image_height = Some(16_384);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(RenderError::ImageDecode)?;
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) * 4 > MAX_DECODE_BYTES
+        || decoder.total_bytes() > MAX_DECODE_BYTES
+    {
+        return Err(RenderError::ImageBudget);
+    }
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(RenderError::ImageDecode)?;
+    decoder
+        .set_limits(limits)
+        .map_err(RenderError::ImageDecode)?;
+    Ok(decoder)
+}
+
+/// Premultiplies straight-alpha sRGB RGBA in linear light, so filtering never bleeds the
+/// colour of transparent pixels.
+fn premultiply(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        if alpha == 255 {
+            continue;
+        }
+        let linear = srgb(pixel[0], pixel[1], pixel[2]);
+        for (byte, value) in pixel[..3].iter_mut().zip(linear) {
+            *byte = srgb_byte(value * f32::from(alpha) / 255.0);
+        }
+    }
+}
+
 impl RasterImage {
-    pub fn decode(encoded: &[u8]) -> Result<Self, RenderError> {
-        if encoded.len() as u64 > MAX_IMAGE_BYTES {
-            return Err(RenderError::ImageBudget);
-        }
-        let format = image::guess_format(encoded).map_err(RenderError::ImageDecode)?;
-        let mut reader = image::ImageReader::with_format(std::io::Cursor::new(encoded), format);
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(16_384);
-        limits.max_image_height = Some(16_384);
-        limits.max_alloc = Some(MAX_IMAGE_BYTES);
-        reader.limits(limits.clone());
-        let mut decoder = reader.into_decoder().map_err(RenderError::ImageDecode)?;
-        let (width, height) = decoder.dimensions();
-        if u64::from(width) * u64::from(height) * 4 > MAX_IMAGE_BYTES
-            || decoder.total_bytes() > MAX_IMAGE_BYTES
-        {
-            return Err(RenderError::ImageBudget);
-        }
-        limits
-            .reserve(decoder.total_bytes())
-            .map_err(RenderError::ImageDecode)?;
-        decoder
-            .set_limits(limits)
-            .map_err(RenderError::ImageDecode)?;
-        let pixels = image::DynamicImage::from_decoder(decoder)
+    /// The pixel size of an encoded picture, read from its header, or why `decode` would
+    /// refuse it.
+    pub fn measure(encoded: &[u8]) -> Result<[u32; 2], RenderError> {
+        let (width, height) = decoder(encoded)?.dimensions();
+        Ok([width, height])
+    }
+
+    /// Decodes a picture, shrinking it to at most `within` pixels along each axis.
+    pub fn decode(encoded: &[u8], within: [u32; 2]) -> Result<Self, RenderError> {
+        let decoder = decoder(encoded)?;
+        let mut pixels = image::DynamicImage::from_decoder(decoder)
             .map_err(RenderError::ImageDecode)?
             .into_rgba8();
-        Self::new([width, height], pixels.into_raw())
+        premultiply(&mut pixels);
+        let size = [pixels.width(), pixels.height()];
+        let shown = [0, 1].map(|axis| size[axis].min(within[axis]).max(1));
+        if shown != size {
+            pixels = image::imageops::resize(
+                &pixels,
+                shown[0],
+                shown[1],
+                image::imageops::FilterType::Triangle,
+            );
+        }
+        Self::premultiplied(shown, pixels.into_raw())
     }
 
     /// Immutable, straight-alpha sRGB RGBA pixels retain one cache identity across clones.
     pub fn new(size: [u32; 2], mut pixels: Vec<u8>) -> Result<Self, RenderError> {
+        premultiply(&mut pixels);
+        Self::premultiplied(size, pixels)
+    }
+
+    fn premultiplied(size: [u32; 2], pixels: Vec<u8>) -> Result<Self, RenderError> {
         let bytes = u64::from(size[0])
             .checked_mul(u64::from(size[1]))
             .and_then(|v| v.checked_mul(4))
@@ -72,22 +120,14 @@ impl RasterImage {
         if bytes > MAX_IMAGE_BYTES {
             return Err(RenderError::ImageBudget);
         }
-        // Premultiply in linear light before filtering; transparent RGB must not bleed at edges.
-        for pixel in pixels.chunks_exact_mut(4) {
-            let alpha = pixel[3];
-            if alpha == 255 {
-                continue;
-            }
-            let linear = srgb(pixel[0], pixel[1], pixel[2]);
-            for (byte, value) in pixel[..3].iter_mut().zip(linear) {
-                let value = value * f32::from(alpha) / 255.0;
-                *byte = srgb_byte(value);
-            }
-        }
         Ok(Self {
             size,
             pixels: pixels.into(),
         })
+    }
+
+    pub fn size(&self) -> [u32; 2] {
+        self.size
     }
 
     /// The identity caches and uploads share across clones.
@@ -104,6 +144,8 @@ impl RasterImage {
 struct CachedImage {
     binding: wgpu::BindGroup,
     bytes: u64,
+    /// The texture goes when every copy of its image has.
+    pixels: WeakBlob<u8>,
 }
 
 struct Batch {
@@ -168,6 +210,9 @@ pub struct Layer<'a> {
     pub origin: [f32; 2],
     /// Device bounds `[left, top, right, bottom]` the layer paints within.
     pub clip: Option<[f32; 4]>,
+    /// The colour behind the layer: on a dark one, text in dark colours of its own is
+    /// lifted to stay legible, as OneNote's dark page does.
+    pub backdrop: Option<[f32; 4]>,
     pub primitives: &'a [Primitive<'a>],
 }
 
@@ -177,6 +222,7 @@ struct Space {
     size: [u32; 2],
     scale: f32,
     origin: [f32; 2],
+    backdrop: Option<[f32; 4]>,
 }
 
 impl Space {
@@ -545,6 +591,8 @@ impl Renderer {
         {
             return Err(RenderError::InvalidLayer);
         }
+        self.images
+            .retain(|_, image| image.pixels.upgrade().is_some());
         let mut active_images = HashSet::new();
         let mut image_bytes = 0;
         for layer in layers {
@@ -552,6 +600,7 @@ impl Renderer {
                 size,
                 scale: layer.scale,
                 origin: layer.origin,
+                backdrop: layer.backdrop,
             };
             for primitive in layer.primitives {
                 if let Primitive::Image { image, rect } = primitive
@@ -626,6 +675,7 @@ impl Renderer {
                 size,
                 scale: layer.scale,
                 origin: layer.origin,
+                backdrop: layer.backdrop,
             };
             let bounds = match layer.clip {
                 Some(clip) => space.scissor(clip),
@@ -816,8 +866,14 @@ impl Renderer {
                 },
             ],
         });
-        self.images
-            .insert(image.id(), CachedImage { binding, bytes });
+        self.images.insert(
+            image.id(),
+            CachedImage {
+                binding,
+                bytes,
+                pixels: image.pixels.downgrade(),
+            },
+        );
         Ok(())
     }
 
@@ -929,7 +985,7 @@ impl Renderer {
                     if glyph.color {
                         [1.0; 4]
                     } else {
-                        run.color.unwrap_or(ink)
+                        run.color.map_or(ink, |color| legible(color, space.backdrop))
                     },
                 )?;
             }
@@ -946,7 +1002,9 @@ impl Renderer {
                     y + (decoration.thickness * scale).max(1.0),
                 ],
                 [0.5 / ATLAS_SIZE as f32; 4],
-                decoration.color.unwrap_or(ink),
+                decoration
+                    .color
+                    .map_or(ink, |color| legible(color, space.backdrop)),
             )?;
         }
         Ok(())
@@ -1410,6 +1468,51 @@ fn srgb_byte(value: f32) -> u8 {
 }
 
 /// Linear RGBA of an opaque sRGB colour.
+/// Least OKLab lightness difference between text and the backdrop it stays legible on.
+const LEGIBLE: f32 = 0.4;
+
+/// `color` lifted clear of a dark `backdrop`'s lightness, keeping hue and chroma.
+fn legible(color: [f32; 4], backdrop: Option<[f32; 4]>) -> [f32; 4] {
+    let [under, ..] = backdrop.map_or([1.0; 3], oklab);
+    let [lightness, a, b] = oklab(color);
+    if under >= 0.5 || lightness >= under + LEGIBLE {
+        return color;
+    }
+    let [red, green, blue] = from_oklab([under + LEGIBLE, a, b]);
+    [red, green, blue, color[3]]
+}
+
+/// OKLab lightness and opponent axes of a linear RGB colour.
+pub fn oklab([red, green, blue, _]: [f32; 4]) -> [f32; 3] {
+    let [l, m, s] = [
+        [0.412_221_46, 0.536_332_55, 0.051_445_995],
+        [0.211_903_5, 0.680_699_5, 0.107_396_96],
+        [0.088_302_46, 0.281_718_85, 0.629_978_7],
+    ]
+    .map(|[r, g, b]| (r * red + g * green + b * blue).cbrt());
+    [
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    ]
+}
+
+/// Linear RGB of an OKLab colour, clipped to the sRGB gamut.
+pub fn from_oklab([lightness, a, b]: [f32; 3]) -> [f32; 3] {
+    let [l, m, s] = [
+        lightness + 0.396_337_78 * a + 0.215_803_76 * b,
+        lightness - 0.105_561_346 * a - 0.063_854_17 * b,
+        lightness - 0.089_484_18 * a - 1.291_485_5 * b,
+    ]
+    .map(|value| value.powi(3));
+    [
+        [4.076_741_7, -3.307_711_6, 0.230_969_94],
+        [-1.268_438, 2.609_757_4, -0.341_319_38],
+        [-0.004_196_086_3, -0.703_418_6, 1.707_614_7],
+    ]
+    .map(|[x, y, z]| (x * l + y * m + z * s).clamp(0.0, 1.0))
+}
+
 pub fn srgb(red: u8, green: u8, blue: u8) -> [f32; 4] {
     let linear = |byte: u8| {
         let value = f32::from(byte) / 255.0;
@@ -1491,18 +1594,21 @@ mod tests {
             .unwrap()
             .write_image_data(&rgba)
             .unwrap();
-        let decoded = RasterImage::decode(&encoded).unwrap();
+        let decoded = RasterImage::decode(&encoded, [2, 1]).unwrap();
         assert_eq!(decoded.size, [2, 1]);
         assert_eq!(decoded.pixels(), [255, 64, 0, 255, 0, 93, 188, 128]);
         for end in 0..encoded.len() - 12 {
-            assert!(RasterImage::decode(&encoded[..end]).is_err(), "{end}");
+            assert!(
+                RasterImage::decode(&encoded[..end], [2, 1]).is_err(),
+                "{end}"
+            );
         }
 
         let mut jpeg = Vec::new();
         image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
             .encode(&[255; 4 * 4 * 3], 4, 4, image::ExtendedColorType::Rgb8)
             .unwrap();
-        let decoded = RasterImage::decode(&jpeg).unwrap();
+        let decoded = RasterImage::decode(&jpeg, [4, 4]).unwrap();
         assert_eq!(decoded.size, [4, 4]);
         assert_eq!(decoded.pixels(), [255; 4 * 4 * 4]);
 
@@ -1510,11 +1616,11 @@ mod tests {
         image::codecs::gif::GifEncoder::new(&mut gif)
             .encode(&[255; 2 * 2 * 4], 2, 2, image::ExtendedColorType::Rgba8)
             .unwrap();
-        let decoded = RasterImage::decode(&gif).unwrap();
+        let decoded = RasterImage::decode(&gif, [2, 2]).unwrap();
         assert_eq!(decoded.size, [2, 2]);
         assert_eq!(decoded.pixels(), [255; 2 * 2 * 4]);
 
-        for size in [[8192, 8192], [16_385, 1]] {
+        for size in [[8193, 8192], [16_385, 1]] {
             let mut header = Vec::new();
             let mut encoder = png::Encoder::new(&mut header, size[0], size[1]);
             encoder.set_color(png::ColorType::Rgba);
@@ -1522,8 +1628,8 @@ mod tests {
             let mut writer = encoder.write_header().unwrap();
             writer.write_chunk(png::chunk::IDAT, &[]).unwrap();
             drop(writer);
-            let error = RasterImage::decode(&header).err().unwrap();
-            if size[0] == 8192 {
+            let error = RasterImage::measure(&header).err().unwrap();
+            if size[0] == 8193 {
                 assert!(matches!(error, RenderError::ImageBudget), "{error:?}");
             } else {
                 assert!(
@@ -1535,6 +1641,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn decoding_shrinks_to_the_size_shown_without_bleeding_transparent_colour() {
+        let mut encoded = Vec::new();
+        let mut encoder = png::Encoder::new(&mut encoded, 4, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let row = [
+            [255, 0, 0, 255],
+            [255, 0, 0, 255],
+            [0, 255, 0, 0],
+            [0, 255, 0, 0],
+        ];
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[row, row].as_flattened().concat())
+            .unwrap();
+        assert_eq!(RasterImage::measure(&encoded).unwrap(), [4, 2]);
+        let shown = RasterImage::decode(&encoded, [2, 1]).unwrap();
+        assert_eq!(shown.size(), [2, 1]);
+        let [left, right] = [&shown.pixels()[..4], &shown.pixels()[4..]];
+        assert!(left[0] > 200 && left[3] > 200, "{left:?}");
+        assert!(right[1] == 0 && right[0] <= right[3], "{right:?}");
+        assert_eq!(
+            RasterImage::decode(&encoded, [8, 8]).unwrap().size(),
+            [4, 2]
+        );
+        assert_eq!(
+            RasterImage::decode(&encoded, [0, 0]).unwrap().size(),
+            [1, 1]
+        );
     }
 
     #[test]
@@ -1641,6 +1780,7 @@ mod tests {
             scale: 2.0,
             origin: [24.0; 2],
             clip: None,
+            backdrop: None,
             primitives,
         }]
     }
@@ -1980,6 +2120,12 @@ mod tests {
         }
         assert!(renderer.images.len() <= MAX_IMAGES);
         assert!(seen.iter().any(|id| !renderer.images.contains_key(id)));
+        let last = previous.take().unwrap().id();
+        target.draw(&mut renderer, &page(&[])).unwrap();
+        assert!(
+            !renderer.images.contains_key(&last),
+            "a texture outlived its image"
+        );
         renderer.images.clear();
         target
             .draw(
@@ -2035,6 +2181,7 @@ mod tests {
                     scale: 2.0,
                     origin: [0.0; 2],
                     clip: None,
+                    backdrop: None,
                     primitives: &primitives,
                 }],
             )
@@ -2096,12 +2243,14 @@ mod tests {
                         scale: 1.0,
                         origin: [0.0; 2],
                         clip: Some([100.0, 50.0, 200.5, 80.0]),
+                        backdrop: None,
                         primitives: &fill,
                     },
                     Layer {
                         scale: 2.0,
                         origin: [300.0, 10.0],
                         clip: None,
+                        backdrop: None,
                         primitives: &chrome,
                     },
                 ],
@@ -2128,6 +2277,7 @@ mod tests {
                     scale: 0.0,
                     origin: [0.0; 2],
                     clip: None,
+                    backdrop: None,
                     primitives: &fill,
                 }]
             ),

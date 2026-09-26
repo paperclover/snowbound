@@ -11,6 +11,8 @@ pub(crate) struct Label {
     pub size: [f32; 2],
 }
 
+type LabelKey = (String, u32, Option<String>);
+
 /// Labels shaped this frame or the previous one, keyed by their text and size.
 #[derive(Default)]
 pub(crate) struct Texts {
@@ -18,13 +20,14 @@ pub(crate) struct Texts {
     context: LayoutContext<()>,
     /// A family registered in place of the system's interface font.
     family: Option<String>,
-    cache: HashMap<(String, u32), (Rc<Label>, u64)>,
+    /// By text, size and preferred family, with the frame each was last used.
+    cache: HashMap<LabelKey, (Rc<Label>, u64)>,
 }
 
 impl Texts {
-    /// `size` is in logical pixels.
-    pub fn label(&mut self, text: &str, size: f32, frame: u64) -> Rc<Label> {
-        let key = (text.to_owned(), size.to_bits());
+    /// `size` is in logical pixels; `font` names a family to prefer over the interface's.
+    pub fn label(&mut self, text: &str, size: f32, font: Option<&str>, frame: u64) -> Rc<Label> {
+        let key = (text.to_owned(), size.to_bits(), font.map(str::to_owned));
         if let Some((label, touched)) = self.cache.get_mut(&key) {
             *touched = frame;
             return label.clone();
@@ -33,12 +36,15 @@ impl Texts {
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
         let system = FontFamilyName::Generic(GenericFamily::SystemUi);
-        builder.push_default(StyleProperty::FontFamily(match &self.family {
-            Some(family) => {
-                FontFamily::List(Cow::Owned(vec![FontFamilyName::named(family), system]))
-            }
-            None => FontFamily::Single(system),
-        }));
+        let families: Vec<_> = font
+            .into_iter()
+            .chain(self.family.as_deref())
+            .map(FontFamilyName::named)
+            .chain([system])
+            .collect();
+        builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(
+            families,
+        ))));
         builder.push_default(StyleProperty::FontSize(size));
         let mut layout = builder.build(text);
         layout.break_all_lines(None);

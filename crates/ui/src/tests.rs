@@ -341,7 +341,7 @@ fn focused_field(text: &str) -> (Ui, String) {
 fn point_to(ui: &mut Ui, text: &str, index: usize) {
     let size = ui.theme.font_size;
     let (texts, frame) = ui.texts();
-    let layout = &texts.label(text, size, frame).layout;
+    let layout = &texts.label(text, size, None, frame).layout;
     let x = parley::editing::Cursor::from_byte_index(layout, index, parley::Affinity::Downstream)
         .geometry(layout, 1.0)
         .x0 as f32;
@@ -380,6 +380,53 @@ fn text_fields_edit_with_keys_and_selection() {
     let signal = field_frame(&mut ui, &mut text);
     assert!(signal.focused);
     assert_eq!(text, "");
+}
+
+#[test]
+fn text_field_carets_fade_on_appkit_s_blink_and_restart_when_moved() {
+    let (mut ui, mut text) = focused_field("one");
+    let start = Instant::now();
+    let mut at = |ui: &mut Ui, millis: u64| {
+        ui.begin([400.0, 300.0], 2.0, start + Duration::from_millis(millis));
+        text_field(
+            ui,
+            field(),
+            &mut text,
+            "Filter",
+            Spec {
+                size: [px(200.0), px(26.0)],
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+        ui.end();
+        let caret = ui.theme.caret;
+        let opacity = ui
+            .layers()
+            .iter()
+            .flat_map(|layer| match layer {
+                Layer::Primitives { primitives, .. } => primitives.as_slice(),
+                Layer::Custom { .. } => &[],
+            })
+            .find_map(|primitive| match primitive {
+                Primitive::RoundedRect { rect, color, .. } if color[..3] == caret[..3] => {
+                    assert_eq!(rect[2] - rect[0], draw::edit::CARET_WIDTH);
+                    Some(color[3])
+                }
+                _ => None,
+            })
+            .unwrap_or(0.0);
+        (opacity, ui.wake_at().map(|wake| wake - start))
+    };
+    assert_eq!(at(&mut ui, 0), (1.0, Some(Duration::from_micros(687_500))));
+    let theme = Theme::dark();
+    let faded = draw::edit::caret_color(theme.caret, theme.base, 0.75)[3];
+    assert_eq!(at(&mut ui, 700).0, faded);
+    assert_eq!(at(&mut ui, 900).0, 0.0);
+    ui.event(key(NamedKey::ArrowRight));
+    assert_eq!(at(&mut ui, 910), (1.0, Some(Duration::from_micros(1_597_500))));
+    ui.window_focused = false;
+    assert_eq!(at(&mut ui, 920), (0.0, None), "an inactive window shows no caret");
 }
 
 #[test]
@@ -621,35 +668,31 @@ fn popups_open_beside_their_anchor_and_flip_to_stay_in_the_window() {
 }
 
 #[test]
-fn popups_fade_in_except_at_a_point() {
+fn popups_show_at_once_by_their_anchor() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     menu_frame(&mut ui, BELOW, None);
     ui.open_popup(menu_id());
     menu_frame(&mut ui, BELOW, None);
     menu_frame(&mut ui, BELOW, None);
-    let reveal = |ui: &Ui| {
+    let alpha = |ui: &Ui| {
         ui.nodes
             .iter()
             .find(|node| node.id == menu_id())
             .unwrap()
             .alpha
     };
-    assert!(reveal(&ui) > 0.0 && reveal(&ui) < 1.0);
-    assert!(
-        ui.rect(menu_id()).unwrap()[1] < 44.0,
-        "and slide from the anchor"
+    assert_eq!(alpha(&ui), 1.0);
+    assert_eq!(
+        ui.rect(menu_id()).unwrap()[1],
+        44.0,
+        "right under the anchor"
     );
-    assert!(ui.wants_frame());
-    for _ in 0..10 {
-        menu_frame(&mut ui, BELOW, None);
-    }
-    assert!(reveal(&ui) > 0.95, "within about 150 ms");
     ui.close_popup(menu_id());
     menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
     ui.open_popup(menu_id());
     menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
     menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
-    assert_eq!(reveal(&ui), 1.0, "a context menu shows at once");
+    assert_eq!(alpha(&ui), 1.0);
     assert_eq!(ui.rect(menu_id()).unwrap()[..2], [50.0, 50.0]);
 }
 
@@ -1053,16 +1096,17 @@ fn rows_slide_while_the_rest_fold_away_and_unfold_at_once() {
         assert!(alpha > 0.0 && alpha < 1.0, "{key} folds where it was");
     }
     assert!(row_top(&ui, 5).unwrap() < 0.0, "out of the seam at the top");
-    list_frame(&mut ui, &rows, &mut selected, &[]);
-    list_frame(&mut ui, &rows, &mut selected, &[]);
+    for _ in 0..4 {
+        list_frame(&mut ui, &rows, &mut selected, &[]);
+    }
     for key in [5, 100] {
         let alpha = alpha(&ui, key).unwrap();
         assert!(alpha > 0.0 && alpha < 1.0, "{key} unfolds where it goes");
     }
-    for _ in 0..7 {
+    for _ in 0..11 {
         list_frame(&mut ui, &rows, &mut selected, &[]);
     }
-    assert_eq!(row_top(&ui, 5), Some(0.0), "there in about 150 ms");
+    assert_eq!(row_top(&ui, 5), Some(0.0), "there in about 250 ms");
     assert_eq!(row_top(&ui, 0), Some(LIST_ROW));
     assert_eq!(row_top(&ui, 100), Some(5.0 * LIST_ROW));
     assert_eq!(alpha(&ui, 100), Some(1.0));
@@ -1161,4 +1205,44 @@ fn keys_move_the_selection_and_the_view_eases_after_it() {
     list_frame(&mut ui, &rows, &mut selected, &[NamedKey::Home]);
     settle_list(&mut ui, &rows, &mut selected);
     assert_eq!((selected, row_top(&ui, 0)), (Some(0), Some(0.0)));
+}
+
+#[test]
+fn a_long_menu_scrolls_by_dragging_its_thumb() {
+    let names: Vec<String> = (0..40).map(|index| format!("Item {index}")).collect();
+    let items: Vec<_> = names
+        .iter()
+        .map(|text| popup::Item {
+            text,
+            ..popup::Item::default()
+        })
+        .collect();
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            popup::menu(ui, menu_id(), BELOW, &items, None);
+        })
+    };
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui);
+    ui.open_popup(menu_id());
+    build(&mut ui);
+    build(&mut ui);
+    let thumb = ui.rect(menu_id().child("rows").child("bar")).unwrap();
+    let top = ui
+        .rect(menu_id().child("rows").child(0u64))
+        .map(|rect| rect[1]);
+    let at = Instant::now();
+    let x = (thumb[0] + thumb[2]) / 2.0;
+    ui.event(Event::PointerMoved([x, thumb[1] + 2.0]));
+    press(&mut ui, at, true);
+    build(&mut ui);
+    ui.event(Event::PointerMoved([x, thumb[1] + 60.0]));
+    build(&mut ui);
+    build(&mut ui);
+    assert!(ui.popup_open(menu_id()));
+    assert_ne!(
+        ui.rect(menu_id().child("rows").child(0u64))
+            .map(|rect| rect[1]),
+        top
+    );
 }

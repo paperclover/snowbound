@@ -35,6 +35,8 @@ const KEYS: [NamedKey; 7] = [
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Item<'a> {
     pub text: &'a str,
+    /// The family the text previews, as in a font menu.
+    pub font: Option<&'a str>,
     pub icon: Option<&'static [&'static str]>,
     /// The icon has colours of its own, so the text's colour does not tint it.
     pub colored: bool,
@@ -280,6 +282,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
         Spec {
             size: [fill(), px(ROW)],
             text: Some(item.text),
+            font: item.font,
             color: Some(color),
             ..Spec::default()
         },
@@ -442,6 +445,14 @@ fn surface(ui: &mut Ui, id: Id, anchor: Anchor, width: f32) {
         ..Spec::default()
     };
     ui.open_as(id, spec);
+}
+
+/// What is typed in open popup `id`'s filter field.
+pub fn query(ui: &Ui, id: Id) -> Option<&str> {
+    ui.popups
+        .iter()
+        .find(|popup| popup.id == id)
+        .map(|popup| popup.query.as_str())
 }
 
 fn state(ui: &mut Ui, id: Id) -> &mut Popup {

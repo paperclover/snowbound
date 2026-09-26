@@ -32,6 +32,7 @@ impl Viewport {
             scale: self.scale,
             origin: self.origin,
             clip: None,
+            backdrop: None,
             primitives,
         }
     }
@@ -53,7 +54,7 @@ impl Paper {
 
     /// A near-neutral colour OneNote draws on white paper, moved onto this paper: its
     /// darkness becomes ink and its tint tints the paper.
-    fn shade(&self, light: [f32; 4]) -> [f32; 4] {
+    pub(crate) fn shade(&self, light: [f32; 4]) -> [f32; 4] {
         let ink = 1.0 - (light[0] + light[1] + light[2]) / 3.0;
         let mut shade = light;
         for channel in 0..3 {
@@ -78,8 +79,14 @@ impl Glyphs for TextLayout {
                     bounds.baseline,
                     run.style().brush.rise,
                     [bounds.top, bounds.height],
-                    // A highlight keeps its stored colour, so automatic text on it stays black.
-                    |brush: &TextBrush| brush.color.or(brush.highlight.map(|_| 0)).map(colorref),
+                    // Automatic text on a highlight stays black, but on a black highlight, which
+                    // paints in the ink, it stays ink.
+                    |brush: &TextBrush| {
+                        brush
+                            .color
+                            .or(brush.highlight.filter(|&color| color != 0).map(|_| 0))
+                            .map(colorref)
+                    },
                     paint,
                 )?;
             }

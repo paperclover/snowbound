@@ -198,6 +198,9 @@ pub struct ParagraphLayout {
     /// continuing from the previous sibling's.
     pub(crate) number: Option<(u32, bool)>,
     pub tags: Vec<ParagraphTag>,
+    /// Its siblings' group, whose list markers its tags clear: the parent paragraph, or the
+    /// table cell holding a cell's top-level paragraph.
+    pub(crate) parent: Option<ExGuid>,
     /// An equation draws in two dimensions in place of its linear text.
     pub math: Option<crate::math::MathLayout>,
 }
@@ -223,13 +226,47 @@ pub struct ParagraphTag {
     pub icon: TagIcon,
     /// Coordinates are outline-local in x and paragraph-local in y.
     pub origin: [f32; 2],
+    /// The icon's side, which follows its paragraph's first run.
+    pub size: f32,
     pub label: String,
     pub disabled: bool,
 }
 
 impl ParagraphTag {
+    /// The icon's side beside 10 to 17.5 pt text.
     pub const SIZE: f32 = 12.0;
+    /// How far a 12 pt icon starts left of its text when no sibling has a list marker.
+    pub const INSET: f32 = 20.25;
+    /// Space between a tag and the leftmost list marker among its paragraph's siblings.
+    const MARKER_GAP: f32 = 0.9;
+
+    /// Where an icon of `side` starts below its paragraph's top, for a first line whose
+    /// baseline is `baseline` below it and a first run of `size` points: OneNote 2010 centres
+    /// it 0.357 of the run's size, less 0.2 pt, above the baseline (within 0.75 pt, 8 to 60 pt).
+    fn top(baseline: f32, size: f32, side: f32) -> f32 {
+        baseline - 0.357 * size + 0.2 - side / 2.0
+    }
+
+    /// OneNote 2010's icon side for text of `size` points.
+    fn side(size: f32) -> f32 {
+        match size {
+            24.0.. => 24.0,
+            18.0.. => 18.0,
+            10.0.. => Self::SIZE,
+            _ => 9.0,
+        }
+    }
+
+    /// Where a one-tag column of `side` starts for text at `x` among siblings whose leftmost
+    /// list marker starts at `marker`; its right edge stays put as the icon grows.
+    fn column(x: f32, marker: Option<f32>, side: f32) -> f32 {
+        let right = x - Self::INSET + Self::SIZE;
+        marker.map_or(right, |marker| right.min(marker - Self::MARKER_GAP)) - side
+    }
 }
+
+/// How much further than its list spacing OneNote 2010 sets a marker's advance from its text.
+const MARKER_OFFSET: f32 = 3.9;
 
 /// A one-run paragraph standing in for an object's caption, so it lays out through the same
 /// shaping (and caching) as the outline's text.
@@ -264,25 +301,23 @@ pub(crate) fn image_size(image: &onestore::page::Image) -> Option<[f32; 2]> {
         .then_some(size)
 }
 
-/// The table OneNote writes on every outline it creates, standing in for a missing one.
-const DEFAULT_INDENTS: [f32; 4] = [18.0, 0.0, 27.0, 27.0];
+/// The step OneNote gives each level past the end of an indentation table.
+const MISSING_INDENT: f64 = 27.0;
 
+/// Text offset of `level` from its outline: entry `n` of `indents` steps level `n` in from
+/// level `n - 1`; entry 0 moves nothing OneNote 2010 draws, text nor markers.
 pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32, LayoutError> {
-    let indents = if indents.is_empty() {
-        &DEFAULT_INDENTS
-    } else {
-        indents
-    };
     if indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
         return Err(LayoutError::InvalidIndentation);
     }
-    let known = (level as usize).min(indents.len() - 1);
-    let indent = (indents[1..=known]
+    let known = (level as usize).min(indents.len().saturating_sub(1));
+    let indent = (indents
+        .get(1..=known)
+        .unwrap_or_default()
         .iter()
         .map(|v| f64::from(*v))
         .sum::<f64>()
-        + f64::from(level - known as u32) * f64::from(*indents.last().unwrap()))
-        as f32;
+        + f64::from(level - known as u32) * MISSING_INDENT) as f32;
     if !indent.is_finite() || indent >= width {
         return Err(LayoutError::InvalidIndentation);
     }
@@ -486,7 +521,7 @@ impl ParagraphLayout {
             )?
         };
         let mut markers = Vec::new();
-        let mut marker_x = indent;
+        let mut marker_x = indent - MARKER_OFFSET;
         let mut number = None;
         for id in paragraph.lists.iter().rev() {
             let definition = definitions.get(id).ok_or(LayoutError::InvalidList)?;
@@ -523,7 +558,11 @@ impl ParagraphLayout {
             let marker = Paragraph::new(
                 value,
                 Format {
-                    font: font.clone().or_else(|| definition.format.font.clone()),
+                    // Without a font of its own a marker takes its text's, as a number does.
+                    font: font
+                        .clone()
+                        .or_else(|| definition.format.font.clone())
+                        .or_else(|| format.font.clone()),
                     font_size: definition.format.font_size.or(format.font_size),
                     color,
                     ..Format::default()
@@ -542,6 +581,7 @@ impl ParagraphLayout {
             markers.push((layout, [marker_x, y]));
         }
         text.minimum_line_height(format.line_spacing.unwrap_or(0.0))?;
+        let baseline = text.lines().next().unwrap().1.baseline;
         let mut tags = Vec::new();
         for tag in &tag_definitions {
             let (tag, shape, label) = (tag.0, tag.1, tag.2);
@@ -563,11 +603,12 @@ impl ParagraphLayout {
                 Some(121) => TagIcon::Music,
                 _ => return Err(LayoutError::UnsupportedContent),
             };
-            // Later tags follow the first to its right, toward the text.
-            let x = marker_x - 20.25 + 12.0 * tags.len() as f32;
+            let size = format.font_size.unwrap_or(11.0);
+            let side = ParagraphTag::side(size);
             tags.push(ParagraphTag {
                 icon,
-                origin: [x, 0.0],
+                origin: [0.0, ParagraphTag::top(baseline, size, side)],
+                size: side,
                 label: label.clone().unwrap_or_default(),
                 disabled: tag.status & 2 != 0,
             });
@@ -575,7 +616,7 @@ impl ParagraphLayout {
         let math = equation
             .then(|| crate::math::layout(engine, &source.text))
             .transpose()?;
-        Ok(Self {
+        let mut result = Self {
             id: paragraph.id,
             origin: [indent, 0.0],
             projection,
@@ -584,7 +625,23 @@ impl ParagraphLayout {
             number,
             tags,
             math,
-        })
+            parent: paragraph.parent,
+        };
+        result.place_tags(result.marker_left());
+        Ok(result)
+    }
+
+    fn marker_left(&self) -> Option<f32> {
+        self.markers.iter().map(|(_, [x, _])| *x).reduce(f32::min)
+    }
+
+    /// Places the tags for siblings whose leftmost marker starts at `marker`; later tags
+    /// follow the first to its right, toward the text.
+    fn place_tags(&mut self, marker: Option<f32>) {
+        for (index, tag) in self.tags.iter_mut().enumerate() {
+            tag.origin[0] =
+                ParagraphTag::column(self.origin[0], marker, tag.size) + tag.size * index as f32;
+        }
     }
 }
 
@@ -607,13 +664,11 @@ impl OutlineLayout {
     /// OneNote gives an outline one tag column, as wide as its most-tagged paragraph needs; each
     /// paragraph's tags start at the column's left edge. Tag origins assume a one-tag column.
     pub fn tag_column_offset(&self) -> f32 {
-        let widest = self
+        -self
             .paragraphs
             .iter()
-            .map(|p| p.tags.len())
-            .max()
-            .unwrap_or(0);
-        -12.0 * widest.saturating_sub(1) as f32
+            .map(|p| p.tags.iter().skip(1).map(|tag| tag.size).sum::<f32>())
+            .fold(0.0, f32::max)
     }
 
     /// Innermost table cell containing a visible paragraph index.
@@ -690,7 +745,23 @@ impl OutlineLayout {
             shape,
         )?;
         result.size[0] = if fixed_width { width } else { result.size[0] }.max(result.table_width());
+        result.place_tags();
         Ok(result)
+    }
+
+    /// Moves each paragraph's tags clear of the widest list marker among its siblings.
+    fn place_tags(&mut self) {
+        let mut markers = BTreeMap::<Option<ExGuid>, f32>::new();
+        for paragraph in &self.paragraphs {
+            if let Some(x) = paragraph.marker_left() {
+                let left = markers.entry(paragraph.parent).or_insert(x);
+                *left = left.min(x);
+            }
+        }
+        for paragraph in &mut self.paragraphs {
+            let marker = markers.get(&paragraph.parent).copied();
+            paragraph.place_tags(marker);
+        }
     }
 
     /// Lays out `nodes` after the flow `state` and `siblings` stack, hiding the children of
@@ -804,7 +875,7 @@ impl OutlineLayout {
                                     &caption(node.id, file.id, name, format),
                                     None,
                                     ATTACHMENT_WIDTH,
-                                    &[0.0],
+                                    &[0.0, 0.0],
                                 )?;
                                 label.reset_origin(x);
                                 let object = ObjectLayout {
@@ -841,7 +912,7 @@ impl OutlineLayout {
                                     ),
                                     None,
                                     w - 16.0,
-                                    &[0.0],
+                                    &[0.0, 0.0],
                                 )?;
                                 label.reset_origin(x + 8.0);
                                 let h = unsupported
@@ -1187,6 +1258,7 @@ impl OutlineLayout {
         }
         self.size = size;
         self.widths = widths;
+        self.place_tags();
     }
 
     pub(crate) fn table_width(&self) -> f32 {
@@ -1251,7 +1323,7 @@ impl OutlineLayout {
                 if cell.paragraphs.is_empty() || !cell.unsupported.is_empty() {
                     return Err(LayoutError::UnsupportedContent);
                 }
-                let child = Self::flow(
+                let mut child = Self::flow(
                     edited_nodes(&cell.paragraphs, Some(cell.id), edit),
                     &cell.indents,
                     width,
@@ -1261,6 +1333,9 @@ impl OutlineLayout {
                     shape,
                 )?;
                 height = height.max(child.size[1]);
+                for paragraph in &mut child.paragraphs {
+                    paragraph.parent.get_or_insert(cell.id);
+                }
                 let paragraph_start = result.paragraphs.len();
                 result.append(child, [x, y + 3.54]);
                 result.tables[0].cells.push(CellLayout {
@@ -1754,7 +1829,11 @@ mod tests {
             )
             .unwrap();
             assert_eq!(tagged.tags[0].icon, expected);
-            assert_eq!(tagged.tags[0].origin, [6.75, 0.0]);
+            let baseline = tagged.text.lines().next().unwrap().1.baseline;
+            assert_eq!(
+                tagged.tags[0].origin,
+                [6.75, baseline - 0.357 * 11.0 + 0.2 - 6.0]
+            );
             assert_eq!(tagged.tags[0].label, "Label");
             assert!(tagged.tags[0].disabled);
             assert_eq!(tagged.text.height(), plain.text.height());
@@ -1797,8 +1876,12 @@ mod tests {
             &definitions,
         )
         .unwrap();
-        assert_eq!(tagged.tags[0].origin[0], tagged.markers[0].1[0] - 20.25);
-        assert_eq!(tagged.tags[0].origin[1], 0.0);
+        assert_eq!(tagged.tags[0].origin[0], tagged.markers[0].1[0] - 12.9);
+        let baseline = tagged.text.lines().next().unwrap().1.baseline;
+        assert_eq!(
+            tagged.tags[0].origin[1],
+            baseline - 0.357 * 11.0 + 0.2 - 6.0
+        );
         let Kind::TagDefinition { shape, .. } = &mut definitions.get_mut(&id).unwrap().kind else {
             unreachable!()
         };
@@ -1814,6 +1897,210 @@ mod tests {
             ),
             Err(LayoutError::UnsupportedContent)
         ));
+    }
+
+    /// OneNote 2010 at 400% (Calibri bullets and numbers from 8 to 24 pt, default list
+    /// spacing): a marker's advance ends 11.1 pt before its text, and a tag's 12 pt slot ends
+    /// 0.9 pt before the leftmost marker among its paragraph's siblings, or 8.25 pt before its
+    /// text when none has one.
+    #[test]
+    fn markers_and_tags_sit_where_onenote_draws_them() {
+        use onestore::document::Tag;
+        let id = |n| ExGuid {
+            n,
+            ..ExGuid::default()
+        };
+        let list = |format: &str| Definition {
+            kind: Kind::List {
+                font: None,
+                format: Some(format.into()),
+                bullet: None,
+                restart: None,
+            },
+            format: Format::default(),
+        };
+        let definitions = BTreeMap::from([
+            (id(900), list("\u{2022}")),
+            (id(901), list("\u{fffd}\u{0}.")),
+            (
+                id(902),
+                Definition {
+                    kind: Kind::TagDefinition {
+                        shape: Some(3),
+                        label: None,
+                        action_type: None,
+                        color: None,
+                        highlight: None,
+                    },
+                    format: Format::default(),
+                },
+            ),
+        ]);
+        let tag = Tag {
+            definition: Some(id(902)),
+            action_type: None,
+            status: 0,
+            created: None,
+            completed: None,
+            start: None,
+            due: None,
+            task_id: None,
+            extra_set: 0,
+        };
+        let tagged = |n, level, parent| {
+            let mut node = paragraph(n, "Tag", level, parent);
+            node.text_mut().unwrap().tags.push(tag.clone());
+            node
+        };
+        let mut number = paragraph(1, "Number", 1, None);
+        number.lists.push(id(901));
+        let mut bullet = paragraph(5, "Bullet", 2, Some(3));
+        bullet.lists.push(id(900));
+        let nodes = [
+            number,
+            tagged(2, 1, None),
+            paragraph(3, "Plain", 1, None),
+            tagged(4, 2, Some(3)),
+            bullet,
+            paragraph(6, "Plain", 2, Some(3)),
+        ];
+        let mut engine = TextEngine::default();
+        let layout = OutlineLayout::flow(
+            nodes.iter(),
+            &[18.0, 0.0, 27.0, 27.0],
+            400.0,
+            false,
+            0,
+            None,
+            &mut |node, previous, width, indents| {
+                ParagraphLayout::shape(&mut engine, node, previous, width, indents, &definitions)
+            },
+        )
+        .unwrap();
+        let [number, first, _, second, bullet, _] = &layout.paragraphs[..] else {
+            panic!()
+        };
+        for paragraph in [number, bullet] {
+            let (marker, [x, _]) = &paragraph.markers[0];
+            let advance = marker.lines().next().unwrap().0.metrics().advance;
+            assert!((x + advance - (paragraph.origin[0] - 11.1)).abs() < 1e-4);
+        }
+        // A numbered sibling pushes the level-1 tag left; the level-2 tag clears the bullet
+        // that follows it rather than its own text.
+        assert_eq!(first.tags[0].origin[0], number.markers[0].1[0] - 0.9 - 12.0);
+        assert_eq!(
+            second.tags[0].origin[0],
+            bullet.markers[0].1[0] - 0.9 - 12.0
+        );
+        assert!(first.tags[0].origin[0] < first.origin[0] - 20.25);
+        let alone = OutlineLayout::flow(
+            [tagged(7, 1, None)].iter(),
+            &[18.0, 0.0, 27.0, 27.0],
+            400.0,
+            false,
+            0,
+            None,
+            &mut |node, previous, width, indents| {
+                ParagraphLayout::shape(&mut engine, node, previous, width, indents, &definitions)
+            },
+        )
+        .unwrap();
+        assert_eq!(alone.paragraphs[0].tags[0].origin[0], -20.25);
+    }
+
+    /// OneNote 2010 at 400%: the first run's size picks the tag icon (9 pt below 10 pt text,
+    /// 12 pt to 17.5, 18 pt to 23.5, then 24 pt up to at least 60), whose right edge stays
+    /// 8.25 pt before the text and whose centre sits 0.357 of the run's size less 0.2 pt above
+    /// the first baseline.
+    #[test]
+    fn tag_icons_follow_the_first_run() {
+        use onestore::document::Tag;
+        let id = |n| ExGuid {
+            n,
+            ..ExGuid::default()
+        };
+        let definitions = BTreeMap::from([(
+            id(902),
+            Definition {
+                kind: Kind::TagDefinition {
+                    shape: Some(3),
+                    label: None,
+                    action_type: None,
+                    color: None,
+                    highlight: None,
+                },
+                format: Format::default(),
+            },
+        )]);
+        let tag = Tag {
+            definition: Some(id(902)),
+            action_type: None,
+            status: 0,
+            created: None,
+            completed: None,
+            start: None,
+            due: None,
+            task_id: None,
+            extra_set: 0,
+        };
+        let tagged = |sizes: &[f32], tags: usize| {
+            let mut node = paragraph(1, "", 1, None);
+            let text = node.text_mut().unwrap();
+            text.text = Paragraph::from_runs(sizes.iter().map(|size| {
+                (
+                    "Tag ".to_string(),
+                    Format {
+                        font_size: Some(*size),
+                        ..Format::default()
+                    },
+                )
+            }));
+            text.tags = vec![tag.clone(); tags];
+            node
+        };
+        let mut engine = TextEngine::default();
+        let mut lay = |nodes: &[PageParagraph]| {
+            OutlineLayout::flow(
+                nodes.iter(),
+                &[18.0, 0.0, 27.0, 27.0],
+                400.0,
+                false,
+                0,
+                None,
+                &mut |node, previous, width, indents| {
+                    ParagraphLayout::shape(
+                        &mut engine,
+                        node,
+                        previous,
+                        width,
+                        indents,
+                        &definitions,
+                    )
+                },
+            )
+            .unwrap()
+        };
+        for (sizes, side) in [
+            (&[9.5][..], 9.0),
+            (&[10.0], 12.0),
+            (&[17.5], 12.0),
+            (&[18.0], 18.0),
+            (&[23.5], 18.0),
+            (&[24.0], 24.0),
+            (&[60.0], 24.0),
+            (&[11.0, 24.0], 12.0),
+            (&[24.0, 11.0], 24.0),
+        ] {
+            let layout = lay(&[tagged(sizes, 1)]);
+            let icon = &layout.paragraphs[0].tags[0];
+            assert_eq!((icon.size, icon.origin[0] + icon.size), (side, -8.25));
+            let baseline = layout.paragraphs[0].text.lines().next().unwrap().1.baseline;
+            let centre = icon.origin[1] + side / 2.0;
+            assert!((centre - (baseline - 0.357 * sizes[0] + 0.2)).abs() < 1e-4);
+        }
+        // A second icon extends the column left by its own side.
+        let layout = lay(&[tagged(&[20.0], 2)]);
+        assert_eq!(layout.tag_column_offset(), -18.0);
     }
 
     #[test]
@@ -1855,7 +2142,7 @@ mod tests {
         let mut engine = TextEngine::default();
         let layout = OutlineLayout::flow(
             [&before, &file, &ink, &after].into_iter(),
-            &[0.0],
+            &[0.0, 0.0],
             468.0,
             false,
             0,
@@ -2082,11 +2369,40 @@ mod tests {
             outline.layout(&mut engine, &BTreeMap::new()),
             Err(LayoutError::InvalidIndentation)
         ));
-        // OneNote stores only the level-zero indent for an outline of top-level paragraphs.
-        outline.indents = vec![0.0];
         outline.paragraphs.truncate(1);
-        let single = outline.layout(&mut engine, &BTreeMap::new()).unwrap();
-        assert_eq!(single.paragraphs[0].origin[0], 0.0);
+        for (indents, x) in [(vec![18.0, 0.0, 27.0, 27.0], 0.0), (vec![0.0], 27.0)] {
+            outline.indents = indents;
+            let single = outline.layout(&mut engine, &BTreeMap::new()).unwrap();
+            assert_eq!(single.paragraphs[0].origin[0], x);
+        }
+    }
+
+    /// Text offsets of levels 1 through 5 as OneNote 2010 draws each table (cold reads of
+    /// Rust-written outlines, measured to the pixel at 96 dpi).
+    #[test]
+    fn indentation_follows_onenote_for_short_and_unusual_tables() {
+        for (indents, expected) in [
+            (&[18.0, 0.0, 27.0, 27.0][..], [0.0, 27.0, 54.0, 81.0, 108.0]),
+            (&[18.0, 0.0], [0.0, 27.0, 54.0, 81.0, 108.0]),
+            (&[0.0, 0.0], [0.0, 27.0, 54.0, 81.0, 108.0]),
+            (&[0.0], [27.0, 54.0, 81.0, 108.0, 135.0]),
+            (&[18.0], [27.0, 54.0, 81.0, 108.0, 135.0]),
+            (&[], [27.0, 54.0, 81.0, 108.0, 135.0]),
+            (&[0.0, 5.0], [5.0, 32.0, 59.0, 86.0, 113.0]),
+            (&[5.0, 10.0, 20.0, 40.0], [10.0, 30.0, 70.0, 97.0, 124.0]),
+            (
+                &[40.0, 0.0, 10.0, 20.0, 30.0, 50.0],
+                [0.0, 10.0, 30.0, 60.0, 110.0],
+            ),
+        ] {
+            for (level, x) in (1..).zip(expected) {
+                assert_eq!(
+                    indentation(level, indents, 500.0).unwrap(),
+                    x,
+                    "{indents:?}"
+                );
+            }
+        }
     }
 
     #[test]

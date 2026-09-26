@@ -414,6 +414,27 @@ impl TextLayout {
 
     pub fn caret(&self, cursor: Cursor, width: f32) -> BoundingBox {
         let mut rect = cursor.geometry(&self.shaped, width);
+        // parley pairs the logical end of an RTL cluster leading its line with the previous
+        // line's last cluster, placing the caret at that line's end.
+        if cursor.affinity() == Affinity::Upstream
+            && let Some(cluster) = cursor
+                .index()
+                .checked_sub(1)
+                .and_then(|index| parley::Cluster::from_byte_index(&self.shaped, index))
+            && cluster.is_rtl()
+            && cluster
+                .previous_visual()
+                .is_some_and(|previous| previous.path().line_index() != cluster.path().line_index())
+        {
+            let x = f64::from(cluster.visual_offset().unwrap_or_default());
+            let metrics = *cluster.line().metrics();
+            rect = BoundingBox::new(
+                x,
+                f64::from(metrics.block_min_coord),
+                x + f64::from(width),
+                f64::from(metrics.block_max_coord),
+            );
+        }
         let index = self
             .shaped
             .lines()

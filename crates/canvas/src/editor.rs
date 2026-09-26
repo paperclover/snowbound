@@ -8,7 +8,9 @@ use draw::edit::{self, Movement, SelectionUnit};
 use onestore::ExGuid;
 use onestore::document::{Format, Kind};
 use onestore::page::text::{EditError, Paragraph};
-use onestore::page::{Definition, Outline, Page, PageObject, PageParagraph, Title};
+use onestore::page::{
+    Definition, Outline, Page, PageObject, PageParagraph, ParagraphContent, Title,
+};
 use parley::{
     Affinity, BoundingBox,
     editing::{Cursor, Selection as ParagraphSelection},
@@ -766,6 +768,35 @@ impl CanvasEditor {
                 .filter(|outline| !self.has_page_outline(outline.id))
                 .map(|outline| PageObject::Outline(outline.snapshot())),
         );
+        // Definitions stay for undo after their last paragraph lets go; the page, as
+        // OneNote stores it, holds only those its paragraphs reference.
+        let mut referenced = BTreeSet::new();
+        for object in &objects {
+            let outlines = match object {
+                PageObject::Outline(outline) => std::slice::from_ref(outline),
+                PageObject::Title(title) => title.outlines.as_slice(),
+                _ => &[],
+            };
+            for (_, _, node) in outlines
+                .iter()
+                .flat_map(|outline| descendants(&outline.paragraphs, None))
+            {
+                let content_tags = match &node.content {
+                    ParagraphContent::Text(text) => text.tags.as_slice(),
+                    ParagraphContent::Table(table) => table.tags.as_slice(),
+                    _ => &[],
+                };
+                referenced.extend(node.lists.iter().copied().chain(node.style));
+                referenced.extend(
+                    node.tags
+                        .iter()
+                        .chain(content_tags)
+                        .filter_map(|tag| tag.definition),
+                );
+            }
+        }
+        let mut definitions = self.definitions.clone();
+        definitions.retain(|id, _| referenced.contains(id));
         Ok(Page {
             title: self.header.title.clone(),
             identity: self.header.identity,
@@ -776,7 +807,7 @@ impl CanvasEditor {
                 .or(self.header.created),
             margin_origin: self.header.margin_origin,
             objects,
-            definitions: self.definitions.clone(),
+            definitions,
         })
     }
 
@@ -1099,10 +1130,14 @@ impl CanvasEditor {
         })
     }
 
+    /// An empty paragraph in `base`'s style, whose runs keep `base`'s language as OneNote's do.
     fn blank_paragraph(&self, base: &PageParagraph) -> Result<PageParagraph, EditError> {
-        let format = self.style_format(base.style)?;
+        let mut format = self.style_format(base.style)?;
+        format.language = format.language.or(base
+            .text()
+            .and_then(|text| text.text.spans()[0].format.language));
         let mut node =
-            crate::document::node(Paragraph::new(String::new(), format.clone()), format)?;
+            crate::document::node(Paragraph::new(String::new(), format), base.format.clone())?;
         node.level = base.level;
         node.style = base.style;
         Ok(node)
@@ -1449,8 +1484,13 @@ impl CanvasEditor {
             .iter()
             .position(|object| matches!(object, page::Content::Image(image) if image.id == id))
             .ok_or(EditError::InvalidRange)?;
+        // An emptied outline keeps its slot for undo after leaving `outlines`.
         let editable = |object: &page::Content| match object {
-            page::Content::Editable(outline) => Some(*outline),
+            page::Content::Editable(outline)
+                if self.outlines.iter().any(|item| item.id == *outline) =>
+            {
+                Some(*outline)
+            }
             _ => None,
         };
         let outline = if forward {
@@ -2226,21 +2266,31 @@ impl CanvasEditor {
 
     /// Pastes plain text as OneNote does: lines become plain Calibri 11 paragraphs without style
     /// or list between the halves of the caret's paragraph (`evidence/structural-edits/xml/c7-*`).
-    pub fn paste(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
+    /// Pasted runs take the clipboard's `language`, an LCID, not the caret's run's as typing
+    /// does; Windows derives it from the keyboard language at copy time.
+    pub fn paste(
+        &mut self,
+        engine: &mut TextEngine,
+        text: &str,
+        language: u32,
+    ) -> Result<(), EditorError> {
         let lines = text
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line))
             .collect::<Vec<_>>();
         let last = lines[lines.len() - 1];
-        if lines.len() == 1 {
-            return self.insert(engine, last);
-        }
         let [anchor, focus] = self.active_outline().selection.positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
+        if lines.len() == 1 {
+            let mut format = self.typing_format(start)?;
+            format.language = Some(language);
+            return self.replace(engine, vec![Paragraph::new(last.to_owned(), format)]);
+        }
         let edge = Paragraph::new(String::new(), self.typing_format(start)?);
         let pasted = Format {
             font: Some("Calibri".into()),
             font_size: Some(11.0),
+            language: Some(language),
             ..Format::default()
         };
         let mut edit = self.active_outline().document.replace(
@@ -2283,7 +2333,7 @@ impl CanvasEditor {
         let format = self.typing_format(start)?;
         let document = &self.active_outline().document;
         let mut edit =
-            document.replace(start..end, vec![Paragraph::new(String::new(), format); 2])?;
+            document.replace(start..end, vec![Paragraph::new(String::new(), format.clone()); 2])?;
         let nodes = document.container(edit.container)?;
         let next = nodes
             .get(crate::document::subtree_end(nodes, edit.range.start))
@@ -2319,8 +2369,12 @@ impl CanvasEditor {
                 .keys()
                 .copied()
                 .find(|id| style(Some(*id)) == Some("p"));
-            tail.text_mut().unwrap().text =
-                Paragraph::new(String::new(), self.style_format(tail.style)?);
+            // The heading's run formatting carries over under the body style (`c9-h1-*`).
+            let run = format.over(&self.style_format(head.style)?);
+            tail.text_mut().unwrap().text = Paragraph::new(
+                String::new(),
+                run.inherit(&self.style_format(tail.style)?),
+            );
         }
         let caret = TextPosition {
             paragraph: start.paragraph + 1,
@@ -2438,7 +2492,12 @@ impl CanvasEditor {
                 } else {
                     [focus.paragraph, neighbor]
                 };
-                let Some(edit) = outline.document.join(upper, lower)? else {
+                let (_, _, top) = outline
+                    .document
+                    .leaf(upper)
+                    .ok_or(EditError::InvalidRange)?;
+                let base = self.style_format(top.style)?;
+                let Some(edit) = outline.document.join(upper, lower, &base)? else {
                     return Ok(false);
                 };
                 let text = outline.document.paragraph(upper).unwrap();
@@ -2982,23 +3041,33 @@ impl CanvasEditor {
     /// Gives each paragraph an edit adds its own copy of the lists it carries, as OneNote keeps
     /// a list node per paragraph.
     fn own_lists(&mut self, edit: &mut DocumentEdit) -> Result<(), EditError> {
-        let existing = self.active_outline().document.container(edit.container)?
-            [edit.range.clone()]
-        .iter()
-        .map(|node| node.id)
+        let existing = descendants(
+            &self.active_outline().document.container(edit.container)?[edit.range.clone()],
+            None,
+        )
+        .map(|(_, _, node)| node.id)
         .collect::<BTreeSet<_>>();
-        for node in &mut edit.replacement {
-            if existing.contains(&node.id) {
-                continue;
+        let mut pending = edit.replacement.iter_mut().collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if !existing.contains(&node.id) {
+                for list in &mut node.lists {
+                    let definition = self
+                        .definitions
+                        .get(list)
+                        .ok_or(EditError::InvalidStructure)?
+                        .clone();
+                    *list = onestore::page::text::new_id()?;
+                    self.definitions.insert(*list, definition);
+                }
             }
-            for list in &mut node.lists {
-                let definition = self
-                    .definitions
-                    .get(list)
-                    .ok_or(EditError::InvalidStructure)?
-                    .clone();
-                *list = onestore::page::text::new_id()?;
-                self.definitions.insert(*list, definition);
+            if let ParagraphContent::Table(table) = &mut node.content {
+                pending.extend(
+                    table
+                        .rows
+                        .iter_mut()
+                        .flat_map(|row| &mut row.cells)
+                        .flat_map(|cell| &mut cell.paragraphs),
+                );
             }
         }
         Ok(())
@@ -4778,6 +4847,13 @@ mod tests {
         assert!(editor.step_from_image(&mut engine, id, true).unwrap());
         assert_eq!(editor.active_outline().id, after);
         assert_eq!(editor.selection().positions, caret(0, 0));
+
+        editor.select_all().unwrap();
+        assert!(editor.delete(&mut engine, true).unwrap());
+        editor.focus_outline(before).unwrap();
+        assert!(editor.outlines().iter().all(|outline| outline.id != after));
+        assert!(!editor.step_from_image(&mut engine, id, true).unwrap());
+        assert_eq!(editor.active_outline().id, before);
     }
 
     #[test]
