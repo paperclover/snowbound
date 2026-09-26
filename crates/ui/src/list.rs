@@ -1,13 +1,15 @@
 //! A virtualized list of equal rows keyed by their items: only rows in view are built,
-//! rows ease to where their items move, and the view holds its place on the selection
-//! while items arrive and leave above it.
+//! rows move to where their items go without passing over one another, and the view holds
+//! its place on the selection while items arrive and leave above it.
 
-use crate::{Axis, Event, Flags, Id, SLIDE, Size, Spec, Ui, fill, mix, px, scrollbar};
-use std::collections::HashMap;
+use crate::{Axis, Event, Flags, HALF_LIFE, Id, Size, Spec, Ui, fill, mix, px, scrollbar};
+use std::collections::{HashMap, HashSet};
 use winit::keyboard::NamedKey;
 
 /// Room beside a scrolling list's rows for its scrollbar.
 pub(crate) const GUTTER: f32 = 12.0;
+/// Seconds a row takes to reach its new place: half leaving where it was, half arriving.
+const DURATION: f32 = 0.15;
 
 /// Items a list shows, in order.
 pub trait Rows {
@@ -56,6 +58,8 @@ pub(crate) struct State {
     shown: Vec<Shown>,
     /// The selection last frame, so a new one scrolls into view.
     selected: Option<u64>,
+    /// How far the furthest sliding row was from its place last frame.
+    slack: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -63,10 +67,73 @@ struct Shown {
     key: u64,
     /// Where its row lies, from the top of the view.
     place: f64,
-    /// How far from its place the row is drawn, easing to nothing.
-    offset: f64,
-    alpha: f32,
     index: Option<usize>,
+    motion: Option<Motion>,
+}
+
+impl Shown {
+    /// Where the row is drawn from the top of the view, and its opacity.
+    fn drawn(&self, reach: f64, slack: f64) -> (f64, f32) {
+        self.motion.map_or((self.place, 1.0), |motion| {
+            let (offset, alpha) = motion.at(reach, slack);
+            (self.place + offset, alpha)
+        })
+    }
+}
+
+/// A row's way to its place after the items change, between offsets from the place.
+#[derive(Clone, Copy)]
+struct Motion {
+    from: f64,
+    to: f64,
+    /// Its opacity as it set out.
+    alpha: f32,
+    style: Style,
+    elapsed: f32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Style {
+    /// A move keeping its order with the rows around: waits out those leaving, then slides.
+    Slide,
+    /// Fades out setting off towards the midpoint and in arriving from it, unseen where
+    /// it passes other rows.
+    Cross,
+    /// Fades in arriving from the middle of the rows entering with it.
+    Enter,
+    /// Fades out setting off towards the middle of the rows leaving with it.
+    Leave,
+}
+
+impl Motion {
+    /// Its offset and opacity; beyond `reach` of both ends it cannot be seen, so its text
+    /// never meets a neighbour's, nor arriving while a row sliding is `slack` from its place.
+    fn at(self, reach: f64, slack: f64) -> (f64, f32) {
+        let t = (self.elapsed / DURATION).min(1.0);
+        let [first, second] = [(2.0 * t).min(1.0), (2.0 * t - 1.0).max(0.0)];
+        let out = |x: f32| 1.0 - (1.0 - x).powi(3);
+        let inward = |x: f32| x.powi(3);
+        let leave = self.alpha * (1.0 - out(first));
+        let (travel, fade) = match self.style {
+            Style::Slide => (out(second), 1.0),
+            Style::Cross => (
+                0.5 * inward(first) + 0.5 * out(second),
+                if t < 0.5 { leave } else { inward(second) },
+            ),
+            Style::Enter => (out(second), inward(second)),
+            Style::Leave => (inward(first), leave),
+        };
+        let offset = self.from + (self.to - self.from) * f64::from(travel);
+        let near = (offset - self.from).abs().min((offset - self.to).abs());
+        let seen = |distance: f64| (1.0 - distance / reach).clamp(0.0, 1.0) as f32;
+        let alpha = match self.style {
+            Style::Slide => 1.0,
+            Style::Enter => fade.min(seen(near)) * seen(slack),
+            Style::Cross if t >= 0.5 => fade.min(seen(near)) * seen(slack),
+            _ => fade.min(seen(near)),
+        };
+        (offset, alpha)
+    }
 }
 
 /// Builds `list` into a box of `spec`, calling `build` inside each row in view, and moves
@@ -187,73 +254,166 @@ pub fn list<R: Rows>(
         state.selected = *selected;
     }
 
-    let rate = f64::from(ui.rate);
-    let settle = |value: f64, target: f64, close: f64| {
-        if fresh || (target - value).abs() < close {
-            target
-        } else {
-            value + (target - value) * rate
-        }
-    };
-    state.scroll = settle(state.scroll, state.target, 0.25);
+    let rate = 1.0 - 0.5_f64.powf(f64::from(ui.dt / HALF_LIFE));
+    if fresh || (state.target - state.scroll).abs() < 0.25 {
+        state.scroll = state.target;
+    } else {
+        state.scroll += (state.target - state.scroll) * rate;
+    }
     let scroll = state.scroll;
     let step = scroll - anchored;
 
-    // Where each row built last frame was drawn, in the view it was drawn in.
+    let reach = height / 6.0;
+    let dt = ui.dt;
+    let tick = |motion: Motion| {
+        let elapsed = motion.elapsed + dt;
+        (elapsed < DURATION).then_some(Motion { elapsed, ..motion })
+    };
+    // Rows built last frame, drawn in the view as anchored.
     let before: HashMap<u64, Shown> = state
         .shown
         .iter()
         .map(|shown| (shown.key, *shown))
         .collect();
-    let place = |index: usize| {
+    let listed: Vec<&Shown> = state
+        .shown
+        .iter()
+        .filter(|shown| shown.index.is_some())
+        .collect();
+    // The most rows staying listed that keep their order slide; the rest would pass over
+    // them, so cross unseen.
+    let order: Vec<(u64, usize)> = listed
+        .iter()
+        .filter_map(|shown| Some((shown.key, rows.find(shown.key)?)))
+        .collect();
+    let mut tails: Vec<usize> = Vec::new();
+    let mut previous = vec![None; order.len()];
+    for at in 0..order.len() {
+        let length = tails.partition_point(|tail| order[*tail].1 < order[at].1);
+        previous[at] = length.checked_sub(1).map(|length| tails[length]);
+        if length == tails.len() {
+            tails.push(at);
+        } else {
+            tails[length] = at;
+        }
+    }
+    let kept: HashSet<u64> = std::iter::successors(tails.last().copied(), |at| previous[*at])
+        .map(|at| order[at].0)
+        .collect();
+    let arrive = |index: usize| {
         let key = rows.key(index);
         let was = top(index) - anchored;
-        let (offset, alpha) = match before.get(&key) {
-            Some(old) => (old.place + old.offset - was, old.alpha),
-            None if !fresh && was + height > 0.0 && was < view => (-SLIDE as f64, 0.0),
-            None => (0.0, 1.0),
-        };
+        let motion = before.get(&key).and_then(|old| {
+            if old.index.is_some() && (old.place - was).abs() < 0.5 {
+                return old.motion.and_then(tick);
+            }
+            let (drawn, alpha) = old.drawn(reach, state.slack);
+            let from = drawn - was;
+            let style = if alpha < 1.0 || !kept.contains(&key) {
+                Style::Cross
+            } else {
+                Style::Slide
+            };
+            tick(Motion {
+                from,
+                to: 0.0,
+                alpha,
+                style,
+                elapsed: 0.0,
+            })
+        });
         Shown {
             key,
             place: top(index) - scroll,
-            offset: settle(offset, 0.0, 0.5),
-            alpha: settle(f64::from(alpha), 1.0, 0.01) as f32,
             index: Some(index),
+            motion,
         }
     };
-    let in_view = row_at(scroll)..row_at(scroll + view + height).min(len);
-    let mut shown: Vec<Shown> = in_view.clone().map(place).collect();
-    let mut leaving = Vec::new();
-    for old in before.values() {
-        match rows.find(old.key) {
-            Some(index) if !in_view.contains(&index) => {
-                let moving = place(index);
-                let drawn = moving.place + moving.offset;
-                if drawn + height > 0.0 && drawn < view {
-                    shown.push(moving);
-                }
-            }
-            Some(_) => {}
-            None => {
-                let alpha = settle(f64::from(old.alpha), 0.0, 0.02) as f32;
-                if alpha > 0.0 {
-                    leaving.push(Shown {
-                        place: old.place + old.offset - step,
-                        offset: 0.0,
-                        alpha,
-                        index: None,
-                        ..*old
-                    });
-                }
+    // Rows newly where the view already was, rather than scrolled into it, enter.
+    let entering = |index: usize| {
+        let was = top(index) - anchored;
+        !fresh && !before.contains_key(&rows.key(index)) && was + height > 0.0 && was < view
+    };
+    let in_view = row_at(scroll)..(row_at(scroll + view) + 1).min(len);
+    let mut shown = Vec::new();
+    let mut index = in_view.start;
+    while index < in_view.end {
+        if !entering(index) {
+            shown.push(arrive(index));
+            index += 1;
+            continue;
+        }
+        let end = (index..in_view.end)
+            .find(|index| !entering(*index))
+            .unwrap_or(in_view.end);
+        let middle = (top(index) + top(end - 1)) / 2.0;
+        shown.extend((index..end).map(|index| Shown {
+            key: rows.key(index),
+            place: top(index) - scroll,
+            index: Some(index),
+            motion: tick(Motion {
+                from: middle - top(index),
+                to: 0.0,
+                alpha: 0.0,
+                style: Style::Enter,
+                elapsed: 0.0,
+            }),
+        }));
+        index = end;
+    }
+    for old in &listed {
+        if let Some(index) = rows.find(old.key).filter(|index| !in_view.contains(index)) {
+            let moving = arrive(index);
+            let drawn = moving.drawn(reach, state.slack).0;
+            if drawn + height > 0.0 && drawn < view {
+                shown.push(moving);
             }
         }
     }
+    let mut leaving: Vec<Shown> = state
+        .shown
+        .iter()
+        .filter(|shown| shown.index.is_none() && rows.find(shown.key).is_none())
+        .filter_map(|shown| {
+            Some(Shown {
+                place: shown.place - step,
+                motion: Some(tick(shown.motion?)?),
+                ..*shown
+            })
+        })
+        .collect();
+    let gone = |shown: &&Shown| rows.find(shown.key).is_none();
+    for run in listed.chunk_by(|a, b| gone(a) == gone(b)) {
+        if !gone(&run[0]) {
+            continue;
+        }
+        let drawn: Vec<_> = run
+            .iter()
+            .map(|shown| shown.drawn(reach, state.slack))
+            .collect();
+        let middle = (drawn[0].0 + drawn[drawn.len() - 1].0) / 2.0;
+        leaving.extend(run.iter().zip(drawn).map(|(shown, (y, alpha))| Shown {
+            key: shown.key,
+            place: y - step,
+            index: None,
+            motion: tick(Motion {
+                from: 0.0,
+                to: middle - y,
+                alpha,
+                style: Style::Leave,
+                elapsed: 0.0,
+            }),
+        }));
+    }
     shown.sort_by(|a, b| a.place.total_cmp(&b.place));
+    let slack = shown
+        .iter()
+        .filter_map(|shown| shown.motion.filter(|motion| motion.style == Style::Slide))
+        .map(|motion| motion.at(reach, 0.0).0.abs())
+        .fold(0.0, f64::max);
     ui.animating |= state.scroll != state.target
         || !leaving.is_empty()
-        || shown
-            .iter()
-            .any(|shown| shown.offset != 0.0 || shown.alpha < 1.0);
+        || shown.iter().any(|shown| shown.motion.is_some());
 
     let theme = ui.theme.clone();
     ui.open_as(
@@ -273,13 +433,14 @@ pub fn list<R: Rows>(
             Some(index) if rows.selectable(index) => Flags::FLOAT | Flags::CLICKABLE,
             _ => Flags::FLOAT,
         };
+        let (y, alpha) = shown.drawn(reach, slack);
         ui.open(
             shown.key,
             Spec {
                 flags,
                 size: [width, px(row)],
-                position: [0.0, (shown.place + shown.offset) as f32],
-                fade: 1.0 - shown.alpha,
+                position: [0.0, y as f32],
+                fade: 1.0 - alpha,
                 ..Spec::default()
             },
         );
@@ -308,7 +469,9 @@ pub fn list<R: Rows>(
     }
     ui.close();
     shown.extend(leaving);
+    shown.sort_by(|a, b| a.place.total_cmp(&b.place));
     state.shown = shown;
+    state.slack = slack;
     ui.lists.insert(id, state);
     clicked
 }

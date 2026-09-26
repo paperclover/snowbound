@@ -222,6 +222,9 @@ pub struct Spec<'a> {
     pub gradient: Option<[f32; 4]>,
     /// A soft shadow of the box's outline, painted beneath it.
     pub shadow: Option<[f32; 4]>,
+    /// How far the box draws inside its leading, top, trailing and bottom edges: fill,
+    /// border, shadow, icon and label; the pointer still finds the whole box.
+    pub inset: [f32; 4],
     /// The fill under the pointer, blended in as hover animates.
     pub hover_fill: Option<[f32; 4]>,
     pub border: Option<[f32; 4]>,
@@ -310,6 +313,7 @@ struct Built {
     fill: Option<[f32; 4]>,
     gradient: Option<[f32; 4]>,
     shadow: Option<[f32; 4]>,
+    inset: [f32; 4],
     hover_fill: Option<[f32; 4]>,
     border: Option<[f32; 4]>,
     hover_border: Option<[f32; 4]>,
@@ -456,8 +460,8 @@ pub struct Ui {
     pointer: Option<[f32; 2]>,
     /// The pointer moved this frame.
     moved: bool,
-    /// The share of its remaining distance an animated value closes this frame.
-    rate: f32,
+    /// Seconds since the previous frame.
+    dt: f32,
     lists: HashMap<Id, list::State>,
     hover: Option<Id>,
     active: Option<Id>,
@@ -487,7 +491,7 @@ impl Ui {
             popups: Vec::new(),
             pointer: None,
             moved: false,
-            rate: 1.0,
+            dt: 0.0,
             lists: HashMap::new(),
             hover: None,
             active: None,
@@ -776,8 +780,8 @@ impl Ui {
     }
 
     fn ease(&mut self, dt: f32) {
+        self.dt = dt;
         let rate = 1.0 - 0.5_f32.powf(dt / HALF_LIFE);
-        self.rate = rate;
         let mut animating = false;
         for (id, state) in &mut self.states {
             let hot = self.hover == Some(*id) && self.active.is_none_or(|active| active == *id);
@@ -965,7 +969,14 @@ impl Ui {
             })
         });
         let border = blend(node.border, node.hover_border);
-        let size = [rect[2] - rect[0], rect[3] - rect[1]];
+        let [left, top, right, bottom] = node.inset;
+        let painted = [
+            rect[0] + left,
+            rect[1] + top,
+            rect[2] - right,
+            rect[3] - bottom,
+        ];
+        let size = [painted[2] - painted[0], painted[3] - painted[1]];
         if let Some(shadow) = node.shadow {
             let [spread, drop] = if node.anchor.is_some() {
                 POPUP_SHADOW
@@ -974,7 +985,7 @@ impl Ui {
             };
             self.display.push(Display::Path {
                 data: outline(node.shape, size, node.radius),
-                origin: [rect[0], rect[1] + drop],
+                origin: [painted[0], painted[1] + drop],
                 style: PathStyle::Shadow(spread),
                 colors: [shadow; 2],
             });
@@ -982,7 +993,7 @@ impl Ui {
         if node.shape == Shape::Rounded {
             if fill.is_some() || border.is_some() {
                 self.display.push(Display::Rect {
-                    rect,
+                    rect: painted,
                     fill: fill.unwrap_or([0.0; 4]),
                     shade,
                     border,
@@ -998,7 +1009,7 @@ impl Ui {
             for (style, colors) in paints.into_iter().flatten() {
                 self.display.push(Display::Path {
                     data: data.clone(),
-                    origin: [rect[0], rect[1]],
+                    origin: [painted[0], painted[1]],
                     style,
                     colors,
                 });
@@ -1019,17 +1030,17 @@ impl Ui {
             });
         }
         let inner = [
-            rect[0] + node.pad[0],
-            rect[1],
-            rect[2] - node.pad[0],
-            rect[3],
+            painted[0] + node.pad[0],
+            painted[1],
+            painted[2] - node.pad[0],
+            painted[3],
         ];
         let mut x = if node.center {
             (inner[0] + inner[2] - node.content_width()) / 2.0
         } else {
             inner[0]
         };
-        let top = (rect[1] + rect[3] - ICON) / 2.0;
+        let top = (painted[1] + painted[3] - ICON) / 2.0;
         if let Some(sources) = node.icon {
             self.display.push(Display::Icon {
                 sources,
@@ -1045,7 +1056,7 @@ impl Ui {
             x += ICON + ICON_GAP;
         }
         if let Some(label) = &node.label {
-            let y = (rect[1] + rect[3] - label.size[1]) / 2.0;
+            let y = (painted[1] + painted[3] - label.size[1]) / 2.0;
             self.display.push(Display::Text {
                 label: label.clone(),
                 origin: [x, y],
@@ -1254,6 +1265,7 @@ impl Built {
             fill: spec.fill,
             gradient: spec.gradient,
             shadow: spec.shadow,
+            inset: spec.inset,
             hover_fill: spec.hover_fill,
             border: spec.border,
             hover_border: spec.hover_border,

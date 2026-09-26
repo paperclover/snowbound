@@ -1,6 +1,7 @@
 //! Renders each popup control open, in both themes, to `/tmp/ui-popups-{dark,light}.png`,
-//! and a combo's list reordering after a keystroke to `/tmp/ui-list-{dark,light}.png`, for
-//! review; then times a list of 200 000 rows.
+//! and frames of lists changing to `/tmp/ui-list-{keystroke,delete}-{dark,light}.png`: a
+//! combo's list after `c` is typed into its filter, and a page list losing rows. Then times
+//! a list of 200 000 rows.
 
 use std::{
     collections::HashMap,
@@ -52,12 +53,24 @@ fn main() {
         let path = format!("/tmp/ui-popups-{name}.png");
         render(panels, 3, &path);
         println!("{path}");
-        let path = format!("/tmp/ui-list-{name}.png");
-        render(keystroke(&theme, &device, &queue, &mut renderer), 4, &path);
-        println!("{path}");
+        let changes = [
+            (
+                "keystroke",
+                keystroke(&theme, &device, &queue, &mut renderer),
+            ),
+            ("delete", delete(&theme, &device, &queue, &mut renderer)),
+        ];
+        for (change, panels) in changes {
+            let path = format!("/tmp/ui-list-{change}-{name}.png");
+            render(panels, 5, &path);
+            println!("{path}");
+        }
     }
     measure();
 }
+
+/// Frames a change shows at: before it, then each of the 150 ms it takes.
+const FRAMES: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 10];
 
 /// A font combo's list before `c` is typed into its filter and at frames after.
 fn keystroke(
@@ -82,9 +95,78 @@ fn keystroke(
     for event in typed("c") {
         scene.ui.event(event);
     }
-    for frame in 1..=20 {
+    for frame in 1..=10 {
         scene.frame(build);
-        if [1, 2, 3, 4, 6, 9, 20].contains(&frame) {
+        if FRAMES.contains(&frame) {
+            panels.push(paint(device, queue, renderer, &scene.ui));
+        }
+    }
+    panels
+}
+
+/// A page list before rows 3 to 5 and 9 are deleted and at frames after.
+fn delete(
+    theme: &Theme,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut draw::Renderer,
+) -> Vec<Vec<u8>> {
+    let mut scene = Scene {
+        ui: Ui::new(theme.clone(), Duration::from_millis(500)),
+        start: Instant::now(),
+        frames: 0,
+    };
+    let names: Vec<String> = (0..30).map(|key| format!("Page {key}")).collect();
+    let mut selected = Some(7);
+    let mut build = |scene: &mut Scene, rows: &Keyed| {
+        scene.frame(|ui, _| {
+            let list = List {
+                rows,
+                row: 26.0,
+                keys: &[],
+                hover_selects: false,
+            };
+            let spec = Spec {
+                size: [px(240.0), px(26.0 * 11.0)],
+                fill: Some(ui.theme.panel),
+                ..Spec::default()
+            };
+            let theme = ui.theme.clone();
+            ui::list(
+                ui,
+                Id::ROOT.child("pages"),
+                spec,
+                list,
+                &mut selected,
+                |ui, row| {
+                    ui.leaf(
+                        "name",
+                        Spec {
+                            size: [fill(), fill()],
+                            text: Some(&names[row.key as usize]),
+                            fill: row.selected.then(|| theme.hover()),
+                            radius: 4.0,
+                            pad: [8.0, 0.0],
+                            ..Spec::default()
+                        },
+                    );
+                },
+            );
+        });
+    };
+    let all = Keyed::new((0..30).collect());
+    for _ in 0..20 {
+        build(&mut scene, &all);
+    }
+    let mut panels = vec![paint(device, queue, renderer, &scene.ui)];
+    let kept = Keyed::new(
+        (0..30)
+            .filter(|key| !(3..=5).contains(key) && *key != 9)
+            .collect(),
+    );
+    for frame in 1..=10 {
+        build(&mut scene, &kept);
+        if FRAMES.contains(&frame) {
             panels.push(paint(device, queue, renderer, &scene.ui));
         }
     }

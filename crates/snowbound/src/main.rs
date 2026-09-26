@@ -42,6 +42,14 @@ const FRAME: f32 = 6.0;
 /// macOS rounds windows' corners by 10 pt; the page's corners share their centres.
 const ROUNDING: f32 = 10.0 - FRAME;
 const PAGE_LIST: f32 = 240.0;
+/// Height of a page tab's row, whose tab leaves `ROW_GAP` below it so tabs stand apart
+/// while the gaps still take the pointer.
+const ROW: f32 = 29.0;
+const ROW_GAP: f32 = 3.0;
+/// Space between the page and a page tab that isn't open.
+const PILL_MARGIN: f32 = 3.0;
+/// Rounding where the open page tab meets the page, concentric with its neighbours'.
+const JOIN: f32 = PILL_MARGIN + ROUNDING;
 
 #[derive(Debug)]
 enum UserEvent {
@@ -670,6 +678,7 @@ impl State {
         let [left, top, right, bottom] = page;
         let tab = open_page
             .and_then(|id| self.ui.rect(id))
+            .map(|row| [row[0], row[1], row[2], row[3] - ROW_GAP])
             .zip(panel)
             .and_then(|(row, panel)| {
                 let [start, end] = [
@@ -677,14 +686,14 @@ impl State {
                     row[3].min(panel[3]).min(bottom),
                 ];
                 let reach = row[2].min(panel[2]);
-                (reach - right > 2.0 * ROUNDING && end - start > 2.0 * ROUNDING).then(|| {
+                (reach - right > 2.0 * JOIN && end - start > 2.0 * ROUNDING).then(|| {
                     // A tab too near the page's corner joins it along the edge.
-                    let start = if start < top + 2.0 * ROUNDING {
+                    let start = if start < top + ROUNDING + JOIN {
                         top
                     } else {
                         start
                     };
-                    let end = if end > bottom - 2.0 * ROUNDING {
+                    let end = if end > bottom - ROUNDING - JOIN {
                         bottom
                     } else {
                         end
@@ -696,11 +705,11 @@ impl State {
         match tab {
             Some([start, end, reach]) => {
                 if start > top {
-                    outline.extend([([right, top], ROUNDING), ([right, start], ROUNDING)]);
+                    outline.extend([([right, top], ROUNDING), ([right, start], JOIN)]);
                 }
                 outline.extend([([reach, start], ROUNDING), ([reach, end], ROUNDING)]);
                 if end < bottom {
-                    outline.extend([([right, end], ROUNDING), ([right, bottom], ROUNDING)]);
+                    outline.extend([([right, end], JOIN), ([right, bottom], ROUNDING)]);
                 }
             }
             None => outline.extend([([right, top], ROUNDING), ([right, bottom], ROUNDING)]),
@@ -1074,22 +1083,15 @@ impl State {
                 flags: Flags::SCROLL | Flags::CLIP,
                 axis: Axis::Y,
                 size: [px(width), fill()],
-                gap: 1.0,
                 ..Spec::default()
             },
         );
         let mut open = None;
-        let pages: Vec<_> = matching(&session.pages, &self.filter).collect();
-        let is_open = |index: Option<usize>| {
-            index
-                .and_then(|index| pages.get(index))
-                .is_some_and(|(space, ..)| *space == session.space)
-        };
-        for (index, (space, title, level)) in pages.iter().enumerate() {
+        for (space, title, level) in matching(&session.pages, &self.filter) {
             let selected = *space == session.space;
             let spec = Spec {
                 flags: Flags::CLICKABLE,
-                size: [px(PAGE_LIST), px(26.0)],
+                size: [px(PAGE_LIST), px(ROW)],
                 text: Some(if title.is_empty() {
                     "Untitled page"
                 } else {
@@ -1098,30 +1100,17 @@ impl State {
                 pad: [10.0 + 16.0 * level.saturating_sub(1) as f32, 0.0],
                 ..Spec::default()
             };
-            let clicked = if selected {
+            let spec = if selected {
                 open = Some(self.ui.id(space));
-                let spec = Spec {
+                Spec {
                     color: Some(theme.paper_ink),
                     fill: Some(theme.paper),
+                    inset: [0.0, 0.0, 0.0, ROW_GAP],
                     ..spec
-                };
-                self.ui.leaf(space, spec).clicked
+                }
             } else {
                 // Tabs not open float free of the page as pills; only the open one joins it.
-                self.ui.open(
-                    space,
-                    Spec {
-                        size: [px(PAGE_LIST), px(26.0)],
-                        ..Spec::default()
-                    },
-                );
-                // A pill beside the open tab gives up a little on that side, widening the gap.
-                let [above, below] = [index.checked_sub(1), Some(index + 1)]
-                    .map(|neighbour| if is_open(neighbour) { 2.0 } else { 0.0 });
-                let spec = Spec {
-                    flags: Flags::CLICKABLE | Flags::FLOAT,
-                    size: [px(PAGE_LIST - 3.0 - 6.0), px(26.0 - above - below)],
-                    position: [3.0, above],
+                Spec {
                     color: Some(if title.is_empty() {
                         ui::mix(theme.ink, section.tab, 0.5)
                     } else {
@@ -1130,13 +1119,11 @@ impl State {
                     fill: Some(section.tab),
                     hover_fill: Some(ui::mix(section.tab, section.accent, 0.3)),
                     radius: ROUNDING,
+                    inset: [PILL_MARGIN, 0.0, 6.0, ROW_GAP],
                     ..spec
-                };
-                let clicked = self.ui.leaf("pill", spec).clicked;
-                self.ui.close();
-                clicked
+                }
             };
-            if clicked && !selected {
+            if self.ui.leaf(space, spec).clicked && !selected {
                 self.commands.push(Command::OpenPage(*space));
             }
         }

@@ -920,13 +920,14 @@ impl Rows for Keyed {
     }
 }
 
-const LIST_ROW: f32 = 20.0;
+const LIST_ROW: f32 = 26.0;
+const VIEW: f32 = 10.0 * LIST_ROW;
 
 fn list_id() -> Id {
     Id::ROOT.child("list")
 }
 
-/// Builds a frame of a list 200 high over `rows`, ten rows in view.
+/// Builds a frame of a list over `rows`, ten rows in view.
 fn list_frame(
     ui: &mut Ui,
     rows: &Keyed,
@@ -942,7 +943,7 @@ fn list_frame(
             hover_selects: false,
         };
         let spec = Spec {
-            size: [px(200.0), px(200.0)],
+            size: [px(200.0), px(VIEW)],
             ..Spec::default()
         };
         clicked = crate::list(ui, list_id(), spec, list, selected, |ui, row| {
@@ -995,7 +996,7 @@ fn lists_hold_the_selection_still_as_items_arrive_and_leave_above() {
     settle_list(&mut ui, &rows, &mut selected);
     let at = row_top(&ui, 500).unwrap();
     assert!(
-        (0.0..200.0).contains(&at),
+        (0.0..VIEW).contains(&at),
         "a new selection scrolls into view"
     );
     rows = Keyed::new((10_000..10_100).chain(0..1000));
@@ -1018,42 +1019,107 @@ fn lists_hold_the_selection_still_as_items_arrive_and_leave_above() {
     assert_eq!(row_top(&ui, 500), Some(at - 60.0));
 }
 
+fn alpha(ui: &Ui, key: u64) -> Option<f32> {
+    let id = list_id().child(key);
+    ui.nodes
+        .iter()
+        .find(|node| node.id == id)
+        .map(|node| node.alpha)
+}
+
 #[test]
-fn rows_ease_to_where_their_items_move_and_fade_in_and_out() {
+fn rows_keeping_their_order_slide_and_the_rest_fade_through() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut selected = None;
     let rows = Keyed::new(0..20);
     settle_list(&mut ui, &rows, &mut selected);
-    assert_eq!(row_top(&ui, 5), Some(5.0 * LIST_ROW));
     let rows = Keyed::new([5, 0, 1, 2, 3, 100, 6, 7, 8, 9, 10, 11]);
     list_frame(&mut ui, &rows, &mut selected, &[]);
-    let alpha = |ui: &Ui, key: u64| {
-        let id = list_id().child(key);
-        ui.nodes
-            .iter()
-            .find(|node| node.id == id)
-            .map(|node| node.alpha)
-    };
-    let moved = row_top(&ui, 5).unwrap();
-    assert!(
-        moved > 0.0 && moved < 5.0 * LIST_ROW,
-        "on its way up: {moved}"
-    );
-    let arriving = alpha(&ui, 100).unwrap();
-    assert!(arriving > 0.0 && arriving < 1.0, "fading in");
-    let leaving = alpha(&ui, 4).unwrap();
-    assert!(leaving > 0.0 && leaving < 1.0, "fading out");
-    for _ in 0..10 {
+    let crossing = row_top(&ui, 5).unwrap();
+    assert!(crossing < 5.0 * LIST_ROW && crossing > 4.5 * LIST_ROW);
+    assert!(alpha(&ui, 5).unwrap() < 1.0, "fading as it sets off");
+    assert_eq!(row_top(&ui, 0), Some(0.0), "sliding waits for rows leaving");
+    assert!(alpha(&ui, 4).unwrap() < 1.0);
+    assert_eq!(alpha(&ui, 100), Some(0.0), "entering waits too");
+    for _ in 0..4 {
         list_frame(&mut ui, &rows, &mut selected, &[]);
     }
-    assert!(
-        row_top(&ui, 5).unwrap() < 3.0,
-        "all but there within about 150 ms"
+    assert_eq!(alpha(&ui, 5), Some(0.0), "unseen half-way");
+    assert_eq!(alpha(&ui, 4), Some(0.0));
+    let sliding = row_top(&ui, 0).unwrap();
+    assert!(sliding > 0.0 && sliding < LIST_ROW);
+    assert_eq!(
+        alpha(&ui, 100),
+        Some(0.0),
+        "entering waits for rows sliding"
     );
-    settle_list(&mut ui, &rows, &mut selected);
-    assert_eq!(row_top(&ui, 5), Some(0.0));
+    for _ in 0..5 {
+        list_frame(&mut ui, &rows, &mut selected, &[]);
+    }
+    assert_eq!(row_top(&ui, 5), Some(0.0), "there in about 150 ms");
+    assert_eq!(row_top(&ui, 0), Some(LIST_ROW));
     assert_eq!(alpha(&ui, 100), Some(1.0));
     assert_eq!(alpha(&ui, 4), None);
+    list_frame(&mut ui, &rows, &mut selected, &[]);
+    assert!(!ui.wants_frame());
+}
+
+/// Two rows whose text is drawn over each other: their labels, centred in each row, meet
+/// within the view while both can be seen.
+fn text_overlaps(ui: &mut Ui) -> Option<String> {
+    let text = ui.measure("Ag")[1];
+    let list = ui.nodes.iter().position(|node| node.id == list_id())?;
+    let rows: Vec<_> = ui
+        .nodes
+        .iter()
+        // Below half an 8-bit step, a row changes no pixel.
+        .filter(|node| {
+            node.parent == list && node.size[1] == px(LIST_ROW) && node.alpha * 255.0 >= 0.5
+        })
+        .map(|node| {
+            let middle = (node.rect[1] + node.rect[3]) / 2.0;
+            let [top, bottom] =
+                [middle - text / 2.0, middle + text / 2.0].map(|y| y.clamp(0.0, VIEW));
+            (top, bottom, node.alpha)
+        })
+        .collect();
+    rows.iter().enumerate().find_map(|(at, a)| {
+        rows[at + 1..]
+            .iter()
+            .find(|b| a.0 < b.1 && b.0 < a.1)
+            .map(|b| format!("{a:?} over {b:?}"))
+    })
+}
+
+#[test]
+fn rows_never_draw_text_over_each_other() {
+    let orders: [Vec<u64>; 7] = [
+        (0..30).collect(),
+        (4..12).chain([2, 3, 16]).chain(12..16).collect(),
+        (0..30).rev().collect(),
+        [7, 3, 12, 0, 1, 25, 26, 2, 4, 5].into(),
+        (0..30)
+            .filter(|key| !(3..6).contains(key) && *key != 8)
+            .collect(),
+        (0..3).chain(40..44).chain(3..30).collect(),
+        [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 50].into(),
+    ];
+    for (at, order) in orders.iter().enumerate() {
+        let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+        let mut selected = None;
+        settle_list(&mut ui, &Keyed::new(0..30), &mut selected);
+        // Each change, and another landing half-way through it.
+        let next = &orders[(at + 1) % orders.len()];
+        for (frame, rows) in (0..30).map(|frame| {
+            let order = if frame < 5 { order } else { next };
+            (frame, Keyed::new(order.iter().copied()))
+        }) {
+            list_frame(&mut ui, &rows, &mut selected, &[]);
+            if let Some(overlap) = text_overlaps(&mut ui) {
+                panic!("order {at}, frame {frame}: {overlap}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -1069,13 +1135,13 @@ fn keys_move_the_selection_and_the_view_eases_after_it() {
     list_frame(&mut ui, &rows, &mut selected, &[NamedKey::End]);
     assert_eq!(selected, Some(999));
     assert!(
-        ui.wants_frame() && row_top(&ui, 999) != Some(200.0 - LIST_ROW),
+        ui.wants_frame() && row_top(&ui, 999) != Some(VIEW - LIST_ROW),
         "the view eases towards it"
     );
     settle_list(&mut ui, &rows, &mut selected);
     assert_eq!(
         row_top(&ui, 999),
-        Some(200.0 - LIST_ROW),
+        Some(VIEW - LIST_ROW),
         "the last row at the bottom"
     );
     list_frame(
