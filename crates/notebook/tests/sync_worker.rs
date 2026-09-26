@@ -111,7 +111,12 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
             },
             move |result| {
                 observed_tx
-                    .send(result.as_ref().cloned().map_err(|error| error.to_string()))
+                    .send(
+                        result
+                            .as_ref()
+                            .map(|synced| synced.edit.clone())
+                            .map_err(|error| error.to_string()),
+                    )
                     .unwrap();
             },
         )
@@ -166,7 +171,9 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                observed_tx.send(result.as_ref().unwrap().clone()).unwrap();
+                observed_tx
+                    .send(result.as_ref().unwrap().edit.clone())
+                    .unwrap();
                 if first {
                     first = false;
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -185,16 +192,11 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
                 let cache = &cache;
                 scope.spawn(move || {
                     let marker = format!("[{writer}] ");
-                    loop {
-                        match model_ops::save(cache, oid, |page| {
-                            model_ops::replace_text(page, oid, 0..0, &marker)
-                        }) {
-                            Ok(Some(id)) => break id,
-                            Err(Error::Io(error))
-                                if error.kind() == io::ErrorKind::ResourceBusy => {}
-                            other => panic!("Unexpected local outcome: {other:?}"),
-                        }
-                    }
+                    model_ops::save(cache, oid, |page| {
+                        model_ops::replace_text(page, oid, 0..0, &marker)
+                    })
+                    .unwrap()
+                    .unwrap()
                 })
             })
             .collect::<Vec<_>>()
@@ -203,11 +205,9 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
             .collect::<std::collections::BTreeSet<_>>()
     });
     resume_tx.send(()).unwrap();
-    let mut published = std::collections::BTreeSet::new();
     while !cache.pending().unwrap().is_empty() {
-        if let Some((id, status)) = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+        if let Some((_, status)) = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
             assert!(matches!(status, EditStatus::Published { .. }), "{status:?}");
-            published.insert(id);
         }
     }
     assert!(
@@ -215,7 +215,12 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
         "Edits waited for the hourly poll"
     );
     worker.stop().unwrap();
-    assert_eq!(published, queued);
+    for id in &queued {
+        assert!(matches!(
+            cache.status(*id).unwrap(),
+            Some(EditStatus::Published { .. })
+        ));
+    }
     let content = text(&cache.snapshot().unwrap()).2;
     for writer in 0..12 {
         assert_eq!(content.matches(&format!("[{writer}] ")).count(), 1);
@@ -223,7 +228,8 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
     assert!(content.ends_with("abc"));
     let server = server.lock().unwrap();
     assert_eq!(text(&server.durable).2, content);
-    assert_eq!(server.publications, queued.len());
+    // Edits queued while the worker was busy publish together.
+    assert_eq!(server.publications, 1);
     assert_eq!(cache.snapshot().unwrap(), server.durable);
 }
 
@@ -308,7 +314,7 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                tx.send(result.as_ref().unwrap().clone()).unwrap();
+                tx.send(result.as_ref().unwrap().edit.clone()).unwrap();
             },
         )
         .unwrap();
@@ -332,7 +338,7 @@ fn cache_failures_stop_retries_and_return_the_error_without_remote_publication()
     let id = save(&cache, oid, 0..0, "L ").unwrap();
     drop(cache);
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("CREATE TRIGGER fail_attempt BEFORE INSERT ON attempt BEGIN SELECT RAISE(ABORT, 'test cache write failure'); END;").unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_attempt BEFORE UPDATE OF attempted ON batches BEGIN SELECT RAISE(ABORT, 'test cache write failure'); END;").unwrap();
     drop(connection);
     let cache = Arc::new(Replica::open(&path).unwrap());
     let server = Arc::new(Mutex::new(Server::new(&source)));
@@ -356,14 +362,14 @@ fn cache_failures_stop_retries_and_return_the_error_without_remote_publication()
 }
 
 #[test]
-fn polling_preserves_conflicts_and_absent_uncertain_revisions_without_replay() {
+fn polling_reports_a_blocked_queue_once_per_remote_change_without_replay() {
     for uncertain in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let source = onestore::create_section("worker.one", "abc", "Fixture").unwrap();
         let (sid, oid, _) = text(&source);
         let cache = Arc::new(Replica::create(dir.path().join("cache.sqlite"), &source).unwrap());
         let id = save(&cache, oid, 1..2, "L").unwrap();
-        let local = cache.snapshot().unwrap();
+        let local = text(&cache.snapshot().unwrap()).2;
         let mut server = if uncertain {
             Server::new(&source)
         } else {
@@ -380,38 +386,48 @@ fn polling_preserves_conflicts_and_absent_uncertain_revisions_without_replay() {
                 Duration::from_millis(10),
                 move || Ok(shared.clone()),
                 move |result| {
-                    tx.send(result.as_ref().cloned().map_err(|_| ())).unwrap();
+                    tx.send(
+                        result
+                            .as_ref()
+                            .map(|synced| synced.edit.clone())
+                            .map_err(|_| ()),
+                    )
+                    .unwrap();
                 },
             )
             .unwrap();
         if uncertain {
             assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
         }
-        let mut previous = None;
-        let started = Instant::now();
-        for _ in 0..5 {
+        let expected = |status: &EditStatus| {
+            if uncertain {
+                matches!(status, EditStatus::AwaitingConfirmation { .. })
+            } else {
+                *status == EditStatus::Conflict(ConflictKind::ContentChanged)
+            }
+        };
+        for round in 0..3 {
             let (actual, status) = rx
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .unwrap()
                 .unwrap();
             assert_eq!(actual, id);
-            if uncertain {
-                assert!(matches!(status, EditStatus::AwaitingConfirmation { .. }));
-            } else {
-                assert_eq!(status, EditStatus::Conflict(ConflictKind::ContentChanged));
-            }
-            if let Some(previous) = previous {
-                assert_eq!(previous, status);
-            }
-            previous = Some(status.clone());
+            assert!(expected(&status), "{status:?}");
+            // An unchanged remote is not read or reported again.
+            assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+            // Another writer's change elsewhere in the text is read and decided again.
+            let mut server = server.lock().unwrap();
+            let changed =
+                onestore::replace_text(&server.visible, sid, oid, 0..0, &round.to_string())
+                    .unwrap();
+            server.visible = changed.clone();
+            server.durable = changed;
+            drop(server);
+            worker.wake();
         }
-        assert!(
-            started.elapsed() >= Duration::from_millis(30),
-            "Worker spun instead of waiting between retries"
-        );
         worker.stop().unwrap();
-        assert_eq!(cache.snapshot().unwrap(), local);
+        assert_eq!(text(&cache.snapshot().unwrap()).2, local);
         assert_eq!(cache.pending().unwrap().len(), 1);
         let server = server.lock().unwrap();
         assert_eq!(server.publications, usize::from(uncertain));
@@ -511,7 +527,7 @@ fn invalid_intervals_and_callback_panics_leave_worker_ownership_recoverable() {
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                tx.send(result.as_ref().unwrap().clone()).unwrap();
+                tx.send(result.as_ref().unwrap().edit.clone()).unwrap();
             },
         )
         .unwrap();
@@ -521,7 +537,7 @@ fn invalid_intervals_and_callback_panics_leave_worker_ownership_recoverable() {
 }
 
 #[test]
-fn reviewed_conflict_wakes_the_worker_and_publishes_the_original_intent_once() {
+fn a_resolved_conflict_wakes_the_worker_and_publishes_the_original_edit_once() {
     let dir = tempfile::tempdir().unwrap();
     let source = onestore::create_section("resolve.one", "abc", "Fixture").unwrap();
     let (sid, oid, _) = text(&source);
@@ -538,7 +554,7 @@ fn reviewed_conflict_wakes_the_worker_and_publishes_the_original_intent_once() {
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
-                tx.send(result.as_ref().unwrap().clone()).unwrap();
+                tx.send(result.as_ref().unwrap().edit.clone()).unwrap();
                 if first {
                     first = false;
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -550,10 +566,7 @@ fn reviewed_conflict_wakes_the_worker_and_publishes_the_original_intent_once() {
         rx.recv_timeout(Duration::from_secs(5)).unwrap(),
         Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
     );
-    model_ops::review(&cache, id, oid, |page| {
-        model_ops::replace_text(page, oid, 1..2, "L")
-    })
-    .unwrap();
+    cache.resolve(id, notebook::Resolution::Mine).unwrap();
     assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
     resume_tx.send(()).unwrap();
     assert!(
@@ -618,8 +631,13 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
             Duration::from_millis(1),
             move || Ok(remote.take().expect("Contention caused a reconnect")),
             move |result| {
-                tx.send(result.as_ref().cloned().map_err(|error| error.to_string()))
-                    .unwrap();
+                tx.send(
+                    result
+                        .as_ref()
+                        .map(|synced| synced.edit.clone())
+                        .map_err(|error| error.to_string()),
+                )
+                .unwrap();
             },
         )
         .unwrap();
@@ -675,14 +693,14 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
                     failed = true;
                     let page =
                         onestore::PageCreation::new(None, Some("Queued"), "Fixture").unwrap();
-                    let second = observed
-                        .create_page(&observed.snapshot().unwrap(), &page)
-                        .unwrap()
-                        .unwrap();
+                    let second = section_op(&observed, onestore::op::SectionOp::Create(page));
                     tx.send((second, None)).unwrap();
                 }
-                Ok(Some((id, status))) => tx.send((*id, Some(status.clone()))).unwrap(),
-                Ok(None) => {}
+                Ok(notebook::Synced {
+                    edit: Some((id, status)),
+                    ..
+                }) => tx.send((*id, Some(status.clone()))).unwrap(),
+                Ok(_) => {}
                 other => panic!("Unexpected worker result: {other:?}"),
             },
         )

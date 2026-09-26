@@ -20,7 +20,8 @@ fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
 
-/// The ops that turn `before`, a page as stored, into `after`.
+/// The ops that turn `before`, a page as stored, into `after`: O(page), for importing a
+/// page, converting queued whole-page edits and resolving a conflict, never per keystroke.
 pub fn lower_page(before: &Page, after: &Page) -> Result<Vec<PageOp>, Error> {
     let old = View::new(before, false)?;
     let new = View::new(after, false)?;

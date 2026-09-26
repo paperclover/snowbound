@@ -159,9 +159,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for event in section.events() {
             match event {
                 Event::Attempt {
-                    id,
-                    status: EditStatus::Published { revision },
-                } => receipts.push((id, revision)),
+                    status: EditStatus::Published { .. },
+                    ..
+                } => {}
                 Event::Attempt { id, status } => {
                     println!(
                         "{}",
@@ -175,7 +175,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 Event::Failed(error) => return Err(error.into()),
-                Event::Refreshed => {}
+                Event::Rejected { error, .. } => return Err(error.into()),
+                Event::Refreshed | Event::Changed(_) => {}
+            }
+        }
+        // A batch reports its newest edit; each edit's receipt is its own.
+        for (id, ..) in &queued {
+            if !receipts.iter().any(|(n, _)| n == id)
+                && let Some(EditStatus::Published { revision }) = section.status(*id)?
+            {
+                receipts.push((*id, revision));
             }
         }
     }

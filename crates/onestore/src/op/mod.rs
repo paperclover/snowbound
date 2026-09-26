@@ -28,6 +28,7 @@ pub(crate) type Values = Vec<(u32, Vec<u8>)>;
 
 /// One user action, applied whole or not at all.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Edit {
     /// FILETIME when the action happened; the modification time of what it changes.
     pub at: u64,
@@ -35,6 +36,7 @@ pub struct Edit {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Op {
     Page { space: ExGuid, op: PageOp },
     Section(SectionOp),
@@ -43,6 +45,7 @@ pub enum Op {
 /// A change to the page an object space holds. Targets are stored identities; paragraph
 /// properties name the paragraph, text edits its text object.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum PageOp {
     /// Replaces a range; inserted text takes the format of the run it lands in, the
     /// following run at a boundary except at the end.
@@ -159,6 +162,7 @@ pub enum PageOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum TableEdit {
     /// New rows before a row, or last, each with one cell per column.
     Rows {
@@ -185,6 +189,7 @@ pub enum TableEdit {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SectionOp {
     Create(PageCreation),
     /// A page created with `creation` holding `page`'s content under the identities it

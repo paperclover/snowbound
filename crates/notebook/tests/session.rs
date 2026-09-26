@@ -1,5 +1,5 @@
 use notebook::{
-    ConflictKind, EditStatus, Recovery,
+    ConflictKind, EditStatus, Recovery, Resolution,
     session::{Event, Notebook, QueuedEdit, Save, Section},
 };
 use onestore::{ExGuid, PreparedEdit, page::Page};
@@ -62,10 +62,14 @@ fn wait(section: &Section, mut accept: impl FnMut(&Event) -> bool) {
 }
 
 fn published(section: &Section, id: u64) {
-    wait(
-        section,
-        |event| matches!(event, Event::Attempt { id: n, status: EditStatus::Published { .. } } if *n == id),
-    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !matches!(
+        section.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ) {
+        assert!(Instant::now() < deadline, "the edit was not published");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn stored_page(file: &Path, space: ExGuid) -> Page {
@@ -77,6 +81,13 @@ fn assert_same(actual: Page, expected: &Page) {
     let mut expected = expected.clone();
     expected.title = actual.title.clone();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn a_section_is_shared_between_threads() {
+    fn shared<T: Send + Sync>() {}
+    shared::<Section>();
+    shared::<notebook::Replica>();
 }
 
 #[test]
@@ -765,7 +776,7 @@ fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recov
 mod server;
 
 /// An uncertain attempt survives a restart as `AwaitingConfirmation`; after exporting the
-/// archive the user either continues from a reviewed page or abandons the branch. Neither
+/// archive the user either publishes the local edits again or abandons the branch. Neither
 /// path records a receipt for the uncertain attempt.
 #[test]
 fn an_uncertain_attempt_is_released_after_restart_by_review() {
@@ -778,10 +789,8 @@ fn an_uncertain_attempt_is_released_after_restart_by_review() {
         let replica = notebook::Replica::create(&cache, &source).unwrap();
         let space = space_of(&source);
         let page = model_ops::page_of(&source, space);
-        let text = first_text(&page);
         let local = edited(&page, "Uncertain ");
-        let id = replica
-            .save(&source, space, &local, "Author")
+        let id = model_ops::save_as(&replica, space, &local, "Author")
             .unwrap()
             .unwrap();
         let mut faulty = server::Server::new(&source);
@@ -815,14 +824,12 @@ fn an_uncertain_attempt_is_released_after_restart_by_review() {
         assert_same(section.page(space).unwrap(), &local);
         let archive = directory.path().join("review.sqlite");
         if continued {
-            let mut reviewed = section.remote_page(space).unwrap();
-            model_ops::replace_text(&mut reviewed, text, 0..0, "Reviewed ");
-            section.release(id, &archive, Some(&reviewed)).unwrap();
+            section.release(id, &archive, Resolution::Mine).unwrap();
             assert_eq!(section.status(id).unwrap(), Some(EditStatus::Pending));
             published(&section, id);
-            assert_same(stored_page(&file, space), &reviewed);
+            assert_same(stored_page(&file, space), &local);
         } else {
-            section.release(id, &archive, None).unwrap();
+            section.release(id, &archive, Resolution::Theirs).unwrap();
             assert_eq!(
                 section.status(id).unwrap(),
                 Some(EditStatus::Archived {
@@ -841,7 +848,11 @@ fn an_uncertain_attempt_is_released_after_restart_by_review() {
         assert!(section.queue().unwrap().is_empty());
         assert!(
             section
-                .release(id, directory.path().join("again.sqlite"), None)
+                .release(
+                    id,
+                    directory.path().join("again.sqlite"),
+                    Resolution::Theirs
+                )
                 .is_err()
         );
         section.close().unwrap();

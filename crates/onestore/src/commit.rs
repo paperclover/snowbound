@@ -644,6 +644,19 @@ impl Transaction {
         }
     }
 
+    /// The image this transaction applies to.
+    pub fn base(&self) -> &Stamp {
+        &self.base
+    }
+
+    /// The bytes a commit writes, by offset, in the order `apply` writes them; the header,
+    /// last, covers bytes 0..1024.
+    pub fn writes(&self) -> impl Iterator<Item = (u64, &[u8])> {
+        std::iter::once((self.base.length, self.append.as_slice()))
+            .chain(self.patches.iter().map(|(offset, bytes)| (*offset, bytes.as_slice())))
+            .chain(std::iter::once((0, self.header.as_slice())))
+    }
+
     /// Writes this transaction into its base image, as a successful commit leaves the file.
     pub fn apply(&self, image: &mut Vec<u8>) -> Result<(), crate::Error> {
         if Stamp::of(image)? != self.base {

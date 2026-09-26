@@ -202,6 +202,13 @@ impl<'a> Section<'a> {
         image
     }
 
+    /// Each object space with the active revision the sealed image stores for it.
+    pub fn revisions(&self) -> impl Iterator<Item = (ExGuid, ExGuid)> + '_ {
+        self.spaces
+            .iter()
+            .filter_map(|(space, stored)| Some((*space, stored.rid?)))
+    }
+
     /// The page an object space holds, with the changes applied since the last seal.
     pub fn page(&self, space: ExGuid) -> Result<Page> {
         let stored = self.spaces.get(&space).ok_or(Error {
@@ -429,7 +436,7 @@ impl<'a> Section<'a> {
     }
 
     /// The root object space, which lists the pages.
-    pub(crate) fn root(&self) -> ExGuid {
+    pub fn root(&self) -> ExGuid {
         self.root
     }
 

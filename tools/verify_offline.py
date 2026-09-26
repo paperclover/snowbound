@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import cache_images
 import sqlite3
 
 from native_stress import edit_history, native_history
@@ -41,12 +42,11 @@ def verify(output, max_gap=120):
         try:
             assert connection.execute('PRAGMA quick_check').fetchall() == [('ok',)], 'Cache integrity failed'
             assert connection.execute('PRAGMA foreign_key_check').fetchall() == [], 'Cache foreign keys failed'
-            for table in ('edits', 'attempt', 'conflicts'):
+            for table in ('edits', 'batches', 'payloads', 'remote'):
                 assert connection.execute(f'SELECT count(*) FROM {table}').fetchone() == (0,), 'Completed cache retains unresolved state'
             persisted = dict(connection.execute('SELECT edit_id, revision FROM receipts'))
             assert persisted == {id: event['revision'] for id, event in receipts.items()}, 'SQLite receipts differ from observed acknowledgements'
-            base, working = connection.execute('SELECT base, working FROM replica WHERE id=1').fetchone()
-            assert working == b'', 'A drained cache retained a divergent local branch'
+            base = cache_images.image(connection)
             caches[actor] = {'receipts': len(persisted), 'image_bytes': len(base), 'image_sha256': hashlib.sha256(base).hexdigest(), 'database_sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
         finally:
             connection.close()

@@ -1,8 +1,9 @@
-use notebook::{Operation, Replica};
+use notebook::Replica;
+use onestore::op::{Op, PageOp};
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
-    page::{Page, PageObject, Paragraph, text::Edit},
+    page::{PageObject, Paragraph},
 };
 use std::{
     io::{self, BufRead, Write},
@@ -86,34 +87,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut ids = Vec::new();
         let mut font_size = None;
         for pending in cache.pending()? {
-            let Operation::Page(intent) = &pending.operation else {
-                panic!("Unexpected operation for this fixture")
+            let [Op::Page { op, .. }] = &pending.edit.ops[..] else {
+                panic!("Unexpected edit for this fixture")
             };
-            let operation = match operation_kind.as_str() {
-                "text" => {
-                    let (object, before, range, replacement) =
-                        intent.text_change().expect("one replaced paragraph");
-                    assert_eq!(object, target);
-                    assert_eq!(before, expected);
-                    assert_eq!(range, 0..u32::try_from(expected.encode_utf16().count())?);
-                    let operation: u64 = replacement.split_once(':').unwrap().0.parse()?;
+            let operation = match (operation_kind.as_str(), op) {
+                ("text", PageOp::Text { text, range, with }) => {
+                    assert_eq!(*text, target);
+                    assert_eq!(*range, 0..u32::try_from(expected.encode_utf16().count())?);
+                    let operation: u64 = with.split_once(':').unwrap().0.parse()?;
                     expected = payload(operation, size);
-                    assert_eq!(replacement, expected);
+                    assert_eq!(*with, expected);
                     operation
                 }
-                "insert" => {
-                    let added: Vec<_> = intent
-                        .after
-                        .objects
-                        .iter()
-                        .filter(|object| {
-                            !intent.before.objects.iter().any(|o| o.id() == object.id())
-                        })
-                        .collect();
-                    // A save that replaced a pending one carries its outlines too.
-                    let Some(PageObject::Outline(outline)) = added.last() else {
-                        panic!("Expected an added outline")
-                    };
+                (
+                    "insert",
+                    PageOp::Add {
+                        object: PageObject::Outline(outline),
+                        ..
+                    },
+                ) => {
                     let text = outline.paragraphs[0].text().unwrap().text.text();
                     let operation: u64 = text.split_once(':').unwrap().0.parse()?;
                     assert_eq!(text, payload(operation, size));
@@ -124,33 +116,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assert!(revision.nodes.contains_key(&outline.id));
                     operation
                 }
-                "format" => {
-                    let paragraph = intent
-                        .after
-                        .objects
-                        .iter()
-                        .find_map(|object| match object {
-                            PageObject::Outline(outline) => outline
-                                .paragraphs
-                                .iter()
-                                .find(|p| p.text().is_some_and(|t| t.id == target)),
-                            _ => None,
-                        })
-                        .expect("formatted paragraph");
-                    let text = paragraph.text().unwrap();
-                    assert_eq!(text.text.text(), expected);
-                    let value = text.text.spans()[0].format.font_size.expect("font size");
-                    assert!(
-                        text.text
-                            .spans()
-                            .iter()
-                            .all(|s| s.format.font_size == Some(value))
-                    );
+                ("format", PageOp::Format { text, set, .. }) => {
+                    assert_eq!(*text, target);
+                    let [onestore::TextAttribute::FontSize(value)] = set[..] else {
+                        panic!("Expected a font size")
+                    };
                     assert!((7.0..=130.0).contains(&value) && value.fract() == 0.0);
                     font_size = Some(value);
                     value as u64 - 6
                 }
-                _ => unreachable!(),
+                other => panic!("Unexpected op {other:?}"),
             };
             assert!(operations.last().is_none_or(|last| *last < operation));
             assert!(ids.last().is_none_or(|last| *last < pending.id));
@@ -167,10 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         if operations.is_empty() {
-            assert!(
-                snapshot == base,
-                "An empty local queue changed its working image"
-            );
+            assert!(snapshot == base, "An empty local queue changed its image");
         }
         if let Some(output) = args.get(3) {
             std::fs::write(output, &snapshot)?;
@@ -197,51 +169,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let replacement = payload(operation, size);
     println!("editing {operation}");
     io::stdout().flush()?;
-    let (space, page) = {
-        let store = Store::parse(&source)?;
-        let index = RevisionIndex::parse(&store)?;
-        let document = Document::parse(&index)?;
-        let mut page = Page::from_space(&document, sid)?;
-        fn target_paragraph(page: &mut Page, oid: ExGuid) -> &mut onestore::page::PageParagraph {
-            page.objects
-                .iter_mut()
+    let end = u32::try_from(text.encode_utf16().count())?;
+    let op = match operation_kind.as_str() {
+        "text" => PageOp::Text {
+            text: oid,
+            range: 0..end,
+            with: replacement.clone(),
+        },
+        "insert" => {
+            let page = cache.page(sid)?;
+            let template = page
+                .objects
+                .iter()
                 .find_map(|object| match object {
                     PageObject::Outline(outline) => outline
                         .paragraphs
-                        .iter_mut()
+                        .iter()
                         .find(|p| p.text().is_some_and(|t| t.id == oid)),
                     _ => None,
                 })
                 .expect("target paragraph")
-        }
-        let end = u32::try_from(text.encode_utf16().count())?;
-        match operation_kind.as_str() {
-            "text" => {
-                let target = target_paragraph(&mut page, oid).text_mut().unwrap();
-                let format = target.text.format_at(0)?.clone();
-                target.text.apply(Edit {
-                    range: 0..end,
-                    replacement: Paragraph::new(replacement.clone(), format),
-                })?;
-            }
-            "insert" => {
-                let template = target_paragraph(&mut page, oid).clone();
-                let mut fresh = template.clone();
-                fresh.id = onestore::page::text::new_id()?;
-                fresh.parent = None;
-                fresh.level = 1;
-                fresh.lists.clear();
-                fresh.tags.clear();
-                fresh.style = None;
-                let format = template.text().unwrap().text.format_at(0)?.clone();
-                fresh.content =
-                    onestore::page::ParagraphContent::Text(onestore::page::TextObject {
-                        id: onestore::page::text::new_id()?,
-                        date_field: None,
-                        text: Paragraph::new(replacement.clone(), format),
-                        tags: Vec::new(),
-                    });
-                let outline = onestore::page::Outline {
+                .clone();
+            let mut fresh = template.clone();
+            fresh.id = onestore::page::text::new_id()?;
+            fresh.parent = None;
+            fresh.level = 1;
+            fresh.lists.clear();
+            fresh.tags.clear();
+            fresh.style = None;
+            let format = template.text().unwrap().text.format_at(0)?.clone();
+            fresh.content = onestore::page::ParagraphContent::Text(onestore::page::TextObject {
+                id: onestore::page::text::new_id()?,
+                date_field: None,
+                text: Paragraph::new(replacement.clone(), format),
+                tags: Vec::new(),
+            });
+            PageOp::Add {
+                object: PageObject::Outline(onestore::page::Outline {
                     id: onestore::page::text::new_id()?,
                     title: false,
                     min_width: None,
@@ -253,29 +217,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     indents: Vec::new(),
                     paragraphs: vec![fresh],
                     unsupported: Vec::new(),
-                };
-                let at = page
+                }),
+                before: page
                     .objects
                     .iter()
-                    .position(|o| matches!(o, PageObject::Title(_)))
-                    .unwrap_or(page.objects.len());
-                page.objects.insert(at, PageObject::Outline(outline));
+                    .find(|o| matches!(o, PageObject::Title(_)))
+                    .map(PageObject::id),
             }
-            "format" => {
-                assert!((1..=124).contains(&operation));
-                let target = target_paragraph(&mut page, oid).text_mut().unwrap();
-                let mut format = target.text.format_at(0)?.clone();
-                format.font_size = Some(6.0 + operation as f32);
-                target.text.apply(Edit {
-                    range: 0..end,
-                    replacement: Paragraph::new(text.clone(), format),
-                })?;
-            }
-            _ => unreachable!(),
         }
-        (sid, page)
+        "format" => {
+            assert!((1..=124).contains(&operation));
+            PageOp::Format {
+                text: oid,
+                range: 0..end,
+                set: vec![onestore::TextAttribute::FontSize(6.0 + operation as f32)],
+                clear: Vec::new(),
+            }
+        }
+        _ => unreachable!(),
     };
-    let id = cache.save(&source, space, &page, "Fixture")?.unwrap();
+    let id = cache.apply(
+        "Fixture",
+        onestore::op::Edit {
+            at: 133_000_000_000_000_000,
+            ops: vec![Op::Page { space: sid, op }],
+        },
+    )?;
     if acknowledgement == "unack" {
         println!("durable {operation} {id}");
     } else {

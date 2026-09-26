@@ -11,7 +11,7 @@ use serde_json::json;
 
 #[path = "support/server.rs"]
 mod server;
-use server::{Fault, Server};
+use server::{Fault, Server, pages};
 #[path = "support/model_ops.rs"]
 mod model_ops;
 use model_ops::{
@@ -105,10 +105,21 @@ pub(crate) fn remote_with(source: &[u8], space: ExGuid, change: impl FnOnce(&mut
         .to_vec()
 }
 
+/// Publishes the batch holding `id`, unless an earlier step already did.
 pub(crate) fn published(cache: &Replica, server: &mut Server, id: u64) {
-    assert!(
-        matches!(cache.sync_once(server).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
-    );
+    if !matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ) {
+        assert!(matches!(
+            cache.sync_once(server).unwrap().edit,
+            Some((_, EditStatus::Published { .. }))
+        ));
+    }
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
 }
 
 fn moved(x: f32, y: f32) -> impl Fn(&mut Outline) {
@@ -144,7 +155,7 @@ fn layout_and_dependent_text_survive_reopen_and_a_remote_format_of_the_same_page
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(cache.pending().unwrap(), pending);
-        assert_eq!(cache.snapshot().unwrap(), local);
+        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
         let mut server = Server::new(&remote_with(&source, space, |page| {
             restyle(page, text_id, 0..8, |format| format.bold = Some(true));
         }));
@@ -232,7 +243,7 @@ fn an_uncertain_move_confirms_from_the_remote_revision_and_adopts_the_remote_tit
 }
 
 #[test]
-fn competing_layout_requires_review_against_the_current_remote_page() {
+fn competing_layout_conflicts_until_the_local_page_is_kept() {
     let (source, space, outline, text_id) = fixture();
     let cases: [(Change<Outline>, Change<Outline>); 2] = [
         (Box::new(moved(180.0, 216.0)), Box::new(moved(288.0, 216.0))),
@@ -255,41 +266,25 @@ fn competing_layout_requires_review_against_the_current_remote_page() {
             remote_change(outline_mut(page, outline));
         }));
         assert_eq!(
-            cache.sync_once(&mut server).unwrap(),
+            cache.sync_once(&mut server).unwrap().edit,
             Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
         );
         assert_eq!(server.publications, 0);
-        assert_eq!(cache.snapshot().unwrap(), local);
+        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
         let dependent = save(&cache, text_id, |page| {
             replace_text(page, text_id, 0..0, "Local ")
         })
         .unwrap()
         .unwrap();
-        let queue = cache.pending().unwrap();
         let local = cache.snapshot().unwrap();
-        let observed = cache.remote_snapshot().unwrap();
-        assert!(
-            cache
-                .review_page(id, &source, &observed, &page_of(&observed, space))
-                .is_err()
-        );
-        assert!(
-            cache
-                .review_page(id, &local, &source, &page_of(&source, space))
-                .is_err()
-        );
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(
             cache.status(id).unwrap(),
             Some(EditStatus::Conflict(ConflictKind::ContentChanged))
         );
-        review(&cache, id, text_id, |page| {
-            local_change(outline_mut(page, outline))
-        })
-        .unwrap();
+        cache.resolve(id, notebook::Resolution::Mine).unwrap();
         assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-        assert_eq!(cache.pending().unwrap()[1], queue[1]);
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         for id in [id, dependent] {
@@ -354,7 +349,7 @@ fn twelve_offline_writers_preserve_all_layout_intents_through_review_and_restart
             let expected = page_of(&cache.snapshot().unwrap(), space);
             drop(cache);
             let cache = Replica::open(&path).unwrap();
-            if cache.sync_once(&mut server).unwrap()
+            if cache.sync_once(&mut server).unwrap().edit
                 == Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
             {
                 review(&cache, id, text_id, change).unwrap();
@@ -411,17 +406,17 @@ fn an_uncertain_layout_attempt_confirms_by_revision_or_by_an_equal_remote_page()
             continue;
         }
         assert_eq!(
-            cache.sync_once(&mut server).unwrap(),
+            cache.sync_once(&mut server).unwrap().edit,
             Some((id, status.clone()))
         );
         server.visible = remote_with(&source, space, |page| {
             resized(216.0, true)(outline_mut(page, outline));
         });
         assert_eq!(
-            cache.sync_once(&mut server).unwrap(),
+            cache.sync_once(&mut server).unwrap().edit,
             Some((id, status.clone()))
         );
-        assert_eq!(cache.snapshot().unwrap(), local);
+        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
         server.visible = remote_with(&source, space, |page| {
             resized(144.0, true)(outline_mut(page, outline));
         });
@@ -503,7 +498,7 @@ fn native_moves_deletions_and_layout_changes_merge_or_require_review() {
         let id = save(&cache, dependent, save_both).unwrap().unwrap();
         let local = cache.snapshot().unwrap();
         let queue = cache.pending().unwrap();
-        let merged = match cache.sync_once(&mut server).unwrap().unwrap() {
+        let merged = match cache.sync_once(&mut server).unwrap().edit.unwrap() {
             (actual, EditStatus::Published { .. }) => {
                 assert_eq!(actual, id, "{name}");
                 true
@@ -515,7 +510,7 @@ fn native_moves_deletions_and_layout_changes_merge_or_require_review() {
                     "{name}"
                 );
                 assert_eq!(cache.pending().unwrap(), queue);
-                assert_eq!(cache.snapshot().unwrap(), local);
+                assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
                 drop(cache);
                 let cache = Replica::open(&path).unwrap();
                 review(&cache, id, dependent, save_both).unwrap();
@@ -590,7 +585,7 @@ fn a_new_native_wrap_reservation_requires_review_before_width_replacement() {
     .unwrap();
     let mut server = Server::new(NATIVE);
     assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
+        cache.sync_once(&mut server).unwrap().edit,
         Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
     );
     review(&cache, id, text_id, |page| {

@@ -1,9 +1,10 @@
 use super::*;
-use onestore::{CommitError, CommitState, Stamp, Transaction};
+use crate::working::{Rebased, Request, Resolve, Sealed};
+use onestore::{CommitError, CommitState, RevisionIndex, Stamp, Store, Transaction};
 use rusqlite::OptionalExtension;
 use std::{
     collections::BTreeMap,
-    sync::{MutexGuard, TryLockError, atomic::Ordering},
+    sync::{MutexGuard, TryLockError},
 };
 
 /// A single remote file with fresh reads and native-compatible guarded publication.
@@ -25,12 +26,30 @@ pub trait Remote {
 pub enum ConflictKind {
     /// The edited page or a selected page no longer exists remotely.
     TargetUnavailable = 0,
-    /// The remote image no longer accepts the intent's publication.
+    /// The remote section no longer accepts the edit.
     UnsupportedEdit = 1,
     /// Page order or indentation changed remotely in a way the batch cannot absorb.
     StructureChanged = 2,
-    /// The remote page changed where the local model changed too; review is required.
+    /// The remote page changed where the local edits changed it too; review is required.
     ContentChanged = 3,
+}
+
+impl ConflictKind {
+    fn from_stored(kind: i64) -> Result<Self> {
+        Ok(match kind {
+            0 => Self::TargetUnavailable,
+            1 => Self::UnsupportedEdit,
+            2 => Self::StructureChanged,
+            3 => Self::ContentChanged,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unknown cached conflict kind",
+                )
+                .into());
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,499 +65,534 @@ pub enum EditStatus {
         revision: ExGuid,
     },
     /// Retired unpublished by a reviewed release; the archive at this path holds the
-    /// intent, its attempt evidence and both images.
+    /// edit, its attempt evidence and both images.
     Archived {
         archive: String,
     },
 }
 
+/// What one synchronization step did: the state its batch reached, named by the batch's
+/// newest edit, and the pages a remote change replaced.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Synced {
+    pub edit: Option<(u64, EditStatus)>,
+    pub changed: Vec<ExGuid>,
+}
+
+/// The queue as a synchronization step starts it.
+struct State {
+    base: Stamp,
+    /// The observed remote image's stamp while it is not the base.
+    remote: Option<Stamp>,
+    /// The first batch waiting on a remote answer: sealed, attempted, or in conflict.
+    blocked: Option<Blocked>,
+    queued: bool,
+}
+
+struct Blocked {
+    batch: i64,
+    attempted: bool,
+    conflict: Option<ConflictKind>,
+    revisions: Option<BTreeMap<ExGuid, ExGuid>>,
+}
+
+fn state(connection: &Connection) -> Result<State> {
+    let base = base::stamp(connection, base::Image::Base)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
+    let blocked = connection
+        .query_row(
+            "SELECT id, attempted, conflict, revisions FROM batches
+             WHERE attempted=1 OR conflict IS NOT NULL ORDER BY id LIMIT 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(batch, attempted, conflict, revisions)| {
+            Ok::<_, Error>(Blocked {
+                batch,
+                attempted,
+                conflict: conflict.map(ConflictKind::from_stored).transpose()?,
+                revisions: revisions
+                    .map(|revisions| decode_revisions(&revisions))
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    Ok(State {
+        base,
+        remote: base::stamp(connection, base::Image::Remote)?,
+        blocked,
+        queued: connection
+            .query_row("SELECT EXISTS(SELECT 1 FROM batches)", [], |row| row.get(0))?,
+    })
+}
+
+fn decode_revisions(encoded: &str) -> Result<BTreeMap<ExGuid, ExGuid>> {
+    let revisions: BTreeMap<ExGuid, ExGuid> = serde_json::from_str(encoded)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if revisions
+        .iter()
+        .any(|(space, revision)| space.guid == [0; 16] || revision.guid == [0; 16])
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cached publication evidence is incomplete",
+        )
+        .into());
+    }
+    Ok(revisions)
+}
+
+/// The revision a batch's seal stored for the first page an edit changes.
+fn revision_of(edit: &onestore::op::Edit, revisions: &BTreeMap<ExGuid, ExGuid>) -> Result<ExGuid> {
+    edit.ops
+        .iter()
+        .find_map(|op| match op {
+            onestore::op::Op::Page { space, .. } => revisions.get(space),
+            onestore::op::Op::Section(_) => None,
+        })
+        .or_else(|| revisions.values().next())
+        .copied()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Cached publication evidence is incomplete",
+            )
+            .into()
+        })
+}
+
+/// The newest edit of a batch.
+fn newest(connection: &Connection, batch: i64) -> Result<u64> {
+    unsigned(
+        connection.query_row("SELECT max(id) FROM edits WHERE batch=?1", [batch], |row| {
+            row.get(0)
+        })?,
+    )
+}
+
 impl Replica {
     /// Returns a durable receipt or the persisted state of a locally acknowledged edit.
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        status(&connection, id)
+        status(&*self.lock()?, id)
     }
 
-    /// The last observed remote image, retained alongside the complete local working image.
-    /// Observation alone does not acknowledge any pending edit's remote durability.
+    /// The last observed remote image. Observation alone does not acknowledge any pending
+    /// edit's remote durability.
     pub fn remote_snapshot(&self) -> Result<Vec<u8>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        images::base(&connection)
+        let connection = self.lock()?;
+        let image = match base::read(&connection, base::Image::Remote)? {
+            Some(image) => Some(image),
+            None => base::read(&connection, base::Image::Base)?,
+        };
+        Ok(image.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
+        })?)
     }
 
-    /// Reconciles one pending edit, or refreshes the working image when the queue is empty.
-    /// Network I/O holds synchronization ownership without holding the cache mutex.
-    /// Uncertain edits are never replayed; retired formatting may confirm its complete observed effect.
-    pub fn sync_once(&self, remote: &mut impl Remote) -> Result<Option<(u64, EditStatus)>> {
+    /// The unpublished batch the remote no longer accepts, if any.
+    pub fn conflict(&self) -> Result<Option<Conflict>> {
+        let connection = self.lock()?;
+        let row: Option<(i64, i64, String)> = connection
+            .query_row(
+                "SELECT id, conflict, space FROM batches WHERE conflict IS NOT NULL ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(batch, kind, space)| {
+            Ok(Conflict {
+                id: newest(&connection, batch)?,
+                space: space.parse()?,
+                kind: ConflictKind::from_stored(kind)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Publishes the oldest unpublished batch, rebasing the queue first when the remote
+    /// changed. Reads the remote image only when its stamp moved; network I/O holds
+    /// synchronization ownership without holding the cache mutex. Uncertain attempts are
+    /// never replayed.
+    pub fn sync_once(&self, remote: &mut impl Remote) -> Result<Synced> {
         let _owner = self.sync_owner()?;
-        struct Step<'a>(&'a Replica);
-        impl Drop for Step<'_> {
-            fn drop(&mut self) {
-                self.0.in_flight.store(0, Ordering::Release);
-            }
+        let state = state(&*self.lock()?)?;
+        let observed = remote.stamp().map_err(Error::RemoteIo)?;
+        if let (Some(observed), Some(blocked)) = (&observed, &state.blocked)
+            && Some(observed) == state.remote.as_ref().or(Some(&state.base))
+        {
+            // Nothing new to decide: the remote is as it was when the batch blocked.
+            let id = newest(&*self.lock()?, blocked.batch)?;
+            return Ok(Synced {
+                edit: Some((
+                    id,
+                    status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                )),
+                changed: Vec::new(),
+            });
         }
-        let _step = Step(self);
-        let base = self.remote_snapshot()?;
-        let changed = match remote.stamp().map_err(Error::RemoteIo)? {
-            Some(stamp) if stamp == Stamp::of(&base)? => None,
-            _ => Some(remote.read().map_err(Error::RemoteIo)?).filter(|read| *read != base),
-        };
-        // An unchanged remote is the base image, validated when it was stored.
-        let identity = changed.as_deref().map(validate).transpose()?;
-        let snapshot = changed.unwrap_or(base);
-        let (intent, attempted) = {
-            let mut connection = self
-                .connection
-                .lock()
-                .map_err(|_| io::Error::other("Cache owner panicked"))?;
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            if identity.is_none() && images::settled(&transaction)? {
-                return Ok(None);
+        let image = match observed {
+            Some(observed) if observed == state.base => None,
+            _ => {
+                let image = remote.read().map_err(Error::RemoteIo)?;
+                // A read image is compared whole: a stamp stands for it only when read alone.
+                let base = base::read(&*self.lock()?, base::Image::Base)?;
+                (base.as_deref() != Some(&image[..])).then_some(image)
             }
-            let (base, working) = images::both(&transaction)?;
-            if let Some(identity) = identity
-                && RevisionIndex::parse(&Store::parse(&base)?)?.root != identity
+        };
+        let mut changed = Vec::new();
+        if let Some(image) = image {
+            if let Some(Blocked {
+                batch,
+                attempted: true,
+                revisions,
+                ..
+            }) = &state.blocked
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Remote snapshot belongs to another document",
-                )
-                .into());
-            }
-            let intent = {
-                let mut query = transaction
-                    .prepare("SELECT id, space, operation FROM edits ORDER BY id LIMIT 1")?;
-                let mut rows = query.query([])?;
-                rows.next()?.map(pending_edit).transpose()?
-            };
-            let Some(intent) = intent else {
-                images::set_base(&transaction, &base, &snapshot, &snapshot)?;
-                transaction.commit()?;
-                return Ok(None);
-            };
-            self.in_flight.store(
-                i64::try_from(intent.id).map_err(io::Error::other)?,
-                Ordering::Release,
-            );
-            let attempted = transaction
-                .query_row(
-                    "SELECT revisions FROM attempt WHERE edit_id=?1",
-                    [i64::try_from(intent.id).map_err(io::Error::other)?],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?;
-            images::set_base(&transaction, &base, &snapshot, &working)?;
-            transaction.commit()?;
-            (intent, attempted)
-        };
-        if let Some(encoded) = attempted {
-            let revisions = attempted_revisions(&encoded, intent.space)?;
-            let mut revision = revisions[&intent.space];
-            let store = Store::parse(&snapshot)?;
-            let index = RevisionIndex::parse(&store)?;
-            if !revisions.iter().all(|(space, revision)| {
-                index
-                    .spaces
-                    .get(space)
-                    .is_some_and(|space| space.revisions.contains_key(revision))
-            }) {
-                // A retired attempt confirms only when its complete effect is observed.
-                let satisfied = match &intent.operation {
-                    Operation::Page(edit) if revisions.len() == 1 => {
-                        page_of(&snapshot, intent.space)?.is_some_and(|page| page == edit.after)
-                    }
-                    _ => false,
-                };
-                if !satisfied {
-                    return Ok(Some((
-                        intent.id,
-                        EditStatus::AwaitingConfirmation { revision },
-                    )));
+                let id = newest(&*self.lock()?, *batch)?;
+                let revisions = revisions.clone().unwrap_or_default();
+                let store = Store::parse(&image)?;
+                if !store.checksum_mismatches.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Notebook transaction checksum damage",
+                    )
+                    .into());
                 }
-                revision = index.active(intent.space)?;
-            }
-            if let Err(error) = remote.confirm(&snapshot) {
-                if error.state == CommitState::Committed {
-                    self.acknowledge(intent.id, revision, &snapshot)?;
-                }
-                return Err(error.into());
-            }
-            self.acknowledge(intent.id, revision, &snapshot)?;
-            return Ok(Some((intent.id, EditStatus::Published { revision })));
-        }
-        let candidate = match &intent.operation {
-            Operation::Page(edit) => page_of(&snapshot, intent.space)?
-                .ok_or(ConflictKind::TargetUnavailable)
-                .and_then(|current| {
-                    let target = if current == edit.before {
-                        edit.after.clone()
-                    } else {
-                        crate::merge::merge(&edit.before, &edit.after, &current)
-                            .ok_or(ConflictKind::ContentChanged)?
-                    };
-                    PreparedEdit::page(&snapshot, intent.space, &target, &edit.author)
-                        .map_err(|_| ConflictKind::UnsupportedEdit)
-                }),
-            Operation::CreatePage(page) => PreparedEdit::create_page(&snapshot, page)
-                .map_err(|_| ConflictKind::StructureChanged),
-            Operation::Pages(edit) => edit.prepare(&snapshot, intent.space)?,
-            Operation::DeletePages(pages) => {
-                let store = Store::parse(&snapshot)?;
                 let index = RevisionIndex::parse(&store)?;
-                if pages.iter().any(|page| {
+                index.validate_current()?;
+                if index.root != self.root {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Remote snapshot belongs to another document",
+                    )
+                    .into());
+                }
+                let observed = revisions.iter().all(|(space, revision)| {
                     index
                         .spaces
-                        .get(page)
-                        .is_none_or(|space| space.labels.is_empty())
-                }) || Document::parse(&index)?
-                    .pages()?
-                    .iter()
-                    .filter(|(sid, _)| pages.contains(sid))
-                    .count()
-                    != pages.len()
-                {
-                    Err(ConflictKind::TargetUnavailable)
+                        .get(space)
+                        .is_some_and(|space| space.revisions.contains_key(revision))
+                });
+                let sealed = working::sealed(&*self.lock()?)?
+                    .filter(|sealed| sealed.batch == *batch)
+                    .and_then(|sealed| sealed.transaction);
+                // Without its revisions the attempt still counts once the remote holds
+                // every page it changed as it changed them; its receipts then name the
+                // remote's revisions.
+                let receipts = if observed {
+                    None
                 } else {
-                    PreparedEdit::delete_pages_permanently(&snapshot, pages)
-                        .map_err(|_| ConflictKind::UnsupportedEdit)
+                    let equal = self.holds(&image, sealed.as_ref(), &revisions)?;
+                    if !equal {
+                        base::write(&*self.lock()?, base::Image::Remote, &image)?;
+                        return Ok(Synced {
+                            edit: Some((
+                                id,
+                                status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                            )),
+                            changed,
+                        });
+                    }
+                    Some(
+                        revisions
+                            .keys()
+                            .filter_map(|space| Some((*space, index.active(*space).ok()?)))
+                            .collect(),
+                    )
+                };
+                if let Err(error) = remote.confirm(&image) {
+                    if error.state == CommitState::Committed {
+                        self.acknowledge(*batch, sealed.as_ref(), receipts.as_ref())?;
+                    }
+                    return Err(error.into());
+                }
+                self.acknowledge(*batch, sealed.as_ref(), receipts.as_ref())?;
+                let revision = self.receipt(id)?;
+                changed = self.rebase(Some(image), None)?.unwrap_or_default();
+                return Ok(Synced {
+                    edit: Some((id, EditStatus::Published { revision })),
+                    changed,
+                });
+            }
+            match self.rebase(Some(image), None)? {
+                Ok(spaces) => changed = spaces,
+                Err(conflict) => {
+                    return Ok(Synced {
+                        edit: Some((conflict.id, EditStatus::Conflict(conflict.kind))),
+                        changed,
+                    });
                 }
             }
-        };
-        let prepared = match candidate {
-            Ok(prepared) => prepared,
-            Err(kind) => {
-                let connection = self
-                    .connection
-                    .lock()
-                    .map_err(|_| io::Error::other("Cache owner panicked"))?;
-                connection.execute("INSERT INTO conflicts(edit_id, kind) VALUES (?1, ?2) ON CONFLICT(edit_id) DO UPDATE SET kind=excluded.kind", params![i64::try_from(intent.id).map_err(io::Error::other)?, kind as i64])?;
-                return Ok(Some((intent.id, EditStatus::Conflict(kind))));
+        } else if let Some(blocked) = &state.blocked {
+            if state.remote.is_some() {
+                // The remote is back at the base: what blocked the queue is gone.
+                let connection = self.lock()?;
+                base::clear(&connection, base::Image::Remote)?;
+                if blocked.conflict.is_some() {
+                    connection.execute("UPDATE batches SET conflict=NULL, space=NULL", [])?;
+                }
             }
+            if blocked.attempted {
+                let id = newest(&*self.lock()?, blocked.batch)?;
+                return Ok(Synced {
+                    edit: Some((
+                        id,
+                        status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                    )),
+                    changed,
+                });
+            }
+            if let Some(kind) = blocked.conflict
+                && state.remote.is_none()
+            {
+                let id = newest(&*self.lock()?, blocked.batch)?;
+                return Ok(Synced {
+                    edit: Some((id, EditStatus::Conflict(kind))),
+                    changed,
+                });
+            }
+        } else if !state.queued {
+            return Ok(Synced::default());
+        }
+        // The cache lock is released before the section thread, which takes it, seals.
+        let waiting = working::sealed(&*self.lock()?)?;
+        let sealed = match waiting {
+            Some(sealed) => {
+                if sealed.transaction.is_some() {
+                    self.lock()?
+                        .execute("UPDATE batches SET attempted=1 WHERE id=?1", [sealed.batch])?;
+                }
+                Some(sealed)
+            }
+            None => self.ask(|reply| Request::Seal { reply })?,
         };
-        if prepared.as_bytes() == snapshot {
-            let store = Store::parse(&snapshot)?;
-            let index = RevisionIndex::parse(&store)?;
-            let revision = index.active(intent.space)?;
-            if let Err(error) = remote.confirm(&snapshot) {
+        let Some(Sealed { batch, transaction }) = sealed else {
+            return Ok(Synced {
+                edit: None,
+                changed,
+            });
+        };
+        let id = newest(&*self.lock()?, batch)?;
+        let Some(transaction) = transaction else {
+            // Edits that changed nothing are published once the remote's image is durable.
+            let base = base::read(&*self.lock()?, base::Image::Base)?.unwrap_or_default();
+            if let Err(error) = remote.confirm(&base) {
                 if error.state == CommitState::Committed {
-                    self.acknowledge(intent.id, revision, &snapshot)?;
+                    self.acknowledge(batch, None, None)?;
                 }
                 return Err(error.into());
             }
-            self.acknowledge(intent.id, revision, &snapshot)?;
-            return Ok(Some((intent.id, EditStatus::Published { revision })));
-        }
-        // Once acknowledged this image is the base, which polls trust without validating.
-        validate(prepared.as_bytes())?;
-        let store = Store::parse(prepared.as_bytes())?;
-        let index = RevisionIndex::parse(&store)?;
-        let revision = index.active(intent.space)?;
-        let before_store = Store::parse(&snapshot)?;
-        let before = RevisionIndex::parse(&before_store)?;
-        let mut revisions: BTreeMap<_, _> = index
-            .spaces
-            .iter()
-            .filter_map(|(sid, space)| {
-                let revision = *space.labels.get(&(ExGuid::default(), 1))?;
-                (before
-                    .spaces
-                    .get(sid)
-                    .and_then(|s| s.labels.get(&(ExGuid::default(), 1)))
-                    != Some(&revision))
-                .then_some((*sid, revision))
-            })
-            .collect();
-        // The receipt's space can be unchanged in a multi-space edit.
-        revisions.insert(intent.space, revision);
-        {
-            let mut connection = self
-                .connection
-                .lock()
-                .map_err(|_| io::Error::other("Cache owner panicked"))?;
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            transaction.execute(
-                "DELETE FROM conflicts WHERE edit_id=?1",
-                [i64::try_from(intent.id).map_err(io::Error::other)?],
-            )?;
-            transaction.execute(
-                "INSERT INTO attempt(id, edit_id, revisions) VALUES (1, ?1, ?2)",
-                params![
-                    i64::try_from(intent.id).map_err(io::Error::other)?,
-                    serde_json::to_string(&revisions).map_err(io::Error::other)?
-                ],
-            )?;
-            transaction.commit()?;
-        }
-        match remote.publish(&prepared.transaction()) {
+            self.acknowledge(batch, None, None)?;
+            let revision = self.receipt(id)?;
+            return Ok(Synced {
+                edit: Some((id, EditStatus::Published { revision })),
+                changed,
+            });
+        };
+        match remote.publish(&transaction) {
             Ok(()) => {}
             Err(error) if error.state == CommitState::NotCommitted => {
-                let connection = self
-                    .connection
-                    .lock()
-                    .map_err(|_| io::Error::other("Cache owner panicked"))?;
-                connection.execute(
-                    "DELETE FROM attempt WHERE edit_id=?1",
-                    [i64::try_from(intent.id).map_err(io::Error::other)?],
-                )?;
+                self.lock()?
+                    .execute("UPDATE batches SET attempted=0 WHERE id=?1", [batch])?;
                 return Err(error.into());
             }
             Err(error) if error.state == CommitState::Committed => {
-                self.acknowledge(intent.id, revision, prepared.as_bytes())?;
+                self.acknowledge(batch, Some(&transaction), None)?;
                 return Err(error.into());
             }
             Err(error) => return Err(error.into()),
         }
-        self.acknowledge(intent.id, revision, prepared.as_bytes())?;
-        Ok(Some((intent.id, EditStatus::Published { revision })))
-    }
-
-    /// Repositions an unattempted page-creation conflict, retaining dependent object identities.
-    pub fn rebase_page_creation_conflict(
-        &self,
-        id: u64,
-        local: &[u8],
-        remote: &[u8],
-        before: Option<ExGuid>,
-    ) -> Result<()> {
-        self.resolve_conflict(id, local, remote, |intent| {
-            let Operation::CreatePage(page) = intent.operation else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Select a page-creation conflict",
-                )
-                .into());
-            };
-            let page = page.reposition(before)?;
-            PreparedEdit::create_page(remote, &page)?;
-            Ok(Operation::CreatePage(page))
+        self.acknowledge(batch, Some(&transaction), None)?;
+        let revision = self.receipt(id)?;
+        Ok(Synced {
+            edit: Some((id, EditStatus::Published { revision })),
+            changed,
         })
     }
 
-    /// Reviews a page batch against both cache images, retaining its page and series identities.
-    pub fn rebase_pages_conflict(
+    /// Whether `image` holds every page in `revisions` as the base with `sealed` has it.
+    fn holds(
         &self,
-        id: u64,
-        local: &[u8],
-        remote: &[u8],
-        edits: &[onestore::PageEdit],
-    ) -> Result<()> {
-        self.resolve_conflict(id, local, remote, |intent| {
-            let Operation::Pages(batch) = intent.operation else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Select a page movement or indentation conflict",
-                )
-                .into());
-            };
-            Ok(Operation::Pages(batch.review(
-                remote,
-                intent.space,
-                edits,
-            )?))
-        })
+        image: &[u8],
+        sealed: Option<&Transaction>,
+        revisions: &BTreeMap<ExGuid, ExGuid>,
+    ) -> Result<bool> {
+        let base = base::read(&*self.lock()?, base::Image::Base)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
+        })?;
+        let (local, remote) = (onestore::Arena::default(), onestore::Arena::default());
+        let mut local = onestore::Section::open(&local, base)?;
+        if let Some(sealed) = sealed {
+            local.replay(sealed)?;
+        }
+        let remote = onestore::Section::open(&remote, image.to_vec())?;
+        Ok(revisions.keys().all(
+            |space| matches!((local.page(*space), remote.page(*space)), (Ok(a), Ok(b)) if a == b),
+        ))
     }
 
-    /// Replaces a conflicting page save with a model reviewed against the remote page.
-    /// Both supplied images must match `snapshot` and `remote_snapshot`; the reviewed
-    /// model must publish against the remote image, and its author is retained.
-    pub fn review_page(&self, id: u64, local: &[u8], remote: &[u8], after: &Page) -> Result<()> {
-        self.resolve_conflict(id, local, remote, |intent| {
-            let Operation::Page(edit) = intent.operation else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Select a page save conflict",
-                )
-                .into());
-            };
-            let before = page_of(remote, intent.space)?.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "The page is no longer in the remote section",
-                )
-            })?;
-            PreparedEdit::page(remote, intent.space, after, &edit.author)?;
-            Ok(Operation::Page(PageIntent {
-                before,
-                after: after.clone(),
-                author: edit.author,
-            }))
-        })
+    /// Asks the section thread to replay the queue on `image`; `Err` is the conflict found.
+    fn rebase(
+        &self,
+        image: Option<Vec<u8>>,
+        resolve: Option<Resolve>,
+    ) -> Result<std::result::Result<Vec<ExGuid>, Conflict>> {
+        Ok(
+            match self.ask(|reply| Request::Rebase {
+                image,
+                resolve,
+                reply,
+            })? {
+                Rebased::Applied { changed } => Ok(changed),
+                Rebased::Conflict { id, space, kind } => Err(Conflict { id, space, kind }),
+            },
+        )
     }
 
-    /// Retires the oldest edit's uncertain attempt after review. The branch is first
-    /// exported to `archive` (a new file), which is the record: no receipt is written.
-    /// `Some(after)` continues from the reviewed page as a fresh intent against the
-    /// current remote page, keeping the edit's id and its dependents; `None` abandons
-    /// the whole local branch, whose edits become `Archived`, and the working image
-    /// returns to the remote image. Both need the reviewed images to be current.
-    pub fn release_attempt(
+    fn receipt(&self, id: u64) -> Result<ExGuid> {
+        match status(&*self.lock()?, id)? {
+            Some(EditStatus::Published { revision }) => Ok(revision),
+            _ => Err(io::Error::other("A published edit has no receipt").into()),
+        }
+    }
+
+    /// Records a published batch: the base becomes the image it left, each of its edits
+    /// gets a receipt naming the revisions its seal stored, or `revisions`, and it leaves
+    /// the queue.
+    fn acknowledge(
         &self,
-        id: u64,
-        local: &[u8],
-        remote: &[u8],
-        archive: &Path,
-        after: Option<&Page>,
+        batch: i64,
+        transaction: Option<&Transaction>,
+        revisions: Option<&BTreeMap<ExGuid, ExGuid>>,
     ) -> Result<()> {
-        let owner = self.sync_owner()?;
-        let intent = self
-            .pending()?
-            .into_iter()
-            .next()
-            .filter(|intent| intent.id == id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Only the oldest edit can hold an attempt",
-                )
-            })?;
-        let continued = match after {
-            Some(after) => {
-                let Operation::Page(edit) = intent.operation else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "Select a page save to continue from",
-                    )
-                    .into());
-                };
-                let before = page_of(remote, intent.space)?.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "The page is no longer in the remote section",
-                    )
-                })?;
-                PreparedEdit::page(remote, intent.space, after, &edit.author)?;
-                Some(Operation::Page(PageIntent {
-                    before,
-                    after: after.clone(),
-                    author: edit.author,
-                }))
-            }
-            None => None,
+        let mut connection = self.lock()?;
+        let database = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(transaction) = transaction {
+            base::publish(&database, transaction)?;
+        }
+        let revisions = match revisions {
+            Some(revisions) => revisions.clone(),
+            None => decode_revisions(&database.query_row(
+                "SELECT revisions FROM batches WHERE id=?1",
+                [batch],
+                |row| row.get::<_, String>(0),
+            )?)?,
         };
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (base, working) = images::both(&transaction)?;
-        if working != local || base != remote {
-            return Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "The reviewed cache images changed",
-            )
-            .into());
+        for queued in queue::load(&database, Some(batch))? {
+            database.execute(
+                "INSERT INTO receipts(edit_id, revision) VALUES (?1, ?2)",
+                params![
+                    signed(queued.id)?,
+                    revision_of(&queued.edit, &revisions)?.to_string()
+                ],
+            )?;
         }
-        let id = i64::try_from(id).map_err(io::Error::other)?;
-        let attempted: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM attempt WHERE edit_id=?1)",
-            [id],
-            |row| row.get(0),
+        database.execute("DELETE FROM batches WHERE id=?1", [batch])?;
+        queue::collect(&database)?;
+        database.commit()?;
+        Ok(())
+    }
+
+    /// Resolves the conflict holding edit `id`: the batch and everything queued after it
+    /// drop their ops on the conflicted page; `Mine` rewrites the remote page to the local
+    /// one first. A conflict on another page may follow.
+    pub fn resolve(&self, id: u64, resolution: Resolution) -> Result<()> {
+        self.resolve_with(id, resolution, None)
+    }
+
+    pub(crate) fn resolve_with(&self, id: u64, keep: Resolution, page: Option<Page>) -> Result<()> {
+        let owner = self.sync_owner()?;
+        let (first, space) = {
+            let connection = self.lock()?;
+            let row: Option<(i64, String)> = connection
+                .query_row(
+                    "SELECT (SELECT min(id) FROM edits WHERE batch=batches.id), space FROM batches
+                     WHERE conflict IS NOT NULL AND id=(SELECT batch FROM edits WHERE id=?1)",
+                    [signed(id)?],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            let Some((first, space)) = row else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "The edit is not in conflict",
+                )
+                .into());
+            };
+            (unsigned(first)?, space.parse()?)
+        };
+        // A conflict on another page is recorded like any other.
+        let _ = self.rebase(
+            None,
+            Some(Resolve {
+                first,
+                space,
+                keep,
+                page,
+            }),
         )?;
-        if !attempted {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "The edit has no uncertain attempt",
-            )
-            .into());
-        }
-        drop(transaction);
-        drop(connection);
-        self.export_recovery(archive)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute("DELETE FROM attempt WHERE edit_id=?1", [id])?;
-        match continued {
-            Some(operation) => {
-                transaction.execute(
-                    "UPDATE edits SET operation=?1 WHERE id=?2",
-                    params![
-                        serde_json::to_string(&operation).map_err(io::Error::other)?,
-                        id
-                    ],
-                )?;
-            }
-            None => {
-                transaction.execute(
-                    "INSERT INTO archived(edit_id, archive) SELECT id, ?1 FROM edits",
-                    [archive.to_string_lossy().into_owned()],
-                )?;
-                transaction.execute("DELETE FROM edits", [])?;
-                transaction.execute("UPDATE replica SET working=x'' WHERE id=1", [])?;
-            }
-        }
-        transaction.commit()?;
-        drop(connection);
         drop(owner);
         self.wake_sync();
         Ok(())
     }
 
-    fn resolve_conflict(
-        &self,
-        id: u64,
-        local: &[u8],
-        remote: &[u8],
-        update: impl FnOnce(PendingEdit) -> Result<Operation>,
-    ) -> Result<()> {
+    /// Retires the uncertain attempt of the batch holding edit `id` after review. The
+    /// queue is first exported to `archive` (a new file), which is the record: no receipt
+    /// is written. `Mine` publishes the batch again against the current remote; `Theirs`
+    /// abandons every unpublished edit, which become `Archived`, and the local pages return
+    /// to the remote's.
+    pub fn release(&self, id: u64, archive: &Path, resolution: Resolution) -> Result<()> {
         let owner = self.sync_owner()?;
-        let intent = self
-            .pending()?
-            .into_iter()
-            .next()
-            .filter(|intent| intent.id == id)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Only the oldest conflict can be rebased",
-                )
-            })?;
-        let operation = update(intent)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (base, working) = images::both(&transaction)?;
-        if working != local || base != remote {
-            return Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "The reviewed cache images changed",
+        let batch: Option<i64> = self
+            .lock()?
+            .query_row(
+                "SELECT id FROM batches WHERE attempted=1 AND id=(SELECT batch FROM edits WHERE id=?1)",
+                [signed(id)?],
+                |row| row.get(0),
             )
-            .into());
-        }
-        let id = i64::try_from(id).map_err(io::Error::other)?;
-        let eligible: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM conflicts WHERE edit_id=?1) AND NOT EXISTS(SELECT 1 FROM attempt)",
-            [id], |row| row.get(0),
-        )?;
-        if !eligible {
+            .optional()?;
+        let Some(batch) = batch else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "The edit is not an unattempted conflict",
+                "The edit has no uncertain attempt",
             )
             .into());
+        };
+        self.export_recovery(archive)?;
+        {
+            let mut connection = self.lock()?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            match resolution {
+                Resolution::Mine => {
+                    transaction.execute("UPDATE batches SET attempted=0 WHERE id=?1", [batch])?;
+                }
+                Resolution::Theirs => {
+                    transaction.execute(
+                        "INSERT INTO archived(edit_id, archive) SELECT id, ?1 FROM edits",
+                        [archive.to_string_lossy().into_owned()],
+                    )?;
+                    transaction.execute("DELETE FROM batches", [])?;
+                    if let Some(remote) = base::read(&transaction, base::Image::Remote)? {
+                        base::write(&transaction, base::Image::Base, &remote)?;
+                        base::clear(&transaction, base::Image::Remote)?;
+                    }
+                    queue::collect(&transaction)?;
+                }
+            }
+            transaction.commit()?;
         }
-        transaction.execute(
-            "UPDATE edits SET operation=?1 WHERE id=?2",
-            params![
-                serde_json::to_string(&operation).map_err(io::Error::other)?,
-                id
-            ],
-        )?;
-        transaction.execute("DELETE FROM conflicts WHERE edit_id=?1", [id])?;
-        transaction.commit()?;
-        drop(connection);
+        if resolution == Resolution::Theirs {
+            self.ask(|reply| Request::Reopen { reply })?;
+        }
         drop(owner);
         self.wake_sync();
         Ok(())
@@ -556,34 +610,25 @@ impl Replica {
             })?)
     }
 
-    fn acknowledge(&self, id: u64, revision: ExGuid, snapshot: &[u8]) -> Result<()> {
-        let id = i64::try_from(id).map_err(io::Error::other)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        transaction.execute(
-            "INSERT INTO receipts(edit_id, revision) VALUES (?1, ?2)",
-            params![id, revision.to_string()],
-        )?;
-        transaction.execute("DELETE FROM edits WHERE id=?1", [id])?;
-        let (base, working) = images::both(&transaction)?;
-        let pending: bool =
-            transaction.query_row("SELECT EXISTS(SELECT 1 FROM edits)", [], |row| row.get(0))?;
-        images::set_base(
-            &transaction,
-            &base,
-            snapshot,
-            if pending { &working } else { snapshot },
-        )?;
-        transaction.commit()?;
-        Ok(())
+    /// Whether nothing is queued and the remote still has the base's stamp, or the queue
+    /// is blocked on a remote that has not changed since; reads neither image and does not
+    /// lock the cache during remote I/O.
+    pub(crate) fn settled(&self, remote: &mut impl Remote) -> Result<bool> {
+        let state = state(&*self.lock()?)?;
+        let expected = match &state.blocked {
+            Some(_) => state.remote.unwrap_or(state.base),
+            None if !state.queued => state.base,
+            None => return Ok(false),
+        };
+        let Some(stamp) = remote.stamp().map_err(Error::RemoteIo)? else {
+            return Ok(false);
+        };
+        Ok(stamp == expected)
     }
 }
 
 pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStatus>> {
-    let id = i64::try_from(id).map_err(io::Error::other)?;
+    let id = signed(id)?;
     if let Some(revision) = connection
         .query_row(
             "SELECT revision FROM receipts WHERE edit_id=?1",
@@ -606,46 +651,26 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
     {
         return Ok(Some(EditStatus::Archived { archive }));
     }
-    let record: Option<(Option<String>, Option<i64>, String)> = connection.query_row(
-        "SELECT attempt.revisions, conflicts.kind, edits.space FROM edits LEFT JOIN attempt ON attempt.edit_id=edits.id LEFT JOIN conflicts ON conflicts.edit_id=edits.id WHERE edits.id=?1", [id], |row| Ok((row.get(0)?,row.get(1)?, row.get(2)?))).optional()?;
+    let record: Option<(bool, Option<i64>, Option<String>, String)> = connection
+        .query_row(
+            "SELECT batches.attempted, batches.conflict, batches.revisions, edits.edit
+             FROM edits JOIN batches ON batches.id=edits.batch WHERE edits.id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
     Ok(match record {
         None => None,
-        Some((Some(revision), _, space)) => Some(EditStatus::AwaitingConfirmation {
-            revision: {
-                let space = space.parse()?;
-                attempted_revisions(&revision, space)?[&space]
-            },
-        }),
-        Some((None, Some(kind), _)) => Some(EditStatus::Conflict(match kind {
-            0 => ConflictKind::TargetUnavailable,
-            1 => ConflictKind::UnsupportedEdit,
-            2 => ConflictKind::StructureChanged,
-            3 => ConflictKind::ContentChanged,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unknown cached conflict kind",
-                )
-                .into());
-            }
-        })),
-        Some((None, None, _)) => Some(EditStatus::Pending),
+        Some((true, _, revisions, edit)) => {
+            let revisions = decode_revisions(revisions.as_deref().unwrap_or("{}"))?;
+            let edit: onestore::op::Edit = serde_json::from_str(&edit)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let revision = revision_of(&edit, &revisions)?;
+            Some(EditStatus::AwaitingConfirmation { revision })
+        }
+        Some((false, Some(kind), ..)) => {
+            Some(EditStatus::Conflict(ConflictKind::from_stored(kind)?))
+        }
+        Some((false, None, ..)) => Some(EditStatus::Pending),
     })
-}
-
-fn attempted_revisions(encoded: &str, space: ExGuid) -> Result<BTreeMap<ExGuid, ExGuid>> {
-    let revisions: BTreeMap<ExGuid, ExGuid> = serde_json::from_str(encoded)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if !revisions.contains_key(&space)
-        || revisions
-            .iter()
-            .any(|(sid, rid)| sid.guid == [0; 16] || rid.guid == [0; 16])
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Cached publication evidence is incomplete",
-        )
-        .into());
-    }
-    Ok(revisions)
 }

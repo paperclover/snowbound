@@ -139,9 +139,10 @@ class OfflineLedgerTests(unittest.TestCase):
                 events.extend({'event': 'reopened_receipt', 'id': op+1, 'revision': f'{actor}-{op}'} for op in range(2))
                 events.append({'event': 'done'})
                 connection = sqlite3.connect(output / 'rust' / f'{actor}.sqlite')
-                connection.executescript('CREATE TABLE receipts(edit_id INTEGER, revision TEXT); CREATE TABLE edits(id INTEGER); CREATE TABLE attempt(id INTEGER); CREATE TABLE conflicts(id INTEGER); CREATE TABLE replica(id INTEGER, base BLOB, working BLOB);')
+                # Schema 15 in WAL mode, as a drained cache leaves it.
+                connection.executescript('PRAGMA journal_mode=WAL; CREATE TABLE receipts(edit_id INTEGER, revision TEXT); CREATE TABLE edits(id INTEGER); CREATE TABLE batches(id INTEGER); CREATE TABLE payloads(sha256 BLOB); CREATE TABLE base(chunk INTEGER, bytes BLOB); CREATE TABLE remote(chunk INTEGER, bytes BLOB);')
                 connection.executemany('INSERT INTO receipts VALUES (?,?)', [(op+1, f'{actor}-{op}') for op in range(2)])
-                connection.execute('INSERT INTO replica VALUES (1, ?, ?)', (b'opaque image', b''))
+                connection.execute('INSERT INTO base VALUES (0, ?)', (b'opaque image',))
                 connection.commit()
                 connection.close()
             for i in range(4):
@@ -165,8 +166,8 @@ class OfflineLedgerTests(unittest.TestCase):
             os.utime(output / 'rust/stop', ns=(0, 0))
             connection = sqlite3.connect(output / 'rust/w0.sqlite')
             for sql, undo in [("UPDATE receipts SET revision='wrong' WHERE edit_id=1", "UPDATE receipts SET revision='w0-0' WHERE edit_id=1"),
-                              ('INSERT INTO attempt VALUES (1)', 'DELETE FROM attempt'),
-                              ("UPDATE replica SET working=X'00'", "UPDATE replica SET working=X''")]:
+                              ('INSERT INTO batches VALUES (1)', 'DELETE FROM batches'),
+                              ("INSERT INTO remote VALUES (0, X'00')", 'DELETE FROM remote')]:
                 connection.execute(sql)
                 connection.commit()
                 with self.assertRaises(AssertionError): verify(output)

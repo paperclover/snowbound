@@ -1,4 +1,4 @@
-use notebook::{EditStatus, Error, Operation, Recovery, Replica};
+use notebook::{EditStatus, Error, Recovery, Replica};
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::Document,
@@ -13,6 +13,8 @@ use std::{
 
 #[path = "support/model_ops.rs"]
 mod model_ops;
+#[path = "support/server.rs"]
+mod server;
 
 const FIXTURE: &str = "../../corpus/native-external-assets/notebook";
 
@@ -54,10 +56,7 @@ fn queued_cache(root: &Path) -> Replica {
     .unwrap()
     .unwrap();
     let page = onestore::PageCreation::new(None, Some("Queued page"), "Author").unwrap();
-    cache
-        .create_page(&cache.snapshot().unwrap(), &page)
-        .unwrap()
-        .unwrap();
+    server::section_op(&cache, onestore::op::SectionOp::Create(page));
     cache
 }
 
@@ -118,7 +117,10 @@ fn downloaded_media_survives_reopen_and_recovery_with_the_queue_intact() {
         (summary.cached_assets, summary.cached_asset_bytes),
         (2, 1024)
     );
-    assert_eq!(cache.snapshot().unwrap(), working);
+    assert_eq!(
+        server::pages(&cache.snapshot().unwrap()),
+        server::pages(&working)
+    );
     assert_eq!(cache.remote_snapshot().unwrap(), remote);
     assert_eq!(cache.pending().unwrap(), pending);
     assert_eq!(cache.status(1).unwrap(), uncertain);
@@ -234,10 +236,11 @@ fn download_network_wait_does_not_block_local_edits() {
         release.send(()).unwrap();
         assert_eq!(download.join().unwrap(), bytes);
         assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-        let Operation::Page(intent) = &cache.pending().unwrap()[2].operation else {
-            panic!()
-        };
-        assert_eq!(intent.text_change().unwrap().3, "during download ");
+        assert!(matches!(
+            &cache.pending().unwrap()[2].edit.ops[..],
+            [onestore::op::Op::Page { op: onestore::op::PageOp::Text { with, .. }, .. }]
+                if with == "during download "
+        ));
     });
 }
 
@@ -284,7 +287,7 @@ fn a_native_refresh_removing_the_reference_rejects_an_inflight_download() {
             panic!("Unexpected enumeration")
         }
         fn read(&mut self, _: &str, _: usize) -> io::Result<Vec<u8>> {
-            assert_eq!(self.0.sync_once(&mut Native).unwrap(), None);
+            assert_eq!(self.0.sync_once(&mut Native).unwrap().edit, None);
             Ok(payload(1024).1)
         }
     }

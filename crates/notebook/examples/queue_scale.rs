@@ -47,13 +47,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     for n in 0..count {
         let edit_start = Instant::now();
-        let source = cache.snapshot()?;
-        let store = Store::parse(&source)?;
-        let index = RevisionIndex::parse(&store)?;
-        let document = Document::parse(&index)?;
         let slot = n % 2;
         let space = pages[slot].0;
-        let mut page = Page::from_space(&document, space)?;
+        let mut page = cache.page(space)?;
         let text = page
             .objects
             .iter_mut()
@@ -76,13 +72,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             range: 0..end,
             replacement: Paragraph::new(expected[slot].clone(), format),
         })?;
-        let id = cache.save(&source, space, &page, "Fixture")?.unwrap();
+        let before = cache.page(space)?;
+        let ops = onestore::op::lower_page(&before, &page)?;
+        let id = cache.apply(
+            "Fixture",
+            onestore::op::Edit {
+                at: 133_000_000_000_000_000,
+                ops: ops
+                    .into_iter()
+                    .map(|op| onestore::op::Op::Page { space, op })
+                    .collect(),
+            },
+        )?;
         assert!(ids.last().is_none_or(|previous| *previous < id));
         ids.push(id);
         println!(
             "{}",
             serde_json::json!({"phase":"ack","n":n,"id":id,
-            "ms":edit_start.elapsed().as_secs_f64()*1000.0,"working_bytes":source.len()})
+            "ms":edit_start.elapsed().as_secs_f64()*1000.0})
         );
     }
     println!(
@@ -114,16 +121,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({"phase":"export","seconds":start.elapsed().as_secs_f64()})
     );
     let start = Instant::now();
-    for (n, id) in ids.iter().enumerate() {
-        let step = Instant::now();
-        assert!(
-            matches!(cache.sync_once(&mut remote)?, Some((actual, EditStatus::Published { .. })) if actual == *id)
-        );
-        println!(
-            "{}",
-            serde_json::json!({"phase":"publish","n":n,"id":id,"ms":step.elapsed().as_secs_f64()*1000.0})
-        );
-    }
+    // The queue publishes as one batch.
+    let step = Instant::now();
+    assert!(matches!(
+        cache.sync_once(&mut remote)?.edit,
+        Some((actual, EditStatus::Published { .. })) if Some(&actual) == ids.last()
+    ));
+    println!(
+        "{}",
+        serde_json::json!({"phase":"publish","count":ids.len(),"ms":step.elapsed().as_secs_f64()*1000.0})
+    );
     assert!(cache.pending()?.is_empty());
     let published = cache.snapshot()?;
     assert_eq!(onestore::read_file(&remote.0)?, published);
@@ -145,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>(),
         ids
     );
-    assert_eq!(archive.snapshot()?, source);
+    verify(&archive.snapshot()?, &pages, &expected)?;
     println!(
         "{}",
         serde_json::json!({"phase":"complete","count":count,

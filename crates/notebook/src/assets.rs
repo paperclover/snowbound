@@ -1,5 +1,9 @@
 use super::*;
 use onestore::FileDataReference;
+use onestore::{
+    RevisionIndex, Store,
+    document::{Document, Kind},
+};
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
@@ -7,12 +11,7 @@ impl Replica {
     /// Reads a previously downloaded external payload without network access.
     /// Absence is distinct from an empty payload; every returned buffer passes its stored checksum.
     pub fn cached_asset(&self, filename: &str, limit: usize) -> Result<Option<Vec<u8>>> {
-        let key = key(filename)?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        cached(&connection, &key, limit)
+        cached(&*self.lock()?, &key(filename)?, limit)
     }
 
     /// Fetches a declared external payload and durably retains it without changing the edit queue.
@@ -26,32 +25,23 @@ impl Replica {
         limit: usize,
     ) -> Result<Vec<u8>> {
         let key = key(filename)?;
-        {
-            let connection = self
-                .connection
-                .lock()
-                .map_err(|_| io::Error::other("Cache owner panicked"))?;
-            if !referenced(&connection, &key)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "The retained document images do not reference this external payload",
-                )
-                .into());
-            }
+        if !self.references(&key)? {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The retained document images do not reference this external payload",
+            )
+            .into());
         }
         let bytes = crate::discover::read_external_asset(source, section, filename, limit)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !referenced(&transaction, &key)? {
+        if !self.references(&key)? {
             return Err(io::Error::new(
                 io::ErrorKind::ResourceBusy,
                 "The external payload reference changed during download",
             )
             .into());
         }
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous = match cached(&transaction, &key, bytes.len()) {
             Err(Error::Io(error)) if error.kind() == io::ErrorKind::FileTooLarge => {
                 return Err(Error::AssetChanged);
@@ -78,21 +68,22 @@ pub(crate) fn key(filename: &str) -> Result<String> {
     Ok(filename.to_ascii_lowercase())
 }
 
-fn referenced(connection: &Connection, key: &str) -> Result<bool> {
-    // One image at a time: the working image usually answers.
-    for read in [crate::images::working, crate::images::base] {
-        let image = read(connection)?;
-        let store = Store::parse(&image)?;
-        let index = RevisionIndex::parse(&store)?;
-        let document = Document::parse(&index)?;
-        if document.spaces.values().flat_map(|space| space.revisions.values())
-            .flat_map(|revision| revision.nodes.values()).any(|node| {
-                matches!(&node.kind, Kind::File { reference: FileDataReference::External(name), .. } if name.eq_ignore_ascii_case(key))
-            }) {
-            return Ok(true);
+impl Replica {
+    /// Whether the local pages or the remote image declare the external payload `key`.
+    fn references(&self, key: &str) -> Result<bool> {
+        for image in [self.snapshot()?, self.remote_snapshot()?] {
+            let store = Store::parse(&image)?;
+            let index = RevisionIndex::parse(&store)?;
+            let document = Document::parse(&index)?;
+            if document.spaces.values().flat_map(|space| space.revisions.values())
+                .flat_map(|revision| revision.nodes.values()).any(|node| {
+                    matches!(&node.kind, Kind::File { reference: FileDataReference::External(name), .. } if name.eq_ignore_ascii_case(key))
+                }) {
+                return Ok(true);
+            }
         }
+        Ok(false)
     }
-    Ok(false)
 }
 
 pub(crate) fn cached(connection: &Connection, key: &str, limit: usize) -> Result<Option<Vec<u8>>> {

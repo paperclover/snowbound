@@ -28,7 +28,7 @@ class RecoveryOracleTests(unittest.TestCase):
         at = len(original.encode('utf-16-le')) // 2
         row = {'event': 'state', 'status': 'uncertain', 'revision': 'new', 'remote_revision': 'old',
                'local_text': original+TOKEN, 'remote_text': original,
-               'pending': [{'id': 1, 'before': original, 'replacement': TOKEN, 'range': [at, at]}]}
+               'pending': [{'id': 1, 'replacement': TOKEN, 'range': [at, at]}]}
         self.assertEqual(state([row], original), row)
         for field, value in [('revision', None), ('revision', 'old'), ('local_text', original),
                              ('remote_text', original+TOKEN+TOKEN), ('status', 'missing'), ('pending', [])]:
@@ -36,7 +36,7 @@ class RecoveryOracleTests(unittest.TestCase):
             changed[field] = value
             with self.subTest(field=field):
                 with self.assertRaises(AssertionError): state([changed], original)
-        for field, value in [('id', 2), ('before', 'other'), ('replacement', 'other'), ('range', [at-1, at-1])]:
+        for field, value in [('id', 2), ('replacement', 'other'), ('range', [at-1, at-1])]:
             changed = copy.deepcopy(row)
             changed['pending'][0][field] = value
             with self.assertRaises(AssertionError): state([changed], original)

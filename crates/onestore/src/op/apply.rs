@@ -15,7 +15,7 @@ use crate::{
     active::{ActivePage, Changes},
     document::Kind,
     page::{
-        Attachment, Image, Ink, Page, PageObject, PageParagraph, Paragraph, ParagraphContent,
+        Attachment, Image, Ink, PageObject, PageParagraph, Paragraph, ParagraphContent,
         TableCell, TableColumn,
     },
 };
@@ -57,12 +57,13 @@ impl<'a> Section<'a> {
 
     /// Lowers `after` against the page `space` holds and applies the result as one edit;
     /// returns the ops, which reach `after` where the writers can store it.
-    pub fn apply_page(
+    #[cfg(test)]
+    pub(crate) fn apply_page(
         &mut self,
         author: &str,
         at: u64,
         space: ExGuid,
-        after: &Page,
+        after: &crate::page::Page,
     ) -> Result<Vec<PageOp>, OpError> {
         let before = self.page(space).map_err(|error| self.classify(Failure::Rejected(error)))?;
         let ops = super::lower_page(&before, after)

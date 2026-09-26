@@ -1,15 +1,18 @@
 //! The application's view of a notebook: sections opened through a local replica that
-//! publishes page saves to the section file in the background.
+//! publishes their edits to the section file in the background.
 
 use crate::{
-    ConflictKind, EditStatus, Error, PendingEdit, Remote, Replica, Result, SyncWorker, discover,
+    Conflict, ConflictKind, EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result,
+    SyncWorker, discover,
 };
 use onestore::{
     CommitError, ExGuid, PageCreation, PreparedEdit, RevisionIndex, Stamp, Store, Transaction,
-    document::Document, page::Page,
+    document::Document,
+    op::{Edit, Op, SectionOp},
+    page::Page,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     io,
     io::Write,
     path::{Path, PathBuf},
@@ -18,7 +21,6 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
-    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -723,10 +725,15 @@ fn catalog_path(folder: &str, name: &str) -> String {
     }
 }
 
-/// What happened on the synchronization thread since the last poll.
+/// What happened to the section since the last poll.
 #[derive(Debug)]
 pub enum Event {
-    /// The working image was refreshed from the section file with no local edit pending.
+    /// A remote change reached these pages; reload them where they are open.
+    Changed(Vec<ExGuid>),
+    /// The section refused an edit `apply` handed it; the pages it names are as they were
+    /// before it, so an editor showing them should reload them.
+    Rejected { spaces: Vec<ExGuid>, error: String },
+    /// Old session API, until the application reloads on `Changed`: pages changed remotely.
     Refreshed,
     /// A publication attempt finished with this durable state.
     Attempt { id: u64, status: EditStatus },
@@ -736,7 +743,7 @@ pub enum Event {
     Failed(String),
 }
 
-/// The outcome of saving an edited page.
+/// The outcome of saving an edited page (old session API).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Save {
     /// The model equals the stored page.
@@ -755,31 +762,27 @@ pub struct QueuedEdit {
     pub status: EditStatus,
 }
 
-/// A section file with its replica, background saves and background publication.
+type Notify = Arc<dyn Fn() + Send + Sync>;
+
+/// A section file with its replica and background publication. `Send + Sync`: edits
+/// arrive from any thread without waiting, and `notify` wakes the host when events wait.
 pub struct Section {
     file: PathBuf,
     replica: Arc<Replica>,
     worker: Option<SyncWorker>,
-    events: Receiver<Event>,
-    saves: Option<Sender<PageSave>>,
-    saved: Receiver<(ExGuid, std::result::Result<Save, String>)>,
+    events: Mutex<Receiver<Event>>,
+    sender: Sender<Event>,
+    notify: Notify,
+    saved: Mutex<Receiver<(ExGuid, std::result::Result<Save, String>)>>,
+    saves: Sender<(ExGuid, std::result::Result<Save, String>)>,
     /// Saves queued and not yet reported.
     unsaved: Arc<AtomicUsize>,
-    saver: Option<JoinHandle<()>>,
-}
-
-/// An edited page `Section::queue_save` hands to the save thread.
-struct PageSave {
-    space: ExGuid,
-    before: Page,
-    after: Page,
-    author: String,
 }
 
 impl Section {
     /// Opens the section file through a replica in `cache`, creating the replica from the
-    /// file on first use. `notify` runs on the synchronization thread whenever an event is
-    /// available.
+    /// file on first use and converting an older one. `notify` runs on a background thread
+    /// whenever an event is available.
     pub fn open(
         file: impl AsRef<Path>,
         cache: impl AsRef<Path>,
@@ -847,58 +850,58 @@ impl Section {
     ) -> Result<Self> {
         let replica = Arc::new(replica);
         let (sender, events) = mpsc::channel();
-        let (saved_sender, saved) = mpsc::channel();
-        let notify = Arc::new(Mutex::new(notify));
-        let signal = move || {
+        let (saves, saved) = mpsc::channel();
+        let notify = Mutex::new(notify);
+        let notify: Notify = Arc::new(move || {
             if let Ok(notify) = notify.lock() {
                 notify();
             }
-        };
-        let (saves, requests) = mpsc::channel();
-        let unsaved = Arc::new(AtomicUsize::new(0));
-        let saver = {
-            let (replica, signal) = (Arc::clone(&replica), signal.clone());
-            let unsaved = Arc::clone(&unsaved);
-            thread::Builder::new()
-                .name("onestore-save".into())
-                .spawn(move || {
-                    save_pages(&replica, &requests, |outcome, count| {
-                        unsaved.fetch_sub(count, Ordering::Release);
-                        if saved_sender.send(outcome).is_ok() {
-                            signal();
+        });
+        let worker = {
+            let (sender, notify) = (sender.clone(), Arc::clone(&notify));
+            replica.start_sync(Duration::from_secs(2), connect, move |result| {
+                let mut events = Vec::new();
+                match result {
+                    Ok(synced) => {
+                        if !synced.changed.is_empty() {
+                            events.push(Event::Changed(synced.changed.clone()));
+                            events.push(Event::Refreshed);
                         }
-                    });
-                })?
-        };
-        let worker = replica.start_sync(Duration::from_secs(2), connect, move |result| {
-            let event = match result {
-                Ok(None) => Event::Refreshed,
-                Ok(Some((id, status))) => Event::Attempt {
-                    id: *id,
-                    status: status.clone(),
-                },
-                Err(Error::RemoteIo(error)) => Event::Unreachable(match error.raw_os_error() {
-                    Some(code) => io::Error::from_raw_os_error(code),
-                    None => io::Error::new(error.kind(), error.to_string()),
-                }),
-                Err(Error::Remote(error)) => {
-                    Event::Unreachable(io::Error::new(error.error.kind(), error.to_string()))
+                        if let Some((id, status)) = &synced.edit {
+                            events.push(Event::Attempt {
+                                id: *id,
+                                status: status.clone(),
+                            });
+                        }
+                    }
+                    Err(Error::RemoteIo(error)) => {
+                        events.push(Event::Unreachable(match error.raw_os_error() {
+                            Some(code) => io::Error::from_raw_os_error(code),
+                            None => io::Error::new(error.kind(), error.to_string()),
+                        }))
+                    }
+                    Err(Error::Remote(error)) => events.push(Event::Unreachable(io::Error::new(
+                        error.error.kind(),
+                        error.to_string(),
+                    ))),
+                    Err(error) => events.push(Event::Failed(error.to_string())),
                 }
-                Err(error) => Event::Failed(error.to_string()),
-            };
-            if sender.send(event).is_ok() {
-                signal();
-            }
-        })?;
+                if !events.is_empty() && events.into_iter().all(|event| sender.send(event).is_ok())
+                {
+                    notify();
+                }
+            })?
+        };
         Ok(Self {
             file,
             replica,
             worker: Some(worker),
-            events,
-            saves: Some(saves),
-            saved,
-            unsaved,
-            saver: Some(saver),
+            events: Mutex::new(events),
+            sender,
+            notify,
+            saved: Mutex::new(saved),
+            saves,
+            unsaved: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -910,111 +913,74 @@ impl Section {
     /// The section file identity, which internal links name as `section-id`
     /// (`onestore::page::link::internal_link`).
     pub fn identity(&self) -> Result<[u8; 16]> {
-        Ok(Store::parse(&self.replica.snapshot()?)?.header.file_id)
+        self.replica.identity()
     }
 
-    /// Page spaces, titles and outline levels (1 at the top) in section order, from the
-    /// local working image.
-    pub fn pages(&self) -> Result<Vec<(ExGuid, String, u32)>> {
-        let snapshot = self.replica.snapshot()?;
-        let store = Store::parse(&snapshot)?;
-        let index = RevisionIndex::parse(&store)?;
-        let document = Document::parse(&index)?;
-        let pages = document.pages()?;
-        let mut spaces = std::collections::BTreeSet::new();
-        pages
-            .into_iter()
-            .map(|(space, page)| {
-                if !spaces.insert(space) {
-                    return Err(onestore::Error {
-                        offset: 0,
-                        message: "Choose an object space containing one active page",
-                    }
-                    .into());
+    /// Applies an edit without waiting: it becomes durable on the section thread, which
+    /// reports a refusal as `Event::Rejected`. Edits apply in the order they arrive.
+    pub fn apply(&self, author: &str, edit: Edit) -> Result<()> {
+        let (sender, notify) = (self.sender.clone(), Arc::clone(&self.notify));
+        let root = self.replica.root;
+        let spaces = crate::queue::spaces(&edit, root);
+        self.replica.submit(
+            author,
+            edit,
+            Box::new(move |result| {
+                let event = match result {
+                    Ok(_) => return,
+                    Err(Error::Rejected(error)) => Event::Rejected {
+                        spaces,
+                        error: error.to_string(),
+                    },
+                    Err(error) => Event::Failed(error.to_string()),
+                };
+                if sender.send(event).is_ok() {
+                    notify();
                 }
-                let (title, level) = Page::heading(document.active(space)?, page);
-                Ok((space, title, level))
-            })
-            .collect()
+            }),
+        )
     }
 
+    /// Page spaces, titles and outline levels (1 at the top) in section order, as the
+    /// local edits leave them.
+    pub fn pages(&self) -> Result<Vec<(ExGuid, String, u32)>> {
+        self.replica.pages()
+    }
+
+    /// The page to show or edit; O(page), for opening and reloading.
     pub fn page(&self, space: ExGuid) -> Result<Page> {
         self.replica.page(space)
     }
 
-    /// Copies a page (usually from another section) to the end of this section as a
-    /// creation and a save queued like the user's own edits, under fresh identities.
-    /// Returns the new page's space. Content outside the model refuses to copy.
+    /// Copies a page (usually from another section) to the end of this section under
+    /// fresh identities, queued like the user's own edits. Returns the new page's space.
+    /// Content outside the model refuses to copy.
     pub fn import_page(&self, page: &Page, author: &str) -> Result<ExGuid> {
-        let copy = page.copy()?;
         let creation = PageCreation::new(None, Some(&page.title), author)?;
-        self.replica
-            .create_page(&self.replica.snapshot()?, &creation)?;
         let space = creation.space();
-        loop {
-            // The worker may publish the creation, and so replace the working image,
-            // between reading it and saving against it.
-            let source = self.replica.snapshot()?;
-            let mut after = Page::from_space(
-                &Document::parse(&RevisionIndex::parse(&Store::parse(&source)?)?)?,
-                space,
-            )?;
-            after
-                .objects
-                .retain(|object| matches!(object, onestore::page::PageObject::Title(_)));
-            after.objects.extend(
-                copy.objects
-                    .iter()
-                    .filter(|object| !matches!(object, onestore::page::PageObject::Title(_)))
-                    .cloned(),
-            );
-            after.definitions = copy.definitions.clone();
-            match self.replica.save(&source, space, &after, author) {
-                Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => continue,
-                result => result?,
-            };
-            break;
-        }
-        self.wake();
+        self.replica.apply(
+            author,
+            Edit {
+                at: crate::now(),
+                ops: vec![Op::Section(SectionOp::Import {
+                    creation,
+                    page: page.copy()?,
+                })],
+            },
+        )?;
         Ok(space)
     }
 
     /// Removes pages permanently, queued like the user's own edits (a move across
     /// sections is `import_page` there, then this here).
-    pub fn delete_pages(&self, pages: &[ExGuid]) -> Result<Option<u64>> {
-        let id = self
-            .replica
-            .delete_pages(&self.replica.snapshot()?, pages)?;
-        self.wake();
-        Ok(id)
-    }
-
-    /// Saves an edited page. `before` is the model the edit started from; a stored page
-    /// that differs from it means the section changed underneath the editor.
-    pub fn save(&self, space: ExGuid, before: &Page, after: &Page, author: &str) -> Result<Save> {
-        Ok(save(&self.replica, space, before, None, after, author)?.0)
-    }
-
-    /// `save` on the section's save thread, returning at once; `saved` reports the outcome.
-    /// Saves queue in order, and one whose `before` is the previous save's `after` continues
-    /// it: pass each save's `after` as the next one's `before`.
-    pub fn queue_save(&self, space: ExGuid, before: Page, after: Page, author: &str) -> Result<()> {
-        let save = PageSave {
-            space,
-            before,
-            after,
-            author: author.to_owned(),
-        };
-        self.unsaved.fetch_add(1, Ordering::Relaxed);
-        self.saves
-            .as_ref()
-            .and_then(|saves| saves.send(save).ok())
-            .ok_or_else(|| io::Error::other("The save thread stopped").into())
-    }
-
-    /// Whether a queued save has yet to report, so the stored page may trail the editor's.
-    pub fn saving(&self) -> bool {
-        self.unsaved.load(Ordering::Acquire) > 0
+    pub fn delete_pages(&self, pages: &[ExGuid]) -> Result<u64> {
+        self.replica.apply(
+            "",
+            Edit {
+                at: crate::now(),
+                ops: vec![Op::Section(SectionOp::Delete(pages.to_vec()))],
+            },
+        )
     }
 
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
@@ -1025,78 +991,48 @@ impl Section {
         self.replica.pending()
     }
 
-    /// Every queued edit with its state: pending, awaiting confirmation of a retained
-    /// attempt, or a conflict awaiting review.
-    pub fn queue(&self) -> Result<Vec<QueuedEdit>> {
-        self.replica
-            .queued()?
-            .into_iter()
-            .map(|(id, space)| {
-                Ok(QueuedEdit {
-                    id,
-                    space,
-                    status: self.replica.status(id)?.unwrap_or(EditStatus::Pending),
-                })
-            })
-            .collect()
-    }
-
-    /// The queued edits whose publication conflicted with a remote change.
-    pub fn conflicts(&self) -> Result<Vec<(QueuedEdit, ConflictKind)>> {
-        Ok(self
-            .queue()?
-            .into_iter()
-            .filter_map(|edit| match edit.status {
-                EditStatus::Conflict(kind) => Some((edit, kind)),
-                _ => None,
-            })
-            .collect())
+    /// The unpublished batch the remote no longer accepts, if any. Show `remote_page`
+    /// against `page` for its space, then `resolve`.
+    pub fn conflict(&self) -> Result<Option<Conflict>> {
+        self.replica.conflict()
     }
 
     /// The page as last observed in the section file, for reviewing a conflict.
     pub fn remote_page(&self, space: ExGuid) -> Result<Page> {
         let snapshot = self.replica.remote_snapshot()?;
-        let store = Store::parse(&snapshot)?;
-        let index = RevisionIndex::parse(&store)?;
-        Ok(Page::from_space(&Document::parse(&index)?, space)?)
+        let arena = onestore::Arena::default();
+        Ok(onestore::Section::open(&arena, snapshot)?.page(space)?)
     }
 
-    /// Resolves the oldest conflict with a page reviewed against `remote_page`; the
-    /// reviewed model publishes as a whole, keeping the edit's id.
-    pub fn review(&self, id: u64, after: &Page) -> Result<()> {
-        let local = self.replica.snapshot()?;
-        let remote = self.replica.remote_snapshot()?;
-        self.replica.review_page(id, &local, &remote, after)?;
-        self.wake();
-        Ok(())
+    /// Ends a conflict: `Mine` publishes the local page over the remote change, `Theirs`
+    /// drops the local edits to the conflicted page (and its later ones).
+    pub fn resolve(&self, id: u64, resolution: Resolution) -> Result<()> {
+        self.replica.resolve(id, resolution)
     }
 
-    /// Retires an uncertain attempt after review, exporting the branch to `archive`
-    /// first: `Some(page)` continues from the reviewed page against `remote_page`,
-    /// `None` abandons the local branch. Neither claims the attempt was acknowledged.
-    pub fn release(&self, id: u64, archive: impl AsRef<Path>, after: Option<&Page>) -> Result<()> {
-        let local = self.replica.snapshot()?;
-        let remote = self.replica.remote_snapshot()?;
-        self.replica
-            .release_attempt(id, &local, &remote, archive.as_ref(), after)?;
-        self.wake();
-        Ok(())
+    /// Retires an uncertain attempt after review, exporting the queue to `archive` first:
+    /// `Mine` publishes the local edits again, `Theirs` abandons them. Neither claims the
+    /// attempt was acknowledged.
+    pub fn release(
+        &self,
+        id: u64,
+        archive: impl AsRef<Path>,
+        resolution: Resolution,
+    ) -> Result<()> {
+        self.replica.release(id, archive.as_ref(), resolution)
     }
 
-    /// Captures both images, the queue and its states in a read-only archive.
+    /// Captures the queue, its images and its states in a read-only archive.
     pub fn export_recovery(&self, path: impl AsRef<Path>) -> Result<()> {
         self.replica.export_recovery(path)
     }
 
     /// Events since the last poll, oldest first.
     pub fn events(&self) -> Vec<Event> {
-        self.events.try_iter().collect()
-    }
-
-    /// Outcomes of queued saves since the last poll, oldest first; `notify` runs for each.
-    /// Consecutive saves continuing one another finish as one, reported once.
-    pub fn saved(&self) -> Vec<(ExGuid, std::result::Result<Save, String>)> {
-        self.saved.try_iter().collect()
+        self.events
+            .lock()
+            .map(|events| events.try_iter().collect())
+            .unwrap_or_default()
     }
 
     /// Requests a synchronization attempt now.
@@ -1115,107 +1051,118 @@ impl Section {
     /// Dropping instead requests cancellation without waiting; the worker retains
     /// cache ownership until that operation finishes. Remote calls must be bounded.
     pub fn close(mut self) -> Result<()> {
-        drop(self.saves.take());
-        if let Some(saver) = self.saver.take() {
-            saver
-                .join()
-                .map_err(|_| io::Error::other("The save thread panicked"))?;
-        }
         match self.worker.take() {
             Some(worker) => worker.stop(),
             None => Ok(()),
         }
     }
-}
 
-/// Saves `after` unless the stored page no longer matches `before`, returning the working
-/// image the save leaves. `known` is the image a previous save of `before` left: while the
-/// working image equals it the page is current unread, and otherwise the page `known`
-/// stores stands in for `before`.
-fn save(
-    replica: &Replica,
-    space: ExGuid,
-    before: &Page,
-    known: Option<&[u8]>,
-    after: &Page,
-    author: &str,
-) -> Result<(Save, Vec<u8>)> {
-    let stored = |image: &[u8]| -> Result<Page> {
-        let store = Store::parse(image)?;
-        Ok(Page::from_space(
-            &Document::parse(&RevisionIndex::parse(&store)?)?,
+    // Old whole-page session API, kept until the application emits ops.
+
+    /// Saves an edited page. `before` is the model the edit started from; a stored page
+    /// that differs from it means the section changed underneath the editor.
+    pub fn save(&self, space: ExGuid, before: &Page, after: &Page, author: &str) -> Result<Save> {
+        let outcome = self.replica.ask(|reply| crate::working::Request::Save {
             space,
-        )?)
-    };
-    loop {
-        let snapshot = replica.snapshot()?;
-        if known != Some(snapshot.as_slice()) {
-            let current = stored(&snapshot)?;
-            let expected = match known {
-                Some(image) => current == stored(image)?,
-                None => current == *before,
-            };
-            if !expected {
-                return Ok((Save::Stale, snapshot));
-            }
-        }
-        match replica.save_image(&snapshot, space, after, author) {
-            Ok((Some(id), image)) => return Ok((Save::Queued(id), image)),
-            Ok((None, image)) => return Ok((Save::Unchanged, image)),
-            Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => {}
-            Err(error) => return Err(error),
-        }
+            before: before.clone(),
+            after: after.clone(),
+            author: author.to_owned(),
+            reply,
+        })?;
+        Ok(outcome.unwrap_or(Save::Unchanged))
     }
-}
 
-/// Runs queued saves until the section drops its sender, folding each run of saves that
-/// continue one another into one.
-fn save_pages(
-    replica: &Replica,
-    requests: &Receiver<PageSave>,
-    report: impl Fn((ExGuid, std::result::Result<Save, String>), usize),
-) {
-    let mut queue = VecDeque::new();
-    // The last save's page and the working image it left.
-    let mut last: Option<(ExGuid, Page, Vec<u8>)> = None;
-    loop {
-        if queue.is_empty() {
-            match requests.recv() {
-                Ok(request) => queue.push_back(request),
-                Err(_) => return,
-            }
-        }
-        queue.extend(requests.try_iter());
-        let mut request = queue.pop_front().unwrap();
-        let mut count = 1;
-        while let Some(next) = queue.front()
-            && (next.space, &next.before, &next.author)
-                == (request.space, &request.after, &request.author)
-        {
-            request.after = queue.pop_front().unwrap().after;
-            count += 1;
-        }
-        let known = last
-            .take()
-            .filter(|(space, after, _)| *space == request.space && *after == request.before);
-        let result = save(
-            replica,
-            request.space,
-            &request.before,
-            known.as_ref().map(|(_, _, image)| image.as_slice()),
-            &request.after,
-            &request.author,
+    /// `save` on the section thread, returning at once; `saved` reports the outcome.
+    /// Saves queue in order, and one whose `before` is the previous save's `after`
+    /// continues it: pass each save's `after` as the next one's `before`.
+    pub fn queue_save(&self, space: ExGuid, before: Page, after: Page, author: &str) -> Result<()> {
+        let (saves, notify, unsaved) = (
+            self.saves.clone(),
+            Arc::clone(&self.notify),
+            Arc::clone(&self.unsaved),
         );
-        let save = match result {
-            Ok((save, image)) => {
-                if save != Save::Stale {
-                    last = Some((request.space, request.after, image));
+        self.unsaved.fetch_add(1, Ordering::Relaxed);
+        self.replica.send(crate::working::Request::Save {
+            space,
+            before,
+            after,
+            author: author.to_owned(),
+            reply: Box::new(move |outcome| {
+                unsaved.fetch_sub(1, Ordering::Release);
+                let outcome = match outcome {
+                    Ok(None) => return,
+                    Ok(Some(save)) => Ok(save),
+                    Err(error) => Err(error.to_string()),
+                };
+                if saves.send((space, outcome)).is_ok() {
+                    notify();
                 }
-                Ok(save)
-            }
-            Err(error) => Err(error.to_string()),
-        };
-        report((request.space, save), count);
+            }),
+        })
+    }
+
+    /// Whether a queued save has yet to report, so the stored page may trail the editor's.
+    pub fn saving(&self) -> bool {
+        self.unsaved.load(Ordering::Acquire) > 0
+    }
+
+    /// Outcomes of queued saves since the last poll, oldest first; `notify` runs for each.
+    /// Consecutive saves continuing one another finish as one, reported once.
+    pub fn saved(&self) -> Vec<(ExGuid, std::result::Result<Save, String>)> {
+        self.saved
+            .lock()
+            .map(|saved| saved.try_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Every queued edit with its state: pending, awaiting confirmation of a retained
+    /// attempt, or a conflict awaiting review. `space` is the first page it edits.
+    pub fn queue(&self) -> Result<Vec<QueuedEdit>> {
+        self.replica
+            .pending()?
+            .into_iter()
+            .map(|edit| {
+                Ok(QueuedEdit {
+                    id: edit.id,
+                    space: edit
+                        .edit
+                        .ops
+                        .iter()
+                        .find_map(|op| match op {
+                            Op::Page { space, .. } => Some(*space),
+                            Op::Section(_) => None,
+                        })
+                        .unwrap_or(self.replica.root),
+                    status: self.replica.status(edit.id)?.unwrap_or(EditStatus::Pending),
+                })
+            })
+            .collect()
+    }
+
+    /// The conflict as a queue entry, for the review dialog.
+    pub fn conflicts(&self) -> Result<Vec<(QueuedEdit, ConflictKind)>> {
+        Ok(self
+            .replica
+            .conflict()?
+            .map(|conflict| {
+                (
+                    QueuedEdit {
+                        id: conflict.id,
+                        space: conflict.space,
+                        status: EditStatus::Conflict(conflict.kind),
+                    },
+                    conflict.kind,
+                )
+            })
+            .into_iter()
+            .collect())
+    }
+
+    /// Resolves the conflict holding `id` with a page reviewed against `remote_page`: the
+    /// remote page is rewritten to `after`.
+    pub fn review(&self, id: u64, after: &Page) -> Result<()> {
+        self.replica
+            .resolve_with(id, Resolution::Mine, Some(after.clone()))
     }
 }
 

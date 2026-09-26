@@ -133,3 +133,35 @@ pub fn text(source: &[u8]) -> (ExGuid, ExGuid, String) {
         })
         .unwrap()
 }
+
+/// Every page of an image, in section order: what two images holding the same edits under
+/// different revision identities share.
+pub fn pages(source: &[u8]) -> Vec<(ExGuid, onestore::page::Page)> {
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    document
+        .pages()
+        .unwrap()
+        .into_iter()
+        .map(|(space, _)| {
+            (
+                space,
+                onestore::page::Page::from_space(&document, space).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Queues a section op as its own edit.
+pub fn section_op(cache: &notebook::Replica, op: onestore::op::SectionOp) -> u64 {
+    cache
+        .apply(
+            "Fixture",
+            onestore::op::Edit {
+                at: 133_000_000_000_000_000,
+                ops: vec![onestore::op::Op::Section(op)],
+            },
+        )
+        .unwrap()
+}

@@ -225,28 +225,79 @@ pub fn delete_paragraph(page: &mut Page, text: ExGuid) {
     panic!("text is on the page");
 }
 
-/// Saves `edit` applied to the page containing `text`, using the replica's current image.
+/// FILETIME now.
+pub fn now() -> u64 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    (unix.as_secs() + 11_644_473_600) * 10_000_000
+}
+
+/// Queues the ops taking the page in `space` to `after`, or nothing when they are equal.
+pub fn save_as(
+    cache: &Replica,
+    space: ExGuid,
+    after: &Page,
+    author: &str,
+) -> Result<Option<u64>, notebook::Error> {
+    save_from(cache, space, &cache.page(space)?, after, author)
+}
+
+/// Queues the ops taking `before`, the page in `space` as it was read, to `after`.
+pub fn save_from(
+    cache: &Replica,
+    space: ExGuid,
+    before: &Page,
+    after: &Page,
+    author: &str,
+) -> Result<Option<u64>, notebook::Error> {
+    let ops = onestore::op::lower_page(before, after)?;
+    if ops.is_empty() {
+        return Ok(None);
+    }
+    cache
+        .apply(
+            author,
+            onestore::op::Edit {
+                at: now(),
+                ops: ops
+                    .into_iter()
+                    .map(|op| onestore::op::Op::Page { space, op })
+                    .collect(),
+            },
+        )
+        .map(Some)
+}
+
+/// Queues `edit` of the page in `space`.
+pub fn save_page(
+    cache: &Replica,
+    space: ExGuid,
+    edit: impl FnOnce(&mut Page),
+) -> Result<Option<u64>, notebook::Error> {
+    let before = cache.page(space)?;
+    let mut after = before.clone();
+    edit(&mut after);
+    save_from(cache, space, &before, &after, AUTHOR)
+}
+
+/// Queues `edit` of the page containing `text`.
 pub fn save(
     cache: &Replica,
     text: ExGuid,
     edit: impl FnOnce(&mut Page),
 ) -> Result<Option<u64>, notebook::Error> {
-    let source = cache.snapshot()?;
-    let (space, mut page) = locate(&source, text);
-    edit(&mut page);
-    cache.save(&source, space, &page, AUTHOR)
+    let (space, _) = locate(&cache.snapshot()?, text);
+    save_page(cache, space, edit)
 }
 
-/// Reviews a conflicting save by applying `edit` to the current remote page.
+/// Resolves a conflict by taking the remote page, then queues `edit` of it.
 pub fn review(
     cache: &Replica,
     id: u64,
     text: ExGuid,
     edit: impl FnOnce(&mut Page),
-) -> Result<(), notebook::Error> {
-    let local = cache.snapshot()?;
-    let remote = cache.remote_snapshot()?;
-    let (_, mut page) = locate(&remote, text);
-    edit(&mut page);
-    cache.review_page(id, &local, &remote, &page)
+) -> Result<Option<u64>, notebook::Error> {
+    cache.resolve(id, notebook::Resolution::Theirs)?;
+    save(cache, text, edit)
 }

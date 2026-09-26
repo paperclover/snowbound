@@ -31,11 +31,6 @@ def run_command(binary, args, output):
 def kill_at(binary, args, phase, output, receipt_window=None):
     events = queue.Queue()
     database = Path(args[1]) / 'cache.sqlite'
-    journal = database.with_name(database.name + '-journal')
-    def header():
-        try:
-            with journal.open('rb') as stream: return stream.read(8)
-        except FileNotFoundError: return b''
     with output.with_suffix('.jsonl').open('w') as log, output.with_suffix('.stderr').open('w') as error:
         process = subprocess.Popen([str(binary), *map(str, args)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error, text=True,
                                    env={**os.environ, 'ONESTORE_RECOVERY_PAUSE': phase})
@@ -57,24 +52,26 @@ def kill_at(binary, args, phase, output, receipt_window=None):
                 if event.get('event') == 'phase' and event['name'] == phase:
                     if receipt_window is not None:
                         assert args[0] == 'sync' and phase == 'publish-after'
-                        assert receipt_window in ('journal', 'database')
-                        before_mtime = database.stat().st_mtime_ns
+                        assert receipt_window == 'wal'
+                        # The receipt transaction is cut once its frames are in the log and
+                        # its commit frame is not.
+                        committed, _ = cache_images.wal_commits(database)
                         process.stdin.write('\n')
                         process.stdin.flush()
                         deadline = time.monotonic() + 5
                         while True:
-                            if header() == bytes.fromhex('d9d505f920a163d7') and (receipt_window == 'journal' or database.stat().st_mtime_ns != before_mtime): break
-                            assert process.poll() is None, 'Receipt transaction finished before the requested cut'
+                            commits, pending = cache_images.wal_commits(database)
+                            if commits == committed and pending: break
+                            assert commits == committed and process.poll() is None, 'Receipt transaction finished before the requested cut'
                             assert time.monotonic() < deadline, 'Receipt transaction window was not observed'
-                            time.sleep(.0001)
                     process.kill()
                     break
             assert process.wait(timeout=10) == -signal.SIGKILL, 'Expected an actual process kill'
             proof = {'pid': process.pid, 'exit': process.returncode, 'phase': phase}
             if receipt_window is not None:
-                proof.update(journal_header_after_kill=header().hex(), database_changed=database.stat().st_mtime_ns != before_mtime, receipt_window=receipt_window)
-                assert proof['journal_header_after_kill'] == 'd9d505f920a163d7', 'Receipt transaction committed before the process died'
-                assert receipt_window != 'database' or proof['database_changed']
+                commits, pending = cache_images.wal_commits(database)
+                proof.update(wal_commits_before=committed, wal_commits_after_kill=commits, uncommitted_frames=pending, receipt_window=receipt_window)
+                assert commits == committed, 'Receipt transaction committed before the process died'
             output.with_suffix('.cut.json').write_text(json.dumps(proof, indent=2))
         finally:
             if process.poll() is None: process.kill()
@@ -103,7 +100,7 @@ def state(rows, original):
     else:
         assert len(result['pending']) == 1, 'Unacknowledged intent was lost or duplicated'
         pending, = result['pending']
-        assert pending['id'] == 1 and pending['before'] == original and pending['replacement'] == TOKEN
+        assert pending['id'] == 1 and pending['replacement'] == TOKEN
         at = len(original.encode('utf-16-le')) // 2
         assert pending['range'] == [at, at], 'Durable intent range changed'
     return result
@@ -187,11 +184,12 @@ def run(source, output):
         try:
             assert connection.execute('PRAGMA quick_check').fetchall() == [('ok',)]
             assert connection.execute('PRAGMA foreign_key_check').fetchall() == []
-            local_image = save_image(output, cache_images.working(connection))
+            # The image the queue applies to; the local text is the probe's, checked above.
+            base_image = save_image(output, cache_images.image(connection))
         finally:
             connection.close()
         result = {'case': index, 'phase': phase, 'during_confirmation': confirmation, 'before_status': before['status'], 'after_status': after['status'],
-                  'visible_before_recovery': before['remote_text'] != original, 'remote_image': remote_image, 'local_image': local_image,
+                  'visible_before_recovery': before['remote_text'] != original, 'remote_image': remote_image, 'base_image': base_image,
                   'remote_text': after['remote_text'], 'local_text': after['local_text']}
         results.append(result)
         (output / 'results.json').write_text(json.dumps(results, indent=2))
@@ -206,14 +204,14 @@ def run(source, output):
 def receipt_windows(source, output):
     binary, source_hash = prepare_run(source, output)
     results = []
-    for window in ('journal', 'database'):
+    for window in ('wal',):
         folder = output / window
         initialized = run_command(binary, ['init', folder, source], output / (window+'-init'))
         original = next(row['remote_text'] for row in initialized if row['event'] == 'state')
         state(initialized, original)
         kill_at(binary, ['sync', folder], 'publish-after', output / (window+'-kill'), receipt_window=window)
         before = state(run_command(binary, ['inspect', folder], output / (window+'-inspect')), original)
-        assert before['status'] == 'uncertain' and before['remote_text'] == original+TOKEN, 'Hot-journal recovery lost the pending confirmation'
+        assert before['status'] == 'uncertain' and before['remote_text'] == original+TOKEN, 'Log recovery lost the pending confirmation'
         before_bytes = (folder / 'remote.one').read_bytes()
         recovered = run_command(binary, ['sync', folder], output / (window+'-recover'))
         after = state(recovered, original)
@@ -226,7 +224,7 @@ def receipt_windows(source, output):
         print(json.dumps({'receipt_window':window, 'status':after['status'], 'remote_image':digest}), flush=True)
     assert hashlib.sha256(source.read_bytes()).hexdigest() == source_hash
     (output/'results.json').write_text(json.dumps(results, indent=2))
-    (output/'summary.json').write_text(json.dumps({'process_kills':2, 'recovered_receipts':2, 'republished_edits':0}, indent=2))
+    (output/'summary.json').write_text(json.dumps({'process_kills':len(results), 'recovered_receipts':len(results), 'republished_edits':0}, indent=2))
 
 
 if __name__ == '__main__':

@@ -3,9 +3,7 @@ mod concurrent;
 
 use notebook::smb::{Client, Credentials};
 use notebook::{EditStatus, Error, Remote, Replica, SmbRemote};
-use onestore::{
-    CommitError, CommitState, ExGuid, RevisionIndex, Store, Transaction, page::Paragraph,
-};
+use onestore::{CommitError, CommitState, ExGuid, RevisionIndex, Store, Transaction};
 use serde_json::json;
 use std::{
     env,
@@ -252,91 +250,19 @@ impl<R: Remote> Remote for Traced<R> {
     }
 }
 
-fn tokens(text: &str) -> Option<Vec<&str>> {
-    let mut remaining = text.strip_prefix("Concurrent edits:")?;
-    let mut tokens = Vec::new();
-    while !remaining.is_empty() {
-        let body = remaining.strip_prefix(" [w")?;
-        let (token, tail) = body.split_once(']')?;
-        let (actor, operation) = token.split_once(':')?;
-        if actor.is_empty()
-            || operation.is_empty()
-            || !actor
-                .bytes()
-                .chain(operation.bytes())
-                .all(|b| b.is_ascii_digit())
-            || tokens.contains(&token)
-        {
-            return None;
-        }
-        tokens.push(token);
-        remaining = tail;
+/// The edit appending `token` at `at` of a text.
+fn append(space: ExGuid, text: ExGuid, at: u32, token: &str) -> onestore::op::Edit {
+    onestore::op::Edit {
+        at: u64::try_from(now()).unwrap_or_default() * 10 + 116_444_736_000_000_000,
+        ops: vec![onestore::op::Op::Page {
+            space,
+            op: onestore::op::PageOp::Text {
+                text,
+                range: at..at,
+                with: token.to_owned(),
+            },
+        }],
     }
-    Some(tokens)
-}
-
-// This owned workload explicitly resolves append conflicts after all retained tokens.
-fn page_with(
-    bytes: &[u8],
-    space: ExGuid,
-    text: ExGuid,
-) -> Result<onestore::page::Page, Box<dyn std::error::Error>> {
-    let store = Store::parse(bytes)?;
-    let index = RevisionIndex::parse(&store)?;
-    let document = onestore::document::Document::parse(&index)?;
-    let page = onestore::page::Page::from_space(&document, space)?;
-    if paragraph_mut(&mut page.clone(), text).is_none() {
-        return Err("The target text is not on its page".into());
-    }
-    Ok(page)
-}
-
-fn paragraph_mut(
-    page: &mut onestore::page::Page,
-    text: ExGuid,
-) -> Option<&mut onestore::page::TextObject> {
-    for object in &mut page.objects {
-        let outlines: Vec<&mut onestore::page::Outline> = match object {
-            onestore::page::PageObject::Outline(outline) => vec![outline],
-            onestore::page::PageObject::Title(title) => title.outlines.iter_mut().collect(),
-            _ => Vec::new(),
-        };
-        for outline in outlines {
-            if let Some(paragraph) = outline
-                .paragraphs
-                .iter_mut()
-                .find(|p| p.text().is_some_and(|t| t.id == text))
-            {
-                return paragraph.text_mut();
-            }
-        }
-    }
-    None
-}
-
-fn append_to(page: &mut onestore::page::Page, text: ExGuid, at: u32, token: &str) {
-    let target = paragraph_mut(page, text).expect("target text is on its page");
-    let format = target.text.format_at(at).unwrap().clone();
-    target
-        .text
-        .apply(onestore::page::text::Edit {
-            range: at..at,
-            replacement: Paragraph::new(token.into(), format),
-        })
-        .unwrap();
-}
-
-fn append_position(before: &str, current: &str, token: &str) -> Option<u32> {
-    let original = tokens(before)?;
-    let present = tokens(current)?;
-    let mut retained = present.iter();
-    for token in original {
-        retained.find(|&&candidate| candidate == token)?;
-    }
-    if current.contains(token) {
-        return None;
-    }
-    u32::try_from(current.encode_utf16().count()).ok()
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -459,10 +385,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let at = u32::try_from(target.text.encode_utf16().count())?;
                 let token = format!(" [{}:{}]", args[2], generated);
                 let started = now();
-                let mut page = page_with(&source, target.space, target.object)?;
-                append_to(&mut page, target.object, at, &token);
-                match cache.save(&source, target.space, &page, "Offline document writer") {
-                    Ok(Some(id)) => {
+                match cache.apply(
+                    "Offline document writer",
+                    append(target.space, target.object, at, &token),
+                ) {
+                    Ok(id) => {
                         println!(
                             "{}",
                             json!({"event":"local_commit", "id":id, "operation":generated, "space":target.space.to_string(), "object":target.object.to_string(), "before":target.text, "token":token, "started_us":started, "finished_us":now()})
@@ -470,43 +397,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ids.push(id);
                         generated += 1;
                     }
-                    Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => {}
                     other => return Err(format!("Unexpected local result: {other:?}").into()),
                 }
             }
-            if let Some(intent) = pending.first()
-                && matches!(cache.status(intent.id)?, Some(EditStatus::Conflict(_)))
-            {
-                let local = cache.snapshot()?;
-                let remote = cache.remote_snapshot()?;
-                let current = view(&remote)?;
-                let notebook::Operation::Page(edit) = &intent.operation else {
-                    return Err(format!(
-                        "Intent {} requires review: {:?}",
-                        intent.id,
-                        cache.status(intent.id)?
-                    )
-                    .into());
-                };
-                let (object, before, _, token) = edit
-                    .text_change()
-                    .ok_or("A review expects one appended token")?;
-                let at = append_position(&before, &current.text, &token)
-                    .ok_or("Append model disagrees with retained history")?;
-                let mut reviewed = page_with(&remote, intent.space, object)?;
-                append_to(&mut reviewed, object, at, &token);
-                match cache.review_page(intent.id, &local, &remote, &reviewed) {
-                    Ok(()) => println!(
-                        "{}",
-                        json!({"event":"reviewed_append", "id":intent.id, "before":before, "remote":current.text, "token":token, "at_us":now()})
-                    ),
+            if let Some(conflict) = cache.conflict()? {
+                // Concurrent appends meet at the end of the text: take the remote text and
+                // append the queued tokens it lacks after it again.
+                let remote = view(&cache.remote_snapshot()?)?;
+                let tokens: Vec<String> = cache
+                    .pending()?
+                    .iter()
+                    .flat_map(|queued| queued.edit.ops.iter())
+                    .filter_map(|op| match op {
+                        onestore::op::Op::Page {
+                            op: onestore::op::PageOp::Text { with, .. },
+                            ..
+                        } => Some(with.clone()),
+                        _ => None,
+                    })
+                    .filter(|token| !remote.text.contains(token.as_str()))
+                    .collect();
+                match cache.resolve(conflict.id, notebook::Resolution::Theirs) {
+                    Ok(()) => {
+                        let mut at = u32::try_from(remote.text.encode_utf16().count())?;
+                        for token in &tokens {
+                            cache.apply(
+                                "Offline document writer",
+                                append(remote.space, remote.object, at, token),
+                            )?;
+                            at += u32::try_from(token.encode_utf16().count())?;
+                        }
+                        println!(
+                            "{}",
+                            json!({"event":"reviewed_append", "id":conflict.id, "remote":remote.text, "tokens":tokens, "at_us":now()})
+                        );
+                    }
                     Err(Error::Io(error))
-                        if [
-                            io::ErrorKind::ResourceBusy,
-                            io::ErrorKind::WouldBlock,
-                            io::ErrorKind::InvalidInput,
-                        ]
-                        .contains(&error.kind()) => {}
+                        if [io::ErrorKind::WouldBlock, io::ErrorKind::InvalidInput]
+                            .contains(&error.kind()) => {}
                     Err(error) => return Err(error.into()),
                 }
             }
@@ -545,75 +473,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         json!({"event":"done", "operations":operations, "at_us":now()})
     );
     Ok(())
-}
-
-#[test]
-fn append_review_requires_a_unique_ordered_history_and_an_absent_new_token() {
-    assert_eq!(
-        append_position(
-            "Concurrent edits: [w0:0]",
-            "Concurrent edits: [w1:0] [w0:0]",
-            " [w0:1]"
-        ),
-        Some(31)
-    );
-    for current in [
-        "Concurrent edits:",
-        "Concurrent edits: [w0:0] [w0:0]",
-        "Concurrent edits: [w0:1] [w0:0]",
-        "Concurrent edits: changed [w0:0]",
-    ] {
-        assert_eq!(
-            append_position("Concurrent edits: [w0:0]", current, " [w0:1]"),
-            None
-        );
-    }
-    assert_eq!(
-        append_position(
-            "Concurrent edits: [w0:0] [w1:0]",
-            "Concurrent edits: [w1:0] [w0:0]",
-            " [w0:1]"
-        ),
-        None
-    );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn publication_differences_retain_removed_text_and_graph_identities() {
-        let before = DocumentView {
-            texts: serde_json::from_value(json!({"left":{"text":"ab"}, "right":{"text":"cd"}, "untouched":{"text":"ef"}})).unwrap(),
-            graph: serde_json::from_value(json!({"outline":{"children":["a","b"]}, "a":{"content":["left"]}, "b":{"content":["right"]}})).unwrap(),
-        };
-        let after = DocumentView {
-            texts: serde_json::from_value(
-                json!({"left":{"text":"abcd"}, "untouched":{"text":"ef"}}),
-            )
-            .unwrap(),
-            graph: serde_json::from_value(
-                json!({"outline":{"children":["a"]}, "a":{"content":["left"]}}),
-            )
-            .unwrap(),
-        };
-        let changes = after.changes(&before);
-        assert_eq!(
-            changes.texts,
-            serde_json::from_value::<serde_json::Map<_, _>>(
-                json!({"left":{"text":"abcd"}, "right":null})
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            changes.graph,
-            serde_json::from_value::<serde_json::Map<_, _>>(
-                json!({"outline":{"children":["a"]}, "b":null})
-            )
-            .unwrap()
-        );
-        assert_eq!(before.changes(&after).texts["right"], before.texts["right"]);
-        assert_eq!(before.changes(&before), DocumentView::default());
-    }
 }

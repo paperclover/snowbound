@@ -1,7 +1,8 @@
 //! Page batch reconciliation: atomic batches with dependent body saves, competing moves and
 //! indentation, uncertain batches, and native page movement fixtures.
 
-use notebook::{ConflictKind, EditStatus, Operation, Recovery, Replica};
+use notebook::{ConflictKind, EditStatus, Recovery, Replica, Resolution};
+use onestore::op::{Op, SectionOp};
 use onestore::{
     ExGuid, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store,
     document::{Document, Format, Kind, Layout},
@@ -117,8 +118,7 @@ fn atomic_page_batches_survive_reopen_with_dependent_text() {
         .iter()
         .map(|(sid, level)| PageEdit::move_to(*sid, None, *level).unwrap())
         .collect();
-    let id = cache.pages(SOURCE, &edits).unwrap().unwrap();
-    assert!(cache.pages(SOURCE, &edits).is_err());
+    let id = section_op(&cache, SectionOp::Pages(edits.to_vec()));
     let mut expected_text = texts(SOURCE);
     let (&(sid, oid), original) = expected_text
         .iter()
@@ -132,17 +132,22 @@ fn atomic_page_batches_survive_reopen_with_dependent_text() {
     .unwrap()
     .unwrap();
     let queue = cache.pending().unwrap();
-    assert!(matches!(&queue[0].operation, Operation::Pages(batch) if batch.edits == edits));
+    assert!(
+        matches!(&queue[0].edit.ops[..], [Op::Section(SectionOp::Pages(batch))] if *batch == edits)
+    );
     let local = cache.snapshot().unwrap();
     drop(cache);
     let cache = Replica::open(&path).unwrap();
     assert_eq!(cache.pending().unwrap(), queue);
-    assert_eq!(cache.snapshot().unwrap(), local);
+    assert_eq!(
+        server::pages(&cache.snapshot().unwrap()),
+        server::pages(&local)
+    );
     let mut server = Server::new(SOURCE);
-    for edit in queue {
-        assert!(matches!(cache.sync_once(&mut server).unwrap(),
-            Some((published, EditStatus::Published { .. })) if published == edit.id));
-    }
+    assert!(matches!(
+        cache.sync_once(&mut server).unwrap().edit,
+        Some((_, EditStatus::Published { .. }))
+    ));
     let expected = [
         before[..3].to_vec(),
         before[6..].to_vec(),
@@ -155,7 +160,7 @@ fn atomic_page_batches_survive_reopen_with_dependent_text() {
         cache.status(id).unwrap(),
         Some(EditStatus::Published { .. })
     ));
-    assert_eq!(server.publications, 2);
+    assert_eq!(server.publications, 1);
 }
 
 #[test]
@@ -164,10 +169,10 @@ fn indentation_only_edits_preserve_remote_page_movement() {
     let cache = Replica::create(directory.path().join("pages.sqlite"), SOURCE).unwrap();
     let before = order(SOURCE);
     let sid = before[4].0;
-    let id = cache
-        .pages(SOURCE, &[PageEdit::set_level(sid, 3).unwrap()])
-        .unwrap()
-        .unwrap();
+    let id = section_op(
+        &cache,
+        SectionOp::Pages([PageEdit::set_level(sid, 3).unwrap()].to_vec()),
+    );
     let mut server = Server::new(SOURCE);
     PreparedEdit::pages(
         SOURCE,
@@ -178,22 +183,19 @@ fn indentation_only_edits_preserve_remote_page_movement() {
     .unwrap();
     let mut expected = order(&server.durable);
     expected.iter_mut().find(|p| p.0 == sid).unwrap().1 = 3;
-    assert!(matches!(cache.sync_once(&mut server).unwrap(),
+    assert!(matches!(cache.sync_once(&mut server).unwrap().edit,
         Some((published, EditStatus::Published { .. })) if published == id));
     assert_eq!(order(&server.durable), expected);
 }
 
 #[test]
-fn competing_page_moves_require_current_review_and_retain_intent_identities() {
+fn competing_page_moves_conflict_until_mine_is_kept_with_its_identities() {
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("pages.sqlite"), SOURCE).unwrap();
     let pages = order(SOURCE);
     let sid = pages[6].0;
     let original = PageEdit::move_to(sid, None, 1).unwrap();
-    let id = cache
-        .pages(SOURCE, std::slice::from_ref(&original))
-        .unwrap()
-        .unwrap();
+    let id = section_op(&cache, SectionOp::Pages(vec![original.clone()]));
     let mut server = Server::new(SOURCE);
     PreparedEdit::pages(
         SOURCE,
@@ -205,37 +207,20 @@ fn competing_page_moves_require_current_review_and_retain_intent_identities() {
     let remote = server.visible.clone();
     let local = cache.snapshot().unwrap();
     assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
+        cache.sync_once(&mut server).unwrap().edit,
         Some((id, EditStatus::Conflict(ConflictKind::StructureChanged)))
     );
     assert_eq!(server.publications, 0);
-    assert_eq!(cache.snapshot().unwrap(), local);
-    let revised = original
-        .reposition(PagePosition::Before(Some(pages[2].0)), 1)
-        .unwrap();
-    let fresh = PageEdit::move_to(sid, Some(pages[2].0), 1).unwrap();
-    assert!(
-        cache
-            .rebase_pages_conflict(id, &local, &remote, &[fresh])
-            .is_err()
+    assert_eq!(
+        server::pages(&cache.snapshot().unwrap()),
+        server::pages(&local)
     );
-    assert!(
-        cache
-            .rebase_pages_conflict(id, SOURCE, &remote, std::slice::from_ref(&revised))
-            .is_err()
-    );
-    assert!(
-        cache
-            .rebase_pages_conflict(id, &local, SOURCE, std::slice::from_ref(&revised))
-            .is_err()
-    );
-    cache
-        .rebase_pages_conflict(id, &local, &remote, std::slice::from_ref(&revised))
-        .unwrap();
-    assert!(matches!(&cache.pending().unwrap()[0].operation,
-        Operation::Pages(batch) if batch.edits == [revised.clone()]));
-    let expected = PreparedEdit::pages(&remote, &[revised]).unwrap();
-    assert!(matches!(cache.sync_once(&mut server).unwrap(),
+    // Keeping mine moves the page last again, from where the remote put it.
+    cache.resolve(id, Resolution::Mine).unwrap();
+    assert!(matches!(&cache.pending().unwrap()[0].edit.ops[..],
+        [Op::Section(SectionOp::Pages(batch))] if *batch == [original.clone()]));
+    let expected = PreparedEdit::pages(&remote, &[original]).unwrap();
+    assert!(matches!(cache.sync_once(&mut server).unwrap().edit,
         Some((published, EditStatus::Published { .. })) if published == id));
     assert_eq!(order(&server.durable), order(expected.as_bytes()));
 }
@@ -245,16 +230,13 @@ fn one_competing_level_prevents_publication_of_the_whole_batch() {
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("pages.sqlite"), SOURCE).unwrap();
     let pages = order(SOURCE);
-    let id = cache
-        .pages(
-            SOURCE,
-            &[
-                PageEdit::set_level(pages[4].0, 3).unwrap(),
-                PageEdit::set_level(pages[5].0, 2).unwrap(),
-            ],
-        )
-        .unwrap()
-        .unwrap();
+    let id = section_op(
+        &cache,
+        SectionOp::Pages(vec![
+            PageEdit::set_level(pages[4].0, 3).unwrap(),
+            PageEdit::set_level(pages[5].0, 2).unwrap(),
+        ]),
+    );
     let local = cache.snapshot().unwrap();
     let mut server = Server::new(SOURCE);
     PreparedEdit::pages(SOURCE, &[PageEdit::set_level(pages[5].0, 1).unwrap()])
@@ -263,12 +245,15 @@ fn one_competing_level_prevents_publication_of_the_whole_batch() {
         .unwrap();
     let remote = server.durable.clone();
     assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
+        cache.sync_once(&mut server).unwrap().edit,
         Some((id, EditStatus::Conflict(ConflictKind::StructureChanged)))
     );
     assert_eq!(server.publications, 0);
     assert_eq!(server.durable, remote);
-    assert_eq!(cache.snapshot().unwrap(), local);
+    assert_eq!(
+        server::pages(&cache.snapshot().unwrap()),
+        server::pages(&local)
+    );
 }
 
 #[test]
@@ -287,7 +272,7 @@ fn uncertain_page_batches_survive_recovery_and_do_not_replay() {
             PageEdit::set_level(pages[4].0, 3).unwrap(),
             PageEdit::set_level(pages[5].0, 2).unwrap(),
         ];
-        let id = cache.pages(SOURCE, &edits).unwrap().unwrap();
+        let id = section_op(&cache, SectionOp::Pages(edits.to_vec()));
         let local = cache.snapshot().unwrap();
         let queue = cache.pending().unwrap();
         let mut server = Server::new(SOURCE);
@@ -304,13 +289,12 @@ fn uncertain_page_batches_survive_recovery_and_do_not_replay() {
         let recovery = Recovery::open(&archive).unwrap();
         assert_eq!(recovery.pending().unwrap(), queue);
         assert_eq!(recovery.status(id).unwrap(), Some(attempted.clone()));
-        assert_eq!(recovery.snapshot().unwrap(), local);
-        assert!(
-            cache
-                .rebase_pages_conflict(id, &local, SOURCE, &edits)
-                .is_err()
+        assert_eq!(
+            server::pages(&recovery.snapshot().unwrap()),
+            server::pages(&local)
         );
-        let result = cache.sync_once(&mut server).unwrap().unwrap();
+        assert!(cache.resolve(id, Resolution::Mine).is_err());
+        let result = cache.sync_once(&mut server).unwrap().edit.unwrap();
         assert_eq!(server.publications, 1);
         if matches!(fault, Fault::UnknownAfter | Fault::PanicAfter) {
             assert!(matches!(result.1, EditStatus::Published { .. }));
@@ -341,10 +325,10 @@ fn an_unchanged_section_revision_cannot_confirm_a_changed_page() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("pages.sqlite");
     let cache = Replica::create(&path, &source).unwrap();
-    let id = cache
-        .pages(&source, &[PageEdit::set_level(sid, 3).unwrap()])
-        .unwrap()
-        .unwrap();
+    let id = section_op(
+        &cache,
+        SectionOp::Pages([PageEdit::set_level(sid, 3).unwrap()].to_vec()),
+    );
     let mut server = Server::new(&source);
     server.fault = Fault::UnknownAfter;
     assert!(cache.sync_once(&mut server).is_err());
@@ -352,7 +336,9 @@ fn an_unchanged_section_revision_cannot_confirm_a_changed_page() {
     drop(cache);
     let db = rusqlite::Connection::open(&path).unwrap();
     let encoded: String = db
-        .query_row("SELECT revisions FROM attempt", [], |r| r.get(0))
+        .query_row("SELECT revisions FROM batches WHERE attempted=1", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     let proofs: BTreeMap<ExGuid, ExGuid> = serde_json::from_str(&encoded).unwrap();
     assert_eq!(proofs.len(), 2);
@@ -368,13 +354,13 @@ fn an_unchanged_section_revision_cannot_confirm_a_changed_page() {
     let complete = server.visible.clone();
     server.visible = source;
     assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
+        cache.sync_once(&mut server).unwrap().edit,
         Some((id, attempted.clone()))
     );
     assert_eq!(server.confirmations, 0);
     server.visible = complete;
     assert!(matches!(
-        cache.sync_once(&mut server).unwrap(),
+        cache.sync_once(&mut server).unwrap().edit,
         Some((_, EditStatus::Published { .. }))
     ));
     assert_eq!(server.publications, 1);
@@ -386,16 +372,13 @@ fn an_explicit_anchor_is_retained_even_when_originally_in_place() {
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("pages.sqlite"), SOURCE).unwrap();
     let pages = order(SOURCE);
-    let id = cache
-        .pages(
-            SOURCE,
-            &[
-                PageEdit::move_to(pages[6].0, Some(pages[7].0), 1).unwrap(),
-                PageEdit::set_level(pages[4].0, 3).unwrap(),
-            ],
-        )
-        .unwrap()
-        .unwrap();
+    let id = section_op(
+        &cache,
+        SectionOp::Pages(vec![
+            PageEdit::move_to(pages[6].0, Some(pages[7].0), 1).unwrap(),
+            PageEdit::set_level(pages[4].0, 3).unwrap(),
+        ]),
+    );
     let mut server = Server::new(SOURCE);
     PreparedEdit::pages(
         SOURCE,
@@ -405,7 +388,7 @@ fn an_explicit_anchor_is_retained_even_when_originally_in_place() {
     .commit(&mut server)
     .unwrap();
     assert_eq!(
-        cache.sync_once(&mut server).unwrap(),
+        cache.sync_once(&mut server).unwrap().edit,
         Some((id, EditStatus::Conflict(ConflictKind::StructureChanged)))
     );
     assert_eq!(server.publications, 0);
@@ -416,10 +399,10 @@ fn convergent_page_indentation_requires_confirmation_without_republishing() {
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("pages.sqlite"), SOURCE).unwrap();
     let sid = order(SOURCE)[4].0;
-    let id = cache
-        .pages(SOURCE, &[PageEdit::set_level(sid, 1).unwrap()])
-        .unwrap()
-        .unwrap();
+    let id = section_op(
+        &cache,
+        SectionOp::Pages([PageEdit::set_level(sid, 1).unwrap()].to_vec()),
+    );
     let mut server = Server::new(SOURCE);
     PreparedEdit::pages(SOURCE, &[PageEdit::set_level(sid, 1).unwrap()])
         .unwrap()
@@ -429,7 +412,7 @@ fn convergent_page_indentation_requires_confirmation_without_republishing() {
     assert!(cache.sync_once(&mut server).is_err());
     assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
     assert_eq!(server.publications, 0);
-    assert!(matches!(cache.sync_once(&mut server).unwrap(),
+    assert!(matches!(cache.sync_once(&mut server).unwrap().edit,
         Some((published, EditStatus::Published { .. })) if published == id));
     assert_eq!(server.publications, 0);
     assert_eq!(server.confirmations, 2);
@@ -464,7 +447,7 @@ fn native_page_changes_reconcile_with_atomic_offline_batches_and_review() {
                     .map(|(sid, level)| PageEdit::move_to(*sid, None, *level).unwrap())
                     .collect()
             };
-            let id = cache.pages(SOURCE, &edits).unwrap().unwrap();
+            let id = section_op(&cache, SectionOp::Pages(edits.to_vec()));
             let text_id = model_ops::save(&cache, text_object, |page| {
                 model_ops::replace_text(page, text_object, 0..0, "Offline ")
             })
@@ -484,8 +467,11 @@ fn native_page_changes_reconcile_with_atomic_offline_batches_and_review() {
                     "02-promoted-parent" | "03-selected-group-move" | "06-promoted-level-two"
                 )
             };
-            let first = cache.sync_once(&mut server).unwrap().unwrap();
-            assert_eq!(first.0, id);
+            let first = if expected_conflict {
+                cache.sync_once(&mut server).unwrap().edit.unwrap()
+            } else {
+                (text_id, EditStatus::Pending)
+            };
             let mut reviewed = edits.clone();
             if expected_conflict {
                 assert_eq!(
@@ -494,26 +480,25 @@ fn native_page_changes_reconcile_with_atomic_offline_batches_and_review() {
                     "{mode}:{phase}"
                 );
                 assert_eq!(server.publications, 0);
-                assert_eq!(cache.snapshot().unwrap(), local);
-                if mode == "indent" && phase == "08-collapsed-group-move" {
-                    reviewed[0] = reviewed[0].reposition(PagePosition::Keep, 1).unwrap();
-                }
-                cache
-                    .rebase_pages_conflict(id, &local, &native, &reviewed)
-                    .unwrap();
-                assert!(matches!(cache.sync_once(&mut server).unwrap(),
-                    Some((published, EditStatus::Published { .. })) if published == id));
-            } else {
-                assert!(
-                    matches!(first.1, EditStatus::Published { .. }),
-                    "{mode}:{phase}"
+                assert_eq!(
+                    server::pages(&cache.snapshot().unwrap()),
+                    server::pages(&local)
                 );
+                // Keeping mine drops the moves that no longer apply.
+                cache.resolve(id, Resolution::Mine).unwrap();
+                reviewed = match &cache.pending().unwrap()[0].edit.ops[..] {
+                    [Op::Section(SectionOp::Pages(kept))] => kept.clone(),
+                    [] => Vec::new(),
+                    other => panic!("{other:?}"),
+                };
             }
+            assert!(
+                matches!(cache.sync_once(&mut server).unwrap().edit, Some((published, EditStatus::Published { .. })) if published == text_id),
+                "{mode}:{phase}"
+            );
             counts[usize::from(expected_conflict)] += 1;
             drop(cache);
             let cache = Replica::open(&path).unwrap();
-            assert!(matches!(cache.sync_once(&mut server).unwrap(),
-                Some((published, EditStatus::Published { .. })) if published == text_id));
             assert!(cache.pending().unwrap().is_empty());
             let mut expected = order(&native);
             for edit in &reviewed {
@@ -529,10 +514,7 @@ fn native_page_changes_reconcile_with_atomic_offline_batches_and_review() {
             }
             assert_eq!(order(&server.durable), expected, "{mode}:{phase}");
             assert_eq!(texts(&server.durable), expected_text, "{mode}:{phase}");
-            assert_eq!(
-                server.publications,
-                1 + usize::from(expected != order(&native))
-            );
+            assert_eq!(server.publications, 1);
             if let Some(output) = std::env::var_os("ONESTORE_OFFLINE_PAGE_EDIT_OUTPUT") {
                 let output = std::path::Path::new(&output);
                 assert!(output.is_absolute());
@@ -580,13 +562,12 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
             PageEdit::move_to(group[1].space(), Some(group[0].space()), 1).unwrap(),
             PageEdit::set_level(group[2].space(), 2).unwrap(),
         ];
-        cache.pages(&source, &edits).unwrap().unwrap();
+        section_op(&cache, SectionOp::Pages(edits.to_vec()));
         let body = format!("Actor {actor} 🦀 e\u{301}");
         let local = cache.snapshot().unwrap();
         let mut model = model_ops::page_of(&local, group[1].space());
         let text = body_outline(&mut model, &body);
-        cache
-            .save(&local, group[1].space(), &model, "Author")
+        model_ops::save_as(&cache, group[1].space(), &model, "Author")
             .unwrap()
             .unwrap();
         expected.extend([
@@ -601,18 +582,18 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
     for (path, queue) in &queues {
         let cache = Replica::open(path).unwrap();
         assert_eq!(cache.pending().unwrap(), *queue);
-        for edit in queue {
-            assert!(matches!(cache.sync_once(&mut server).unwrap(),
-                Some((published, EditStatus::Published { .. })) if published == edit.id));
-        }
+        assert!(matches!(
+            cache.sync_once(&mut server).unwrap().edit,
+            Some((_, EditStatus::Published { .. }))
+        ));
         assert!(cache.pending().unwrap().is_empty());
     }
-    assert_eq!(server.publications, 24);
+    assert_eq!(server.publications, 12);
     assert_eq!(order(&server.durable), expected);
     assert_eq!(texts(&server.durable), expected_text);
     for (path, queue) in &queues {
         let cache = Replica::open(path).unwrap();
-        assert_eq!(cache.sync_once(&mut server).unwrap(), None);
+        assert_eq!(cache.sync_once(&mut server).unwrap().edit, None);
         assert_eq!(order(&cache.snapshot().unwrap()), expected);
         for edit in queue {
             assert!(matches!(
@@ -631,10 +612,7 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
             .map(|(_, queue)| {
                 queue
                     .iter()
-                    .map(|edit| {
-                        serde_json::json!({"id": edit.id, "space": edit.space,
-                "operation": edit.operation})
-                    })
+                    .map(|edit| serde_json::json!({"id": edit.id, "edit": edit.edit}))
                     .collect::<Vec<_>>()
             })
             .collect();

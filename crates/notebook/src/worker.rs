@@ -61,7 +61,8 @@ impl Drop for SyncWorker {
 impl Replica {
     /// Starts one worker, reconnecting through `connect` after transport failures.
     /// Local edits wake it; `interval` controls idle polling and transport retries. While
-    /// nothing is queued, a remote whose `stamp` holds is not read again.
+    /// nothing is queued, or the queue waits on a remote that has not changed since, a
+    /// remote whose `stamp` holds is not read again.
     /// Contended operations returning `NotCommitted` also back off by up to one second.
     /// `observe` runs on the worker after each attempt, including connection errors.
     /// Cache/document errors stop the worker; inspect them through `observe` or `stop`.
@@ -75,7 +76,7 @@ impl Replica {
     where
         R: Remote + 'static,
         F: FnMut() -> io::Result<R> + Send + 'static,
-        O: FnMut(&Result<Option<(u64, EditStatus)>>) + Send + 'static,
+        O: FnMut(&Result<Synced>) + Send + 'static,
     {
         if interval.is_zero() || Instant::now().checked_add(interval).is_none() {
             return Err(io::Error::new(
@@ -103,18 +104,19 @@ impl Replica {
                 let mut remote: Option<R> = None;
                 let jitter = RandomState::new();
                 let mut contention = 0_u32;
-                // The first attempt always runs, so `observe` hears once that the remote is
-                // reachable.
-                let mut attempted = false;
+                // The first step, and the first after a failure, always runs, so `observe`
+                // hears that the remote is reachable and what state the queue is in.
+                let mut reported = false;
                 while !worker_signal.stopped.load(Ordering::Acquire) {
                     let result = match remote.as_mut() {
                         Some(remote) => {
-                            if attempted && replica.settled(remote).unwrap_or(false) {
+                            if reported && replica.settled(remote).unwrap_or(false) {
                                 let _ = receiver.recv_timeout(interval);
                                 continue;
                             }
-                            attempted = true;
-                            replica.sync_once(remote)
+                            let result = replica.sync_once(remote);
+                            reported = result.is_ok();
+                            result
                         }
                         None => match connect() {
                             Ok(connected) => {
@@ -126,11 +128,14 @@ impl Replica {
                     };
                     observe(&result);
                     match result {
-                        Ok(Some((_, EditStatus::Published { .. }))) => {
+                        Ok(Synced {
+                            edit: Some((_, EditStatus::Published { .. })),
+                            ..
+                        }) => {
                             contention = 0;
                             continue;
                         }
-                        Ok(None) => contention = 0,
+                        Ok(Synced { edit: None, .. }) => contention = 0,
                         Ok(_) => {}
                         Err(Error::Remote(onestore::CommitError {
                             state: onestore::CommitState::NotCommitted,

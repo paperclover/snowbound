@@ -6,32 +6,33 @@ pub mod discover;
 pub mod smb;
 
 use onestore::{
-    ExGuid, PageCreation, PreparedEdit, RevisionIndex, Store,
-    document::{Document, Kind},
+    ExGuid,
+    op::{Edit, OpError},
     page::Page,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::{
     fs::OpenOptions,
     io,
     path::Path,
-    sync::{Mutex, atomic::AtomicI64},
+    sync::{Arc, Mutex, MutexGuard, mpsc},
+    thread::JoinHandle,
     time::Duration,
 };
 
 mod assets;
-mod images;
+mod base;
 mod merge;
-mod pages;
-mod rebase;
+mod migrate;
+mod queue;
 mod recovery;
 mod schema;
 pub mod session;
-pub use pages::PageEdits;
 pub use recovery::{Recovery, RecoverySummary};
 mod sync;
-pub use sync::{ConflictKind, EditStatus, Remote};
+pub use sync::{ConflictKind, EditStatus, Remote, Synced};
 mod worker;
+mod working;
 #[cfg(feature = "smb")]
 pub use smb::SmbRemote;
 pub use worker::SyncWorker;
@@ -50,6 +51,9 @@ pub enum Error {
     RemoteIo(io::Error),
     #[error(transparent)]
     Discovery(#[from] discover::Error),
+    /// The section refused an edit; the pages it names are as they were.
+    #[error(transparent)]
+    Rejected(#[from] OpError),
     #[error("External payload identity now refers to different bytes")]
     AssetChanged,
     #[cfg(feature = "protected")]
@@ -60,114 +64,49 @@ pub enum Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APPLICATION_ID: u32 = 0x4f4e454f;
-const SCHEMA_VERSION: u32 = 14;
 
-/// An edited page model together with the stored model it was edited from.
-/// `before` is the precondition reconciliation checks against the remote page.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PageIntent {
-    pub before: Page,
-    pub after: Page,
-    pub author: String,
-}
-
-impl PageIntent {
-    /// Describes the intent as one paragraph's text replacement, when that is all it changes:
-    /// the text object, its text before, the replaced UTF-16 range and the replacement.
-    pub fn text_change(&self) -> Option<(ExGuid, String, std::ops::Range<u32>, String)> {
-        fn texts(page: &Page) -> Vec<(ExGuid, &onestore::page::Paragraph)> {
-            let mut out = Vec::new();
-            for object in &page.objects {
-                let outlines: Vec<&onestore::page::Outline> = match object {
-                    onestore::page::PageObject::Outline(outline) => vec![outline],
-                    onestore::page::PageObject::Title(title) => title.outlines.iter().collect(),
-                    _ => Vec::new(),
-                };
-                for outline in outlines {
-                    for paragraph in &outline.paragraphs {
-                        if let Some(text) = paragraph.text() {
-                            out.push((text.id, &text.text));
-                        }
-                    }
-                }
-            }
-            out
-        }
-        let (before, after) = (texts(&self.before), texts(&self.after));
-        if before.len() != after.len() {
-            return None;
-        }
-        let mut changed = None;
-        for ((id, x), (other, y)) in before.iter().zip(&after) {
-            if id != other {
-                return None;
-            }
-            if x.text() != y.text() {
-                if changed.is_some() {
-                    return None;
-                }
-                changed = Some((*id, *x, *y));
-            }
-        }
-        let (id, x, y) = changed?;
-        let (b, o) = (x.text(), y.text());
-        let prefix = b
-            .char_indices()
-            .zip(o.chars())
-            .take_while(|((_, c), d)| c == d)
-            .map(|((i, c), _)| i + c.len_utf8())
-            .last()
-            .unwrap_or(0);
-        let suffix = b[prefix..]
-            .chars()
-            .rev()
-            .zip(o[prefix..].chars().rev())
-            .take_while(|(c, d)| c == d)
-            .map(|(c, _)| c.len_utf8())
-            .sum::<usize>();
-        let start = x.utf16_offset(prefix).ok()?;
-        let end = x.utf16_offset(b.len() - suffix).ok()?;
-        Some((
-            id,
-            b.to_owned(),
-            start..end,
-            o[prefix..o.len() - suffix].to_owned(),
-        ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum Operation {
-    /// An edited page model; body content is edited only through this intent.
-    Page(PageIntent),
-    CreatePage(PageCreation),
-    Pages(PageEdits),
-    /// Permanent removal of explicitly selected page spaces from the section.
-    DeletePages(Vec<ExGuid>),
-}
-
-/// A locally acknowledged intent; its ID remains stable across cache reopen.
+/// A locally durable edit; its ID remains stable across cache reopen.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingEdit {
     pub id: u64,
+    pub author: String,
+    pub edit: Edit,
+}
+
+/// Unpublished work the remote section no longer accepts: the batch holding edit `id`
+/// changed page `space` where the remote changed it too.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub id: u64,
     pub space: ExGuid,
-    pub operation: Operation,
+    pub kind: ConflictKind,
+}
+
+/// How a conflict or an uncertain attempt ends. `Mine` keeps the local pages: a conflicted
+/// page is rewritten from the remote page to the local one; a released attempt publishes
+/// again. `Theirs` drops the local edits to the conflicted page, or the whole unpublished
+/// branch of a released attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    Mine,
+    Theirs,
 }
 
 /// Owns one local cache. Share this handle between threads; a second open fails busy.
-/// SQLite's exclusive connection retains ownership between local transactions.
+/// Edits apply on the cache's section thread, which keeps the section parsed; SQLite's
+/// exclusive connection retains ownership between local transactions.
 pub struct Replica {
-    connection: Mutex<Connection>,
+    connection: Arc<Mutex<Connection>>,
+    working: Option<mpsc::Sender<working::Request>>,
+    thread: Option<JoinHandle<()>>,
     synchronization: Mutex<()>,
-    /// The intent a synchronization step selected for publication, or zero.
-    in_flight: AtomicI64,
-    worker: Mutex<std::sync::Weak<worker::Signal>>,
+    worker: Arc<Mutex<std::sync::Weak<worker::Signal>>>,
+    /// The section's root object space, which names the document.
+    root: ExGuid,
 }
 
 impl Replica {
-    /// Seeds a new cache from a validated notebook image, refusing any existing path.
+    /// Seeds a new cache from a validated section image, refusing any existing path.
     /// An initialization error preserves the created file for inspection.
     pub fn create(path: impl AsRef<Path>, source: &[u8]) -> Result<Self> {
         validate(source)?;
@@ -179,364 +118,224 @@ impl Replica {
             options.mode(0o600);
         }
         drop(options.open(path.as_ref())?);
-        Self::connect(path.as_ref(), Some(source))
-    }
-
-    /// Reopens an existing cache and its durable pending edits without network access.
-    /// Unrecognized databases and unsupported journal modes are rejected without conversion.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::connect(path.as_ref(), None)
-    }
-
-    fn connect(path: &Path, source: Option<&[u8]>) -> Result<Self> {
-        let mut connection = cache_connection(path)?;
+        let mut connection = cache_connection(path.as_ref())?;
+        write_ahead(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
+        let tables: i64 =
+            transaction.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
         let application: u32 =
             transaction.pragma_query_value(None, "application_id", |row| row.get(0))?;
-        let version: u32 =
-            transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if let Some(source) = source {
-            let tables: i64 =
-                transaction
-                    .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
-            if application != 0 || version != 0 || tables != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::AlreadyExists,
-                    "Cache initialization found an existing database",
-                )
-                .into());
-            }
-            transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
-            transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            transaction.execute_batch(
-                "
-                CREATE TABLE replica (
-                    id INTEGER PRIMARY KEY CHECK(id=1),
-                    base BLOB NOT NULL,
-                    working BLOB NOT NULL
-                ) STRICT;
-            ",
-            )?;
-            schema::create(&transaction)?;
-            transaction.execute("INSERT INTO replica VALUES (1, ?1, x'')", [source])?;
-        } else {
-            if application != APPLICATION_ID {
-                return Err(
-                    io::Error::new(io::ErrorKind::InvalidData, "Not a notebook cache").into(),
-                );
-            }
-            if version != SCHEMA_VERSION {
-                // Older caches are refused rather than migrated until the application is
-                // usable end to end; the queue must be drained by the build that wrote it.
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Cache schema version {version} is not the supported version {SCHEMA_VERSION}"),
-                )
-                .into());
-            }
-            validate_images(&transaction)?;
-            pending(&transaction)?;
-        }
-        transaction.commit()?;
-        Ok(Self {
-            connection: Mutex::new(connection),
-            synchronization: Mutex::new(()),
-            in_flight: AtomicI64::new(0),
-            worker: Mutex::new(std::sync::Weak::new()),
-        })
-    }
-
-    /// Returns the latest complete locally committed image, including pending edits.
-    pub fn snapshot(&self) -> Result<Vec<u8>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        images::working(&connection)
-    }
-
-    /// The page in `space` as the working image stores it.
-    pub fn page(&self, space: ExGuid) -> Result<Page> {
-        let snapshot = self.snapshot()?;
-        let store = Store::parse(&snapshot)?;
-        let index = RevisionIndex::parse(&store)?;
-        Ok(Page::from_space(&Document::parse(&index)?, space)?)
-    }
-
-    /// Whether no edit is queued and the remote still has the last observed image's stamp,
-    /// reading neither image; the cache is not locked during remote I/O.
-    pub(crate) fn settled(&self, remote: &mut impl Remote) -> Result<bool> {
-        let lock = || {
-            self.connection
-                .lock()
-                .map_err(|_| io::Error::other("Cache owner panicked"))
-        };
-        if !images::settled(&*lock()?)? {
-            return Ok(false);
-        }
-        let Some(stamp) = remote.stamp().map_err(Error::RemoteIo)? else {
-            return Ok(false);
-        };
-        Ok(images::stamp(&*lock()?)? == stamp)
-    }
-
-    pub fn pending(&self) -> Result<Vec<PendingEdit>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        pending(&connection)
-    }
-
-    /// Identities and page spaces of the pending edits, oldest first, without reading their
-    /// operations.
-    pub(crate) fn queued(&self) -> Result<Vec<(u64, ExGuid)>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let mut query = connection.prepare("SELECT id, space FROM edits ORDER BY id")?;
-        let mut rows = query.query([])?;
-        let mut edits = Vec::new();
-        while let Some(row) = rows.next()? {
-            edits.push((
-                u64::try_from(row.get::<_, i64>(0)?).map_err(io::Error::other)?,
-                row.get::<_, String>(1)?.parse()?,
-            ));
-        }
-        Ok(edits)
-    }
-
-    /// Durably queues an edited page model using the supplied local snapshot.
-    /// While the newest pending edit is an unattempted save of the same page, a new save
-    /// replaces its result instead of queueing another publication, as OneNote does
-    /// within its own save interval. An unchanged model returns `None`.
-    pub fn save(
-        &self,
-        source: &[u8],
-        space: ExGuid,
-        after: &Page,
-        author: &str,
-    ) -> Result<Option<u64>> {
-        Ok(self.save_image(source, space, after, author)?.0)
-    }
-
-    /// `save`, with the working image it leaves.
-    pub(crate) fn save_image(
-        &self,
-        source: &[u8],
-        space: ExGuid,
-        after: &Page,
-        author: &str,
-    ) -> Result<(Option<u64>, Vec<u8>)> {
-        let prepared = PreparedEdit::page(source, space, after, author)?;
-        if prepared.as_bytes() == source {
-            return Ok((None, source.to_vec()));
-        }
-        let before = page_of(source, space)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "The saved page is not in the local image",
-            )
-        })?;
-        {
-            let mut connection = self
-                .connection
-                .lock()
-                .map_err(|_| io::Error::other("Cache owner panicked"))?;
-            let transaction =
-                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let (base, current) = images::both(&transaction)?;
-            if current != source {
-                return Err(io::Error::new(
-                    io::ErrorKind::ResourceBusy,
-                    "The local snapshot changed before this edit",
-                )
-                .into());
-            }
-            let newest: Option<(i64, String, String)> = transaction
-                .query_row(
-                    "SELECT id, space, operation FROM edits WHERE id=(SELECT max(id) FROM edits)",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            // The intent a step is publishing has no attempt row yet; rewriting it would lose
-            // this save under the published bytes.
-            if let Some((id, sid, operation)) = newest
-                && id != self.in_flight.load(std::sync::atomic::Ordering::Acquire)
-                && sid == space.to_string()
-                && let Ok(Operation::Page(mut head)) = serde_json::from_str::<Operation>(&operation)
-            {
-                let attempted: bool = transaction.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM attempt WHERE edit_id=?1) OR EXISTS(SELECT 1 FROM conflicts WHERE edit_id=?1)",
-                    [id],
-                    |row| row.get(0),
-                )?;
-                if !attempted {
-                    head.after = after.clone();
-                    transaction.execute(
-                        "UPDATE edits SET operation=?1 WHERE id=?2",
-                        params![
-                            serde_json::to_string(&Operation::Page(head))
-                                .map_err(io::Error::other)?,
-                            id
-                        ],
-                    )?;
-                    images::set_working(&transaction, &base, prepared.as_bytes())?;
-                    transaction.commit()?;
-                    drop(connection);
-                    self.wake_sync();
-                    let id = u64::try_from(id).map_err(io::Error::other)?;
-                    return Ok((Some(id), prepared.as_bytes().to_vec()));
-                }
-            }
-        }
-        let id = self.record(
-            source,
-            space,
-            Operation::Page(PageIntent {
-                before,
-                after: after.clone(),
-                author: author.to_owned(),
-            }),
-            &prepared,
-        )?;
-        Ok((id, prepared.as_bytes().to_vec()))
-    }
-
-    /// Queues a new page and its section entry with stable identities for dependent edits.
-    pub fn create_page(&self, source: &[u8], page: &PageCreation) -> Result<Option<u64>> {
-        let edit = PreparedEdit::create_page(source, page)?;
-        self.record(
-            source,
-            page.space(),
-            Operation::CreatePage(page.clone()),
-            &edit,
-        )
-    }
-
-    /// Queues the permanent removal of explicitly selected pages; the batch is republished
-    /// only while every selected page still exists remotely.
-    pub fn delete_pages(&self, source: &[u8], pages: &[ExGuid]) -> Result<Option<u64>> {
-        let edit = PreparedEdit::delete_pages_permanently(source, pages)?;
-        let space = validate(source)?;
-        self.record(source, space, Operation::DeletePages(pages.to_vec()), &edit)
-    }
-
-    fn record(
-        &self,
-        source: &[u8],
-        space: ExGuid,
-        operation: Operation,
-        edit: &PreparedEdit<'_>,
-    ) -> Result<Option<u64>> {
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| io::Error::other("Cache owner panicked"))?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (base, current) = images::both(&transaction)?;
-        if current != source {
+        if application != 0 || tables != 0 {
             return Err(io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                "The local snapshot changed before this edit",
+                io::ErrorKind::AlreadyExists,
+                "Cache initialization found an existing database",
             )
             .into());
         }
-        if edit.as_bytes() == source {
-            return Ok(None);
-        }
-        transaction.execute(
-            "INSERT INTO edits(space, operation) VALUES (?1, ?2)",
-            params![
-                space.to_string(),
-                serde_json::to_string(&operation).map_err(io::Error::other)?
-            ],
-        )?;
-        let id = u64::try_from(transaction.last_insert_rowid()).map_err(io::Error::other)?;
-        images::set_working(&transaction, &base, edit.as_bytes())?;
+        transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
+        transaction.pragma_update(None, "user_version", schema::VERSION)?;
+        schema::create(&transaction)?;
+        base::write(&transaction, base::Image::Base, source)?;
         transaction.commit()?;
-        drop(connection);
-        self.wake_sync();
-        Ok(Some(id))
+        Self::start(connection)
+    }
+
+    /// Reopens an existing cache and its durable pending edits without network access.
+    /// A schema-14 cache is converted once, after exporting it to `<path>.v14-recovery`;
+    /// a conversion that cannot reproduce every queued page leaves it untouched.
+    /// Unrecognized databases and unsupported journal modes are rejected.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let mut connection = cache_connection(path)?;
+        let application: u32 =
+            connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        if application != APPLICATION_ID {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "Not a notebook cache").into());
+        }
+        let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        if integrity != "ok" {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "Cache integrity check failed").into(),
+            );
+        }
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        // A schema-14 cache converts in its rollback journal, so a failed conversion leaves
+        // the file as it was.
+        match version {
+            migrate::VERSION => migrate::migrate(&mut connection, path)?,
+            schema::VERSION => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Cache schema version {version} is not the supported version {}",
+                        schema::VERSION
+                    ),
+                )
+                .into());
+            }
+        }
+        write_ahead(&connection)?;
+        Self::start(connection)
+    }
+
+    fn start(connection: Connection) -> Result<Self> {
+        let connection = Arc::new(Mutex::new(connection));
+        let worker = Arc::new(Mutex::new(std::sync::Weak::new()));
+        let (sender, thread, root) = working::spawn(Arc::clone(&connection), Arc::clone(&worker))?;
+        Ok(Self {
+            connection,
+            working: Some(sender),
+            thread: Some(thread),
+            synchronization: Mutex::new(()),
+            worker,
+            root,
+        })
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        lock(&self.connection)
+    }
+
+    /// Hands `request` to the section thread.
+    fn send(&self, request: working::Request) -> Result<()> {
+        self.working
+            .as_ref()
+            .and_then(|working| working.send(request).ok())
+            .ok_or_else(|| io::Error::other("The section thread stopped").into())
+    }
+
+    /// Asks the section thread and waits for its answer.
+    fn ask<T: Send + 'static>(
+        &self,
+        request: impl FnOnce(working::Reply<T>) -> working::Request,
+    ) -> Result<T> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.send(request(Box::new(move |result| {
+            let _ = sender.send(result);
+        })))?;
+        receiver
+            .recv()
+            .map_err(|_| io::Error::other("The section thread stopped"))?
+    }
+
+    /// Applies an edit and queues it durably for publication, returning its id once
+    /// written. A refused edit returns `Rejected` and leaves every page as it was.
+    pub fn apply(&self, author: &str, edit: Edit) -> Result<u64> {
+        self.ask(|reply| working::Request::Apply {
+            author: author.to_owned(),
+            edit,
+            reply,
+        })
+    }
+
+    /// `apply` without waiting: `reply` runs on the section thread once the edit is
+    /// durable or refused.
+    pub(crate) fn submit(
+        &self,
+        author: &str,
+        edit: Edit,
+        reply: working::Reply<u64>,
+    ) -> Result<()> {
+        self.send(working::Request::Apply {
+            author: author.to_owned(),
+            edit,
+            reply,
+        })
+    }
+
+    /// The page in `space` as the queued edits leave it; O(page), for opening and reloading.
+    pub fn page(&self, space: ExGuid) -> Result<Page> {
+        self.ask(|reply| working::Request::Page { space, reply })
+    }
+
+    /// Page spaces, titles and outline levels (1 at the top) in section order.
+    pub fn pages(&self) -> Result<Vec<(ExGuid, String, u32)>> {
+        self.ask(|reply| working::Request::Pages { reply })
+    }
+
+    /// The section image the queued edits leave, the unsealed ones sealed as one more
+    /// revision whose identities differ per call: O(section), for tests and diagnostics.
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
+        self.ask(|reply| working::Request::Image { reply })
+    }
+
+    /// The section file's identity, which internal links name as `section-id`.
+    pub fn identity(&self) -> Result<[u8; 16]> {
+        let stamp = base::stamp(&*self.lock()?, base::Image::Base)?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Damaged cached image"))?;
+        Ok(onestore::Header::parse(&stamp.header)?.file_id)
+    }
+
+    /// Queued edits, oldest first.
+    pub fn pending(&self) -> Result<Vec<PendingEdit>> {
+        pending(&*self.lock()?)
     }
 
     fn wake_sync(&self) {
-        if let Ok(worker) = self.worker.lock()
-            && let Some(worker) = worker.upgrade()
-        {
-            worker.wake();
+        wake(&self.worker);
+    }
+}
+
+impl Drop for Replica {
+    fn drop(&mut self) {
+        drop(self.working.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }
 
-fn page_of(source: &[u8], space: ExGuid) -> Result<Option<Page>> {
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    let document = Document::parse(&index)?;
-    Ok(Page::from_space(&document, space).ok())
+fn lock(connection: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
+    connection
+        .lock()
+        .map_err(|_| io::Error::other("Cache owner panicked").into())
 }
 
-fn validate(source: &[u8]) -> Result<ExGuid> {
-    let store = Store::parse(source)?;
-    if !store.checksum_mismatches.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Notebook transaction checksum damage",
-        )
-        .into());
+fn wake(worker: &Mutex<std::sync::Weak<worker::Signal>>) {
+    if let Ok(worker) = worker.lock()
+        && let Some(worker) = worker.upgrade()
+    {
+        worker.wake();
     }
-    let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
-    Document::parse(&index)?;
-    Ok(index.root)
+}
+
+/// Fully validates a section image, returning its root object space.
+fn validate(source: &[u8]) -> Result<ExGuid> {
+    let arena = onestore::Arena::default();
+    Ok(onestore::Section::open(&arena, source.to_vec())?.root())
 }
 
 fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {
-    let mut query = connection.prepare("SELECT id, space, operation FROM edits ORDER BY id")?;
-    let mut rows = query.query([])?;
-    let mut edits = Vec::new();
-    while let Some(row) = rows.next()? {
-        edits.push(pending_edit(row)?);
-    }
-    Ok(edits)
+    queue::load(connection, None)
 }
 
-fn pending_edit(row: &rusqlite::Row<'_>) -> Result<PendingEdit> {
-    let edit = PendingEdit {
-        id: u64::try_from(row.get::<_, i64>(0)?).map_err(io::Error::other)?,
-        space: row.get::<_, String>(1)?.parse()?,
-        operation: serde_json::from_str(&row.get::<_, String>(2)?)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-    };
-    if matches!(&edit.operation, Operation::CreatePage(page) if page.space() != edit.space) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Cached page identity differs from its creation intent",
-        )
-        .into());
-    }
-    Ok(edit)
+fn unsigned(value: i64) -> Result<u64> {
+    Ok(u64::try_from(value).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?)
 }
 
+fn signed(value: u64) -> Result<i64> {
+    Ok(i64::try_from(value).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?)
+}
+
+/// Opens a cache without writing to it: exclusive locking, a full sync of every commit
+/// (`F_FULLFSYNC` on macOS, the WAL's syncs included) and foreign keys, each queried back.
 fn cache_connection(path: &Path) -> Result<Connection> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(Duration::ZERO)?;
     connection.execute_batch(
-        "PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=EXTRA; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;",
+        "PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA foreign_keys=ON;",
     )?;
-    for (name, expected) in [("locking_mode", "exclusive"), ("journal_mode", "delete")] {
-        let actual: String = connection.pragma_query_value(None, name, |row| row.get(0))?;
-        if actual != expected {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unsupported cache locking or journal mode",
-            )
-            .into());
-        }
+    let locking: String = connection.pragma_query_value(None, "locking_mode", |row| row.get(0))?;
+    let journal: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if locking != "exclusive" || !["wal", "delete"].contains(&journal.as_str()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Unsupported cache locking or journal mode",
+        )
+        .into());
     }
-    for (name, expected) in [("synchronous", 3), ("fullfsync", 1), ("foreign_keys", 1)] {
+    for (name, expected) in [("synchronous", 2), ("fullfsync", 1), ("foreign_keys", 1)] {
         let actual: i64 = connection.pragma_query_value(None, name, |row| row.get(0))?;
         if actual != expected {
             return Err(io::Error::new(
@@ -549,20 +348,27 @@ fn cache_connection(path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-fn validate_images(connection: &Connection) -> Result<()> {
-    let integrity: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-    if integrity != "ok" {
-        return Err(
-            io::Error::new(io::ErrorKind::InvalidData, "Cache integrity check failed").into(),
-        );
-    }
-    let (base, working) = images::both(connection)?;
-    if validate(&base)? != validate(&working)? {
+/// Switches a cache to write-ahead logging: a commit appends its pages to `<cache>-wal`
+/// instead of copying the originals to a rollback journal. Under exclusive locking the WAL
+/// index lives in memory, so the WAL is the only file beside the cache; it is checkpointed
+/// and removed on close, and replayed on the next open after a crash.
+fn write_ahead(connection: &Connection) -> Result<()> {
+    let mode: String =
+        connection.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    if mode != "wal" {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Cache images belong to different documents",
+            io::ErrorKind::Unsupported,
+            "The cache cannot use write-ahead logging",
         )
         .into());
     }
     Ok(())
+}
+
+/// FILETIME now, as an edit's `at`.
+pub(crate) fn now() -> u64 {
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100)
 }

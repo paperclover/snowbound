@@ -1,7 +1,8 @@
-use notebook::{Error, Operation, Replica};
+use notebook::{Error, Replica};
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
+    op::{Edit, Op, PageOp, SectionOp},
     page::{Outline, PageObject},
 };
 use std::{
@@ -14,6 +15,8 @@ use std::{
 
 #[path = "support/model_ops.rs"]
 mod model_ops;
+#[path = "support/server.rs"]
+mod server;
 
 fn target(source: &[u8]) -> (ExGuid, ExGuid, String) {
     let store = Store::parse(source).unwrap();
@@ -36,25 +39,23 @@ fn target(source: &[u8]) -> (ExGuid, ExGuid, String) {
         .unwrap()
 }
 
-fn text_of(page: &onestore::page::Page, text: ExGuid) -> String {
-    model_ops::paragraph_with(page, text)
-        .unwrap()
-        .text()
-        .unwrap()
-        .text
-        .text()
-        .to_owned()
-}
-
-fn intent(replica: &Replica, at: usize) -> notebook::PageIntent {
-    match &replica.pending().unwrap()[at].operation {
-        Operation::Page(intent) => intent.clone(),
-        other => panic!("{other:?}"),
+/// An edit typing `with` at the start of a text.
+fn typed(space: ExGuid, text: ExGuid, with: &str) -> Edit {
+    Edit {
+        at: model_ops::now(),
+        ops: vec![Op::Page {
+            space,
+            op: PageOp::Text {
+                text,
+                range: 0..0,
+                with: with.into(),
+            },
+        }],
     }
 }
 
 #[test]
-fn cache_reopen_preserves_exact_images_and_intents() {
+fn cache_reopen_preserves_the_base_and_queued_edits() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("section.sqlite");
     let source = onestore::create_section("section.one", "café 🦀", "Fixture").unwrap();
@@ -72,77 +73,102 @@ fn cache_reopen_preserves_exact_images_and_intents() {
     })
     .unwrap()
     .unwrap();
-    let edited = replica.snapshot().unwrap();
-    assert_eq!(target(&edited).2, "café 🐈 日本語");
-    let intents = replica.pending().unwrap();
-    assert_eq!(intents.len(), 1);
-    assert_eq!((intents[0].id, intents[0].space), (first, sid));
-    let first_intent = intent(&replica, 0);
+    assert_eq!(target(&replica.snapshot().unwrap()).2, "café 🐈 日本語");
+    let edits = replica.pending().unwrap();
+    assert_eq!(edits.len(), 1);
     assert_eq!(
-        first_intent.text_change(),
-        Some((oid, "café 🦀".into(), 5..7, "🐈 日本語".into()))
+        (edits[0].id, edits[0].author.as_str()),
+        (first, model_ops::AUTHOR)
     );
-    assert_eq!(first_intent.author, model_ops::AUTHOR);
+    assert!(matches!(
+        &edits[0].edit.ops[..],
+        [Op::Page { space, op: PageOp::Text { text, range, with } }]
+            if (*space, *text, range.clone(), with.as_str()) == (sid, oid, 5..7, "🐈 日本語")
+    ));
+    let beside = |suffix: &str| {
+        let mut file = path.as_os_str().to_owned();
+        file.push(suffix);
+        std::path::PathBuf::from(file)
+    };
+    // Commits go to the write-ahead log; its index stays in memory.
+    assert!(beside("-wal").exists());
+    assert!(!beside("-shm").exists());
     drop(replica);
+    assert!(
+        !beside("-wal").exists(),
+        "closing checkpoints and removes the log"
+    );
     let replica = Replica::open(&path).unwrap();
-    assert_eq!(replica.snapshot().unwrap(), edited);
-    assert_eq!(replica.pending().unwrap(), intents);
-    let second = model_ops::save(&replica, oid, |page| {
-        model_ops::replace_text(page, oid, 0..0, "Recovered ")
-    })
-    .unwrap()
-    .unwrap();
-    assert_eq!(second, first, "an unattempted save is replaced in place");
-    let coalesced = intent(&replica, 0);
-    assert_eq!(coalesced.before, first_intent.before);
-    assert_eq!(text_of(&coalesced.after, oid), "Recovered café 🐈 日本語");
+    assert_eq!(target(&replica.snapshot().unwrap()).2, "café 🐈 日本語");
+    assert_eq!(replica.pending().unwrap(), edits);
+    let second = replica
+        .apply(model_ops::AUTHOR, typed(sid, oid, "Recovered "))
+        .unwrap();
+    assert!(second > first);
     assert_eq!(
         target(&replica.snapshot().unwrap()).2,
         "Recovered café 🐈 日本語"
     );
+    assert_eq!(replica.pending().unwrap().len(), 2);
 }
 
 #[test]
-fn failed_saves_preserve_both_intent_queue_and_working_image() {
+fn refused_edits_and_failed_writes_leave_the_queue_as_it_was() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("section.sqlite");
     let source = onestore::create_section("section.one", "café 🦀", "Fixture").unwrap();
     let replica = Replica::create(&path, &source).unwrap();
     let (sid, oid, _) = target(&source);
-    let (_, mut page) = model_ops::locate(&source, oid);
-    let mut empty = Outline {
+    let empty = Outline {
         id: onestore::page::text::new_id().unwrap(),
         title: false,
         min_width: None,
-        layout: Default::default(),
+        layout: onestore::document::Layout {
+            x: Some(72.0),
+            y: Some(400.0),
+            ..Default::default()
+        },
         indents: Vec::new(),
         paragraphs: Vec::new(),
         unsupported: Vec::new(),
     };
-    empty.layout.x = Some(72.0);
-    empty.layout.y = Some(400.0);
-    page.objects.push(PageObject::Outline(empty));
-    assert!(replica.save(&source, sid, &page, "Author").is_err());
-    let (_, mut page) = model_ops::locate(&source, oid);
-    model_ops::replace_text(&mut page, oid, 0..0, "Elsewhere ");
-    let foreign = ExGuid::default();
-    assert!(replica.save(&source, foreign, &page, "Author").is_err());
+    let refused = Edit {
+        at: model_ops::now(),
+        ops: vec![
+            Op::Page {
+                space: sid,
+                op: PageOp::Text {
+                    text: oid,
+                    range: 0..0,
+                    with: "Undone ".into(),
+                },
+            },
+            Op::Page {
+                space: sid,
+                op: PageOp::Add {
+                    object: PageObject::Outline(empty),
+                    before: None,
+                },
+            },
+        ],
+    };
+    assert!(matches!(
+        replica.apply("Author", refused),
+        Err(Error::Rejected(_))
+    ));
+    assert!(matches!(
+        replica.apply("Author", typed(ExGuid::default(), oid, "Elsewhere ")),
+        Err(Error::Rejected(_))
+    ));
     assert_eq!(replica.snapshot().unwrap(), source);
     assert!(replica.pending().unwrap().is_empty());
     drop(replica);
     let connection = rusqlite::Connection::open(&path).unwrap();
-    connection.execute_batch("CREATE TRIGGER fail_image BEFORE UPDATE ON replica BEGIN SELECT RAISE(ABORT, 'Injected image update failure'); END;").unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_edit BEFORE INSERT ON edits BEGIN SELECT RAISE(ABORT, 'Injected queue failure'); END;").unwrap();
     drop(connection);
     let replica = Replica::open(&path).unwrap();
-    assert!(matches!(
-        model_ops::save(&replica, oid, |page| model_ops::replace_text(
-            page,
-            oid,
-            0..0,
-            "lost? "
-        )),
-        Err(Error::Database(_))
-    ));
+    assert!(replica.apply("Author", typed(sid, oid, "lost? ")).is_err());
+    assert_eq!(replica.snapshot().unwrap(), source);
     drop(replica);
     let replica = Replica::open(&path).unwrap();
     assert_eq!(replica.snapshot().unwrap(), source);
@@ -155,7 +181,7 @@ fn concurrent_recovery_exports_capture_one_complete_acknowledged_queue() {
 
     let directory = tempfile::tempdir().unwrap();
     let source = onestore::create_section("recovery.one", "base", "Fixture").unwrap();
-    let (_, object, _) = target(&source);
+    let (space, object, _) = target(&source);
     let replica = Replica::create(directory.path().join("live.sqlite"), &source).unwrap();
     let start = Barrier::new(4);
     std::thread::scope(|scope| {
@@ -164,18 +190,12 @@ fn concurrent_recovery_exports_capture_one_complete_acknowledged_queue() {
             scope.spawn(move || {
                 start.wait();
                 for edit in 0..20 {
-                    loop {
-                        let marker = format!("[{writer}:{edit}] ");
-                        match model_ops::save(replica, object, |page| {
-                            model_ops::replace_text(page, object, 0..0, &marker)
-                        }) {
-                            Ok(Some(_)) => break,
-                            Err(Error::Io(error)) if error.kind() == ErrorKind::ResourceBusy => {
-                                continue;
-                            }
-                            other => panic!("Unexpected local edit: {other:?}"),
-                        }
-                    }
+                    replica
+                        .apply(
+                            "Fixture",
+                            typed(space, object, &format!("[{writer}:{edit}] ")),
+                        )
+                        .unwrap();
                 }
             });
         }
@@ -185,20 +205,22 @@ fn concurrent_recovery_exports_capture_one_complete_acknowledged_queue() {
             replica.export_recovery(&path).unwrap();
             let archive = Recovery::open(path).unwrap();
             let pending = archive.pending().unwrap();
-            let snapshot = target(&archive.snapshot().unwrap()).2;
-            match pending.as_slice() {
-                [] => assert_eq!(snapshot, "base"),
-                [single] => {
-                    let Operation::Page(intent) = &single.operation else {
-                        panic!()
-                    };
-                    let (id, before, range, replacement) = intent.text_change().unwrap();
-                    assert_eq!((id, before.as_str(), range), (object, "base", 0..0));
-                    assert_eq!(snapshot, format!("{replacement}base"));
-                    assert_eq!(text_of(&intent.after, object), snapshot);
-                }
-                more => panic!("saves to one page coalesce: {more:?}"),
-            }
+            // Each edit types at the start, so the text is the queue read backwards.
+            let expected: String = pending
+                .iter()
+                .rev()
+                .map(|edit| match &edit.edit.ops[..] {
+                    [
+                        Op::Page {
+                            op: PageOp::Text { with, .. },
+                            ..
+                        },
+                    ] => with.as_str(),
+                    other => panic!("{other:?}"),
+                })
+                .chain(["base"])
+                .collect();
+            assert_eq!(target(&archive.snapshot().unwrap()).2, expected);
             assert_eq!(archive.remote_snapshot().unwrap(), source);
             assert_eq!(
                 archive.summary().unwrap().queued_edits,
@@ -207,7 +229,7 @@ fn concurrent_recovery_exports_capture_one_complete_acknowledged_queue() {
             assert!(archive.receipts().unwrap().is_empty());
         }
     });
-    assert_eq!(replica.pending().unwrap().len(), 1);
+    assert_eq!(replica.pending().unwrap().len(), 60);
     let content = target(&replica.snapshot().unwrap()).2;
     for writer in 0..3 {
         for edit in 0..20 {
@@ -242,9 +264,10 @@ fn ownership_and_foreign_file_rejection_preserve_existing_data() {
         .unwrap();
     for sql in [
         "PRAGMA application_id=0".to_owned(),
+        // Schema 14 converts; older caches do not.
         format!(
             "PRAGMA application_id=1330529615; PRAGMA user_version={}",
-            current - 1
+            current - 2
         ),
         format!("PRAGMA user_version={}", current + 1),
     ] {
@@ -289,52 +312,26 @@ fn ownership_and_foreign_file_rejection_preserve_existing_data() {
 }
 
 #[test]
-fn twelve_local_editors_reject_stale_images_and_coalesce_into_one_save() {
+fn twelve_local_editors_queue_every_edit_once_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("section.sqlite");
     let source = onestore::create_section("section.one", "Shared café 🦀", "Fixture").unwrap();
     let replica = Replica::create(&path, &source).unwrap();
     let (sid, oid, _) = target(&source);
     let barrier = Barrier::new(12);
-    let deadline = Instant::now() + Duration::from_secs(60);
     let outcomes = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..12)
             .map(|writer| {
-                let (replica, source, barrier) = (&replica, &source, &barrier);
+                let (replica, barrier) = (&replica, &barrier);
                 scope.spawn(move || {
-                    let (_, mut page) = model_ops::locate(source, oid);
-                    model_ops::replace_text(&mut page, oid, 0..0, &format!("[initial-{writer}] "));
                     barrier.wait();
-                    let mut ids = Vec::new();
-                    let first_won = match replica.save(source, sid, &page, model_ops::AUTHOR) {
-                        Ok(Some(id)) => {
-                            ids.push(id);
-                            true
-                        }
-                        Err(Error::Io(error)) if error.kind() == ErrorKind::ResourceBusy => false,
-                        other => panic!("Unexpected first edit: {other:?}"),
-                    };
-                    for edit in 0..20 {
-                        loop {
-                            assert!(
-                                Instant::now() < deadline,
-                                "Writer {writer} stopped progressing at {edit}"
-                            );
-                            let marker = format!("[{writer}-{edit}] ");
-                            match model_ops::save(replica, oid, |page| {
-                                model_ops::replace_text(page, oid, 0..0, &marker)
-                            }) {
-                                Ok(Some(id)) => {
-                                    ids.push(id);
-                                    break;
-                                }
-                                Err(Error::Io(error))
-                                    if error.kind() == ErrorKind::ResourceBusy => {}
-                                other => panic!("Unexpected edit: {other:?}"),
-                            }
-                        }
-                    }
-                    (first_won, ids)
+                    (0..20)
+                        .map(|edit| {
+                            replica
+                                .apply("Fixture", typed(sid, oid, &format!("[{writer}-{edit}] ")))
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
@@ -343,31 +340,29 @@ fn twelve_local_editors_reject_stale_images_and_coalesce_into_one_save() {
             .map(|handle| handle.join().unwrap())
             .collect::<Vec<_>>()
     });
-    assert_eq!(outcomes.iter().filter(|(won, _)| *won).count(), 1);
-    let ids: BTreeSet<_> = outcomes.into_iter().flat_map(|(_, ids)| ids).collect();
-    assert_eq!(ids.len(), 1, "every save replaced the unattempted head");
-    let final_bytes = replica.snapshot().unwrap();
-    let content = target(&final_bytes).2;
-    let pending = replica.pending().unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].id, *ids.first().unwrap());
-    let (id, before, range, replacement) = intent(&replica, 0).text_change().unwrap();
-    assert_eq!((id, before.as_str(), range), (oid, "Shared café 🦀", 0..0));
-    assert_eq!(content, format!("{replacement}Shared café 🦀"));
-    assert_eq!(content.matches("[initial-").count(), 1);
+    for ids in &outcomes {
+        assert!(
+            ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "a writer's edits keep its order"
+        );
+    }
+    let ids: BTreeSet<_> = outcomes.into_iter().flatten().collect();
+    assert_eq!(ids.len(), 240);
+    let content = target(&replica.snapshot().unwrap()).2;
+    assert!(content.ends_with("Shared café 🦀"));
     for writer in 0..12 {
         for edit in 0..20 {
             assert_eq!(content.matches(&format!("[{writer}-{edit}] ")).count(), 1);
         }
     }
-    let (_, mut stale) = model_ops::locate(&source, oid);
-    model_ops::replace_text(&mut stale, oid, 0..0, "stale ");
-    assert!(
-        matches!(replica.save(&source, sid, &stale, "Author"), Err(Error::Io(error)) if error.kind() == ErrorKind::ResourceBusy)
+    let pending = replica.pending().unwrap();
+    assert_eq!(
+        pending.iter().map(|edit| edit.id).collect::<BTreeSet<_>>(),
+        ids
     );
     drop(replica);
     let reopened = Replica::open(&path).unwrap();
-    assert_eq!(reopened.snapshot().unwrap(), final_bytes);
+    assert_eq!(target(&reopened.snapshot().unwrap()).2, content);
     assert_eq!(reopened.pending().unwrap(), pending);
 }
 
@@ -375,11 +370,10 @@ fn twelve_local_editors_reject_stale_images_and_coalesce_into_one_save() {
 fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("model.sqlite");
-    let original = "ab🚀ab🦀 é repeated repeated".to_owned();
-    let mut text = original.clone();
+    let mut text = "ab🚀ab🦀 é repeated repeated".to_owned();
     let source = onestore::create_section("model.one", &text, "Fixture").unwrap();
     let mut replica = Replica::create(&path, &source).unwrap();
-    let (space, object, _) = target(&source);
+    let (_, object, _) = target(&source);
     let mut random = 911_u64;
     let mut next = || {
         random ^= random << 13;
@@ -387,8 +381,7 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
         random ^= random << 17;
         random
     };
-    let mut acknowledged = 0;
-    let mut pending = Vec::new();
+    let mut acknowledged = Vec::new();
     for step in 0..512 {
         let boundaries: Vec<_> = text
             .char_indices()
@@ -403,47 +396,45 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
         let replacement = ["", "🐈", "日本語", "repeated", "é", "ab🦀ab"][next() as usize % 6];
         let mut expected = text.clone();
         expected.replace_range(bytes, replacement);
-        let before = replica.snapshot().unwrap();
         let acknowledgement = model_ops::save(&replica, object, |page| {
             model_ops::replace_text(page, object, range.clone(), replacement)
         })
         .unwrap();
-        if let Some(id) = acknowledgement {
-            assert_ne!(text, expected);
-            acknowledged += 1;
-            pending = replica.pending().unwrap();
-            assert_eq!(pending.len(), 1);
-            assert_eq!((pending[0].id, pending[0].space), (1, space));
-            let saved = intent(&replica, 0);
-            assert_eq!(id, 1);
-            assert_eq!(text_of(&saved.before, object), original);
-            assert_eq!(text_of(&saved.after, object), expected);
-            if step % 37 == 0 {
-                let (_, mut stale) = model_ops::locate(&before, object);
-                model_ops::replace_text(&mut stale, object, 0..0, "stale");
-                assert!(
-                    matches!(replica.save(&before, space, &stale, "Author"), Err(Error::Io(error)) if error.kind() == ErrorKind::ResourceBusy)
-                );
+        match acknowledgement {
+            Some(id) => {
+                assert_ne!(text, expected);
+                assert!(acknowledged.last().is_none_or(|last| *last < id));
+                acknowledged.push(id);
             }
-        } else {
-            assert_eq!(text, expected);
+            None => assert_eq!(text, expected),
         }
         text = expected;
-        let source = replica.snapshot().unwrap();
-        assert_eq!(target(&source).2, text, "seed 911, step {step}");
+        assert_eq!(
+            target(&replica.snapshot().unwrap()).2,
+            text,
+            "seed 911, step {step}"
+        );
         if step % 37 == 0 {
+            let pending = replica.pending().unwrap();
             drop(replica);
             replica = Replica::open(&path).unwrap();
-            assert_eq!(replica.snapshot().unwrap(), source);
+            assert_eq!(target(&replica.snapshot().unwrap()).2, text);
             assert_eq!(replica.pending().unwrap(), pending);
         }
     }
-    assert!(acknowledged > 256, "Most random edits change the text");
-    let source = replica.snapshot().unwrap();
-    drop(replica);
-    let replica = Replica::open(&path).unwrap();
-    assert_eq!(replica.pending().unwrap(), pending);
-    assert_eq!(replica.snapshot().unwrap(), source);
+    assert!(
+        acknowledged.len() > 256,
+        "Most random edits change the text"
+    );
+    assert_eq!(
+        replica
+            .pending()
+            .unwrap()
+            .iter()
+            .map(|edit| edit.id)
+            .collect::<Vec<_>>(),
+        acknowledged
+    );
 }
 
 #[test]
@@ -465,71 +456,43 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
                     let mut objects = Vec::new();
                     barrier.wait();
                     for sequence in 0..4 {
+                        assert!(Instant::now() < deadline, "Client {client} stopped");
                         let content = if sequence == 0 {
                             format!("Client {client}")
                         } else {
                             format!("Paragraph {client}:{sequence}")
                         };
                         let mut inserted = None;
-                        loop {
-                            assert!(
-                                Instant::now() < deadline,
-                                "Client {client} stopped at insertion {sequence}"
-                            );
-                            let result = model_ops::save(cache, anchor, |page| {
-                                let text = if sequence == 0 {
-                                    model_ops::insert_outline(
-                                        page,
-                                        72.0,
-                                        144.0 + client as f32 * 72.0,
-                                        &content,
-                                    )
-                                    .2
-                                } else {
-                                    model_ops::insert_after(
-                                        page,
-                                        *objects.last().unwrap(),
-                                        &content,
-                                    )
-                                    .1
-                                };
-                                let end = content.encode_utf16().count() as u32;
-                                model_ops::restyle(page, text, 0..end, |format| {
-                                    format.italic = None
-                                });
-                                model_ops::restyle(page, text, 0..6, italic);
-                                inserted = Some(text);
-                            });
-                            match result {
-                                Ok(Some(id)) => {
-                                    ids.push(id);
-                                    objects.push(inserted.unwrap());
-                                    break;
-                                }
-                                Err(Error::Io(e)) if e.kind() == ErrorKind::ResourceBusy => {}
-                                other => panic!("{other:?}"),
-                            }
-                        }
+                        let id = model_ops::save(cache, anchor, |page| {
+                            let text = if sequence == 0 {
+                                model_ops::insert_outline(
+                                    page,
+                                    72.0,
+                                    144.0 + client as f32 * 72.0,
+                                    &content,
+                                )
+                                .2
+                            } else {
+                                model_ops::insert_after(page, *objects.last().unwrap(), &content).1
+                            };
+                            let end = content.encode_utf16().count() as u32;
+                            model_ops::restyle(page, text, 0..end, |format| format.italic = None);
+                            model_ops::restyle(page, text, 0..6, italic);
+                            inserted = Some(text);
+                        })
+                        .unwrap()
+                        .unwrap();
+                        ids.push(id);
+                        objects.push(inserted.unwrap());
                         if sequence == 0 {
                             continue;
                         }
                         let text = *objects.last().unwrap();
-                        loop {
-                            assert!(
-                                Instant::now() < deadline,
-                                "Client {client} stopped at text {sequence}"
-                            );
-                            match model_ops::save(cache, text, |page| {
-                                model_ops::replace_text(page, text, 0..0, "Edited ")
-                            }) {
-                                Ok(Some(id)) => {
-                                    ids.push(id);
-                                    break;
-                                }
-                                Err(Error::Io(e)) if e.kind() == ErrorKind::ResourceBusy => {}
-                                other => panic!("{other:?}"),
-                            }
-                        }
+                        ids.push(
+                            cache
+                                .apply(model_ops::AUTHOR, typed(sid, text, "Edited "))
+                                .unwrap(),
+                        );
                     }
                     (ids, objects)
                 })
@@ -544,12 +507,14 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
         .iter()
         .flat_map(|(ids, _)| ids.iter().copied())
         .collect();
-    assert_eq!(all.iter().map(|(ids, _)| ids.len()).sum::<usize>(), 84);
-    assert_eq!(ids.len(), 1);
+    assert_eq!(ids.len(), 84);
     let snapshot = cache.snapshot().unwrap();
     drop(cache);
     let cache = Replica::open(&path).unwrap();
-    assert_eq!(cache.snapshot().unwrap(), snapshot);
+    assert_eq!(
+        server::pages(&cache.snapshot().unwrap()),
+        server::pages(&snapshot)
+    );
     assert_eq!(
         cache
             .pending()
@@ -588,8 +553,8 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
 }
 
 #[test]
-fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
-    for operation in ["Page", "CreatePage", "Pages", "DeletePages"] {
+fn unrecognized_persisted_ops_are_rejected_without_dropping_fields() {
+    for kind in ["Text", "Create", "Pages", "Delete"] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("unknown.sqlite");
         let first = onestore::create_section("unknown.one", "Original", "Author").unwrap();
@@ -598,52 +563,47 @@ fn unrecognized_persisted_operations_are_rejected_without_dropping_fields() {
             .unwrap()
             .as_bytes()
             .to_vec();
-        let (_, oid, _) = target(&source);
+        let (space, oid, _) = target(&source);
         let store = Store::parse(&source).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let sid = Document::parse(&index).unwrap().pages().unwrap()[1].0;
         let cache = Replica::create(&path, &source).unwrap();
-        match operation {
-            "Page" => {
-                model_ops::save(&cache, oid, |page| {
-                    model_ops::replace_text(page, oid, 0..0, "New ")
-                })
-                .unwrap()
-                .unwrap();
+        let section = |op| {
+            server::section_op(&cache, op);
+        };
+        match kind {
+            "Text" => {
+                cache.apply("Author", typed(space, oid, "New ")).unwrap();
             }
-            "CreatePage" => {
-                let page = onestore::PageCreation::new(None, Some("Created"), "Author").unwrap();
-                cache.create_page(&source, &page).unwrap().unwrap();
-            }
-            "Pages" => {
-                cache
-                    .pages(&source, &[onestore::PageEdit::set_level(sid, 2).unwrap()])
-                    .unwrap()
-                    .unwrap();
-            }
-            _ => {
-                cache.delete_pages(&source, &[sid]).unwrap().unwrap();
-            }
+            "Create" => section(SectionOp::Create(
+                onestore::PageCreation::new(None, Some("Created"), "Author").unwrap(),
+            )),
+            "Pages" => section(SectionOp::Pages(vec![
+                onestore::PageEdit::set_level(sid, 2).unwrap(),
+            ])),
+            _ => section(SectionOp::Delete(vec![sid])),
         }
         drop(cache);
-        let db = rusqlite::Connection::open(&path).unwrap();
-        let encoded: String = db
-            .query_row("SELECT operation FROM edits", [], |r| r.get(0))
+        let encoded: String = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT edit FROM edits", [], |r| r.get(0))
             .unwrap();
-        let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
-        if value[operation].is_object() {
-            value[operation]["future_option"] = true.into();
-        } else {
-            value["future_option"] = true.into();
+        for target in ["", "/ops/0", "/ops/0/Page/op/Text", "/ops/0/Section"] {
+            let mut value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+            let Some(object) = value.pointer_mut(target).and_then(|v| v.as_object_mut()) else {
+                continue;
+            };
+            object.insert("future_option".into(), true.into());
+            rusqlite::Connection::open(&path)
+                .unwrap()
+                .execute("UPDATE edits SET edit=?1", [value.to_string()])
+                .unwrap();
+            let before = fs::read(&path).unwrap();
+            assert!(
+                matches!(Replica::open(&path),Err(Error::Io(error))if error.kind()==ErrorKind::InvalidData),
+                "{kind} {target}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), before);
         }
-        db.execute("UPDATE edits SET operation=?1", [value.to_string()])
-            .unwrap();
-        drop(db);
-        let before = fs::read(&path).unwrap();
-        assert!(
-            matches!(Replica::open(&path),Err(Error::Io(error))if error.kind()==ErrorKind::InvalidData),
-            "{operation}"
-        );
-        assert_eq!(fs::read(&path).unwrap(), before);
     }
 }

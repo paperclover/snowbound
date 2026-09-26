@@ -1,7 +1,7 @@
-use crate::disk;
-use notebook::{EditStatus, Operation, Remote, Replica};
+use crate::{disk, model_ops};
+use notebook::{EditStatus, Remote, Replica, Resolution};
 use onestore::{
-    CommitError, ExGuid, PageEdit, PagePosition, PreparedEdit, RevisionIndex, Store, Transaction,
+    CommitError, ExGuid, PageEdit, PreparedEdit, RevisionIndex, Store, Transaction,
     document::{Document, Format, Kind, Layout},
     page::{
         Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
@@ -97,27 +97,9 @@ pub fn body_outline(page: &mut Page, text: &str) -> ExGuid {
     id
 }
 
-/// The text identity of the first body outline's first paragraph.
-fn body_text(page: &Page) -> ExGuid {
-    page.objects
-        .iter()
-        .find_map(|object| match object {
-            PageObject::Outline(outline) => outline.paragraphs[0].text().map(|text| text.id),
-            _ => None,
-        })
-        .unwrap()
-}
-
-fn page_of(source: &[u8], space: ExGuid) -> Page {
-    let store = Store::parse(source).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
-    Page::from_space(&document, space).unwrap()
-}
-
+/// Publishes through the crash-injecting disk, asserting each commit is atomic.
 struct Session<'a> {
     disk: &'a mut disk::Disk,
-    operation: Option<&'a Operation>,
 }
 
 impl Remote for Session<'_> {
@@ -128,41 +110,6 @@ impl Remote for Session<'_> {
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         let mut image = self.disk.visible.clone();
         transaction.apply(&mut image).unwrap();
-        let mut expected = pages(&self.disk.visible);
-        match self.operation.unwrap() {
-            Operation::CreatePage(page) => expected.push((page.space(), page.object(), 1)),
-            Operation::Pages(batch) => {
-                for change in &batch.edits {
-                    let at = expected.iter().position(|p| p.0 == change.space()).unwrap();
-                    expected[at].2 = change.level();
-                    if let PagePosition::Before(before) = change.position() {
-                        let page = expected.remove(at);
-                        let at = before.map_or(expected.len(), |before| {
-                            expected.iter().position(|p| p.0 == before).unwrap()
-                        });
-                        expected.insert(at, page);
-                    }
-                }
-            }
-            Operation::Page(intent) => {
-                let body = body_text(&intent.after);
-                let store = Store::parse(&image).unwrap();
-                let index = RevisionIndex::parse(&store).unwrap();
-                let document = Document::parse(&index).unwrap();
-                let matching: Vec<_> = document
-                    .spaces
-                    .values()
-                    .filter_map(|space| {
-                        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-                        view.nodes.get(&body)
-                    })
-                    .collect();
-                assert_eq!(matching.len(), 1);
-                assert!(matches!(&matching[0].kind, Kind::RichText { text, .. } if text == BODY));
-            }
-            _ => panic!(),
-        }
-        assert_eq!(pages(&image), expected);
         let old = current::current(&self.disk.durable);
         let new = current::current(&image);
         let result = transaction.commit(self.disk);
@@ -177,6 +124,16 @@ impl Remote for Session<'_> {
     fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
         onestore::confirm_snapshot(self.disk, snapshot)
     }
+}
+
+fn section_op(cache: &Replica, op: onestore::op::SectionOp) -> Result<u64, notebook::Error> {
+    cache.apply(
+        "Author",
+        onestore::op::Edit {
+            at: 133_000_000_000_000_000,
+            ops: vec![onestore::op::Op::Section(op)],
+        },
+    )
 }
 
 pub fn run(input: &[u8]) {
@@ -196,21 +153,27 @@ pub fn run(input: &[u8]) {
         let path = directory.path().join(format!("{actor}.sqlite"));
         let cache = replicas[actor].get_or_insert_with(|| Replica::create(&path, &SOURCE).unwrap());
         let snapshot = cache.snapshot().unwrap();
+        let listed = pages(&snapshot);
         let pending = cache.pending().unwrap();
         match step[1] % 8 {
             0 | 1 => {
-                let title = (step[2] & 1 != 0).then_some("Same 🦋 é");
+                let title = (step[2] & 1 != 0).then_some("Same 🦋 é");
                 let page = onestore::PageCreation::new(None, title, "Author").unwrap();
-                cache.create_page(&snapshot, &page).unwrap().unwrap();
+                section_op(cache, onestore::op::SectionOp::Create(page.clone())).unwrap();
                 owned[actor].push((page.space(), page.object()));
                 if step[1] % 8 == 1 {
-                    let source = cache.snapshot().unwrap();
-                    let mut model = page_of(&source, page.space());
+                    let mut model = cache.page(page.space()).unwrap();
                     body_outline(&mut model, BODY);
-                    cache
-                        .save(&source, page.space(), &model, "Author")
+                    model_ops::save_as(cache, page.space(), &model, "Author")
                         .unwrap()
                         .unwrap();
+                    let local = cache.page(page.space()).unwrap();
+                    assert!(
+                        local
+                            .objects
+                            .iter()
+                            .any(|object| matches!(object, PageObject::Outline(o) if o.paragraphs[0].text().is_some_and(|t| t.text.text() == BODY)))
+                    );
                 }
             }
             2 => {
@@ -220,7 +183,7 @@ pub fn run(input: &[u8]) {
                     .collect();
                 replicas[actor] = None;
                 let cache = Replica::open(&path).unwrap();
-                assert!(cache.snapshot().unwrap() == snapshot);
+                assert_eq!(pages(&cache.snapshot().unwrap()), listed);
                 assert_eq!(cache.pending().unwrap(), pending);
                 assert_eq!(
                     pending
@@ -240,15 +203,20 @@ pub fn run(input: &[u8]) {
                 let prior = pending
                     .first()
                     .and_then(|edit| cache.status(edit.id).unwrap());
-                let mut session = Session {
-                    disk: &mut disk,
-                    operation: pending.first().map(|edit| &edit.operation),
-                };
-                let result = cache.sync_once(&mut session);
+                let result = cache.sync_once(&mut Session { disk: &mut disk });
                 if matches!(prior, Some(EditStatus::AwaitingConfirmation { .. })) {
                     assert!(
                         result.is_err()
-                            || !matches!(result.unwrap(), Some((_, EditStatus::Conflict(_))))
+                            || !matches!(
+                                result.as_ref().unwrap().edit,
+                                Some((_, EditStatus::Conflict(_)))
+                            )
+                    );
+                }
+                if result.is_ok() && cache.pending().unwrap().is_empty() {
+                    assert_eq!(
+                        pages(&cache.snapshot().unwrap()),
+                        pages(&cache.remote_snapshot().unwrap())
                     );
                 }
             }
@@ -257,13 +225,12 @@ pub fn run(input: &[u8]) {
                 disk.fail_at = None;
             }
             6 => {
-                let order = pages(&snapshot);
                 let count = 1 + usize::from(step[3] & 1 != 0);
                 let selected: Vec<_> = (0..count)
-                    .map(|i| order[(usize::from(step[2]) + i) % order.len()].0)
+                    .map(|i| listed[(usize::from(step[2]) + i) % listed.len()].0)
                     .collect();
                 let anchor = (step[4] & 1 != 0)
-                    .then_some(order[usize::from(step[5]) % order.len()].0)
+                    .then_some(listed[usize::from(step[5]) % listed.len()].0)
                     .filter(|sid| !selected.contains(sid));
                 let edits: Vec<_> = selected
                     .iter()
@@ -278,43 +245,28 @@ pub fn run(input: &[u8]) {
                     })
                     .collect();
                 let expected = PreparedEdit::pages(&snapshot, &edits);
-                match cache.pages(&snapshot, &edits) {
-                    Ok(id) => {
-                        let expected = expected.unwrap();
-                        assert_eq!(
-                            current::current(&cache.snapshot().unwrap()),
-                            current::current(expected.as_bytes())
-                        );
-                        assert_eq!(id.is_some(), expected.as_bytes() != snapshot);
-                    }
+                match section_op(cache, onestore::op::SectionOp::Pages(edits)) {
+                    Ok(_) => assert_eq!(
+                        pages(&cache.snapshot().unwrap()),
+                        pages(expected.unwrap().as_bytes())
+                    ),
                     Err(_) => {
                         assert!(expected.is_err());
-                        assert_eq!(cache.snapshot().unwrap(), snapshot);
+                        assert_eq!(pages(&cache.snapshot().unwrap()), listed);
                         assert_eq!(cache.pending().unwrap(), pending);
                     }
                 }
             }
             7 => {
-                if let Some(edit) = pending.first()
-                    && matches!(
-                        cache.status(edit.id).unwrap(),
-                        Some(EditStatus::Conflict(_))
-                    )
-                    && let Operation::Pages(batch) = &edit.operation
-                {
-                    let remote = cache.remote_snapshot().unwrap();
-                    let order = pages(&remote);
-                    let anchor = (step[2] & 1 != 0)
-                        .then_some(order[usize::from(step[3]) % order.len()].0)
-                        .filter(|sid| batch.edits.iter().all(|e| e.space() != *sid));
-                    let edits: Vec<_> = batch
-                        .edits
-                        .iter()
-                        .map(|edit| edit.reposition(PagePosition::Before(anchor), 1).unwrap())
-                        .collect();
-                    let result = cache.rebase_pages_conflict(edit.id, &snapshot, &remote, &edits);
-                    assert_eq!(cache.snapshot().unwrap(), snapshot);
-                    if result.is_err() {
+                if let Some(conflict) = cache.conflict().unwrap() {
+                    // Taking theirs for the page list would drop the pages this actor made.
+                    let root = listed.iter().all(|(sid, ..)| *sid != conflict.space);
+                    let keep = if root || step[2] & 1 == 0 {
+                        Resolution::Mine
+                    } else {
+                        Resolution::Theirs
+                    };
+                    if cache.resolve(conflict.id, keep).is_err() {
                         assert_eq!(cache.pending().unwrap(), pending);
                     }
                 }

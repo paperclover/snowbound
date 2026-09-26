@@ -98,12 +98,10 @@ fn report(cache: &Replica, root: &Path) -> Result<(), Box<dyn std::error::Error>
         "{}",
         json!({"event":"state", "status":status, "revision":revision,
         "local_text":local.text, "remote_text":remote.text, "remote_revision":remote.revision.to_string(),
-        "pending":cache.pending()?.iter().map(|pending|match &pending.operation {
-            notebook::Operation::Page(intent) => match intent.text_change() {
-                Some((_, before, range, replacement)) => json!({"id":pending.id,"before":before,"replacement":replacement,"range":[range.start,range.end]}),
-                None => json!({"id":pending.id,"operation":"page"}),
-            },
-            operation => json!({"id":pending.id,"operation":operation}),
+        "pending":cache.pending()?.iter().map(|pending| match &pending.edit.ops[..] {
+            [onestore::op::Op::Page { op: onestore::op::PageOp::Text { range, with, .. }, .. }] =>
+                json!({"id":pending.id,"replacement":with,"range":[range.start,range.end]}),
+            _ => json!({"id":pending.id,"edit":pending.edit}),
         }).collect::<Vec<_>>() })
     );
     Ok(())
@@ -128,34 +126,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drop(remote);
         let cache = Replica::create(root.join("cache.sqlite"), &source)?;
         let at = u32::try_from(target.text.encode_utf16().count())?;
-        let mut page = {
-            let store = onestore::Store::parse(&source)?;
-            let index = onestore::RevisionIndex::parse(&store)?;
-            let document = onestore::document::Document::parse(&index)?;
-            onestore::page::Page::from_space(&document, target.space)?
+        let edit = onestore::op::Edit {
+            at: 133_000_000_000_000_000,
+            ops: vec![onestore::op::Op::Page {
+                space: target.space,
+                op: onestore::op::PageOp::Text {
+                    text: target.object,
+                    range: at..at,
+                    with: " [offline-recovery]".into(),
+                },
+            }],
         };
-        let paragraph = page
-            .objects
-            .iter_mut()
-            .find_map(|object| match object {
-                onestore::page::PageObject::Outline(outline) => outline
-                    .paragraphs
-                    .iter_mut()
-                    .find(|p| p.text().is_some_and(|t| t.id == target.object)),
-                _ => None,
-            })
-            .ok_or("Target paragraph is not on its page")?
-            .text_mut()
-            .unwrap();
-        let format = paragraph.text.format_at(at)?.clone();
-        paragraph.text.apply(onestore::page::text::Edit {
-            range: at..at,
-            replacement: onestore::page::Paragraph::new(" [offline-recovery]".into(), format),
-        })?;
-        assert_eq!(
-            cache.save(&source, target.space, &page, "Fixture")?,
-            Some(1)
-        );
+        assert_eq!(cache.apply("Fixture", edit)?, 1);
         phase("local-after");
         report(&cache, root)?;
     } else if args.len() == 2 && ["inspect", "sync"].contains(&mode.as_str()) {

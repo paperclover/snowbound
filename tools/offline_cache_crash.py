@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Interrupt owned offline-cache writers and verify every retained intent and image."""
 import argparse
+import cache_images
 import hashlib
 import json
 import os
@@ -31,7 +32,7 @@ def run(binary, output):
     retained = []
     retained_ids = []
     results = []
-    delays = [None, "ack", "unack", "journal", "database-write", 0, .001, .01, .02, .04, .08, .16, .32, .64, 1.28, 2.56, None, "ack"]
+    delays = [None, "ack", "unack", "wal", 0, .001, .01, .02, .04, .08, .16, .32, .64, 1.28, 2.56, None, "ack"]
     for operation, delay in enumerate(delays, 1):
         with (output / f"owner-{operation}.stderr").open("w") as stderr:
             owner = subprocess.Popen([binary, "edit", cache], stdin=subprocess.PIPE,
@@ -48,34 +49,28 @@ def run(binary, output):
                 contender = subprocess.run([binary, "read", cache], capture_output=True, text=True, timeout=15)
                 (output / f"contender-{operation}.stderr").write_text(contender.stderr)
                 assert contender.returncode != 0 and "DatabaseBusy" in contender.stderr, contender
-                before_write = cache.stat().st_mtime_ns
                 owner.stdin.write(f"{operation} {'unack' if delay == 'unack' else 'ack'}\n")
                 owner.stdin.flush()
                 expect(f"editing {operation}")
                 acknowledgement = None
-                journal_observation = None
+                log_observation = None
                 if delay == "ack":
                     acknowledgement = expect(f"ack {operation}")
                 elif delay == "unack":
                     expect(f"durable {operation}")
-                elif delay in ("journal", "database-write"):
+                elif delay == "wal":
+                    # Cut the edit's transaction once its frames are in the log and its
+                    # commit frame is not.
                     deadline = time.monotonic() + 10
-                    journal = cache.with_name(cache.name + "-journal")
+                    committed, _ = cache_images.wal_commits(cache)
                     while time.monotonic() < deadline:
-                        try:
-                            with journal.open("rb") as active:
-                                header = active.read(28)
-                            size = journal.stat().st_size
-                            database_changed = cache.stat().st_mtime_ns != before_write
-                            if (header[:8] == bytes.fromhex("d9d505f920a163d7") and
-                                    (delay == "journal" or database_changed)):
-                                journal_observation = {"header": header.hex(), "bytes": size,
-                                                       "database_changed": database_changed}
-                                break
-                        except FileNotFoundError:
-                            pass
-                        time.sleep(.0001)
-                    assert journal_observation, f"No active {delay} phase observed"
+                        commits, pending = cache_images.wal_commits(cache)
+                        if commits == committed and pending:
+                            log_observation = {"wal_commits": commits, "uncommitted_frames": pending}
+                            break
+                        if commits != committed:
+                            break
+                    assert log_observation, "No uncommitted log frames observed"
                 elif delay is not None:
                     time.sleep(delay)
                 owner.kill()
@@ -88,9 +83,7 @@ def run(binary, output):
                 actual = json.loads(read.stdout)
                 operations = actual["operations"]
                 ids = actual["ids"]
-                # A save replaces the newest pending save of its page under the same intent.
-                coalesced = retained[:-1] + [operation] if ids == retained_ids else None
-                assert operations in (retained, retained + [operation], coalesced), (retained, operation, actual)
+                assert operations in (retained, retained + [operation]), (retained, operation, actual)
                 assert ids[:len(retained_ids)] == retained_ids, (retained_ids, actual)
                 if acknowledgement:
                     assert operations[-1] == operation
@@ -105,7 +98,7 @@ def run(binary, output):
                                 "retained_operations": operations, "ids": ids,
                                 "section_bytes": actual["section_bytes"],
                                 "complete_payloads": True, "exclusive_owner": True,
-                                "journal_observation": journal_observation})
+                                "log_observation": log_observation})
                 retained, retained_ids = operations, ids
                 (output / "results.json").write_text(json.dumps(results, indent=2))
                 print(json.dumps(results[-1]), flush=True)

@@ -2,184 +2,97 @@
 
 The application-facing crate: notebook discovery, a durable local replica with
 reconnect reconciliation, external-asset caching, recovery export and optional
-embedded SMB access. The replica stores the last observed remote image of one section,
-the working image as its difference from that, and the editor's intents in a
-local SQLite database; a save writes the revision it appended, not the section. `sync_once` provides a
-reconciliation step and `start_sync` owns automatic polling and reconnects. Local
-success does not acknowledge publication to a shared notebook.
+embedded SMB access. A replica keeps one section's queue in a local SQLite database:
+the image the queued edits apply to (the base, in 16 KiB chunks), the edits as
+`onestore::op` ops in publication batches, and picture and attachment bytes once
+each by hash. Local success does not acknowledge publication to a shared notebook.
 
-## Saving pages
+```text
+editor ── Edit ──► section thread ─ Section::apply, INSERT edit ─┐
+                   (the parsed section: base + sealed + open)     │ one fsync per burst
+sync thread: remote.stamp() == base ? publish(sealed batch) ──────┤ base chunks += transaction
+             otherwise read once, replay the queue on it ─────────┘ conflict, or base := remote
+```
 
-The editor works on `onestore::page::Page` values and saves whole pages. `save`
-diffs the supplied model against the page stored in the supplied local snapshot,
-writes the difference into the working image and queues one
-`Operation::Page(PageIntent { before, after, author })`; `before` is the page the
-edit started from and is the precondition reconciliation checks. Text, styles,
-paragraph formatting, hyperlinks (external and internal), bullets, numbering, note tags, table rows, columns, cell shading, nested tables, pictures (insertion in paragraphs or on the page, position, size, description), attachments, ink strokes, equations, paragraph structure,
-outline layout, insertions and deletions are all differences between `before` and
-`after`; the library never sees editor operations.
+## Edits
+
+`Replica::apply(author, edit)` applies an `onestore::op::Edit` to the section the
+queue leaves and returns its id once written; a refused edit returns `Rejected`
+and changes nothing. `page(space)` and `pages()` read what the queue leaves, for
+opening and reloading. Edits collect in an open batch until the sync thread seals
+it, so edits arriving while a publication is in flight publish together.
 
 ```no_run
-use onestore::{ExGuid, page::Page};
+use onestore::{ExGuid, op::{Edit, Op, PageOp}};
 use notebook::Replica;
-# fn example(path: &std::path::Path, source: &[u8], space: ExGuid, edited: &Page)
+# fn example(path: &std::path::Path, source: &[u8], space: ExGuid, text: ExGuid)
 # -> Result<(), Box<dyn std::error::Error>> {
-// `space` identifies the page; `edited` is the editor's current model of it.
 let cache = Replica::create(path, source)?;
-let snapshot = cache.snapshot()?;
-let local_id = cache.save(&snapshot, space, edited, "Author")?;
+let typed = PageOp::Text { text, range: 0..0, with: "Hello ".into() };
+let id = cache.apply("Author", Edit { at: 133_000_000_000_000_000, ops: vec![Op::Page { space, op: typed }] })?;
 drop(cache);
 
 let reopened = Replica::open(path)?;
-let pending = reopened.pending()?;
-assert_eq!(pending.last().map(|edit| edit.id), local_id);
+assert_eq!(reopened.pending()?.last().map(|edit| edit.id), Some(id));
 # Ok(())
 # }
 ```
 
-Saves coalesce the way OneNote's own autosave does: while the newest queued intent
-for the same page has not been attempted, a later save replaces its `after` model
-under the same ID. Once an intent has been attempted or holds a conflict it is
-never rewritten, nor is the intent a synchronization step has selected for
-publication; the next save then queues a new intent. A save whose model equals
-the stored page returns `None`. `PageIntent::text_change` describes an intent that
-changes exactly one paragraph's text as the text object, its previous text, the
-replaced UTF-16 range and the replacement.
-
-Share one `Replica` between application threads. Each save compares its supplied
-snapshot under the cache transaction; stale snapshots return `Io(ResourceBusy)`.
-The intent and its resulting image commit together. Keep the cache on a local
-filesystem: the connection holds exclusive ownership between transactions, and a
-second open fails busy. No network wait occurs in a local save. After a database
-error, reopen and inspect the durable state before retrying.
+Share one `Replica` between threads. Keep the cache on a local filesystem: the
+connection holds exclusive ownership between transactions, and a second open fails
+busy. No network wait occurs in a local edit. After a database error the section
+thread rereads the queue.
 
 ## Sessions
 
 `session::Notebook::open(root, cache_dir)` discovers a notebook directory and
 `session::Section::open(file, cache_dir, notify)` opens one section file through
-a replica stored under the cache directory, named by the section's document
-identity so the same file reopens the same queue after a relaunch. A section
-publishes in the background to the file itself under OneNote-compatible
-exclusion. `pages()` lists page spaces and titles from the local image,
-`page(space)` returns the model to edit (its `identity` and the section's
-`identity()` feed `onestore::page::link::internal_link`), and `save(space, before, after,
-author)` queues the edited model: `Save::Queued(id)` is durable locally,
-`Save::Unchanged` means the model equals the stored page, and `Save::Stale`
-means the stored page no longer matches `before` because the section changed
-underneath the editor, so the page must be reloaded before saving again.
-`queue_save(space, before, after, author)` does the same on the section's save
-thread and returns at once, so an editor's frame never waits on the write;
-`saved()` drains the outcomes. A queued save whose `before` is the previous
-one's `after` continues it, needing no reload in between, and a run of such
-saves waiting together is written once.
-`events()` drains what the synchronization thread reported since the last
-poll: refreshes, attempt outcomes and unreachable files; `notify` runs
-whenever an event or save outcome is available so the application can wake its
-event loop. `close()` finishes queued saves and stops publication.
+a replica named by the section's document identity, so the same file reopens the
+same queue after a relaunch. A section is `Send + Sync`: `apply(author, edit)`
+returns at once and reports a refusal as `Event::Rejected`; `events()` drains
+remote changes (`Changed(spaces)`), publication outcomes, unreachable files and
+failures; `notify` runs on a background thread whenever an event waits.
+`conflict()`, `remote_page(space)` and `resolve(id, Resolution)` present and end a
+conflict; `release(id, archive, Resolution)` ends an uncertain attempt.
+`import_page` creates a page holding a copy of another; `delete_pages` removes pages.
 
-`Event::Unreachable` retains an `io::Error`: callers can distinguish permission
-denial, missing targets, timeouts, and connection failures through `kind()` without
-parsing display text. Document/cache failures are reported as `Event::Failed` and
-stop the worker. Durable publication outcomes remain available through `status`.
+Until the application emits ops, `save`, `queue_save`, `saved`, `saving`,
+`conflicts`, `queue`, `review` and `Event::Refreshed` keep the whole-page API: a
+save lowers the page it is given against the stored page (`onestore::op::lower_page`)
+and applies the ops.
 
-`Section::resume(file, replica, notify)` starts a session from an owned
-`Replica::open(cache_file)` without consulting the remote file. The caller retains
-the cache location and publication path for offline relaunch. Local pages and
-saves remain available while the target is absent; synchronization verifies the
-document identity before adopting or publishing remote content. A different
-document stops the worker and retains the pending local edits. `Section::open`
-remains the online convenience constructor that discovers the identity from the
-file and creates or reopens its cache.
-
-With the `smb` feature, `Section::resume_smb(path, replica, limit, connect,
-notify)` binds the same session operations to a share-relative path. `connect`
-returns a new SMB client on the synchronization worker and is called again after
-transport failure. The caller supplies credentials there, outside the replica
-schema; construction and local saving do not wait for a network connection.
-
-## Pages of a section
-
-`create_page` accepts the core `PageCreation` intent and queues its page space
-and section entry as one publication. Subsequent saves of the new page use the
-intent's stable identities immediately after local acknowledgement. Independent
-page additions rebase against the current section order; duplicate titles remain
-distinct. An unavailable or no-longer-leading insertion anchor produces
-`StructureChanged`. `rebase_page_creation_conflict(id, local, remote, before)`
-reviews a replacement anchor against both cache images while retaining the new
-page and dependent object identities. Existing page identities require
-reconciliation; a matching page alone does not establish a receipt.
-
-`pages(snapshot, edits)` queues a slice of core `PageEdit` intents as one atomic
-publication. `PagePosition::Keep` preserves remote movement during indentation-only
-edits. Every requested level remains explicit: a competing remote level produces
-`StructureChanged` unless it already matches the requested level. Moves compare
-the selected page's position relative to surviving observed pages; an unchanged
-or already-satisfied position can proceed, and new remote pages remain present.
-Indistinguishable competing moves retain a conflict and the complete local image.
-`rebase_pages_conflict(id, local, remote, edits)` reviews the batch against both
-cache images. Use `PageEdit::reposition(position, level)` on the retained intents
-to revise anchors or indentation; replacing page or allocated series identities
-is rejected. Dependent edits remain queued. Attempt evidence includes every
-changed space plus the receipt space when that space is unchanged. An existing
-section revision alone cannot confirm a page edit. The
-[offline page corpus](../../corpus/page-lifecycle/offline-edits/README.md)
-contains native comparisons, reproduction commands and stateful sanitizer seeds.
-
-`delete_pages(snapshot, pages)` queues the permanent removal of page spaces;
-a page already absent remotely produces `TargetUnavailable`.
+`Section::resume(file, replica, notify)` starts from an owned `Replica` without
+consulting the remote file; with the `smb` feature, `Section::resume_smb(path,
+replica, limit, connect, notify)` binds a share-relative path, `connect` running on
+the worker again after transport failure.
 
 ## Reconciliation
 
-`sync_once(&mut remote)` processes the oldest pending intent through a `Remote`
-implementation, returning its ID and `EditStatus`. When the remote page still
-equals `before`, the intent publishes as prepared. When the remote page changed,
-a three-way merge keeps everything the remote changed and re-applies the local
-changes wherever the two sides touched different objects, fields or text ranges:
-a local text edit merges with a remote edit elsewhere in the same paragraph, an
-outline move merges with a remote text change, a new paragraph survives a remote
-deletion elsewhere. Any overlap retains `Conflict(ContentChanged)` together with
-the complete local image and the last observed remote image returned by
-`remote_snapshot`; a page removed remotely retains `TargetUnavailable`, and a
-page the writer can no longer express retains `UnsupportedEdit`.
+`sync_once(&mut remote)` returns what one step did as `Synced { edit, changed }`:
+the state the step's batch reached, named by its newest edit, and the pages a remote
+change replaced. While the remote's stamp (header and length) equals the base's, the
+oldest sealed batch publishes as its `Transaction`, and the base's chunks take its
+writes; nothing is read. When the stamp moved, the remote image is read once and the
+queue replays on it (`merge.rs`): an op whose objects the remote left alone applies
+as it is; a text op shifts past the remote's changes to the same text when its
+range stays clear of them; a move, deletion or property the remote already made is
+done; a page the remote already holds as the local edits leave it drops their ops.
+Anything else is a `Conflict` on the batch: the queue stays on its base and the
+remote image is kept for review. `resolve(id, Mine)` rewrites the remote page to the
+local one (`lower_page`, once), `Theirs` drops the local ops on that page; either
+applies from the conflicted batch on.
 
-Publication attempts are recorded before network I/O. A retained attempt
-requires its recorded revision to remain present in the remote, or the remote
-page to equal the intent's `after` model exactly, followed by comparison,
-flushing and refreshed header version metadata before acknowledgement. Otherwise
-the attempt remains `AwaitingConfirmation`; an uncertain publication is never
-replayed. A durable `Published` receipt survives reopening. Transport errors
-return `Error::Remote` or `Error::RemoteIo`; inspect `status(id)` after the error
-to distinguish a retained attempt from a pending edit or receipt. The error return
-does not roll back a locally acknowledged intent.
+Publication attempts are recorded before network I/O. An attempt confirms only
+when the remote holds its revisions, or every page it changed as it changed them,
+followed by `Remote::confirm`; otherwise it stays `AwaitingConfirmation` and is never
+replayed. `release(id, archive, Resolution)` exports the queue first, then
+publishes the batch again (`Mine`) or abandons every unpublished edit (`Theirs`).
+A durable `Published` receipt survives reopening.
 
-The current operation processes one queue head; while edits remain, `snapshot`
-preserves the complete local working image. An empty queue can refresh from the
-remote image. Synchronization holds a separate owner lock, so local saves can
-continue during network waits; competing synchronization calls return `WouldBlock`.
-
-`review_page(id, local, remote, after)` resolves the oldest page conflict with a
-model the user reviewed against the current remote page: the intent's `before`
-becomes that remote page and its `after` the reviewed model, under the same ID,
-in one local transaction. The supplied images must still match `snapshot()` and
-`remote_snapshot()`. Review performs no network I/O, clears the conflict to
-`Pending` and wakes the worker; publication still reads the latest remote image,
-so another overlapping remote edit can produce a new conflict. Pending intents
-and uncertain attempts cannot be reviewed.
-
-An attempt that stays `AwaitingConfirmation` is released by review, never by
-replay: `release_attempt(id, local, remote, archive, after)` on the replica
-(`release` on a session) exports the branch to a new archive, then retires
-the oldest edit's attempt. `Some(page)` continues from a page reviewed
-against the current remote image as a fresh intent under the same id,
-keeping later edits; `None` abandons the local branch, whose ids report
-`EditStatus::Archived { archive }` from then on, and the working image
-returns to the remote image. Neither writes a receipt: the uncertain
-publication may or may not have landed, and the archive is the record of
-what was attempted.
-
-Opening recognizes the application identity and the current schema version only;
-caches and archives written by other versions are refused unchanged. Until the
-application is usable end to end there are no migrations.
+A schema-14 cache is converted when opened: it is exported to
+`<cache>.v14-recovery`, each queued page is lowered against the page the conversion
+has so far, and every converted page must equal the page in the old working image,
+or the conversion rolls back and the open fails naming the archive.
 
 With the optional `smb` feature, `SmbRemote::new(client, path, limit)` binds an
 `notebook::smb::Client` to one share-relative file and snapshot limit. Remote identity uses the logical root
@@ -188,18 +101,15 @@ object space, which survives the tested native compaction that replaces the file
 An `Arc<Replica>` can own one background worker. Supply a connection factory, poll
 interval and observer; successful publications drain immediately, durable local
 edits wake the worker, and `wake()` requests an immediate reachability retry.
-While nothing is queued, a remote whose `Remote::stamp` (its header and length, read
-without coordination) equals the last observed image's is not read again; publishing
-against an unchanged stamp needs no read either.
+While nothing is queued, or the queue waits on a remote that has not changed since,
+a remote whose `Remote::stamp` holds is not read again.
 Transport failures discard the old connection and retry through the factory;
 Read contention and `NotCommitted` operations with `WouldBlock` or `ResourceBusy`
 reuse the connection. Contended `NotCommitted` operations use randomized backoff,
 capped at one second, to separate competing retry cycles. Cancellation interrupts this delay; local wake notifications
 remain coalesced until its end.
 `RemoteIo` distinguishes connection/read failures from
-local `Io` errors. Cache/document errors stop the worker. Observers receive every
-attempt's result on the worker thread, including unchanged conflict/uncertain
-statuses; durable edit state remains available through `status`.
+local `Io` errors. Cache/document errors stop the worker.
 
 ```no_run
 # #[cfg(feature = "smb")]
@@ -229,35 +139,25 @@ worker.stop()?;
 ```
 
 `stop()` cancels future steps and joins the worker, returning a fatal cache error
-or worker panic. Dropping it requests cancellation without waiting. An in-flight
-step completes before releasing ownership; a replacement worker cannot start
-while the old one still owns the replica. Remote operations and callbacks must
-have bounded execution times if shutdown latency matters. A dropped worker can
-briefly retain the cache; use `stop()` before requiring an immediate reopen.
-Cancellation and application restart retain pending edits and publication attempts.
-Credentials belong to the factory, not the cache database.
+or worker panic. Dropping it requests cancellation without waiting. Remote
+operations and callbacks must have bounded execution times if shutdown latency
+matters. Credentials belong to the factory, not the cache database.
 
-Creation refuses existing paths. Opening recognizes the application identity and
-schema version, validates database integrity and both notebook images, and rejects
-unsupported journal modes without converting them. Failed initialization preserves
-the file for inspection. SQLite uses DELETE journaling, EXTRA synchronization and
-fullfsync; each required setting is queried back.
-
-The cache and its pending intents contain notebook content. The core `onestore`
-crate stays independent of SQLite and network runtimes. Device and simulator
-examples compile and link for iOS; recorded process-interruption tests do not
-establish physical power-loss durability. Evidence is tracked in [Milestone 9](../../evidence/MILESTONE9.md).
+Creation refuses existing paths. Opening validates database integrity and replays
+the queue on its base. SQLite runs in WAL mode under exclusive locking with FULL
+synchronization and fullfsync, each queried back: every commit is durable, and the only
+file beside the cache is `<cache>-wal`, which holds committed pages until a checkpoint
+and must travel with the cache when it is copied. Recovery archives are single files.
+The cache contains notebook content.
 
 The SMB-enabled `smb_offline_client` example is an owned-lab workload for
-`tools/native_collaboration.py --offline --embedded-smb`. It separates local
-acknowledgements, remote publication attempts, persisted receipts and cache reopen
-checks. Its append-specific conflict review policy lives in the test client;
-the library continues to preserve conflicts requiring an explicit decision.
+`tools/native_collaboration.py --offline --embedded-smb`; its append-specific
+conflict policy lives in the client.
 
 ## Recovery archives
 
-`export_recovery(new_path)` captures both complete notebook images, the intent
-queue, uncertain attempts, conflicts, receipts, downloaded media and the edit-ID sequence in one
+`export_recovery(new_path)` captures the base and remote images, the edit queue,
+uncertain attempts, conflicts, receipts, downloaded media and the edit-ID sequence in one
 SQLite snapshot. It refuses existing destinations and leaves the live queue
 unchanged. Export to a local directory from a background thread: copying holds
 the cache mutex while capturing the database. Failure after the final rename can
@@ -448,9 +348,6 @@ physical power-loss durability.
 ## Queue measurement
 
 `cargo run -p notebook --release --example queue_scale -- NEW_DIRECTORY 1000`
-measures alternating-page saves that retain separate queue IDs, cache reopen,
-recovery export and local-file publication. JSON lines record each acknowledgement
-and publication latency plus image/cache sizes. The workload verifies every ID
-and both final page titles, then independently reopens the recovery archive.
-Use an external resource monitor for peak memory; these local-file timings do not
-measure SMB or phone performance.
+measures alternating-page edits, cache reopen, recovery export and one local-file
+publication of the queue. `keystroke_probe PARAGRAPHS KEYSTROKES` types into a large
+page and reports the bytes the cache and the section file write per keystroke.
