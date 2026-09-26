@@ -1079,7 +1079,13 @@ impl State {
             },
         );
         let mut open = None;
-        for (space, title, level) in matching(&session.pages, &self.filter) {
+        let pages: Vec<_> = matching(&session.pages, &self.filter).collect();
+        let is_open = |index: Option<usize>| {
+            index
+                .and_then(|index| pages.get(index))
+                .is_some_and(|(space, ..)| *space == session.space)
+        };
+        for (index, (space, title, level)) in pages.iter().enumerate() {
             let selected = *space == session.space;
             let spec = Spec {
                 flags: Flags::CLICKABLE,
@@ -1109,10 +1115,13 @@ impl State {
                         ..Spec::default()
                     },
                 );
+                // A pill beside the open tab gives up a little on that side, widening the gap.
+                let [above, below] = [index.checked_sub(1), Some(index + 1)]
+                    .map(|neighbour| if is_open(neighbour) { 2.0 } else { 0.0 });
                 let spec = Spec {
                     flags: Flags::CLICKABLE | Flags::FLOAT,
-                    size: [px(PAGE_LIST - 3.0 - 6.0), px(26.0)],
-                    position: [3.0, 0.0],
+                    size: [px(PAGE_LIST - 3.0 - 6.0), px(26.0 - above - below)],
+                    position: [3.0, above],
                     color: Some(if title.is_empty() {
                         ui::mix(theme.ink, section.tab, 0.5)
                     } else {
