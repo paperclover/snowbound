@@ -92,10 +92,13 @@ fn append_placeholder(rect: [f32; 4], paper: Paper, primitives: &mut Vec<Primiti
         rect,
         color: paper.shade(colorref(0x00e4ddd6)),
     });
-    primitives.push(Primitive::Rect {
-        rect: [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 1.0, rect[3] - 1.0],
-        color: paper.shade(colorref(0x00faf7f3)),
-    });
+    let inner = [rect[0] + 1.0, rect[1] + 1.0, rect[2] - 1.0, rect[3] - 1.0];
+    if inner[0] < inner[2] && inner[1] < inner[3] {
+        primitives.push(Primitive::Rect {
+            rect: inner,
+            color: paper.shade(colorref(0x00faf7f3)),
+        });
+    }
 }
 
 #[derive(Debug)]
@@ -140,10 +143,11 @@ impl From<EditorError> for SceneError {
 
 impl PageScene {
     pub fn new(mut page: Page, engine: &mut TextEngine) -> Result<Self, SceneError> {
-        let objects = crate::editor::page::build(&mut page, engine, false)
+        let mut objects = crate::editor::page::build(&mut page, engine, false)
             .map_err(SceneError::from)?
             .objects;
         let pictures = Self::decode_images(&objects, None)?;
+        pictures.mark_unavailable(&mut objects, engine)?;
         Ok(Self {
             reference: Some(objects),
             ..pictures
@@ -154,12 +158,35 @@ impl PageScene {
         page: Page,
         engine: &mut TextEngine,
     ) -> Result<(Self, CanvasEditor), SceneError> {
-        let editor = CanvasEditor::from_page(page, engine).map_err(SceneError::from)?;
-        Ok((Self::decode_images(&editor.objects, Some(&editor))?, editor))
+        let mut editor = CanvasEditor::from_page(page, engine).map_err(SceneError::from)?;
+        let scene = Self::decode_images(&editor.objects, Some(&editor))?;
+        scene.mark_unavailable(&mut editor.objects, engine)?;
+        Ok((scene, editor))
+    }
+
+    /// Turns page pictures that did not decode into placeholders; their stored data is kept.
+    fn mark_unavailable(
+        &self,
+        objects: &mut Vec<Content>,
+        engine: &mut TextEngine,
+    ) -> Result<(), SceneError> {
+        *objects = std::mem::take(objects)
+            .into_iter()
+            .map(|object| match object {
+                Content::Image(source)
+                    if !self.images.contains_key(&source.id)
+                        && !self.backgrounds.contains_key(&source.id) =>
+                {
+                    Content::unavailable(onestore::page::PageObject::Image(source), engine)
+                }
+                object => Ok(object),
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(())
     }
 
     /// Decodes every picture the page draws, page-level ones and those inside outlines,
-    /// except the template backgrounds it recognises.
+    /// except the template backgrounds it recognises; one without decodable data is left out.
     fn decode_images(
         objects: &[Content],
         editor: Option<&CanvasEditor>,
@@ -215,8 +242,9 @@ impl PageScene {
         let mut images = std::collections::BTreeMap::new();
         let mut bytes = 0_u64;
         for (id, encoded) in payloads {
-            let image = RasterImage::decode(encoded.ok_or(SceneError::MissingImage)?)
-                .map_err(SceneError::Image)?;
+            let Some(image) = encoded.and_then(|encoded| RasterImage::decode(encoded).ok()) else {
+                continue;
+            };
             bytes += image.pixels().len() as u64;
             if bytes > draw::MAX_IMAGE_BYTES {
                 return Err(SceneError::Image(RenderError::ImageBudget));
@@ -282,6 +310,9 @@ impl PageScene {
                     append_ink(ink, [rect[0], rect[1]], primitives)
                 }
                 crate::outline::ObjectKind::Unsupported(_) => {
+                    append_placeholder(rect, paper, primitives)
+                }
+                crate::outline::ObjectKind::Picture if !self.images.contains_key(&object.id) => {
                     append_placeholder(rect, paper, primitives)
                 }
                 crate::outline::ObjectKind::Picture | crate::outline::ObjectKind::File(_) => {}

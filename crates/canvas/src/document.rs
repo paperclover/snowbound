@@ -243,19 +243,158 @@ fn starts(nodes: &[PageParagraph], first: usize) -> impl Iterator<Item = usize> 
     })
 }
 
-pub(crate) fn validate_flat<'a>(
-    mut nodes: impl Iterator<Item = &'a PageParagraph>,
-) -> Result<(), EditError> {
-    if nodes.any(|node| {
-        !node.lists.is_empty()
-            || !node.tags.is_empty()
-            || node.collapsed
-            || node.parent.is_some()
-            || node.text().is_none_or(|text| !text.tags.is_empty())
-    }) {
-        return Err(EditError::UnsupportedContent);
+/// The index after `nodes[index]`'s last descendant. Descendants follow their ancestor
+/// contiguously; a paragraph only an outline group indents has no parent to descend from.
+pub(crate) fn subtree_end(nodes: &[PageParagraph], index: usize) -> usize {
+    let mut members = BTreeSet::from([nodes[index].id]);
+    index
+        + 1
+        + nodes[index + 1..]
+            .iter()
+            .take_while(|node| {
+                node.parent.is_some_and(|parent| members.contains(&parent))
+                    && members.insert(node.id)
+            })
+            .count()
+}
+
+/// The nodes from `from` on that descend from a paragraph in `moves` or `shifts`, rebuilt so
+/// the children of each paragraph in `moves` belong to its new parent, one level below it, and
+/// every subtree keeps its depth below its root; ends at the last node that changes.
+fn adopt(
+    nodes: &[PageParagraph],
+    from: usize,
+    moves: &BTreeMap<ExGuid, &PageParagraph>,
+    mut shifts: BTreeMap<ExGuid, i64>,
+) -> Result<Vec<PageParagraph>, EditError> {
+    let mut adopted = Vec::new();
+    let mut changed = 0;
+    for node in &nodes[from..] {
+        let Some(parent) = node.parent else { break };
+        let mut node = node.clone();
+        let shift = match (moves.get(&parent), shifts.get(&parent)) {
+            (Some(holder), _) => {
+                node.parent = Some(holder.id);
+                i64::from(holder.level) + 1 - i64::from(node.level)
+            }
+            (None, Some(shift)) => *shift,
+            (None, None) => break,
+        };
+        node.level = u32::try_from(i64::from(node.level) + shift)
+            .map_err(|_| EditError::InvalidStructure)?;
+        shifts.insert(node.id, shift);
+        if shift != 0 || moves.contains_key(&parent) {
+            changed = adopted.len() + 1;
+        }
+        adopted.push(node);
     }
-    Ok(())
+    adopted.truncate(changed);
+    Ok(adopted)
+}
+
+/// The sibling `nodes[index]` follows, passing over `skipped` siblings, when everything
+/// between them descends from it or from a skipped paragraph.
+pub(crate) fn previous_sibling(
+    nodes: &[PageParagraph],
+    index: usize,
+    skipped: &BTreeSet<ExGuid>,
+) -> Option<usize> {
+    let node = &nodes[index];
+    let sibling = (0..index).rev().find(|&at| {
+        nodes[at].level <= node.level
+            && !(nodes[at].level == node.level && skipped.contains(&nodes[at].id))
+    })?;
+    if nodes[sibling].level != node.level || nodes[sibling].parent != node.parent {
+        return None;
+    }
+    let mut members = BTreeSet::from([nodes[sibling].id]);
+    nodes[sibling + 1..index]
+        .iter()
+        .all(|node| {
+            let inside = skipped.contains(&node.id)
+                || node.parent.is_some_and(|parent| members.contains(&parent));
+            members.insert(node.id);
+            inside
+        })
+        .then_some(sibling)
+}
+
+/// Tab or Shift+Tab on `range` of `nodes` as OneNote does, moving each paragraph with its
+/// subtree: indenting makes a paragraph the last child of its previous sibling, or without one
+/// indents it within its group; outdenting a child makes it its parent's sibling, adopting the
+/// siblings after it. None when nothing moves.
+pub(crate) fn indent(
+    nodes: &[PageParagraph],
+    container: Option<ExGuid>,
+    range: Range<usize>,
+    outdent: bool,
+) -> Option<DocumentEdit> {
+    let selected = nodes[range.clone()]
+        .iter()
+        .map(|node| node.id)
+        .collect::<BTreeSet<_>>();
+    let mut end = range.end;
+    let mut tops = BTreeMap::new();
+    let mut adopters = BTreeMap::new();
+    for index in range.clone() {
+        let node = &nodes[index];
+        if node.parent.is_some_and(|parent| selected.contains(&parent)) {
+            continue;
+        }
+        end = end.max(subtree_end(nodes, index));
+        if !outdent {
+            let parent = previous_sibling(nodes, index, &selected).map(|at| nodes[at].id);
+            tops.insert(node.id, (parent.or(node.parent), 1));
+        } else if node.level > 1 {
+            let parent = node
+                .parent
+                .and_then(|id| nodes[..index].iter().rposition(|node| node.id == id))
+                .filter(|&at| nodes[at].level + 1 == node.level);
+            let parent = match parent {
+                Some(at) => {
+                    end = end.max(subtree_end(nodes, at));
+                    adopters.insert(nodes[at].id, node.id);
+                    nodes[at].parent
+                }
+                None => node.parent,
+            };
+            tops.insert(node.id, (parent, -1));
+        }
+    }
+    if tops.is_empty() {
+        return None;
+    }
+    let mut shifts = BTreeMap::new();
+    let replacement = nodes[range.start..end]
+        .iter()
+        .map(|node| {
+            let mut node = node.clone();
+            let shift = match (tops.get(&node.id), node.parent) {
+                (Some(&(parent, shift)), _) => {
+                    node.parent = parent;
+                    shift
+                }
+                (None, Some(parent))
+                    if !selected.contains(&node.id) && adopters.contains_key(&parent) =>
+                {
+                    node.parent = Some(adopters[&parent]);
+                    0
+                }
+                (None, parent) => parent
+                    .and_then(|parent| shifts.get(&parent).copied())
+                    .unwrap_or(0),
+            };
+            node.level = node.level.saturating_add_signed(shift);
+            shifts.insert(node.id, shift);
+            node
+        })
+        .collect();
+    Some(DocumentEdit {
+        columns: BTreeMap::new(),
+        container,
+        range: range.start..end,
+        replacement,
+    })
 }
 
 pub(crate) fn container_mut(
@@ -316,10 +455,6 @@ impl TextDocument {
 
     pub fn nodes(&self) -> &[PageParagraph] {
         &self.nodes
-    }
-
-    pub(crate) fn validate_flat(&self) -> Result<(), EditError> {
-        validate_flat(self.nodes.iter())
     }
 
     pub fn text_nodes(&self) -> impl Iterator<Item = &PageParagraph> {
@@ -452,6 +587,11 @@ impl TextDocument {
         Ok(result)
     }
 
+    /// Replaces `range` as OneNote's typing, Enter and deletion do: the first paragraph keeps
+    /// its identity and properties, and a paragraph the replacement adds takes its level,
+    /// parent, style and lists but no note tags, except that a range's last paragraph stays
+    /// itself when the replacement ends in one. The last paragraph holds the children of the
+    /// paragraphs the edit removes or splits.
     pub(crate) fn replace(
         &self,
         range: Range<TextPosition>,
@@ -469,13 +609,7 @@ impl TextDocument {
         if container != end_container {
             return Err(EditError::UnsupportedContent);
         }
-        if range.start.paragraph != range.end.paragraph || replacement.len() != 1 {
-            validate_flat(self.container(container)?.iter().enumerate().filter_map(
-                |(index, node)| {
-                    ((start..=end).contains(&index) || node.text().is_some()).then_some(node)
-                },
-            ))?;
-        }
+        let nodes = self.container(container)?;
         let mut prefix = first.text().unwrap().text.slice(0..range.start.offset)?;
         let last_text = &last.text().unwrap().text;
         let suffix =
@@ -484,30 +618,88 @@ impl TextDocument {
         prefix.append(replacement.next().ok_or(EditError::InvalidRange)?)?;
         let mut head = first.clone();
         head.text_mut().unwrap().text = prefix;
-        let mut nodes = vec![head];
         let following = replacement.len();
+        let keeps_last = start != end && following > 0;
+        let mut added = Vec::new();
         for (index, text) in replacement.enumerate() {
-            if index + 1 == following && range.start.paragraph != range.end.paragraph {
+            let mut next = if keeps_last && index + 1 == following {
                 let mut end = last.clone();
                 end.text_mut().unwrap().text = text;
-                nodes.push(end);
+                end
             } else {
                 let mut next = node(text, first.format.clone())?;
-                next.level = first.level;
                 next.style = first.style;
-                nodes.push(next);
-            }
+                next.lists.clone_from(&first.lists);
+                next
+            };
+            next.parent = first.parent;
+            next.level = first.level;
+            added.push(next);
         }
+        if let Some(tail) = added.last_mut() {
+            tail.collapsed |= std::mem::take(&mut head.collapsed);
+        }
+        let tail = added.last_mut().unwrap_or(&mut head);
         if !suffix.text().is_empty() {
-            let end = nodes.last_mut().unwrap();
-            end.text_mut().unwrap().text.append(suffix)?;
+            tail.text_mut().unwrap().text.append(suffix)?;
         }
+        let tail = added.last().unwrap_or(&head);
+        let mut moves = nodes[start + 1..end + usize::from(!keeps_last)]
+            .iter()
+            .map(|node| (node.id, tail))
+            .collect::<BTreeMap<_, _>>();
+        if tail.id != head.id {
+            moves.insert(head.id, tail);
+        }
+        let shifts = keeps_last
+            .then(|| (last.id, i64::from(first.level) - i64::from(last.level)))
+            .into_iter()
+            .collect();
+        let adopted = adopt(nodes, end + 1, &moves, shifts)?;
         Ok(DocumentEdit {
             columns: BTreeMap::new(),
             container,
-            range: start..end + 1,
-            replacement: nodes,
+            range: start..end + 1 + adopted.len(),
+            replacement: [head].into_iter().chain(added).chain(adopted).collect(),
         })
+    }
+
+    /// Appends text leaf `lower`'s text to `upper`'s, keeping the upper paragraph's properties
+    /// and giving it the lower one's children; None unless nothing but `upper`'s hidden subtree
+    /// lies between them in one container.
+    pub(crate) fn join(
+        &self,
+        upper: usize,
+        lower: usize,
+    ) -> Result<Option<DocumentEdit>, EditError> {
+        let (container, first, top) = self.leaf(upper).ok_or(EditError::InvalidRange)?;
+        let (end_container, last, bottom) = self.leaf(lower).ok_or(EditError::InvalidRange)?;
+        let nodes = self.container(container)?;
+        if container != end_container
+            || last <= first
+            || last > first + 1 && !(top.collapsed && subtree_end(nodes, first) == last)
+        {
+            return Ok(None);
+        }
+        let mut head = top.clone();
+        let text = head.text_mut().unwrap();
+        // OneNote moves the lower text object into an emptied upper paragraph.
+        if text.text.text().is_empty() {
+            text.id = bottom.text().unwrap().id;
+        }
+        text.text.append(bottom.text().unwrap().text.clone())?;
+        let moves = BTreeMap::from([(bottom.id, &head)]);
+        let adopted = adopt(nodes, last + 1, &moves, BTreeMap::new())?;
+        Ok(Some(DocumentEdit {
+            columns: BTreeMap::new(),
+            container,
+            range: first..last + 1 + adopted.len(),
+            replacement: [head]
+                .into_iter()
+                .chain(nodes[first + 1..last].iter().cloned())
+                .chain(adopted)
+                .collect(),
+        }))
     }
 
     /// Rejects exactly the edits after which [`validate_nodes`] would reject the document, or
@@ -899,13 +1091,21 @@ mod tests {
         assert_eq!(document.nodes()[1], original.nodes()[1]);
         document.apply(undo).unwrap();
         assert_eq!(document, original);
-        assert_eq!(
-            document.replace(
+        let edit = document
+            .replace(
                 position(0, 0)..position(4, 0),
-                vec![Paragraph::new(String::new(), Format::default())]
-            ),
-            Err(EditError::UnsupportedContent)
+                vec![Paragraph::new(String::new(), Format::default())],
+            )
+            .unwrap();
+        document.apply(edit).unwrap();
+        assert_eq!(
+            document
+                .paragraphs()
+                .map(Paragraph::text)
+                .collect::<Vec<_>>(),
+            ["after"]
         );
+        assert_eq!(document.nodes().len(), 1);
     }
 
     #[test]
@@ -1221,7 +1421,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_nested_tagged_text_preserves_metadata_and_refuses_structural_changes() {
+    fn editing_nested_tagged_text_preserves_metadata_through_structural_changes() {
         let mut nodes = TextDocument::new(
             ["parent", "a🌳e\u{301}z", "child"]
                 .into_iter()
@@ -1284,19 +1484,51 @@ mod tests {
                 assert_eq!(document, edited);
             }
         }
-        for (range, count) in [
-            (position(1, 0)..position(1, 0), 2),
-            (position(0, 6)..position(1, 0), 1),
-            (position(1, 0)..position(2, 0), 1),
-        ] {
-            assert_eq!(
-                original.replace(
+        let structure = |range: Range<TextPosition>, count| {
+            let mut document = original.clone();
+            let edit = document
+                .replace(
                     range,
-                    vec![Paragraph::new(String::new(), Format::default()); count]
-                ),
-                Err(EditError::UnsupportedContent)
-            );
-        }
+                    vec![Paragraph::new(String::new(), Format::default()); count],
+                )
+                .unwrap();
+            let undo = document.apply(edit).unwrap();
+            let edited = document.nodes().to_vec();
+            document.apply(undo).unwrap();
+            assert_eq!(document, original);
+            edited
+        };
+        let [parent, item, child] = original.nodes() else {
+            unreachable!()
+        };
+        // The new half takes the list, the children and their collapsed state, not the tags.
+        let split = structure(position(1, 0)..position(1, 0), 2);
+        assert_eq!(split[1].id, item.id);
+        assert!(split[1].text().unwrap().text.text().is_empty() && !split[1].collapsed);
+        assert_eq!(split[1].tags, item.tags);
+        let tail = &split[2];
+        assert_eq!(tail.text().unwrap().text, item.text().unwrap().text);
+        assert_eq!((tail.parent, tail.level), (Some(parent.id), 2));
+        assert_eq!(tail.lists, item.lists);
+        assert!(tail.tags.is_empty() && tail.text().unwrap().tags.is_empty() && tail.collapsed);
+        assert_eq!((split[3].parent, split[3].level), (Some(tail.id), 3));
+        // The upper paragraph wins a join and adopts the lower one's children.
+        let joined = structure(position(0, 6)..position(1, 0), 1);
+        assert_eq!(joined[0].text().unwrap().text.text(), "parenta🌳e\u{301}z");
+        assert_eq!((joined[0].id, joined[0].lists.len()), (parent.id, 0));
+        assert_eq!(
+            (joined[1].id, joined[1].parent, joined[1].level),
+            (child.id, Some(parent.id), 2)
+        );
+        let joined = structure(position(1, 6)..position(2, 0), 1);
+        assert_eq!(joined.len(), 2);
+        assert_eq!(
+            PageParagraph {
+                content: item.content.clone(),
+                ..joined[1].clone()
+            },
+            *item
+        );
     }
 
     #[test]
@@ -1365,7 +1597,7 @@ mod tests {
         .unwrap();
         for (original, regions) in [
             (original, vec![0, 0, 0]),
-            (table_document(), vec![0, 1, 1, 2, 3]),
+            (table_document(), vec![0, 1, 1, 2, 0]),
         ] {
             let positions: Vec<_> = original
                 .paragraphs()

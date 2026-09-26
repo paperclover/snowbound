@@ -98,7 +98,12 @@ pub(crate) fn painted_layout(text: &dyn Glyphs) -> &TextLayout {
 
 const CHECKBOX: &str = include_str!("../../assets/tags/checkbox.svg");
 const CHECKMARK: &str = include_str!("../../assets/tags/checkmark.svg");
+const STAR: &str = include_str!("../../assets/tags/star.svg");
 const QUESTION: &str = include_str!("../../assets/tags/question.svg");
+const HIGHLIGHT: &str = include_str!("../../assets/tags/highlight.svg");
+const CONTACT: &str = include_str!("../../assets/tags/contact.svg");
+const ADDRESS: &str = include_str!("../../assets/tags/address.svg");
+const PHONE: &str = include_str!("../../assets/tags/phone.svg");
 const MUSIC: &str = include_str!("../../assets/tags/music.svg");
 const EXCLAMATION: &str = include_str!("../../assets/tags/exclamation.svg");
 const RED_SQUARE: &str = include_str!("../../assets/tags/red-square.svg");
@@ -110,7 +115,12 @@ pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
     match icon {
         TagIcon::CheckBox { checked: false } => &[CHECKBOX],
         TagIcon::CheckBox { checked: true } => &[CHECKBOX, CHECKMARK],
+        TagIcon::Star => &[STAR],
         TagIcon::Question => &[QUESTION],
+        TagIcon::Highlight => &[HIGHLIGHT],
+        TagIcon::Contact => &[CONTACT],
+        TagIcon::Address => &[ADDRESS],
+        TagIcon::Phone => &[PHONE],
         TagIcon::Music => &[MUSIC],
         TagIcon::Exclamation => &[EXCLAMATION],
         TagIcon::RedSquare => &[RED_SQUARE],
@@ -140,7 +150,7 @@ mod tests {
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
         let (device, queue) =
             pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let size = [256, 64];
+        let size = [448, 64];
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Tag readback test"),
             size: wgpu::Extent3d {
@@ -165,7 +175,12 @@ mod tests {
         let icons = [
             TagIcon::CheckBox { checked: false },
             TagIcon::CheckBox { checked: true },
+            TagIcon::Star,
             TagIcon::Question,
+            TagIcon::Highlight,
+            TagIcon::Contact,
+            TagIcon::Address,
+            TagIcon::Phone,
             TagIcon::Music,
             TagIcon::Exclamation,
             TagIcon::RedSquare,

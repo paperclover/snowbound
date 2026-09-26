@@ -6,6 +6,7 @@ use crate::{
 };
 use draw::edit::{self, Movement, SelectionUnit};
 use onestore::ExGuid;
+use onestore::document::{Format, Kind};
 use onestore::page::text::{EditError, Paragraph};
 use onestore::page::{Definition, Outline, Page, PageObject, PageParagraph, Title};
 use parley::{
@@ -20,6 +21,8 @@ use std::{
 
 pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
 
+#[cfg(test)]
+mod evidence;
 mod format;
 pub(crate) mod page;
 mod table;
@@ -126,22 +129,20 @@ pub struct TextOutline {
 impl TextOutline {
     /// A single plain paragraph containing only ASCII spaces or no text.
     pub fn is_empty(&self) -> bool {
-        self.document.nodes().len() == 1
-            && self.document.validate_flat().is_ok()
-            && self
-                .document
-                .paragraphs()
-                .next()
-                .unwrap()
-                .text()
-                .bytes()
-                .all(|byte| byte == b' ')
+        let [node] = self.document.nodes() else {
+            return false;
+        };
+        node.lists.is_empty()
+            && node.tags.is_empty()
+            && !node.collapsed
+            && node.text().is_some_and(|text| {
+                text.tags.is_empty() && text.text.text().bytes().all(|byte| byte == b' ')
+            })
     }
 
     /// Tests an outline-local point against the provisional paragraph band.
     pub fn contains_extension(&self, point: [f32; 2]) -> bool {
         !self.title
-            && self.document.validate_flat().is_ok()
             && (0.0..=self.shaped.size[0]).contains(&point[0])
             && point[1] > self.shaped.size[1]
             && point[1] <= self.shaped.size[1] + 27.0
@@ -1148,7 +1149,11 @@ impl CanvasEditor {
                 let outline = self.active_outline();
                 let count = outline.document.nodes().len();
                 let height = outline.shaped.size[1];
-                let node = self.blank_paragraph(&outline.document.nodes()[count - 1])?;
+                let last = &outline.document.nodes()[count - 1];
+                let node = PageParagraph {
+                    parent: last.parent,
+                    ..self.blank_paragraph(last)?
+                };
                 self.apply(
                     engine,
                     DocumentEdit {
@@ -1864,13 +1869,6 @@ impl CanvasEditor {
             };
             if target.is_none() && !extend && anchor == focus && !self.active_outline().title {
                 let outline = self.active_outline();
-                crate::document::validate_flat(
-                    outline
-                        .document
-                        .nodes()
-                        .iter()
-                        .filter(|node| node.text().is_some()),
-                )?;
                 let last = outline.document.nodes().len() - 1;
                 let up = matches!(movement, Movement::Up);
                 let base_node = &outline.document.nodes()[if up { 0 } else { last }];
@@ -1964,7 +1962,10 @@ impl CanvasEditor {
                     columns: BTreeMap::new(),
                     container: None,
                     range: last + 1..last + 1,
-                    replacement: vec![node],
+                    replacement: vec![PageParagraph {
+                        parent: base_node.parent,
+                        ..node
+                    }],
                 };
                 let paragraph = outline.document.paragraphs().count();
                 let previous = if let Focus::Outline(index) = self.active {
@@ -2223,12 +2224,127 @@ impl CanvasEditor {
         self.replace(engine, replacement)
     }
 
+    /// Pastes plain text as OneNote does: lines become plain Calibri 11 paragraphs without style
+    /// or list between the halves of the caret's paragraph (`evidence/structural-edits/xml/c7-*`).
+    pub fn paste(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
+        let lines = text
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .collect::<Vec<_>>();
+        let last = lines[lines.len() - 1];
+        if lines.len() == 1 {
+            return self.insert(engine, last);
+        }
+        let [anchor, focus] = self.active_outline().selection.positions;
+        let (start, end) = (anchor.min(focus), anchor.max(focus));
+        let edge = Paragraph::new(String::new(), self.typing_format(start)?);
+        let pasted = Format {
+            font: Some("Calibri".into()),
+            font_size: Some(11.0),
+            ..Format::default()
+        };
+        let mut edit = self.active_outline().document.replace(
+            start..end,
+            std::iter::once(edge.clone())
+                .chain(
+                    lines
+                        .iter()
+                        .map(|line| Paragraph::new((*line).to_owned(), pasted.clone())),
+                )
+                .chain([edge])
+                .collect(),
+        )?;
+        for node in &mut edit.replacement[1..=lines.len()] {
+            node.style = None;
+            node.lists.clear();
+        }
+        let caret = TextPosition {
+            paragraph: start.paragraph + lines.len(),
+            offset: u32::try_from(last.encode_utf16().count())
+                .map_err(|_| EditError::TextTooLong)?,
+        };
+        self.commit(
+            engine,
+            edit,
+            Selection {
+                positions: [caret; 2],
+                affinities: [Affinity::Upstream; 2],
+            },
+        )
+    }
+
+    /// Enter as OneNote 2010 does (`evidence/structural-edits`): the new paragraph takes the
+    /// level, lists and character formatting at the caret but no note tags. At a paragraph's
+    /// start its tags stay with its text below; an empty paragraph opens a plain one above and
+    /// leaves the list it ends; a heading continues as body text.
+    fn split(&mut self, engine: &mut TextEngine) -> Result<(), EditorError> {
+        let [anchor, focus] = self.active_outline().selection.positions;
+        let (start, end) = (anchor.min(focus), anchor.max(focus));
+        let format = self.typing_format(start)?;
+        let document = &self.active_outline().document;
+        let mut edit =
+            document.replace(start..end, vec![Paragraph::new(String::new(), format); 2])?;
+        let nodes = document.container(edit.container)?;
+        let next = nodes
+            .get(crate::document::subtree_end(nodes, edit.range.start))
+            .filter(|next| {
+                let node = &nodes[edit.range.start];
+                next.parent == node.parent && next.level == node.level
+            });
+        let [head, tail, ..] = &mut edit.replacement[..] else {
+            unreachable!("a split holds both halves")
+        };
+        let empty = |node: &PageParagraph| node.text().unwrap().text.text().is_empty();
+        if start.offset == 0 {
+            tail.tags = std::mem::take(&mut head.tags);
+            tail.text_mut().unwrap().tags = std::mem::take(&mut head.text_mut().unwrap().tags);
+        }
+        let style = |id: Option<ExGuid>| match &self.definitions.get(&id?)?.kind {
+            Kind::Style { name } => name.as_deref(),
+            _ => None,
+        };
+        if empty(head) && empty(tail) {
+            head.lists.clear();
+            if next.is_none_or(|next| next.lists.is_empty()) {
+                tail.lists.clear();
+            }
+        } else if empty(tail)
+            && matches!(
+                style(head.style),
+                Some("h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+            )
+        {
+            tail.style = self
+                .definitions
+                .keys()
+                .copied()
+                .find(|id| style(Some(*id)) == Some("p"));
+            tail.text_mut().unwrap().text =
+                Paragraph::new(String::new(), self.style_format(tail.style)?);
+        }
+        let caret = TextPosition {
+            paragraph: start.paragraph + 1,
+            offset: 0,
+        };
+        self.commit(
+            engine,
+            edit,
+            Selection {
+                positions: [caret; 2],
+                affinities: [Affinity::Upstream; 2],
+            },
+        )
+    }
+
+    /// Tab or Shift+Tab at the start of the selected paragraphs; see [`crate::document::indent`].
+    /// A default bullet or number steps to the style OneNote gives its new depth.
     pub fn indent(&mut self, engine: &mut TextEngine, outdent: bool) -> Result<bool, EditorError> {
         let outline = self.active_outline();
         if outline.title {
             return Ok(false);
         }
-        let [anchor, focus] = outline.selection.positions;
+        let selection = outline.selection;
+        let [anchor, focus] = selection.positions;
         let start = anchor.min(focus);
         let end = anchor.max(focus);
         let (container, local_start, _) = outline
@@ -2245,96 +2361,111 @@ impl CanvasEditor {
         let range = local_start
             ..local_end + usize::from(end.offset != 0 || start.paragraph == end.paragraph);
         let nodes = outline.document.container(container)?;
-        // Lists and tags move with their paragraphs; parent links and collapsed children would not.
-        if nodes.iter().enumerate().any(|(index, node)| {
-            (range.contains(&index) || node.text().is_some())
-                && (node.parent.is_some() || node.collapsed)
-        }) {
-            return Err(EditError::UnsupportedContent.into());
-        }
-        let nodes = &nodes[range.clone()];
-        if outdent && nodes.iter().all(|node| node.level == 1) {
+        let Some(mut edit) = crate::document::indent(nodes, container, range, outdent) else {
             return Ok(false);
-        }
-        let replacement = nodes
+        };
+        let levels = nodes[edit.range.clone()]
             .iter()
-            .map(|node| {
-                let mut node = node.clone();
-                node.level = if outdent {
-                    node.level.saturating_sub(1).max(1)
-                } else {
-                    node.level
-                        .checked_add(1)
-                        .ok_or(EditError::InvalidStructure)?
+            .map(|node| node.level)
+            .collect::<Vec<_>>();
+        for (node, level) in edit.replacement.iter_mut().zip(levels) {
+            if node.level == level {
+                continue;
+            }
+            for list in &mut node.lists {
+                let Some(definition) = self
+                    .definitions
+                    .get(list)
+                    .and_then(|definition| format::nested_list(definition, node.level > level))
+                else {
+                    continue;
                 };
-                Ok(node)
-            })
-            .collect::<Result<Vec<_>, EditError>>()?;
-        self.commit(
-            engine,
-            DocumentEdit {
-                columns: BTreeMap::new(),
-                container,
-                range,
-                replacement,
-            },
-            outline.selection,
-        )?;
+                *list = onestore::page::text::new_id()?;
+                self.definitions.insert(*list, definition);
+            }
+        }
+        self.commit(engine, edit, selection)?;
         Ok(true)
     }
 
+    /// Deletes the selection or the character beside the caret. Backspace at a paragraph's start
+    /// first removes its list, then outdents it, then joins it to the paragraph above, whose
+    /// properties win; Delete at its end joins the paragraph below (`evidence/structural-edits/
+    /// xml/c4-*`, `c5b-*`). Joins pass over a collapsed paragraph's hidden children.
     pub fn delete(&mut self, engine: &mut TextEngine, backward: bool) -> Result<bool, EditorError> {
-        let [anchor, focus] = self.active_outline().selection.positions;
+        let selection = self.active_outline().selection;
+        let [anchor, focus] = selection.positions;
         let mut range = anchor.min(focus)..anchor.max(focus);
         if range.is_empty() {
-            let paragraph = self.active_outline().paragraph_layout(focus.paragraph)?;
-            let cursor =
-                paragraph.cursor(focus.offset, self.active_outline().selection.affinities[1])?;
-            if let Some(cluster) =
+            let outline = self.active_outline();
+            let paragraph = outline.paragraph_layout(focus.paragraph)?;
+            let cursor = paragraph.cursor(focus.offset, selection.affinities[1])?;
+            let Some(cluster) =
                 cursor.logical_clusters(&paragraph.text.shaped)[usize::from(!backward)]
-            {
-                let visible = paragraph.projection.text();
-                let bytes = cluster.text_range();
-                range.start.offset = paragraph.projection.source_offset(
-                    visible.utf16_offset(bytes.start)?,
-                    onestore::page::text::Affinity::Downstream,
-                )?;
-                range.end.offset = paragraph.projection.source_offset(
-                    visible.utf16_offset(bytes.end)?,
-                    onestore::page::text::Affinity::Upstream,
-                )?;
-            } else {
-                let document = &self.active_outline().document;
+            else {
+                let (container, local, node) = outline
+                    .document
+                    .leaf(focus.paragraph)
+                    .ok_or(EditError::InvalidRange)?;
+                if backward && !node.lists.is_empty() {
+                    let item = PageParagraph {
+                        lists: Vec::new(),
+                        ..node.clone()
+                    };
+                    let edit = DocumentEdit {
+                        columns: BTreeMap::new(),
+                        container,
+                        range: local..local + 1,
+                        replacement: vec![item],
+                    };
+                    self.commit(engine, edit, selection)?;
+                    return Ok(true);
+                }
+                if backward && node.level > 1 {
+                    return self.indent(engine, true);
+                }
+                let visible = outline.visible_index(focus.paragraph)?;
                 let Some(neighbor) = (if backward {
-                    focus.paragraph.checked_sub(1)
+                    visible.checked_sub(1)
                 } else {
-                    focus.paragraph.checked_add(1)
+                    Some(visible + 1).filter(|next| *next < outline.shaped.paragraphs.len())
                 }) else {
                     return Ok(false);
                 };
-                let (container, local, current) = document
-                    .leaf(focus.paragraph)
-                    .ok_or(EditError::InvalidRange)?;
-                let Some((next_container, next_local, next)) = document.leaf(neighbor) else {
-                    return Ok(false);
-                };
-                if container != next_container || local.abs_diff(next_local) != 1 {
-                    return Ok(false);
-                }
-                let (previous, start, end) = if backward {
-                    (next, neighbor, focus.paragraph)
+                let neighbor = outline.source_index(neighbor);
+                let [upper, lower] = if backward {
+                    [neighbor, focus.paragraph]
                 } else {
-                    (current, focus.paragraph, neighbor)
+                    [focus.paragraph, neighbor]
                 };
-                let text = &previous.text().unwrap().text;
-                range = TextPosition {
-                    paragraph: start,
+                let Some(edit) = outline.document.join(upper, lower)? else {
+                    return Ok(false);
+                };
+                let text = outline.document.paragraph(upper).unwrap();
+                let caret = TextPosition {
+                    paragraph: upper,
                     offset: text.utf16_offset(text.text().len())?,
-                }..TextPosition {
-                    paragraph: end,
-                    offset: 0,
                 };
-            }
+                self.commit(
+                    engine,
+                    edit,
+                    Selection {
+                        positions: [caret; 2],
+                        affinities: [Affinity::Upstream; 2],
+                    },
+                )?;
+                return Ok(true);
+            };
+            let visible = paragraph.projection.text();
+            let bytes = cluster.text_range();
+            range.start.offset = paragraph.projection.source_offset(
+                visible.utf16_offset(bytes.start)?,
+                onestore::page::text::Affinity::Downstream,
+            )?;
+            range.end.offset = paragraph.projection.source_offset(
+                visible.utf16_offset(bytes.end)?,
+                onestore::page::text::Affinity::Upstream,
+            )?;
         }
         self.delete_range(engine, range)
     }
@@ -2748,10 +2879,11 @@ impl CanvasEditor {
             .split('\n')
             .map(|part| Paragraph::new(part.to_owned(), format.clone()))
             .collect();
-        let edit = self
+        let mut edit = self
             .active_outline()
             .document
             .replace(range.clone(), replacement)?;
+        self.own_lists(&mut edit)?;
         let inverse = self.apply(
             engine,
             edit,
@@ -2764,6 +2896,12 @@ impl CanvasEditor {
         )?;
         let original = if let Some(composition) = self.composition.take() {
             let mut original = composition.original;
+            // Nodes this edit reaches past what the composition changed are still as they were.
+            let changed = original.edit.range.len();
+            original
+                .edit
+                .replacement
+                .extend(inverse.edit.replacement.iter().skip(changed).cloned());
             original.edit.range = inverse.edit.range;
             for (id, widths) in inverse.edit.columns {
                 original.edit.columns.entry(id).or_insert(widths);
@@ -2832,11 +2970,37 @@ impl CanvasEditor {
     fn commit(
         &mut self,
         engine: &mut TextEngine,
-        edit: DocumentEdit,
+        mut edit: DocumentEdit,
         selection: Selection,
     ) -> Result<(), EditorError> {
+        self.own_lists(&mut edit)?;
         let inverse = self.apply(engine, edit, selection, true, None)?;
         self.record_change(inverse);
+        Ok(())
+    }
+
+    /// Gives each paragraph an edit adds its own copy of the lists it carries, as OneNote keeps
+    /// a list node per paragraph.
+    fn own_lists(&mut self, edit: &mut DocumentEdit) -> Result<(), EditError> {
+        let existing = self.active_outline().document.container(edit.container)?
+            [edit.range.clone()]
+        .iter()
+        .map(|node| node.id)
+        .collect::<BTreeSet<_>>();
+        for node in &mut edit.replacement {
+            if existing.contains(&node.id) {
+                continue;
+            }
+            for list in &mut node.lists {
+                let definition = self
+                    .definitions
+                    .get(list)
+                    .ok_or(EditError::InvalidStructure)?
+                    .clone();
+                *list = onestore::page::text::new_id()?;
+                self.definitions.insert(*list, definition);
+            }
+        }
         Ok(())
     }
 
@@ -5553,6 +5717,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 2, 1]
         );
+        // Backspace outdents an indented paragraph before joining it (`c4-child-1.xml`).
+        editor.delete(&mut engine, true).unwrap();
+        assert_eq!(editor.active_outline().document.nodes()[1].level, 1);
         editor.delete(&mut engine, true).unwrap();
         assert_eq!(
             editor.active_outline().document.nodes()[0]
@@ -5562,9 +5729,9 @@ mod tests {
                 .text(),
             "alpha beta gamma delta"
         );
-        editor.undo(&mut engine).unwrap();
-        editor.undo(&mut engine).unwrap();
-        editor.undo(&mut engine).unwrap();
+        for _ in 0..4 {
+            editor.undo(&mut engine).unwrap();
+        }
         assert_eq!(editor.active_outline().document, source);
         assert_eq!(editor.selection(), selection);
         assert!(!editor.indent(&mut engine, true).unwrap());
@@ -6505,7 +6672,16 @@ mod tests {
         let edited = layout_snapshot(&editor.active_outline().shaped);
         let before = editor.active_outline().document.clone();
         let selection = editor.selection();
-        assert!(editor.insert(&mut engine, "\n").is_err());
+        editor.enter(&mut engine, false).unwrap();
+        let split = &editor.active_outline().document.nodes()[2];
+        assert_eq!((split.parent, split.level), (Some(nodes[0].id), 2));
+        assert_ne!(split.lists, [marker]);
+        assert_eq!(
+            editor.definitions[&split.lists[0]],
+            editor.definitions[&marker]
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, before);
         assert!(editor.resize(&mut engine, 20.0).is_err());
         assert_eq!(editor.active_outline().document, before);
         assert_eq!(editor.selection(), selection);
@@ -6553,6 +6729,75 @@ mod tests {
         assert_eq!(editor.selection().positions[1].paragraph, 2);
         editor.select_all().unwrap();
         assert!(!editor.selection_rects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn joins_pass_over_hidden_children_and_a_split_hands_them_on_still_collapsed() {
+        let mut engine = TextEngine::default();
+        let mut nodes = TextDocument::new(
+            ["Collapsed", "Hidden", "After"]
+                .into_iter()
+                .map(|text| Paragraph::new(text.into(), Format::default()))
+                .collect(),
+        )
+        .unwrap()
+        .nodes()
+        .to_vec();
+        nodes[0].collapsed = true;
+        nodes[1].parent = Some(nodes[0].id);
+        nodes[1].level = 2;
+        let outline = Outline {
+            paragraphs: nodes.clone(),
+            ..TextOutline::new(
+                &mut engine,
+                TextDocument::from_nodes(nodes.clone()).unwrap(),
+                300.0,
+                [0.0; 2],
+            )
+            .unwrap()
+            .snapshot()
+        };
+        let mut editor =
+            CanvasEditor::from_outlines(&mut engine, vec![outline], BTreeMap::new()).unwrap();
+        let texts = |editor: &CanvasEditor| {
+            editor
+                .active_outline()
+                .document
+                .paragraphs()
+                .map(|text| text.text().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let at = |paragraph, offset| [TextPosition { paragraph, offset }; 2].into();
+        editor.select(at(2, 0)).unwrap();
+        assert!(editor.delete(&mut engine, true).unwrap());
+        assert_eq!(texts(&editor), ["CollapsedAfter", "Hidden"]);
+        assert_eq!(
+            editor.selection().positions,
+            [TextPosition {
+                paragraph: 0,
+                offset: 9
+            }; 2]
+        );
+        editor.undo(&mut engine).unwrap();
+        editor.select(at(0, 9)).unwrap();
+        assert!(editor.delete(&mut engine, false).unwrap());
+        assert_eq!(texts(&editor), ["CollapsedAfter", "Hidden"]);
+        editor.undo(&mut engine).unwrap();
+        editor.select(at(0, 9)).unwrap();
+        editor.enter(&mut engine, false).unwrap();
+        let split = editor.active_outline().document.nodes();
+        assert!(!split[0].collapsed && split[1].collapsed);
+        assert_eq!(split[2].parent, Some(split[1].id));
+        assert_eq!(
+            editor
+                .active_outline()
+                .layouts()
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>(),
+            [0, 1, 3]
+        );
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document.nodes(), nodes);
     }
 
     #[test]
@@ -7934,9 +8179,13 @@ mod tests {
             .outlines
             .iter()
             .find(|outline| {
+                let [node] = outline.document.nodes() else {
+                    return false;
+                };
                 !outline.title
-                    && outline.document.nodes().len() == 1
-                    && outline.document.validate_flat().is_ok()
+                    && node.lists.is_empty()
+                    && node.tags.is_empty()
+                    && node.text().is_some_and(|text| text.tags.is_empty())
             })
             .unwrap()
             .id;

@@ -624,11 +624,22 @@ impl Page {
                             Ok(width)
                         })
                         .transpose()?;
+                    let title_text = |node: &Element<'_>| {
+                        node.extra.first().is_some_and(|fields| {
+                            fields.iter().any(|field| {
+                                field.id == 0x88001cb4 && matches!(field.value, FieldValue::NoData)
+                            })
+                        })
+                    };
                     let mut outline = Outline {
                         id,
-                        title: fields.iter().any(|field| {
-                            field.id == 0x88001cb4 && matches!(field.value, FieldValue::NoData)
-                        }),
+                        // OneNote flags the outline and its paragraph; `PageCreation` flags only
+                        // the paragraph, and OneNote still shows that outline as the title.
+                        title: title_text(node)
+                            || node
+                                .children
+                                .iter()
+                                .any(|id| revision.nodes.get(id).is_some_and(title_text)),
                         min_width,
                         layout: node.layout.clone(),
                         indents: indents.clone(),

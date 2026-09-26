@@ -52,13 +52,19 @@ pub enum Alignment {
     Right,
 }
 
-/// OneNote 2010's default tags whose stored definition local evidence shows: To Do from a
-/// native Ctrl+1 (`corpus/paragraph-edit/reconciliation/keyboard`), Question from notebooks
-/// OneNote tagged (`corpus/private/exact-native`).
+/// OneNote 2010's default tags, Ctrl+1 to Ctrl+9, as it stores their definitions
+/// (`evidence/structural-edits/tags/tags.one`); declared in that order, their action types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoteTag {
     ToDo,
+    Important,
     Question,
+    RememberForLater,
+    Definition,
+    Highlight,
+    Contact,
+    Address,
+    PhoneNumber,
 }
 
 /// What the selection shows on the toolbar.
@@ -112,20 +118,38 @@ impl Toggle {
 }
 
 impl NoteTag {
-    const ALL: [Self; 2] = [Self::ToDo, Self::Question];
+    pub(super) const ALL: [Self; 9] = [
+        Self::ToDo,
+        Self::Important,
+        Self::Question,
+        Self::RememberForLater,
+        Self::Definition,
+        Self::Highlight,
+        Self::Contact,
+        Self::Address,
+        Self::PhoneNumber,
+    ];
 
-    fn definition(self) -> Definition {
-        let (label, action_type, shape) = match self {
-            Self::ToDo => ("To Do", 0, CHECKBOX),
-            Self::Question => ("Question", 2, 15),
+    pub(super) fn definition(self) -> Definition {
+        let (label, shape, highlight) = match self {
+            Self::ToDo => ("To Do", CHECKBOX, None),
+            Self::Important => ("Important", 13, None),
+            Self::Question => ("Question", 15, None),
+            Self::RememberForLater => ("Remember for later", 0, Some(0x0000_ffff)),
+            Self::Definition => ("Definition", 0, Some(0x0000_ff00)),
+            Self::Highlight => ("Highlight", 136, None),
+            Self::Contact => ("Contact", 118, None),
+            Self::Address => ("Address", 23, None),
+            Self::PhoneNumber => ("Phone number", 18, None),
         };
         Definition {
             kind: Kind::TagDefinition {
                 label: Some(label.into()),
-                action_type: Some(action_type),
+                action_type: Some(self as u16),
                 shape: Some(shape),
-                color: None,
-                highlight: None,
+                // The highlighting tags also set black text.
+                color: highlight.map(|_| 0),
+                highlight,
             },
             format: Format::default(),
         }
@@ -391,7 +415,7 @@ impl CanvasEditor {
     ) -> Result<(), EditorError> {
         let outline = self.active_outline();
         let (id, title, selection) = (outline.id, outline.title, outline.selection);
-        let (container, range, ends) = selected(&outline.document, selection)?;
+        let (container, mut range, ends) = selected(&outline.document, selection)?;
         let mut replacement = outline.document.container(container)?[range.clone()].to_vec();
         let mut ranges = covered(&replacement, ends)
             .map(|(node, range)| (node.id, range))
@@ -434,6 +458,18 @@ impl CanvasEditor {
             Formatting::Bullets | Formatting::Numbering => {
                 let remove = covered(&replacement, ends)
                     .all(|(node, _)| self.list(node).as_ref() == Some(&command));
+                // A list applied after a plain sibling nests under it, as Tab would
+                // (`evidence/structural-edits/xml/pb-1.xml`); removing it leaves it there.
+                let nodes = outline.document.container(container)?;
+                if !remove
+                    && crate::document::previous_sibling(nodes, range.start, &BTreeSet::new())
+                        .is_some_and(|sibling| nodes[sibling].lists.is_empty())
+                    && let Some(edit) =
+                        crate::document::indent(nodes, container, range.clone(), false)
+                {
+                    range = edit.range;
+                    replacement = edit.replacement;
+                }
                 let wanted = covered(&replacement, ends)
                     .map(|(node, _)| node)
                     .filter(|node| !remove && self.list(node).as_ref() != Some(&command))
@@ -632,10 +668,73 @@ impl CanvasEditor {
     }
 }
 
+/// The list a Tab (`deeper`) or Shift+Tab gives a paragraph with a default list, as OneNote
+/// 2010 steps • to ○ and 1. to a. (`evidence/structural-edits/xml/c6-bullet-tab.xml`,
+/// `c8-tab-1.xml`), then to ■ as `corpus/private` nests bullets, and to i.; outdenting stops at
+/// the first style.
+pub(super) fn nested_list(definition: &Definition, deeper: bool) -> Option<Definition> {
+    const BULLETS: [(&str, &str, u16); 3] = [
+        ("Calibri", "\u{2022}", 1),
+        ("Courier New", "\u{25cb}", 4),
+        ("Wingdings", "\u{a7}", 7),
+    ];
+    const SEQUENCES: [char; 3] = ['\0', '\u{4}', '\u{2}'];
+    let Kind::List {
+        font,
+        format: Some(format),
+        restart,
+        bullet,
+    } = &definition.kind
+    else {
+        return None;
+    };
+    let step = |index: usize| {
+        if deeper {
+            Some((index + 1) % 3)
+        } else {
+            index.checked_sub(1)
+        }
+    };
+    let kind = match bullet {
+        Some(_) => {
+            let index = BULLETS.iter().position(|(name, glyph, index)| {
+                (font.as_deref(), format.as_str(), *bullet) == (Some(*name), *glyph, Some(*index))
+            })?;
+            let (name, glyph, index) = BULLETS[step(index)?];
+            Kind::List {
+                font: Some(name.into()),
+                format: Some(glyph.into()),
+                restart: *restart,
+                bullet: Some(index),
+            }
+        }
+        None => {
+            let (prefix, rest) = format.split_once('\u{fffd}')?;
+            let mut rest = rest.chars();
+            let sequence = rest.next()?;
+            let index = SEQUENCES.iter().position(|known| *known == sequence)?;
+            Kind::List {
+                font: font.clone(),
+                format: Some(format!(
+                    "{prefix}\u{fffd}{}{}",
+                    SEQUENCES[step(index)?],
+                    rest.as_str()
+                )),
+                restart: *restart,
+                bullet: None,
+            }
+        }
+    };
+    Some(Definition {
+        kind,
+        format: definition.format.clone(),
+    })
+}
+
 /// The list OneNote 2010 gives a paragraph with `format`: its Ctrl+. bullet
 /// (`corpus/paragraph-edit/reconciliation/keyboard`), or the `##.` arabic numbering it stores
 /// from its COM interface (`corpus/outline-edit/tree`).
-fn list_definition(numbering: bool, format: &Format) -> Definition {
+pub(super) fn list_definition(numbering: bool, format: &Format) -> Definition {
     let font_size = Some(format.font_size.unwrap_or(11.0));
     if numbering {
         Definition {
@@ -1007,9 +1106,10 @@ mod tests {
             .as_ptr();
         editor.select([at(1, 1); 2].into()).unwrap();
         editor.format(&mut engine, Formatting::Numbering).unwrap();
+        // An unnumbered sibling leaves the count alone (`evidence/structural-edits/xml/c8-bs-1.xml`).
         assert_eq!(
             numbers(&mut engine, &editor),
-            [Some(1), None, Some(1), Some(2)]
+            [Some(1), None, Some(2), Some(3)]
         );
         assert_eq!(
             editor.active_outline().shaped.paragraphs[0]
@@ -1036,7 +1136,7 @@ mod tests {
         editor.format(&mut engine, Formatting::Outdent).unwrap();
         assert_eq!(
             numbers(&mut engine, &editor),
-            [Some(1), Some(2), None, Some(1)]
+            [Some(1), Some(2), None, Some(3)]
         );
         editor.select(all).unwrap();
         let state = editor.format_state().unwrap();
@@ -1203,6 +1303,57 @@ mod tests {
         }
         assert!(!editor.undo(&mut engine).unwrap());
         assert_eq!(editor.active_outline().document, original);
+    }
+
+    #[test]
+    fn the_nine_default_tags_are_onenotes_stored_definitions_and_all_draw() {
+        use onestore::{RevisionIndex, Store, document::Document};
+        let bytes = include_bytes!("../../../../evidence/structural-edits/tags/tags.one");
+        let store = Store::parse(bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let (space, _) = document.pages().unwrap()[0];
+        let stored = Page::from_space(&document, space).unwrap().definitions;
+        let stored = stored
+            .values()
+            .filter(|definition| matches!(definition.kind, Kind::TagDefinition { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), NoteTag::ALL.len());
+        for tag in NoteTag::ALL {
+            assert!(stored.contains(&&tag.definition()), "{tag:?}");
+        }
+        let mut engine = TextEngine::default();
+        let mut editor = plain(&mut engine, &["tagged"]);
+        for tag in NoteTag::ALL {
+            editor.format(&mut engine, Formatting::Tag(tag)).unwrap();
+        }
+        assert_eq!(editor.format_state().unwrap().tags, NoteTag::ALL);
+        let paragraph = &editor.active_outline().shaped.paragraphs[0];
+        use crate::outline::TagIcon;
+        assert_eq!(
+            paragraph
+                .tags
+                .iter()
+                .map(|tag| tag.icon)
+                .collect::<Vec<_>>(),
+            [
+                TagIcon::CheckBox { checked: false },
+                TagIcon::Star,
+                TagIcon::Question,
+                TagIcon::Highlight,
+                TagIcon::Contact,
+                TagIcon::Address,
+                TagIcon::Phone,
+            ]
+        );
+        // Remember for later and Definition draw no symbol; the newer one's green marks the text.
+        assert!(
+            paragraph
+                .text
+                .backgrounds()
+                .all(|(_, color)| color == 0x0000_ff00)
+        );
+        assert!(paragraph.text.backgrounds().next().is_some());
     }
 
     #[test]

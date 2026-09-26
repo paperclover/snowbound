@@ -39,10 +39,5 @@ pub const UNDO: &[&str] = art!("icons/undo");
 pub const ZOOM_IN: &[&str] = art!("icons/zoom-in");
 pub const ZOOM_OUT: &[&str] = art!("icons/zoom-out");
 
-pub const TAG_STAR: &[&str] = art!("tags/star");
 pub const TAG_REMEMBER: &[&str] = art!("tags/remember");
 pub const TAG_DEFINITION: &[&str] = art!("tags/definition");
-pub const TAG_HIGHLIGHT: &[&str] = art!("tags/highlight");
-pub const TAG_CONTACT: &[&str] = art!("tags/contact");
-pub const TAG_ADDRESS: &[&str] = art!("tags/address");
-pub const TAG_PHONE: &[&str] = art!("tags/phone");

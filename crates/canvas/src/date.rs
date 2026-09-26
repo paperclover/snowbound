@@ -72,13 +72,17 @@ impl PageDate {
         if source.title || source.paragraphs.is_empty() || source.paragraphs.len() > 2 {
             return Err(EditError::UnsupportedContent.into());
         }
-        let document = TextDocument::from_nodes(source.paragraphs.clone())?;
-        document.validate_flat()?;
-        if source
-            .paragraphs
-            .iter()
-            .any(|paragraph| paragraph.text().unwrap().text.spans().len() != 1)
-        {
+        TextDocument::from_nodes(source.paragraphs.clone())?;
+        // A date field is one plain run in a plain paragraph.
+        if source.paragraphs.iter().any(|paragraph| {
+            !paragraph.lists.is_empty()
+                || !paragraph.tags.is_empty()
+                || paragraph.collapsed
+                || paragraph.parent.is_some()
+                || paragraph
+                    .text()
+                    .is_none_or(|text| !text.tags.is_empty() || text.text.spans().len() != 1)
+        }) {
             return Err(EditError::UnsupportedContent.into());
         }
         let layout = outline_layout(&source, engine, definitions, TITLE_WIDTH)?;

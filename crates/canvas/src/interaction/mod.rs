@@ -819,12 +819,21 @@ impl PageView {
         self.commit_text(text)
     }
 
-    /// Text committed by an input method or pasted, line breaks included.
+    /// Text committed by an input method, line breaks included.
     pub fn commit_text(&mut self, text: String) -> Result<Response> {
         if !self.accepts_text() {
             return Ok(Response::default());
         }
         self.editor.commit_text(&mut self.engine, text)?;
+        self.edited()
+    }
+
+    /// Clipboard text; see [`CanvasEditor::paste`].
+    pub fn paste(&mut self, text: &str) -> Result<Response> {
+        if !self.accepts_text() {
+            return Ok(Response::default());
+        }
+        self.editor.paste(&mut self.engine, text)?;
         self.edited()
     }
 

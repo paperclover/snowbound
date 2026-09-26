@@ -597,7 +597,12 @@ fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>
                 use crate::outline::TagIcon;
                 let fallback = match tag.icon {
                     TagIcon::CheckBox { .. } => "To do",
+                    TagIcon::Star => "Important",
                     TagIcon::Question => "Question",
+                    TagIcon::Highlight => "Highlight",
+                    TagIcon::Contact => "Contact",
+                    TagIcon::Address => "Address",
+                    TagIcon::Phone => "Phone number",
                     TagIcon::Music => "Music",
                     TagIcon::Exclamation => "Critical",
                     TagIcon::RedSquare => "Project A",

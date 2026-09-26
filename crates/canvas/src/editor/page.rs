@@ -47,6 +47,19 @@ pub struct ReadOnlyObject {
 }
 
 impl Content {
+    /// A picture drawn as a placeholder because it has no data, size or decodable pixels.
+    pub(crate) fn unavailable(
+        source: PageObject,
+        engine: &mut TextEngine,
+    ) -> Result<Self, EditorError> {
+        Ok(Self::ReadOnly(ReadOnlyObject::new(
+            source,
+            [0.0; 2],
+            "Image unavailable\nRead-only",
+            engine,
+        )?))
+    }
+
     pub(super) fn layout(&self) -> Option<(onestore::ExGuid, &onestore::document::Layout)> {
         match self {
             Self::Outline { source, .. } => Some((source.id, &source.layout)),
@@ -290,12 +303,7 @@ pub(crate) fn build(
                     || source.layout.max_width.is_none()
                     || source.layout.max_height.is_none()
                 {
-                    objects.push(Content::ReadOnly(ReadOnlyObject::new(
-                        object,
-                        page.margin_origin,
-                        "Image unavailable\nRead-only",
-                        engine,
-                    )?));
+                    objects.push(Content::unavailable(object, engine)?);
                     continue;
                 }
                 let origin = [

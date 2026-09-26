@@ -42,6 +42,8 @@ struct Block {
     state: (f64, Option<f32>),
     /// A table's vertical coordinates before its offset.
     rel: Vec<f32>,
+    /// The number the next numbered sibling at the node's level continues from.
+    count: Option<u32>,
 }
 
 /// A layout of root nodes `range` once an edit applies, and how the nodes after them move.
@@ -142,6 +144,8 @@ fn verticals<'a>(
 
 /// OneNote centers a file's icon and name in a column this wide.
 const ATTACHMENT_WIDTH: f32 = 54.0;
+/// The grey OneNote gives secondary text such as the page date (its `PageDateTime` style).
+const PLACEHOLDER: u32 = 0x0080_8080;
 
 #[derive(Clone)]
 pub struct TableLayout {
@@ -201,7 +205,12 @@ pub struct ParagraphLayout {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum TagIcon {
     CheckBox { checked: bool },
+    Star,
     Question,
+    Highlight,
+    Contact,
+    Address,
+    Phone,
     Music,
     Exclamation,
     RedSquare,
@@ -255,8 +264,16 @@ pub(crate) fn image_size(image: &onestore::page::Image) -> Option<[f32; 2]> {
         .then_some(size)
 }
 
+/// The table OneNote writes on every outline it creates, standing in for a missing one.
+const DEFAULT_INDENTS: [f32; 4] = [18.0, 0.0, 27.0, 27.0];
+
 pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32, LayoutError> {
-    if indents.is_empty() || indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
+    let indents = if indents.is_empty() {
+        &DEFAULT_INDENTS
+    } else {
+        indents
+    };
+    if indents.iter().any(|v| !v.is_finite() || *v < 0.0) || level == 0 {
         return Err(LayoutError::InvalidIndentation);
     }
     let known = (level as usize).min(indents.len() - 1);
@@ -282,8 +299,19 @@ fn follows(number: Option<(u32, bool)>, previous: Option<u32>) -> Option<u32> {
     number.map(|(number, restart)| if restart { number } else { next(previous) })
 }
 
-/// Removes deeper paragraphs' entries from a flow's `(level, number)` stack of the latest
-/// paragraph at each level, and the previous sibling's at `level`, returning that one's number.
+/// What the numbered sibling after `node`, numbered `number`, continues from: siblings without
+/// a number leave the count alone, as do empty numbered ones after another number
+/// (`evidence/structural-edits/xml/c8-bs-1.xml`, `c8-enter-empty-1.xml`, `c2s-num-1.xml`).
+fn tally(node: &PageParagraph, number: Option<u32>, previous: Option<u32>) -> Option<u32> {
+    number
+        .filter(|_| {
+            previous.is_none() || node.text().is_some_and(|text| !text.text.text().is_empty())
+        })
+        .or(previous)
+}
+
+/// Removes deeper paragraphs' entries from a flow's `(level, count)` stack of the latest
+/// paragraph at each level, and the previous sibling's at `level`, returning that one's count.
 fn sibling(siblings: &mut Vec<(u32, Option<u32>)>, level: u32) -> Option<u32> {
     while siblings.last().is_some_and(|(deeper, _)| *deeper > level) {
         siblings.pop();
@@ -296,7 +324,7 @@ fn sibling(siblings: &mut Vec<(u32, Option<u32>)>, level: u32) -> Option<u32> {
 
 /// `number` in a list numbering sequence: 0 arabic, 1 and 2 upper and lower roman, 3 and 4
 /// upper and lower letters, as OneNote 2010's `numberSequence`.
-fn numeral(sequence: Option<char>, number: u32) -> Result<String, LayoutError> {
+pub(crate) fn numeral(sequence: Option<char>, number: u32) -> Result<String, LayoutError> {
     let roman = |number: u32| {
         const DIGITS: [(u32, &str); 13] = [
             (1000, "M"),
@@ -471,8 +499,13 @@ impl ParagraphLayout {
             else {
                 return Err(LayoutError::InvalidList);
             };
+            let mut color = definition.format.color;
             let value = match value.split_once('\u{fffd}') {
                 Some((prefix, rest)) => {
+                    // An empty numbered paragraph shows its number as a grey placeholder.
+                    if source.text.text().is_empty() {
+                        color = Some(PLACEHOLDER);
+                    }
                     let current = restart.unwrap_or(next(previous));
                     number = Some((current, restart.is_some()));
                     let mut rest = rest.chars();
@@ -492,7 +525,7 @@ impl ParagraphLayout {
                 Format {
                     font: font.clone().or_else(|| definition.format.font.clone()),
                     font_size: definition.format.font_size.or(format.font_size),
-                    color: definition.format.color,
+                    color,
                     ..Format::default()
                 },
             );
@@ -517,8 +550,13 @@ impl ParagraphLayout {
                 Some(3) => TagIcon::CheckBox {
                     checked: tag.status & 1 != 0,
                 },
+                Some(13) => TagIcon::Star,
                 Some(15) => TagIcon::Question,
                 Some(17) => TagIcon::Exclamation,
+                Some(18) => TagIcon::Phone,
+                Some(23) => TagIcon::Address,
+                Some(118) => TagIcon::Contact,
+                Some(136) => TagIcon::Highlight,
                 Some(100) => TagIcon::RedSquare,
                 Some(101) => TagIcon::YellowSquare,
                 Some(102) => TagIcon::BlueSquare,
@@ -702,6 +740,7 @@ impl OutlineLayout {
                 extent: [f32::NEG_INFINITY; 2],
                 state,
                 rel: Vec::new(),
+                count: None,
             };
             if !hidden {
                 let (space, height, flow, extent) = match &node.content {
@@ -836,7 +875,8 @@ impl OutlineLayout {
                     return Err(LayoutError::InvalidSpacing);
                 }
             }
-            siblings.push((node.level, number));
+            block.count = tally(node, number, previous);
+            siblings.push((node.level, block.count));
             block.state = state;
             if depth == 0 {
                 result.blocks.push(block);
@@ -932,7 +972,7 @@ impl OutlineLayout {
             for root in (0..range.start).rev() {
                 if nodes[root].level < level {
                     level = nodes[root].level;
-                    siblings.push((level, self.number(nodes, root).map(|(number, _)| number)));
+                    siblings.push((level, self.blocks[root].count));
                     if level <= 1 {
                         break;
                     }
@@ -990,10 +1030,11 @@ impl OutlineLayout {
                 let previous = sibling(&mut siblings, nodes[root].level);
                 let number = self.number(nodes, root);
                 let now = follows(number, previous);
-                if now != number.map(|(number, _)| number) {
+                let counted = tally(&nodes[root], now, previous);
+                if now != number.map(|(number, _)| number) || counted != self.blocks[root].count {
                     renumbered = root + 1;
                 }
-                siblings.push((nodes[root].level, now));
+                siblings.push((nodes[root].level, counted));
                 if nodes[root].level <= 1 && renumbered <= root {
                     break;
                 }
@@ -1678,8 +1719,13 @@ mod tests {
         });
         for (shape, expected) in [
             (3, TagIcon::CheckBox { checked: true }),
+            (13, TagIcon::Star),
             (15, TagIcon::Question),
             (17, TagIcon::Exclamation),
+            (18, TagIcon::Phone),
+            (23, TagIcon::Address),
+            (118, TagIcon::Contact),
+            (136, TagIcon::Highlight),
             (100, TagIcon::RedSquare),
             (101, TagIcon::YellowSquare),
             (102, TagIcon::BlueSquare),

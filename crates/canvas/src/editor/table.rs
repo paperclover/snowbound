@@ -101,12 +101,23 @@ impl CanvasEditor {
                     Paragraph::new(String::new(), format.clone()),
                 ],
             )?;
+            let id = new_id()?;
+            // The table's paragraph holds the list, tags and children (`evidence/structural-edits/
+            // xml/c6-*-midtab.xml`, `c10-tab-parent-1.xml`).
+            let children = split.replacement.split_off(2);
+            let head = &mut split.replacement[0];
+            let lists = std::mem::take(&mut head.lists);
+            let mut tags = std::mem::take(&mut head.tags);
+            tags.append(&mut head.text_mut().unwrap().tags);
+            let collapsed = std::mem::take(&mut split.replacement[1].collapsed);
+            let tail = split.replacement[1].id;
             let cells = split
                 .replacement
                 .drain(..)
                 .map(|mut paragraph| {
                     paragraph.level = 1;
                     paragraph.parent = None;
+                    paragraph.lists.clear();
                     Ok(TableCell {
                         id: new_id()?,
                         layout: Default::default(),
@@ -118,15 +129,15 @@ impl CanvasEditor {
                 })
                 .collect::<Result<Vec<_>, EditError>>()?;
             let wrapper = PageParagraph {
-                id: new_id()?,
+                id,
                 parent: source.parent,
                 level: source.level,
                 style: None,
                 format: source.format.clone(),
-                lists: Vec::new(),
-                tags: Vec::new(),
+                lists,
+                tags,
                 media: Default::default(),
-                collapsed: false,
+                collapsed,
                 content: ParagraphContent::Table(onestore::page::Table {
                     id: new_id()?,
                     columns: vec![
@@ -146,6 +157,14 @@ impl CanvasEditor {
                 }),
             };
             split.replacement.push(wrapper);
+            split
+                .replacement
+                .extend(children.into_iter().map(|mut child| {
+                    if child.parent == Some(tail) {
+                        child.parent = Some(id);
+                    }
+                    child
+                }));
             return self.commit(
                 engine,
                 split,
@@ -261,7 +280,7 @@ impl CanvasEditor {
             .leaf(focus.paragraph)
             .ok_or(EditError::InvalidRange)?;
         let Some(cell) = cell.filter(|_| anchor == focus) else {
-            return self.insert(engine, "\n");
+            return self.split(engine);
         };
         let location = locate(&outline.document, cell).ok_or(EditError::InvalidStructure)?;
         let ParagraphContent::Table(table) = &location.node.content else {
@@ -284,7 +303,7 @@ impl CanvasEditor {
             && local + 1 == row.cells[location.column].paragraphs.len()
             && focus.offset == text.utf16_offset(text.text().len())?;
         if !exit && !append {
-            return self.insert(engine, "\n");
+            return self.split(engine);
         }
         let mut wrapper = location.node.clone();
         let ParagraphContent::Table(table) = &mut wrapper.content else {

@@ -1076,27 +1076,27 @@ impl State {
             });
         });
         divider(ui, "text", theme);
-        let tags: [(&[&str], Option<NoteTag>); 9] = [
+        let tags: [(&[&str], NoteTag); 9] = [
             (
                 tag_sources(TagIcon::CheckBox { checked: false }),
-                Some(NoteTag::ToDo),
+                NoteTag::ToDo,
             ),
-            (art::TAG_STAR, None),
-            (tag_sources(TagIcon::Question), Some(NoteTag::Question)),
-            (art::TAG_REMEMBER, None),
-            (art::TAG_DEFINITION, None),
-            (art::TAG_HIGHLIGHT, None),
-            (art::TAG_CONTACT, None),
-            (art::TAG_ADDRESS, None),
-            (art::TAG_PHONE, None),
+            (tag_sources(TagIcon::Star), NoteTag::Important),
+            (tag_sources(TagIcon::Question), NoteTag::Question),
+            (art::TAG_REMEMBER, NoteTag::RememberForLater),
+            (art::TAG_DEFINITION, NoteTag::Definition),
+            (tag_sources(TagIcon::Highlight), NoteTag::Highlight),
+            (tag_sources(TagIcon::Contact), NoteTag::Contact),
+            (tag_sources(TagIcon::Address), NoteTag::Address),
+            (tag_sources(TagIcon::Phone), NoteTag::PhoneNumber),
         ];
         group(ui, "tags", |ui| {
             for (index, tags) in tags.chunks(5).enumerate() {
                 row(ui, index, |ui| {
                     for (column, (icon, tag)) in tags.iter().enumerate() {
-                        let lit = tag.is_some_and(|tag| state.tags.contains(&tag));
+                        let lit = state.tags.contains(tag);
                         if ui::shell::tool_button(ui, column, icon, [1.0; 4], lit).clicked {
-                            command = tag.map(Formatting::Tag);
+                            command = Some(Formatting::Tag(*tag));
                         }
                     }
                     if index == 1 {
@@ -1448,7 +1448,7 @@ impl State {
             Command::Page(Request::Copy(text)) => self.clipboard.set_text(text)?,
             Command::Page(Request::Paste) => {
                 let text = self.clipboard.get_text()?;
-                let response = self.view.commit_text(text)?;
+                let response = self.view.paste(&text)?;
                 self.respond(response);
             }
             Command::Page(Request::CharacterPalette) => macos::show_character_palette(),
