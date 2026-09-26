@@ -1,9 +1,9 @@
 use crate::{
-    Error, ExGuid, PropertySets, RevisionIndex, Store,
+    Error, ExGuid, PropertySets,
+    active::{ActivePage, Changes},
     create::{current_timestamps, properties, string},
-    document::{Document, Kind},
-    edit::editable_parents,
-    write::{PropertyObject, fresh_guid, write_revision_on},
+    document::Kind,
+    write::{PropertyObject, fresh_guid},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -98,19 +98,26 @@ pub(crate) fn format_text(
     range: Range<u32>,
     attributes: &[TextAttribute],
 ) -> Result<Vec<u8>, Error> {
+    crate::active::write(source, space, |active| {
+        format_changes(active, object, range, attributes)
+    })
+}
+
+/// `format_text` on an active page.
+pub(crate) fn format_changes(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    range: Range<u32>,
+    attributes: &[TextAttribute],
+) -> Result<Changes, Error> {
     if attributes.is_empty() || range.start > range.end {
         return Err(invalid(
             "Select a text range and at least one formatting attribute",
         ));
     }
     let values = attribute_values(attributes)?;
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
-    let document = Document::parse(&index)?;
-    let view = document.active(space)?;
-    let pages = document.pages_in(space)?;
-    let parents = editable_parents(view, &pages, object)?;
+    let view = &active.view;
+    let parents = active.editable_parents(object)?;
     let node = &view.nodes[&object];
     let Kind::RichText {
         text,
@@ -172,87 +179,86 @@ pub(crate) fn format_text(
         }
     }
     let modified = current_timestamps()?.0.to_le_bytes();
-    write_revision_on(&index, space, |raw| {
-        let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-        let fields = PropertySets::parse(&target.bytes)?;
-        if fields.sets[0].iter().any(|p| p.id == 0x24003458) {
-            return Err(invalid("This text object contains associated run objects"));
-        }
-        if segments.len() != runs.len() && fields.sets[0].iter().any(|p| p.id == 0x40003499) {
-            return Err(invalid(
-                "Formatting boundaries cannot split preserved run data",
-            ));
-        }
-        let mut styles = BTreeMap::new();
-        let mut changed = BTreeMap::new();
-        let mut references = Vec::new();
-        let mut ends = Vec::new();
-        let mut updated = false;
-        let changes: Vec<_> = values
-            .iter()
-            .map(|(id, value)| (*id, value.as_slice()))
-            .collect();
-        for &(i, end, selected) in &segments {
-            let previous = runs[i].format;
-            let key = (previous, selected);
-            let id = if let Some(id) = styles.get(&key) {
-                *id
-            } else if let Some(id) = previous.filter(|_| !selected) {
+    let raw = &active.live.revision;
+    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+    let fields = PropertySets::parse(&target.bytes)?;
+    if fields.sets[0].iter().any(|p| p.id == 0x24003458) {
+        return Err(invalid("This text object contains associated run objects"));
+    }
+    if segments.len() != runs.len() && fields.sets[0].iter().any(|p| p.id == 0x40003499) {
+        return Err(invalid(
+            "Formatting boundaries cannot split preserved run data",
+        ));
+    }
+    let mut styles = BTreeMap::new();
+    let mut changed = BTreeMap::new();
+    let mut references = Vec::new();
+    let mut ends = Vec::new();
+    let mut updated = false;
+    let changes: Vec<_> = values
+        .iter()
+        .map(|(id, value)| (*id, value.as_slice()))
+        .collect();
+    for &(i, end, selected) in &segments {
+        let previous = runs[i].format;
+        let key = (previous, selected);
+        let id = if let Some(id) = styles.get(&key) {
+            *id
+        } else if let Some(id) = previous.filter(|_| !selected) {
+            id
+        } else {
+            let mut style = match previous {
+                Some(id) => PropertyObject::from_object(&raw.objects[&id])?,
+                None => PropertyObject {
+                    jcid: 0x12004d,
+                    bytes: properties(&[])?,
+                    global_ids: Arc::new(BTreeMap::new()),
+                },
+            };
+            if selected {
+                style.set(&changes)?;
+            }
+            if let Some(id) = previous
+                .filter(|id| raw.objects[id].data == crate::ObjectData::Properties(&style.bytes))
+            {
+                styles.insert(key, id);
                 id
             } else {
-                let mut style = match previous {
-                    Some(id) => PropertyObject::from_object(&raw.objects[&id])?,
-                    None => PropertyObject {
-                        jcid: 0x12004d,
-                        bytes: properties(&[])?,
-                        global_ids: Arc::new(BTreeMap::new()),
-                    },
+                if !PropertySets::parse(&style.bytes)?.sets[0]
+                    .iter()
+                    .any(|p| p.id == 0x14001c3b)
+                {
+                    style.set(&[(
+                        0x14001c3b,
+                        &resolved[i].format.language.unwrap_or(0x409).to_le_bytes(),
+                    )])?;
+                }
+                let id = ExGuid {
+                    guid: fresh_guid()?,
+                    n: 1,
                 };
-                if selected {
-                    style.set(&changes)?;
-                }
-                if let Some(id) = previous.filter(|id| {
-                    raw.objects[id].data == crate::ObjectData::Properties(&style.bytes)
-                }) {
-                    styles.insert(key, id);
-                    id
-                } else {
-                    if !PropertySets::parse(&style.bytes)?.sets[0]
-                        .iter()
-                        .any(|p| p.id == 0x14001c3b)
-                    {
-                        style.set(&[(
-                            0x14001c3b,
-                            &resolved[i].format.language.unwrap_or(0x409).to_le_bytes(),
-                        )])?;
-                    }
-                    let id = ExGuid {
-                        guid: fresh_guid()?,
-                        n: 1,
-                    };
-                    style.reference(id)?;
-                    changed.insert(id, style);
-                    styles.insert(key, id);
-                    id
-                }
-            };
-            updated |= selected && previous != Some(id);
-            references.extend_from_slice(&target.reference(id)?);
-            ends.extend_from_slice(&end.to_le_bytes());
-        }
-        if !updated {
-            return Ok(BTreeMap::new());
-        }
-        ends.truncate(ends.len() - 4);
-        target.set(&[
-            (0x24001e13, &references),
-            (0x1c001e12, &ends),
-            (0x14001d7a, &modified),
-        ])?;
-        changed.insert(object, target);
-        touch_ancestors(raw, &parents, object, &modified, &mut changed)?;
-        Ok(changed)
-    })
+                style.reference(id)?;
+                changed.insert(id, style);
+                styles.insert(key, id);
+                id
+            }
+        };
+        updated |= selected && previous != Some(id);
+        references.extend_from_slice(&target.reference(id)?);
+        ends.extend_from_slice(&end.to_le_bytes());
+    }
+    if !updated {
+        return Ok(BTreeMap::new());
+    }
+    ends.truncate(ends.len() - 4);
+    target.set(&[
+        (0x24001e13, &references),
+        (0x1c001e12, &ends),
+        (0x14001d7a, &modified),
+    ])?;
+    changed.insert(object, target);
+    touch_ancestors(raw, parents, object, &modified, &mut changed)?;
+    Ok(changed)
 }
 
 pub(crate) fn touch_ancestors(

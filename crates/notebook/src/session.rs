@@ -9,14 +9,15 @@ use onestore::{
     page::Page,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     io,
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
-        mpsc::{self, Receiver},
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
     },
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -751,12 +752,23 @@ pub struct QueuedEdit {
     pub status: EditStatus,
 }
 
-/// A section file with its replica and background publication.
+/// A section file with its replica, background saves and background publication.
 pub struct Section {
     file: PathBuf,
     replica: Arc<Replica>,
     worker: Option<SyncWorker>,
     events: Receiver<Event>,
+    saves: Option<Sender<PageSave>>,
+    saved: Receiver<(ExGuid, std::result::Result<Save, String>)>,
+    saver: Option<JoinHandle<()>>,
+}
+
+/// An edited page `Section::queue_save` hands to the save thread.
+struct PageSave {
+    space: ExGuid,
+    before: Page,
+    after: Page,
+    author: String,
 }
 
 impl Section {
@@ -830,6 +842,26 @@ impl Section {
     ) -> Result<Self> {
         let replica = Arc::new(replica);
         let (sender, events) = mpsc::channel();
+        let (saved_sender, saved) = mpsc::channel();
+        let notify = Arc::new(Mutex::new(notify));
+        let signal = move || {
+            if let Ok(notify) = notify.lock() {
+                notify();
+            }
+        };
+        let (saves, requests) = mpsc::channel();
+        let saver = {
+            let (replica, signal) = (Arc::clone(&replica), signal.clone());
+            thread::Builder::new()
+                .name("onestore-save".into())
+                .spawn(move || {
+                    save_pages(&replica, &requests, |outcome| {
+                        if saved_sender.send(outcome).is_ok() {
+                            signal();
+                        }
+                    });
+                })?
+        };
         let worker = replica.start_sync(Duration::from_secs(2), connect, move |result| {
             let event = match result {
                 Ok(None) => Event::Refreshed,
@@ -847,7 +879,7 @@ impl Section {
                 Err(error) => Event::Failed(error.to_string()),
             };
             if sender.send(event).is_ok() {
-                notify();
+                signal();
             }
         })?;
         Ok(Self {
@@ -855,6 +887,9 @@ impl Section {
             replica,
             worker: Some(worker),
             events,
+            saves: Some(saves),
+            saved,
+            saver: Some(saver),
         })
     }
 
@@ -951,20 +986,23 @@ impl Section {
     /// Saves an edited page. `before` is the model the edit started from; a stored page
     /// that differs from it means the section changed underneath the editor.
     pub fn save(&self, space: ExGuid, before: &Page, after: &Page, author: &str) -> Result<Save> {
-        loop {
-            let snapshot = self.replica.snapshot()?;
-            let store = Store::parse(&snapshot)?;
-            let index = RevisionIndex::parse(&store)?;
-            if Page::from_space(&Document::parse(&index)?, space)? != *before {
-                return Ok(Save::Stale);
-            }
-            match self.replica.save(&snapshot, space, after, author) {
-                Ok(Some(id)) => return Ok(Save::Queued(id)),
-                Ok(None) => return Ok(Save::Unchanged),
-                Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => {}
-                Err(error) => return Err(error),
-            }
-        }
+        Ok(save(&self.replica, space, before, None, after, author)?.0)
+    }
+
+    /// `save` on the section's save thread, returning at once; `saved` reports the outcome.
+    /// Saves queue in order, and one whose `before` is the previous save's `after` continues
+    /// it: pass each save's `after` as the next one's `before`.
+    pub fn queue_save(&self, space: ExGuid, before: Page, after: Page, author: &str) -> Result<()> {
+        let save = PageSave {
+            space,
+            before,
+            after,
+            author: author.to_owned(),
+        };
+        self.saves
+            .as_ref()
+            .and_then(|saves| saves.send(save).ok())
+            .ok_or_else(|| io::Error::other("The save thread stopped").into())
     }
 
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
@@ -1043,6 +1081,12 @@ impl Section {
         self.events.try_iter().collect()
     }
 
+    /// Outcomes of queued saves since the last poll, oldest first; `notify` runs for each.
+    /// Consecutive saves continuing one another finish as one, reported once.
+    pub fn saved(&self) -> Vec<(ExGuid, std::result::Result<Save, String>)> {
+        self.saved.try_iter().collect()
+    }
+
     /// Requests a synchronization attempt now.
     pub fn wake(&self) {
         if let Some(worker) = &self.worker {
@@ -1058,10 +1102,105 @@ impl Section {
     /// Dropping instead requests cancellation without waiting; the worker retains
     /// cache ownership until that operation finishes. Remote calls must be bounded.
     pub fn close(mut self) -> Result<()> {
+        drop(self.saves.take());
+        if let Some(saver) = self.saver.take() {
+            saver
+                .join()
+                .map_err(|_| io::Error::other("The save thread panicked"))?;
+        }
         match self.worker.take() {
             Some(worker) => worker.stop(),
             None => Ok(()),
         }
+    }
+}
+
+/// Saves `after` unless the stored page no longer matches `before`, returning the working
+/// image the save leaves. `known` is the image a previous save of `before` left: while the
+/// working image equals it the page is current unread, and otherwise the page `known`
+/// stores stands in for `before`.
+fn save(
+    replica: &Replica,
+    space: ExGuid,
+    before: &Page,
+    known: Option<&[u8]>,
+    after: &Page,
+    author: &str,
+) -> Result<(Save, Vec<u8>)> {
+    let stored = |image: &[u8]| -> Result<Page> {
+        let store = Store::parse(image)?;
+        Ok(Page::from_space(
+            &Document::parse(&RevisionIndex::parse(&store)?)?,
+            space,
+        )?)
+    };
+    loop {
+        let snapshot = replica.snapshot()?;
+        if known != Some(snapshot.as_slice()) {
+            let current = stored(&snapshot)?;
+            let expected = match known {
+                Some(image) => current == stored(image)?,
+                None => current == *before,
+            };
+            if !expected {
+                return Ok((Save::Stale, snapshot));
+            }
+        }
+        match replica.save_image(&snapshot, space, after, author) {
+            Ok((Some(id), image)) => return Ok((Save::Queued(id), image)),
+            Ok((None, image)) => return Ok((Save::Unchanged, image)),
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::ResourceBusy => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Runs queued saves until the section drops its sender, folding each run of saves that
+/// continue one another into one.
+fn save_pages(
+    replica: &Replica,
+    requests: &Receiver<PageSave>,
+    report: impl Fn((ExGuid, std::result::Result<Save, String>)),
+) {
+    let mut queue = VecDeque::new();
+    // The last save's page and the working image it left.
+    let mut last: Option<(ExGuid, Page, Vec<u8>)> = None;
+    loop {
+        if queue.is_empty() {
+            match requests.recv() {
+                Ok(request) => queue.push_back(request),
+                Err(_) => return,
+            }
+        }
+        queue.extend(requests.try_iter());
+        let mut request = queue.pop_front().unwrap();
+        while let Some(next) = queue.front()
+            && (next.space, &next.before, &next.author)
+                == (request.space, &request.after, &request.author)
+        {
+            request.after = queue.pop_front().unwrap().after;
+        }
+        let known = last
+            .take()
+            .filter(|(space, after, _)| *space == request.space && *after == request.before);
+        let result = save(
+            replica,
+            request.space,
+            &request.before,
+            known.as_ref().map(|(_, _, image)| image.as_slice()),
+            &request.after,
+            &request.author,
+        );
+        let save = match result {
+            Ok((save, image)) => {
+                if save != Save::Stale {
+                    last = Some((request.space, request.after, image));
+                }
+                Ok(save)
+            }
+            Err(error) => Err(error.to_string()),
+        };
+        report((request.space, save));
     }
 }
 

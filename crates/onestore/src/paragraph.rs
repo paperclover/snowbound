@@ -1,9 +1,10 @@
 use crate::{
-    Error, ExGuid, Object, ObjectData, PropertySets, RevisionIndex, Store,
+    Error, ExGuid, Object, ObjectData, PropertySets,
+    active::{ActivePage, Changes},
     create::{current_timestamps, properties, string},
-    document::{Document, Element, Kind},
-    edit::{editable_parents, update_title},
-    write::{PropertyObject, fresh_guid, write_revision_on},
+    document::{Element, Kind},
+    edit::update_title,
+    write::{PropertyObject, fresh_guid},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -80,20 +81,15 @@ impl ParagraphSplit {
                 "Choose paragraph text and an author name without NUL",
             ));
         }
-        let store = Store::parse(source)?;
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
-        let mut document = Document::parse(&index)?;
-        let pages = document.pages_in(space)?;
-        let [_] = pages.as_slice() else {
+        crate::active::write(source, space, |active| self.changes(active))
+    }
+
+    pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
+        let [_] = active.pages.as_slice() else {
             return Err(invalid("Splitting requires a single active page"));
         };
-        let view = document
-            .spaces
-            .remove(&space)
-            .and_then(crate::document::Space::into_active)
-            .ok_or_else(|| invalid("The active page is unavailable"))?;
-        let parents = editable_parents(&view, &pages, self.text)?;
+        let view = &active.view;
+        let parents = active.editable_parents(self.text)?;
         let [paragraph] = parents
             .get(&self.text)
             .map(Vec::as_slice)
@@ -138,8 +134,8 @@ impl ParagraphSplit {
             }
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
-        let raw = index.resolve_active(space)?;
-        let (text, runs) = ordinary_text(&view, &raw, self.text)?;
+        let raw = &active.live.revision;
+        let (text, runs) = ordinary_text(view, raw, self.text)?;
         let node = &view.nodes[&self.text];
         let length = u32::try_from(text.encode_utf16().count())
             .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
@@ -251,8 +247,8 @@ impl ParagraphSplit {
             };
             object.set(&[(0x14001d7a, &modified)])?;
         }
-        update_title(&store, &raw, view, &pages, &mut changed)?;
-        write_revision_on(&index, space, |_| Ok(changed))
+        update_title(active, view.clone(), &mut changed)?;
+        Ok(changed)
     }
 }
 
@@ -406,21 +402,17 @@ impl ParagraphJoin {
                 "Choose two distinct text objects and an author name without NUL",
             ));
         }
-        let store = Store::parse(source)?;
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
-        let mut document = Document::parse(&index)?;
-        let pages = document.pages_in(space)?;
+        crate::active::write(source, space, |active| self.changes(active))
+    }
+
+    pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
+        let pages = &active.pages;
         if pages.len() != 1 {
             return Err(invalid("Joining requires a single active page"));
         }
-        let view = document
-            .spaces
-            .remove(&space)
-            .and_then(crate::document::Space::into_active)
-            .ok_or_else(|| invalid("The active page is unavailable"))?;
-        let parents = editable_parents(&view, &pages, self.left)?;
-        editable_parents(&view, &pages, self.right)?;
+        let view = &active.view;
+        let parents = active.editable_parents(self.left)?;
+        active.editable_parents(self.right)?;
         let parent = |id| -> Result<ExGuid, Error> {
             let [parent] = parents.get(&id).map(Vec::as_slice).unwrap_or_default() else {
                 return Err(invalid("Select text with a unique editable parent"));
@@ -482,9 +474,9 @@ impl ParagraphJoin {
                 "Joining these child indentation levels requires a hierarchy edit",
             ));
         }
-        let raw = index.resolve_active(space)?;
-        let (a, a_runs) = ordinary_text(&view, &raw, self.left)?;
-        let (b, b_runs) = ordinary_text(&view, &raw, self.right)?;
+        let raw = &active.live.revision;
+        let (a, a_runs) = ordinary_text(view, raw, self.left)?;
+        let (b, b_runs) = ordinary_text(view, raw, self.right)?;
         let length = u32::try_from(a.encode_utf16().count())
             .map_err(|_| invalid("Paragraph exceeds the UTF-16 offset range"))?;
         let right_length = u32::try_from(b.encode_utf16().count())
@@ -531,8 +523,8 @@ impl ParagraphJoin {
                 references.extend_from_slice(&target.reference(id)?);
                 ends.extend_from_slice(&run.end.to_le_bytes());
             }
-            let left_base = character_properties(&view, &raw, self.left)?;
-            let right_base = character_properties(&view, &raw, self.right)?;
+            let left_base = character_properties(view, raw, self.left)?;
+            let right_base = character_properties(view, raw, self.right)?;
             for (i, run) in b_runs.iter().enumerate() {
                 if run.start == run.end && i != b_runs.len() - 1 {
                     continue;
@@ -681,8 +673,8 @@ impl ParagraphJoin {
             object.set(&[(0x14001d7a, &modified)])?;
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
-        update_title(&store, &raw, view, &pages, &mut changed)?;
-        write_revision_on(&index, space, |_| Ok(changed))
+        update_title(active, view.clone(), &mut changed)?;
+        Ok(changed)
     }
 }
 

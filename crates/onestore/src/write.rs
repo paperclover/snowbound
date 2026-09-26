@@ -105,8 +105,8 @@ fn compact(id: ExGuid, table: &BTreeMap<u32, [u8; 16]>) -> Result<[u8; 4]> {
 }
 
 /// The global id table entries a property object's references name.
-pub(crate) fn table_entries(bytes: &[u8]) -> Result<BTreeSet<u32>> {
-    let mut entries = BTreeSet::new();
+pub(crate) fn table_entries(bytes: &[u8]) -> Result<Vec<u32>> {
+    let mut entries = Vec::new();
     for property in PropertySets::parse(bytes)?.sets.iter().flatten() {
         if let Value::References { compact_ids, .. } = property.value {
             entries.extend(
@@ -340,36 +340,42 @@ pub(crate) fn replace_objects(
     space: ExGuid,
     edits: &[ObjectEdit<'_>],
 ) -> Result<Vec<u8>> {
-    write_revision_on(index, space, |revision| {
-        let mut changed = BTreeMap::new();
-        for edit in edits {
-            if changed.contains_key(&edit.object) {
-                return Err(Error {
-                    offset: 0,
-                    message: "Duplicate object edit",
-                });
-            }
-            let object = revision.objects.get(&edit.object).ok_or(Error {
+    write_revision_on(index, space, |revision| patched(revision, edits))
+}
+
+/// Objects of `revision` with `edits` applied.
+pub(crate) fn patched(
+    revision: &crate::ResolvedRevision<'_>,
+    edits: &[ObjectEdit<'_>],
+) -> Result<BTreeMap<ExGuid, PropertyObject>> {
+    let mut changed = BTreeMap::new();
+    for edit in edits {
+        if changed.contains_key(&edit.object) {
+            return Err(Error {
                 offset: 0,
-                message: "Object is absent from the active revision",
-            })?;
-            let ObjectData::Properties(blob) = object.data else {
-                return Err(Error {
-                    offset: 0,
-                    message: "Object does not contain editable properties",
-                });
-            };
-            changed.insert(
-                edit.object,
-                PropertyObject {
-                    jcid: object.jcid,
-                    bytes: patch_properties(blob, edit.updates, edit.inserts, &[])?,
-                    global_ids: Arc::clone(&object.global_ids),
-                },
-            );
+                message: "Duplicate object edit",
+            });
         }
-        Ok(changed)
-    })
+        let object = revision.objects.get(&edit.object).ok_or(Error {
+            offset: 0,
+            message: "Object is absent from the active revision",
+        })?;
+        let ObjectData::Properties(blob) = object.data else {
+            return Err(Error {
+                offset: 0,
+                message: "Object does not contain editable properties",
+            });
+        };
+        changed.insert(
+            edit.object,
+            PropertyObject {
+                jcid: object.jcid,
+                bytes: patch_properties(blob, edit.updates, edit.inserts, &[])?,
+                global_ids: Arc::clone(&object.global_ids),
+            },
+        );
+    }
+    Ok(changed)
 }
 
 /// The object type OneNote gives embedded picture payload declarations; embedded files
@@ -377,10 +383,57 @@ pub(crate) fn replace_objects(
 pub(crate) const FILE_DATA_JCID: u32 = 0x80039;
 pub(crate) const EMBEDDED_FILE_JCID: u32 = 0x80036;
 
+/// The reference and extension of a file-data declaration built by `PropertyObject::file`.
+fn file_declaration(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
+    let malformed = || Error {
+        offset: 0,
+        message: "Malformed file-data declaration",
+    };
+    let mut rest = bytes;
+    let mut parts = Vec::new();
+    for _ in 0..2 {
+        let length = usize::try_from(u32::from_le_bytes(
+            rest.get(..4).ok_or_else(malformed)?.try_into().unwrap(),
+        ))
+        .map_err(|_| malformed())?;
+        let bytes = rest.get(4..4 + length).ok_or_else(malformed)?;
+        parts.push(bytes);
+        rest = &rest[4 + length..];
+    }
+    if !rest.is_empty() {
+        return Err(malformed());
+    }
+    Ok((parts[0], parts[1]))
+}
+
+/// An object of type `jcid` stored as `bytes`, as a revision declares it.
+pub(crate) fn declared(
+    jcid: u32,
+    bytes: &[u8],
+    global_ids: Arc<BTreeMap<u32, [u8; 16]>>,
+) -> Result<crate::Object<'_>> {
+    let data = if is_file_declaration(jcid) {
+        let (reference, extension) = file_declaration(bytes)?;
+        ObjectData::File {
+            reference,
+            extension,
+        }
+    } else {
+        ObjectData::Properties(bytes)
+    };
+    Ok(crate::Object {
+        jcid,
+        reference_count: 0,
+        data,
+        global_ids,
+    })
+}
+
 fn is_file_declaration(jcid: u32) -> bool {
     jcid == FILE_DATA_JCID || jcid == EMBEDDED_FILE_JCID
 }
 
+#[derive(Clone)]
 pub(crate) struct PropertyObject {
     pub jcid: u32,
     pub bytes: Vec<u8>,
@@ -424,29 +477,6 @@ impl PropertyObject {
             bytes,
             global_ids: Arc::new(BTreeMap::from([(0, id.guid)])),
         })
-    }
-
-    /// The reference and extension of a file-data declaration built by `file`.
-    fn file_declaration(&self) -> Result<(&[u8], &[u8])> {
-        let malformed = || Error {
-            offset: 0,
-            message: "Malformed file-data declaration",
-        };
-        let mut rest = self.bytes.as_slice();
-        let mut parts = Vec::new();
-        for _ in 0..2 {
-            let length = usize::try_from(u32::from_le_bytes(
-                rest.get(..4).ok_or_else(malformed)?.try_into().unwrap(),
-            ))
-            .map_err(|_| malformed())?;
-            let bytes = rest.get(4..4 + length).ok_or_else(malformed)?;
-            parts.push(bytes);
-            rest = &rest[4 + length..];
-        }
-        if !rest.is_empty() {
-            return Err(malformed());
-        }
-        Ok((parts[0], parts[1]))
     }
 
     pub fn from_object(object: &crate::Object<'_>) -> Result<Self> {
@@ -735,6 +765,440 @@ pub(crate) trait Protection {
     fn seal_file(&self, clear: &[u8]) -> Vec<u8>;
 }
 
+/// The global-ID entries a group of objects declared together uses: each object's own
+/// and those its properties reference. A section's group stores only these.
+fn used_entries<'o>(
+    table: &BTreeMap<u32, [u8; 16]>,
+    objects: impl IntoIterator<Item = (ExGuid, &'o crate::Object<'o>)>,
+) -> Result<Vec<u32>> {
+    let mut used = Vec::new();
+    for (id, object) in objects {
+        used.push(u32::from_le_bytes(compact(id, table)?) >> 8);
+        if let ObjectData::Properties(bytes) = object.data {
+            used.extend(table_entries(bytes)?);
+        }
+    }
+    used.sort_unstable();
+    used.dedup();
+    Ok(used)
+}
+
+/// A space's revision as appending a revision and reading it back leaves it.
+pub(crate) struct LiveRevision<'a> {
+    pub revision: crate::ResolvedRevision<'a>,
+    /// Incoming references of each object reachable from the roots; a root counts once.
+    incoming: BTreeMap<ExGuid, u32>,
+    /// Reachable read-only property objects by type and content, which identical new
+    /// objects alias.
+    readonly: BTreeMap<u32, BTreeMap<&'a [u8], BTreeSet<ExGuid>>>,
+    /// Revisions in the dependency chain, counted to 512; zero before the first.
+    depth: usize,
+}
+
+impl<'a> LiveRevision<'a> {
+    pub(crate) fn new(revision: crate::ResolvedRevision<'a>, depth: usize) -> Result<Self> {
+        let incoming = if depth == 0 {
+            BTreeMap::new()
+        } else {
+            revision.checked_counts()?
+        };
+        let mut readonly = BTreeMap::new();
+        for id in incoming.keys() {
+            index(&mut readonly, *id, &revision.objects[id], true);
+        }
+        Ok(Self {
+            revision,
+            incoming,
+            readonly,
+            depth,
+        })
+    }
+
+    pub(crate) fn is_reachable(&self, id: ExGuid) -> bool {
+        self.incoming.contains_key(&id)
+    }
+
+    /// Validates replacements and drops what the revision would not store: new read-only
+    /// objects identical to reachable or earlier ones, whose references move to those, and
+    /// reachable objects that stay as they are.
+    pub(crate) fn prepare(
+        &self,
+        mut replacements: BTreeMap<ExGuid, PropertyObject>,
+        is_section: bool,
+    ) -> Result<BTreeMap<ExGuid, PropertyObject>> {
+        let revision = &self.revision;
+        for (id, replacement) in &replacements {
+            if let Some(object) = revision.objects.get(id) {
+                if object.jcid & 0x100000 != 0 {
+                    return Err(Error {
+                        offset: 0,
+                        message: "Read-only object requires a new identity",
+                    });
+                }
+                if replacement.jcid != object.jcid
+                    || !matches!(object.data, ObjectData::Properties(_))
+                {
+                    return Err(Error {
+                        offset: 0,
+                        message: "An existing object's type cannot be changed",
+                    });
+                }
+            } else if !is_section && replacement.jcid != 0x20001 {
+                return Err(Error {
+                    offset: 0,
+                    message: "New objects in a table of contents are its entries",
+                });
+            }
+            if replacement.global_ids.keys().any(|i| *i > 0xffffff) {
+                return Err(Error {
+                    offset: 0,
+                    message: "Invalid property object declaration",
+                });
+            }
+            compact(*id, &replacement.global_ids)?;
+            if is_file_declaration(replacement.jcid) {
+                if !is_section {
+                    return Err(Error {
+                        offset: 0,
+                        message: "File-data objects require a section file",
+                    });
+                }
+                file_declaration(&replacement.bytes)?;
+            } else if replacement.jcid & 0x20000 == 0 {
+                return Err(Error {
+                    offset: 0,
+                    message: "Invalid property object declaration",
+                });
+            } else {
+                PropertySets::parse(&replacement.bytes)?;
+            }
+        }
+        // Native coalescing of duplicate readonly styles can leave dangling references.
+        let mut aliases = BTreeMap::new();
+        for (id, replacement) in &replacements {
+            if revision.objects.contains_key(id)
+                || replacement.jcid & 0x100000 == 0
+                || PropertySets::parse(&replacement.bytes)?
+                    .sets
+                    .iter()
+                    .flatten()
+                    .any(|p| matches!(p.value, Value::References { .. }))
+            {
+                continue;
+            }
+            let existing = self
+                .readonly
+                .get(&replacement.jcid)
+                .and_then(|contents| contents.get(replacement.bytes.as_slice()))
+                .and_then(|ids| ids.first().copied());
+            let existing = existing.or_else(|| {
+                replacements.range(..id).find_map(|(other, object)| {
+                    (object.jcid == replacement.jcid && object.bytes == replacement.bytes)
+                        .then_some(*aliases.get(other).unwrap_or(other))
+                })
+            });
+            if let Some(existing) = existing {
+                aliases.insert(*id, existing);
+            }
+        }
+        for id in aliases.keys() {
+            replacements.remove(id);
+        }
+        for object in replacements.values_mut() {
+            if is_file_declaration(object.jcid) {
+                continue;
+            }
+            // The compact IDs this object's table gives aliased identities.
+            let targets: Vec<(u32, ExGuid)> = aliases
+                .iter()
+                .filter(|(id, _)| id.n <= 0xff)
+                .filter_map(|(id, existing)| {
+                    let (index, _) = object.global_ids.iter().find(|(_, g)| **g == id.guid)?;
+                    Some(((index << 8) | id.n, *existing))
+                })
+                .collect();
+            if targets.is_empty() {
+                continue;
+            }
+            let mut remapped = Vec::new();
+            for property in PropertySets::parse(&object.bytes)?.sets.iter().flatten() {
+                if let Value::References {
+                    stream: crate::IdStream::Objects,
+                    compact_ids,
+                } = property.value
+                {
+                    for bytes in compact_ids.chunks_exact(4) {
+                        let raw = u32::from_le_bytes(bytes.try_into().unwrap());
+                        if let Some((_, existing)) = targets.iter().find(|(id, _)| *id == raw) {
+                            let offset = bytes.as_ptr().addr() - object.bytes.as_ptr().addr();
+                            remapped.push((offset, *existing));
+                        }
+                    }
+                }
+            }
+            for (offset, id) in remapped {
+                let reference = object.reference(id)?;
+                object.bytes[offset..offset + 4].copy_from_slice(&reference);
+            }
+        }
+        // Detached objects must pass the final reachability check even when unchanged. Equal
+        // bytes are the same object when the table entries they name agree: stored tables
+        // keep only those.
+        let mut unchanged = Vec::new();
+        for (id, replacement) in &replacements {
+            if let Some(object) = revision.objects.get(id)
+                && self.is_reachable(*id)
+                && object.data == ObjectData::Properties(&replacement.bytes)
+                && (Arc::ptr_eq(&object.global_ids, &replacement.global_ids)
+                    || table_entries(&replacement.bytes)?.iter().all(|entry| {
+                        object.global_ids.get(entry) == replacement.global_ids.get(entry)
+                    }))
+            {
+                unchanged.push(*id);
+            }
+        }
+        for id in unchanged {
+            replacements.remove(&id);
+        }
+        Ok(replacements)
+    }
+
+    /// Stores prepared replacements as the next revision, which checkpoints when the chain
+    /// would exceed 512 revisions.
+    pub(crate) fn commit(
+        &mut self,
+        replacements: Vec<(ExGuid, crate::Object<'a>)>,
+    ) -> Result<Commit> {
+        let mut changed = BTreeSet::new();
+        // Whether each object whose count may move was reachable before.
+        let mut touched = BTreeMap::new();
+        let (mut added, mut removed) = (Vec::new(), Vec::new());
+        for (id, object) in replacements {
+            changed.insert(id);
+            let reachable = self.is_reachable(id);
+            touched.insert(id, reachable);
+            if reachable {
+                moved_references(
+                    &self.revision.objects[&id],
+                    &object,
+                    &mut removed,
+                    &mut added,
+                )?;
+            }
+            self.revision.objects.insert(id, object);
+        }
+        let roots: BTreeSet<ExGuid> = self.revision.roots.values().copied().collect();
+        if roots.len() != self.revision.roots.len() {
+            return Err(Error {
+                offset: 0,
+                message: "Object is the root of multiple roles",
+            });
+        }
+        added.extend(
+            roots
+                .into_iter()
+                .filter(|id| !self.incoming.contains_key(id)),
+        );
+        // Attaching before detaching keeps a moved subtree from being walked twice.
+        while let Some(id) = added.pop() {
+            let object = self.revision.objects.get(&id).ok_or(Error {
+                offset: 0,
+                message: "Reachable object has no declaration",
+            })?;
+            let count = self.incoming.entry(id).or_default();
+            touched.entry(id).or_insert(*count > 0);
+            *count = count.checked_add(1).ok_or(Error {
+                offset: 0,
+                message: "Object reference count overflows",
+            })?;
+            if *count == 1 {
+                added.extend(object.references()?.objects);
+                index(&mut self.readonly, id, object, true);
+            }
+        }
+        while let Some(id) = removed.pop() {
+            touched.entry(id).or_insert(true);
+            let count = self.incoming.get_mut(&id).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                self.incoming.remove(&id);
+                let object = &self.revision.objects[&id];
+                removed.extend(object.references()?.objects);
+                index(&mut self.readonly, id, object, false);
+            }
+        }
+        for (&id, &reachable) in &touched {
+            let count = self.incoming.get(&id).copied();
+            if changed.contains(&id) && count.is_none() {
+                return Err(Error {
+                    offset: 0,
+                    message: "Edited object is not reachable in the resulting revision",
+                });
+            }
+            let object = self.revision.objects.get_mut(&id).unwrap();
+            if (reachable || count.is_some()) && object.reference_count != count.unwrap_or(0) {
+                object.reference_count = count.unwrap_or(0);
+                changed.insert(id);
+            }
+        }
+        // Native cold-open fails on long dependency chains; cap their depth at 512.
+        let checkpoint = self.depth == 0 || self.depth >= 512;
+        self.depth = if checkpoint { 1 } else { self.depth + 1 };
+        Ok(Commit {
+            checkpoint,
+            changed,
+            touched: touched.into_keys().collect(),
+        })
+    }
+
+    /// Gives the objects a revision declares the id tables reading it back yields: objects
+    /// sharing a table are declared in one group, which keeps the entries they use.
+    pub(crate) fn settle(&mut self, declared: impl IntoIterator<Item = ExGuid>) -> Result<()> {
+        let mut groups = BTreeMap::<_, Vec<_>>::new();
+        for id in declared {
+            let table = Arc::clone(&self.revision.objects[&id].global_ids);
+            groups.entry(table).or_default().push(id);
+        }
+        for (table, ids) in groups {
+            let used = used_entries(
+                &table,
+                ids.iter().map(|id| (*id, &self.revision.objects[id])),
+            )?;
+            if used.iter().eq(table.keys()) {
+                continue;
+            }
+            let kept: Arc<BTreeMap<_, _>> = Arc::new(
+                table
+                    .iter()
+                    .filter(|(entry, _)| used.binary_search(entry).is_ok())
+                    .map(|(entry, guid)| (*entry, *guid))
+                    .collect(),
+            );
+            for id in ids {
+                self.revision.objects.get_mut(&id).unwrap().global_ids = Arc::clone(&kept);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Adds a reachable read-only property object to `readonly`, or removes an unreachable one.
+fn index<'a>(
+    readonly: &mut BTreeMap<u32, BTreeMap<&'a [u8], BTreeSet<ExGuid>>>,
+    id: ExGuid,
+    object: &crate::Object<'a>,
+    reachable: bool,
+) {
+    let ObjectData::Properties(bytes) = object.data else {
+        return;
+    };
+    if object.jcid & 0x100000 == 0 {
+        return;
+    }
+    let ids = readonly
+        .entry(object.jcid)
+        .or_default()
+        .entry(bytes)
+        .or_default();
+    if reachable {
+        ids.insert(id);
+    } else {
+        ids.remove(&id);
+    }
+}
+
+/// Adds the object references `before` has and `after`, a later version of the object,
+/// lacks to `removed`, and those it gains to `added`.
+fn moved_references(
+    before: &crate::Object<'_>,
+    after: &crate::Object<'_>,
+    removed: &mut Vec<ExGuid>,
+    added: &mut Vec<ExGuid>,
+) -> Result<()> {
+    let compact_ids = |object: &crate::Object<'_>| -> Result<Vec<[u8; 4]>> {
+        let ObjectData::Properties(bytes) = object.data else {
+            return Ok(Vec::new());
+        };
+        let mut ids = Vec::new();
+        for property in PropertySets::parse(bytes)?.sets.iter().flatten() {
+            if let Value::References {
+                stream: crate::IdStream::Objects,
+                compact_ids,
+            } = property.value
+            {
+                ids.extend(
+                    compact_ids
+                        .chunks_exact(4)
+                        .map(|id| <[u8; 4]>::try_from(id).unwrap()),
+                );
+            }
+        }
+        Ok(ids)
+    };
+    let decode = |ids: &[[u8; 4]], table| -> Result<Vec<ExGuid>> {
+        let bytes = ids.concat();
+        let mut cursor = crate::bytes::Cursor {
+            bytes: &bytes,
+            offset: 0,
+        };
+        std::iter::from_fn(|| (!cursor.bytes.is_empty()).then(|| cursor.compact(table))).collect()
+    };
+    // Equal compact IDs name the same objects where the later table keeps the earlier entries.
+    let (old, new) = (&before.global_ids, &after.global_ids);
+    let extended = Arc::ptr_eq(old, new) || {
+        let mut later = new.iter();
+        old.iter()
+            .all(|entry| later.find(|later| later.0 >= entry.0) == Some(entry))
+    };
+    if extended {
+        let (old_ids, new_ids) = (compact_ids(before)?, compact_ids(after)?);
+        let (gone, gained) = differing(&old_ids, &new_ids);
+        removed.extend(decode(gone, old)?);
+        added.extend(decode(gained, new)?);
+    } else {
+        let (old_refs, new_refs) = (before.references()?.objects, after.references()?.objects);
+        let (gone, gained) = differing(&old_refs, &new_refs);
+        removed.extend_from_slice(gone);
+        added.extend_from_slice(gained);
+    }
+    Ok(())
+}
+
+/// The parts of two sequences between their common prefix and suffix: removing the first
+/// from `before` and adding the second yields `after` as a multiset.
+pub(crate) fn differing<'s, T: PartialEq>(before: &'s [T], after: &'s [T]) -> (&'s [T], &'s [T]) {
+    let prefix = before.iter().zip(after).take_while(|(a, b)| a == b).count();
+    let suffix = before[prefix..]
+        .iter()
+        .rev()
+        .zip(after[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (
+        &before[prefix..before.len() - suffix],
+        &after[prefix..after.len() - suffix],
+    )
+}
+
+/// A revision `LiveRevision::commit` stored.
+pub(crate) struct Commit {
+    /// Whether the revision declares every object, depending on none.
+    pub checkpoint: bool,
+    /// The objects it declares otherwise: the replacements and those whose counts moved.
+    pub changed: BTreeSet<ExGuid>,
+    /// Objects whose reachability or reference count may have moved.
+    pub touched: BTreeSet<ExGuid>,
+}
+
+/// Revisions in the dependency chain of `rid`, counted to 512.
+pub(crate) fn chain_depth(index: &RevisionIndex<'_>, space: ExGuid, rid: ExGuid) -> usize {
+    std::iter::successors(Some(rid), |id| {
+        index.spaces[&space].revisions[id].dependency
+    })
+    .take(512)
+    .count()
+}
+
 pub(crate) fn write_revision(
     source: &[u8],
     space: ExGuid,
@@ -880,12 +1344,20 @@ pub(crate) fn write_revision_on(
     Ok(output)
 }
 
-fn build_on(
+#[cfg(test)]
+thread_local! {
+    /// Revisions `build_on` has built on this thread.
+    pub(crate) static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn build_on(
     index: &RevisionIndex<'_>,
     payloads: &[([u8; 16], &[u8])],
     protection: Option<&dyn Protection>,
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    BUILDS.with(|builds| builds.set(builds.get() + 1));
     let store = index.store;
     let source = store.data;
     let is_section = store.header.file_type == FileType::Section;
@@ -933,7 +1405,7 @@ fn build_on(
     for (space, change) in changes {
         let new_space = matches!(change, RevisionEdit::Create { .. });
         let current = (ExGuid::default(), 1_u32);
-        let (rid, label, mut revision, mut replacements) = match change {
+        let (rid, label, revision, replacements) = match change {
             RevisionEdit::Update(objects) => {
                 let rid = index.active(space)?;
                 (Some(rid), current, resolve(space, rid)?, objects)
@@ -986,179 +1458,29 @@ fn build_on(
             }
         };
         let existing: BTreeSet<ExGuid> = revision.objects.keys().copied().collect();
-        let reachable = if rid.is_some() {
-            revision.reachable()?
-        } else {
-            BTreeSet::new()
-        };
-        for (id, replacement) in &replacements {
-            if let Some(object) = revision.objects.get(id) {
-                if object.jcid & 0x100000 != 0 {
-                    return Err(Error {
-                        offset: 0,
-                        message: "Read-only object requires a new identity",
-                    });
-                }
-                if replacement.jcid != object.jcid
-                    || !matches!(object.data, ObjectData::Properties(_))
-                {
-                    return Err(Error {
-                        offset: 0,
-                        message: "An existing object's type cannot be changed",
-                    });
-                }
-            } else if !is_section && replacement.jcid != 0x20001 {
-                return Err(Error {
-                    offset: 0,
-                    message: "New objects in a table of contents are its entries",
-                });
-            }
-            if replacement.global_ids.keys().any(|i| *i > 0xffffff) {
-                return Err(Error {
-                    offset: 0,
-                    message: "Invalid property object declaration",
-                });
-            }
-            compact(*id, &replacement.global_ids)?;
-            if is_file_declaration(replacement.jcid) {
-                if !is_section {
-                    return Err(Error {
-                        offset: 0,
-                        message: "File-data objects require a section file",
-                    });
-                }
-                replacement.file_declaration()?;
-            } else if replacement.jcid & 0x20000 == 0 {
-                return Err(Error {
-                    offset: 0,
-                    message: "Invalid property object declaration",
-                });
-            } else {
-                PropertySets::parse(&replacement.bytes)?;
-            }
-        }
-        // Native coalescing of duplicate readonly styles can leave dangling references.
-        let mut aliases = BTreeMap::new();
-        for (id, replacement) in &replacements {
-            if revision.objects.contains_key(id)
-                || replacement.jcid & 0x100000 == 0
-                || PropertySets::parse(&replacement.bytes)?
-                    .sets
-                    .iter()
-                    .flatten()
-                    .any(|p| matches!(p.value, Value::References { .. }))
-            {
-                continue;
-            }
-            let existing = revision.objects.iter().find_map(|(other, object)| {
-                (reachable.contains(other)
-                    && object.jcid == replacement.jcid
-                    && object.data == ObjectData::Properties(&replacement.bytes))
-                .then_some(*other)
-            });
-            let existing = existing.or_else(|| {
-                replacements.range(..id).find_map(|(other, object)| {
-                    (object.jcid == replacement.jcid && object.bytes == replacement.bytes)
-                        .then_some(*aliases.get(other).unwrap_or(other))
-                })
-            });
-            if let Some(existing) = existing {
-                aliases.insert(*id, existing);
-            }
-        }
-        for id in aliases.keys() {
-            replacements.remove(id);
-        }
-        for object in replacements.values_mut() {
-            if is_file_declaration(object.jcid) {
-                continue;
-            }
-            let mut remapped = Vec::new();
-            for property in PropertySets::parse(&object.bytes)?.sets.iter().flatten() {
-                if let Value::References {
-                    stream: crate::IdStream::Objects,
-                    compact_ids,
-                } = property.value
-                {
-                    for bytes in compact_ids.chunks_exact(4) {
-                        let offset = bytes.as_ptr().addr() - object.bytes.as_ptr().addr();
-                        let id =
-                            crate::bytes::Cursor { bytes, offset }.compact(&object.global_ids)?;
-                        if let Some(existing) = aliases.get(&id) {
-                            remapped.push((offset, *existing));
-                        }
-                    }
-                }
-            }
-            for (offset, id) in remapped {
-                let reference = object.reference(id)?;
-                object.bytes[offset..offset + 4].copy_from_slice(&reference);
-            }
-        }
-        // Detached objects must pass the final reachability check even when unchanged. Equal
-        // bytes are the same object when the table entries they name agree: stored tables
-        // keep only those.
-        let mut unchanged = Vec::new();
-        for (id, replacement) in &replacements {
-            if let Some(object) = revision.objects.get(id)
-                && reachable.contains(id)
-                && object.data == ObjectData::Properties(&replacement.bytes)
-                && table_entries(&replacement.bytes)?
-                    .iter()
-                    .all(|entry| object.global_ids.get(entry) == replacement.global_ids.get(entry))
-            {
-                unchanged.push(*id);
-            }
-        }
-        for id in unchanged {
-            replacements.remove(&id);
-        }
+        let depth = rid.map_or(0, |rid| chain_depth(index, space, rid));
+        let mut live = LiveRevision::new(revision, depth)?;
+        let replacements = live.prepare(replacements, is_section)?;
         if replacements.is_empty() {
             continue;
         }
-        let mut changed: BTreeSet<_> = replacements.keys().copied().collect();
-        for (id, replacement) in &replacements {
-            let data = if is_file_declaration(replacement.jcid) {
-                let (reference, extension) = replacement.file_declaration()?;
-                ObjectData::File {
-                    reference,
-                    extension,
-                }
-            } else {
-                ObjectData::Properties(&replacement.bytes)
-            };
-            revision.objects.insert(
-                *id,
-                crate::Object {
-                    jcid: replacement.jcid,
-                    reference_count: 0,
-                    data,
-                    global_ids: Arc::clone(&replacement.global_ids),
-                },
-            );
-        }
-        let incoming = revision.reference_counts()?;
-        if replacements.keys().any(|id| !incoming.contains_key(id)) {
-            return Err(Error {
-                offset: 0,
-                message: "Edited object is not reachable in the resulting revision",
-            });
-        }
-        for (id, object) in &mut revision.objects {
-            if reachable.contains(id) || incoming.contains_key(id) {
-                let count = incoming.get(id).copied().unwrap_or(0);
-                if object.reference_count != count {
-                    object.reference_count = count;
-                    changed.insert(*id);
-                }
-            }
-        }
-
-        // Native cold-open fails on long dependency chains; cap their depth at 512.
-        let checkpoint = rid.is_none()
-            || std::iter::successors(rid, |id| index.spaces[&space].revisions[id].dependency)
-                .nth(511)
-                .is_some();
+        let Commit {
+            checkpoint,
+            changed,
+            ..
+        } = live.commit(
+            replacements
+                .iter()
+                .map(|(id, replacement)| {
+                    let global_ids = Arc::clone(&replacement.global_ids);
+                    Ok((
+                        *id,
+                        declared(replacement.jcid, &replacement.bytes, global_ids)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        )?;
+        let revision = &live.revision;
         let selected: Vec<_> = revision
             .objects
             .iter()
@@ -1272,15 +1594,9 @@ fn build_on(
             };
             // A table read from a long-lived page names every session that edited it; the
             // group stores the entries its objects use.
-            let mut used = BTreeSet::new();
-            for (id, object) in &objects {
-                used.insert(u32::from_le_bytes(compact(*id, table)?) >> 8);
-                if let ObjectData::Properties(bytes) = object.data {
-                    used.extend(table_entries(bytes)?);
-                }
-            }
+            let used = used_entries(table, objects.iter().copied())?;
             for (id, guid) in table {
-                if is_section && !used.contains(id) {
+                if is_section && used.binary_search(id).is_err() {
                     continue;
                 }
                 let mut entry = id.to_le_bytes().to_vec();

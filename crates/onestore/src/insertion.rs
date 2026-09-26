@@ -1,9 +1,9 @@
 use crate::{
-    Error, ExGuid, Object, ObjectData, RevisionIndex, Store,
+    Error, ExGuid, Object, ObjectData,
+    active::{ActivePage, Changes},
     create::{current_timestamps, default_text_style, properties, string},
-    document::{Document, Element, Kind},
-    edit::{editable_parents, page_title},
-    write::{PropertyObject, fresh_guid, write_revision_on},
+    document::Kind,
+    write::{PropertyObject, fresh_guid},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -191,20 +191,15 @@ impl Insertion {
 
     pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        let store = Store::parse(source)?;
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
-        let mut document = Document::parse(&index)?;
-        let pages = document.pages_in(space)?;
-        let [page] = pages.as_slice() else {
+        crate::active::write(source, space, |active| self.changes(active))
+    }
+
+    pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
+        let [page] = active.pages.as_slice() else {
             return Err(invalid("Insertion requires a single active page"));
         };
-        let mut view = document
-            .spaces
-            .remove(&space)
-            .and_then(crate::document::Space::into_active)
-            .ok_or_else(|| invalid("The active page is unavailable"))?;
-        let parents = editable_parents(&view, &pages, self.parent)?;
+        let view = &active.view;
+        let parents = active.editable_parents(self.parent)?;
         let parent = &view.nodes[&self.parent];
         let position = match self.placement {
             Placement::Paragraph { before } => {
@@ -363,82 +358,74 @@ impl Insertion {
                 },
             );
         }
-        let raw = index.resolve_active(space)?;
+        let raw = &active.live.revision;
         if new.keys().any(|id| raw.objects.contains_key(id)) {
             return Err(invalid(
                 "An insertion identity is already present; reconcile the existing edit",
             ));
         }
-        // Drop the semantic view before moving the property bytes it borrows.
+        // Drop the overlay before moving the property bytes it borrows.
         let title = {
-            view.nodes
-                .get_mut(&self.parent)
-                .unwrap()
-                .children
-                .insert(position, self.object());
+            let mut overlay = BTreeMap::new();
+            let mut parent = view.nodes[&self.parent].clone();
+            parent.children.insert(position, self.object());
+            overlay.insert(self.parent, parent);
             for (id, object) in &new {
-                view.nodes.insert(
+                overlay.insert(
                     *id,
-                    Element::parse(
-                        &Object {
-                            jcid: object.jcid,
-                            reference_count: 0,
-                            data: ObjectData::Properties(&object.bytes),
-                            global_ids: Arc::clone(&object.global_ids),
-                        },
-                        &store,
-                    )?,
+                    active.element(&Object {
+                        jcid: object.jcid,
+                        reference_count: 0,
+                        data: ObjectData::Properties(&object.bytes),
+                        global_ids: Arc::clone(&object.global_ids),
+                    })?,
                 );
             }
-            let title = page_title(&view, &pages, None)?;
-            drop(view);
-            title
+            active.title(&overlay, None)?
         };
-        write_revision_on(&index, space, |raw| {
-            let mut changed = new;
-            for id in &ancestors {
-                let mut object = PropertyObject::from_object(&raw.objects[id])?;
-                object.set(&[(0x14001d7a, &modified)])?;
-                changed.insert(*id, object);
-            }
-            let parent = changed.get_mut(&self.parent).unwrap();
+        let mut changed = new;
+        for id in &ancestors {
+            let mut object = PropertyObject::from_object(&raw.objects[id])?;
+            object.set(&[(0x14001d7a, &modified)])?;
+            changed.insert(*id, object);
+        }
+        let parent = changed.get_mut(&self.parent).unwrap();
+        let properties = crate::PropertySets::parse(&parent.bytes)?;
+        let existing = properties.sets[0].iter().find(|p| p.id == 0x24001c20);
+        let mut ids = match existing.map(|p| &p.value) {
+            Some(crate::Value::References { compact_ids, .. }) => compact_ids.to_vec(),
+            None => Vec::new(),
+            _ => return Err(invalid("The parent has an invalid child list")),
+        };
+        let child = parent.reference(self.object())?;
+        if position > ids.len() / 4 {
+            return Err(invalid("The parent has an invalid child list"));
+        }
+        ids.splice(position * 4..position * 4, child);
+        parent.set(&[(0x24001c20, &ids)])?;
+        if matches!(self.placement, Placement::Paragraph { .. }) {
             let properties = crate::PropertySets::parse(&parent.bytes)?;
-            let existing = properties.sets[0].iter().find(|p| p.id == 0x24001c20);
-            let mut ids = match existing.map(|p| &p.value) {
-                Some(crate::Value::References { compact_ids, .. }) => compact_ids.to_vec(),
-                None => Vec::new(),
-                _ => return Err(invalid("The parent has an invalid child list")),
-            };
-            let child = parent.reference(self.object())?;
-            if position > ids.len() / 4 {
-                return Err(invalid("The parent has an invalid child list"));
+            if !properties.sets[0].iter().any(|p| p.id == 0x0c001c03) {
+                parent.set(&[(0x0c001c03, &[1])])?;
             }
-            ids.splice(position * 4..position * 4, child);
-            parent.set(&[(0x24001c20, &ids)])?;
-            if matches!(self.placement, Placement::Paragraph { .. }) {
-                let properties = crate::PropertySets::parse(&parent.bytes)?;
-                if !properties.sets[0].iter().any(|p| p.id == 0x0c001c03) {
-                    parent.set(&[(0x0c001c03, &[1])])?;
-                }
+        }
+        if let Some((page, automatic, title)) = title {
+            let metadata = raw
+                .roots
+                .get(&2)
+                .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
+            if raw.objects[metadata].jcid != 0x20030 {
+                return Err(invalid("Page title metadata is unavailable"));
             }
-            if let Some((page, automatic, title)) = title {
-                let metadata = raw
-                    .roots
-                    .get(&2)
-                    .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-                if raw.objects[metadata].jcid != 0x20030 {
-                    return Err(invalid("Page title metadata is unavailable"));
-                }
-                let title = string(&title);
-                let mut metadata_object = PropertyObject::from_object(&raw.objects[metadata])?;
-                metadata_object.set(&[(0x1c001cf3, &title)])?;
-                changed.insert(*metadata, metadata_object);
-                changed
-                    .get_mut(&page)
-                    .unwrap()
-                    .set(&[(0x1c001d3c, if automatic { &title } else { &[0, 0] })])?;
-            }
-            Ok(changed)
-        })
+            let title = string(&title);
+            let mut metadata_object = PropertyObject::from_object(&raw.objects[metadata])?;
+            metadata_object.set(&[(0x1c001cf3, &title)])?;
+            changed.insert(*metadata, metadata_object);
+            changed
+                .get_mut(&page)
+                .unwrap()
+                .set(&[(0x1c001d3c, if automatic { &title } else { &[0, 0] })])?;
+        }
+        Ok(changed)
     }
 }

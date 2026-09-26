@@ -82,6 +82,11 @@ impl Object<'_> {
 
 impl ResolvedRevision<'_> {
     pub fn reachable(&self) -> Result<BTreeSet<ExGuid>> {
+        Ok(self.checked_counts()?.into_keys().collect())
+    }
+
+    /// Incoming reference counts of the reachable objects, which must equal those stored.
+    pub(crate) fn checked_counts(&self) -> Result<BTreeMap<ExGuid, u32>> {
         let incoming = self.reference_counts()?;
         for (id, count) in &incoming {
             if self.objects[id].reference_count != *count {
@@ -91,7 +96,7 @@ impl ResolvedRevision<'_> {
                 });
             }
         }
-        Ok(incoming.into_keys().collect())
+        Ok(incoming)
     }
 
     pub(crate) fn reference_counts(&self) -> Result<BTreeMap<ExGuid, u32>> {

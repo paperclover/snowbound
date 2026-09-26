@@ -1,0 +1,374 @@
+use crate::{
+    Error, ExGuid, Object, RevisionIndex, Store,
+    document::{Document, Element, Revision, Space},
+    write::{Commit, LiveRevision, PropertyObject, chain_depth, declared, differing},
+};
+use bumpalo::Bump;
+use std::collections::{BTreeMap, BTreeSet};
+
+type Result<T> = std::result::Result<T, Error>;
+
+/// Objects a writer stores in one revision of a page space.
+pub(crate) type Changes = BTreeMap<ExGuid, PropertyObject>;
+
+/// A page space's active revision with the views its writers read, kept as appending
+/// their revisions and parsing the result would leave it.
+pub(crate) struct ActivePage<'a> {
+    store: &'a Store<'a>,
+    pub pages: Vec<ExGuid>,
+    pub live: LiveRevision<'a>,
+    /// Elements of the reachable objects.
+    pub view: Revision<'a>,
+    /// `view.parents(&pages)`.
+    pub parents: BTreeMap<ExGuid, Vec<ExGuid>>,
+    /// Elements of `view` carrying the page-title flag.
+    titles: BTreeSet<ExGuid>,
+    /// Payloads embedded by revisions `write` applied, in order.
+    pub payloads: Vec<([u8; 16], &'a [u8])>,
+}
+
+impl<'a> ActivePage<'a> {
+    pub(crate) fn parse(index: &'a RevisionIndex<'a>, space: ExGuid) -> Result<Self> {
+        index.validate_current()?;
+        let mut document = Document::parse(index)?;
+        let pages = document.pages_in(space)?;
+        let view = document
+            .spaces
+            .remove(&space)
+            .and_then(Space::into_active)
+            .ok_or(Error {
+                offset: 0,
+                message: "The active page is unavailable",
+            })?;
+        let rid = index.active(space)?;
+        let live = LiveRevision::new(index.resolve(space, rid)?, chain_depth(index, space, rid))?;
+        let parents = view.parents(&pages)?;
+        let titles = view
+            .nodes
+            .iter()
+            .filter(|(_, node)| is_title(node))
+            .map(|(id, _)| *id)
+            .collect();
+        Ok(Self {
+            store: index.store,
+            pages,
+            live,
+            view,
+            parents,
+            titles,
+            payloads: Vec::new(),
+        })
+    }
+
+    /// The element of an object, reading payloads `write` embedded as well as stored ones.
+    pub(crate) fn element<'o>(&self, object: &Object<'o>) -> Result<Element<'o>>
+    where
+        'a: 'o,
+    {
+        Element::parse_with(object, self.store, &mut |guid| match self
+            .payloads
+            .iter()
+            .find(|(id, _)| *id == guid)
+        {
+            Some((_, payload)) => Ok(*payload),
+            None => self.store.file_data(guid),
+        })
+    }
+
+    /// `parents`, after checking that `object` and its ancestors are editable.
+    pub(crate) fn editable_parents(
+        &self,
+        object: ExGuid,
+    ) -> Result<&BTreeMap<ExGuid, Vec<ExGuid>>> {
+        crate::edit::check_editable(&self.view, &self.parents, &self.pages, object)?;
+        Ok(&self.parents)
+    }
+
+    /// `edit::page_title` of the view with `overlay` replacing or adding elements that
+    /// neither carry the title flag nor detach any element that does.
+    pub(crate) fn title(
+        &self,
+        overlay: &BTreeMap<ExGuid, Element<'_>>,
+        text_update: Option<(ExGuid, &str)>,
+    ) -> Result<Option<(ExGuid, bool, String)>> {
+        crate::edit::title_of(
+            |id| overlay.get(&id).or_else(|| self.view.nodes.get(&id)),
+            &self.parents,
+            self.titles.iter().copied(),
+            &self.pages,
+            text_update,
+        )
+    }
+
+    /// Stores a writer's objects and payloads as the next revision; false when it stores
+    /// nothing, as appending it would leave the image unchanged.
+    pub(crate) fn write(
+        &mut self,
+        arena: &'a Bump,
+        payloads: &[([u8; 16], &[u8])],
+        changes: Changes,
+    ) -> Result<bool> {
+        let changes = self.live.prepare(changes, true)?;
+        for (guid, payload) in payloads {
+            self.payloads.push((*guid, arena.alloc_slice_copy(payload)));
+        }
+        if changes.is_empty() {
+            return Ok(!payloads.is_empty());
+        }
+        let mut objects = Vec::new();
+        for (id, change) in changes {
+            let bytes = arena.alloc_slice_copy(&change.bytes);
+            objects.push((id, declared(change.jcid, bytes, change.global_ids)?));
+        }
+        let replaced: BTreeSet<ExGuid> = objects.iter().map(|(id, _)| *id).collect();
+        let Commit {
+            checkpoint,
+            changed,
+            touched,
+        } = self.live.commit(objects)?;
+        if checkpoint {
+            let all: Vec<ExGuid> = self.live.revision.objects.keys().copied().collect();
+            self.live.settle(all)?;
+        } else {
+            self.live.settle(changed)?;
+        }
+        self.refresh(&replaced, touched)?;
+        Ok(true)
+    }
+
+    /// Brings the view, parents and titles up to date with the revision for the objects a
+    /// commit touched, which include those it replaced.
+    fn refresh(&mut self, replaced: &BTreeSet<ExGuid>, touched: BTreeSet<ExGuid>) -> Result<()> {
+        let mut attach = Vec::new();
+        let mut detach = Vec::new();
+        let mut gone = BTreeMap::new();
+        for id in touched {
+            let reachable = self.live.is_reachable(id);
+            let viewed = self.view.nodes.contains_key(&id);
+            if reachable == viewed && !(reachable && replaced.contains(&id)) {
+                continue;
+            }
+            let fresh = if reachable {
+                Some(self.element(&self.live.revision.objects[&id])?)
+            } else {
+                None
+            };
+            let old = self.view.nodes.remove(&id);
+            // An element leaving the view detaches with its last parent.
+            if let Some(node) = &fresh
+                && (self.parents.contains_key(&id) || self.pages.contains(&id))
+            {
+                let before: Vec<ExGuid> = old.iter().flat_map(edges).collect();
+                let after: Vec<ExGuid> = edges(node).collect();
+                let (removed, added) = differing(&before, &after);
+                detach.extend(removed.iter().map(|child| (id, *child)));
+                attach.extend(added.iter().map(|child| (id, *child)));
+            }
+            self.titles.remove(&id);
+            if let Some(node) = fresh {
+                if is_title(&node) {
+                    self.titles.insert(id);
+                }
+                self.view.nodes.insert(id, node);
+            } else if let Some(node) = old {
+                gone.insert(id, node);
+            }
+        }
+        let node = |nodes: &BTreeMap<ExGuid, Element<'a>>, id: ExGuid| {
+            nodes
+                .get(&id)
+                .or_else(|| gone.get(&id))
+                .map(|node| edges(node).collect::<Vec<_>>())
+                .ok_or(Error {
+                    offset: 0,
+                    message: "Page content is unavailable",
+                })
+        };
+        // Attaching before detaching keeps a moved subtree from being walked twice.
+        while let Some((parent, child)) = attach.pop() {
+            let parents = self.parents.entry(child).or_default();
+            parents.push(parent);
+            if parents.len() == 1 && !self.pages.contains(&child) {
+                attach.extend(
+                    node(&self.view.nodes, child)?
+                        .into_iter()
+                        .map(|grandchild| (child, grandchild)),
+                );
+            }
+        }
+        while let Some((parent, child)) = detach.pop() {
+            let parents = self.parents.get_mut(&child).unwrap();
+            let at = parents.iter().position(|id| *id == parent).unwrap();
+            parents.remove(at);
+            if parents.is_empty() {
+                self.parents.remove(&child);
+                if !self.pages.contains(&child) {
+                    detach.extend(
+                        node(&self.view.nodes, child)?
+                            .into_iter()
+                            .map(|grandchild| (child, grandchild)),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn edges<'n>(node: &'n Element<'_>) -> impl Iterator<Item = ExGuid> + 'n {
+    node.children
+        .iter()
+        .chain(&node.content)
+        .chain(&node.structure)
+        .copied()
+}
+
+fn is_title(node: &Element<'_>) -> bool {
+    node.extra
+        .first()
+        .is_some_and(|fields| fields.iter().any(|field| field.id == 0x88001cb4))
+}
+
+/// Writes one revision of a page space: `changes` computes its objects from the active page.
+pub(crate) fn write(
+    source: &[u8],
+    space: ExGuid,
+    changes: impl FnOnce(&ActivePage<'_>) -> Result<Changes>,
+) -> Result<Vec<u8>> {
+    let store = Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    let changes = changes(&ActivePage::parse(&index, space)?)?;
+    if changes.is_empty() {
+        return Ok(source.to_vec());
+    }
+    crate::write::write_revision_on(&index, space, |_| Ok(changes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Insertion, ParagraphSplit, TextAttribute, TreeEdit, document::Kind};
+
+    /// `active` equals the page `image` stores, views included.
+    fn assert_stores(active: &ActivePage<'_>, image: &[u8], space: ExGuid) {
+        let store = Store::parse(image).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let read = ActivePage::parse(&index, space).unwrap();
+        assert_eq!(read.live.revision.roots, active.live.revision.roots);
+        let objects = |page: &ActivePage<'_>| -> Vec<String> {
+            page.live
+                .revision
+                .objects
+                .iter()
+                .map(|(id, object)| format!("{id} {object:?}"))
+                .collect()
+        };
+        assert_eq!(objects(&read), objects(active));
+        assert_eq!(format!("{:?}", read.view), format!("{:?}", active.view));
+        let parents = |page: &ActivePage<'_>| -> Vec<(ExGuid, Vec<ExGuid>)> {
+            page.parents
+                .iter()
+                .map(|(child, parents)| {
+                    let mut parents = parents.clone();
+                    parents.sort();
+                    (*child, parents)
+                })
+                .collect()
+        };
+        assert_eq!(parents(&read), parents(active));
+        assert_eq!(read.titles, active.titles);
+    }
+
+    /// Applies `steps` random writes to the first page of `source` both in memory and by
+    /// appending each revision, comparing the two as it goes.
+    fn check_writes(source: &[u8], steps: usize) {
+        let mut image = source.to_vec();
+        let store = Store::parse(source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let (space, _) = Document::parse(&index).unwrap().pages().unwrap()[0];
+        let arena = Bump::new();
+        let mut active = ActivePage::parse(&index, space).unwrap();
+        let mut seed = 7_u64;
+        let mut pick = |count: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % count.max(1)
+        };
+        for step in 0..steps {
+            let nodes = &active.view.nodes;
+            let listed = |kind: fn(&Kind<'_>) -> bool| -> Vec<ExGuid> {
+                nodes
+                    .iter()
+                    .filter(|(id, node)| kind(&node.kind) && active.parents.contains_key(id))
+                    .map(|(id, _)| *id)
+                    .collect()
+            };
+            let paragraphs = listed(|kind| matches!(kind, Kind::Paragraph { .. }));
+            let containers = listed(|kind| {
+                matches!(
+                    kind,
+                    Kind::Paragraph { .. } | Kind::Outline { .. } | Kind::Cell { .. }
+                )
+            });
+            let texts = listed(|kind| matches!(kind, Kind::RichText { .. }));
+            let paragraph = paragraphs[pick(paragraphs.len())];
+            let container = containers[pick(containers.len())];
+            let anchor = nodes[&container].children.get(pick(4)).copied();
+            let text = texts[pick(texts.len())];
+            let words = ["", "a", "Two words", "東京 🦀", "longer text here"];
+            let word = words[pick(words.len())];
+            let changes = match pick(8) {
+                0..=3 => Insertion::paragraph(container, anchor, word, "Author")
+                    .and_then(|insertion| insertion.changes(&active)),
+                4 => TreeEdit::move_to(paragraph, container, anchor, "Author")
+                    .and_then(|edit| edit.changes(&active)),
+                5 => TreeEdit::delete(paragraph, "Author").and_then(|edit| edit.changes(&active)),
+                6 => ParagraphSplit::new(text, pick(3) as u32, "Author")
+                    .and_then(|split| split.changes(&active)),
+                _ => crate::formatting::format_changes(
+                    &active,
+                    text,
+                    0..pick(2) as u32,
+                    &[TextAttribute::Bold(pick(2) == 0)],
+                ),
+            };
+            let Ok(changes) = changes else {
+                continue;
+            };
+            let store = Store::parse(&image).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let written =
+                crate::write::write_revision_on(&index, space, |_| Ok(changes.clone())).unwrap();
+            assert_eq!(
+                active.write(&arena, &[], changes).unwrap(),
+                written != image,
+                "step {step}"
+            );
+            image = written;
+            if step % 40 == 0 {
+                assert_stores(&active, &image, space);
+            }
+        }
+        assert_stores(&active, &image, space);
+    }
+
+    #[test]
+    fn writes_leave_the_page_that_appending_and_reading_their_revisions_does() {
+        // Past 512 revisions, so the chain checkpoints once.
+        check_writes(
+            include_bytes!(
+                "../../../corpus/native/20260905-05/snapshots/02-text/notebook/synthetic.one"
+            ),
+            720,
+        );
+        check_writes(
+            include_bytes!("../../../corpus/m6/native-features-01/notebook/Features.one"),
+            160,
+        );
+        check_writes(
+            &crate::create_section("model.one", "First", "Author").unwrap(),
+            160,
+        );
+    }
+}

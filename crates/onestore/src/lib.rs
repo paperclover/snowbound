@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
+mod active;
 mod bytes;
 mod commit;
 mod create;

@@ -1323,24 +1323,21 @@ impl State {
             return Ok(());
         };
         let after = self.view.editor.page()?;
-        match session
-            .section
-            .save(session.space, &session.before, &after, "snowbound")?
-        {
-            notebook::session::Save::Unchanged => {}
-            notebook::session::Save::Queued(_) => {
-                session.before = session.section.page(session.space)?;
-                session.status = "Saving";
-                if let Some(entry) = session
-                    .pages
-                    .iter_mut()
-                    .find(|(space, ..)| *space == session.space)
-                {
-                    entry.1 = after.title;
-                }
-            }
-            notebook::session::Save::Stale => self.reload()?,
+        if after == session.before {
+            return Ok(());
         }
+        if let Some(entry) = session
+            .pages
+            .iter_mut()
+            .find(|(space, ..)| *space == session.space)
+        {
+            entry.1.clone_from(&after.title);
+        }
+        // Queued saves chain: each one's `after` is the next one's `before`.
+        let before = std::mem::replace(&mut session.before, after.clone());
+        session
+            .section
+            .queue_save(session.space, before, after, "snowbound")?;
         Ok(())
     }
 
@@ -1397,6 +1394,18 @@ impl State {
         };
         let shown = (session.status, session.conflict);
         let mut refreshed = false;
+        let mut stale = false;
+        for (space, outcome) in session.section.saved() {
+            match outcome {
+                Ok(notebook::session::Save::Queued(_)) => session.status = "Saving",
+                Ok(notebook::session::Save::Unchanged) => {}
+                Ok(notebook::session::Save::Stale) => stale |= space == session.space,
+                Err(error) => {
+                    eprintln!("Saving failed: {error}");
+                    session.status = "Not saving";
+                }
+            }
+        }
         for event in session.section.events() {
             use notebook::session::Event;
             session.status = match event {
@@ -1436,6 +1445,8 @@ impl State {
             } else if session.section.page(session.space)? != session.before {
                 self.reload()?;
             }
+        } else if stale {
+            self.reload()?;
         }
         Ok(())
     }

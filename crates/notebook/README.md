@@ -67,10 +67,15 @@ author)` queues the edited model: `Save::Queued(id)` is durable locally,
 `Save::Unchanged` means the model equals the stored page, and `Save::Stale`
 means the stored page no longer matches `before` because the section changed
 underneath the editor, so the page must be reloaded before saving again.
+`queue_save(space, before, after, author)` does the same on the section's save
+thread and returns at once, so an editor's frame never waits on the write;
+`saved()` drains the outcomes. A queued save whose `before` is the previous
+one's `after` continues it, needing no reload in between, and a run of such
+saves waiting together is written once.
 `events()` drains what the synchronization thread reported since the last
-poll: refreshes, attempt outcomes and unreachable files; `notify` runs on that
-thread whenever an event is available so the application can wake its event
-loop. `close()` stops publication.
+poll: refreshes, attempt outcomes and unreachable files; `notify` runs
+whenever an event or save outcome is available so the application can wake its
+event loop. `close()` finishes queued saves and stops publication.
 
 `Event::Unreachable` retains an `io::Error`: callers can distinguish permission
 denial, missing targets, timeouts, and connection failures through `kind()` without

@@ -233,6 +233,86 @@ fn an_external_change_refreshes_the_page_and_stales_a_save_from_the_old_model() 
 }
 
 #[test]
+fn queued_saves_continue_each_other_detect_stale_pages_and_finish_before_close() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("notes.one");
+    let cache = directory.path().join("cache");
+    std::fs::write(
+        &file,
+        onestore::create_section("notes.one", "Original", "Author").unwrap(),
+    )
+    .unwrap();
+    let (section, _) = open(&file, &cache);
+    let space = section.pages().unwrap()[0].0;
+    let mut before = section.page(space).unwrap();
+    for word in ["one ", "two ", "three ", "four ", "five "] {
+        let after = edited(&before, word);
+        section
+            .queue_save(space, before, after.clone(), "Editor")
+            .unwrap();
+        before = after;
+    }
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let mut stored = section.page(space).unwrap();
+        stored.title = before.title.clone();
+        if stored == before {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the saves did not arrive");
+        for (_, save) in section.saved() {
+            assert!(matches!(save, Ok(Save::Queued(_))), "{save:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    while !section.pending().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the saves were not published");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let native = edited(&section.page(space).unwrap(), "Native ");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let bytes = onestore::read_file(&file).unwrap();
+        match PreparedEdit::page(&bytes, space, &native, "Native")
+            .unwrap()
+            .commit_file(&file)
+        {
+            Ok(()) => break,
+            Err(error) if error.error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("{error:?}"),
+        }
+    }
+    section.wake();
+    while !section.page(space).unwrap().objects.eq(&native.objects) {
+        assert!(Instant::now() < deadline, "the refresh did not arrive");
+        wait(&section, |event| matches!(event, Event::Refreshed));
+    }
+    let stale = edited(&before, "Local ");
+    section.queue_save(space, before, stale, "Editor").unwrap();
+    // Outcomes of the earlier saves may still be arriving.
+    while !section
+        .saved()
+        .into_iter()
+        .any(|saved| saved == (space, Ok(Save::Stale)))
+    {
+        assert!(Instant::now() < deadline, "the stale save was not reported");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let native = section.page(space).unwrap();
+    let after = edited(&native, "Local ");
+    section
+        .queue_save(space, native, after.clone(), "Editor")
+        .unwrap();
+    section.close().unwrap();
+    let (section, _) = open(&file, &cache);
+    assert_same(section.page(space).unwrap(), &after);
+    section.close().unwrap();
+}
+
+#[test]
 fn a_notebook_directory_lists_its_sections_and_opens_them() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("Personal");

@@ -1,5 +1,6 @@
 //! Publishes an edited page model by lowering the difference from the stored page onto
-//! the typed writers, then squashing their transactions into one revision per space.
+//! the typed writers, whose revisions accumulate in memory, then squashing them into one
+//! revision per space.
 
 use super::{
     Attachment, Image, Ink, Math, Outline, Page, PageObject, PageParagraph, ParagraphContent, Table,
@@ -7,9 +8,11 @@ use super::{
 use crate::{
     Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, PropertySets,
     RevisionIndex, Store, TextAttribute, TreeEdit, Value,
-    document::{Document, Format, Kind, Tag},
+    active::{ActivePage, Changes},
+    document::{Format, Kind, Tag},
     write::{PropertyObject, RevisionEdit},
 };
+use bumpalo::Bump;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -339,38 +342,36 @@ pub(crate) fn write_page(
     if author.contains('\0') {
         return Err(invalid("Choose an author name without NUL"));
     }
-    // The parsed source is released before the writers parse their own images.
-    let (page, before, existing) = {
-        let store = Store::parse(source)?;
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
-        let document = Document::parse(&index)?;
-        let pages = document.pages_in(space)?;
-        let [page] = pages.as_slice() else {
-            return Err(invalid("Choose an object space containing one active page"));
-        };
-        let existing = index
-            .resolve_active(space)?
-            .objects
-            .keys()
-            .copied()
-            .collect();
-        (*page, Page::from_space(&document, space)?, existing)
+    let store = Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    let arena = Bump::new();
+    let active = ActivePage::parse(&index, space)?;
+    let [page] = active.pages[..] else {
+        return Err(invalid("Choose an object space containing one active page"));
     };
+    let before = Page::from_revision(&active.view, page)?;
     let mut lowering = Lowering {
-        image: source.to_vec(),
+        active,
+        arena: &arena,
         current: Some(before.clone()),
-        space,
+        edited: false,
         page,
         author,
         alias: BTreeMap::new(),
         built: BTreeSet::new(),
     };
-    lowering.run(&before, after, &existing)?;
-    if lowering.image == source {
-        return Ok(lowering.image);
+    lowering.run(&before, after)?;
+    if !lowering.edited {
+        return Ok(source.to_vec());
     }
-    squash(source, &lowering.image, &lowering.alias, None)
+    let active = &lowering.active;
+    squash(
+        &index,
+        &[(space, &active.live.revision)],
+        &active.payloads,
+        &lowering.alias,
+        None,
+    )
 }
 
 /// Direct children of every container, in model order, plus lookups by identity.
@@ -461,10 +462,13 @@ impl<'a> View<'a> {
 }
 
 struct Lowering<'a> {
-    image: Vec<u8>,
-    /// The page as `image` stores it, until a writer changes the image.
+    active: ActivePage<'a>,
+    /// Holds the objects the typed writers store for as long as `active` reads them.
+    arena: &'a Bump,
+    /// The page as `active` stores it, until a writer changes it.
     current: Option<Page>,
-    space: ExGuid,
+    /// Whether a writer stored anything.
+    edited: bool,
     page: ExGuid,
     author: &'a str,
     /// Model identities of new objects mapped to the identities the typed writers allocated.
@@ -473,7 +477,7 @@ struct Lowering<'a> {
     built: BTreeSet<ExGuid>,
 }
 
-impl Lowering<'_> {
+impl<'a> Lowering<'a> {
     fn id(&self, model: ExGuid) -> ExGuid {
         self.alias.get(&model).copied().unwrap_or(model)
     }
@@ -488,31 +492,35 @@ impl Lowering<'_> {
         Ok(written)
     }
 
-    fn apply(&mut self, edit: impl FnOnce(&[u8]) -> Result<Vec<u8>, Error>) -> Result<(), Error> {
-        let image = edit(&self.image)?;
-        if image != self.image {
-            self.image = image;
+    /// Stores the next revision a typed writer computes from the page as stored so far.
+    fn write(
+        &mut self,
+        changes: impl FnOnce(&ActivePage<'a>) -> Result<Changes, Error>,
+    ) -> Result<(), Error> {
+        self.write_with(&[], changes)
+    }
+
+    fn write_with(
+        &mut self,
+        payloads: &[([u8; 16], &[u8])],
+        changes: impl FnOnce(&ActivePage<'a>) -> Result<Changes, Error>,
+    ) -> Result<(), Error> {
+        let changes = changes(&self.active)?;
+        if self.active.write(self.arena, payloads, changes)? {
             self.current = None;
+            self.edited = true;
         }
         Ok(())
     }
 
     fn current(&mut self) -> Result<Page, Error> {
         if self.current.is_none() {
-            let store = Store::parse(&self.image)?;
-            let index = RevisionIndex::parse(&store)?;
-            let document = Document::parse(&index)?;
-            self.current = Some(Page::from_space(&document, self.space)?);
+            self.current = Some(Page::from_revision(&self.active.view, self.page)?);
         }
         Ok(self.current.clone().unwrap())
     }
 
-    fn run(
-        &mut self,
-        before: &Page,
-        after: &Page,
-        existing: &BTreeSet<ExGuid>,
-    ) -> Result<(), Error> {
+    fn run(&mut self, before: &Page, after: &Page) -> Result<(), Error> {
         if after.created != before.created || after.margin_origin != before.margin_origin {
             return Err(invalid("Page creation time and margins cannot be edited"));
         }
@@ -540,7 +548,7 @@ impl Lowering<'_> {
         for id in new.outlines.keys().chain(new.paragraphs.keys()) {
             if !old.outlines.contains_key(id)
                 && !old.paragraphs.contains_key(id)
-                && existing.contains(id)
+                && self.active.live.revision.objects.contains_key(id)
             {
                 return Err(invalid(
                     "A new model identity already exists in the section",
@@ -730,8 +738,7 @@ impl Lowering<'_> {
                 }
             };
             let insertion = Insertion::outline(self.page, x, y, text, self.author)?;
-            let space = self.space;
-            self.apply(|image| insertion.apply(image, space))?;
+            self.write(|active| insertion.changes(active))?;
             let outline_id = insertion.object();
             self.alias.insert(*id, outline_id);
             self.alias.insert(
@@ -809,8 +816,7 @@ impl Lowering<'_> {
                     continue;
                 }
                 let split = ParagraphSplit::new(previous.id, offset, self.author)?;
-                let space = self.space;
-                self.apply(|image| split.apply(image, space))?;
+                self.write(|active| split.changes(active))?;
                 self.alias.insert(right, split.object());
                 self.alias.insert(next.id, split.text_object());
                 let list = placed.get_mut(container).unwrap();
@@ -855,8 +861,7 @@ impl Lowering<'_> {
                     ));
                 }
                 let join = ParagraphJoin::new(previous.id, removed.id, self.author)?;
-                let space = self.space;
-                self.apply(|image| join.apply(image, space))?;
+                self.write(|active| join.changes(active))?;
                 consumed.insert(right);
                 placed.get_mut(container).unwrap().retain(|id| *id != right);
                 placed.remove(&right);
@@ -905,8 +910,7 @@ impl Lowering<'_> {
                     next.map(|n| self.id(n)),
                     self.author,
                 )?;
-                let space = self.space;
-                self.apply(|image| edit.apply(image, space))?;
+                self.write(|active| edit.changes(active))?;
             }
             next = Some(*id);
         }
@@ -1037,7 +1041,6 @@ impl Lowering<'_> {
                 values.push((0x1c001d9d, crate::create::string(path)));
             }
             let holder = self.id(*paragraph_id);
-            let space = self.space;
             let mut payloads: Vec<([u8; 16], &[u8])> = vec![(payload_guid, bytes)];
             let mut preview = None;
             if let Some(icon) = &attachment.preview {
@@ -1054,35 +1057,34 @@ impl Lowering<'_> {
                     payload_reference(guid),
                 ));
             }
-            self.apply(|current| {
-                crate::write::write_revision_with_payloads(current, space, &payloads, |raw| {
-                    let mut changed = BTreeMap::new();
-                    let mut file = PropertyObject::file(file_id, &reference, extension)?;
-                    file.jcid = 0x80036;
-                    changed.insert(file_id, file);
-                    let mut node = PropertyObject {
-                        jcid: 0x60035,
-                        bytes: crate::create::properties(&values)?,
-                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, attachment_id.guid)])),
-                    };
-                    node.reference(attachment_id)?;
-                    let container = node.reference(file_id)?;
-                    node.set(&[(0x20001d9b, &container)])?;
-                    if let Some((icon_id, icon_reference)) = &preview {
-                        changed.insert(
-                            *icon_id,
-                            PropertyObject::file(*icon_id, icon_reference, ".png")?,
-                        );
-                        let icon = node.reference(*icon_id)?;
-                        node.set(&[(0x20001c3f, &icon)])?;
-                    }
-                    changed.insert(attachment_id, node);
-                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                    let content = object.reference(attachment_id)?;
-                    object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                    changed.insert(holder, object);
-                    Ok(changed)
-                })
+            self.write_with(&payloads, |active| {
+                let raw = &active.live.revision;
+                let mut changed = BTreeMap::new();
+                let mut file = PropertyObject::file(file_id, &reference, extension)?;
+                file.jcid = 0x80036;
+                changed.insert(file_id, file);
+                let mut node = PropertyObject {
+                    jcid: 0x60035,
+                    bytes: crate::create::properties(&values)?,
+                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, attachment_id.guid)])),
+                };
+                node.reference(attachment_id)?;
+                let container = node.reference(file_id)?;
+                node.set(&[(0x20001d9b, &container)])?;
+                if let Some((icon_id, icon_reference)) = &preview {
+                    changed.insert(
+                        *icon_id,
+                        PropertyObject::file(*icon_id, icon_reference, ".png")?,
+                    );
+                    let icon = node.reference(*icon_id)?;
+                    node.set(&[(0x20001c3f, &icon)])?;
+                }
+                changed.insert(attachment_id, node);
+                let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                let content = object.reference(attachment_id)?;
+                object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                changed.insert(holder, object);
+                Ok(changed)
             })?;
         }
         Ok(())
@@ -1201,49 +1203,47 @@ impl Lowering<'_> {
         }
         let (modified, filetime) = crate::create::current_timestamps()?;
         let modified = modified.to_le_bytes();
-        let (space, page) = (self.space, self.page);
-        self.apply(|current| {
-            crate::write::write_revision(current, space, |raw| {
-                let mut changed = BTreeMap::new();
-                let mut data_object = PropertyObject {
-                    jcid: 0x2003b,
-                    bytes: crate::create::properties(&[])?,
-                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, data.guid)])),
-                };
-                data_object.reference(data)?;
-                let references =
-                    write_strokes(&mut changed, &mut data_object, &strokes, 0, filetime)?;
-                data_object.set(&[(0x24003416, &references)])?;
-                changed.insert(data, data_object);
-                let mut object = PropertyObject {
-                    jcid: 0x60014,
-                    bytes: crate::create::properties(&[
-                        (0x14001d7a, modified.to_vec()),
-                        (0x14001d4e, 1u32.to_le_bytes().to_vec()),
-                    ])?,
-                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, container.guid)])),
-                };
-                object.reference(container)?;
-                let data_reference = object.reference(data)?;
-                object.set(&[(0x20003415, &data_reference)])?;
-                changed.insert(container, object);
-                match holder {
-                    Some(holder) => {
-                        let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                        let content = object.reference(container)?;
-                        object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                        changed.insert(holder, object);
-                    }
-                    None => {
-                        let mut object = PropertyObject::from_object(&raw.objects[&page])?;
-                        let mut children = page_children(&object)?;
-                        children.extend(object.reference(container)?);
-                        object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
-                        changed.insert(page, object);
-                    }
+        let page = self.page;
+        self.write(|active| {
+            let raw = &active.live.revision;
+            let mut changed = BTreeMap::new();
+            let mut data_object = PropertyObject {
+                jcid: 0x2003b,
+                bytes: crate::create::properties(&[])?,
+                global_ids: std::sync::Arc::new(BTreeMap::from([(0, data.guid)])),
+            };
+            data_object.reference(data)?;
+            let references = write_strokes(&mut changed, &mut data_object, &strokes, 0, filetime)?;
+            data_object.set(&[(0x24003416, &references)])?;
+            changed.insert(data, data_object);
+            let mut object = PropertyObject {
+                jcid: 0x60014,
+                bytes: crate::create::properties(&[
+                    (0x14001d7a, modified.to_vec()),
+                    (0x14001d4e, 1u32.to_le_bytes().to_vec()),
+                ])?,
+                global_ids: std::sync::Arc::new(BTreeMap::from([(0, container.guid)])),
+            };
+            object.reference(container)?;
+            let data_reference = object.reference(data)?;
+            object.set(&[(0x20003415, &data_reference)])?;
+            changed.insert(container, object);
+            match holder {
+                Some(holder) => {
+                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                    let content = object.reference(container)?;
+                    object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                    changed.insert(holder, object);
                 }
-                Ok(changed)
-            })
+                None => {
+                    let mut object = PropertyObject::from_object(&raw.objects[&page])?;
+                    let mut children = page_children(&object)?;
+                    children.extend(object.reference(container)?);
+                    object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
+                    changed.insert(page, object);
+                }
+            }
+            Ok(changed)
         })
     }
 
@@ -1266,47 +1266,41 @@ impl Lowering<'_> {
             }
         }
         let container = self.id(ink.id);
-        let data = {
-            let store = Store::parse(&self.image)?;
-            let index = RevisionIndex::parse(&store)?;
-            let document = Document::parse(&index)?;
-            let revision = document
-                .spaces
-                .get(&self.space)
-                .and_then(crate::document::Space::active)
-                .ok_or_else(|| invalid("The page space is unavailable"))?;
-            match revision.nodes.get(&container).map(|node| &node.kind) {
-                Some(crate::document::Kind::Ink {
-                    data: Some(data), ..
-                }) => *data,
-                _ => return Err(invalid("Stored ink has no stroke data to rewrite")),
-            }
+        let data = match self
+            .active
+            .view
+            .nodes
+            .get(&container)
+            .map(|node| &node.kind)
+        {
+            Some(crate::document::Kind::Ink {
+                data: Some(data), ..
+            }) => *data,
+            _ => return Err(invalid("Stored ink has no stroke data to rewrite")),
         };
         let (modified, filetime) = crate::create::current_timestamps()?;
         let modified = modified.to_le_bytes();
-        let space = self.space;
-        self.apply(|current| {
-            crate::write::write_revision(current, space, |raw| {
-                let mut changed = BTreeMap::new();
-                let mut data_object = PropertyObject::from_object(&raw.objects[&data])?;
-                let mut references = Vec::new();
-                for id in &kept {
-                    references.extend(data_object.reference(*id)?);
-                }
-                references.extend(write_strokes(
-                    &mut changed,
-                    &mut data_object,
-                    &added,
-                    kept.len(),
-                    filetime,
-                )?);
-                data_object.set(&[(0x24003416, &references)])?;
-                changed.insert(data, data_object);
-                let mut object = PropertyObject::from_object(&raw.objects[&container])?;
-                object.set(&[(0x14001d7a, &modified)])?;
-                changed.insert(container, object);
-                Ok(changed)
-            })
+        self.write(|active| {
+            let raw = &active.live.revision;
+            let mut changed = BTreeMap::new();
+            let mut data_object = PropertyObject::from_object(&raw.objects[&data])?;
+            let mut references = Vec::new();
+            for id in &kept {
+                references.extend(data_object.reference(*id)?);
+            }
+            references.extend(write_strokes(
+                &mut changed,
+                &mut data_object,
+                &added,
+                kept.len(),
+                filetime,
+            )?);
+            data_object.set(&[(0x24003416, &references)])?;
+            changed.insert(data, data_object);
+            let mut object = PropertyObject::from_object(&raw.objects[&container])?;
+            object.set(&[(0x14001d7a, &modified)])?;
+            changed.insert(container, object);
+            Ok(changed)
         })
     }
 
@@ -1349,44 +1343,38 @@ impl Lowering<'_> {
             values.push((0x08001d13 | (1 << 31), Vec::new()));
         }
         values.push((0x08001d85, Vec::new()));
-        let (space, page) = (self.space, self.page);
+        let page = self.page;
         let payload: &[u8] = bytes;
-        self.apply(|current| {
-            crate::write::write_revision_with_payloads(
-                current,
-                space,
-                &[(payload_guid, payload)],
-                |raw| {
-                    let mut changed = BTreeMap::new();
-                    let file = PropertyObject::file(file_id, &reference, extension)?;
-                    changed.insert(file_id, file);
-                    let mut picture = PropertyObject {
-                        jcid: 0x60011,
-                        bytes: crate::create::properties(&values)?,
-                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, image_id.guid)])),
-                    };
-                    picture.reference(image_id)?;
-                    let container = picture.reference(file_id)?;
-                    picture.set(&[(0x20001c3f, &container)])?;
-                    changed.insert(image_id, picture);
-                    match holder {
-                        Some(holder) => {
-                            let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                            let content = object.reference(image_id)?;
-                            object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
-                            changed.insert(holder, object);
-                        }
-                        None => {
-                            let mut object = PropertyObject::from_object(&raw.objects[&page])?;
-                            let mut children = page_children(&object)?;
-                            children.extend(object.reference(image_id)?);
-                            object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
-                            changed.insert(page, object);
-                        }
-                    }
-                    Ok(changed)
-                },
-            )
+        self.write_with(&[(payload_guid, payload)], |active| {
+            let raw = &active.live.revision;
+            let mut changed = BTreeMap::new();
+            let file = PropertyObject::file(file_id, &reference, extension)?;
+            changed.insert(file_id, file);
+            let mut picture = PropertyObject {
+                jcid: 0x60011,
+                bytes: crate::create::properties(&values)?,
+                global_ids: std::sync::Arc::new(BTreeMap::from([(0, image_id.guid)])),
+            };
+            picture.reference(image_id)?;
+            let container = picture.reference(file_id)?;
+            picture.set(&[(0x20001c3f, &container)])?;
+            changed.insert(image_id, picture);
+            match holder {
+                Some(holder) => {
+                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                    let content = object.reference(image_id)?;
+                    object.set(&[(0x24001c1f, &content), (0x14001d7a, &modified)])?;
+                    changed.insert(holder, object);
+                }
+                None => {
+                    let mut object = PropertyObject::from_object(&raw.objects[&page])?;
+                    let mut children = page_children(&object)?;
+                    children.extend(object.reference(image_id)?);
+                    object.set(&[(0x24001c20, &children), (0x14001d7a, &modified)])?;
+                    changed.insert(page, object);
+                }
+            }
+            Ok(changed)
         })
     }
 
@@ -1434,18 +1422,17 @@ impl Lowering<'_> {
                 None => removed.extend([0x140034cd, 0x140034ce]),
             }
         }
-        let (space, object) = (self.space, self.id(attachment.id));
-        self.apply(|current| {
-            crate::write::write_revision(current, space, |raw| {
-                let mut node = PropertyObject::from_object(&raw.objects[&object])?;
-                node.remove(&removed)?;
-                let values: Vec<(u32, &[u8])> = values
-                    .iter()
-                    .map(|(id, bytes)| (*id, bytes.as_slice()))
-                    .collect();
-                node.set(&values)?;
-                Ok(BTreeMap::from([(object, node)]))
-            })
+        let object = self.id(attachment.id);
+        self.write(|active| {
+            let raw = &active.live.revision;
+            let mut node = PropertyObject::from_object(&raw.objects[&object])?;
+            node.remove(&removed)?;
+            let values: Vec<(u32, &[u8])> = values
+                .iter()
+                .map(|(id, bytes)| (*id, bytes.as_slice()))
+                .collect();
+            node.set(&values)?;
+            Ok(BTreeMap::from([(object, node)]))
         })
     }
 
@@ -1466,18 +1453,17 @@ impl Lowering<'_> {
                 None => removed.push(0x1c001e58),
             }
         }
-        let (space, object) = (self.space, self.id(image.id));
-        self.apply(|current| {
-            crate::write::write_revision(current, space, |raw| {
-                let mut picture = PropertyObject::from_object(&raw.objects[&object])?;
-                picture.remove(&removed)?;
-                let values: Vec<(u32, &[u8])> = values
-                    .iter()
-                    .map(|(id, bytes)| (*id, bytes.as_slice()))
-                    .collect();
-                picture.set(&values)?;
-                Ok(BTreeMap::from([(object, picture)]))
-            })
+        let object = self.id(image.id);
+        self.write(|active| {
+            let raw = &active.live.revision;
+            let mut picture = PropertyObject::from_object(&raw.objects[&object])?;
+            picture.remove(&removed)?;
+            let values: Vec<(u32, &[u8])> = values
+                .iter()
+                .map(|(id, bytes)| (*id, bytes.as_slice()))
+                .collect();
+            picture.set(&values)?;
+            Ok(BTreeMap::from([(object, picture)]))
         })
     }
 
@@ -1540,8 +1526,7 @@ impl Lowering<'_> {
                     };
                     let insertion =
                         Insertion::paragraph(self.id(*container), anchor, text, self.author)?;
-                    let space = self.space;
-                    self.apply(|image| insertion.apply(image, space))?;
+                    self.write(|active| insertion.changes(active))?;
                     self.alias.insert(*id, insertion.object());
                     if let Some(text_id) = text_id {
                         self.alias.insert(text_id, insertion.text_object());
@@ -1549,8 +1534,7 @@ impl Lowering<'_> {
                 } else if !kept.contains(id) {
                     let edit =
                         TreeEdit::move_to(self.id(*id), self.id(*container), anchor, self.author)?;
-                    let space = self.space;
-                    self.apply(|image| edit.apply(image, space))?;
+                    self.write(|active| edit.changes(active))?;
                 }
                 next = Some(*id);
             }
@@ -1607,19 +1591,17 @@ impl Lowering<'_> {
                         values.push((0x1c001c12, measurement_bytes(&cell.indents, 4)?));
                     }
                 }
-                let (space, object) = (self.space, self.id(cell.id));
-                self.apply(|current| {
-                    crate::write::write_revision(current, space, |raw| {
-                        let mut object_properties =
-                            PropertyObject::from_object(&raw.objects[&object])?;
-                        object_properties.remove(&removed)?;
-                        let values: Vec<(u32, &[u8])> = values
-                            .iter()
-                            .map(|(id, bytes)| (*id, bytes.as_slice()))
-                            .collect();
-                        object_properties.set(&values)?;
-                        Ok(BTreeMap::from([(object, object_properties)]))
-                    })
+                let object = self.id(cell.id);
+                self.write(|active| {
+                    let raw = &active.live.revision;
+                    let mut object_properties = PropertyObject::from_object(&raw.objects[&object])?;
+                    object_properties.remove(&removed)?;
+                    let values: Vec<(u32, &[u8])> = values
+                        .iter()
+                        .map(|(id, bytes)| (*id, bytes.as_slice()))
+                        .collect();
+                    object_properties.set(&values)?;
+                    Ok(BTreeMap::from([(object, object_properties)]))
                 })?;
             }
         }
@@ -1755,56 +1737,54 @@ impl Lowering<'_> {
             }
             let holder = self.id(*paragraph_id);
             let is_new = previous.is_none();
-            let space = self.space;
-            self.apply(|image| {
-                crate::write::write_revision(image, space, |raw| {
-                    let mut changed: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
-                    for (id, jcid, values) in &created {
-                        let mut node = PropertyObject {
-                            jcid: *jcid,
-                            bytes: crate::create::properties(values)?,
-                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                        };
-                        node.reference(*id)?;
-                        changed.insert(*id, node);
-                    }
-                    let mut row_refs = Vec::new();
-                    for (row_id, cells) in &rows {
-                        let mut row = match changed.remove(row_id) {
-                            Some(row) => row,
-                            None => PropertyObject::from_object(&raw.objects[row_id])?,
-                        };
-                        let mut cell_refs = Vec::new();
-                        for cell in cells {
-                            cell_refs.extend_from_slice(&row.reference(*cell)?);
-                        }
-                        row.set(&[(0x24001c20, &cell_refs), (0x14001d7a, &modified)])?;
-                        changed.insert(*row_id, row);
-                    }
-                    let mut table_object = match changed.remove(&table_id) {
-                        Some(object) => object,
-                        None => PropertyObject::from_object(&raw.objects[&table_id])?,
+            self.write(|active| {
+                let raw = &active.live.revision;
+                let mut changed: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
+                for (id, jcid, values) in &created {
+                    let mut node = PropertyObject {
+                        jcid: *jcid,
+                        bytes: crate::create::properties(values)?,
+                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
                     };
-                    for (row_id, _) in &rows {
-                        row_refs.extend_from_slice(&table_object.reference(*row_id)?);
+                    node.reference(*id)?;
+                    changed.insert(*id, node);
+                }
+                let mut row_refs = Vec::new();
+                for (row_id, cells) in &rows {
+                    let mut row = match changed.remove(row_id) {
+                        Some(row) => row,
+                        None => PropertyObject::from_object(&raw.objects[row_id])?,
+                    };
+                    let mut cell_refs = Vec::new();
+                    for cell in cells {
+                        cell_refs.extend_from_slice(&row.reference(*cell)?);
                     }
-                    table_object.remove(&[0x1c001d7d, 0x08001d5e])?;
-                    table_object.set(
-                        &table_values
-                            .iter()
-                            .map(|(id, bytes)| (*id, bytes.as_slice()))
-                            .collect::<Vec<_>>(),
-                    )?;
-                    table_object.set(&[(0x24001c20, &row_refs)])?;
-                    changed.insert(table_id, table_object);
-                    if is_new {
-                        let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
-                        let reference = object.reference(table_id)?;
-                        object.set(&[(0x24001c1f, &reference), (0x14001d7a, &modified)])?;
-                        changed.insert(holder, object);
-                    }
-                    Ok(changed)
-                })
+                    row.set(&[(0x24001c20, &cell_refs), (0x14001d7a, &modified)])?;
+                    changed.insert(*row_id, row);
+                }
+                let mut table_object = match changed.remove(&table_id) {
+                    Some(object) => object,
+                    None => PropertyObject::from_object(&raw.objects[&table_id])?,
+                };
+                for (row_id, _) in &rows {
+                    row_refs.extend_from_slice(&table_object.reference(*row_id)?);
+                }
+                table_object.remove(&[0x1c001d7d, 0x08001d5e])?;
+                table_object.set(
+                    &table_values
+                        .iter()
+                        .map(|(id, bytes)| (*id, bytes.as_slice()))
+                        .collect::<Vec<_>>(),
+                )?;
+                table_object.set(&[(0x24001c20, &row_refs)])?;
+                changed.insert(table_id, table_object);
+                if is_new {
+                    let mut object = PropertyObject::from_object(&raw.objects[&holder])?;
+                    let reference = object.reference(table_id)?;
+                    object.set(&[(0x24001c1f, &reference), (0x14001d7a, &modified)])?;
+                    changed.insert(holder, object);
+                }
+                Ok(changed)
             })?;
         }
         Ok(())
@@ -1846,8 +1826,7 @@ impl Lowering<'_> {
                 continue;
             }
             let edit = TreeEdit::delete(*id, self.author)?;
-            let space = self.space;
-            self.apply(|image| edit.apply(image, space))?;
+            self.write(|active| edit.changes(active))?;
         }
         let kept: BTreeSet<ExGuid> = page_images(new.page)
             .map(|(id, _)| id)
@@ -1859,8 +1838,7 @@ impl Lowering<'_> {
         {
             if !kept.contains(&id) {
                 let edit = TreeEdit::delete(id, self.author)?;
-                let space = self.space;
-                self.apply(|image| edit.apply(image, space))?;
+                self.write(|active| edit.changes(active))?;
             }
         }
         for id in old.outlines.keys() {
@@ -1869,8 +1847,7 @@ impl Lowering<'_> {
                     return Err(invalid("Title outlines cannot be removed"));
                 }
                 let edit = TreeEdit::delete(*id, self.author)?;
-                let space = self.space;
-                self.apply(|image| edit.apply(image, space))?;
+                self.write(|active| edit.changes(active))?;
             }
         }
         Ok(())
@@ -1943,56 +1920,54 @@ impl Lowering<'_> {
             ends.truncate(ends.len() - 4);
             let has_objects = sets.iter().any(|set| !set.is_empty());
             let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-            let space = self.space;
-            self.apply(|current| {
-                crate::write::write_revision(current, space, |raw| {
-                    let mut changed = BTreeMap::new();
-                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                    let mut references = Vec::new();
-                    let mut created: Vec<(Values, ExGuid)> = Vec::new();
-                    for values in &styles {
-                        let id = match created.iter().find(|(known, _)| known == values) {
-                            Some((_, id)) => *id,
-                            None => {
-                                let id = ExGuid {
-                                    guid: crate::write::fresh_guid()?,
-                                    n: 1,
-                                };
-                                let mut style = PropertyObject {
-                                    jcid: 0x12004d,
-                                    bytes: crate::create::properties(values)?,
-                                    global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                                };
-                                style.reference(id)?;
-                                changed.insert(id, style);
-                                created.push((values.clone(), id));
-                                id
-                            }
-                        };
-                        references.extend(target.reference(id)?);
-                    }
-                    target.remove(&[0x1c003498, 0x40003499])?;
+            self.write(|active| {
+                let raw = &active.live.revision;
+                let mut changed = BTreeMap::new();
+                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                let mut references = Vec::new();
+                let mut created: Vec<(Values, ExGuid)> = Vec::new();
+                for values in &styles {
+                    let id = match created.iter().find(|(known, _)| known == values) {
+                        Some((_, id)) => *id,
+                        None => {
+                            let id = ExGuid {
+                                guid: crate::write::fresh_guid()?,
+                                n: 1,
+                            };
+                            let mut style = PropertyObject {
+                                jcid: 0x12004d,
+                                bytes: crate::create::properties(values)?,
+                                global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
+                            };
+                            style.reference(id)?;
+                            changed.insert(id, style);
+                            created.push((values.clone(), id));
+                            id
+                        }
+                    };
+                    references.extend(target.reference(id)?);
+                }
+                target.remove(&[0x1c003498, 0x40003499])?;
+                target.set(&[
+                    (0x1c001c22, &encoded),
+                    (0x1c001e12, &ends),
+                    (0x24001e13, &references),
+                    (0x14001d7a, &modified),
+                ])?;
+                if has_objects {
+                    target.set_sets(0x40003499, 0x44000811, &sets)?;
+                }
+                if all_math {
+                    // The flags and language marker OneNote's equation editor leaves on
+                    // every equation text object.
                     target.set(&[
-                        (0x1c001c22, &encoded),
-                        (0x1c001e12, &ends),
-                        (0x24001e13, &references),
-                        (0x14001d7a, &modified),
+                        (0x10001cfe, &0x7f_u16.to_le_bytes()),
+                        (0x14001c3e, &1u32.to_le_bytes()),
+                        (0x14001c84, &1u32.to_le_bytes()),
                     ])?;
-                    if has_objects {
-                        target.set_sets(0x40003499, 0x44000811, &sets)?;
-                    }
-                    if all_math {
-                        // The flags and language marker OneNote's equation editor leaves on
-                        // every equation text object.
-                        target.set(&[
-                            (0x10001cfe, &0x7f_u16.to_le_bytes()),
-                            (0x14001c3e, &1u32.to_le_bytes()),
-                            (0x14001c84, &1u32.to_le_bytes()),
-                        ])?;
-                    }
-                    changed.insert(object, target);
-                    Ok(changed)
-                })
+                }
+                changed.insert(object, target);
+                Ok(changed)
             })?;
         }
         Ok(())
@@ -2016,8 +1991,8 @@ impl Lowering<'_> {
                 continue;
             }
             let (range, replacement) = text_edit(stored.text.text(), text.text.text())?;
-            let (space, object) = (self.space, stored.id);
-            self.apply(|image| crate::replace_text(image, space, object, range, &replacement))?;
+            let object = stored.id;
+            self.write(|active| crate::edit::text_changes(active, object, range, &replacement))?;
         }
         Ok(())
     }
@@ -2132,70 +2107,56 @@ impl Lowering<'_> {
                 }
                 nodes.push((node_id, values));
             }
-            let (space, object) = (self.space, self.id(*id));
-            self.apply(|image| {
-                let store = Store::parse(image)?;
-                let index = RevisionIndex::parse(&store)?;
-                let document = Document::parse(&index)?;
-                let parents = crate::edit::editable_parents(
-                    document.active(space)?,
-                    &document.pages_in(space)?,
-                    object,
-                )?;
+            let object = self.id(*id);
+            self.write(|active| {
+                let parents = active.editable_parents(object)?;
                 let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-                crate::write::write_revision(image, space, |raw| {
-                    let mut changed = BTreeMap::new();
-                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                    let mut references = Vec::new();
-                    for (list, values) in &nodes {
-                        let mut node = match raw.objects.get(list) {
-                            Some(existing) => {
-                                if existing.jcid != 0x60012 {
-                                    return Err(invalid(
-                                        "A list definition identity belongs to another object",
-                                    ));
-                                }
-                                let mut node = PropertyObject::from_object(existing)?;
-                                node.remove(&[
-                                    0x1c001c1a, 0x1c001c52, 0x14001cb7, 0x10001d0e, 0x0c001cc0,
-                                    0x1c001c0a, 0x10001c0b, 0x14001c0c, 0x14001c3b, 0x08001c04,
-                                    0x08001c05,
-                                ])?;
-                                node
+                let raw = &active.live.revision;
+                let mut changed = BTreeMap::new();
+                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                let mut references = Vec::new();
+                for (list, values) in &nodes {
+                    let mut node = match raw.objects.get(list) {
+                        Some(existing) => {
+                            if existing.jcid != 0x60012 {
+                                return Err(invalid(
+                                    "A list definition identity belongs to another object",
+                                ));
                             }
-                            None => PropertyObject {
-                                jcid: 0x60012,
-                                bytes: crate::create::properties(&[])?,
-                                global_ids: std::sync::Arc::new(BTreeMap::from([(0, list.guid)])),
-                            },
-                        };
-                        node.set(
-                            &values
-                                .iter()
-                                .map(|(id, bytes)| (*id, bytes.as_slice()))
-                                .collect::<Vec<_>>(),
-                        )?;
-                        node.set(&[(0x14001d7a, &modified)])?;
-                        node.reference(*list)?;
-                        references.extend_from_slice(&target.reference(*list)?);
-                        changed.insert(*list, node);
-                    }
-                    if references.is_empty() {
-                        target.remove(&[0x24001c26])?;
-                    } else {
-                        target.set(&[(0x24001c26, &references)])?;
-                    }
-                    target.set(&[(0x14001d7a, &modified)])?;
-                    changed.insert(object, target);
-                    crate::formatting::touch_ancestors(
-                        raw,
-                        &parents,
-                        object,
-                        &modified,
-                        &mut changed,
+                            let mut node = PropertyObject::from_object(existing)?;
+                            node.remove(&[
+                                0x1c001c1a, 0x1c001c52, 0x14001cb7, 0x10001d0e, 0x0c001cc0,
+                                0x1c001c0a, 0x10001c0b, 0x14001c0c, 0x14001c3b, 0x08001c04,
+                                0x08001c05,
+                            ])?;
+                            node
+                        }
+                        None => PropertyObject {
+                            jcid: 0x60012,
+                            bytes: crate::create::properties(&[])?,
+                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, list.guid)])),
+                        },
+                    };
+                    node.set(
+                        &values
+                            .iter()
+                            .map(|(id, bytes)| (*id, bytes.as_slice()))
+                            .collect::<Vec<_>>(),
                     )?;
-                    Ok(changed)
-                })
+                    node.set(&[(0x14001d7a, &modified)])?;
+                    node.reference(*list)?;
+                    references.extend_from_slice(&target.reference(*list)?);
+                    changed.insert(*list, node);
+                }
+                if references.is_empty() {
+                    target.remove(&[0x24001c26])?;
+                } else {
+                    target.set(&[(0x24001c26, &references)])?;
+                }
+                target.set(&[(0x14001d7a, &modified)])?;
+                changed.insert(object, target);
+                crate::formatting::touch_ancestors(raw, parents, object, &modified, &mut changed)?;
+                Ok(changed)
             })?;
         }
         Ok(())
@@ -2330,51 +2291,42 @@ impl Lowering<'_> {
                     }
                     sets.push((index, fields));
                 }
-                let space = self.space;
-                self.apply(|image| {
-                    let store = Store::parse(image)?;
-                    let index = RevisionIndex::parse(&store)?;
-                    let document = Document::parse(&index)?;
-                    let parents = crate::edit::editable_parents(
-                        document.active(space)?,
-                        &document.pages_in(space)?,
-                        object,
-                    )?;
+                self.write(|active| {
+                    let parents = active.editable_parents(object)?;
                     let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-                    crate::write::write_revision(image, space, |raw| {
-                        let mut changed = BTreeMap::new();
-                        for (id, values) in &definitions {
-                            let Some(values) = values else {
-                                continue;
-                            };
-                            let mut node = PropertyObject {
-                                jcid: 0x120043,
-                                bytes: crate::create::properties(values)?,
-                                global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
-                            };
-                            node.reference(*id)?;
-                            changed.insert(*id, node);
-                        }
-                        let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                        let mut encoded = Vec::new();
-                        for (index, fields) in &sets {
-                            let reference = target.reference(definitions[*index].0)?;
-                            let mut set = vec![(0x20003488, reference.to_vec())];
-                            set.extend(fields.iter().cloned());
-                            encoded.push(set);
-                        }
-                        target.set_sets(0x40003489, 0x44000811, &encoded)?;
-                        target.set(&[(0x14001d7a, &modified)])?;
-                        changed.insert(object, target);
-                        crate::formatting::touch_ancestors(
-                            raw,
-                            &parents,
-                            object,
-                            &modified,
-                            &mut changed,
-                        )?;
-                        Ok(changed)
-                    })
+                    let raw = &active.live.revision;
+                    let mut changed = BTreeMap::new();
+                    for (id, values) in &definitions {
+                        let Some(values) = values else {
+                            continue;
+                        };
+                        let mut node = PropertyObject {
+                            jcid: 0x120043,
+                            bytes: crate::create::properties(values)?,
+                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
+                        };
+                        node.reference(*id)?;
+                        changed.insert(*id, node);
+                    }
+                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                    let mut encoded = Vec::new();
+                    for (index, fields) in &sets {
+                        let reference = target.reference(definitions[*index].0)?;
+                        let mut set = vec![(0x20003488, reference.to_vec())];
+                        set.extend(fields.iter().cloned());
+                        encoded.push(set);
+                    }
+                    target.set_sets(0x40003489, 0x44000811, &encoded)?;
+                    target.set(&[(0x14001d7a, &modified)])?;
+                    changed.insert(object, target);
+                    crate::formatting::touch_ancestors(
+                        raw,
+                        parents,
+                        object,
+                        &modified,
+                        &mut changed,
+                    )?;
+                    Ok(changed)
                 })?;
             }
         }
@@ -2444,25 +2396,24 @@ impl Lowering<'_> {
                 }
                 Some(values)
             };
-            let (space, object) = (self.space, self.id(text.id));
-            self.apply(|image| {
-                crate::write::write_revision(image, space, |raw| {
-                    let mut changed = BTreeMap::new();
-                    if let Some(values) = &values {
-                        let mut node = PropertyObject {
-                            jcid: 0x12004d,
-                            bytes: crate::create::properties(values)?,
-                            global_ids: std::sync::Arc::new(BTreeMap::from([(0, style_id.guid)])),
-                        };
-                        node.reference(style_id)?;
-                        changed.insert(style_id, node);
-                    }
-                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                    let reference = target.reference(style_id)?;
-                    target.set(&[(0x2000342c, &reference)])?;
-                    changed.insert(object, target);
-                    Ok(changed)
-                })
+            let object = self.id(text.id);
+            self.write(|active| {
+                let raw = &active.live.revision;
+                let mut changed = BTreeMap::new();
+                if let Some(values) = &values {
+                    let mut node = PropertyObject {
+                        jcid: 0x12004d,
+                        bytes: crate::create::properties(values)?,
+                        global_ids: std::sync::Arc::new(BTreeMap::from([(0, style_id.guid)])),
+                    };
+                    node.reference(style_id)?;
+                    changed.insert(style_id, node);
+                }
+                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                let reference = target.reference(style_id)?;
+                target.set(&[(0x2000342c, &reference)])?;
+                changed.insert(object, target);
+                Ok(changed)
             })?;
         }
         Ok(())
@@ -2531,55 +2482,41 @@ impl Lowering<'_> {
                     "Generated title fields cannot be formatted as ordinary text",
                 ));
             }
-            let (space, object) = (self.space, stored.id);
-            self.apply(|image| {
-                let store = Store::parse(image)?;
-                let index = RevisionIndex::parse(&store)?;
-                let document = Document::parse(&index)?;
-                let parents = crate::edit::editable_parents(
-                    document.active(space)?,
-                    &document.pages_in(space)?,
-                    object,
-                )?;
+            let object = stored.id;
+            self.write(|active| {
+                let parents = active.editable_parents(object)?;
                 let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-                crate::write::write_revision(image, space, |raw| {
-                    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-                    target.set(
-                        &values
+                let raw = &active.live.revision;
+                let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+                target.set(
+                    &values
+                        .iter()
+                        .map(|(id, bytes)| (*id, bytes.as_slice()))
+                        .collect::<Vec<_>>(),
+                )?;
+                if let Some((_, alignment)) = values.iter().find(|(id, _)| *id == 0x0c003477) {
+                    for property in [0x14001c3e, 0x14001c84] {
+                        let fields = PropertySets::parse(&target.bytes)?;
+                        let previous = fields.sets[0]
                             .iter()
-                            .map(|(id, bytes)| (*id, bytes.as_slice()))
-                            .collect::<Vec<_>>(),
-                    )?;
-                    if let Some((_, alignment)) = values.iter().find(|(id, _)| *id == 0x0c003477) {
-                        for property in [0x14001c3e, 0x14001c84] {
-                            let fields = PropertySets::parse(&target.bytes)?;
-                            let previous = fields.sets[0]
-                                .iter()
-                                .find(|field| field.id == property)
-                                .map(|field| match field.value {
-                                    Value::Bytes(bytes) => bytes
-                                        .try_into()
-                                        .map(u32::from_le_bytes)
-                                        .map_err(|_| invalid("Invalid paragraph layout alignment")),
-                                    _ => Err(invalid("Invalid paragraph layout alignment")),
-                                })
-                                .transpose()?
-                                .unwrap_or(0);
-                            let value = (previous & !7) | (u32::from(alignment[0]) + 1);
-                            target.set(&[(property, &value.to_le_bytes())])?;
-                        }
+                            .find(|field| field.id == property)
+                            .map(|field| match field.value {
+                                Value::Bytes(bytes) => bytes
+                                    .try_into()
+                                    .map(u32::from_le_bytes)
+                                    .map_err(|_| invalid("Invalid paragraph layout alignment")),
+                                _ => Err(invalid("Invalid paragraph layout alignment")),
+                            })
+                            .transpose()?
+                            .unwrap_or(0);
+                        let value = (previous & !7) | (u32::from(alignment[0]) + 1);
+                        target.set(&[(property, &value.to_le_bytes())])?;
                     }
-                    target.set(&[(0x14001d7a, &modified)])?;
-                    let mut changed = BTreeMap::from([(object, target)]);
-                    crate::formatting::touch_ancestors(
-                        raw,
-                        &parents,
-                        object,
-                        &modified,
-                        &mut changed,
-                    )?;
-                    Ok(changed)
-                })
+                }
+                target.set(&[(0x14001d7a, &modified)])?;
+                let mut changed = BTreeMap::from([(object, target)]);
+                crate::formatting::touch_ancestors(raw, parents, object, &modified, &mut changed)?;
+                Ok(changed)
             })?;
         }
         Ok(())
@@ -2646,9 +2583,9 @@ impl Lowering<'_> {
                 if attributes.is_empty() {
                     continue;
                 }
-                let (space, object) = (self.space, stored.id);
-                self.apply(|image| {
-                    crate::formatting::format_text(image, space, object, range, &attributes)
+                let object = stored.id;
+                self.write(|active| {
+                    crate::formatting::format_changes(active, object, range, &attributes)
                 })?;
             }
         }
@@ -2664,9 +2601,9 @@ impl Lowering<'_> {
                 .get(&self.id(*id))
                 .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
             if stored.collapsed != paragraph.collapsed {
-                let (space, object) = (self.space, self.id(*id));
+                let object = self.id(*id);
                 let edit = OutlineEdit::Collapsed(paragraph.collapsed);
-                self.apply(|image| edit.apply(image, space, object))?;
+                self.write(|active| edit.changes(active, object))?;
             }
         }
         for (id, outline) in &new.outlines {
@@ -2677,7 +2614,7 @@ impl Lowering<'_> {
                 .outlines
                 .get(&self.id(*id))
                 .ok_or_else(|| invalid("An outline is missing after text edits"))?;
-            let (space, object) = (self.space, self.id(*id));
+            let object = self.id(*id);
             // A new outline takes the model's indentation table (a copied outline keeps
             // its levels' offsets); a stored table stays as it is.
             if !old.outlines.contains_key(id)
@@ -2685,12 +2622,11 @@ impl Lowering<'_> {
                 && outline.indents != stored.indents
             {
                 let indents = measurement_bytes(&outline.indents, 4)?;
-                self.apply(|current| {
-                    crate::write::write_revision(current, space, |raw| {
-                        let mut node = PropertyObject::from_object(&raw.objects[&object])?;
-                        node.set(&[(0x1c001c12, &indents)])?;
-                        Ok(BTreeMap::from([(object, node)]))
-                    })
+                self.write(|active| {
+                    let raw = &active.live.revision;
+                    let mut node = PropertyObject::from_object(&raw.objects[&object])?;
+                    node.set(&[(0x1c001c12, &indents)])?;
+                    Ok(BTreeMap::from([(object, node)]))
                 })?;
             }
             if (outline.layout.x, outline.layout.y) != (stored.layout.x, stored.layout.y) {
@@ -2698,7 +2634,7 @@ impl Lowering<'_> {
                     return Err(invalid("An outline position needs both coordinates"));
                 };
                 let edit = OutlineEdit::Position { x, y };
-                self.apply(|image| edit.apply(image, space, object))?;
+                self.write(|active| edit.changes(active, object))?;
             }
             if (outline.layout.max_width, outline.layout.width_set_by_user)
                 != (stored.layout.max_width, stored.layout.width_set_by_user)
@@ -2711,7 +2647,7 @@ impl Lowering<'_> {
                     points,
                     user_set: outline.layout.width_set_by_user == Some(true),
                 };
-                self.apply(|image| edit.apply(image, space, object))?;
+                self.write(|active| edit.changes(active, object))?;
             }
         }
         Ok(())
@@ -2754,6 +2690,9 @@ fn kept_set(
         return Err(invalid(
             "Images and unsupported objects cannot be reordered",
         ));
+    }
+    if sequence.windows(2).all(|pair| pair[0].1 < pair[1].1) {
+        return Ok(sequence.into_iter().map(|(id, _)| id).collect());
     }
     // Longest increasing subsequence over `after` positions, forced through immovable items.
     let n = sequence.len();
@@ -2926,12 +2865,24 @@ fn attributes(current: &Format, target: &Format, fresh: bool) -> Result<Vec<Text
     Ok(out)
 }
 
-/// Rewrites every revision the typed writers appended as one transaction on `source`,
-/// renaming writer-allocated identities to the model's. A protected `source` takes the
-/// revisions its plaintext twin gained.
+/// Payload identities the file-data store of `store` declares, in order.
+pub(crate) fn declared_payloads(store: &Store<'_>) -> Vec<[u8; 16]> {
+    store
+        .lists
+        .values()
+        .flat_map(|list| &list.nodes)
+        .filter(|node| node.id == 0x94)
+        .filter_map(|node| node.payload.get(..16).and_then(|g| g.try_into().ok()))
+        .collect()
+}
+
+/// Writes the spaces the typed writers `edited` as one transaction on the validated
+/// `source`, renaming writer-allocated identities to the model's and embedding the
+/// `payloads` it lacks. A protected `source` takes the revisions its plaintext twin gained.
 pub(crate) fn squash(
-    source: &[u8],
-    applied: &[u8],
+    source: &RevisionIndex<'_>,
+    edited: &[(ExGuid, &crate::ResolvedRevision<'_>)],
+    payloads: &[([u8; 16], &[u8])],
     alias: &BTreeMap<ExGuid, ExGuid>,
     protection: Option<&dyn crate::write::Protection>,
 ) -> Result<Vec<u8>, Error> {
@@ -2939,44 +2890,19 @@ pub(crate) fn squash(
         .iter()
         .map(|(model, image)| (*image, *model))
         .collect();
-    let declared = |store: &Store<'_>| -> Vec<[u8; 16]> {
-        store
-            .lists
-            .values()
-            .flat_map(|list| &list.nodes)
-            .filter(|node| node.id == 0x94)
-            .filter_map(|node| node.payload.get(..16).and_then(|g| g.try_into().ok()))
-            .collect()
-    };
-    let existing = declared(&Store::parse(source)?);
-    let applied_store = Store::parse(applied)?;
-    let applied_index = RevisionIndex::parse(&applied_store)?;
-    // Payloads the typed edits embedded travel into the squashed transaction as well.
-    let mut payloads = Vec::new();
-    for guid in declared(&applied_store) {
-        if !existing.contains(&guid) {
-            payloads.push((guid, applied_store.file_data(guid)?));
-        }
-    }
+    let existing = declared_payloads(source.store);
+    let payloads: Vec<_> = payloads
+        .iter()
+        .filter(|(guid, _)| !existing.contains(guid))
+        .copied()
+        .collect();
     let edit = |index: &RevisionIndex<'_>| {
         let mut changes = BTreeMap::new();
-        for sid in applied_index.spaces.keys() {
-            let Some(space) = index.spaces.get(sid) else {
-                // The twin's scaffold spaces are not the section's.
-                if protection.is_some() {
-                    continue;
-                }
-                return Err(invalid("Page edits cannot create object spaces"));
-            };
-            let after_rid = applied_index.active(*sid)?;
-            if space.labels.get(&(ExGuid::default(), 1)) == Some(&after_rid) {
-                continue;
-            }
+        for (sid, after) in edited {
             let before = match protection {
                 Some(protection) => protection.resolve(*sid, index.active(*sid)?)?,
                 None => index.resolve_active(*sid)?,
             };
-            let after = applied_index.resolve(*sid, after_rid)?;
             if before.roots != after.roots {
                 return Err(invalid("Page edits cannot change revision roots"));
             }
@@ -2994,7 +2920,7 @@ pub(crate) fn squash(
                 {
                     let entries = match object.data {
                         ObjectData::Properties(bytes) => crate::write::table_entries(bytes)?,
-                        _ => BTreeSet::new(),
+                        _ => Vec::new(),
                     };
                     if entries
                         .iter()
@@ -3044,12 +2970,8 @@ pub(crate) fn squash(
         }
         Ok(changes)
     };
-    let validate = protection.is_none();
-    let output = crate::write::build(source, &payloads, protection, validate, edit)?;
-    // The parsed images are released before the result is parsed.
-    drop(applied_index);
-    drop(applied_store);
-    crate::write::check(&output, validate)?;
+    let output = crate::write::build_on(source, &payloads, protection, edit)?;
+    crate::write::check(&output, protection.is_none())?;
     Ok(output)
 }
 
@@ -3075,4 +2997,82 @@ fn remap(object: &mut PropertyObject, rename: &BTreeMap<ExGuid, ExGuid>) -> Resu
         object.bytes[offset..offset + 4].copy_from_slice(&reference);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::page::{PageParagraph, Paragraph, TextObject, text::new_id};
+
+    /// A new page in a new section and the page with `count` paragraphs added in an outline.
+    fn generated(count: usize) -> (Vec<u8>, ExGuid, Page) {
+        let section = crate::create_section("big.one", "First", "Author").unwrap();
+        let creation = crate::PageCreation::new(None, Some("Big"), "Author").unwrap();
+        let source = crate::PreparedEdit::create_page(&section, &creation)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        let space = creation.space();
+        let store = Store::parse(&source).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let mut page =
+            Page::from_space(&crate::document::Document::parse(&index).unwrap(), space).unwrap();
+        let paragraph = |i: usize| PageParagraph {
+            id: new_id().unwrap(),
+            parent: None,
+            level: 1,
+            style: None,
+            format: Format::default(),
+            content: ParagraphContent::Text(TextObject {
+                id: new_id().unwrap(),
+                date_field: None,
+                text: Paragraph::new(format!("Paragraph {i}"), Format::default()),
+                tags: Vec::new(),
+            }),
+            lists: Vec::new(),
+            tags: Vec::new(),
+            media: Default::default(),
+            collapsed: false,
+        };
+        page.objects.push(PageObject::Outline(Outline {
+            id: new_id().unwrap(),
+            title: false,
+            min_width: None,
+            layout: crate::document::Layout {
+                x: Some(36.0),
+                y: Some(86.4),
+                ..Default::default()
+            },
+            indents: Vec::new(),
+            paragraphs: (0..count).map(paragraph).collect(),
+            unsupported: Vec::new(),
+        }));
+        (source, space, page)
+    }
+
+    #[test]
+    fn a_page_write_builds_one_revision_however_many_paragraphs_it_adds() {
+        for count in [10, 40] {
+            let (source, space, after) = generated(count);
+            let builds = crate::write::BUILDS.with(std::cell::Cell::get);
+            let written = write_page(&source, space, &after, "Author").unwrap();
+            assert_eq!(crate::write::BUILDS.with(std::cell::Cell::get) - builds, 1);
+            let store = Store::parse(&written).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let read = Page::from_space(&crate::document::Document::parse(&index).unwrap(), space)
+                .unwrap();
+            let texts = |page: &Page| -> Vec<String> {
+                page.objects
+                    .iter()
+                    .filter_map(|object| match object {
+                        PageObject::Outline(outline) => Some(outline),
+                        _ => None,
+                    })
+                    .flat_map(|outline| &outline.paragraphs)
+                    .filter_map(|paragraph| Some(paragraph.text()?.text.text().to_owned()))
+                    .collect()
+            };
+            assert_eq!(texts(&read), texts(&after));
+        }
+    }
 }

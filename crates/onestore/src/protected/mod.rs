@@ -407,15 +407,36 @@ pub(crate) fn write_page(
     }
     let twin = unlocked.twin()?;
     let applied = Zeroizing::new(crate::page::write::write_page(&twin, space, page, author)?);
-    // Squash skips the spaces the source lacks as the twin's scaffold; the writers added none.
-    let spaces = |image: &[u8]| -> Result<Vec<ExGuid>> {
-        let store = crate::Store::parse(image)?;
-        Ok(RevisionIndex::parse(&store)?.spaces.into_keys().collect())
-    };
-    if spaces(&twin)? != spaces(&applied)? {
+    let applied_store = crate::Store::parse(&applied)?;
+    let applied_index = RevisionIndex::parse(&applied_store)?;
+    let twin_store = crate::Store::parse(&twin)?;
+    if RevisionIndex::parse(&twin_store)?
+        .spaces
+        .keys()
+        .ne(applied_index.spaces.keys())
+    {
         return Err(invalid("Page edits cannot create object spaces"));
     }
-    let written = crate::page::write::squash(source, &applied, &BTreeMap::new(), Some(&unlocked))?;
+    // The twin's scaffold spaces are not the section's.
+    let mut edited = Vec::new();
+    for (sid, space) in &index.spaces {
+        let rid = applied_index.active(*sid)?;
+        if space.labels.get(&(ExGuid::default(), 1)) != Some(&rid) {
+            edited.push((*sid, applied_index.resolve(*sid, rid)?));
+        }
+    }
+    let edited: Vec<_> = edited.iter().map(|(sid, after)| (*sid, after)).collect();
+    let payloads = crate::page::write::declared_payloads(&applied_store)
+        .into_iter()
+        .map(|guid| Ok((guid, applied_store.file_data(guid)?)))
+        .collect::<std::result::Result<Vec<_>, crate::Error>>()?;
+    let written = crate::page::write::squash(
+        &index,
+        &edited,
+        &payloads,
+        &BTreeMap::new(),
+        Some(&unlocked),
+    )?;
     let store = crate::Store::parse(&written)?;
     UnlockedSection::open(&RevisionIndex::parse(&store)?, password, Limits::default())?;
     Ok(written)

@@ -1,9 +1,10 @@
 use crate::{
-    Error, ExGuid, RevisionIndex, Store,
+    Error, ExGuid,
+    active::{ActivePage, Changes},
     create::{current_timestamps, properties, string},
-    document::{Document, Kind, Revision},
+    document::{Kind, Revision},
     edit::{editable_parents, update_title},
-    write::{PropertyObject, fresh_guid, write_revision_on},
+    write::{PropertyObject, fresh_guid},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -96,21 +97,17 @@ impl TreeEdit {
 
     pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        let store = Store::parse(source)?;
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
-        let mut document = Document::parse(&index)?;
-        let pages = document.pages_in(space)?;
+        crate::active::write(source, space, |active| self.changes(active))
+    }
+
+    pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
+        let pages = &active.pages;
         let [page] = pages.as_slice() else {
             return Err(invalid("Tree editing requires a single active page"));
         };
-        let mut view = document
-            .spaces
-            .remove(&space)
-            .and_then(crate::document::Space::into_active)
-            .unwrap();
-        let parents = editable_parents(&view, &pages, self.object)?;
-        let path = checked_path(&view, &parents, *page, self.object)?;
+        let mut view = active.view.clone();
+        let parents = active.editable_parents(self.object)?;
+        let path = checked_path(&view, parents, *page, self.object)?;
         let source_parent = *path
             .get(1)
             .ok_or_else(|| invalid("Select a paragraph or ordinary page outline"))?;
@@ -132,7 +129,7 @@ impl TreeEdit {
         let mut changed_ids = BTreeSet::from([source_parent]);
         let mut affected = BTreeSet::from([self.object]);
         if let Placement::Move { parent, before } = self.placement {
-            if checked_path(&view, &parents, *page, parent)?.contains(&self.object) {
+            if checked_path(&view, parents, *page, parent)?.contains(&self.object) {
                 return Err(invalid("A subtree cannot move inside itself"));
             }
             let destination = &view.nodes[&parent];
@@ -143,7 +140,7 @@ impl TreeEdit {
             }
             let previous = destination.children.clone();
             if parent == source_parent && before == Some(self.object) {
-                return Ok(source.to_vec());
+                return Ok(Changes::new());
             }
             view.nodes
                 .get_mut(&source_parent)
@@ -156,7 +153,7 @@ impl TreeEdit {
                 .unwrap_or(children.len());
             children.insert(position, self.object);
             if parent == source_parent && *children == previous {
-                return Ok(source.to_vec());
+                return Ok(Changes::new());
             }
             changed_ids.insert(parent);
         } else {
@@ -187,7 +184,7 @@ impl TreeEdit {
                 if node.extra[0].iter().any(|field| field.id == 0x08001d0c) {
                     return Err(invalid("The emptied container cannot be deleted"));
                 }
-                let path = checked_path(&view, &parents, *page, at)?;
+                let path = checked_path(&view, parents, *page, at)?;
                 let parent = path[1];
                 view.nodes
                     .get_mut(&parent)
@@ -256,7 +253,7 @@ impl TreeEdit {
             if !checked.insert(id) {
                 continue;
             }
-            checked_path(&view, &parents, *page, id)?;
+            checked_path(&view, parents, *page, id)?;
             let node = &view.nodes[&id];
             if matches!(self.placement, Placement::Delete)
                 && node.extra[0].iter().any(|field| field.id == 0x08001d0c)
@@ -273,8 +270,8 @@ impl TreeEdit {
                     .copied(),
             );
         }
-        let raw = index.resolve_active(space)?;
-        let active_parents = editable_parents(&view, &pages, *page)?;
+        let raw = &active.live.revision;
+        let active_parents = editable_parents(&view, pages, *page)?;
         let modified = current_timestamps()?.0.to_le_bytes();
         let mut changed = BTreeMap::new();
         let author_id = ExGuid {
@@ -370,8 +367,8 @@ impl TreeEdit {
             object.set(&[(0x20001d79, &author), (0x14001d7a, &modified)])?;
             changed.insert(self.object, object);
         }
-        update_title(&store, &raw, view, &pages, &mut changed)?;
-        write_revision_on(&index, space, |_| Ok(changed))
+        update_title(active, view, &mut changed)?;
+        Ok(changed)
     }
 }
 
@@ -417,7 +414,7 @@ fn checked_path(
 mod tests {
     use super::*;
     use crate::write::write_revision;
-    use crate::{Insertion, PreparedEdit};
+    use crate::{Insertion, PreparedEdit, RevisionIndex, Store, document::Document};
 
     #[test]
     fn a_retained_move_intent_can_reuse_its_immutable_author_after_another_move() {

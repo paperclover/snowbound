@@ -46,13 +46,13 @@ impl<'a> Space<'a> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Revision<'a> {
     pub roots: BTreeMap<u32, ExGuid>,
     pub nodes: BTreeMap<ExGuid, Element<'a>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Element<'a> {
     pub jcid: u32,
     pub children: Vec<ExGuid>,
@@ -490,13 +490,13 @@ pub enum Kind<'a> {
     Unknown,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Field<'a> {
     pub id: u32,
     pub value: FieldValue<'a>,
 }
 
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum FieldValue<'a> {
     NoData,
     Bytes(#[serde(serialize_with = "hex")] &'a [u8]),
@@ -648,6 +648,29 @@ impl<'a, 'o> Fields<'a, 'o> {
 }
 
 fn references(bytes: &[u8], ids: &BTreeMap<u32, [u8; 16]>) -> Result<Vec<ExGuid>> {
+    // A long list, such as a large outline's children, reads a dense table as an array.
+    if bytes.len() >= 256
+        && bytes.len().is_multiple_of(4)
+        && let Some((last, _)) = ids.last_key_value()
+        && *last as usize + 1 == ids.len()
+    {
+        let table: Vec<[u8; 16]> = ids.values().copied().collect();
+        return bytes
+            .chunks_exact(4)
+            .enumerate()
+            .map(|(i, bytes)| {
+                let raw = u32::from_le_bytes(bytes.try_into().unwrap());
+                let guid = table.get((raw >> 8) as usize).ok_or(Error {
+                    offset: i * 4,
+                    message: "Compact ID refers to a missing global ID",
+                })?;
+                Ok(ExGuid {
+                    guid: *guid,
+                    n: raw & 0xff,
+                })
+            })
+            .collect();
+    }
     let mut cursor = Cursor { bytes, offset: 0 };
     let mut result = Vec::new();
     while !cursor.bytes.is_empty() {
@@ -906,11 +929,7 @@ impl<'a> Document<'a> {
 }
 
 impl<'a> Element<'a> {
-    pub(crate) fn parse(object: &Object<'a>, store: &Store<'a>) -> Result<Self> {
-        Self::parse_with(object, store, &mut |id| store.file_data(id))
-    }
-
-    fn parse_with(
+    pub(crate) fn parse_with(
         object: &Object<'a>,
         store: &Store<'a>,
         file_data: &mut impl FnMut([u8; 16]) -> Result<&'a [u8]>,

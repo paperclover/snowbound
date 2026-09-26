@@ -1,7 +1,8 @@
 use crate::{
-    Error, ExGuid, Object, ObjectData, PropertySets, RevisionIndex, Store,
+    Error, ExGuid, Object, ObjectData, PropertySets,
+    active::{ActivePage, Changes},
     create::string,
-    document::{Document, Element, Kind},
+    document::{Element, Kind},
     write::PropertyObject,
 };
 use std::{collections::BTreeMap, ops::Range, sync::Arc};
@@ -35,28 +36,31 @@ pub fn replace_text(
     range: Range<u32>,
     replacement: &str,
 ) -> Result<Vec<u8>, Error> {
-    let invalid = |message| Error { offset: 0, message };
     if range.start > range.end || replacement.contains(['\0', '\n', '\r', '\u{fffc}']) {
-        return Err(invalid(
-            "Use a valid text range and ordinary paragraph text",
-        ));
+        return Err(Error {
+            offset: 0,
+            message: "Use a valid text range and ordinary paragraph text",
+        });
     }
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
-    let rid = index.active(space)?;
-    let raw = index.resolve(space, rid)?;
-    if !raw.reachable()?.contains(&object) {
+    crate::active::write(source, space, |active| {
+        text_changes(active, object, range, replacement)
+    })
+}
+
+/// `replace_text` on an active page.
+pub(crate) fn text_changes(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    range: Range<u32>,
+    replacement: &str,
+) -> Result<Changes, Error> {
+    let invalid = |message| Error { offset: 0, message };
+    let raw = &active.live.revision;
+    if !active.live.is_reachable(object) {
         return Err(invalid("Object is not reachable in the active revision"));
     }
-    let document = Document::parse(&index)?;
-    let revision = document
-        .spaces
-        .get(&space)
-        .and_then(|s| s.revisions.get(&rid))
-        .ok_or_else(|| invalid("The active document revision is unavailable"))?;
-    let pages = document.pages_in(space)?;
-    let parents = editable_parents(revision, &pages, object)?;
+    let revision = &active.view;
+    let parents = active.editable_parents(object)?;
     let node = revision
         .nodes
         .get(&object)
@@ -129,7 +133,7 @@ pub fn replace_text(
         ));
     };
     if &text[start..end] == replacement {
-        return Ok(source.to_vec());
+        return Ok(Changes::new());
     }
     let added = u32::try_from(replacement.encode_utf16().count())
         .map_err(|_| invalid("Replacement text exceeds the UTF-16 offset range"))?;
@@ -235,9 +239,9 @@ pub fn replace_text(
         pending.extend(parents.get(&id).into_iter().flatten().copied());
     }
     let Some((page, automatic, title_text)) =
-        page_title(revision, &pages, Some((object, &changed)))?
+        active.title(&BTreeMap::new(), Some((object, &changed)))?
     else {
-        return crate::write::replace_objects(&index, space, &edits);
+        return crate::write::patched(raw, &edits);
     };
     let Kind::Page {
         alternate_title, ..
@@ -296,7 +300,7 @@ pub fn replace_text(
             &[]
         },
     });
-    crate::write::replace_objects(&index, space, &edits)
+    crate::write::patched(raw, &edits)
 }
 
 pub(crate) fn editable_parents(
@@ -304,8 +308,19 @@ pub(crate) fn editable_parents(
     pages: &[ExGuid],
     object: ExGuid,
 ) -> Result<std::collections::BTreeMap<ExGuid, Vec<ExGuid>>, Error> {
-    let invalid = |message| Error { offset: 0, message };
     let parents = revision.parents(pages)?;
+    check_editable(revision, &parents, pages, object)?;
+    Ok(parents)
+}
+
+/// Requires `object` on an active page with neither it nor an ancestor read-only.
+pub(crate) fn check_editable(
+    revision: &crate::document::Revision<'_>,
+    parents: &BTreeMap<ExGuid, Vec<ExGuid>>,
+    pages: &[ExGuid],
+    object: ExGuid,
+) -> Result<(), Error> {
+    let invalid = |message| Error { offset: 0, message };
     if !parents.contains_key(&object) && !pages.contains(&object) {
         return Err(invalid("Select content on an active editable page"));
     }
@@ -323,7 +338,7 @@ pub(crate) fn editable_parents(
         }
         pending.extend(parents.get(&id).into_iter().flatten().copied());
     }
-    Ok(parents)
+    Ok(())
 }
 
 pub(crate) fn page_title(
@@ -331,14 +346,32 @@ pub(crate) fn page_title(
     pages: &[ExGuid],
     text_update: Option<(ExGuid, &str)>,
 ) -> Result<Option<(ExGuid, bool, String)>, Error> {
+    title_of(
+        |id| revision.nodes.get(&id),
+        &revision.parents(pages)?,
+        revision.nodes.keys().copied(),
+        pages,
+        text_update,
+    )
+}
+
+/// `page_title` over the elements `node` finds, whose parents from `pages` are `parents`;
+/// `candidates` lists, in order, every element that may be title text.
+pub(crate) fn title_of<'n>(
+    node: impl Fn(ExGuid) -> Option<&'n Element<'n>>,
+    parents: &BTreeMap<ExGuid, Vec<ExGuid>>,
+    candidates: impl Iterator<Item = ExGuid>,
+    pages: &[ExGuid],
+    text_update: Option<(ExGuid, &str)>,
+) -> Result<Option<(ExGuid, bool, String)>, Error> {
     let invalid = |message| Error { offset: 0, message };
-    let parents = revision.parents(pages)?;
-    let seen: std::collections::BTreeSet<_> = parents.keys().chain(pages).copied().collect();
-    let titles: Vec<_> = revision
-        .nodes
-        .iter()
-        .filter_map(|(id, node)| {
-            if !seen.contains(id) || !node.extra[0].iter().any(|field| field.id == 0x88001cb4) {
+    let titles: Vec<_> = candidates
+        .filter_map(|id| {
+            if !parents.contains_key(&id) && !pages.contains(&id) {
+                return None;
+            }
+            let node = node(id)?;
+            if !node.extra[0].iter().any(|field| field.id == 0x88001cb4) {
                 return None;
             }
             match &node.kind {
@@ -346,7 +379,7 @@ pub(crate) fn page_title(
                     text,
                     boilerplate: false,
                     ..
-                } => Some((*id, text.as_str())),
+                } => Some((id, text.as_str())),
                 _ => None,
             }
         })
@@ -369,15 +402,15 @@ pub(crate) fn page_title(
     let [page] = pages else {
         return Err(invalid("Title editing requires a single active page"));
     };
-    let Kind::Page { rtl, .. } = &revision.nodes[page].kind else {
+    let Kind::Page { rtl, .. } = &node(*page).unwrap().kind else {
         unreachable!()
     };
     let mut title_text = title_line(title_text);
     if automatic {
-        let mut roots = revision.nodes[page].children.clone();
+        let mut roots = node(*page).unwrap().children.clone();
         roots.sort_by(|a, b| {
-            let a = &revision.nodes[a].layout;
-            let b = &revision.nodes[b].layout;
+            let a = &node(*a).unwrap().layout;
+            let b = &node(*b).unwrap().layout;
             a.y.unwrap_or(0.0)
                 .total_cmp(&b.y.unwrap_or(0.0))
                 .then_with(|| {
@@ -394,12 +427,12 @@ pub(crate) fn page_title(
             if !seen.insert(id) {
                 continue;
             }
-            let node = &revision.nodes[&id];
+            let element = node(id).unwrap();
             if let Kind::RichText {
                 text,
                 boilerplate: false,
                 ..
-            } = &node.kind
+            } = &element.kind
             {
                 title_text = automatic_title(
                     if let Some((_, changed)) = text_update.filter(|(object, _)| *object == id) {
@@ -412,40 +445,37 @@ pub(crate) fn page_title(
                     break;
                 }
             }
-            if *rtl == Some(true) && matches!(node.kind, Kind::Row) {
-                pending.extend(node.children.iter().copied());
+            if *rtl == Some(true) && matches!(element.kind, Kind::Row) {
+                pending.extend(element.children.iter().copied());
             } else {
-                pending.extend(node.children.iter().rev().copied());
+                pending.extend(element.children.iter().rev().copied());
             }
-            pending.extend(node.content.iter().rev().copied());
-            pending.extend(node.structure.iter().rev().copied());
+            pending.extend(element.content.iter().rev().copied());
+            pending.extend(element.structure.iter().rev().copied());
         }
     }
     Ok(Some((*page, automatic, title_text.to_owned())))
 }
 
+/// Updates the page title for `changed` objects made on `view`, a copy of the page's view.
 pub(crate) fn update_title(
-    store: &Store<'_>,
-    raw: &crate::ResolvedRevision<'_>,
+    active: &ActivePage<'_>,
     view: crate::document::Revision<'_>,
-    pages: &[ExGuid],
     changed: &mut BTreeMap<ExGuid, PropertyObject>,
 ) -> Result<(), Error> {
     let invalid = |message| Error { offset: 0, message };
+    let (raw, pages) = (&active.live.revision, &active.pages);
     // Shorten the moved view's lifetime to the changed property buffers.
     let mut view = view;
     for (id, object) in changed.iter() {
         view.nodes.insert(
             *id,
-            Element::parse(
-                &Object {
-                    jcid: object.jcid,
-                    reference_count: 0,
-                    data: ObjectData::Properties(&object.bytes),
-                    global_ids: Arc::clone(&object.global_ids),
-                },
-                store,
-            )?,
+            active.element(&Object {
+                jcid: object.jcid,
+                reference_count: 0,
+                data: ObjectData::Properties(&object.bytes),
+                global_ids: Arc::clone(&object.global_ids),
+            })?,
         );
     }
     let title = page_title(&view, pages, None)?;

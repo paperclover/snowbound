@@ -274,9 +274,20 @@ impl Replica {
         after: &Page,
         author: &str,
     ) -> Result<Option<u64>> {
+        Ok(self.save_image(source, space, after, author)?.0)
+    }
+
+    /// `save`, with the working image it leaves.
+    pub(crate) fn save_image(
+        &self,
+        source: &[u8],
+        space: ExGuid,
+        after: &Page,
+        author: &str,
+    ) -> Result<(Option<u64>, Vec<u8>)> {
         let prepared = PreparedEdit::page(source, space, after, author)?;
         if prepared.as_bytes() == source {
-            return Ok(None);
+            return Ok((None, source.to_vec()));
         }
         let before = page_of(source, space)?.ok_or_else(|| {
             io::Error::new(
@@ -332,11 +343,12 @@ impl Replica {
                     transaction.commit()?;
                     drop(connection);
                     self.wake_sync();
-                    return Ok(Some(u64::try_from(id).map_err(io::Error::other)?));
+                    let id = u64::try_from(id).map_err(io::Error::other)?;
+                    return Ok((Some(id), prepared.as_bytes().to_vec()));
                 }
             }
         }
-        self.record(
+        let id = self.record(
             source,
             space,
             Operation::Page(PageIntent {
@@ -345,7 +357,8 @@ impl Replica {
                 author: author.to_owned(),
             }),
             &prepared,
-        )
+        )?;
+        Ok((id, prepared.as_bytes().to_vec()))
     }
 
     /// Queues a new page and its section entry with stable identities for dependent edits.

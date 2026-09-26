@@ -1,9 +1,10 @@
 use crate::{
-    Error, ExGuid, RevisionIndex, Store,
+    Error, ExGuid,
+    active::{ActivePage, Changes},
     create::current_timestamps,
-    document::{Document, Kind},
-    edit::{editable_parents, update_title},
-    write::{PropertyObject, write_revision_on},
+    document::Kind,
+    edit::update_title,
+    write::PropertyObject,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -30,6 +31,10 @@ impl OutlineEdit {
         space: ExGuid,
         object: ExGuid,
     ) -> Result<Vec<u8>, Error> {
+        crate::active::write(source, space, |active| self.changes(active, object))
+    }
+
+    pub(crate) fn changes(self, active: &ActivePage<'_>, object: ExGuid) -> Result<Changes, Error> {
         let invalid = |message| Error { offset: 0, message };
         let values = match self {
             Self::Position { x, y } => {
@@ -54,20 +59,12 @@ impl OutlineEdit {
             }
             Self::Collapsed(value) => vec![(0x0c001c11, vec![u8::from(value)])],
         };
-        let store = Store::parse(source)?;
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
-        let mut document = Document::parse(&index)?;
-        let pages = document.pages_in(space)?;
+        let pages = &active.pages;
         let [page] = pages.as_slice() else {
             return Err(invalid("Outline editing requires a single active page"));
         };
-        let view = document
-            .spaces
-            .remove(&space)
-            .and_then(crate::document::Space::into_active)
-            .unwrap();
-        let parents = editable_parents(&view, &pages, object)?;
+        let view = &active.view;
+        let parents = active.editable_parents(object)?;
         let node = &view.nodes[&object];
         match self {
             Self::Collapsed(_) => {
@@ -105,34 +102,33 @@ impl OutlineEdit {
             pending.extend(parents.get(&id).into_iter().flatten().copied());
         }
         let modified = current_timestamps()?.0.to_le_bytes();
-        write_revision_on(&index, space, |raw| {
-            let mut target = PropertyObject::from_object(&raw.objects[&object])?;
-            target.set(
-                &values
-                    .iter()
-                    .map(|(id, data)| (*id, data.as_slice()))
-                    .collect::<Vec<_>>(),
-            )?;
-            if matches!(self, Self::Width { .. }) {
-                target.remove(&[0x14001cdb])?;
+        let raw = &active.live.revision;
+        let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+        target.set(
+            &values
+                .iter()
+                .map(|(id, data)| (*id, data.as_slice()))
+                .collect::<Vec<_>>(),
+        )?;
+        if matches!(self, Self::Width { .. }) {
+            target.remove(&[0x14001cdb])?;
+        }
+        if raw.objects[&object].data == crate::ObjectData::Properties(&target.bytes) {
+            return Ok(BTreeMap::new());
+        }
+        target.set(&[(0x14001d7a, &modified)])?;
+        let mut changed = BTreeMap::from([(object, target)]);
+        for id in ancestors {
+            if id != object {
+                let mut ancestor = PropertyObject::from_object(&raw.objects[&id])?;
+                ancestor.set(&[(0x14001d7a, &modified)])?;
+                changed.insert(id, ancestor);
             }
-            if raw.objects[&object].data == crate::ObjectData::Properties(&target.bytes) {
-                return Ok(BTreeMap::new());
-            }
-            target.set(&[(0x14001d7a, &modified)])?;
-            let mut changed = BTreeMap::from([(object, target)]);
-            for id in ancestors {
-                if id != object {
-                    let mut ancestor = PropertyObject::from_object(&raw.objects[&id])?;
-                    ancestor.set(&[(0x14001d7a, &modified)])?;
-                    changed.insert(id, ancestor);
-                }
-            }
-            if matches!(self, Self::Position { .. }) {
-                update_title(&store, raw, view, &pages, &mut changed)?;
-            }
-            Ok(changed)
-        })
+        }
+        if matches!(self, Self::Position { .. }) {
+            update_title(active, view.clone(), &mut changed)?;
+        }
+        Ok(changed)
     }
 }
 
@@ -140,6 +136,7 @@ impl OutlineEdit {
 mod tests {
     use super::*;
     use crate::write::write_revision;
+    use crate::{RevisionIndex, Store, document::Document};
 
     #[test]
     fn protection_on_the_target_or_ancestor_prevents_layout_edits() {
