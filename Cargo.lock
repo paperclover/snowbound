@@ -3073,6 +3073,9 @@ version = "0.1.0"
 dependencies = [
  "draw",
  "parley",
+ "png",
+ "pollster",
+ "wgpu",
  "winit",
 ]
 

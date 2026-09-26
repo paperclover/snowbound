@@ -41,7 +41,7 @@ pub fn section_tabs(
     let placed: Vec<_> = tabs
         .iter()
         .map(|(name, _)| {
-            let width = 10.0 + ui.measure(name)[0] + 4.0 + tallest / 2.0;
+            let width = 10.0 + ui.measure(name)[0] + 4.0 + lean(height);
             left += width;
             (left - width, width)
         })
@@ -75,7 +75,7 @@ pub fn section_tabs(
                 border: Some(fade(section.edge, open)),
                 shadow: (open > 0.0).then(|| fade([0.0, 0.0, 0.0, 0.35], open)),
                 radius: TAB_ROUNDING,
-                shape: Shape::Tab { slant: tall },
+                shape: Shape::Tab { lean: lean(height) },
                 pad: [10.0, 0.0],
                 ..Spec::default()
             },
@@ -89,10 +89,15 @@ pub fn section_tabs(
     (clicked, open_tab)
 }
 
-/// Where the tab laid out at `tab` meets the edge below it: from its leading edge to the
-/// foot of its slant.
-pub fn tab_base(tab: [f32; 4]) -> [f32; 2] {
-    [tab[0], tab[2] + (tab[3] - tab[1]) / 2.0]
+/// Where the tab laid out at `tab` in a row `height` tall meets the edge below it: from its
+/// leading edge to the foot of its slant.
+pub fn tab_base(tab: [f32; 4], height: f32) -> [f32; 2] {
+    [tab[0], tab[2] - lean(height) + (tab[3] - tab[1])]
+}
+
+/// How far inside a tab's box its slant starts: half the open tab's height.
+fn lean(height: f32) -> f32 {
+    (height - 2.0) / 2.0
 }
 
 /// A square button showing `icon` tinted by `tint`; artwork in its own colours takes white.

@@ -21,6 +21,9 @@ pub struct Theme {
     pub paper_ink: [f32; 4],
     /// Key caps, small controls and field borders.
     pub chip: [f32; 4],
+    /// Menus and other popups, and the shadow they cast.
+    pub popup: [f32; 4],
+    pub shadow: [f32; 4],
     /// Saturation and lightness each of a section's colours takes from its hue.
     pub shades: Shades,
 }
@@ -62,6 +65,8 @@ impl Theme {
             paper: srgb(0x1f, 0x20, 0x22),
             paper_ink: srgb(0xe6, 0xe6, 0xe6),
             chip: srgb(0x38, 0x3c, 0x3d),
+            popup: srgb(0x2b, 0x2e, 0x30),
+            shadow: [0.0, 0.0, 0.0, 0.6],
             shades: Shades {
                 frame: [[0.30, 0.36], [0.30, 0.30]],
                 tab: [0.22, 0.25],
@@ -84,6 +89,8 @@ impl Theme {
             paper: [1.0; 4],
             paper_ink: [0.0, 0.0, 0.0, 1.0],
             chip: srgb(0xcf, 0xd3, 0xd9),
+            popup: [1.0; 4],
+            shadow: [0.0, 0.0, 0.0, 0.3],
             shades: Shades {
                 frame: [[0.55, 0.82], [0.55, 0.76]],
                 tab: [0.45, 0.70],

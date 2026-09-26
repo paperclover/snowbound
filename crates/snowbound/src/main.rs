@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
     time::Instant,
 };
-use ui::{Axis, Flags, Id, Shape, Spec, Theme, Ui, children, fill, fit, px};
+use ui::{Axis, Flags, Id, Spec, Theme, Ui, children, fill, fit, px};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -727,7 +727,10 @@ impl State {
             paper,
             |_| strip,
         );
-        let [foot, toe] = self.ui.rect(open_tab).map_or([end; 2], ui::shell::tab_base);
+        let [foot, toe] = self
+            .ui
+            .rect(open_tab)
+            .map_or([end; 2], |tab| ui::shell::tab_base(tab, TAB_ROW));
         for edge in [
             [
                 ([start, frame[1] + outer], 0.0),
@@ -1089,28 +1092,41 @@ impl State {
                 pad: [10.0 + 16.0 * level.saturating_sub(1) as f32, 0.0],
                 ..Spec::default()
             };
-            let spec = if selected {
+            let clicked = if selected {
                 open = Some(self.ui.id(space));
-                Spec {
+                let spec = Spec {
                     color: Some(theme.paper_ink),
                     fill: Some(theme.paper),
                     ..spec
-                }
+                };
+                self.ui.leaf(space, spec).clicked
             } else {
-                Spec {
+                // Tabs not open float free of the page as pills; only the open one joins it.
+                self.ui.open(
+                    space,
+                    Spec {
+                        size: [px(PAGE_LIST), px(26.0)],
+                        pad: [6.0, 0.0],
+                        ..Spec::default()
+                    },
+                );
+                let spec = Spec {
+                    size: [fill(), px(26.0)],
                     color: Some(if title.is_empty() {
                         ui::mix(theme.ink, section.tab, 0.5)
                     } else {
                         theme.ink
                     }),
                     fill: Some(section.tab),
-                    hover_fill: Some(section.frame[0]),
-                    radius: ROUNDING,
-                    shape: Shape::Trailing,
+                    hover_fill: Some(ui::mix(section.tab, theme.ink, 0.12)),
+                    radius: 13.0,
                     ..spec
-                }
+                };
+                let clicked = self.ui.leaf("pill", spec).clicked;
+                self.ui.close();
+                clicked
             };
-            if self.ui.leaf(space, spec).clicked && !selected {
+            if clicked && !selected {
                 self.commands.push(Command::OpenPage(*space));
             }
         }

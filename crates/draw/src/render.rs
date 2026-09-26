@@ -1098,7 +1098,9 @@ impl Renderer {
             rect[3] * space.scale + space.origin[1],
         ];
         let start = self.vertices.len();
-        self.quad(space, rect, [0.5 / ATLAS_SIZE as f32; 4], colors[0])?;
+        // A pixel of margin holds the antialiased fringe outside the edge.
+        let fringe = [rect[0] - 1.0, rect[1] - 1.0, rect[2] + 1.0, rect[3] + 1.0];
+        self.quad(space, fringe, [0.5 / ATLAS_SIZE as f32; 4], colors[0])?;
         let half = [(rect[2] - rect[0]) * 0.5, (rect[3] - rect[1]) * 0.5];
         if !(4.0 * (half[0] + half[1])).is_finite() || !colors[1].iter().all(|v| v.is_finite()) {
             return Err(RenderError::InvalidPrimitive);

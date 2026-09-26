@@ -74,10 +74,14 @@ pub(crate) fn solve(nodes: &mut [Built], states: &HashMap<Id, State>, scale: f32
                 }
             }
         }
+        let window = nodes[0].computed[axis];
         for index in 0..nodes.len() {
             let mut cursor = nodes[index].pad[axis];
             for child in nodes[index].children.clone() {
-                nodes[child].relative[axis] = if nodes[child].flags.contains(Flags::FLOAT) {
+                nodes[child].relative[axis] = if let Some(anchor) = nodes[child].anchor {
+                    let slide = (1.0 - nodes[child].alpha) * crate::SLIDE;
+                    anchor.place(axis, nodes[child].computed[axis], window, slide)
+                } else if nodes[child].flags.contains(Flags::FLOAT) {
                     nodes[child].position[axis]
                 } else if along(&nodes[index], axis) {
                     let at = cursor;
@@ -127,11 +131,9 @@ fn strictness(nodes: &[Built], index: usize, axis: usize) -> f32 {
 }
 
 fn in_flow(nodes: &[Built], index: usize) -> impl Iterator<Item = usize> + '_ {
-    nodes[index]
-        .children
-        .iter()
-        .copied()
-        .filter(|child| !nodes[*child].flags.contains(Flags::FLOAT))
+    nodes[index].children.iter().copied().filter(|child| {
+        !nodes[*child].flags.contains(Flags::FLOAT) && nodes[*child].anchor.is_none()
+    })
 }
 
 /// The children's extent on `axis`: summed with gaps along the flow, otherwise the largest.
