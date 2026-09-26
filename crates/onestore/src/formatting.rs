@@ -100,20 +100,8 @@ impl TextAttribute {
     }
 }
 
-pub(crate) fn format_text(
-    source: &[u8],
-    space: ExGuid,
-    object: ExGuid,
-    range: Range<u32>,
-    attributes: &[TextAttribute],
-) -> Result<Vec<u8>, Error> {
-    crate::active::write(source, space, |active| {
-        format_changes(active, object, range, attributes, &[])
-    })
-}
-
-/// `format_text` on an active page, also removing the `cleared` properties from the range's
-/// run styles so the text inherits them.
+/// Character formatting set over a UTF-16 range, also removing the `cleared` properties
+/// from the range's run styles so the text inherits them.
 pub(crate) fn format_changes(
     active: &ActivePage<'_>,
     object: ExGuid,

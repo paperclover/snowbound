@@ -287,17 +287,16 @@ pub fn save(
     text: ExGuid,
     edit: impl FnOnce(&mut Page),
 ) -> Result<Option<u64>, notebook::Error> {
-    let (space, _) = locate(&cache.snapshot()?, text);
-    save_page(cache, space, edit)
-}
-
-/// Resolves a conflict by taking the remote page, then queues `edit` of it.
-pub fn review(
-    cache: &Replica,
-    id: u64,
-    text: ExGuid,
-    edit: impl FnOnce(&mut Page),
-) -> Result<Option<u64>, notebook::Error> {
-    cache.resolve(id, notebook::Resolution::Theirs)?;
-    save(cache, text, edit)
+    let mut space = None;
+    for (listed, ..) in cache.pages()? {
+        if paragraph_with(&cache.page(listed)?, text).is_some() {
+            space = Some(listed);
+            break;
+        }
+    }
+    save_page(
+        cache,
+        space.expect("text object belongs to an active page"),
+        edit,
+    )
 }

@@ -17,7 +17,6 @@ pub mod text;
 
 pub use ink::{Ink, InkStroke};
 pub use math::Math;
-pub(crate) mod write;
 
 /// Picture and attachment payloads travel with the model (queued intents replay them),
 /// as base64 text.
@@ -52,6 +51,10 @@ mod payload {
 }
 pub use text::Paragraph;
 
+/// The page node's colour (View, Page Color) as COLORREF, absent for "No color"; not in
+/// MS-ONE, observed in OneNote 2010's pages (`evidence/notebook-management`).
+pub(crate) const PAGE_COLOR: u32 = 0x14001d2a;
+
 /// The role of a title-outline paragraph that displays the page's creation date or time.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DateField {
@@ -67,6 +70,9 @@ pub struct Page {
     /// FILETIME ticks from the page's TopologyCreationTimeStamp.
     pub created: Option<u64>,
     pub margin_origin: [f32; 2],
+    /// The page's colour (View, Page Color), COLORREF; `None` is OneNote's "No color".
+    #[serde(default)]
+    pub color: Option<u32>,
     pub objects: Vec<PageObject>,
     pub definitions: BTreeMap<ExGuid, Definition>,
 }
@@ -394,9 +400,14 @@ impl Page {
     /// links keep naming the original. Content outside the model has no copy, so an
     /// `Unsupported` object is an error.
     pub fn copy(&self) -> Result<Self, Error> {
+        self.copy_with(&mut [])
+    }
+
+    /// `copy`, renaming `ids`, identities on this page, to theirs on the copy.
+    pub fn copy_with(&self, ids: &mut [ExGuid]) -> Result<Self, Error> {
         let invalid = |message| Error { offset: 0, message };
-        let mut value =
-            serde_json::to_value(self).map_err(|_| invalid("Page is not serializable"))?;
+        let mut value = serde_json::to_value((self, &*ids))
+            .map_err(|_| invalid("Page is not serializable"))?;
         let mut fresh: BTreeMap<String, String> = BTreeMap::new();
         fn walk(
             value: &mut serde_json::Value,
@@ -444,8 +455,9 @@ impl Page {
             Ok(())
         }
         walk(&mut value, &mut fresh)?;
-        let mut copy: Self =
+        let (mut copy, renamed): (Self, Vec<ExGuid>) =
             serde_json::from_value(value).map_err(|_| invalid("Page copy does not deserialize"))?;
+        ids.copy_from_slice(&renamed);
         copy.identity = Some(crate::write::fresh_guid()?);
         // A paragraph's indent level follows its parent chain; a level beyond that comes
         // from an outline group, which the model does not hold.
@@ -475,6 +487,28 @@ impl Page {
             return Err(invalid("Outline groups cannot be copied"));
         }
         Ok(copy)
+    }
+
+    /// The date and time the title's date fields show, when it has both.
+    pub fn date_text(&self) -> Option<[String; 2]> {
+        let title = self.objects.iter().find_map(|object| match object {
+            PageObject::Title(title) => Some(title),
+            _ => None,
+        })?;
+        let outline = title.outlines.iter().find(|outline| Some(outline.id) == title.date)?;
+        let [first, second] = &outline.paragraphs[..] else {
+            return None;
+        };
+        let [first, second] = [first.text()?, second.text()?];
+        let text = |object: &TextObject| object.text.text().to_owned();
+        // OneNote writes the date first; a field marked as the other role says otherwise.
+        Some(
+            if first.date_field == Some(DateField::Time) || second.date_field == Some(DateField::Date) {
+                [text(second), text(first)]
+            } else {
+                [text(first), text(second)]
+            },
+        )
     }
 
     /// The notebook-management identity of the page in an active page revision, which
@@ -562,6 +596,17 @@ impl Page {
                 margin_origin_x.unwrap_or(1.0_f32 * 36.0),
                 margin_origin_y.unwrap_or(0.4_f32 * 36.0),
             ],
+            color: root
+                .extra
+                .first()
+                .and_then(|fields| fields.iter().find(|field| field.id == PAGE_COLOR))
+                .map(|field| match field.value {
+                    FieldValue::Bytes(&[red, green, blue, alpha]) => {
+                        Ok(u32::from_le_bytes([red, green, blue, alpha]))
+                    }
+                    _ => Err(invalid("The page colour is damaged")),
+                })
+                .transpose()?,
             objects: Vec::new(),
             definitions: BTreeMap::new(),
         };

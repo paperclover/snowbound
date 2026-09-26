@@ -1,4 +1,3 @@
-use crate::{ExGuid, replace_property_bytes};
 use std::io::{self, ErrorKind};
 
 #[cfg(any(unix, windows))]
@@ -33,8 +32,14 @@ impl FileIo {
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            // SMB can lose exclusion when separate opens race with flock.
-            options.custom_flags(nix::libc::O_EXLOCK | nix::libc::O_NONBLOCK);
+            // SMB can lose exclusion when separate opens race with flock. On smbfs these are
+            // share modes: a shared reader denies only writers, so OneNote's readers proceed.
+            let lock = if write {
+                nix::libc::O_EXLOCK
+            } else {
+                nix::libc::O_SHLOCK
+            };
+            options.custom_flags(lock | nix::libc::O_NONBLOCK);
         }
         let file = options.open(path)?;
         #[cfg(not(target_os = "macos"))]
@@ -100,14 +105,14 @@ pub fn place_file(path: impl AsRef<Path>, ancestor: [u8; 16], name: &str) -> io:
     released
 }
 
-/// Reads a snapshot under the same whole-file exclusion used for commits.
-/// Native writers can expose incomplete graphs to unlocked filesystem reads.
+/// Reads a snapshot excluding writers, as commits exclude everyone (macOS shares it with
+/// other readers). Native writers can expose incomplete graphs to unlocked filesystem reads.
 #[cfg(any(unix, windows))]
 pub fn read_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     read_file_limited(path, usize::MAX)
 }
 
-/// Reads under whole-file exclusion, rejecting a snapshot larger than the byte limit.
+/// `read_file`, rejecting a snapshot larger than the byte limit.
 /// A size failure returns `FileTooLarge` without a partial snapshot.
 #[cfg(any(unix, windows))]
 pub fn read_file_limited(path: impl AsRef<Path>, limit: usize) -> io::Result<Vec<u8>> {
@@ -147,278 +152,25 @@ impl CommitIo for FileIo {
     }
 }
 
-/// Commits under an exclusive whole-file lock; contention returns WouldBlock.
-/// Calls are serialized within this process because macOS SMB locks are reentrant.
-/// Durability relies on the filesystem and server honoring their flush contract.
-/// A changed snapshot returns ResourceBusy without publishing the edit.
+/// `confirm` under the same whole-file exclusion `commit_file` uses.
 #[cfg(any(unix, windows))]
-pub fn commit_file_property(
-    path: impl AsRef<Path>,
-    source: &[u8],
-    space: ExGuid,
-    object: ExGuid,
-    property: u32,
-    value: &[u8],
-) -> Result<(), CommitError> {
+pub fn confirm_file(path: impl AsRef<Path>, base: &Stamp) -> Result<(), CommitError> {
     let mut io = FileIo::open(path, true).map_err(|error| CommitError {
         state: CommitState::NotCommitted,
         error,
     })?;
-    let result = commit_property_bytes(&mut io, source, space, object, property, value);
+    let result = confirm(&mut io, base);
     io.finish(result)
 }
 
-/// Commits a text edit with the same exclusion and snapshot check as scalar edits.
-#[cfg(any(unix, windows))]
-pub fn commit_file_text(
-    path: impl AsRef<Path>,
-    source: &[u8],
-    space: ExGuid,
-    object: ExGuid,
-    range: std::ops::Range<u32>,
-    replacement: &str,
-) -> Result<(), CommitError> {
-    let mut io = FileIo::open(path, true).map_err(|error| CommitError {
-        state: CommitState::NotCommitted,
-        error,
-    })?;
-    let result = commit_text(&mut io, source, space, object, range, replacement);
-    io.finish(result)
-}
-
-/// Atomically publishes text and its dependent run boundaries under caller-held exclusion.
-pub fn commit_text(
-    io: &mut impl CommitIo,
-    source: &[u8],
-    space: ExGuid,
-    object: ExGuid,
-    range: std::ops::Range<u32>,
-    replacement: &str,
-) -> Result<(), CommitError> {
-    PreparedEdit::text(source, space, object, range, replacement)
-        .map_err(|error| CommitError {
-            state: CommitState::NotCommitted,
-            error: io::Error::new(ErrorKind::InvalidData, error),
-        })?
-        .commit(io)
-}
-
-/// An immutable writer-generated transition tied to its original snapshot.
-/// Persist intended revision identities from `as_bytes` before publishing an offline edit.
-/// Missing identities after native maintenance do not prove an edit was never published.
-pub struct PreparedEdit<'a> {
-    source: &'a [u8],
-    written: Vec<u8>,
-}
-
-impl<'a> PreparedEdit<'a> {
-    /// Applies page moves in slice order and publishes final order and indentation atomically.
-    /// Each page occurs once; all pages to move must be explicit, including selected subpages.
-    pub fn pages(source: &'a [u8], edits: &[crate::PageEdit]) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: crate::pages::edit_pages(source, edits, &[])?,
-        })
-    }
-
-    /// Applies table-of-contents edits (sections and section groups: add, rename, colour,
-    /// order, remove) as one revision of a `.onetoc2` file.
-    pub fn table_of_contents(
-        source: &'a [u8],
-        edits: &[crate::TocEdit],
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: crate::toc::edit_table_of_contents(source, edits)?,
-        })
-    }
-
-    /// Permanently removes explicitly selected pages from the section in one transaction.
-    /// Subpages must be selected explicitly; a surviving first subpage becomes top-level.
-    /// Creates no recycle-bin copies. Prior revisions remain stored; this is not secure erasure.
-    pub fn delete_pages_permanently(
-        source: &'a [u8],
-        pages: &[crate::ExGuid],
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: crate::pages::edit_pages(source, &[], pages)?,
-        })
-    }
-
-    /// Publishes an edited page model as one revision per changed space.
-    /// The model must come from this snapshot; new paragraphs and outlines carry the identities
-    /// the model assigned, and content outside the model is untouched.
-    pub fn page(
-        source: &'a [u8],
-        space: ExGuid,
-        page: &crate::page::Page,
-        author: &str,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: crate::page::write::write_page(source, space, page, author)?,
-        })
-    }
-
-    /// `page` for a password-protected section: the revision is stored under the section's
-    /// key. The model must come from this snapshot unlocked with `password`.
-    #[cfg(feature = "protected")]
-    pub fn page_protected(
-        source: &'a [u8],
-        password: &str,
-        space: ExGuid,
-        page: &crate::page::Page,
-        author: &str,
-    ) -> Result<Self, crate::protected::Error> {
-        Ok(Self {
-            source,
-            written: crate::protected::write_page(source, password, space, page, author)?,
-        })
-    }
-
-    /// Creates a page and its section entry in one transaction, retaining the intent's identities.
-    pub fn create_page(source: &'a [u8], page: &crate::PageCreation) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: page.apply(source)?,
-        })
-    }
-
-    /// Moves or removes a subtree and normalizes its containers in one revision.
-    pub fn tree(
-        source: &'a [u8],
-        space: ExGuid,
-        edit: &crate::TreeEdit,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: edit.apply(source, space)?,
-        })
-    }
-
-    /// Changes outline geometry or a paragraph's saved expansion state, preserving content.
-    pub fn outline(
-        source: &'a [u8],
-        space: ExGuid,
-        object: ExGuid,
-        edit: crate::OutlineEdit,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: edit.apply(source, space, object)?,
-        })
-    }
-
-    /// Joins adjacent ordinary paragraphs with native left-tag and text-identity semantics.
-    pub fn join(
-        source: &'a [u8],
-        space: ExGuid,
-        join: &crate::ParagraphJoin,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: join.apply(source, space)?,
-        })
-    }
-
-    /// Splits a paragraph and updates its children, lists, tags and title metadata atomically.
-    /// Fields and associated run metadata are rejected before I/O.
-    pub fn split(
-        source: &'a [u8],
-        space: ExGuid,
-        split: &crate::ParagraphSplit,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: split.apply(source, space)?,
-        })
-    }
-
-    /// Prepares an insertion and its dependent metadata in one revision, without I/O.
-    pub fn insert(
-        source: &'a [u8],
-        space: ExGuid,
-        insertion: &crate::Insertion,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: insertion.apply(source, space)?,
-        })
-    }
-
-    /// Validates and prepares a text edit without I/O, with `replace_text` semantics.
-    pub fn text(
-        source: &'a [u8],
-        space: ExGuid,
-        object: ExGuid,
-        range: std::ops::Range<u32>,
-        replacement: &str,
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: crate::replace_text(source, space, object, range, replacement)?,
-        })
-    }
-
-    /// Changes character formatting over a UTF-16 range, preserving unselected runs and styles.
-    /// A zero-length range sets the insertion style only when the paragraph is empty.
-    /// Fields, associated run objects and boundaries splitting preserved run data are rejected.
-    pub fn format(
-        source: &'a [u8],
-        space: ExGuid,
-        object: ExGuid,
-        range: std::ops::Range<u32>,
-        attributes: &[crate::TextAttribute],
-    ) -> Result<Self, crate::Error> {
-        Ok(Self {
-            source,
-            written: crate::formatting::format_text(source, space, object, range, attributes)?,
-        })
-    }
-
-    /// The exact complete image this edit will publish; identities do not regenerate on commit.
-    /// Do not overwrite a live notebook with this image; use `commit` under exclusion.
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.written
-    }
-
-    /// The bytes publishing this edit writes, against its snapshot's stamp.
-    pub fn transaction(&self) -> Transaction {
-        Transaction::between(self.source, &self.written)
-    }
-
-    /// `Transaction::commit` of this edit.
-    pub fn commit(&self, io: &mut impl CommitIo) -> Result<(), CommitError> {
-        self.transaction().commit(io)
-    }
-
-    /// `Transaction::commit_file` of this edit.
-    #[cfg(any(unix, windows))]
-    pub fn commit_file(&self, path: impl AsRef<Path>) -> Result<(), CommitError> {
-        self.transaction().commit_file(path)
-    }
-}
-
-/// `confirm_snapshot` under the same whole-file exclusion `commit_file` uses.
-#[cfg(any(unix, windows))]
-pub fn confirm_file_snapshot(path: impl AsRef<Path>, source: &[u8]) -> Result<(), CommitError> {
-    let mut io = FileIo::open(path, true).map_err(|error| CommitError {
-        state: CommitState::NotCommitted,
-        error,
-    })?;
-    let result = confirm_snapshot(&mut io, source);
-    io.finish(result)
-}
-
-/// Checks and flushes a snapshot's stamp, then refreshes its header version metadata.
-/// No revision is added; reread before using the snapshot for another physical commit.
+/// Checks that the file still has `base`'s stamp and flushes it, then refreshes its header
+/// version metadata. No revision is added; reread before committing on `base` again.
 /// The caller must hold OneNote-compatible exclusion and independently establish which
-/// intents the snapshot contains. A successful read alone is not a durable acknowledgement.
-pub fn confirm_snapshot(io: &mut impl CommitIo, source: &[u8]) -> Result<(), CommitError> {
+/// intents the image contains. A successful read alone is not a durable acknowledgement.
+pub fn confirm(io: &mut impl CommitIo, base: &Stamp) -> Result<(), CommitError> {
     let mut state = CommitState::NotCommitted;
     let result = (|| -> io::Result<()> {
-        let header = crate::Header::parse(source).map_err(io::Error::other)?;
+        let header = crate::Header::parse(&base.header).map_err(io::Error::other)?;
         let generation = header
             .generation
             .checked_add(1)
@@ -427,7 +179,7 @@ pub fn confirm_snapshot(io: &mut impl CommitIo, source: &[u8]) -> Result<(), Com
         version[..16].copy_from_slice(&crate::write::fresh_guid().map_err(io::Error::other)?);
         version[16..24].copy_from_slice(&generation.to_le_bytes());
         version[24..].copy_from_slice(&crate::write::fresh_guid().map_err(io::Error::other)?);
-        Stamp::of(source).map_err(io::Error::other)?.check(io)?;
+        base.check(io)?;
         state = CommitState::Unknown;
         io.flush()?;
         write_all(io, 212, &version)?;
@@ -491,26 +243,6 @@ fn write_all(io: &mut impl CommitIo, mut offset: u64, mut bytes: &[u8]) -> io::R
         }
     }
     Ok(())
-}
-
-/// Publishes a scalar revision after checking the locked file against its snapshot.
-/// Unknown outcomes require rereading; Committed errors affect lock release.
-pub fn commit_property_bytes(
-    io: &mut impl CommitIo,
-    source: &[u8],
-    space: ExGuid,
-    object: ExGuid,
-    property: u32,
-    value: &[u8],
-) -> Result<(), CommitError> {
-    let written =
-        replace_property_bytes(source, space, object, property, value).map_err(|error| {
-            CommitError {
-                state: CommitState::NotCommitted,
-                error: io::Error::new(ErrorKind::InvalidData, error),
-            }
-        })?;
-    Transaction::between(source, &written).commit(io)
 }
 
 /// What a commit requires unchanged since its snapshot: the header, which every committed
@@ -619,31 +351,6 @@ impl TryFrom<Wire> for Transaction {
 }
 
 impl Transaction {
-    /// The transaction turning `source`, a parsed image, into `written`, which extends it.
-    pub(crate) fn between(source: &[u8], written: &[u8]) -> Self {
-        let differs = |at: &usize| source[*at] != written[*at];
-        let mut patches = Vec::new();
-        let mut offset = 1024;
-        while let Some(start) = (offset..source.len()).find(differs) {
-            let mut end = start + 1;
-            // Equal gaps shorter than a write request's overhead join the patch.
-            while let Some(next) = (end..source.len().min(end + 64)).find(differs) {
-                end = next + 1;
-            }
-            patches.push((start as u64, written[start..end].to_vec()));
-            offset = end;
-        }
-        Self {
-            base: Stamp {
-                header: *source.first_chunk().unwrap(),
-                length: source.len() as u64,
-            },
-            append: written[source.len()..].to_vec(),
-            patches,
-            header: *written.first_chunk().unwrap(),
-        }
-    }
-
     /// The image this transaction applies to.
     pub fn base(&self) -> &Stamp {
         &self.base

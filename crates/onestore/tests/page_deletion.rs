@@ -1,6 +1,7 @@
 use onestore::{
-    ExGuid, FileDataReference, ObjectData, PreparedEdit, PropertySets, RevisionIndex, Store,
+    ExGuid, FileDataReference, ObjectData, PropertySets, RevisionIndex, Store,
     document::{Document, Kind},
+    op::{PageOp, SectionOp},
 };
 use std::collections::BTreeSet;
 
@@ -130,7 +131,7 @@ fn removal_matches_all_native_cases_and_retains_every_old_revision() {
             .into_iter()
             .map(|ordinal| pages[ordinal].0)
             .collect();
-        let prepared = PreparedEdit::delete_pages_permanently(&original, &removed).unwrap();
+        let prepared = ops::section_op(&original, SectionOp::Delete(removed.to_vec())).unwrap();
         if let Some(output) = std::env::var_os("ONESTORE_PAGE_REMOVAL_OUTPUT") {
             let output = std::path::Path::new(&output);
             assert!(output.is_absolute());
@@ -140,7 +141,7 @@ fn removal_matches_all_native_cases_and_retains_every_old_revision() {
             std::fs::write(case.join("Lifecycle.one"), prepared.as_bytes()).unwrap();
         }
         verify(&original, prepared.as_bytes(), &native, &removed);
-        assert!(PreparedEdit::delete_pages_permanently(prepared.as_bytes(), &removed).is_err());
+        assert!(ops::section_op(prepared.as_bytes(), SectionOp::Delete(removed.to_vec())).is_err());
     }
 }
 
@@ -160,22 +161,22 @@ fn removal_rejects_duplicate_missing_and_non_page_spaces_without_publication() {
         }],
         vec![pages[0].0, index.root],
     ] {
-        assert!(PreparedEdit::delete_pages_permanently(SOURCE, &selected).is_err());
+        assert!(ops::section_op(SOURCE, SectionOp::Delete(selected.to_vec())).is_err());
     }
     assert_eq!(
-        PreparedEdit::delete_pages_permanently(SOURCE, &[])
+        ops::section_op(SOURCE, SectionOp::Delete([].to_vec()))
             .unwrap()
             .as_bytes(),
         SOURCE
     );
-    let written = PreparedEdit::delete_pages_permanently(SOURCE, &[pages[0].0]).unwrap();
+    let written = ops::section_op(SOURCE, SectionOp::Delete([pages[0].0].to_vec())).unwrap();
     assert!(
-        PreparedEdit::delete_pages_permanently(written.as_bytes(), &[pages[1].0, pages[0].0])
+        ops::section_op(written.as_bytes(), SectionOp::Delete([pages[1].0, pages[0].0].to_vec()))
             .is_err()
     );
 }
 
-use page_schedule::{current, disk};
+use page_schedule::{current, disk, ops};
 
 /// OneNote created a page in each section after Rust permanently removed pages from it;
 /// the surviving pages keep their revisions through the native save and a cold reopen.
@@ -267,7 +268,7 @@ fn tombstones_and_first_page_promotion_survive_each_storage_interruption() {
             .take(if all { pages.len() } else { 1 })
             .map(|page| page.0)
             .collect();
-        let prepared = PreparedEdit::delete_pages_permanently(source, &removed).unwrap();
+        let prepared = ops::section_op(source, SectionOp::Delete(removed.to_vec())).unwrap();
         let old = current::current(source);
         let new = current::current(prepared.as_bytes());
         assert_ne!(old, new);
@@ -331,8 +332,17 @@ fn stale_removal_cannot_delete_a_newer_page_edit() {
             _ => None,
         })
         .unwrap();
-    let removal = PreparedEdit::delete_pages_permanently(SOURCE, &[sid]).unwrap();
-    let remote = onestore::replace_text(SOURCE, sid, text, 0..0, "New remote content ").unwrap();
+    let removal = ops::section_op(SOURCE, SectionOp::Delete([sid].to_vec())).unwrap();
+    let remote = ops::page_edited(
+        SOURCE,
+        sid,
+        vec![PageOp::Text {
+            text,
+            range: 0..0,
+            with: "New remote content ".into(),
+        }],
+    )
+    .unwrap();
     let mut disk = disk::Disk {
         visible: remote.clone(),
         durable: remote.clone(),
@@ -380,7 +390,7 @@ fn external_payloads_and_their_historical_references_survive_file_removal() {
     let pages = Document::parse(&index).unwrap().pages().unwrap();
     assert_eq!(pages.len(), 3);
     let selected: Vec<_> = pages.iter().map(|page| page.0).collect();
-    let prepared = PreparedEdit::delete_pages_permanently(&original, &selected).unwrap();
+    let prepared = ops::section_op(&original, SectionOp::Delete(selected.to_vec())).unwrap();
     let output = std::env::var_os("ONESTORE_PAGE_REMOVAL_EXTERNAL_OUTPUT");
     let root = output
         .as_ref()
@@ -409,7 +419,7 @@ fn external_payloads_and_their_historical_references_survive_file_removal() {
     assert_eq!(payloads.len(), 3);
     let path = root.join("synthetic.one");
     std::fs::write(&path, &original).unwrap();
-    prepared.commit_file(&path).unwrap();
+    prepared.transaction.as_ref().unwrap().commit_file(&path).unwrap();
     let written = onestore::read_file(&path).unwrap();
     assert_eq!(written, prepared.as_bytes());
     let current_store = Store::parse(&written).unwrap();

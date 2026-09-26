@@ -6,10 +6,8 @@ use crate::{
     op::content::{NATIVE_INDENTS, measurement_bytes},
     write::{PropertyObject, fresh_guid},
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ops::Range,
     sync::Arc,
 };
 
@@ -17,59 +15,29 @@ fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 enum Placement {
     Paragraph { before: Option<ExGuid> },
     Outline { x: f32, y: f32 },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FormatSpan {
-    guid: [u8; 16],
-    range: Range<u32>,
-    attributes: Vec<crate::TextAttribute>,
-}
-
-/// A paragraph or outline insertion with stable object identities and creation time.
-/// Retain this intent across rebases; constructing another intent allocates different identities.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Insertion {
+/// A paragraph or outline insertion with its creation time; `changes_as` names the new
+/// objects.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Insertion {
     guid: [u8; 16],
     parent: ExGuid,
     placement: Placement,
     text: String,
     author: String,
     created: u32,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    formats: Vec<FormatSpan>,
 }
 
 impl Insertion {
-    /// Adds a nonoverlapping UTF-16 formatting span, retaining all existing identities.
-    /// Gaps use the ordinary insertion style; only empty text accepts a zero-length span.
-    pub fn with_formatting(
-        &self,
-        range: Range<u32>,
-        attributes: &[crate::TextAttribute],
-    ) -> Result<Self, Error> {
-        let mut intent = self.clone();
-        intent.formats.push(FormatSpan {
-            guid: fresh_guid()?,
-            range,
-            attributes: attributes.to_vec(),
-        });
-        intent.formats.sort_by_key(|span| span.range.start);
-        intent.validate()?;
-        Ok(intent)
-    }
-
     /// Inserts before a direct child, or appends when `before` is None.
     /// The parent must be an editable outline, paragraph, outline group or table cell.
     /// Carriage returns represent soft line breaks; line feeds and embedded-field markers are rejected.
-    pub fn paragraph(
+    pub(crate) fn paragraph(
         parent: ExGuid,
         before: Option<ExGuid>,
         text: &str,
@@ -79,36 +47,8 @@ impl Insertion {
     }
 
     /// Adds an outline to an editable page at coordinates measured in points.
-    pub fn outline(page: ExGuid, x: f32, y: f32, text: &str, author: &str) -> Result<Self, Error> {
+    pub(crate) fn outline(page: ExGuid, x: f32, y: f32, text: &str, author: &str) -> Result<Self, Error> {
         Self::new(page, Placement::Outline { x, y }, text, author)
-    }
-
-    /// Changes a paragraph intent's placement while retaining its identities, text and author.
-    pub fn reposition_paragraph(
-        &self,
-        parent: ExGuid,
-        before: Option<ExGuid>,
-    ) -> Result<Self, Error> {
-        if !matches!(self.placement, Placement::Paragraph { .. }) {
-            return Err(invalid("An outline intent cannot become a paragraph"));
-        }
-        let mut intent = self.clone();
-        intent.parent = parent;
-        intent.placement = Placement::Paragraph { before };
-        intent.validate()?;
-        Ok(intent)
-    }
-
-    /// Changes an outline intent's placement while retaining its identities, text and author.
-    pub fn reposition_outline(&self, page: ExGuid, x: f32, y: f32) -> Result<Self, Error> {
-        if !matches!(self.placement, Placement::Outline { .. }) {
-            return Err(invalid("A paragraph intent cannot become an outline"));
-        }
-        let mut intent = self.clone();
-        intent.parent = page;
-        intent.placement = Placement::Outline { x, y };
-        intent.validate()?;
-        Ok(intent)
     }
 
     fn new(parent: ExGuid, placement: Placement, text: &str, author: &str) -> Result<Self, Error> {
@@ -119,26 +59,9 @@ impl Insertion {
             text: text.to_owned(),
             author: author.to_owned(),
             created: current_timestamps()?.0,
-            formats: Vec::new(),
         };
         intent.validate()?;
         Ok(intent)
-    }
-
-    /// Identity of the new paragraph, or the new outline for an outline insertion.
-    pub fn object(&self) -> ExGuid {
-        ExGuid {
-            guid: self.guid,
-            n: 1,
-        }
-    }
-
-    /// Identity of the insertion's ordinary rich-text object.
-    pub fn text_object(&self) -> ExGuid {
-        ExGuid {
-            guid: self.guid,
-            n: 2,
-        }
     }
 
     fn validate(&self) -> Result<(), Error> {
@@ -156,69 +79,11 @@ impl Insertion {
         {
             return Err(invalid("Outline coordinates must be finite"));
         }
-        if !self.formats.is_empty() {
-            let units: Vec<_> = self.text.encode_utf16().collect();
-            let length = u32::try_from(units.len())
-                .map_err(|_| invalid("Text exceeds UTF-16 offset range"))?;
-            let mut identities = BTreeSet::from([self.guid]);
-            let mut end = 0;
-            for span in &self.formats {
-                if span.guid == [0; 16] || !identities.insert(span.guid) {
-                    return Err(invalid("Formatting identities must be distinct"));
-                }
-                if span.range.start > span.range.end
-                    || span.range.end > length
-                    || span.range.start < end
-                    || (span.range.is_empty() && (!units.is_empty() || self.formats.len() != 1))
-                {
-                    return Err(invalid(
-                        "Formatting spans must be nonoverlapping ranges within the new text",
-                    ));
-                }
-                for boundary in [span.range.start, span.range.end] {
-                    if boundary > 0
-                        && boundary < length
-                        && (0xd800..=0xdbff).contains(&units[boundary as usize - 1])
-                    {
-                        return Err(invalid("Formatting boundary splits a surrogate pair"));
-                    }
-                }
-                crate::formatting::attribute_values(&span.attributes)?;
-                end = span.range.end;
-            }
-        }
         Ok(())
     }
 
-    pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
-        self.validate()?;
-        crate::active::write(source, space, |active| self.changes(active))
-    }
-
-    pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
-        let paragraph = ExGuid {
-            guid: self.guid,
-            n: if matches!(self.placement, Placement::Outline { .. }) {
-                3
-            } else {
-                1
-            },
-        };
-        let changes = self.changes_as(active, self.object(), paragraph, self.text_object())?;
-        let raw = &active.live.revision;
-        if changes
-            .keys()
-            .any(|id| id.guid == self.guid && raw.objects.contains_key(id))
-        {
-            return Err(invalid(
-                "An insertion identity is already present; reconcile the existing edit",
-            ));
-        }
-        Ok(changes)
-    }
-
-    /// `changes` creating the outline or paragraph `object`, the paragraph `paragraph` and its
-    /// text `text` under those identities.
+    /// The objects creating the outline or paragraph `object`, the paragraph `paragraph` and
+    /// its text `text` under those identities.
     pub(crate) fn changes_as(
         &self,
         active: &ActivePage<'_>,
@@ -321,7 +186,7 @@ impl Insertion {
                     (0x10001cfe, 0x409_u16.to_le_bytes().to_vec()),
                 ],
             ),
-            (author, 0x120001, vec![(0x1c001d75, string(&self.author))]),
+            (author, 0x120001, crate::create::author_properties(&self.author)),
             (default, 0x12004d, default_text_style()),
         ] {
             new.insert(
@@ -332,51 +197,6 @@ impl Insertion {
                     global_ids: Arc::clone(&table),
                 },
             );
-        }
-        if !self.formats.is_empty() {
-            let mut segments = Vec::new();
-            let mut end = 0;
-            for span in &self.formats {
-                if end < span.range.start {
-                    segments.push((span.range.start, default));
-                }
-                let id = ExGuid {
-                    guid: span.guid,
-                    n: 1,
-                };
-                let mut style = PropertyObject {
-                    jcid: 0x12004d,
-                    bytes: properties(&default_text_style())?,
-                    global_ids: Arc::new(BTreeMap::from([(0, span.guid)])),
-                };
-                let values = crate::formatting::attribute_values(&span.attributes)?;
-                style.set(
-                    &values
-                        .iter()
-                        .map(|(id, value)| (*id, value.as_slice()))
-                        .collect::<Vec<_>>(),
-                )?;
-                new.insert(id, style);
-                segments.push((span.range.end, id));
-                end = span.range.end;
-            }
-            let length = u32::try_from(self.text.encode_utf16().count())
-                .map_err(|_| invalid("Text exceeds UTF-16 offset range"))?;
-            if end < length {
-                segments.push((length, default));
-            }
-            if !segments.iter().any(|(_, id)| *id == default) {
-                new.remove(&default);
-            }
-            let target = new.get_mut(&text).unwrap();
-            let mut references = Vec::new();
-            let mut ends = Vec::new();
-            for (end, id) in segments {
-                references.extend_from_slice(&target.reference(id)?);
-                ends.extend_from_slice(&end.to_le_bytes());
-            }
-            ends.truncate(ends.len() - 4);
-            target.set(&[(0x24001e13, &references), (0x1c001e12, &ends)])?;
         }
         if let Placement::Outline { x, y } = self.placement {
             let children = reference(paragraph)?;
@@ -449,7 +269,7 @@ impl Insertion {
                 .roots
                 .get(&2)
                 .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-            if raw.objects[metadata].jcid != 0x20030 {
+            if ![0x20030, 0x20038].contains(&raw.objects[metadata].jcid) {
                 return Err(invalid("Page title metadata is unavailable"));
             }
             let title = string(&title);

@@ -74,7 +74,7 @@ fn slots(edit: &mut Edit, mut visit: impl FnMut(&mut Payload)) {
                 } => cells(list, &mut visit),
                 _ => {}
             },
-            Op::Section(SectionOp::Import { page, .. }) => {
+            Op::Section(SectionOp::Import { page, .. } | SectionOp::Conflict { page, .. }) => {
                 for added in &mut page.objects {
                     object(added, &mut visit);
                 }
@@ -235,8 +235,12 @@ pub(crate) fn spaces(edit: &Edit, root: onestore::ExGuid) -> Vec<onestore::ExGui
                     SectionOp::Create(creation) | SectionOp::Import { creation, .. } => {
                         spaces.push(creation.space());
                     }
+                    SectionOp::Conflict { of, creation, .. } => {
+                        spaces.extend([*of, creation.space()]);
+                    }
                     SectionOp::Pages(edits) => spaces.extend(edits.iter().map(|edit| edit.space())),
                     SectionOp::Delete(pages) => spaces.extend(pages),
+                    SectionOp::Color(_) => {}
                 }
             }
         }

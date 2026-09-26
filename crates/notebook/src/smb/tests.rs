@@ -1,7 +1,8 @@
 use super::*;
 use onestore::{
-    RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store, Transaction,
     document::{Document, Kind},
+    op::{Edit, Op, PageOp},
 };
 use std::{
     fs,
@@ -117,11 +118,7 @@ fn create(client: &Client, path: &str, bytes: &[u8]) {
             },
         )
         .unwrap();
-    let mut file = File {
-        client,
-        id: Some(response.file_id),
-        length: response.end_of_file,
-    };
+    let mut file = File::new(client, &response);
     let mut offset = 0;
     while offset < bytes.len() {
         offset += file.write_at(offset as u64, &bytes[offset..]).unwrap();
@@ -129,6 +126,43 @@ fn create(client: &Client, path: &str, bytes: &[u8]) {
     file.flush().unwrap();
     file.close().unwrap();
 }
+/// The transaction replacing `range` of the first text in `image` with `with`, as typed now.
+fn replaced(image: &[u8], range: std::ops::Range<u32>, with: &str) -> Transaction {
+    let (space, text, _) = text(image);
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, image.to_vec()).unwrap();
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
+        / 100
+        + 116_444_736_000_000_000;
+    section
+        .apply(
+            "Fixture",
+            &Edit {
+                at,
+                ops: vec![Op::Page {
+                    space,
+                    op: PageOp::Text {
+                        text,
+                        range,
+                        with: with.to_owned(),
+                    },
+                }],
+            },
+        )
+        .unwrap();
+    section.seal().unwrap().unwrap()
+}
+
+/// `image` after `transaction`.
+fn applied(image: &[u8], transaction: &Transaction) -> Vec<u8> {
+    let mut image = image.to_vec();
+    transaction.apply(&mut image).unwrap();
+    image
+}
+
 fn text(bytes: &[u8]) -> (ExGuid, ExGuid, String) {
     let store = Store::parse(bytes).unwrap();
     assert!(store.checksum_mismatches.is_empty());
@@ -171,21 +205,15 @@ fn live_coordination() {
             client
                 .open(&path, false)
                 .unwrap()
-                .coordinate(&path, false)
+                .coordinate(&path, false, &[])
                 .unwrap()
         })
         .collect();
-    let (sid, oid, before) = text(&source);
+    let (_, _, before) = text(&source);
     let replacement = "After café 🦀";
+    let everything = 0..before.encode_utf16().count() as u32;
     writer
-        .commit_text(
-            &path,
-            &source,
-            sid,
-            oid,
-            0..before.encode_utf16().count() as u32,
-            replacement,
-        )
+        .commit_transaction(&path, &replaced(&source, everything.clone(), replacement))
         .unwrap();
     let after = writer.read(&path, 1 << 20).unwrap();
     assert_eq!(text(&after).2, replacement);
@@ -196,7 +224,7 @@ fn live_coordination() {
         assert_eq!(snapshot, after);
     }
     let error = writer
-        .commit_text(&path, &source, sid, oid, 0..1, "X")
+        .commit_transaction(&path, &replaced(&source, 0..1, "X"))
         .unwrap_err();
     assert_eq!(error.state, CommitState::NotCommitted);
     assert_eq!(error.error.kind(), io::ErrorKind::ResourceBusy);
@@ -262,7 +290,7 @@ fn live_coordination() {
         .unwrap();
     drop(connection);
     guard.close().unwrap();
-    let error = stale.coordinate(&path, true).err().unwrap();
+    let error = stale.coordinate(&path, true, &[]).err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::ResourceBusy);
     assert_eq!(writer.read(&path, 1 << 20).unwrap(), source);
 
@@ -270,7 +298,7 @@ fn live_coordination() {
     let file = retiring
         .open(&path, true)
         .unwrap()
-        .coordinate(&path, true)
+        .coordinate(&path, true, &[])
         .unwrap();
     retiring.retire();
     assert_eq!(
@@ -282,7 +310,7 @@ fn live_coordination() {
     loop {
         match writer
             .open(&path, true)
-            .and_then(|file| file.coordinate(&path, true))
+            .and_then(|file| file.coordinate(&path, true, &[]))
         {
             Ok(file) => {
                 file.close().unwrap();
@@ -300,7 +328,7 @@ fn live_coordination() {
     let mut unfinished = writer
         .open(&path, true)
         .unwrap()
-        .coordinate(&path, true)
+        .coordinate(&path, true, &[])
         .unwrap();
     assert_eq!(
         unfinished
@@ -314,14 +342,7 @@ fn live_coordination() {
     assert_eq!(snapshot.len(), source.len() + 11);
     assert_eq!(text(&snapshot).2, before);
     writer
-        .commit_text(
-            &path,
-            &snapshot,
-            sid,
-            oid,
-            0..before.encode_utf16().count() as u32,
-            "Recovered café 🦀",
-        )
+        .commit_transaction(&path, &replaced(&snapshot, everything, "Recovered café 🦀"))
         .unwrap();
     let recovered = writer.read(&path, 1 << 20).unwrap();
     assert_eq!(text(&recovered).2, "Recovered café 🦀");
@@ -376,19 +397,27 @@ fn live_stamp_and_transaction() {
         onestore::Stamp::of(&source).unwrap()
     );
     guard.close().unwrap();
-    let (sid, oid, _) = text(&source);
-    let edit = onestore::PreparedEdit::text(&source, sid, oid, 0..0, "Changed ").unwrap();
-    let transaction = edit.transaction();
+    let transaction = replaced(&source, 0..0, "Changed ");
+    let edited = applied(&source, &transaction);
     poller.commit_transaction(&path, &transaction).unwrap();
     assert_eq!(
         poller.stamp(&path).unwrap(),
-        onestore::Stamp::of(edit.as_bytes()).unwrap()
+        onestore::Stamp::of(&edited).unwrap()
     );
-    assert_eq!(poller.read(&path, 1 << 20).unwrap(), edit.as_bytes());
+    assert_eq!(poller.read(&path, 1 << 20).unwrap(), edited);
     let stale = poller.commit_transaction(&path, &transaction).unwrap_err();
     assert_eq!(stale.state, CommitState::NotCommitted);
     assert_eq!(stale.error.kind(), io::ErrorKind::ResourceBusy);
-    assert_eq!(poller.read(&path, 1 << 20).unwrap(), edit.as_bytes());
+    assert_eq!(poller.read(&path, 1 << 20).unwrap(), edited);
+    let base = onestore::Stamp::of(&edited).unwrap();
+    poller.confirm(&path, &base).unwrap();
+    let confirmed = poller.read(&path, 1 << 20).unwrap();
+    assert_eq!(confirmed[..212], edited[..212]);
+    assert_ne!(confirmed[212..252], edited[212..252]);
+    assert_eq!(confirmed[252..], edited[252..]);
+    let stale = poller.confirm(&path, &base).unwrap_err();
+    assert_eq!(stale.state, CommitState::NotCommitted);
+    assert_eq!(stale.error.kind(), io::ErrorKind::ResourceBusy);
     poller.delete(&path).unwrap();
 }
 
@@ -488,7 +517,7 @@ fn live_reader_hold() {
     let mut file = client
         .open(&path, false)
         .unwrap()
-        .coordinate(&path, false)
+        .coordinate(&path, false, &[])
         .unwrap();
     fs::write(output.join("ready"), b"held").unwrap();
     let deadline = Instant::now() + Duration::from_secs(300);
@@ -580,13 +609,13 @@ fn live_structure() {
     let mut notebook =
         Notebook::open_smb(std::sync::Arc::clone(&client), &root, cache.path()).unwrap();
     assert_eq!(
-        notebook.create_section("", "Second", "Author").unwrap(),
+        notebook.create_section("", "Second", &onestore::PageCreation::new(None, Some(""), "Author").unwrap()).unwrap(),
         "Second.one"
     );
     assert_eq!(notebook.create_group("", "Archive").unwrap(), "Archive");
     assert_eq!(
         notebook
-            .create_section("Archive", "Inner", "Author")
+            .create_section("Archive", "Inner", &onestore::PageCreation::new(None, Some(""), "Author").unwrap())
             .unwrap(),
         "Archive/Inner.one"
     );

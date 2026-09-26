@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::Document,
     page::{MediaIndex, Page, PageObject, ParagraphContent, Recording},
 };
@@ -96,8 +98,8 @@ fn editing_a_recorded_page_keeps_the_recording_and_its_annotation() {
         tags: Vec::new(),
     });
     outline.paragraphs.push(added.clone());
-    let written = PreparedEdit::page(NATIVE, space, &after, "Media author").unwrap();
-    let (_, stored) = page(written.as_bytes());
+    let written = ops::saved(NATIVE, space, &after).unwrap();
+    let (_, stored) = page(written.as_slice());
     assert_eq!(recording(&stored), recording(&before));
     assert_eq!(stored.objects.len(), before.objects.len());
 
@@ -112,7 +114,7 @@ fn editing_a_recorded_page_keeps_the_recording_and_its_annotation() {
         .unwrap();
     let last = outline.paragraphs.last_mut().unwrap();
     last.media = recording(&before).1;
-    assert!(PreparedEdit::page(written.as_bytes(), space, &annotated, "x").is_err());
+    assert!(ops::saved(written.as_slice(), space, &annotated).is_err());
     let mut recaptured = after.clone();
     for object in &mut recaptured.objects {
         if let PageObject::Outline(outline) = object {
@@ -123,13 +125,13 @@ fn editing_a_recorded_page_keeps_the_recording_and_its_annotation() {
             }
         }
     }
-    assert!(PreparedEdit::page(written.as_bytes(), space, &recaptured, "x").is_err());
+    assert!(ops::saved(written.as_slice(), space, &recaptured).is_err());
 
     if let Some(directory) = std::env::var_os("ONESTORE_MEDIA_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("Features.one"), written.as_bytes()).unwrap();
-        let file_id = Store::parse(written.as_bytes()).unwrap().header.file_id;
+        std::fs::write(directory.join("Features.one"), written.as_slice()).unwrap();
+        let file_id = Store::parse(written.as_slice()).unwrap().header.file_id;
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -139,7 +141,7 @@ fn editing_a_recorded_page_keeps_the_recording_and_its_annotation() {
             .unwrap(),
         )
         .unwrap();
-        let store = Store::parse(written.as_bytes()).unwrap();
+        let store = Store::parse(written.as_slice()).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let count = Document::parse(&index).unwrap().pages().unwrap().len();
         std::fs::write(directory.join("expected-count.txt"), count.to_string()).unwrap();

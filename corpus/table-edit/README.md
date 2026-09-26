@@ -27,7 +27,7 @@ modification time, the indent array copied from a sibling cell (OneNote's
 default without one), and the flags every native cell carries, rebuilds each table's row and cell order to the
 model's, and writes the column count, widths, locks and border flag. New
 tables start as an empty paragraph whose content the structure pass replaces.
-An emptied cell keeps a replacement paragraph, as the tree writer provides.
+An edit that ends with an empty cell is refused; its ops refill the cell themselves.
 `tools/test_table_edit.py` checks all three captures without a VM. Regenerate
 with `ONESTORE_TABLE_EXPORT`, `ONESTORE_TABLE_EDIT_EXPORT` and
 `ONESTORE_NESTED_TABLE_EXPORT` set to new absolute directories while running

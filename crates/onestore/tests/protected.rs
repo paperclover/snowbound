@@ -3,6 +3,7 @@
 use onestore::{
     RevisionIndex, Store,
     document::{Document, Kind},
+    op::{Edit, Op, PageOp},
     protected::{Error, Limits, UnlockedSection},
 };
 use std::{fs, path::Path};
@@ -33,10 +34,19 @@ fn known_passwords_open_independent_native_fixtures() {
             .iter()
             .find(|(_, node)| matches!(node.kind, Kind::RichText { .. }))
             .unwrap();
-        assert!(
-            onestore::PreparedEdit::text(&bytes, space, *object, 0..0, "Must remain protected")
-                .is_err()
-        );
+        // The ordinary section writer refuses a protected section.
+        let arena = onestore::Arena::default();
+        assert!(onestore::Section::open(&arena, bytes.clone()).is_err());
+        let op = PageOp::Text {
+            text: *object,
+            range: 0..0,
+            with: "Must remain protected".into(),
+        };
+        let edit = Edit {
+            at: 134_000_000_000_000_000,
+            ops: vec![Op::Page { space, op }],
+        };
+        assert!(unlocked.apply("Rust", &edit).is_ok());
         assert!(
             document
                 .spaces
@@ -139,6 +149,7 @@ fn a_protected_page_edit_is_stored_under_the_section_key() {
         let mut expected = pages(&bytes);
         let mut edited = 0;
         for (space, page) in &mut expected {
+            let before = page.clone();
             let paragraphs = page.objects.iter_mut().find_map(|object| match object {
                 PageObject::Outline(outline)
                     if outline.paragraphs.iter().any(|p| p.text().is_some()) =>
@@ -174,14 +185,21 @@ fn a_protected_page_edit_is_stored_under_the_section_key() {
             text.text
                 .append(Paragraph::new(" still protected".to_owned(), format))
                 .unwrap();
-            let edit =
-                onestore::PreparedEdit::page_protected(&bytes, password, *space, page, "Rust")
-                    .unwrap();
+            let ops = onestore::op::lower_page(&before, page).unwrap();
+            let edit = Edit {
+                at: 134_000_000_000_000_000,
+                ops: ops.into_iter().map(|op| Op::Page { space: *space, op }).collect(),
+            };
+            let store = Store::parse(&bytes).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
             assert!(matches!(
-                onestore::PreparedEdit::page_protected(&bytes, "wrong", *space, page, "Rust"),
+                UnlockedSection::open(&index, "wrong", Limits::default()),
                 Err(Error::PasswordMismatch)
             ));
-            let written = edit.as_bytes().to_vec();
+            let unlocked = UnlockedSection::open(&index, password, Limits::default()).unwrap();
+            let transaction = unlocked.apply("Rust", &edit).unwrap();
+            let mut written = bytes.clone();
+            transaction.apply(&mut written).unwrap();
             for clear in [&b" still protected"[..], b"stays sealed"] {
                 assert!(!written.windows(clear.len()).any(|w| w == clear));
             }

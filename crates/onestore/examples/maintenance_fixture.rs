@@ -1,3 +1,6 @@
+#[path = "support/typing.rs"]
+mod typing;
+
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
@@ -46,7 +49,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             format!("Revision {revision}: {}", "x".repeat(65536))
         };
-        bytes = onestore::replace_text(&bytes, sid, oid, 0..end, &text)?;
+        let edit = typing::text(sid, oid, 0..end, &text);
+        if let Some(transaction) = typing::sealed(&bytes, "Fixture", &edit)? {
+            transaction.apply(&mut bytes)?;
+        }
     }
     let store = Store::parse(&bytes)?;
     let toc = onestore::create_table_of_contents(

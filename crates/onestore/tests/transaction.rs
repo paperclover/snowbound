@@ -1,6 +1,10 @@
+#[path = "support/ops.rs"]
+mod ops;
+
 use onestore::{
-    CommitIo, CommitState, ExGuid, PreparedEdit, RevisionIndex, Stamp, Store,
+    CommitIo, CommitState, ExGuid, RevisionIndex, Stamp, Store, Transaction,
     document::{Document, Kind},
+    op::{Op, PageOp},
 };
 use std::io;
 
@@ -21,6 +25,21 @@ fn text(source: &[u8]) -> (ExGuid, ExGuid) {
         }
     }
     panic!("Missing text fixture")
+}
+
+/// The transaction typing `with` at the start of the text object, and the image it leaves.
+fn typed(space: ExGuid, text: ExGuid, with: &str) -> (Transaction, Vec<u8>) {
+    let op = PageOp::Text {
+        text,
+        range: 0..0,
+        with: with.into(),
+    };
+    let transaction = ops::transaction(SOURCE, "Author", vec![Op::Page { space, op }])
+        .unwrap()
+        .unwrap();
+    let mut image = SOURCE.to_vec();
+    transaction.apply(&mut image).unwrap();
+    (transaction, image)
 }
 
 /// A file that records how many bytes a commit reads and writes.
@@ -54,20 +73,19 @@ impl CommitIo for Counted {
 #[test]
 fn a_transaction_reads_the_header_and_writes_only_its_edit() {
     let (sid, oid) = text(SOURCE);
-    let edit = PreparedEdit::text(SOURCE, sid, oid, 0..0, "é").unwrap();
-    let transaction = edit.transaction();
+    let (transaction, written) = typed(sid, oid, "é");
     let mut image = SOURCE.to_vec();
     transaction.apply(&mut image).unwrap();
-    assert_eq!(image, edit.as_bytes());
+    assert_eq!(image, written);
     let mut file = Counted {
         bytes: SOURCE.to_vec(),
         read: 0,
         written: 0,
     };
     transaction.commit(&mut file).unwrap();
-    assert_eq!(file.bytes, edit.as_bytes());
+    assert_eq!(file.bytes, written);
     assert!(file.read <= 1024 + 2, "read {} bytes", file.read);
-    let appended = edit.as_bytes().len() - SOURCE.len();
+    let appended = written.len() - SOURCE.len();
     assert!(
         file.written < appended + 2048,
         "wrote {} bytes for {appended} appended",
@@ -86,9 +104,9 @@ fn a_transaction_reads_the_header_and_writes_only_its_edit() {
 #[test]
 fn stamps_name_the_committed_image() {
     let (sid, oid) = text(SOURCE);
-    let edit = PreparedEdit::text(SOURCE, sid, oid, 0..0, "x").unwrap();
+    let (transaction, written) = typed(sid, oid, "x");
     let before = Stamp::of(SOURCE).unwrap();
-    let after = Stamp::of(edit.as_bytes()).unwrap();
+    let after = Stamp::of(&written).unwrap();
     assert_ne!(before, after);
     assert_eq!(before.length, SOURCE.len() as u64);
     // An unpublished tail changes the length, so a commit built without it is refused.
@@ -100,7 +118,7 @@ fn stamps_name_the_committed_image() {
         read: 0,
         written: 0,
     };
-    let error = edit.commit(&mut file).unwrap_err();
+    let error = transaction.commit(&mut file).unwrap_err();
     assert_eq!(error.error.kind(), io::ErrorKind::ResourceBusy);
     assert_eq!(file.written, 0);
     assert!(Stamp::of(&SOURCE[..1023]).is_err());

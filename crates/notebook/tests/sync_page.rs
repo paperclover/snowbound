@@ -1,7 +1,10 @@
-//! Page creation reconciliation: dependent body saves, uncertain publication, anchor review,
+//! Page creation reconciliation: dependent body saves, uncertain publication, lost anchors,
 //! and deterministic multi-actor schedules.
 
-use notebook::{ConflictKind, EditStatus, Recovery, Replica, Resolution};
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
+
+use notebook::{EditStatus, Recovery, Replica};
 use onestore::op::SectionOp;
 use onestore::{
     ExGuid, PageCreation, RevisionIndex, Store,
@@ -67,11 +70,11 @@ fn offline_page_creation_rebases_with_dependent_edits_and_duplicate_titles() {
         assert!(
             matches!(&original[0].edit.ops[..], [onestore::op::Op::Section(SectionOp::Create(retained))] if retained == &page)
         );
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(cache.pending().unwrap(), original);
-        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+        assert_eq!(pages(&snapshot(&cache)), pages(&local));
         assert!(matches!(
             cache.sync_once(&mut server).unwrap().edit,
             Some((published, EditStatus::Published { .. })) if published == dependent
@@ -120,7 +123,7 @@ fn uncertain_page_publication_retains_both_revisions_and_never_replays() {
         let cache = Replica::create(&path, &source).unwrap();
         let page = PageCreation::new(None, Some("Created"), "Author").unwrap();
         let id = section_op(&cache, SectionOp::Create(page.clone()));
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         let mut server = Server::new(&source);
         server.fault = fault;
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -155,12 +158,12 @@ fn uncertain_page_publication_retains_both_revisions_and_never_replays() {
         assert_eq!(server.confirmations, usize::from(visible));
         if visible {
             assert!(matches!(result.1, EditStatus::Published { .. }));
-            assert!(cache.snapshot().unwrap() == observed);
+            assert!(snapshot(&cache) == observed);
             assert!(observed[..212] == server.durable[..212]);
             assert!(observed[252..] == server.durable[252..]);
         } else {
             assert_eq!(result, (id, attempted.clone()));
-            assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+            assert_eq!(pages(&snapshot(&cache)), pages(&local));
         }
     }
 }
@@ -235,8 +238,10 @@ fn surviving_page_revision_alone_does_not_confirm_section_publication() {
     assert_eq!(server.publications, 1);
 }
 
+/// A page created before a page the remote moved goes before the next page the remote left
+/// in place, its content under the identities it was made with.
 #[test]
-fn changed_page_anchor_conflicts_until_kept_without_regenerating_dependent_identities() {
+fn a_moved_page_anchor_places_the_page_without_regenerating_dependent_identities() {
     let source = include_bytes!("../../../corpus/page-lifecycle/03-renamed/notebook/Lifecycle.one");
     let remote = include_bytes!("../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
     let store = Store::parse(source).unwrap();
@@ -252,30 +257,29 @@ fn changed_page_anchor_conflicts_until_kept_without_regenerating_dependent_ident
     let save = model_ops::save_as(&cache, page.space(), &created, "Author")
         .unwrap()
         .unwrap();
-    let local = cache.snapshot().unwrap();
-    let pending = cache.pending().unwrap();
+    let local = snapshot(&cache);
     let mut server = Server::new(remote);
-    assert_eq!(
-        cache.sync_once(&mut server).unwrap().edit,
-        Some((save, EditStatus::Conflict(ConflictKind::StructureChanged)))
-    );
-    cache.resolve(id, Resolution::Mine).unwrap();
-    assert_eq!(cache.pending().unwrap()[1], pending[1]);
     assert!(matches!(
-        &cache.pending().unwrap()[0].edit.ops[..],
-        [onestore::op::Op::Section(SectionOp::Create(reviewed))] if *reviewed == page.reposition(None).unwrap()
+        cache.sync_once(&mut server).unwrap().edit,
+        Some((published, EditStatus::Published { .. })) if published == save
     ));
-    assert_eq!(
-        model_ops::page_of(&cache.snapshot().unwrap(), page.space()),
-        model_ops::page_of(&local, page.space())
-    );
-    drop(cache);
-    let cache = Replica::open(&path).unwrap();
     assert!(matches!(
-        cache.sync_once(&mut server).unwrap().edit,
-        Some((_, EditStatus::Published { .. }))
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
     ));
     assert_eq!(server.publications, 1);
+    assert_eq!(
+        model_ops::page_of(&server.durable, page.space()),
+        model_ops::page_of(&local, page.space())
+    );
+    let arena = onestore::Arena::default();
+    let listed = onestore::Section::open(&arena, server.durable.clone())
+        .unwrap()
+        .pages()
+        .unwrap();
+    // The remote made `child` and `grandchild` subpages; `Renamed` stayed.
+    let at = listed.iter().position(|listed| listed.0 == pages[6].0).unwrap();
+    assert_eq!(listed[at - 1].0, page.space());
     let store = Store::parse(&server.durable).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
@@ -285,8 +289,9 @@ fn changed_page_anchor_conflicts_until_kept_without_regenerating_dependent_ident
         Kind::RichText { text, .. } if text == "Retained body"));
 }
 
+/// Edits of a page the remote removed put the local version back where it stood.
 #[test]
-fn keeping_mine_puts_back_a_page_the_remote_removed_where_it_stood() {
+fn a_page_the_remote_removed_comes_back_where_it_stood() {
     let source = include_bytes!("../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
     let order = |image: &[u8]| -> Vec<(ExGuid, String, u32)> {
         let arena = onestore::Arena::default();
@@ -319,73 +324,61 @@ fn keeping_mine_puts_back_a_page_the_remote_removed_where_it_stood() {
             _ => None,
         })
         .unwrap();
-    for keep in [Resolution::Mine, Resolution::Theirs] {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = Replica::create(directory.path().join("pages.sqlite"), source).unwrap();
-        let id = model_ops::save(&cache, text, |page| {
-            model_ops::replace_text(page, text, 0..0, "Kept ")
-        })
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("pages.sqlite"), source).unwrap();
+    model_ops::save(&cache, text, |page| {
+        model_ops::replace_text(page, text, 0..0, "Kept ")
+    })
+    .unwrap()
+    .unwrap();
+    let local = cache.page(space).unwrap();
+    let removed = ops::section_op(source, SectionOp::Delete([space].to_vec()))
         .unwrap()
-        .unwrap();
-        let local = cache.page(space).unwrap();
-        let removed = onestore::PreparedEdit::delete_pages_permanently(source, &[space])
-            .unwrap()
-            .as_bytes()
-            .to_vec();
-        let mut server = Server::new(&removed);
-        assert_eq!(
-            cache.sync_once(&mut server).unwrap().edit,
-            Some((id, EditStatus::Conflict(ConflictKind::TargetUnavailable)))
-        );
-        assert_eq!(
-            server.publications, 0,
-            "a removed page is not edited in place"
-        );
-        cache.resolve(id, keep).unwrap();
-        assert!(matches!(
-            cache.sync_once(&mut server).unwrap().edit,
-            Some((_, EditStatus::Published { .. }))
-        ));
-        let published = order(&server.durable);
-        assert!(published.iter().all(|(page, ..)| *page != space));
-        match keep {
-            Resolution::Mine => {
-                assert_eq!(published.len(), pages.len());
-                let (restored, title, restored_level) = published[at].clone();
-                assert_eq!(
-                    (title.as_str(), restored_level),
-                    (pages[at].1.as_str(), level)
-                );
-                let page = model_ops::page_of(&server.durable, restored);
-                let texts = |page: &onestore::page::Page| -> Vec<String> {
-                    page.objects
-                        .iter()
-                        .filter_map(|object| match object {
-                            onestore::page::PageObject::Outline(outline) => Some(outline),
-                            _ => None,
-                        })
-                        .flat_map(|outline| &outline.paragraphs)
-                        .filter_map(|p| p.text().map(|t| t.text.text().to_owned()))
-                        .collect()
-                };
-                assert_eq!(texts(&page), texts(&local));
-                assert!(texts(&page)[0].starts_with("Kept "));
-                let others: Vec<_> = published
-                    .iter()
-                    .map(|(page, ..)| *page)
-                    .filter(|page| *page != restored)
-                    .collect();
-                let before: Vec<_> = pages
-                    .iter()
-                    .map(|(page, ..)| *page)
-                    .filter(|page| *page != space)
-                    .collect();
-                assert_eq!(others, before);
-            }
-            Resolution::Theirs => assert_eq!(published, order(&removed)),
-        }
-        assert_eq!(pages_of(&cache), published);
-    }
+        .as_bytes()
+        .to_vec();
+    let mut server = Server::new(&removed);
+    assert!(matches!(
+        cache.sync_once(&mut server).unwrap().edit,
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert_eq!(
+        server.publications, 1,
+        "a removed page is not edited in place"
+    );
+    let published = order(&server.durable);
+    assert!(published.iter().all(|(page, ..)| *page != space));
+    assert_eq!(published.len(), pages.len());
+    let (restored, title, restored_level) = published[at].clone();
+    assert_eq!(
+        (title.as_str(), restored_level),
+        (pages[at].1.as_str(), level)
+    );
+    let page = model_ops::page_of(&server.durable, restored);
+    let texts = |page: &onestore::page::Page| -> Vec<String> {
+        page.objects
+            .iter()
+            .filter_map(|object| match object {
+                onestore::page::PageObject::Outline(outline) => Some(outline),
+                _ => None,
+            })
+            .flat_map(|outline| &outline.paragraphs)
+            .filter_map(|p| p.text().map(|t| t.text.text().to_owned()))
+            .collect()
+    };
+    assert_eq!(texts(&page), texts(&local));
+    assert!(texts(&page)[0].starts_with("Kept "));
+    let others: Vec<_> = published
+        .iter()
+        .map(|(page, ..)| *page)
+        .filter(|page| *page != restored)
+        .collect();
+    let before: Vec<_> = pages
+        .iter()
+        .map(|(page, ..)| *page)
+        .filter(|page| *page != space)
+        .collect();
+    assert_eq!(others, before);
+    assert_eq!(pages_of(&cache), published);
 }
 
 fn pages_of(cache: &Replica) -> Vec<(ExGuid, String, u32)> {

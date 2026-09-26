@@ -53,13 +53,13 @@ fn sections_and_groups_are_created_renamed_coloured_ordered_and_deleted() {
     onestore::place_file(root.join("First.one"), toc_id, "First.one").unwrap();
     let mut notebook = Notebook::open(&root, temporary.path().join("cache")).unwrap();
     assert_eq!(
-        notebook.create_section("", "Second", "Author").unwrap(),
+        notebook.create_section("", "Second", &onestore::PageCreation::new(None, Some(""), "Author").unwrap()).unwrap(),
         "Second.one"
     );
     assert_eq!(notebook.create_group("", "Archive").unwrap(), "Archive");
     assert_eq!(
         notebook
-            .create_section("Archive", "Inner", "Author")
+            .create_section("Archive", "Inner", &onestore::PageCreation::new(None, Some(""), "Author").unwrap())
             .unwrap(),
         "Archive/Inner.one"
     );

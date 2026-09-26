@@ -8,6 +8,7 @@ use zeroize::{Zeroize, Zeroizing};
 const NS: &str = "http://schemas.microsoft.com/office/2006/encryption";
 const PASSWORD_NS: &str = "http://schemas.microsoft.com/office/2006/keyEncryptor/password";
 
+#[derive(Clone)]
 pub(super) struct Key {
     value: Zeroizing<[u8; 16]>,
     file_iv: [u8; 16],

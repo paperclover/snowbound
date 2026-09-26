@@ -6,7 +6,6 @@ use crate::{
     edit::update_title,
     write::{PropertyObject, fresh_guid},
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
@@ -17,11 +16,10 @@ fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
 
-/// Splits ordinary paragraph text while retaining the new objects' identities across retries.
-/// The original paragraph/text remain on the left; nested children move to the right.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ParagraphSplit {
+/// Splits ordinary paragraph text. The original paragraph/text remain on the left; nested
+/// children move to the right.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParagraphSplit {
     guid: [u8; 16],
     text: ExGuid,
     offset: u32,
@@ -31,7 +29,7 @@ pub struct ParagraphSplit {
 
 impl ParagraphSplit {
     /// The offset is measured in UTF-16 code units and must lie between Unicode scalars.
-    pub fn new(text: ExGuid, offset: u32, author: &str) -> Result<Self, Error> {
+    pub(crate) fn new(text: ExGuid, offset: u32, author: &str) -> Result<Self, Error> {
         if text.guid == [0; 16] || author.contains('\0') {
             return Err(invalid(
                 "Choose paragraph text and an author name without NUL",
@@ -44,64 +42,6 @@ impl ParagraphSplit {
             author: author.to_owned(),
             created: current_timestamps()?.0,
         })
-    }
-
-    /// Identity of the new right paragraph.
-    pub fn object(&self) -> ExGuid {
-        ExGuid {
-            guid: self.guid,
-            n: 1,
-        }
-    }
-
-    /// Identity of the new right paragraph's text.
-    pub fn text_object(&self) -> ExGuid {
-        ExGuid {
-            guid: self.guid,
-            n: 2,
-        }
-    }
-
-    /// Original text identity and UTF-16 split boundary.
-    pub fn position(&self) -> (ExGuid, u32) {
-        (self.text, self.offset)
-    }
-
-    /// Changes the split boundary while retaining allocated identities and creation time.
-    /// Preparing the edit validates the offset against the supplied text.
-    pub fn reposition(&self, offset: u32) -> Self {
-        let mut split = self.clone();
-        split.offset = offset;
-        split
-    }
-
-    pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
-        if self.guid == [0; 16] || self.text.guid == [0; 16] || self.author.contains('\0') {
-            return Err(invalid(
-                "Choose paragraph text and an author name without NUL",
-            ));
-        }
-        crate::active::write(source, space, |active| self.changes(active))
-    }
-
-    pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
-        let lists = (5..256)
-            .map(|n| ExGuid {
-                guid: self.guid,
-                n,
-            })
-            .collect::<Vec<_>>();
-        let changes = self.changes_as(active, self.object(), self.text_object(), &lists)?;
-        let raw = &active.live.revision;
-        if changes
-            .keys()
-            .any(|id| id.guid == self.guid && raw.objects.contains_key(id))
-        {
-            return Err(invalid(
-                "A split identity already exists; reconcile the existing edit",
-            ));
-        }
-        Ok(changes)
     }
 
     /// `changes` creating the right paragraph `paragraph` with text `right`, and a copy of
@@ -244,7 +184,7 @@ impl ParagraphSplit {
             author_id,
             PropertyObject {
                 jcid: 0x120001,
-                bytes: properties(&[(0x1c001d75, string(&self.author))])?,
+                bytes: properties(&crate::create::author_properties(&self.author))?,
                 global_ids: Arc::new(BTreeMap::from([(0, self.guid)])),
             },
         );
@@ -411,22 +351,16 @@ fn ordinary_text<'a>(
 /// The left paragraph survives. Empty left text adopts the right text identity;
 /// otherwise the left text survives. The left paragraph's tags are retained.
 /// Right-side tags are removed from active text, including when the left text is empty.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ParagraphJoin {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ParagraphJoin {
     left: ExGuid,
     right: ExGuid,
     author: String,
 }
 
 impl ParagraphJoin {
-    /// Ordered left and right text identities.
-    pub fn texts(&self) -> [ExGuid; 2] {
-        [self.left, self.right]
-    }
-
     /// Select the preceding leaf paragraph's text and the following paragraph's text.
-    pub fn new(left: ExGuid, right: ExGuid, author: &str) -> Result<Self, Error> {
+    pub(crate) fn new(left: ExGuid, right: ExGuid, author: &str) -> Result<Self, Error> {
         if left == right || left.guid == [0; 16] || right.guid == [0; 16] || author.contains('\0') {
             return Err(invalid(
                 "Choose two distinct text objects and an author name without NUL",
@@ -437,19 +371,6 @@ impl ParagraphJoin {
             right,
             author: author.to_owned(),
         })
-    }
-
-    pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
-        if self.left == self.right
-            || self.left.guid == [0; 16]
-            || self.right.guid == [0; 16]
-            || self.author.contains('\0')
-        {
-            return Err(invalid(
-                "Choose two distinct text objects and an author name without NUL",
-            ));
-        }
-        crate::active::write(source, space, |active| self.changes(active))
     }
 
     pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
@@ -672,7 +593,7 @@ impl ParagraphJoin {
             author,
             PropertyObject {
                 jcid: 0x120001,
-                bytes: properties(&[(0x1c001d75, string(&self.author))])?,
+                bytes: properties(&crate::create::author_properties(&self.author))?,
                 global_ids: Arc::new(BTreeMap::from([(0, author.guid)])),
             },
         );

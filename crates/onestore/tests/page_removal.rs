@@ -1,3 +1,5 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
     ExGuid, FileDataReference, IdStream, ObjectData, PropertySets, RevisionIndex, Store, Value,
     document::Document,
@@ -525,7 +527,16 @@ fn copy_comparison_rejects_text_and_payload_changes() {
             .then_some(*oid)
         })
         .unwrap();
-    let changed = onestore::replace_text(copied, copy_sid, text, 0..0, "Changed ").unwrap();
+    let changed = ops::page_edited(
+        copied,
+        copy_sid,
+        vec![onestore::op::PageOp::Text {
+            text,
+            range: 0..0,
+            with: "Changed ".into(),
+        }],
+    )
+    .unwrap();
     let changed_store = Store::parse(&changed).unwrap();
     RevisionIndex::parse(&changed_store)
         .unwrap()

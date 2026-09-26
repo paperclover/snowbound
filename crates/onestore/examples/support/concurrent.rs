@@ -318,7 +318,46 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use onestore::{Insertion, ParagraphJoin, ParagraphSplit, PreparedEdit, TextAttribute};
+    use onestore::{
+        TextAttribute,
+        document::{Format, Layout},
+        op::{Edit, Op, PageOp},
+        page::{Outline, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject, text::new_id},
+    };
+
+    fn paragraph(text: &str, level: u32) -> PageParagraph {
+        PageParagraph {
+            id: new_id().unwrap(),
+            parent: None,
+            level,
+            style: None,
+            format: Format::default(),
+            content: ParagraphContent::Text(TextObject {
+                id: new_id().unwrap(),
+                date_field: None,
+                text: Paragraph::new(text.into(), Format {
+                    font: Some("Calibri".into()),
+                    font_size: Some(11.0),
+                    language: Some(0x409),
+                    ..Format::default()
+                }),
+                tags: Vec::new(),
+            }),
+            lists: Vec::new(),
+            tags: Vec::new(),
+            media: Default::default(),
+            collapsed: false,
+        }
+    }
+
+    fn edited(image: &[u8], space: ExGuid, ops: Vec<PageOp>) -> Vec<u8> {
+        let arena = onestore::Arena::default();
+        let mut section = onestore::Section::open(&arena, image.to_vec()).unwrap();
+        let ops = ops.into_iter().map(|op| Op::Page { space, op }).collect();
+        section.apply("Author", &Edit { at: 134_000_000_000_000_000, ops }).unwrap();
+        section.seal().unwrap();
+        section.image()
+    }
 
     #[test]
     fn observation_follows_split_suffixes_and_moved_children_through_active_ancestry() {
@@ -328,57 +367,96 @@ mod tests {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let (space, page) = document.pages().unwrap()[0];
-        let insertion = Insertion::outline(page, 144.0, 216.0, "Document w0:0 🦀", "Author")
-            .unwrap()
-            .with_formatting(0..16, &[TextAttribute::Bold(true)])
-            .unwrap();
-        let inserted = PreparedEdit::insert(&source, space, &insertion).unwrap();
-        let before = document_view(inserted.as_bytes()).unwrap();
+        let first = paragraph("Document w0:0 🦀", 1);
+        let (paragraph_id, text) = (first.id, first.text().unwrap().id);
+        let outline_id = new_id().unwrap();
+        let inserted = edited(
+            &source,
+            space,
+            vec![
+                PageOp::Add {
+                    object: PageObject::Outline(Outline {
+                        id: outline_id,
+                        title: false,
+                        min_width: None,
+                        layout: Layout {
+                            x: Some(144.0),
+                            y: Some(216.0),
+                            ..Default::default()
+                        },
+                        indents: Vec::new(),
+                        paragraphs: vec![first],
+                        unsupported: Vec::new(),
+                    }),
+                    before: None,
+                },
+                PageOp::Format {
+                    text,
+                    range: 0..16,
+                    set: vec![TextAttribute::Bold(true)],
+                    clear: Vec::new(),
+                },
+            ],
+        );
+        let before = document_view(&inserted).unwrap();
         assert_eq!(before.texts.len(), 1);
         assert_eq!(before.graph.len(), 2);
-        let outline = insertion.object().to_string();
-        let paragraph = before.graph[&outline]["children"][0]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let child =
-            Insertion::paragraph(paragraph.parse().unwrap(), None, "Unmarked child", "Author")
-                .unwrap();
-        let with_child = PreparedEdit::insert(inserted.as_bytes(), space, &child).unwrap();
-        let before = document_view(with_child.as_bytes()).unwrap();
+        let outline = outline_id.to_string();
+        let paragraph_name = paragraph_id.to_string();
+        assert_eq!(before.graph[&outline]["children"], json!([paragraph_name]));
+        let child = paragraph("Unmarked child", 2);
+        let child_id = child.id;
+        let with_child = edited(
+            &inserted,
+            space,
+            vec![PageOp::Insert {
+                container: paragraph_id,
+                before: None,
+                paragraphs: vec![child],
+            }],
+        );
+        let before = document_view(&with_child).unwrap();
         assert_eq!(before.texts.len(), 2);
         assert_eq!(before.graph.len(), 3);
         assert_eq!(
             before.graph[&outline],
-            json!({"parent":page.to_string(), "children":[paragraph], "content":[], "child_level":1, "position":{"x":144.0,"y":216.0}})
+            json!({"parent":page.to_string(), "children":[paragraph_name], "content":[], "child_level":1, "position":{"x":144.0,"y":216.0}})
         );
         for offset in [14, 16] {
-            let split = ParagraphSplit::new(insertion.text_object(), offset, "Author").unwrap();
-            let split_edit = PreparedEdit::split(with_child.as_bytes(), space, &split).unwrap();
-            let observed = document_view(split_edit.as_bytes()).unwrap();
+            let (split, right) = (new_id().unwrap(), new_id().unwrap());
+            let split_edit = edited(
+                &with_child,
+                space,
+                vec![PageOp::Split {
+                    text,
+                    at: offset,
+                    paragraph: split,
+                    right,
+                    lists: Vec::new(),
+                }],
+            );
+            let observed = document_view(&split_edit).unwrap();
             assert_eq!(observed.texts.len(), 3);
             assert_eq!(observed.graph.len(), 4);
             assert_eq!(
-                observed.texts[&split.text_object().to_string()]["text"],
+                observed.texts[&right.to_string()]["text"],
                 if offset == 14 { "🦀" } else { "" }
             );
             assert_eq!(
                 observed.graph[&outline]["children"],
-                json!([paragraph, split.object().to_string()])
+                json!([paragraph_name, split.to_string()])
             );
-            assert_eq!(observed.graph[&paragraph]["children"], json!([]));
+            assert_eq!(observed.graph[&paragraph_name]["children"], json!([]));
             assert_eq!(
-                observed.graph[&split.object().to_string()]["children"],
-                json!([child.object().to_string()])
+                observed.graph[&split.to_string()]["children"],
+                json!([child_id.to_string()])
             );
             assert_eq!(
-                observed.graph[&child.object().to_string()]["parent"],
-                split.object().to_string()
+                observed.graph[&child_id.to_string()]["parent"],
+                split.to_string()
             );
-            let join =
-                ParagraphJoin::new(insertion.text_object(), split.text_object(), "Author").unwrap();
-            let joined = PreparedEdit::join(split_edit.as_bytes(), space, &join).unwrap();
-            let joined = document_view(joined.as_bytes()).unwrap();
+            let joined = edited(&split_edit, space, vec![PageOp::Join { left: text, right }]);
+            let joined = document_view(&joined).unwrap();
             assert_eq!(joined.graph, before.graph);
             let characters = |view: &DocumentView| {
                 view.texts

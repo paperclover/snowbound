@@ -1,6 +1,7 @@
 use onestore::{
-    ExGuid, OutlineEdit as Edit, PreparedEdit, RevisionIndex, Store,
+    ExGuid, OutlineEdit as Edit, RevisionIndex, Store,
     document::{Document, Kind},
+    op::PageOp,
 };
 use std::collections::BTreeSet;
 
@@ -8,6 +9,8 @@ use std::collections::BTreeSet;
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
 
 const SOURCE: &[u8] = include_bytes!("../../../corpus/outline-edit/before/notebook/synthetic.one");
 
@@ -62,7 +65,7 @@ fn geometry_and_expansion_preserve_unrelated_properties_objects_and_history() {
     for (name, sid, object, edit) in cases(&document) {
         let restored = serde_json::from_value(serde_json::to_value(edit).unwrap()).unwrap();
         assert_eq!(edit, restored);
-        let prepared = PreparedEdit::outline(SOURCE, sid, object, restored).unwrap();
+        let prepared = ops::page_op(SOURCE, sid, PageOp::Outline { object, edit: restored }).unwrap();
         let after_store = Store::parse(prepared.as_bytes()).unwrap();
         assert!(after_store.checksum_mismatches.is_empty());
         let after_index = RevisionIndex::parse(&after_store).unwrap();
@@ -139,7 +142,7 @@ fn geometry_and_expansion_preserve_unrelated_properties_objects_and_history() {
                 assert_eq!(old_space.labels, after_index.spaces[space_id].labels);
             }
         }
-        let again = PreparedEdit::outline(prepared.as_bytes(), sid, object, edit).unwrap();
+        let again = ops::page_op(prepared.as_bytes(), sid, PageOp::Outline { object, edit }).unwrap();
         assert_eq!(again.as_bytes(), prepared.as_bytes());
     }
 }
@@ -159,20 +162,15 @@ fn invalid_geometry_and_non_outline_targets_are_rejected() {
                     user_set: true,
                 },
             ] {
-                assert!(PreparedEdit::outline(SOURCE, sid, object, edit).is_err());
+                assert!(ops::page_op(SOURCE, sid, PageOp::Outline { object, edit }).is_err());
             }
         }
         for points in [-1.0, 0.0, 35.999] {
             assert!(
-                PreparedEdit::outline(
-                    SOURCE,
-                    sid,
-                    object,
-                    Edit::Width {
+                ops::page_op(SOURCE, sid, PageOp::Outline { object, edit: Edit::Width {
                         points,
                         user_set: false
-                    }
-                )
+                    } })
                 .is_err()
             );
         }
@@ -181,7 +179,7 @@ fn invalid_geometry_and_non_outline_targets_are_rejected() {
         for (id, node) in &view.nodes {
             if !matches!(node.kind, Kind::Outline { .. }) {
                 assert!(
-                    PreparedEdit::outline(SOURCE, sid, *id, Edit::Position { x: 72.0, y: 72.0 })
+                    ops::page_op(SOURCE, sid, PageOp::Outline { object: *id, edit: Edit::Position { x: 72.0, y: 72.0 } })
                         .is_err()
                 );
             }
@@ -197,20 +195,20 @@ fn invalid_geometry_and_non_outline_targets_are_rejected() {
                         },
                         Edit::Collapsed(true),
                     ] {
-                        assert!(PreparedEdit::outline(SOURCE, sid, child, edit).is_err());
+                        assert!(ops::page_op(SOURCE, sid, PageOp::Outline { object: child, edit }).is_err());
                     }
                 }
             }
             if !matches!(node.kind, Kind::Paragraph { .. }) {
-                assert!(PreparedEdit::outline(SOURCE, sid, *id, Edit::Collapsed(true)).is_err());
+                assert!(ops::page_op(SOURCE, sid, PageOp::Outline { object: *id, edit: Edit::Collapsed(true) }).is_err());
             }
         }
         assert!(
-            PreparedEdit::outline(SOURCE, ExGuid::default(), object, Edit::Collapsed(true))
+            ops::page_op(SOURCE, ExGuid::default(), PageOp::Outline { object, edit: Edit::Collapsed(true) })
                 .is_err()
         );
         assert!(
-            PreparedEdit::outline(SOURCE, sid, ExGuid::default(), Edit::Collapsed(true)).is_err()
+            ops::page_op(SOURCE, sid, PageOp::Outline { object: ExGuid::default(), edit: Edit::Collapsed(true) }).is_err()
         );
     }
 }
@@ -228,15 +226,10 @@ fn resizing_a_native_reserved_width_preserves_content() {
     let space = &document.spaces[&sid];
     let before = &space.revisions[&space.contexts[&ExGuid::default()]];
     assert!(before.nodes[&object].layout.reserved_width.is_some());
-    let edit = PreparedEdit::outline(
-        source,
-        sid,
-        object,
-        Edit::Width {
+    let edit = ops::page_op(source, sid, PageOp::Outline { object, edit: Edit::Width {
             points: 144.0,
             user_set: true,
-        },
-    )
+        } })
     .unwrap();
     let after_store = Store::parse(edit.as_bytes()).unwrap();
     let after_index = RevisionIndex::parse(&after_store).unwrap();
@@ -270,12 +263,8 @@ fn outline_movement_updates_both_automatic_title_fields_without_changing_content
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
     let (sid, page) = document.pages().unwrap()[0];
-    let insertion =
-        onestore::Insertion::outline(page, 144.0, 144.0, "Second 🦋 é", "Author").unwrap();
-    let source = PreparedEdit::insert(&source, sid, &insertion)
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let (add, insertion, _) = ops::new_outline(144.0, 144.0, "Second 🦋 é");
+    let source = ops::page_op(&source, sid, add).unwrap().image;
     let store = Store::parse(&source).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
@@ -288,7 +277,7 @@ fn outline_movement_updates_both_automatic_title_fields_without_changing_content
         (144.0, 36.0, "First"),
         (0.0, 144.0, "First"),
     ] {
-        let edit = PreparedEdit::outline(&source, sid, insertion.object(), Edit::Position { x, y })
+        let edit = ops::page_op(&source, sid, PageOp::Outline { object: insertion, edit: Edit::Position { x, y } })
             .unwrap();
         let saved = Store::parse(edit.as_bytes()).unwrap();
         let saved_index = RevisionIndex::parse(&saved).unwrap();
@@ -308,7 +297,7 @@ fn outline_movement_updates_both_automatic_title_fields_without_changing_content
             after.nodes.keys().collect::<Vec<_>>()
         );
         for (oid, node) in &before.nodes {
-            if ![page, metadata, insertion.object()].contains(oid) {
+            if ![page, metadata, insertion].contains(oid) {
                 assert_eq!(
                     serde_json::to_value(node).unwrap(),
                     serde_json::to_value(&after.nodes[oid]).unwrap()
@@ -320,12 +309,7 @@ fn outline_movement_updates_both_automatic_title_fields_without_changing_content
             format!("{:?}", saved_index.resolve(sid, rid).unwrap())
         );
         assert_eq!(
-            PreparedEdit::outline(
-                edit.as_bytes(),
-                sid,
-                insertion.object(),
-                Edit::Position { x, y }
-            )
+            ops::page_op(edit.as_bytes(), sid, PageOp::Outline { object: insertion, edit: Edit::Position { x, y } })
             .unwrap()
             .as_bytes(),
             edit.as_bytes()
@@ -366,7 +350,7 @@ fn native_automatic_and_explicit_titles_follow_outline_movement() {
                 72.0
             },
         };
-        candidate = PreparedEdit::outline(&candidate, sid, outline, change)
+        candidate = ops::page_op(&candidate, sid, PageOp::Outline { object: outline, edit: change })
             .unwrap()
             .as_bytes()
             .to_vec();
@@ -418,11 +402,8 @@ fn outline_publication_interruptions_reopen_as_complete_old_or_new_layout() {
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
     let paragraph = view.nodes[&outline].children[0];
-    let second = onestore::Insertion::outline(page, 144.0, 36.0, "Second", "Author").unwrap();
-    let source = PreparedEdit::insert(&source, sid, &second)
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let (add, _, _) = ops::new_outline(144.0, 36.0, "Second");
+    let source = ops::page_op(&source, sid, add).unwrap().image;
     for (object, operation) in [
         (outline, Edit::Position { x: 216.0, y: 72.0 }),
         (
@@ -434,7 +415,7 @@ fn outline_publication_interruptions_reopen_as_complete_old_or_new_layout() {
         ),
         (paragraph, Edit::Collapsed(true)),
     ] {
-        let edit = PreparedEdit::outline(&source, sid, object, operation).unwrap();
+        let edit = ops::page_op(&source, sid, PageOp::Outline { object, edit: operation }).unwrap();
         let before = current::current(&source);
         let after = current::current(edit.as_bytes());
         for write_limit in [17, 4096] {
@@ -481,11 +462,8 @@ fn repeated_geometry_changes_and_expansion_match_an_independent_model() {
         .unwrap();
     let paragraph = view.nodes[&outline].children[0];
     let text = view.nodes[&paragraph].content[0];
-    let second = onestore::Insertion::outline(page, 144.0, 36.0, "Second", "Author").unwrap();
-    let original = PreparedEdit::insert(&original, sid, &second)
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let (add, _, _) = ops::new_outline(144.0, 36.0, "Second");
+    let original = ops::page_op(&original, sid, add).unwrap().image;
     for seed in 1..=16_u64 {
         let mut rng = seed;
         let mut source = original.clone();
@@ -520,7 +498,7 @@ fn repeated_geometry_changes_and_expansion_match_an_independent_model() {
                     (paragraph, Edit::Collapsed(rng & 1 != 0))
                 }
             };
-            source = PreparedEdit::outline(&source, sid, object, edit)
+            source = ops::page_op(&source, sid, PageOp::Outline { object, edit })
                 .unwrap()
                 .as_bytes()
                 .to_vec();
@@ -574,7 +552,7 @@ fn export_native_outline_candidates() {
     let document = Document::parse(&index).unwrap();
     let mut bytes = SOURCE.to_vec();
     for (_, sid, object, edit) in cases(&document) {
-        bytes = PreparedEdit::outline(&bytes, sid, object, edit)
+        bytes = ops::page_op(&bytes, sid, PageOp::Outline { object, edit })
             .unwrap()
             .as_bytes()
             .to_vec();

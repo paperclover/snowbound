@@ -82,9 +82,11 @@ Superscript and subscript runs draw at two thirds of their size, a third of the 
 
 A paragraph stored as an equation draws in two dimensions from the tree `onestore::page::Math` parses: sub- and superscripts at 70%, fractions over a rule on the math axis, radicals drawn with the pen, n-ary operators at display size with limits above and below (integrals take them as scripts), stretched fences, accents and bars above, boxes, matrices and equation arrays. Latin letters draw in mathematical italic. Cambria Math falls back to STIX Two Math on macOS, and atoms are placed by their glyph ink rather than the math font's tall line box; an equation line is at least as tall as a line of text. The linear text stays the editable source, laid out in the body font so the caret keeps a text height; editing equations in two dimensions is a follow-up.
 
-## Optional font substitution
+## Font substitution
 
-The host and `layout-probe` accept repeated `--substitute-font FONT_FILE` options. Supply Arimo regular/italic variable fonts or Carlito regular/bold/italic/bold-italic files. Each file is registered only in this process, as Arial or Calibri respectively; this explicitly replaces that family even when a system copy exists. Stored `Format.font` values remain unchanged. No font files are installed or bundled by this option.
+`TextEngine::default()` lays out Calibri, Arial, Times New Roman and Courier New in the bundled Carlito 1.104, Arimo 1.341, Tinos 1.340 and Cousine 1.241 (`crates/canvas/assets/fonts`, SIL Open Font License) wherever the system lacks them. The font box names such a family with its substitute, as "Carlito (Calibri)"; stored `Format.font` values keep the document's name.
+
+The host and `layout-probe` also accept repeated `--substitute-font FONT_FILE` options for another Arimo, Carlito, Tinos or Cousine file. Each file is registered only in this process, as its family's counterpart; this explicitly replaces that family even when a system copy exists. No font files are installed.
 
 ```sh
 "target/Snowbound.app/Contents/MacOS/Snowbound" TEXT_FILE 240 --substitute-font ARIMO_FILE

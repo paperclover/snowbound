@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Format},
     page::{
         Attachment, Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id,
@@ -9,7 +11,6 @@ use std::sync::Arc;
 
 const NATIVE: &[u8] =
     include_bytes!("../../../corpus/native/cold-05-06-attachment/notebook/synthetic.one");
-const AUTHOR: &str = "Attachment author";
 const PAYLOAD: &[u8] = b"Rust wrote this attachment.\n";
 
 fn first_page(bytes: &[u8]) -> (ExGuid, Page) {
@@ -117,8 +118,8 @@ fn insert_attachment(section: &str, preview: Option<Arc<[u8]>>) -> Vec<u8> {
     });
     body_paragraphs(&mut after).push(holder.clone());
     body_paragraphs(&mut after).push(plain_paragraph(&template, "After the file"));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
@@ -129,16 +130,16 @@ fn insert_attachment(section: &str, preview: Option<Arc<[u8]>>) -> Vec<u8> {
     assert_eq!(stored_attachment.bytes.as_deref(), Some(PAYLOAD));
     assert_eq!(stored_attachment.preview, preview);
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
     let mut removed = stored.clone();
     body_paragraphs(&mut removed).retain(|p| p.id != holder.id);
-    let again = PreparedEdit::page(written.as_bytes(), space, &removed, AUTHOR).unwrap();
-    assert!(attachments(&page_in(again.as_bytes(), space)).is_empty());
-    written.as_bytes().to_vec()
+    let again = ops::saved(written.as_slice(), space, &removed).unwrap();
+    assert!(attachments(&page_in(again.as_slice(), space)).is_empty());
+    written.as_slice().to_vec()
 }
 
 /// `ONESTORE_ATTACHMENT_EXPORT` names a directory receiving both candidates for a cold reopen:
@@ -186,7 +187,7 @@ fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
         recording: None,
     });
     body_paragraphs(&mut after).push(holder);
-    assert!(PreparedEdit::page(&source, space, &after, AUTHOR).is_err());
+    assert!(ops::saved(&source, space, &after).is_err());
     let (space, native) = first_page(NATIVE);
     let mut renamed = native.clone();
     let mut found = 0;
@@ -202,8 +203,8 @@ fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
         }
     }
     assert_eq!(found, 1);
-    let written = PreparedEdit::page(NATIVE, space, &renamed, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(NATIVE, space, &renamed).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let (before, after) = (attachments(&native)[0], attachments(&stored)[0]);
     assert_eq!(after.filename, "renamed \u{1f980}.txt");
     assert_eq!(
@@ -216,8 +217,8 @@ fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
     if let Some(directory) = std::env::var_os("ONESTORE_ATTACHMENT_RENAME_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
-        let file_id = Store::parse(written.as_bytes()).unwrap().header.file_id;
+        std::fs::write(directory.join("synthetic.one"), written.as_slice()).unwrap();
+        let file_id = Store::parse(written.as_slice()).unwrap().header.file_id;
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(

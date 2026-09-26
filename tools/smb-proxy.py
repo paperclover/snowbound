@@ -8,6 +8,18 @@ import struct
 import time
 
 
+def lease_state(frame, at, contexts):
+    """The lease state of a CREATE's `RqLs` context, if any (MS-SMB2 2.2.13.2.8, 2.2.14.2.10)."""
+    offset, length = struct.unpack_from('<II', frame, at + contexts)
+    cursor = at + offset if length else None
+    while cursor is not None:
+        following, name_offset, name_length, _, data_offset = struct.unpack_from('<IHHHH', frame, cursor)
+        if frame[cursor + name_offset:cursor + name_offset + name_length] == b'RqLs':
+            return struct.unpack_from('<I', frame, cursor + data_offset + 16)[0]
+        cursor = cursor + following if following else None
+    return None
+
+
 def header_fields(offset, data):
     result = {}
     for name, start, length in [('transactions', 96, 4), ('version', 212, 16),
@@ -77,7 +89,7 @@ async def main():
                     at = 0
                     while frame[at:at+4] == b'\xfeSMB':
                         command = struct.unpack_from('<H', frame, at+12)[0]
-                        entry = {'connection': connection_id, 'direction': direction, 'command': command,
+                        entry = {'connection': connection_id, 'direction': direction, 'command': command, 'frame': frames[direction],
                                  'message': struct.unpack_from('<Q', frame, at+24)[0],
                                  'credit_charge': struct.unpack_from('<H', frame, at+6)[0],
                                  'credits': struct.unpack_from('<H', frame, at+14)[0]}
@@ -110,12 +122,16 @@ async def main():
                             elif command == 5:
                                 entry['oplock'] = frame[at+67]
                                 entry['access'] = struct.unpack_from('<I', frame, at+88)[0]
-                                entry['share'] = struct.unpack_from('<I', frame, at+96)[0]
+                                entry['share'], entry['disposition'], entry['options'] = struct.unpack_from('<III', frame, at+96)
                                 offset, length = struct.unpack_from('<HH', frame, at+108)
                                 entry['path'] = frame[at+offset:at+offset+length].decode('utf-16-le')
+                                if entry['oplock'] == 0xff:
+                                    entry['lease'] = lease_state(frame, at, 112)
                         elif command == 5 and entry['status'] == '0x0':
                             entry['oplock'] = frame[at+66]
                             entry['file_id'] = frame[at+128:at+144].hex()
+                            if entry['oplock'] == 0xff:
+                                entry['lease'] = lease_state(frame, at, 144)
                         elif command == 9 and entry['status'] == '0x0':
                             entry['written'] = struct.unpack_from('<I', frame, at+68)[0]
                         if direction == 'request':
@@ -145,12 +161,20 @@ async def main():
                         if not next_command:
                             break
                         at += next_command
+                    frames[direction] += 1
                     if frame[:4] == b'\xfdSMB':
                         record(encrypted=True, direction=direction)
-                    writer.write(prefix + frame)
-                    await writer.drain()
+                    if state.get('delay_ms'):
+                        # Half the round trip each way, as on a wide-area link: every frame
+                        # arrives that much later, in order, without queueing behind others.
+                        loop = asyncio.get_running_loop()
+                        loop.call_at(loop.time() + state['delay_ms'] / 2000, writer.write, prefix + frame)
+                    else:
+                        writer.write(prefix + frame)
+                        await writer.drain()
 
             requests = {}
+            frames = {'request': 0, 'response': 0}
             tasks = [asyncio.create_task(forward(client, server_writer, 'request')),
                      asyncio.create_task(forward(server, client_writer, 'response'))]
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

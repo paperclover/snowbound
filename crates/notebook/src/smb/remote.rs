@@ -26,15 +26,15 @@ impl Remote for SmbRemote {
         self.client.read(&self.path, self.limit)
     }
 
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
-        self.client.stamp(&self.path).map(Some)
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        self.client.stamp(&self.path)
     }
 
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         self.client.commit_transaction(&self.path, transaction)
     }
 
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        self.client.confirm_snapshot(&self.path, snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        self.client.confirm(&self.path, base)
     }
 }

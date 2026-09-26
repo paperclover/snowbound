@@ -1,9 +1,9 @@
 use crate::{
     Error, ExGuid,
     create::{current_timestamps, properties, string},
-    document::{Document, FieldValue, Kind},
+    document::{FieldValue, Kind},
     op::content::{NATIVE_INDENTS, measurement_bytes},
-    write::{PropertyObject, RevisionEdit, fresh_guid, write_revisions},
+    write::{PropertyObject, fresh_guid},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,7 +15,7 @@ fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
 
-fn metadata_id(space: ExGuid) -> ExGuid {
+pub(crate) fn metadata_id(space: ExGuid) -> ExGuid {
     let mut id = ExGuid {
         guid: space.guid,
         n: 1,
@@ -28,7 +28,7 @@ fn metadata_id(space: ExGuid) -> ExGuid {
     id
 }
 
-fn metadata_guid(metadata: &crate::document::Element<'_>) -> Result<[u8; 16], Error> {
+pub(crate) fn metadata_guid(metadata: &crate::document::Element<'_>) -> Result<[u8; 16], Error> {
     metadata.extra[0]
         .iter()
         .find_map(|field| match field.value {
@@ -38,7 +38,7 @@ fn metadata_guid(metadata: &crate::document::Element<'_>) -> Result<[u8; 16], Er
         .ok_or_else(|| invalid("Page metadata needs its page identifier"))
 }
 
-fn set_references(object: &mut PropertyObject, property: u32, ids: &[ExGuid]) -> Result<(), Error> {
+pub(crate) fn set_references(object: &mut PropertyObject, property: u32, ids: &[ExGuid]) -> Result<(), Error> {
     let mut references = Vec::new();
     for id in ids {
         references.extend_from_slice(&object.reference(*id)?);
@@ -49,6 +49,20 @@ fn set_references(object: &mut PropertyObject, property: u32, ids: &[ExGuid]) ->
         global_ids: Arc::clone(&object.global_ids),
     };
     object.copy_property(&source, property)
+}
+
+/// A conflict page (MS-ONE 2.1.2): the version of a page a merge could not take, kept
+/// read-only under the page it conflicts with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictPage {
+    pub space: ExGuid,
+    pub title: String,
+    /// Whose version it is (`ConflictingUserName`).
+    pub user: String,
+    /// FILETIME of its `TopologyCreationTimeStamp`, when the merge made it.
+    pub created: Option<u64>,
+    /// The conflict objects on it (`IsConflictObjectForRender`), which OneNote highlights.
+    pub objects: Vec<ExGuid>,
 }
 
 /// Whether an edit preserves position or moves before a page (None appends).
@@ -138,42 +152,7 @@ pub(crate) struct PageParts<'a> {
     pub stored_metadata: (ExGuid, PropertyObject),
 }
 
-pub(crate) fn edit_pages(
-    source: &[u8],
-    edits: &[PageEdit],
-    removals: &[ExGuid],
-) -> Result<Vec<u8>, Error> {
-    write_revisions(source, |index| {
-        let document = Document::parse(index)?;
-        let pages: Vec<ExGuid> = document.pages()?.into_iter().map(|(sid, _)| sid).collect();
-        let root = document.active(document.root)?;
-        let raw = index.resolve_active(document.root)?;
-        let parts = |sid: ExGuid| -> Result<PageParts<'_>, Error> {
-            let page = document.active(sid)?;
-            let revision = index.resolve_active(sid)?;
-            let metadata = page
-                .roots
-                .get(&2)
-                .and_then(|id| page.nodes.get(id))
-                .ok_or_else(|| invalid("Page metadata is unavailable"))?;
-            let (manifest, stored) = (revision.roots[&1], revision.roots[&2]);
-            Ok(PageParts {
-                metadata: metadata.clone(),
-                manifest: (manifest, PropertyObject::from_object(&revision.objects[&manifest])?),
-                stored_metadata: (stored, PropertyObject::from_object(&revision.objects[&stored])?),
-            })
-        };
-        let Some(changes) = page_changes(document.root, root, &raw, &pages, parts, edits, removals)? else {
-            return Ok(BTreeMap::new());
-        };
-        Ok(changes
-            .into_iter()
-            .map(|(space, changes)| (space, RevisionEdit::Update(changes)))
-            .collect())
-    })
-}
-
-/// `edit_pages` on a section kept open: the objects each changed space stores.
+/// Page moves and removals on a section kept open: the objects each changed space stores.
 pub(crate) fn section_changes(
     section: &mut crate::Section<'_>,
     edits: &[PageEdit],
@@ -197,12 +176,18 @@ pub(crate) fn section_changes(
     let parts = |sid: ExGuid| -> Result<PageParts<'_>, Error> {
         let revision = section.revision(sid)?;
         let (manifest, stored) = (revision.roots[&1], revision.roots[&2]);
-        Ok(PageParts {
-            metadata: crate::document::Element::parse_with(
-                &revision.objects[&stored],
+        let element = |id| {
+            crate::document::Element::parse_with(
+                &revision.objects[id],
                 crate::FileType::Section,
                 &mut |_| Err(invalid("Page metadata holds no payload")),
-            )?,
+            )
+        };
+        if element(&manifest)?.content.len() != 1 {
+            return Err(invalid("Each page space must contain one page with a valid level"));
+        }
+        Ok(PageParts {
+            metadata: element(&stored)?,
             manifest: (manifest, PropertyObject::from_object(&revision.objects[&manifest])?),
             stored_metadata: (stored, PropertyObject::from_object(&revision.objects[&stored])?),
         })
@@ -491,6 +476,12 @@ pub struct PageCreation {
     title: Option<String>,
     author: String,
     created: u32,
+    /// The title's date and time fields' text, for a titled page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    date: Option<[String; 2]>,
+    /// The page identity and creation time (FILETIME) a page keeps from elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kept: Option<([u8; 16], u64)>,
 }
 
 impl PageCreation {
@@ -505,9 +496,55 @@ impl PageCreation {
             title: title.map(str::to_owned),
             author: author.to_owned(),
             created: current_timestamps()?.0,
+            date: None,
+            kept: None,
         };
         page.validate()?;
         Ok(page)
+    }
+
+    /// Gives a titled page's title OneNote 2010's date and time fields, showing `date` and
+    /// `time`: the creation time (`created`) as the user's long date and short time.
+    pub fn dated(mut self, date: &str, time: &str) -> Result<Self, Error> {
+        if self.title.is_none() {
+            return Err(invalid("Only a titled page shows its date"));
+        }
+        self.date = Some([date.to_owned(), time.to_owned()]);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Keeps `identity`, the page identity internal links name, and `created`, as OneNote
+    /// 2010 keeps both for a page it moves to the notebook's recycle bin.
+    pub fn keeping(mut self, identity: [u8; 16], created: u64) -> Result<Self, Error> {
+        if identity == [0; 16] {
+            return Err(invalid("Keep an existing page identity"));
+        }
+        let seconds = (created / 10_000_000)
+            .checked_sub(11_644_473_600 + 315_532_800)
+            .and_then(|seconds| u32::try_from(seconds).ok())
+            .ok_or_else(|| invalid("The kept creation time is outside OneNote's range"))?;
+        self.created = seconds;
+        self.kept = Some((identity, created));
+        Ok(self)
+    }
+
+    /// Who creates the page.
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    /// When the page was created, FILETIME, which its date and time fields show.
+    pub fn created(&self) -> u64 {
+        match self.kept {
+            Some((_, created)) => created,
+            None => (u64::from(self.created) + 315_532_800 + 11_644_473_600) * 10_000_000,
+        }
+    }
+
+    /// The page identity internal links name as `page-id`.
+    fn identity(&self) -> [u8; 16] {
+        self.kept.map_or(self.guid, |(identity, _)| identity)
     }
 
     pub fn space(&self) -> ExGuid {
@@ -531,6 +568,11 @@ impl PageCreation {
         })
     }
 
+    /// The page the new page goes before; `None` appends it.
+    pub fn before(&self) -> Option<ExGuid> {
+        self.before
+    }
+
     /// Changes the insertion anchor while retaining all identities and creation metadata.
     pub fn reposition(&self, before: Option<ExGuid>) -> Result<Self, Error> {
         let mut page = self.clone();
@@ -547,8 +589,9 @@ impl PageCreation {
             || self.before.is_some_and(|id| id.guid == [0; 16])
             || self
                 .title
-                .as_ref()
-                .is_some_and(|title| title.contains(['\0', '\r', '\n', '\u{fffc}', '\u{fddf}']))
+                .iter()
+                .chain(self.date.iter().flatten())
+                .any(|text| text.contains(['\0', '\r', '\n', '\u{fffc}', '\u{fddf}']))
         {
             return Err(invalid(
                 "Use a new page identity, an existing page anchor, and ordinary single-line title text",
@@ -557,28 +600,7 @@ impl PageCreation {
         Ok(())
     }
 
-    pub(crate) fn apply(&self, source: &[u8]) -> Result<Vec<u8>, Error> {
-        self.validate()?;
-        write_revisions(source, |index| {
-            if index.spaces.contains_key(&self.space()) {
-                return Err(invalid(
-                    "This page identity already exists; reconcile the original creation",
-                ));
-            }
-            let document = Document::parse(index)?;
-            document.pages()?;
-            let view = document.active(document.root)?;
-            let raw = index.resolve_active(document.root)?;
-            let (root, roots, objects) = self.creation(view, &raw)?;
-            Ok(BTreeMap::from([
-                (document.root, RevisionEdit::Update(root)),
-                (self.space(), RevisionEdit::Create { roots, objects }),
-            ]))
-        })
-    }
-
-    /// `apply` on a section kept open: the root space's changes, and the new space's roots
-    /// and objects.
+    /// The root space's changes creating this page, and the new space's roots and objects.
     pub(crate) fn changes(
         &self,
         section: &mut crate::Section<'_>,
@@ -592,6 +614,133 @@ impl PageCreation {
         let root = section.root();
         let page = section.active(root)?;
         self.creation(&page.view, &page.live.revision)
+    }
+
+    /// The object space of a conflict page this creation makes, as OneNote 2010 stores one:
+    /// the page's space with `jcidConflictPageMetaData` (MS-ONE 2.2.35) as its metadata,
+    /// naming this creation's author as the conflicting user and `title` as the page's.
+    /// Returns the roots, the objects and the metadata, which the conflicting page's
+    /// manifest also keeps a copy of.
+    pub(crate) fn conflict(
+        &self,
+        section: &mut crate::Section<'_>,
+        title: &str,
+        level: u32,
+    ) -> Result<(BTreeMap<u32, ExGuid>, crate::active::Changes, PropertyObject), Error> {
+        if self.before.is_some() {
+            return Err(invalid("A conflict page is not placed in the page list"));
+        }
+        let (_, roots, mut objects) = self.changes(section)?;
+        let timestamp = self.created();
+        let initials = crate::create::initials(&self.author);
+        let metadata = PropertyObject {
+            jcid: 0x20038,
+            bytes: properties(&[
+                (0x1c001cf3, string(title)),
+                (0x1c001c30, self.identity().to_vec()),
+                (0x14001dff, level.to_le_bytes().to_vec()),
+                (0x14001d82, 40_u32.to_le_bytes().to_vec()),
+                (0x1400348b, 40_u32.to_le_bytes().to_vec()),
+                (0x18001c65, timestamp.to_le_bytes().to_vec()),
+                (0x1c001d9e, string(&self.author)),
+                (0x1c001d9f, string(&initials)),
+            ])?,
+            global_ids: Arc::new(BTreeMap::from([(0, self.guid)])),
+        };
+        objects.insert(roots[&2], metadata.clone());
+        Ok((roots, objects, metadata))
+    }
+
+    /// The title's second outline as OneNote 2010 writes it for a new page (object numbers,
+    /// jcids and properties): a read-only outline of two paragraphs, the date then the
+    /// time, in the `PageDateTime` style.
+    fn date_fields(&self, date: &str, time: &str) -> Vec<(u32, u32, Vec<(u32, Vec<u8>)>)> {
+        let reference = |n: u32| n.to_le_bytes().to_vec();
+        let modified = || (0x14001d7a, self.created.to_le_bytes().to_vec());
+        let yes = |id: u32| (id | 1 << 31, Vec::new());
+        let paragraph = |text: u32| {
+            vec![
+                modified(),
+                (0x20001d79, reference(17)),
+                (0x20001d78, reference(17)),
+                (0x14001d09, self.created.to_le_bytes().to_vec()),
+                (0x0c001c03, vec![1]),
+                (0x24001c1f, reference(text)),
+                yes(0x08001cb2),
+                yes(0x08001d0c),
+                (0x08001c34, Vec::new()),
+            ]
+        };
+        let text = |value: &str, role: u32| {
+            // OneNote keeps Latin-1 text as TextExtendedAscii, other text as Unicode.
+            let content = match value.chars().map(|c| u8::try_from(c).ok()).collect::<Option<Vec<u8>>>() {
+                Some(latin) => (0x1c003498, latin),
+                None => (0x1c001c22, string(value)),
+            };
+            vec![
+                modified(),
+                (0x2000342c, reference(23)),
+                yes(0x08001cde),
+                yes(0x08001c00),
+                yes(0x08001c88),
+                yes(0x08001d0c),
+                yes(role),
+                (0x10001cfe, 0x409_u16.to_le_bytes().to_vec()),
+                (0x1c001cc8, vec![0, 0, 0, 0, 3]),
+                content,
+                (0x24001e13, reference(19)),
+                yes(0x080034dd),
+            ]
+        };
+        let no = |id: u32| (id, Vec::new());
+        vec![
+            (
+                20,
+                0x6000c,
+                vec![
+                    modified(),
+                    (0x24001c20, [reference(21), reference(24)].concat()),
+                    (
+                        0x1c001c12,
+                        measurement_bytes(&NATIVE_INDENTS, 4).expect("Native indents encode"),
+                    ),
+                    (0x0c001c13, vec![0]),
+                    (0x0c001c03, vec![1]),
+                    (0x14001c1c, 0.6_f32.to_le_bytes().to_vec()),
+                    yes(0x08001cb5),
+                    yes(0x08001c00),
+                    yes(0x08001cb2),
+                    yes(0x08001cde),
+                    yes(0x08001d0c),
+                    (0x14001c3e, reference(0)),
+                    (0x14001c84, reference(0xc)),
+                ],
+            ),
+            (21, 0x6000d, paragraph(22)),
+            (22, 0x6000e, text(date, 0x08001cb5)),
+            (
+                23,
+                0x12004d,
+                vec![
+                    (0x1c00345a, string("PageDateTime")),
+                    no(0x08001c04),
+                    no(0x08001c05),
+                    no(0x08001c06),
+                    (0x14001c0c, 0x0080_8080_u32.to_le_bytes().to_vec()),
+                    (0x1c001c0a, string("Calibri")),
+                    (0x10001c0b, 20_u16.to_le_bytes().to_vec()),
+                    (0x1400342e, 0_f32.to_le_bytes().to_vec()),
+                    (0x1400342f, 0_f32.to_le_bytes().to_vec()),
+                    (0x14003430, 0_f32.to_le_bytes().to_vec()),
+                    no(0x08001c07),
+                    (0x14001c0d, 0xff00_0000_u32.to_le_bytes().to_vec()),
+                    no(0x08001c09),
+                    no(0x08001c08),
+                ],
+            ),
+            (24, 0x6000d, paragraph(25)),
+            (25, 0x6000e, text(time, 0x08001c87)),
+        ]
     }
 
     fn creation(
@@ -621,9 +770,7 @@ impl PageCreation {
             };
             let id = |n| ExGuid { guid: self.guid, n };
             let reference = |n: u32| n.to_le_bytes().to_vec();
-            let timestamp = ((u64::from(self.created) + 315532800 + 11644473600) * 10000000)
-                .to_le_bytes()
-                .to_vec();
+            let timestamp = self.created().to_le_bytes().to_vec();
             let modified = || (0x14001d7a, self.created.to_le_bytes().to_vec());
             let mut table = BTreeMap::from([(0, self.guid)]);
             let metadata_id = metadata_id(self.space());
@@ -638,7 +785,7 @@ impl PageCreation {
             };
             let title = self.title.as_deref().unwrap_or_default().trim_start();
             let metadata = vec![
-                (0x1c001c30, self.guid.to_vec()),
+                (0x1c001c30, self.identity().to_vec()),
                 (0x1c001cf3, string(title)),
                 (0x14001d82, reference(40)),
                 (0x1400348b, reference(40)),
@@ -649,6 +796,7 @@ impl PageCreation {
                 vec![
                     modified(),
                     (0x1c001d75, string(&self.author)),
+                    (0x1c001df8, string(&crate::create::initials(&self.author))),
                     (0x1c001d3c, string("")),
                 ],
                 crate::create::page_margins(),
@@ -669,7 +817,11 @@ impl PageCreation {
                         0x6002c,
                         vec![
                             modified(),
-                            (0x24001c20, reference(14)),
+                            (
+                                0x24001c20,
+                                [reference(14), self.date.iter().flat_map(|_| reference(20)).collect()]
+                                    .concat(),
+                            ),
                             (0x14001c14, 0_f32.to_le_bytes().to_vec()),
                             (0x14001c15, 0_f32.to_le_bytes().to_vec()),
                             (0x14001c3e, reference(0x0009_000c)),
@@ -723,7 +875,7 @@ impl PageCreation {
                             (0x88001cb4, vec![]),
                         ],
                     ),
-                    (17, 0x120001, vec![(0x1c001d75, string(&self.author))]),
+                    (17, 0x120001, crate::create::author_properties(&self.author)),
                     (
                         18,
                         0x12004d,
@@ -736,6 +888,11 @@ impl PageCreation {
                     (19, 0x12004d, vec![(0x14001c3b, reference(0x409))]),
                 ] {
                     objects.insert(id(n), object(jcid, values)?);
+                }
+                if let Some([date, time]) = &self.date {
+                    for (n, jcid, values) in self.date_fields(date, time) {
+                        objects.insert(id(n), object(jcid, values)?);
+                    }
                 }
             }
             let series = object(
@@ -774,7 +931,25 @@ impl PageCreation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{RevisionIndex, Store};
+    use crate::{
+        RevisionIndex, Store,
+        document::Document,
+        op::{Edit, Op, OpError, SectionOp},
+        write::{RevisionEdit, write_revisions},
+    };
+
+    /// Page moves and removals through a section, sealed: the image they leave.
+    fn edit_pages(source: &[u8], edits: &[PageEdit], removals: &[ExGuid]) -> Result<Vec<u8>, OpError> {
+        let arena = crate::Arena::default();
+        let mut section = crate::Section::open(&arena, source.to_vec()).map_err(OpError::Failed)?;
+        let mut ops = vec![Op::Section(SectionOp::Pages(edits.to_vec()))];
+        if !removals.is_empty() {
+            ops.push(Op::Section(SectionOp::Delete(removals.to_vec())));
+        }
+        section.apply("Author", &Edit { at: 133_700_000_000_000_000, ops })?;
+        section.seal().map_err(OpError::Failed)?;
+        Ok(section.image())
+    }
 
     #[test]
     fn page_movement_restores_an_optional_metadata_cache_from_history() {

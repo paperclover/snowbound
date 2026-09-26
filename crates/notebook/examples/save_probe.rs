@@ -1,12 +1,13 @@
-//! Times importing a generated page into a copy of a section, then saving a one-character
-//! edit of it: `save_probe SECTION PARAGRAPHS`.
+//! Times importing a generated page into a copy of a section, then typing one character
+//! into it until durable and queued: `save_probe SECTION PARAGRAPHS`.
 
 use notebook::session::Section;
 use onestore::{
     document::{Format, Layout},
+    op::{Edit, Op, PageOp},
     page::{
         Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
-        text::{Edit, new_id},
+        text::new_id,
     },
 };
 use std::time::{Duration, Instant};
@@ -49,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity: None,
         created: None,
         margin_origin: [0.0; 2],
+        color: None,
         objects: vec![PageObject::Outline(Outline {
             id: new_id()?,
             title: false,
@@ -67,38 +69,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let space = section.import_page(&imported, "Probe")?;
     println!("import {count}: {:?}", start.elapsed());
-    let before = section.page(space)?;
-    let edit = |page: &Page, word: &str| -> Result<Page, Box<dyn std::error::Error>> {
-        let mut after = page.clone();
-        let text = after
-            .objects
-            .iter_mut()
-            .find_map(|object| match object {
-                PageObject::Outline(outline) if outline.paragraphs.len() == count => {
-                    outline.paragraphs[count / 2].text_mut()
-                }
-                _ => None,
-            })
-            .ok_or("the imported outline is missing")?;
-        let format = text.text.format_at(0)?.clone();
-        text.text.apply(Edit {
-            range: 0..0,
-            replacement: Paragraph::new(word.into(), format),
-        })?;
-        Ok(after)
+    let text = section
+        .page(space)?
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) if outline.paragraphs.len() == count => {
+                outline.paragraphs[count / 2].text().map(|text| text.id)
+            }
+            _ => None,
+        })
+        .ok_or("the imported outline is missing")?;
+    let typed = |word: &str| Edit {
+        at: 133_000_000_000_000_000,
+        ops: vec![Op::Page {
+            space,
+            op: PageOp::Text {
+                text,
+                range: 0..0,
+                with: word.into(),
+            },
+        }],
     };
-    let after = edit(&before, "x")?;
     let start = Instant::now();
-    section.save(space, &before, &after, "Probe")?;
-    println!("save: {:?}", start.elapsed());
-    let next = edit(&after, "y")?;
+    section.replica().apply("Probe", typed("x"))?;
+    println!("typed, durable: {:?}", start.elapsed());
     let start = Instant::now();
-    section.queue_save(space, after, next, "Probe")?;
-    println!("queue_save: {:?}", start.elapsed());
+    section.apply("Probe", typed("y"))?;
+    println!("typed, queued: {:?}", start.elapsed());
     let deadline = start + Duration::from_secs(600);
     while Instant::now() < deadline {
-        if let Some((_, save)) = section.saved().pop() {
-            println!("queued save done: {:?} {save:?}", start.elapsed());
+        if section.replica().pending()?.len() == 2 {
+            println!("queued edit durable: {:?}", start.elapsed());
             break;
         }
         std::thread::sleep(Duration::from_millis(1));

@@ -15,6 +15,7 @@ use std::{
 mod model_ops;
 #[path = "support/server.rs"]
 mod server;
+use server::{remote_snapshot, snapshot};
 
 const FIXTURE: &str = "../../corpus/native-external-assets/notebook";
 
@@ -86,8 +87,8 @@ impl notebook::discover::Source for Payload {
 fn downloaded_media_survives_reopen_and_recovery_with_the_queue_intact() {
     let directory = tempfile::tempdir().unwrap();
     let cache = queued_cache(directory.path());
-    let working = cache.snapshot().unwrap();
-    let remote = cache.remote_snapshot().unwrap();
+    let working = snapshot(&cache);
+    let remote = remote_snapshot(&cache);
     let pending = cache.pending().unwrap();
     assert_eq!(
         pending.iter().map(|edit| edit.id).collect::<Vec<_>>(),
@@ -118,10 +119,10 @@ fn downloaded_media_survives_reopen_and_recovery_with_the_queue_intact() {
         (2, 1024)
     );
     assert_eq!(
-        server::pages(&cache.snapshot().unwrap()),
+        server::pages(&snapshot(&cache)),
         server::pages(&working)
     );
-    assert_eq!(cache.remote_snapshot().unwrap(), remote);
+    assert_eq!(remote_snapshot(&cache), remote);
     assert_eq!(cache.pending().unwrap(), pending);
     assert_eq!(cache.status(1).unwrap(), uncertain);
     cache
@@ -227,7 +228,7 @@ fn download_network_wait_does_not_block_local_edits() {
                 .unwrap()
         });
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
-        let text = first_text(&cache.snapshot().unwrap());
+        let text = first_text(&snapshot(&cache));
         let id = model_ops::save(&cache, text, |page| {
             model_ops::replace_text(page, text, 0..0, "during download ")
         })
@@ -272,12 +273,18 @@ fn a_native_refresh_removing_the_reference_rejects_an_inflight_download() {
     struct Native;
     impl notebook::Remote for Native {
         fn read(&mut self) -> io::Result<Vec<u8>> {
-            fs::read("../../corpus/native-external-assets/native/synthetic.one")
+            let mut image = fs::read("../../corpus/native-external-assets/native/synthetic.one")?;
+            // The fixture keeps the old header; a native commit writes a new file version.
+            image[212] ^= 1;
+            Ok(image)
         }
         fn publish(&mut self, _: &onestore::Transaction) -> Result<(), onestore::CommitError> {
             panic!("Unexpected publication")
         }
-        fn confirm(&mut self, _: &[u8]) -> Result<(), onestore::CommitError> {
+        fn stamp(&mut self) -> io::Result<onestore::Stamp> {
+            onestore::Stamp::of(&self.read()?).map_err(io::Error::other)
+        }
+        fn confirm(&mut self, _: &onestore::Stamp) -> Result<(), onestore::CommitError> {
             panic!("Unexpected confirmation")
         }
     }
@@ -301,8 +308,8 @@ fn a_native_refresh_removing_the_reference_rejects_an_inflight_download() {
     );
     assert!(cache.cached_asset(&name, 1024).unwrap().is_none());
     assert_eq!(
-        cache.snapshot().unwrap(),
-        fs::read("../../corpus/native-external-assets/native/synthetic.one").unwrap()
+        snapshot(&cache),
+        notebook::Remote::read(&mut Native).unwrap()
     );
 }
 

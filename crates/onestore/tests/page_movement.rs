@@ -1,6 +1,10 @@
+#[path = "support/ops.rs"]
+mod ops;
+
 use onestore::{
-    ExGuid, PageEdit, PreparedEdit, RevisionIndex, Store,
+    ExGuid, PageEdit, RevisionIndex, Store,
     document::{Document, Kind},
+    op::{PageOp, SectionOp},
 };
 
 #[path = "support/current.rs"]
@@ -175,10 +179,10 @@ fn explicit_page_edits_match_native_selection_and_indentation() {
         let serialized = serde_json::to_vec(&edits).unwrap();
         let retained: Vec<PageEdit> = serde_json::from_slice(&serialized).unwrap();
         assert_eq!(edits, retained);
-        let prepared = PreparedEdit::pages(&source, &retained).unwrap();
+        let prepared = ops::section_op(&source, SectionOp::Pages(retained.to_vec())).unwrap();
         verify(&source, prepared.as_bytes(), native);
         assert_eq!(
-            PreparedEdit::pages(prepared.as_bytes(), &retained)
+            ops::section_op(prepared.as_bytes(), SectionOp::Pages(retained.to_vec()))
                 .unwrap()
                 .as_bytes(),
             prepared.as_bytes()
@@ -187,7 +191,7 @@ fn explicit_page_edits_match_native_selection_and_indentation() {
         source = prepared.as_bytes().to_vec();
     }
     let edit = PageEdit::move_to(ids[3], None, 1).unwrap();
-    let single = PreparedEdit::pages(SOURCE, &[edit]).unwrap();
+    let single = ops::section_op(SOURCE, SectionOp::Pages([edit].to_vec())).unwrap();
     verify(
         SOURCE,
         single.as_bytes(),
@@ -206,32 +210,29 @@ fn invalid_and_empty_page_edits_do_not_publish() {
     }
     assert!(PageEdit::move_to(ids[0], Some(ids[0]), 1).is_err());
     assert!(PageEdit::set_level(ExGuid::default(), 1).is_err());
-    assert_eq!(PreparedEdit::pages(SOURCE, &[]).unwrap().as_bytes(), SOURCE);
+    assert_eq!(ops::section_op(SOURCE, SectionOp::Pages([].to_vec())).unwrap().as_bytes(), SOURCE);
     assert_eq!(
-        PreparedEdit::pages(SOURCE, &[PageEdit::set_level(ids[0], 1).unwrap()])
+        ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(ids[0], 1).unwrap()].to_vec()))
             .unwrap()
             .as_bytes(),
         SOURCE
     );
-    assert!(PreparedEdit::pages(SOURCE, &[PageEdit::set_level(ids[0], 2).unwrap()]).is_err());
+    assert!(ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(ids[0], 2).unwrap()].to_vec())).is_err());
     let duplicate = PageEdit::set_level(ids[3], 2).unwrap();
-    assert!(PreparedEdit::pages(SOURCE, &[duplicate.clone(), duplicate]).is_err());
+    assert!(ops::section_op(SOURCE, SectionOp::Pages([duplicate.clone(), duplicate].to_vec())).is_err());
     let missing = ExGuid {
         guid: [0x77; 16],
         n: 1,
     };
-    assert!(PreparedEdit::pages(SOURCE, &[PageEdit::set_level(missing, 1).unwrap()]).is_err());
+    assert!(ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(missing, 1).unwrap()].to_vec())).is_err());
     assert!(
-        PreparedEdit::pages(
-            SOURCE,
-            &[PageEdit::move_to(ids[3], Some(missing), 1).unwrap()]
-        )
+        ops::section_op(SOURCE, SectionOp::Pages([PageEdit::move_to(ids[3], Some(missing), 1).unwrap()].to_vec()))
         .is_err()
     );
     let mut value = serde_json::to_value(PageEdit::set_level(ids[3], 2).unwrap()).unwrap();
     value["level"] = 4.into();
     let invalid: PageEdit = serde_json::from_value(value.clone()).unwrap();
-    assert!(PreparedEdit::pages(SOURCE, &[invalid]).is_err());
+    assert!(ops::section_op(SOURCE, SectionOp::Pages([invalid].to_vec())).is_err());
     value["unknown"] = true.into();
     assert!(serde_json::from_value::<PageEdit>(value).is_err());
 }
@@ -246,12 +247,12 @@ fn moving_pages_preserves_ink_file_data_and_native_feature_objects() {
         let first = pages(source)[0];
         let created =
             onestore::PageCreation::new(Some(first), Some("Movement anchor"), "Author").unwrap();
-        let source = PreparedEdit::create_page(source, &created)
+        let source = ops::section_op(source, SectionOp::Create(created.clone()))
             .unwrap()
             .as_bytes()
             .to_vec();
         let moved =
-            PreparedEdit::pages(&source, &[PageEdit::move_to(first, None, 1).unwrap()]).unwrap();
+            ops::section_op(&source, SectionOp::Pages([PageEdit::move_to(first, None, 1).unwrap()].to_vec())).unwrap();
         assert_eq!(pages(moved.as_bytes()).last(), Some(&first));
         let stores = [&source, moved.as_bytes()].map(|bytes| Store::parse(bytes).unwrap());
         let indexes = stores
@@ -295,7 +296,7 @@ fn section_reordering_refreshes_stale_native_metadata_levels() {
         .enumerate()
         .map(|(i, sid)| PageEdit::move_to(*sid, None, u32::try_from(i + 1).unwrap()).unwrap())
         .collect();
-    let prepared = PreparedEdit::pages(source, &edits).unwrap();
+    let prepared = ops::section_op(source, SectionOp::Pages(edits.to_vec())).unwrap();
     let stores = [source.as_slice(), prepared.as_bytes()].map(|b| Store::parse(b).unwrap());
     let indexes = stores.each_ref().map(|s| RevisionIndex::parse(s).unwrap());
     let documents = indexes.each_ref().map(|i| Document::parse(i).unwrap());
@@ -335,7 +336,7 @@ fn metadata_copy_order_does_not_change_page_identity() {
         "../../../corpus/page-lifecycle/page-edits/optional-cache/source-cold/notebook/Lifecycle.one"
     );
     let sid = pages(source)[3];
-    let edited = PreparedEdit::pages(source, &[PageEdit::set_level(sid, 2).unwrap()]).unwrap();
+    let edited = ops::section_op(source, SectionOp::Pages([PageEdit::set_level(sid, 2).unwrap()].to_vec())).unwrap();
     let expected = include_bytes!(
         "../../../corpus/page-lifecycle/page-edits/optional-cache/candidate/Lifecycle.one"
     );
@@ -371,8 +372,8 @@ fn native_edits_on_moved_pages_support_more_rust_changes() {
     let bodies: Vec<_> = view.nodes.iter().filter_map(|(id, node)|
         matches!(&node.kind, Kind::RichText { text, .. } if text == "Native body after a Rust page move.").then_some(*id)).collect();
     let [body] = bodies.as_slice() else { panic!() };
-    let moved = PreparedEdit::pages(source, &[PageEdit::set_level(sid, 2).unwrap()]).unwrap();
-    let edited = PreparedEdit::text(moved.as_bytes(), sid, *body, 0..0, "Rust + ").unwrap();
+    let moved = ops::section_op(source, SectionOp::Pages([PageEdit::set_level(sid, 2).unwrap()].to_vec())).unwrap();
+    let edited = ops::page_op(moved.as_bytes(), sid, PageOp::Text { text: *body, range: 0..0, with: "Rust + ".into() }).unwrap();
     let after_store = Store::parse(edited.as_bytes()).unwrap();
     let after_index = RevisionIndex::parse(&after_store).unwrap();
     let after = Document::parse(&after_index).unwrap();
@@ -401,7 +402,7 @@ fn grouped_page_levels_and_membership_survive_each_storage_interruption() {
     let mut source = onestore::create_section("movement.one", "Original", "Author").unwrap();
     for _ in 0..2 {
         let page = onestore::PageCreation::new(None, Some("Same title"), "Author").unwrap();
-        source = PreparedEdit::create_page(&source, &page)
+        source = ops::section_op(&source, SectionOp::Create(page.clone()))
             .unwrap()
             .as_bytes()
             .to_vec();
@@ -421,7 +422,7 @@ fn grouped_page_levels_and_membership_survive_each_storage_interruption() {
             PageEdit::set_level(ids[first], 2).unwrap(),
             PageEdit::set_level(ids[first + 1], 3).unwrap(),
         ];
-        let prepared = PreparedEdit::pages(source, &edits).unwrap();
+        let prepared = ops::section_op(source, SectionOp::Pages(edits.to_vec())).unwrap();
         let old = current::current(source);
         let new = current::current(prepared.as_bytes());
         assert_eq!(new.len(), old.len());
@@ -460,7 +461,7 @@ fn grouped_page_levels_and_membership_survive_each_storage_interruption() {
 fn repeated_nesting_retains_series_history_across_revision_checkpoints() {
     let mut source = onestore::create_section("movement.one", "Original", "Author").unwrap();
     let page = onestore::PageCreation::new(None, Some("Child"), "Author").unwrap();
-    source = PreparedEdit::create_page(&source, &page)
+    source = ops::section_op(&source, SectionOp::Create(page.clone()))
         .unwrap()
         .as_bytes()
         .to_vec();
@@ -468,7 +469,7 @@ fn repeated_nesting_retains_series_history_across_revision_checkpoints() {
     for step in 0..520 {
         let level = if step % 2 == 0 { 2 } else { 1 };
         let edit = PageEdit::set_level(page.space(), level).unwrap();
-        let written = PreparedEdit::pages(&source, &[edit])
+        let written = ops::section_op(&source, SectionOp::Pages([edit].to_vec()))
             .unwrap()
             .as_bytes()
             .to_vec();

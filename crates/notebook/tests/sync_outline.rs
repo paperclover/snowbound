@@ -1,9 +1,12 @@
 //! Outline layout through page-model saves: reconciliation against the remote page,
 //! review of competing layout, twelve offline writers, and the native outline fixtures.
 
-use notebook::{ConflictKind, EditStatus, Replica};
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
+
+use notebook::{EditStatus, Replica};
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::Document,
     page::{Outline, Page, PageObject, PageParagraph},
 };
@@ -11,12 +14,12 @@ use serde_json::json;
 
 #[path = "support/server.rs"]
 mod server;
-use server::{Fault, Server, pages};
+use server::{Fault, Server, conflicts, pages, snapshot};
 #[path = "support/model_ops.rs"]
 mod model_ops;
 use model_ops::{
     delete_paragraph, insert_outline, outlines_mut, page_of, paragraph_with, replace_text, restyle,
-    review, save,
+    save,
 };
 #[path = "support/model_schedule.rs"]
 mod model_schedule;
@@ -99,10 +102,28 @@ pub(crate) fn text_of(page: &Page, text: ExGuid) -> String {
 pub(crate) fn remote_with(source: &[u8], space: ExGuid, change: impl FnOnce(&mut Page)) -> Vec<u8> {
     let mut page = page_of(source, space);
     change(&mut page);
-    PreparedEdit::page(source, space, &page, "Native author")
+    ops::saved(source, space, &page)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec()
+}
+
+/// Runs one synchronization step, which publishes; true when the remote's version of
+/// `space` stayed and the local one became a conflict page under it.
+pub(crate) fn conflicted(cache: &Replica, server: &mut Server, space: ExGuid) -> bool {
+    let count = |image: &[u8]| {
+        conflicts(image)
+            .into_iter()
+            .filter(|(page, _)| *page == space)
+            .map(|(_, pages)| pages.len())
+            .sum::<usize>()
+    };
+    let before = count(&server.durable);
+    assert!(matches!(
+        cache.sync_once(server).unwrap().edit,
+        Some((_, EditStatus::Published { .. }))
+    ));
+    count(&server.durable) > before
 }
 
 /// Publishes the batch holding `id`, unless an earlier step already did.
@@ -149,13 +170,13 @@ fn layout_and_dependent_text_survive_reopen_and_a_remote_format_of_the_same_page
         let path = directory.path().join("cache.sqlite");
         let cache = Replica::create(&path, &source).unwrap();
         let id = save(&cache, text_id, &change).unwrap().unwrap();
-        let expected = page_of(&cache.snapshot().unwrap(), space);
+        let expected = page_of(&snapshot(&cache), space);
         let pending = cache.pending().unwrap();
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         drop(cache);
         let cache = Replica::open(&path).unwrap();
         assert_eq!(cache.pending().unwrap(), pending);
-        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+        assert_eq!(pages(&snapshot(&cache)), pages(&local));
         let mut server = Server::new(&remote_with(&source, space, |page| {
             restyle(page, text_id, 0..8, |format| format.bold = Some(true));
         }));
@@ -208,9 +229,9 @@ fn an_uncertain_move_confirms_from_the_remote_revision_and_adopts_the_remote_tit
     let (source, space, outline, _) = fixture();
     let mut page = page_of(&source, space);
     insert_outline(&mut page, 144.0, 36.0, "Second");
-    let source = PreparedEdit::page(&source, space, &page, "Author")
+    let source = ops::saved(&source, space, &page)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     let second = text_with(&page_of(&source, space), "Second");
     let directory = tempfile::tempdir().unwrap();
@@ -242,8 +263,9 @@ fn an_uncertain_move_confirms_from_the_remote_revision_and_adopts_the_remote_tit
     assert_eq!((server.publications, server.confirmations), (1, 1));
 }
 
+/// Competing layout keeps the remote's on the page and the local one on its conflict page.
 #[test]
-fn competing_layout_conflicts_until_the_local_page_is_kept() {
+fn competing_layout_keeps_the_local_one_on_a_conflict_page() {
     let (source, space, outline, text_id) = fixture();
     let cases: [(Change<Outline>, Change<Outline>); 2] = [
         (Box::new(moved(180.0, 216.0)), Box::new(moved(288.0, 216.0))),
@@ -256,46 +278,40 @@ fn competing_layout_conflicts_until_the_local_page_is_kept() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("cache.sqlite");
         let cache = Replica::create(&path, &source).unwrap();
-        let id = save(&cache, text_id, |page| {
+        save(&cache, text_id, |page| {
             local_change(outline_mut(page, outline))
         })
         .unwrap()
         .unwrap();
-        let local = cache.snapshot().unwrap();
-        let mut server = Server::new(&remote_with(&source, space, |page| {
+        let local = page_of(&snapshot(&cache), space);
+        let remote = remote_with(&source, space, |page| {
             remote_change(outline_mut(page, outline));
-        }));
+        });
+        let mut server = Server::new(&remote);
+        assert!(conflicted(&cache, &mut server, space));
+        assert_eq!(server.publications, 1);
+        let durable = page_of(&server.durable, space);
         assert_eq!(
-            cache.sync_once(&mut server).unwrap().edit,
-            Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
+            outline_of(&durable, outline).layout,
+            outline_of(&page_of(&remote, space), outline).layout
         );
-        assert_eq!(server.publications, 0);
-        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+        let arena = onestore::Arena::default();
+        let mut section = onestore::Section::open(&arena, server.durable.clone()).unwrap();
+        let conflict = section.conflicts().unwrap()[0].1[0].space;
+        let kept = section.page(conflict).unwrap();
+        assert_eq!(body_outlines(&kept)[0].layout, outline_of(&local, outline).layout);
         let dependent = save(&cache, text_id, |page| {
             replace_text(page, text_id, 0..0, "Local ")
         })
         .unwrap()
         .unwrap();
-        let local = cache.snapshot().unwrap();
         drop(cache);
         let cache = Replica::open(&path).unwrap();
+        published(&cache, &mut server, dependent);
         assert_eq!(
-            cache.status(id).unwrap(),
-            Some(EditStatus::Conflict(ConflictKind::ContentChanged))
+            text_of(&page_of(&server.durable, space), text_id),
+            "Local Original 🦀 é"
         );
-        cache.resolve(id, notebook::Resolution::Mine).unwrap();
-        assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-        drop(cache);
-        let cache = Replica::open(&path).unwrap();
-        for id in [id, dependent] {
-            published(&cache, &mut server, id);
-        }
-        let durable = page_of(&server.durable, space);
-        assert_eq!(
-            outline_of(&durable, outline).layout,
-            outline_of(&page_of(&local, space), outline).layout
-        );
-        assert_eq!(text_of(&durable, text_id), "Local Original 🦀 é");
     }
 }
 
@@ -346,15 +362,14 @@ fn twelve_offline_writers_preserve_all_layout_intents_through_review_and_restart
                 paragraph_mut(page, text_id).collapsed = (actor + round) % 2 != 0;
             };
             let id = save(&cache, text_id, change).unwrap().unwrap();
-            let expected = page_of(&cache.snapshot().unwrap(), space);
+            let expected = page_of(&snapshot(&cache), space);
             drop(cache);
             let cache = Replica::open(&path).unwrap();
-            if cache.sync_once(&mut server).unwrap().edit
-                == Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-            {
-                review(&cache, id, text_id, change).unwrap();
+            if conflicted(&cache, &mut server, space) {
+                // The writer makes the change again over the remote's version.
+                let again = save(&cache, text_id, change).unwrap().unwrap();
                 reviewed += 1;
-                published(&cache, &mut server, id);
+                published(&cache, &mut server, again);
             }
             assert!(matches!(
                 cache.status(id).unwrap(),
@@ -388,7 +403,7 @@ fn an_uncertain_layout_attempt_confirms_by_revision_or_by_an_equal_remote_page()
         })
         .unwrap()
         .unwrap();
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         let mut server = Server::new(&source);
         server.fault = fault;
         assert!(cache.sync_once(&mut server).is_err());
@@ -416,7 +431,7 @@ fn an_uncertain_layout_attempt_confirms_by_revision_or_by_an_equal_remote_page()
             cache.sync_once(&mut server).unwrap().edit,
             Some((id, status.clone()))
         );
-        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+        assert_eq!(pages(&snapshot(&cache)), pages(&local));
         server.visible = remote_with(&source, space, |page| {
             resized(144.0, true)(outline_mut(page, outline));
         });
@@ -483,7 +498,7 @@ pub(crate) fn native_pages(source: &[u8]) -> Vec<(String, ExGuid, ExGuid, ExGuid
 }
 
 #[test]
-fn native_moves_deletions_and_layout_changes_merge_or_require_review() {
+fn native_moves_deletions_and_layout_changes_merge_or_keep_a_conflict_page() {
     let mut server = Server::new(NATIVE);
     let mut records = Vec::new();
     for (name, space, outline, target, dependent) in native_pages(BEFORE) {
@@ -496,28 +511,20 @@ fn native_moves_deletions_and_layout_changes_merge_or_require_review() {
         let path = directory.path().join("cache.sqlite");
         let cache = Replica::create(&path, BEFORE).unwrap();
         let id = save(&cache, dependent, save_both).unwrap().unwrap();
-        let local = cache.snapshot().unwrap();
-        let queue = cache.pending().unwrap();
-        let merged = match cache.sync_once(&mut server).unwrap().edit.unwrap() {
-            (actual, EditStatus::Published { .. }) => {
-                assert_eq!(actual, id, "{name}");
-                true
+        let merged = !conflicted(&cache, &mut server, space);
+        assert!(matches!(
+            cache.status(id).unwrap(),
+            Some(EditStatus::Published { .. })
+        ));
+        if !merged {
+            // The dependent text merged; the writer makes the change again.
+            drop(cache);
+            let cache = Replica::open(&path).unwrap();
+            // Unless the remote made the same change.
+            if let Some(again) = save(&cache, dependent, &change).unwrap() {
+                published(&cache, &mut server, again);
             }
-            result => {
-                assert_eq!(
-                    result,
-                    (id, EditStatus::Conflict(ConflictKind::ContentChanged)),
-                    "{name}"
-                );
-                assert_eq!(cache.pending().unwrap(), queue);
-                assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
-                drop(cache);
-                let cache = Replica::open(&path).unwrap();
-                review(&cache, id, dependent, save_both).unwrap();
-                published(&cache, &mut server, id);
-                false
-            }
-        };
+        }
         let durable = page_of(&server.durable, space);
         assert!(
             text_of(&durable, dependent).starts_with("Local "),
@@ -564,7 +571,7 @@ fn native_moves_deletions_and_layout_changes_merge_or_require_review() {
 }
 
 #[test]
-fn a_new_native_wrap_reservation_requires_review_before_width_replacement() {
+fn a_new_native_wrap_reservation_keeps_the_local_width_on_a_conflict_page() {
     let (_, space, outline, _, text_id) = native_pages(BEFORE)
         .into_iter()
         .find(|(name, ..)| name == "Move outline")
@@ -584,15 +591,17 @@ fn a_new_native_wrap_reservation_requires_review_before_width_replacement() {
     .unwrap()
     .unwrap();
     let mut server = Server::new(NATIVE);
-    assert_eq!(
-        cache.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
-    review(&cache, id, text_id, |page| {
+    assert!(conflicted(&cache, &mut server, space));
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    let again = save(&cache, text_id, |page| {
         resized(144.0, true)(outline_mut(page, outline))
     })
+    .unwrap()
     .unwrap();
-    published(&cache, &mut server, id);
+    published(&cache, &mut server, again);
     let layout = outline_of(&page_of(&server.durable, space), outline)
         .layout
         .clone();

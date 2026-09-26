@@ -34,9 +34,9 @@ fn fixture() -> (Vec<u8>, ExGuid, ExGuid, [ExGuid; 4], [ExGuid; 4]) {
     for at in 1..4 {
         anchor = model_ops::insert_after(&mut page, anchor, &format!("Sibling {at}")).1;
     }
-    let source = PreparedEdit::page(&source, space, &page, "Author")
+    let source = ops::saved(&source, space, &page)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     let stored = page_of(&source, space);
     let siblings = &outline_of(&stored, outline).paragraphs;
@@ -87,12 +87,12 @@ fn move_preserves_remote_content_and_dependent_edits_through_reopen() {
     })
     .unwrap()
     .unwrap();
-    let local = cache.snapshot().unwrap();
+    let local = snapshot(&cache);
     let queue = cache.pending().unwrap();
     drop(cache);
     let cache = Replica::open(&path).unwrap();
     assert_eq!(cache.pending().unwrap(), queue);
-    assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+    assert_eq!(pages(&snapshot(&cache)), pages(&local));
     let mut server = Server::new(&remote_with(&source, space, |page| {
         insert_child(page, paragraphs[0], "New remote child");
         restyle(page, texts[1], 0..7, |format| format.bold = Some(true));
@@ -185,14 +185,16 @@ fn native_empty_child_list_normalization_merges_with_a_local_deletion() {
     }
 }
 
+/// Deleting what the remote changed keeps the remote's content, and the local version on a
+/// conflict page; the edits that do not depend on the deletion merge.
 #[test]
-fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
+fn deletion_of_remote_content_keeps_a_conflict_page_and_merges_later_work() {
     let (source, space, outline, paragraphs, texts) = fixture();
     let mut page = page_of(&source, space);
     insert_child(&mut page, paragraphs[0], "Descendant");
-    let source = PreparedEdit::page(&source, space, &page, "Author")
+    let source = ops::saved(&source, space, &page)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     let child = outline_of(&page_of(&source, space), outline).paragraphs[1]
         .text()
@@ -215,24 +217,20 @@ fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
             replace_text(page, texts[1], 0..0, "Local ");
         };
         let id = save(&cache, texts[1], change).unwrap().unwrap();
-        let queue = cache.pending().unwrap();
-        let local = cache.snapshot().unwrap();
         let mut server = Server::new(&remote_with(&source, space, remote));
+        assert!(conflicted(&cache, &mut server, space));
         assert_eq!(
-            cache.sync_once(&mut server).unwrap().edit,
-            Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
+            text_of(&page_of(&server.durable, space), texts[1]),
+            "Local Sibling 1"
         );
-        assert_eq!(server.publications, 0);
-        assert_eq!(cache.pending().unwrap(), queue);
-        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
         drop(cache);
         let cache = Replica::open(&path).unwrap();
-        assert_eq!(
-            cache.status(id).unwrap(),
-            Some(EditStatus::Conflict(ConflictKind::ContentChanged))
-        );
-        review(&cache, id, texts[1], change).unwrap();
         published(&cache, &mut server, id);
+        // The writer deletes the paragraph again, remote changes and all.
+        let again = save(&cache, texts[1], |page| delete_paragraph(page, texts[0]))
+            .unwrap()
+            .unwrap();
+        published(&cache, &mut server, again);
         assert_eq!(
             order(&server.durable, space, outline),
             paragraphs[1..].to_vec()
@@ -247,7 +245,7 @@ fn deletion_requires_review_of_remote_content_and_preserves_later_work() {
 #[test]
 fn sibling_and_ancestry_changes_have_explicit_merge_or_conflict() {
     let (source, space, outline, paragraphs, texts) = fixture();
-    // The published order of the fixture's paragraphs, or a conflict.
+    // The published order of the fixture's paragraphs, or a conflict page.
     let cases: [(Change<Page>, Option<&[usize]>); 5] = [
         (
             Box::new(move |page| {
@@ -279,14 +277,16 @@ fn sibling_and_ancestry_changes_have_explicit_merge_or_conflict() {
         .unwrap()
         .unwrap();
         let mut server = Server::new(&remote_with(&source, space, remote));
-        let result = cache.sync_once(&mut server).unwrap().edit.unwrap();
-        assert_eq!(result.0, id);
+        let conflict = conflicted(&cache, &mut server, space);
+        assert!(matches!(
+            cache.status(id).unwrap(),
+            Some(EditStatus::Published { .. })
+        ));
         let Some(expected) = expected else {
-            assert_eq!(result.1, EditStatus::Conflict(ConflictKind::ContentChanged));
-            assert_eq!(server.publications, 0);
+            assert!(conflict);
             continue;
         };
-        assert!(matches!(result.1, EditStatus::Published { .. }));
+        assert!(!conflict);
         let published: Vec<ExGuid> = order(&server.durable, space, outline)
             .into_iter()
             .filter(|id| paragraphs.contains(id))
@@ -352,7 +352,7 @@ fn cell_mut(page: &mut Page, id: ExGuid) -> &mut TableCell {
 }
 
 /// Moves a cell's sole paragraph to the end of another cell, or deletes it, leaving the
-/// cell an empty paragraph as the writers do.
+/// cell a new empty paragraph, as an edit that empties a cell must.
 fn empty_cell(page: &mut Page, cell: ExGuid, destination: Option<ExGuid>) {
     let emptied = cell_mut(page, cell);
     let mut replacement = model_ops::fresh_paragraph(&emptied.paragraphs[0], "");
@@ -419,7 +419,7 @@ fn emptied_cell_replacement_is_durable_and_cannot_be_silently_omitted_on_replay(
                 empty_cell(page, cell, move_out.then_some(neighbour));
             })
             .unwrap();
-            let local = cache.snapshot().unwrap();
+            let local = snapshot(&cache);
             let queue = cache.pending().unwrap();
             {
                 let page = page_of(&local, space);
@@ -431,7 +431,7 @@ fn emptied_cell_replacement_is_durable_and_cannot_be_silently_omitted_on_replay(
             drop(cache);
             let cache = Replica::open(&path).unwrap();
             assert_eq!(cache.pending().unwrap(), queue);
-            assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+            assert_eq!(pages(&snapshot(&cache)), pages(&local));
             let mut server = Server::new(&if competing {
                 remote_with(source, space, |page| {
                     let target = cell_mut(page, cell);
@@ -574,28 +574,20 @@ fn native_tree_and_layout_changes_reconcile_without_discarding_unreviewed_conten
         let path = directory.path().join("native.sqlite");
         let cache = Replica::create(&path, BEFORE).unwrap();
         let id = save(&cache, dependent, save_both).unwrap().unwrap();
-        let local = cache.snapshot().unwrap();
-        let queue = cache.pending().unwrap();
-        let merged = match cache.sync_once(&mut server).unwrap().edit.unwrap() {
-            (actual, EditStatus::Published { .. }) => {
-                assert_eq!(actual, id, "{name}");
-                true
+        let merged = !conflicted(&cache, &mut server, space);
+        assert!(matches!(
+            cache.status(id).unwrap(),
+            Some(EditStatus::Published { .. })
+        ));
+        if !merged {
+            // The dependent text merged; the writer makes the change again.
+            drop(cache);
+            let cache = Replica::open(&path).unwrap();
+            // Unless the remote made the same change.
+            if let Some(again) = save(&cache, dependent, &change).unwrap() {
+                published(&cache, &mut server, again);
             }
-            result => {
-                assert_eq!(
-                    result,
-                    (id, EditStatus::Conflict(ConflictKind::ContentChanged)),
-                    "{name}"
-                );
-                assert_eq!(cache.pending().unwrap(), queue);
-                assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
-                drop(cache);
-                let cache = Replica::open(&path).unwrap();
-                review(&cache, id, dependent, save_both).unwrap();
-                published(&cache, &mut server, id);
-                false
-            }
-        };
+        }
         let durable = page_of(&server.durable, space);
         assert!(
             text_of(&durable, dependent).starts_with("Offline "),

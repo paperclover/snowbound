@@ -9,7 +9,7 @@ from unittest.mock import patch
 import native_stress
 from native_stress import edit_history, native_history, verify_capture
 from native_collaboration import reachable_page_text
-from document_model import DEFAULT_CONTEXT
+from document_model import DEFAULT_CONTEXT, EXPORTER
 
 
 class NativeHistoryTests(unittest.TestCase):
@@ -17,7 +17,7 @@ class NativeHistoryTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / 'model'
-            subprocess.run([root / 'target/debug/examples/document',
+            subprocess.run([EXPORTER,
                 root / 'corpus/collaboration/round-01/offline/notebook/synthetic.one', output], check=True)
             model = json.loads((output / 'document.json').read_text())
         retained = reachable_page_text(model)

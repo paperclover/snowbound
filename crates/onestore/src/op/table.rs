@@ -35,7 +35,6 @@ pub(crate) fn validate_table(table: &Table) -> Result<(), Error> {
             return Err(invalid("Every table row has one cell per column"));
         }
         for cell in &row.cells {
-            // An emptied cell keeps a replacement paragraph, as the tree writer provides.
             for paragraph in &cell.paragraphs {
                 if let crate::page::ParagraphContent::Table(nested) = &paragraph.content {
                     validate_table(nested)?;

@@ -323,45 +323,6 @@ pub(crate) struct ObjectEdit<'a> {
     pub inserts: &'a [(u32, &'a [u8])],
 }
 
-/// Replaces a root-level scalar byte property in the default active revision.
-/// The caller supplies its encoded value and is responsible for MS-ONE semantics.
-/// Returns a complete file image without I/O; use `commit_file_property` to update an existing file.
-pub fn replace_property_bytes(
-    source: &[u8],
-    space: ExGuid,
-    object_id: ExGuid,
-    property: u32,
-    value: &[u8],
-) -> Result<Vec<u8>> {
-    if !(3..=7).contains(&((property >> 26) & 31)) {
-        return Err(Error {
-            offset: 0,
-            message: "Property does not contain scalar bytes",
-        });
-    }
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
-    replace_objects(
-        &index,
-        space,
-        &[ObjectEdit {
-            object: object_id,
-            updates: &[(property, value)],
-            inserts: &[],
-        }],
-    )
-}
-
-/// Patches objects of a source the caller has parsed and validated.
-pub(crate) fn replace_objects(
-    index: &RevisionIndex<'_>,
-    space: ExGuid,
-    edits: &[ObjectEdit<'_>],
-) -> Result<Vec<u8>> {
-    write_revision_on(index, space, |revision| patched(revision, edits))
-}
-
 /// Objects of `revision` with `edits` applied.
 pub(crate) fn patched(
     revision: &crate::ResolvedRevision<'_>,
@@ -511,6 +472,7 @@ pub(crate) struct PropertyObject {
 
 pub(crate) enum RevisionEdit {
     Update(BTreeMap<ExGuid, PropertyObject>),
+    #[cfg(any(test, feature = "protected"))]
     Create {
         roots: BTreeMap<u32, ExGuid>,
         objects: BTreeMap<ExGuid, PropertyObject>,
@@ -1269,24 +1231,18 @@ pub(crate) fn chain_depth(index: &RevisionIndex<'_>, space: ExGuid, rid: ExGuid)
     .count()
 }
 
+/// A test fixture: `source` with one revision of `space` storing `edit`'s objects.
+#[cfg(test)]
 pub(crate) fn write_revision(
     source: &[u8],
     space: ExGuid,
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
-    write_revision_with_payloads(source, space, &[], edit)
-}
-
-pub(crate) fn write_revision_with_payloads(
-    source: &[u8],
-    space: ExGuid,
-    payloads: &[([u8; 16], &[u8])],
-    edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
-) -> Result<Vec<u8>> {
-    write_revisions_with_payloads(source, payloads, update(space, edit))
+    write_revisions(source, update(space, edit))
 }
 
 /// One space's active revision edited into its update.
+#[cfg(test)]
 fn update(
     space: ExGuid,
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
@@ -1300,26 +1256,30 @@ fn update(
     }
 }
 
+/// A test fixture: the transaction appending `edit`'s revisions to `source`.
+#[cfg(test)]
+pub(crate) fn revisions(
+    source: &[u8],
+    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
+) -> Result<Option<crate::Transaction>> {
+    let store = Store::parse(source)?;
+    let index = RevisionIndex::parse(&store)?;
+    index.validate_current()?;
+    build_on(&index, &[], None, edit)
+}
+
+/// A test fixture: `source` with `edit`'s revisions appended.
+#[cfg(test)]
 pub(crate) fn write_revisions(
     source: &[u8],
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
-    write_revisions_with_payloads(source, &[], edit)
+    publish(source, &[], None, true, edit)
 }
 
-/// `write_revisions` that also stores embedded payloads: each becomes a file-data store
-/// object referenced from the root file node list under its identity, as OneNote embeds
-/// pictures and attachments.
-pub(crate) fn write_revisions_with_payloads(
-    source: &[u8],
-    payloads: &[([u8; 16], &[u8])],
-    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
-) -> Result<Vec<u8>> {
-    publish(source, payloads, None, true, edit)
-}
-
-/// `write_revisions_with_payloads` without validating that current revisions are
-/// complete: a protected section is validated by unlocking it, through `protection`.
+/// `source` with `edit`'s revisions and the `payloads` appended, without validating that
+/// current revisions are complete: a protected section is validated by unlocking it,
+/// through `protection`.
 #[cfg(feature = "protected")]
 pub(crate) fn append_revisions(
     source: &[u8],
@@ -1330,6 +1290,7 @@ pub(crate) fn append_revisions(
     publish(source, payloads, protection, false, edit)
 }
 
+#[cfg(any(test, feature = "protected"))]
 fn publish(
     source: &[u8],
     payloads: &[([u8; 16], &[u8])],
@@ -1355,7 +1316,8 @@ pub(crate) fn check(output: &[u8], validate: bool) -> Result<()> {
 
 /// The written image, unchecked: `check` follows once the caller has released whatever
 /// `edit` borrowed.
-pub(crate) fn build(
+#[cfg(any(test, feature = "protected"))]
+fn build(
     source: &[u8],
     payloads: &[([u8; 16], &[u8])],
     protection: Option<&dyn Protection>,
@@ -1367,16 +1329,20 @@ pub(crate) fn build(
     if validate {
         index.validate_current()?;
     }
-    build_on(&index, payloads, protection, edit)
+    applied(source, build_on(&index, payloads, protection, edit)?.as_ref())
 }
 
 /// `write_revision` on a source the caller has parsed and validated.
+#[cfg(test)]
 pub(crate) fn write_revision_on(
     index: &RevisionIndex<'_>,
     space: ExGuid,
     edit: impl FnOnce(&crate::ResolvedRevision<'_>) -> Result<BTreeMap<ExGuid, PropertyObject>>,
 ) -> Result<Vec<u8>> {
-    let output = build_on(index, &[], None, update(space, edit))?;
+    let output = applied(
+        index.store.data,
+        build_on(index, &[], None, update(space, edit))?.as_ref(),
+    )?;
     check(&output, true)?;
     Ok(output)
 }
@@ -1387,12 +1353,14 @@ thread_local! {
     pub(crate) static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The transaction appending `edit`'s revisions and the `payloads` to the parsed store;
+/// none when nothing changes.
 pub(crate) fn build_on(
     index: &RevisionIndex<'_>,
     payloads: &[([u8; 16], &[u8])],
     protection: Option<&dyn Protection>,
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
-) -> Result<Vec<u8>> {
+) -> Result<Option<crate::Transaction>> {
     #[cfg(test)]
     BUILDS.with(|builds| builds.set(builds.get() + 1));
     let store = index.store;
@@ -1411,13 +1379,13 @@ pub(crate) fn build_on(
     let changes = edit(index)?;
     let mut appending = Appending::new(store.state()?);
     for (space, change) in changes {
-        let new_space = matches!(change, RevisionEdit::Create { .. });
         let current = (ExGuid::default(), 1_u32);
-        let (rid, label, revision, replacements) = match change {
+        let (rid, label, revision, replacements, new_space) = match change {
             RevisionEdit::Update(objects) => {
                 let rid = index.active(space)?;
-                (Some(rid), current, resolve(space, rid)?, objects)
+                (Some(rid), current, resolve(space, rid)?, objects, false)
             }
+            #[cfg(any(test, feature = "protected"))]
             RevisionEdit::Create { roots, objects } => {
                 if !is_section || space.guid == [0; 16] || index.spaces.contains_key(&space) {
                     return Err(Error {
@@ -1439,6 +1407,7 @@ pub(crate) fn build_on(
                         objects: BTreeMap::new(),
                     },
                     objects,
+                    true,
                 )
             }
             #[cfg(feature = "protected")]
@@ -1462,6 +1431,7 @@ pub(crate) fn build_on(
                         objects: BTreeMap::new(),
                     },
                     objects,
+                    false,
                 )
             }
         };
@@ -1525,13 +1495,78 @@ pub(crate) fn build_on(
         )?;
     }
     appending.payloads(payloads, protection)?;
-    Ok(match appending.finish()? {
-        Some((transaction, _)) => {
-            let mut output = source.to_vec();
-            transaction.apply(&mut output)?;
-            output
+    Ok(appending.finish()?.map(|(transaction, _)| transaction))
+}
+
+/// `source` with `transaction` applied.
+pub(crate) fn applied(source: &[u8], transaction: Option<&crate::Transaction>) -> Result<Vec<u8>> {
+    let mut output = source.to_vec();
+    if let Some(transaction) = transaction {
+        transaction.apply(&mut output)?;
+    }
+    Ok(output)
+}
+
+/// Payload identities the file-data store of `store` declares, in order.
+#[cfg(any(test, feature = "protected"))]
+pub(crate) fn declared_payloads(store: &Store<'_>) -> Vec<[u8; 16]> {
+    store
+        .lists
+        .values()
+        .flat_map(|list| &list.nodes)
+        .filter(|node| node.id == 0x94)
+        .filter_map(|node| node.payload.get(..16).and_then(|g| g.try_into().ok()))
+        .collect()
+}
+
+/// Writes the live objects of each `edited` revision that differ from its space's active
+/// revision in the validated `source` as one revision per space, embedding the `payloads`
+/// it lacks. A protected `source` takes the revisions its plaintext twin gained.
+#[cfg(any(test, feature = "protected"))]
+pub(crate) fn squash(
+    source: &RevisionIndex<'_>,
+    edited: &[(ExGuid, &crate::ResolvedRevision<'_>)],
+    payloads: &[([u8; 16], &[u8])],
+    protection: Option<&dyn Protection>,
+) -> Result<Option<crate::Transaction>> {
+    let existing = declared_payloads(source.store);
+    let payloads: Vec<_> = payloads
+        .iter()
+        .filter(|(guid, _)| !existing.contains(guid))
+        .copied()
+        .collect();
+    build_on(source, &payloads, protection, |index| {
+        let mut changes = BTreeMap::new();
+        for (space, after) in edited {
+            let before = match protection {
+                Some(protection) => protection.resolve(*space, index.active(*space)?)?,
+                None => index.resolve_active(*space)?,
+            };
+            if before.roots != after.roots {
+                return Err(Error {
+                    offset: 0,
+                    message: "Page edits cannot change revision roots",
+                });
+            }
+            // Retired styles and deleted content stay in history; only live objects are written.
+            let live = after.reachable()?;
+            let mut changed = BTreeMap::new();
+            for (id, object) in &after.objects {
+                if !live.contains(id)
+                    || before
+                        .objects
+                        .get(id)
+                        .map(|previous| unchanged(previous, object))
+                        .transpose()?
+                        == Some(true)
+                {
+                    continue;
+                }
+                changed.insert(*id, replacement(*id, object)?);
+            }
+            changes.insert(*space, RevisionEdit::Update(changed));
         }
-        None => source.to_vec(),
+        Ok(changes)
     })
 }
 

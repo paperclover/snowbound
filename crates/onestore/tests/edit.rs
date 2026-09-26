@@ -2,14 +2,18 @@
 mod checkpoint;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
 #[path = "support/trace.rs"]
 mod trace;
 
 use disk::Disk;
 use onestore::{
-    CommitState, ExGuid, RevisionIndex, Store,
+    CommitError, CommitIo, CommitState, ExGuid, RevisionIndex, Store, Transaction,
     document::{Document, Kind},
+    op::{Op, OpError, PageOp},
 };
+use std::ops::Range;
 
 const SOURCE: &[u8] = include_bytes!(
     "../../../corpus/native/20260905-05/snapshots/03-format-unicode/notebook/synthetic.one"
@@ -29,6 +33,55 @@ fn target(source: &[u8]) -> (ExGuid, ExGuid) {
         }
     }
     panic!("Missing native text fixture")
+}
+
+fn typed(space: ExGuid, text: ExGuid, range: Range<u32>, with: &str) -> Vec<Op> {
+    let op = PageOp::Text {
+        text,
+        range,
+        with: with.into(),
+    };
+    vec![Op::Page { space, op }]
+}
+
+/// `source` with `range` of the text object replaced.
+fn replace_text(
+    source: &[u8],
+    space: ExGuid,
+    text: ExGuid,
+    range: Range<u32>,
+    with: &str,
+) -> Result<Vec<u8>, OpError> {
+    ops::edited(source, typed(space, text, range, with))
+}
+
+/// The transaction replacing `range` of the text object in `source`.
+fn text_transaction(
+    source: &[u8],
+    space: ExGuid,
+    text: ExGuid,
+    range: Range<u32>,
+    with: &str,
+) -> Result<Transaction, CommitError> {
+    let refused = |error: String| CommitError {
+        state: CommitState::NotCommitted,
+        error: std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+    };
+    ops::transaction(source, "Author", typed(space, text, range, with))
+        .map_err(|error| refused(error.to_string()))?
+        .ok_or_else(|| refused("The edit changes nothing".into()))
+}
+
+/// `text_transaction` committed under caller-held exclusion.
+fn commit_text(
+    io: &mut impl CommitIo,
+    source: &[u8],
+    space: ExGuid,
+    text: ExGuid,
+    range: Range<u32>,
+    with: &str,
+) -> Result<(), CommitError> {
+    text_transaction(source, space, text, range, with)?.commit(io)
 }
 
 fn text_runs(source: &[u8], sid: ExGuid, oid: ExGuid) -> serde_json::Value {
@@ -61,9 +114,11 @@ fn prepared_publication_preserves_its_identity_through_every_io_failure() {
     let source =
         onestore::create_section("prepared.one", "Fictitious: café 🦀", "Fixture").unwrap();
     let (sid, oid) = target(&source);
-    let source = checkpoint::pending(&source, sid, oid, 0x14001d7a);
-    let edit = onestore::PreparedEdit::text(&source, sid, oid, 0..0, "Prepared 🐈 ").unwrap();
-    let store = Store::parse(edit.as_bytes()).unwrap();
+    let source = checkpoint::pending(&source, sid, oid);
+    let edit = text_transaction(&source, sid, oid, 0..0, "Prepared 🐈 ").unwrap();
+    let mut written = source.clone();
+    edit.apply(&mut written).unwrap();
+    let store = Store::parse(&written).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let planned = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
     let persisted: ExGuid =
@@ -72,7 +127,7 @@ fn prepared_publication_preserves_its_identity_through_every_io_failure() {
     let before_index = RevisionIndex::parse(&before_store).unwrap();
     assert!(!before_index.spaces[&sid].revisions.contains_key(&persisted));
     let before = text_runs(&source, sid, oid);
-    let after = text_runs(edit.as_bytes(), sid, oid);
+    let after = text_runs(&written, sid, oid);
     for write_limit in [17, 4096] {
         let disk = |fail_at| Disk {
             visible: source.clone(),
@@ -84,12 +139,12 @@ fn prepared_publication_preserves_its_identity_through_every_io_failure() {
         };
         let mut success = disk(None);
         edit.commit(&mut success).unwrap();
-        assert_eq!(success.durable, edit.as_bytes());
+        assert_eq!(success.durable, written);
         let operations = success.operation;
         let error = edit.commit(&mut success).unwrap_err();
         assert_eq!(error.state, CommitState::NotCommitted);
         assert_eq!(error.error.kind(), std::io::ErrorKind::ResourceBusy);
-        assert_eq!(success.durable, edit.as_bytes());
+        assert_eq!(success.durable, written);
         for at in 1..=operations {
             let mut interrupted = disk(Some(at));
             let error = edit.commit(&mut interrupted).unwrap_err();
@@ -108,7 +163,8 @@ fn prepared_publication_preserves_its_identity_through_every_io_failure() {
                 interrupted.visible.clone_from(&snapshot);
                 interrupted.fail_at = None;
                 interrupted.write_limit = 17;
-                onestore::confirm_snapshot(&mut interrupted, &snapshot).unwrap();
+                onestore::confirm(&mut interrupted, &onestore::Stamp::of(&snapshot).unwrap())
+                    .unwrap();
                 assert_refreshed(&snapshot, &interrupted.durable);
             }
         }
@@ -126,9 +182,9 @@ fn snapshot_confirmation_needs_no_surviving_edit_target() {
         random: 911,
     };
     assert!(
-        onestore::replace_text(SOURCE, ExGuid::default(), ExGuid::default(), 0..0, "").is_err()
+        replace_text(SOURCE, ExGuid::default(), ExGuid::default(), 0..0, "").is_err()
     );
-    onestore::confirm_snapshot(&mut disk, SOURCE).unwrap();
+    onestore::confirm(&mut disk, &onestore::Stamp::of(SOURCE).unwrap()).unwrap();
     assert_refreshed(SOURCE, &disk.durable);
     let flush = disk.operation;
     for (failure, state) in [
@@ -140,7 +196,7 @@ fn snapshot_confirmation_needs_no_surviving_edit_target() {
         disk.operation = 0;
         disk.fail_at = Some(failure);
         assert_eq!(
-            onestore::confirm_snapshot(&mut disk, SOURCE)
+            onestore::confirm(&mut disk, &onestore::Stamp::of(SOURCE).unwrap())
                 .unwrap_err()
                 .state,
             state
@@ -153,7 +209,7 @@ fn confirmation_notifies_cached_readers_after_interrupted_version_publication() 
     let source =
         onestore::create_section("confirmation.one", "Fictitious: before", "Fixture").unwrap();
     let (sid, oid) = target(&source);
-    let mut snapshot = onestore::replace_text(&source, sid, oid, 0..0, "Recovered ").unwrap();
+    let mut snapshot = replace_text(&source, sid, oid, 0..0, "Recovered ").unwrap();
     snapshot[212..252].copy_from_slice(&source[212..252]);
     let expected = text_runs(&snapshot, sid, oid);
     assert_ne!(expected, text_runs(&source, sid, oid));
@@ -167,11 +223,13 @@ fn confirmation_notifies_cached_readers_after_interrupted_version_publication() 
             random: 911,
         };
         let mut success = disk(None);
-        onestore::confirm_snapshot(&mut success, &snapshot).unwrap();
+        onestore::confirm(&mut success, &onestore::Stamp::of(&snapshot).unwrap()).unwrap();
         assert_refreshed(&snapshot, &success.durable);
         for failure in 1..=success.operation {
             let mut interrupted = disk(Some(failure));
-            let error = onestore::confirm_snapshot(&mut interrupted, &snapshot).unwrap_err();
+            let error =
+                onestore::confirm(&mut interrupted, &onestore::Stamp::of(&snapshot).unwrap())
+                    .unwrap_err();
             assert_ne!(error.state, CommitState::Committed);
             assert_eq!(text_runs(&interrupted.durable, sid, oid), expected);
             assert_eq!(&interrupted.durable[..212], &snapshot[..212]);
@@ -183,51 +241,53 @@ fn confirmation_notifies_cached_readers_after_interrupted_version_publication() 
 #[test]
 fn confirming_visible_text_requires_flush_without_another_revision() {
     let (sid, oid) = target(SOURCE);
-    let visible = onestore::replace_text(SOURCE, sid, oid, 0..0, "Recovered ").unwrap();
+    let visible = replace_text(SOURCE, sid, oid, 0..0, "Recovered ").unwrap();
+    let base = onestore::Stamp::of(&visible).unwrap();
     let mut disk = Disk {
         visible: visible.clone(),
         durable: SOURCE.to_vec(),
         operation: 0,
         fail_at: None,
-        write_limit: 0,
+        write_limit: 64,
         random: 1,
     };
-    onestore::commit_text(&mut disk, &visible, sid, oid, 0..0, "").unwrap();
-    assert_eq!(disk.visible, visible);
-    assert_eq!(disk.durable, visible);
+    onestore::confirm(&mut disk, &base).unwrap();
+    assert_refreshed(&visible, &disk.durable);
     let flush = disk.operation;
     for (failure, state) in [
         (1, CommitState::NotCommitted),
         (flush, CommitState::Unknown),
     ] {
+        disk.visible.clone_from(&visible);
         disk.durable = SOURCE.to_vec();
         disk.operation = 0;
         disk.fail_at = Some(failure);
-        let error = onestore::commit_text(&mut disk, &visible, sid, oid, 0..0, "").unwrap_err();
+        let error = onestore::confirm(&mut disk, &base).unwrap_err();
         assert_eq!(error.state, state);
-        assert_eq!(disk.visible, visible);
+        assert_eq!(&disk.visible[..212], &visible[..212]);
+        assert_eq!(&disk.visible[252..], &visible[252..]);
     }
 }
 
 #[test]
 fn confirmation_rejects_a_changed_header_or_length_before_any_write() {
-    let (sid, oid) = target(SOURCE);
     let mut source = SOURCE.to_vec();
     source.resize(3 * 1024 * 1024 + 131, 0);
+    let base = onestore::Stamp::of(&source).unwrap();
     let mut disk = trace::Trace {
         bytes: source.clone(),
         events: Vec::new(),
     };
-    onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap();
-    assert_eq!(disk.events.len(), 1);
-    if let trace::Event::Write(offset, bytes) = &disk.events[0] {
-        panic!("Confirmation wrote {} bytes at {offset}", bytes.len());
-    }
+    let confirmed = |events: &[trace::Event]| {
+        matches!(events, [trace::Event::Flush, trace::Event::Write(212, version), trace::Event::Flush] if version.len() == 40)
+    };
+    onestore::confirm(&mut disk, &base).unwrap();
+    assert!(confirmed(&disk.events));
     for changed in [96, 128, 212, 1023] {
         disk.bytes.clone_from(&source);
         disk.bytes[changed] ^= 1;
         disk.events.clear();
-        let error = onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap_err();
+        let error = onestore::confirm(&mut disk, &base).unwrap_err();
         assert_eq!(error.state, CommitState::NotCommitted);
         assert_eq!(error.error.kind(), std::io::ErrorKind::ResourceBusy);
         assert!(disk.events.is_empty());
@@ -237,14 +297,14 @@ fn confirmation_rejects_a_changed_header_or_length_before_any_write() {
         disk.bytes.clone_from(&source);
         disk.bytes[changed] ^= 1;
         disk.events.clear();
-        onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap();
-        assert!(matches!(disk.events[..], [trace::Event::Flush]));
+        onestore::confirm(&mut disk, &base).unwrap();
+        assert!(confirmed(&disk.events));
     }
     for length in [source.len() - 1, source.len() + 1] {
         disk.bytes.clone_from(&source);
         disk.bytes.resize(length, 0);
         disk.events.clear();
-        let error = onestore::commit_text(&mut disk, &source, sid, oid, 0..0, "").unwrap_err();
+        let error = onestore::confirm(&mut disk, &base).unwrap_err();
         assert_eq!(error.state, CommitState::NotCommitted);
         assert!(disk.events.is_empty());
     }
@@ -332,7 +392,7 @@ fn text_splices_preserve_formats_objects_and_history_in_one_transaction() {
     let old_index = RevisionIndex::parse(&old).unwrap();
     let before = text_runs(SOURCE, sid, oid);
     for replacement in ["", "🦀", "A longer replacement with 日本語 and e\u{301}"] {
-        let edited = onestore::replace_text(SOURCE, sid, oid, 0..10, replacement).unwrap();
+        let edited = replace_text(SOURCE, sid, oid, 0..10, replacement).unwrap();
         let store = Store::parse(&edited).unwrap();
         assert_eq!(
             store.header.transaction_count,
@@ -379,7 +439,7 @@ fn text_splices_preserve_formats_objects_and_history_in_one_transaction() {
 #[test]
 fn invalid_text_edits_never_touch_storage() {
     let (sid, oid) = target(SOURCE);
-    let source = onestore::replace_text(SOURCE, sid, oid, 0..0, "🦀").unwrap();
+    let source = replace_text(SOURCE, sid, oid, 0..0, "🦀").unwrap();
     for (range, replacement) in [
         (1..1, "x"),
         (0..999, "x"),
@@ -396,7 +456,7 @@ fn invalid_text_edits_never_touch_storage() {
             random: 1,
         };
         let error =
-            onestore::commit_text(&mut disk, &source, sid, oid, range, replacement).unwrap_err();
+            commit_text(&mut disk, &source, sid, oid, range, replacement).unwrap_err();
         assert_eq!(error.state, CommitState::NotCommitted);
         assert_eq!(disk.operation, 0);
         assert_eq!(disk.durable, source);
@@ -437,7 +497,7 @@ fn cross_run_splices_match_a_character_model_and_preserve_history() {
             let mut expected = before.clone();
             expected.splice(a..b, replacement.chars().map(|c| (c, before[a].1.clone())));
             let edited =
-                onestore::replace_text(SOURCE, sid, oid, offsets[a]..offsets[b], replacement)
+                replace_text(SOURCE, sid, oid, offsets[a]..offsets[b], replacement)
                     .unwrap();
             assert_eq!(characters(&edited), expected, "characters {a}..{b}");
             let current_store = Store::parse(&edited).unwrap();
@@ -460,8 +520,8 @@ fn cross_run_splices_match_a_character_model_and_preserve_history() {
         }
     }
     let cleared =
-        onestore::replace_text(SOURCE, sid, oid, 0..*offsets.last().unwrap(), "").unwrap();
-    let typed = onestore::replace_text(&cleared, sid, oid, 0..0, "new").unwrap();
+        replace_text(SOURCE, sid, oid, 0..*offsets.last().unwrap(), "").unwrap();
+    let typed = replace_text(&cleared, sid, oid, 0..0, "new").unwrap();
     let format = &before.last().unwrap().1;
     assert_eq!(
         characters(&typed),
@@ -472,7 +532,7 @@ fn cross_run_splices_match_a_character_model_and_preserve_history() {
     );
     let text: String = before[..before.len() - 1].iter().map(|(c, _)| *c).collect();
     assert_eq!(
-        onestore::replace_text(SOURCE, sid, oid, 0..*offsets.last().unwrap(), &text).unwrap(),
+        replace_text(SOURCE, sid, oid, 0..*offsets.last().unwrap(), &text).unwrap(),
         SOURCE
     );
 }
@@ -520,9 +580,9 @@ fn export_native_cross_run_edits() {
             .unwrap();
         let range = range.start..range.end.min(length);
         let mut edited =
-            onestore::replace_text(&source, sid, oid, range.clone(), replacement).unwrap();
+            replace_text(&source, sid, oid, range.clone(), replacement).unwrap();
         if retype {
-            edited = onestore::replace_text(&edited, sid, oid, 0..0, "Retyped 🦀").unwrap();
+            edited = replace_text(&edited, sid, oid, 0..0, "Retyped 🦀").unwrap();
         }
         let candidate = output.join(name).join("candidate");
         fs::create_dir_all(&candidate).unwrap();
@@ -540,7 +600,7 @@ fn export_native_cross_run_edits() {
 fn insertion_at_a_style_boundary_uses_the_following_style() {
     let (sid, oid) = target(SOURCE);
     let before = text_runs(SOURCE, sid, oid);
-    let edited = onestore::replace_text(SOURCE, sid, oid, 18..18, "🦀").unwrap();
+    let edited = replace_text(SOURCE, sid, oid, 18..18, "🦀").unwrap();
     let mut expected = before.clone();
     expected[1]["text"] = format!("🦀{}", before[1]["text"].as_str().unwrap()).into();
     assert_eq!(text_runs(&edited, sid, oid), expected);
@@ -588,10 +648,10 @@ fn automatic_titles_follow_native_line_and_utf16_limits() {
         };
         let (sid, oid) = check(&source, &expected);
         let cleared =
-            onestore::replace_text(&source, sid, oid, 0..text.encode_utf16().count() as u32, "")
+            replace_text(&source, sid, oid, 0..text.encode_utf16().count() as u32, "")
                 .unwrap();
         check(&cleared, "");
-        let written = onestore::replace_text(&cleared, sid, oid, 0..0, "  new 🦀 name  ").unwrap();
+        let written = replace_text(&cleared, sid, oid, 0..0, "  new 🦀 name  ").unwrap();
         check(&written, "new 🦀 name");
     }
 }
@@ -641,7 +701,7 @@ fn automatic_titles_follow_native_rtl_and_attachment_order() {
                 if node.extra[0].iter().any(|field| field.id == 0x88001cb4) {
                     continue;
                 }
-                let changed = onestore::replace_text(&source, sid, *oid, 0..0, "Edited ").unwrap();
+                let changed = replace_text(&source, sid, *oid, 0..0, "Edited ").unwrap();
                 let store = Store::parse(&changed).unwrap();
                 let current = RevisionIndex::parse(&store).unwrap();
                 let after = Document::parse(&current).unwrap();
@@ -675,8 +735,8 @@ fn automatic_titles_follow_native_rtl_and_attachment_order() {
 fn an_emptied_final_run_retains_its_insertion_style() {
     let (sid, oid) = target(SOURCE);
     let before = text_runs(SOURCE, sid, oid);
-    let erased = onestore::replace_text(SOURCE, sid, oid, 22..27, "").unwrap();
-    let edited = onestore::replace_text(&erased, sid, oid, 22..22, "a").unwrap();
+    let erased = replace_text(SOURCE, sid, oid, 22..27, "").unwrap();
+    let edited = replace_text(&erased, sid, oid, 22..22, "a").unwrap();
     let mut expected = before.clone();
     expected[3]["text"] = "a".into();
     assert_eq!(text_runs(&edited, sid, oid), expected);
@@ -739,12 +799,12 @@ fn title_text_and_navigation_caches_publish_together() {
                 .collect::<std::collections::BTreeMap<_, _>>(),
         ])
     };
-    let checkpoint = checkpoint::pending(&source, sid, *oid, 0x14001d7a);
+    let checkpoint = checkpoint::pending(&source, sid, *oid);
     for (source, write_limit) in [(source.as_slice(), 17), (checkpoint.as_slice(), 257)] {
         let before = state(source);
         for replacement in ["Renamed 🦀 日本語", ""] {
             let edit =
-                onestore::PreparedEdit::text(source, sid, *oid, 0..end, replacement).unwrap();
+                text_transaction(source, sid, *oid, 0..end, replacement).unwrap();
             let disk = |fail_at| Disk {
                 visible: source.to_vec(),
                 durable: source.to_vec(),
@@ -790,7 +850,7 @@ fn title_text_and_navigation_caches_publish_together() {
                 );
             }
             assert_other_objects_preserved(&old, &current, *oid);
-            for at in source.len().div_ceil(193)..=success.operation {
+            for at in 1..=success.operation {
                 let mut interrupted = disk(Some(at));
                 let error = edit.commit(&mut interrupted).unwrap_err();
                 let observed = state(&interrupted.durable);
@@ -827,7 +887,7 @@ fn native_conflict_pages_are_readable_but_not_random_edit_targets() {
             if !matches!(node.kind, Kind::RichText { .. }) {
                 continue;
             }
-            assert!(onestore::replace_text(&source, *sid, *oid, 0..0, "edit").is_err());
+            assert!(replace_text(&source, *sid, *oid, 0..0, "edit").is_err());
             conflicts += 1;
         }
     }
@@ -837,7 +897,7 @@ fn native_conflict_pages_are_readable_but_not_random_edit_targets() {
 #[test]
 fn interrupted_text_commits_never_publish_mismatched_run_boundaries() {
     let (sid, oid) = target(SOURCE);
-    let checkpoint = checkpoint::pending(SOURCE, sid, oid, 0x14001d7a);
+    let checkpoint = checkpoint::pending(SOURCE, sid, oid);
     for source in [SOURCE, checkpoint.as_slice()] {
         let make_disk = |fail_at, random| Disk {
             visible: source.to_vec(),
@@ -849,14 +909,14 @@ fn interrupted_text_commits_never_publish_mismatched_run_boundaries() {
         };
         let before = text_runs(source, sid, oid);
         let mut success = make_disk(None, 1);
-        onestore::commit_text(&mut success, source, sid, oid, 0..23, "🐈 mixed edit").unwrap();
+        commit_text(&mut success, source, sid, oid, 0..23, "🐈 mixed edit").unwrap();
         let after = text_runs(&success.durable, sid, oid);
         assert_ne!(before, after);
-        for at in source.len().div_ceil(193)..=success.operation {
+        for at in 1..=success.operation {
             for seed in [1, 42] {
                 let mut disk = make_disk(Some(at), seed);
                 let error =
-                    onestore::commit_text(&mut disk, source, sid, oid, 0..23, "🐈 mixed edit")
+                    commit_text(&mut disk, source, sid, oid, 0..23, "🐈 mixed edit")
                         .unwrap_err();
                 let observed = text_runs(&disk.durable, sid, oid);
                 match error.state {
@@ -906,7 +966,7 @@ fn empty_and_legacy_native_text_gain_unicode_without_losing_existing_properties(
         let properties = PropertySets::parse(blob).unwrap();
         assert!(!properties.sets[0].iter().any(|p| p.id == 0x1c001c22));
         let expected = format!("🦀 café {original}");
-        let written = onestore::replace_text(&source, sid, oid, 0..0, "🦀 café ").unwrap();
+        let written = replace_text(&source, sid, oid, 0..0, "🦀 café ").unwrap();
         let after_store = Store::parse(&written).unwrap();
         assert!(after_store.checksum_mismatches.is_empty());
         let after = RevisionIndex::parse(&after_store).unwrap();
@@ -953,12 +1013,12 @@ fn empty_and_legacy_native_text_gain_unicode_without_losing_existing_properties(
             random,
         };
         let mut success = disk(None, 1);
-        onestore::commit_text(&mut success, &source, sid, oid, 0..0, "🦀 café ").unwrap();
-        for at in source.len().div_ceil(193)..=success.operation {
+        commit_text(&mut success, &source, sid, oid, 0..0, "🦀 café ").unwrap();
+        for at in 1..=success.operation {
             for seed in [1, 42] {
                 let mut interrupted = disk(Some(at), seed);
                 let error =
-                    onestore::commit_text(&mut interrupted, &source, sid, oid, 0..0, "🦀 café ")
+                    commit_text(&mut interrupted, &source, sid, oid, 0..0, "🦀 café ")
                         .unwrap_err();
                 let actual = text_runs(&interrupted.durable, sid, oid);
                 match error.state {

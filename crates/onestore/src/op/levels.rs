@@ -14,21 +14,6 @@ fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
 
-/// The children of `container` with its outline groups lifted into it, in order.
-pub(crate) fn flat_children(view: &Revision<'_>, container: ExGuid) -> Vec<ExGuid> {
-    fn flat(view: &Revision<'_>, id: ExGuid, out: &mut Vec<ExGuid>) {
-        for child in &view.nodes[&id].children {
-            match view.nodes[child].kind {
-                Kind::OutlineGroup => flat(view, *child, out),
-                _ => out.push(*child),
-            }
-        }
-    }
-    let mut children = Vec::new();
-    flat(view, container, &mut children);
-    children
-}
-
 /// How much deeper than `container` each of its children lies, groups lifted.
 pub(crate) fn stored_depths(view: &Revision<'_>, container: ExGuid) -> Vec<(ExGuid, u32)> {
     fn walk(view: &Revision<'_>, id: ExGuid, base: u32, out: &mut Vec<(ExGuid, u32)>) {
@@ -44,23 +29,6 @@ pub(crate) fn stored_depths(view: &Revision<'_>, container: ExGuid) -> Vec<(ExGu
     let mut out = Vec::new();
     walk(view, container, 0, &mut out);
     out
-}
-
-/// Lifts the children of `container`'s outline groups into it.
-pub(crate) fn ungroup_changes(active: &ActivePage<'_>, container: ExGuid) -> Result<Changes, Error> {
-    let children = flat_children(&active.view, container);
-    let parents = active.editable_parents(container)?;
-    let modified = crate::create::current_timestamps()?.0.to_le_bytes();
-    let raw = &active.live.revision;
-    let mut holder = PropertyObject::from_object(&raw.objects[&container])?;
-    let mut references = Vec::new();
-    for child in children {
-        references.extend(holder.reference(child)?);
-    }
-    holder.set(&[(0x24001c20, &references), (0x14001d7a, &modified)])?;
-    let mut changed = BTreeMap::from([(container, holder)]);
-    crate::formatting::touch_ancestors(raw, parents, container, &modified, &mut changed)?;
-    Ok(changed)
 }
 
 /// Children in runs: one child at the container's child level, or a run sharing a deeper

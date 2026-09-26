@@ -3,7 +3,7 @@ mod concurrent;
 
 use notebook::smb::{Client, Credentials};
 use notebook::{EditStatus, Error, Remote, Replica, SmbRemote};
-use onestore::{CommitError, CommitState, ExGuid, RevisionIndex, Store, Transaction};
+use onestore::{CommitError, CommitState, ExGuid, RevisionIndex, Stamp, Store, Transaction};
 use serde_json::json;
 use std::{
     env,
@@ -18,7 +18,7 @@ mod support {
     pub mod view;
 }
 use concurrent::{DocumentView, document_view};
-use support::view::view;
+use support::view::{cached, view};
 
 impl DocumentView {
     fn changes(&self, before: &Self) -> Self {
@@ -79,6 +79,13 @@ impl<R: Remote> Remote for Traced<R> {
         Ok(bytes)
     }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+        // Publication reads nothing while the stamp holds; observe an unseen base once.
+        if Stamp::of(&self.read).ok().as_ref() != Some(transaction.base()) {
+            self.read().map_err(|error| CommitError {
+                state: CommitState::NotCommitted,
+                error,
+            })?;
+        }
         let mut image = self.read.clone();
         transaction.apply(&mut image).map_err(|error| CommitError {
             state: CommitState::NotCommitted,
@@ -193,10 +200,22 @@ impl<R: Remote> Remote for Traced<R> {
                 thread::sleep(Duration::from_millis(10));
             }
         }
+        if result.is_ok() {
+            self.read = image;
+            self.before = Some((after.text, documents));
+        }
         result
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        self.remote.stamp()
+    }
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
         let captured = (|| -> Result<_, Box<dyn std::error::Error>> {
+            // A confirmation follows the read of its image, except for edits that changed nothing.
+            if Stamp::of(&self.read).ok().as_ref() != Some(base) {
+                self.read = self.remote.read()?;
+            }
+            let snapshot = &self.read[..];
             let store = Store::parse(snapshot)?;
             let index = RevisionIndex::parse(&store)?;
             let revisions = index
@@ -240,7 +259,7 @@ impl<R: Remote> Remote for Traced<R> {
             error: io::Error::other(error.to_string()),
         })?;
         let started = now();
-        let result = self.remote.confirm(snapshot);
+        let result = self.remote.confirm(base);
         println!(
             "{}",
             json!({"event":"remote_confirm", "started_us":started, "finished_us":now(), "revisions":revisions, "current_revisions":current, "capture":capture.as_ref().and_then(|path| path.file_name()).map(|name| name.to_string_lossy()), "text":self.before.as_ref().map(|(text,_)|text),
@@ -343,6 +362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
     let mut ids = Vec::new();
+    let mut tokens = Vec::new();
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut generated = 0;
         let mut received = 0;
@@ -380,62 +400,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 8
             };
             if generated < operations && pending.len() < capacity {
-                let source = cache.snapshot()?;
-                let target = view(&source)?;
-                let at = u32::try_from(target.text.encode_utf16().count())?;
+                let (space, object, text) = cached(&cache)?;
+                let at = u32::try_from(text.encode_utf16().count())?;
                 let token = format!(" [{}:{}]", args[2], generated);
                 let started = now();
                 match cache.apply(
                     "Offline document writer",
-                    append(target.space, target.object, at, &token),
+                    append(space, object, at, &token),
                 ) {
                     Ok(id) => {
                         println!(
                             "{}",
-                            json!({"event":"local_commit", "id":id, "operation":generated, "space":target.space.to_string(), "object":target.object.to_string(), "before":target.text, "token":token, "started_us":started, "finished_us":now()})
+                            json!({"event":"local_commit", "id":id, "operation":generated, "space":space.to_string(), "object":object.to_string(), "before":text, "token":token, "started_us":started, "finished_us":now()})
                         );
                         ids.push(id);
+                        tokens.push(token);
                         generated += 1;
                     }
                     other => return Err(format!("Unexpected local result: {other:?}").into()),
                 }
             }
-            if let Some(conflict) = cache.conflict()? {
-                // Concurrent appends meet at the end of the text: take the remote text and
-                // append the queued tokens it lacks after it again.
-                let remote = view(&cache.remote_snapshot()?)?;
-                let tokens: Vec<String> = cache
-                    .pending()?
+            if received == ids.len() && cache.pending()?.is_empty() {
+                // Concurrent appends meet at the end of the text: a merge keeps the remote's
+                // text and this writer's on a conflict page. Append the published tokens
+                // the text lacks after it again.
+                let (space, object, text) = cached(&cache)?;
+                let missing: Vec<String> = tokens
                     .iter()
-                    .flat_map(|queued| queued.edit.ops.iter())
-                    .filter_map(|op| match op {
-                        onestore::op::Op::Page {
-                            op: onestore::op::PageOp::Text { with, .. },
-                            ..
-                        } => Some(with.clone()),
-                        _ => None,
-                    })
-                    .filter(|token| !remote.text.contains(token.as_str()))
+                    .filter(|token| !text.contains(token.as_str()))
+                    .cloned()
                     .collect();
-                match cache.resolve(conflict.id, notebook::Resolution::Theirs) {
-                    Ok(()) => {
-                        let mut at = u32::try_from(remote.text.encode_utf16().count())?;
-                        for token in &tokens {
-                            cache.apply(
-                                "Offline document writer",
-                                append(remote.space, remote.object, at, token),
-                            )?;
-                            at += u32::try_from(token.encode_utf16().count())?;
-                        }
-                        println!(
-                            "{}",
-                            json!({"event":"reviewed_append", "id":conflict.id, "remote":remote.text, "tokens":tokens, "at_us":now()})
-                        );
-                    }
-                    Err(Error::Io(error))
-                        if [io::ErrorKind::WouldBlock, io::ErrorKind::InvalidInput]
-                            .contains(&error.kind()) => {}
-                    Err(error) => return Err(error.into()),
+                let mut at = u32::try_from(text.encode_utf16().count())?;
+                for token in &missing {
+                    ids.push(cache.apply("Offline document writer", append(space, object, at, token))?);
+                    at += u32::try_from(token.encode_utf16().count())?;
+                }
+                if !missing.is_empty() {
+                    println!(
+                        "{}",
+                        json!({"event":"reviewed_append", "remote":text, "tokens":missing, "at_us":now()})
+                    );
                 }
             }
             if generated == operations && received == ids.len() {

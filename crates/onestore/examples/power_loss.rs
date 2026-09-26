@@ -8,12 +8,24 @@ use trace::{Event, Trace};
 
 #[path = "../tests/support/checkpoint.rs"]
 mod checkpoint;
+#[path = "support/typing.rs"]
+mod typing;
 
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
 };
 use std::{collections::BTreeMap, fs, path::PathBuf};
+
+/// `source`, a table of contents, with the notebook recoloured to `color`.
+fn recolored(source: &[u8], color: u32) -> Result<Vec<u8>, onestore::Error> {
+    let mut image = source.to_vec();
+    let edit = onestore::TocEdit::Color(color);
+    if let Some(transaction) = onestore::edit_table_of_contents(source, &[edit])? {
+        transaction.apply(&mut image)?;
+    }
+    Ok(image)
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
@@ -69,12 +81,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let index = RevisionIndex::parse(&store)?;
         let document = Document::parse(&index)?;
         let toc = store.header.file_type == onestore::FileType::TableOfContents;
+        // A table of contents changes the notebook's colour.
         let (sid, oid) = if toc {
             let root = &document.spaces[&document.root];
-            (
-                document.root,
-                root.revisions[&root.contexts[&ExGuid::default()]].roots[&1],
-            )
+            let root = &root.revisions[&root.contexts[&ExGuid::default()]];
+            (document.root, root.roots[&1])
         } else {
             document
                 .spaces
@@ -95,37 +106,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .ok_or("Missing native fixture text")?
         };
-        if name.ends_with("checkpoint") {
-            source =
-                checkpoint::pending(&source, sid, oid, if toc { 0x14001cbe } else { 0x14001d7a });
-        }
-        if name == "toc-rollover" {
-            loop {
+        match name {
+            "checkpoint" => source = checkpoint::pending(&source, sid, oid),
+            "toc-checkpoint" => {
+                for value in 0.. {
+                    let store = Store::parse(&source)?;
+                    let index = RevisionIndex::parse(&store)?;
+                    let rid = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
+                    let depth = std::iter::successors(Some(rid), |id| {
+                        index.spaces[&sid].revisions[id].dependency
+                    })
+                    .count();
+                    if depth == 512 {
+                        break;
+                    }
+                    source = recolored(&source, value)?;
+                }
+            }
+            "toc-rollover" => loop {
                 let count = Store::parse(&source)?.header.transaction_count;
                 if count == 255 {
                     break;
                 }
                 assert!(count < 255);
-                source = onestore::replace_property_bytes(
-                    &source,
-                    sid,
-                    oid,
-                    0x14001cbe,
-                    &count.to_le_bytes(),
-                )?;
-            }
+                source = recolored(&source, count)?;
+            },
+            _ => {}
         }
         let apply = |io: &mut Trace,
                      bytes: &[u8],
                      recovering: bool|
          -> Result<(), Box<dyn std::error::Error>> {
             if toc {
-                let value = if recovering {
-                    [0x44, 0x55, 0x66, 0]
-                } else {
-                    [0x33, 0x66, 0x99, 0]
-                };
-                onestore::commit_property_bytes(io, bytes, sid, oid, 0x14001cbe, &value)?;
+                let color = if recovering { 0x665544 } else { 0x996633 };
+                let edit = onestore::TocEdit::Color(color);
+                let transaction =
+                    onestore::edit_table_of_contents(bytes, &[edit])?.ok_or("No change")?;
+                transaction.commit(io)?;
             } else {
                 let store = Store::parse(bytes)?;
                 let index = RevisionIndex::parse(&store)?;
@@ -136,18 +153,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     unreachable!()
                 };
                 let end = u32::try_from(text.encode_utf16().count())?;
-                onestore::commit_text(
-                    io,
-                    bytes,
-                    sid,
-                    oid,
-                    end..end,
-                    if recovering {
-                        " [recovered]"
-                    } else {
-                        " [durable café 🦀]"
-                    },
-                )?;
+                let with = if recovering {
+                    " [recovered]"
+                } else {
+                    " [durable café 🦀]"
+                };
+                let edit = typing::text(sid, oid, end..end, with);
+                let transaction = typing::sealed(bytes, "Power loss", &edit)?.ok_or("No change")?;
+                transaction.commit(io)?;
             }
             Ok(())
         };

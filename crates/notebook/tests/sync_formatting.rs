@@ -1,21 +1,23 @@
 //! Formatting and insertion as page-model differences: what reconciles with an independent
-//! remote change, what conflicts, and what a reviewed conflict publishes.
+//! remote change, what keeps a conflict page, and what the edit made again publishes.
 
-use notebook::{ConflictKind, EditStatus, Replica};
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
+
+use notebook::{EditStatus, Replica};
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Format},
     page::{Page, PageObject},
 };
 
 #[path = "support/server.rs"]
 mod server;
-use server::{Fault, Server, pages};
+use server::{Fault, Server, conflicted, pages, snapshot};
 #[path = "support/model_ops.rs"]
 mod model_ops;
 use model_ops::{
-    AUTHOR, insert_after, insert_outline, page_of, paragraph_with, replace_text, restyle, review,
-    save,
+    AUTHOR, insert_after, insert_outline, page_of, paragraph_with, replace_text, restyle, save,
 };
 
 const OUTLINES: &[u8] =
@@ -80,9 +82,9 @@ fn remote_with(space: ExGuid, change: impl FnOnce(&mut Page)) -> Server {
     let mut page = page_of(OUTLINES, space);
     change(&mut page);
     Server::new(
-        PreparedEdit::page(OUTLINES, space, &page, "Native author")
+        ops::saved(OUTLINES, space, &page)
             .unwrap()
-            .as_bytes(),
+            .as_slice(),
     )
 }
 
@@ -112,7 +114,7 @@ fn offline_formatting_merges_with_a_remote_edit_to_another_paragraph() {
             .all(|format| format.bold == Some(true))
     );
     assert_eq!(text_of(&published, ids[3]), "Remote Trailing sibling");
-    assert_eq!(cache.snapshot().unwrap(), server.durable);
+    assert_eq!(snapshot(&cache), server.durable);
 }
 
 #[test]
@@ -127,7 +129,7 @@ fn offline_formatting_conflicts_only_with_remote_changes_it_overlaps() {
         })
         .unwrap()
         .unwrap();
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         let mut server = remote_with(space, |page| {
             if typed {
                 replace_text(page, ids[0], 0..0, "Remote ");
@@ -150,18 +152,18 @@ fn offline_formatting_conflicts_only_with_remote_changes_it_overlaps() {
                 );
             }
         } else {
-            assert_eq!(
-                outcome,
-                Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-            );
-            assert_eq!(server.publications, 0);
-            assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+            assert!(matches!(outcome, Some((_, EditStatus::Published { .. }))));
+            assert!(conflicted(&server.durable, space));
+            let remote = page_of(&server.durable, space);
+            assert!(formats(&remote, ids[0]).iter().all(|format| format.bold != Some(true)));
+            assert_eq!(pages(&snapshot(&cache)), pages(&server.durable));
+            assert_ne!(pages(&local), pages(&server.durable));
         }
     }
 }
 
 #[test]
-fn competing_formatting_of_one_paragraph_conflicts_until_reviewed() {
+fn competing_formatting_of_one_paragraph_keeps_a_conflict_page_until_made_again() {
     let (space, page) = page_titled(OUTLINES, PAGE);
     let ids = plain(&page);
     let directory = tempfile::tempdir().unwrap();
@@ -172,24 +174,22 @@ fn competing_formatting_of_one_paragraph_conflicts_until_reviewed() {
     })
     .unwrap()
     .unwrap();
-    let pending = cache.pending().unwrap();
     let mut server = remote_with(space, |page| {
         restyle(page, ids[0], 0..3, |format| format.italic = Some(true));
     });
-    for _ in 0..2 {
-        assert_eq!(
-            cache.sync_once(&mut server).unwrap().edit,
-            Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-        );
-    }
-    assert_eq!(cache.pending().unwrap(), pending);
+    assert!(matches!(
+        cache.sync_once(&mut server).unwrap().edit,
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(conflicted(&server.durable, space));
+    assert_eq!(cache.sync_once(&mut server).unwrap().edit, None);
     drop(cache);
     let cache = Replica::open(&path).unwrap();
-    assert_eq!(
+    assert!(matches!(
         cache.status(id).unwrap(),
-        Some(EditStatus::Conflict(ConflictKind::ContentChanged))
-    );
-    review(&cache, id, ids[0], |page| {
+        Some(EditStatus::Published { .. })
+    ));
+    save(&cache, ids[0], |page| {
         restyle(page, ids[0], 0..6, |format| format.font_size = Some(14.0));
     })
     .unwrap();
@@ -287,7 +287,7 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
         })
         .unwrap()
         .unwrap();
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         let mut server = remote_with(space, |page| {
             for (step, &at) in remote.iter().enumerate() {
                 if step % 2 == 0 {
@@ -313,17 +313,10 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
         }
         if underlined[target] && start == 0 {
             conflicts += 1;
-            assert_eq!(
-                outcome.1,
-                EditStatus::Conflict(ConflictKind::ContentChanged),
-                "seed {seed}"
-            );
-            assert_eq!(server.publications, 0, "seed {seed}");
-            assert_eq!(
-                pages(&cache.snapshot().unwrap()),
-                pages(&local),
-                "seed {seed}"
-            );
+            assert!(matches!(outcome.1, EditStatus::Published { .. }), "seed {seed}");
+            assert!(conflicted(&server.durable, space), "seed {seed}");
+            assert_eq!(page_of(&server.durable, space), remote_page, "seed {seed}");
+            assert_ne!(pages(&snapshot(&cache)), pages(&local), "seed {seed}");
             continue;
         }
         published += 1;
@@ -345,7 +338,7 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
                 "seed {seed}"
             );
         }
-        assert_eq!(cache.snapshot().unwrap(), server.durable, "seed {seed}");
+        assert_eq!(snapshot(&cache), server.durable, "seed {seed}");
     }
     assert!(
         published >= 16,
@@ -366,11 +359,11 @@ fn offline_insertions_survive_reopen_and_carry_their_formatting() {
     })
     .unwrap()
     .unwrap();
-    let local = cache.snapshot().unwrap();
+    let local = snapshot(&cache);
     let pending = cache.pending().unwrap();
     drop(cache);
     cache = Replica::open(&path).unwrap();
-    assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+    assert_eq!(pages(&snapshot(&cache)), pages(&local));
     assert_eq!(cache.pending().unwrap(), pending);
     let mut server = remote_with(space, |page| replace_text(page, ids[3], 0..0, "Remote "));
     assert!(
@@ -399,7 +392,7 @@ fn offline_insertions_survive_reopen_and_carry_their_formatting() {
     for (offset, format) in styles.iter().enumerate() {
         assert_eq!(format.bold == Some(true), (8..17).contains(&offset));
     }
-    assert_eq!(cache.snapshot().unwrap(), server.durable);
+    assert_eq!(snapshot(&cache), server.durable);
 }
 
 #[test]
@@ -415,7 +408,7 @@ fn uncertain_formatting_attempts_keep_the_original_attempt_and_never_replay() {
         })
         .unwrap()
         .unwrap();
-        let local = cache.snapshot().unwrap();
+        let local = snapshot(&cache);
         let mut server = Server::new(OUTLINES);
         server.fault = fault;
         assert!(cache.sync_once(&mut server).is_err());
@@ -433,7 +426,7 @@ fn uncertain_formatting_attempts_keep_the_original_attempt_and_never_replay() {
             }
             assert_eq!(server.publications, 1);
             assert_eq!(server.durable, OUTLINES);
-            assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+            assert_eq!(pages(&snapshot(&cache)), pages(&local));
             continue;
         }
         assert!(matches!(
@@ -474,7 +467,7 @@ fn a_format_the_remote_already_carries_is_confirmed_without_republishing() {
     );
     assert_eq!((server.publications, server.confirmations), (0, 2));
     assert!(cache.pending().unwrap().is_empty());
-    let published = page_of(&cache.snapshot().unwrap(), space);
+    let published = page_of(&snapshot(&cache), space);
     assert_eq!(published, page_of(&server.durable, space));
     assert!(
         formats(&published, ids[0])
@@ -552,7 +545,7 @@ fn paragraph_formatting_survives_reopen_rebase_and_a_lost_publication_reply() {
         let id = save(&cache, ids[0], |page| restyle(page, ids[0], 0..6, apply))
             .unwrap()
             .unwrap();
-        let expected = formats(&page_of(&cache.snapshot().unwrap(), space), ids[0]);
+        let expected = formats(&page_of(&snapshot(&cache), space), ids[0]);
         drop(cache);
         let cache = Replica::open(directory.path().join("cache.sqlite")).unwrap();
         let mut server = remote_with(space, |page| replace_text(page, ids[3], 0..0, "Remote "));

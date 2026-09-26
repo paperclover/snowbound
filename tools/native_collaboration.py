@@ -18,7 +18,7 @@ import xml.etree.ElementTree as ET
 
 from native_runner import ROOT, clone, command, windows, vm, collect_artifacts
 from native_xml import texts
-from document_model import ordered_pages, view, walk
+from document_model import EXPORTER, ordered_pages, view, walk
 import linux_vm
 
 
@@ -260,7 +260,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     target = output / label / 'notebook'
                     target.mkdir(parents=True)
                     for name, data in snapshot.items(): (target / name).write_bytes(data)
-                    result = subprocess.run([ROOT / 'target/debug/examples/document', target / 'synthetic.one', target.parent / 'model'], capture_output=True, text=True)
+                    result = subprocess.run([EXPORTER, target / 'synthetic.one', target.parent / 'model'], capture_output=True, text=True)
                     if result.returncode == 0:
                         (target.parent / 'locks.txt').write_text(ssh('sudo smbstatus --locks'))
                         print('Captured collaboration state:', label, flush=True)
@@ -318,7 +318,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                 recovered.mkdir()
                 with (recovered / 'synthetic.one').open('wb') as stream:
                     subprocess.run(linux_vm.ssh_argv(server, 'cat /srv/agent/m6-collaboration/synthetic.one'), stdout=stream, check=True, timeout=60)
-                subprocess.run([ROOT / 'target/debug/examples/document', recovered / 'synthetic.one', recovered / 'model'], check=True)
+                subprocess.run([EXPORTER, recovered / 'synthetic.one', recovered / 'model'], check=True)
                 model = json.loads((recovered / 'model/document.json').read_text())
                 text = active_text(model)
                 retained = verify_text('Concurrent edits:', text, logs)
@@ -459,7 +459,7 @@ def replay(output, server, stress_clients=0, stress_operations=30, sync_every=1,
                     if temporary.exists(): shutil.rmtree(temporary)
                     snapshot = output / 'conflict.one'
                     snapshot.write_bytes(snapshot_file('synthetic.one'))
-                    subprocess.run([ROOT / 'target/debug/examples/document', snapshot, temporary], check=True)
+                    subprocess.run([EXPORTER, snapshot, temporary], check=True)
                     model = json.loads((temporary / 'document.json').read_text())
                     values = [node['kind'].get('text') for space in model['spaces'].values() for revision in space['revisions'].values() for node in revision['nodes'].values()]
                     if 'Client A concurrent edit.' in values and 'Client B concurrent edit.' in values: break

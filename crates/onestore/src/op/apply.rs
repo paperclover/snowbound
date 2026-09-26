@@ -49,6 +49,28 @@ impl<'a> Section<'a> {
                         Op::Section(op) => section.apply_section(author, op)?,
                     }
                 }
+                let spaces: BTreeSet<_> = edit
+                    .ops
+                    .iter()
+                    .filter_map(|op| match op {
+                        Op::Page { space, .. } => Some(*space),
+                        Op::Section(_) => None,
+                    })
+                    .collect();
+                for space in spaces {
+                    // A page the edit went on to delete has no cells left to check.
+                    let Ok(page) = section.active(space) else {
+                        continue;
+                    };
+                    if page.view.nodes.values().any(|node| {
+                        matches!(node.kind, Kind::Cell { .. }) && node.children.is_empty()
+                    }) {
+                        return Err(OpError::Unsupported(
+                            "A table cell keeps a paragraph; insert its replacement first",
+                        )
+                        .into());
+                    }
+                }
                 Ok(())
             })
         })
@@ -99,28 +121,26 @@ impl<'a> Section<'a> {
             }
             SectionOp::Import { creation, page } => {
                 self.apply_section(author, &SectionOp::Create(creation.clone()))?;
+                self.fill(author, creation.space(), page)?;
+            }
+            SectionOp::Conflict {
+                of,
+                creation,
+                page,
+                objects,
+            } => {
+                let level = self
+                    .pages()?
+                    .into_iter()
+                    .find(|(space, ..)| space == of)
+                    .map(|(.., level)| level)
+                    .ok_or(OpError::TargetUnavailable(*of))?;
                 let space = creation.space();
-                let before = self.page(space)?;
-                let mut after = page.clone();
-                // The created page's title stays; the imported page brings the rest.
-                after.objects.retain(|object| !matches!(object, PageObject::Title(_)));
-                for object in before.objects.iter().rev() {
-                    if let PageObject::Title(_) = object {
-                        after.objects.insert(0, object.clone());
-                    }
-                }
-                after.title = before.title.clone();
-                after.identity = before.identity;
-                after.created = before.created;
-                after.margin_origin = before.margin_origin;
-                for op in super::lower_page(&before, &after)? {
-                    Writer {
-                        section: self,
-                        space,
-                        author,
-                    }
-                    .apply(&op)?;
-                }
+                let (roots, created, metadata) = creation.conflict(self, &page.title, level)?;
+                self.create_space(space, roots, created)?;
+                self.fill(author, space, page)?;
+                self.mark_conflict(space, creation, page, objects)?;
+                self.link_conflict(*of, space, metadata)?;
             }
             SectionOp::Pages(edits) => {
                 for (space, changes) in crate::pages::section_changes(self, edits, &[])? {
@@ -128,13 +148,235 @@ impl<'a> Section<'a> {
                 }
             }
             SectionOp::Delete(pages) => {
-                for (space, changes) in crate::pages::section_changes(self, &[], pages)? {
-                    self.apply_changes(space, &[], changes)?;
+                let mut listed = Vec::new();
+                let conflicts = self.conflicts()?;
+                for space in pages {
+                    let of = conflicts.iter().find_map(|(of, conflicts)| {
+                        conflicts.iter().any(|page| page.space == *space).then_some(*of)
+                    });
+                    match of {
+                        Some(of) => self.unlink_conflict(of, *space)?,
+                        None => listed.push(*space),
+                    }
                 }
+                if !listed.is_empty() {
+                    for (space, changes) in crate::pages::section_changes(self, &[], &listed)? {
+                        self.apply_changes(space, &[], changes)?;
+                    }
+                }
+            }
+            SectionOp::Color(color) => {
+                let root = self.root();
+                let page = self.active(root)?;
+                let metadata = *page
+                    .view
+                    .roots
+                    .get(&2)
+                    .filter(|id| page.live.revision.objects.contains_key(id))
+                    .ok_or_else(|| invalid("The section has no metadata to colour"))?;
+                let mut object = crate::write::PropertyObject::from_object(
+                    &page.live.revision.objects[&metadata],
+                )?;
+                object.set(&[(0x14001cbe, &color.unwrap_or(0xffff_ffff).to_le_bytes())])?;
+                self.apply_changes(root, &[], BTreeMap::from([(metadata, object)]))?;
             }
         }
         Ok(())
     }
+
+    /// Writes `page`'s content onto the page just created in `space`, whose title stays.
+    fn fill(&mut self, author: &str, space: ExGuid, page: &crate::page::Page) -> Result<(), Failure> {
+        let before = self.page(space)?;
+        let mut after = page.clone();
+        after.objects.retain(|object| !matches!(object, PageObject::Title(_)));
+        for object in &mut after.objects {
+            // Stroke points are page coordinates; new ink takes its position from them.
+            if let PageObject::Ink(ink) = object {
+                ink.layout = Default::default();
+            }
+        }
+        for object in before.objects.iter().rev() {
+            if let PageObject::Title(_) = object {
+                after.objects.insert(0, object.clone());
+            }
+        }
+        after.title = before.title.clone();
+        after.identity = before.identity;
+        after.created = before.created;
+        after.margin_origin = before.margin_origin;
+        for op in super::lower_page(&before, &after)? {
+            Writer {
+                section: self,
+                space,
+                author,
+            }
+            .apply(&op)?;
+        }
+        Ok(())
+    }
+
+    /// Marks a filled conflict page as OneNote 2010 does: the page read-only, deletable and
+    /// a conflict page (MS-ONE 2.1.2), and each of `objects` a conflict object (2.1.1). The
+    /// created title stands for `page`'s, so objects of that title mark its counterparts.
+    fn mark_conflict(
+        &mut self,
+        space: ExGuid,
+        creation: &crate::PageCreation,
+        page: &crate::page::Page,
+        objects: &[ExGuid],
+    ) -> Result<(), Failure> {
+        let created = |n| ExGuid {
+            guid: creation.space().guid,
+            n,
+        };
+        let mut titles = BTreeMap::new();
+        for object in &page.objects {
+            let PageObject::Title(title) = object else {
+                continue;
+            };
+            titles.insert(title.id, created(13));
+            if let Some(outline) = title.outlines.first() {
+                titles.insert(outline.id, created(14));
+                if let Some(paragraph) = outline.paragraphs.first() {
+                    titles.insert(paragraph.id, created(15));
+                    if let Some(text) = paragraph.text() {
+                        titles.insert(text.id, created(16));
+                    }
+                }
+            }
+        }
+        let active = self.active(space)?;
+        let mut changes = BTreeMap::new();
+        let mut page_node = crate::write::PropertyObject::from_object(
+            &active.live.revision.objects[&creation.object()],
+        )?;
+        page_node.set(&[(0x88001cde, &[]), (0x88001d0c, &[]), (0x88001d7c, &[])])?;
+        changes.insert(creation.object(), page_node);
+        for id in objects {
+            let id = titles.get(id).copied().unwrap_or(*id);
+            if !active.live.is_reachable(id) {
+                return Err(OpError::TargetUnavailable(id).into());
+            }
+            let mut object =
+                crate::write::PropertyObject::from_object(&active.live.revision.objects[&id])?;
+            // A table is rendered as conflicting but is not selectable as such.
+            if object.jcid == 0x60022 {
+                object.set(&[(0x88001d96, &[])])?;
+            } else {
+                object.set(&[(0x88001ddb, &[]), (0x88001d96, &[])])?;
+            }
+            changes.insert(id, object);
+        }
+        self.apply_changes(space, &[], changes)?;
+        Ok(())
+    }
+
+    /// Lists conflict page `space` under page `of` as OneNote 2010 does: the page's manifest
+    /// references it and keeps a copy of its metadata, and the page's metadata and the
+    /// section's copy of it say the page has conflict pages (MS-ONE 2.2.34, 2.3.71).
+    fn link_conflict(
+        &mut self,
+        of: ExGuid,
+        space: ExGuid,
+        mut metadata: crate::write::PropertyObject,
+    ) -> Result<(), Failure> {
+        use crate::{pages::set_references, write::PropertyObject};
+        let page = self.active(of)?;
+        let manifest_id = page.view.roots[&1];
+        let manifest_node = &page.view.nodes[&manifest_id];
+        let mut spaces = manifest_node.spaces.clone();
+        spaces.push(space);
+        let mut copies = objects(manifest_node, 0x24003442);
+        let copy = crate::pages::metadata_id(space);
+        copies.push(copy);
+        metadata.reference(copy)?;
+        let mut manifest = PropertyObject::from_object(&page.live.revision.objects[&manifest_id])?;
+        set_references(&mut manifest, 0x2c001d63, &spaces)?;
+        set_references(&mut manifest, 0x24003442, &copies)?;
+        self.apply_changes(
+            of,
+            &[],
+            BTreeMap::from([(manifest_id, manifest), (copy, metadata)]),
+        )?;
+        self.has_conflicts(of, true)
+    }
+
+    /// Deletes conflict page `space` of page `of` as OneNote 2010 does: the manifest stops
+    /// referencing it (its metadata copy stays) and the last one's removal clears
+    /// `HasConflictPages`; the conflict page's own space is left as it is.
+    fn unlink_conflict(&mut self, of: ExGuid, space: ExGuid) -> Result<(), Failure> {
+        use crate::{pages::set_references, write::PropertyObject};
+        let page = self.active(of)?;
+        let manifest_id = page.view.roots[&1];
+        let spaces: Vec<ExGuid> = page.view.nodes[&manifest_id]
+            .spaces
+            .iter()
+            .copied()
+            .filter(|listed| *listed != space)
+            .collect();
+        let mut manifest = PropertyObject::from_object(&page.live.revision.objects[&manifest_id])?;
+        if spaces.is_empty() {
+            manifest.remove(&[0x2c001d63])?;
+        } else {
+            set_references(&mut manifest, 0x2c001d63, &spaces)?;
+        }
+        self.apply_changes(of, &[], BTreeMap::from([(manifest_id, manifest)]))?;
+        if spaces.is_empty() {
+            self.has_conflicts(of, false)?;
+        }
+        Ok(())
+    }
+
+    /// Sets or clears `HasConflictPages` on page `of`'s metadata and on the section's copy
+    /// of it, where its series keeps one.
+    fn has_conflicts(&mut self, of: ExGuid, value: bool) -> Result<(), Failure> {
+        use crate::write::PropertyObject;
+        let flag = |object: &crate::Object<'_>| -> Result<PropertyObject, Error> {
+            let mut object = PropertyObject::from_object(object)?;
+            if value {
+                object.set(&[(0x88001d97, &[])])?;
+            } else {
+                object.remove(&[0x88001d97])?;
+            }
+            Ok(object)
+        };
+        let page = self.active(of)?;
+        let stored_id = page.view.roots[&2];
+        let identity = crate::pages::metadata_guid(&page.view.nodes[&stored_id])?;
+        let stored = flag(&page.live.revision.objects[&stored_id])?;
+        self.apply_changes(of, &[], BTreeMap::from([(stored_id, stored)]))?;
+        let root = self.root();
+        let section = self.active(root)?;
+        let copy = section
+            .view
+            .nodes
+            .values()
+            .find(|node| node.spaces.contains(&of))
+            .map(|series| objects(series, 0x24003442))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|id| {
+                section.view.nodes.get(id).is_some_and(|node| {
+                    crate::pages::metadata_guid(node).is_ok_and(|guid| guid == identity)
+                })
+            });
+        if let Some(id) = copy {
+            let object = flag(&section.live.revision.objects[&id])?;
+            self.apply_changes(root, &[], BTreeMap::from([(id, object)]))?;
+        }
+        Ok(())
+    }
+}
+
+/// The objects an element's reference property names.
+fn objects(node: &crate::document::Element<'_>, property: u32) -> Vec<ExGuid> {
+    node.extra[0]
+        .iter()
+        .find_map(|field| match &field.value {
+            crate::document::FieldValue::Objects(ids) if field.id == property => Some(ids.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Whether an op may store more than one revision of a page, so its failure part way needs
@@ -348,6 +590,19 @@ impl<'a> Writer<'_, 'a> {
                     Ok(BTreeMap::from([(*metadata, object)]))
                 })
             }
+            PageOp::Color(color) => self.write(|page| {
+                let [node] = crate::active::manifest_pages(&page.view)[..] else {
+                    return Err(invalid("The page has no page node to colour"));
+                };
+                let mut object =
+                    crate::write::PropertyObject::from_object(&page.live.revision.objects[&node])?;
+                // OneNote's "No color" removes the property.
+                match color {
+                    Some(color) => object.set(&[(crate::page::PAGE_COLOR, &color.to_le_bytes())])?,
+                    None => object.remove(&[crate::page::PAGE_COLOR])?,
+                }
+                Ok(BTreeMap::from([(node, object)]))
+            }),
             PageOp::Insert {
                 container,
                 before,
@@ -386,18 +641,6 @@ impl<'a> Writer<'_, 'a> {
             }
             PageOp::Delete { object } => {
                 self.target(*object)?;
-                let page = self.page()?;
-                if matches!(page.view.nodes[object].kind, Kind::Paragraph { .. }) {
-                    let container = self.container(*object)?;
-                    if matches!(self.page()?.view.nodes[&container].kind, Kind::Cell { .. })
-                        && levels::flat_children(&self.page()?.view, container) == [*object]
-                    {
-                        return Err(OpError::Unsupported(
-                            "A table cell keeps a paragraph; insert its replacement first",
-                        )
-                        .into());
-                    }
-                }
                 let edit = TreeEdit::delete(*object, self.author)?;
                 self.write(|page| edit.changes(page))
             }

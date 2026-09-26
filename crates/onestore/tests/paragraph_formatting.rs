@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
     page::{Page, PageObject, Paragraph},
 };
@@ -48,12 +50,12 @@ fn paragraph_properties_preserve_native_mixed_runs_and_shared_styles() {
         }
     }
     assert_eq!(count, 6);
-    let prepared = PreparedEdit::page(SOURCE, space, &after, "Format author").unwrap();
-    assert_eq!(page(prepared.as_bytes()).1, after);
+    let prepared = ops::saved(SOURCE, space, &after).unwrap();
+    assert_eq!(page(prepared.as_slice()).1, after);
     let before_store = Store::parse(SOURCE).unwrap();
     let before_index = RevisionIndex::parse(&before_store).unwrap();
     let before_doc = Document::parse(&before_index).unwrap();
-    let after_store = Store::parse(prepared.as_bytes()).unwrap();
+    let after_store = Store::parse(prepared.as_slice()).unwrap();
     let after_index = RevisionIndex::parse(&after_store).unwrap();
     let old = before_index.resolve_active(space).unwrap();
     let new = after_index.resolve_active(space).unwrap();
@@ -65,7 +67,7 @@ fn paragraph_properties_preserve_native_mixed_runs_and_shared_styles() {
     if let Some(directory) = std::env::var_os("ONESTORE_PARAGRAPH_FORMAT_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("synthetic.one"), prepared.as_bytes()).unwrap();
+        std::fs::write(directory.join("synthetic.one"), prepared.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -103,7 +105,7 @@ fn paragraph_formatting_rejects_invalid_values_and_conflicting_run_settings() {
         let mut format = text.text.format_at(0).unwrap().clone();
         change(&mut format);
         text.text = Paragraph::new(text.text.text().to_owned(), format);
-        assert!(PreparedEdit::page(SOURCE, space, &after, "Author").is_err());
+        assert!(ops::saved(SOURCE, space, &after).is_err());
     }
     let mut after = before.clone();
     let text = after
@@ -121,5 +123,5 @@ fn paragraph_formatting_rejects_invalid_values_and_conflicting_run_settings() {
     left.alignment = Some(1);
     right.alignment = Some(2);
     text.text = Paragraph::from_runs([("Left".into(), left), ("Right".into(), right)]);
-    assert!(PreparedEdit::page(SOURCE, space, &after, "Author").is_err());
+    assert!(ops::saved(SOURCE, space, &after).is_err());
 }

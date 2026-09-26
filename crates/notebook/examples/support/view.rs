@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
@@ -54,4 +56,43 @@ pub fn view(bytes: &[u8]) -> Result<View, Box<dyn std::error::Error>> {
         return Err("Expected one concurrent-edit paragraph".into());
     }
     Ok(found.pop().unwrap())
+}
+
+/// The concurrent-edit paragraph of `page`: its text object and text.
+fn in_page(page: &onestore::page::Page) -> Option<(ExGuid, String)> {
+    let mut pending: Vec<&onestore::page::PageParagraph> = page
+        .objects
+        .iter()
+        .flat_map(|object| match object {
+            onestore::page::PageObject::Outline(outline) => outline.paragraphs.iter().collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    pending.reverse();
+    while let Some(paragraph) = pending.pop() {
+        if let Some(text) = paragraph.text()
+            && text.text.text().starts_with("Concurrent edits:")
+        {
+            return Some((text.id, text.text.text().to_owned()));
+        }
+        if let onestore::page::ParagraphContent::Table(table) = &paragraph.content {
+            pending.extend(table.rows.iter().flat_map(|row| &row.cells).flat_map(|cell| &cell.paragraphs).rev());
+        }
+    }
+    None
+}
+
+/// The concurrent-edit paragraph as the queued edits leave it: its page, text object and
+/// text.
+pub fn cached(cache: &notebook::Replica) -> Result<(ExGuid, ExGuid, String), Box<dyn std::error::Error>> {
+    let mut found = Vec::new();
+    for (space, ..) in cache.pages()? {
+        if let Some((object, text)) = in_page(&cache.page(space)?) {
+            found.push((space, object, text));
+        }
+    }
+    match <[_; 1]>::try_from(found) {
+        Ok([found]) => Ok(found),
+        Err(_) => Err("Expected one concurrent-edit paragraph".into()),
+    }
 }

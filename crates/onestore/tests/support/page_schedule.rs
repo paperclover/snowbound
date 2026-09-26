@@ -1,6 +1,7 @@
 use onestore::{
-    CommitState, ExGuid, Insertion, PageCreation, PageEdit, PreparedEdit, RevisionIndex, Store,
+    CommitState, ExGuid, PageCreation, PageEdit, RevisionIndex, Store,
     document::{Document, FieldValue, Kind},
+    op::{PageOp, SectionOp},
 };
 use std::{collections::BTreeMap, sync::LazyLock};
 
@@ -8,6 +9,8 @@ use std::{collections::BTreeMap, sync::LazyLock};
 pub(crate) mod current;
 #[path = "disk.rs"]
 pub(crate) mod disk;
+#[path = "ops.rs"]
+pub(crate) mod ops;
 
 static SOURCE: LazyLock<Vec<u8>> = LazyLock::new(|| {
     onestore::create_section("pages.one", "Original 🦀 é 東京", "Author").unwrap()
@@ -24,17 +27,17 @@ pub fn run(input: &[u8]) {
         _ => SOURCE.as_slice(),
     };
     if let Ok(intent) = serde_json::from_slice::<PageCreation>(input)
-        && let Ok(prepared) = PreparedEdit::create_page(source, &intent)
+        && let Ok(prepared) = ops::section_op(source, SectionOp::Create(intent.clone()))
     {
         current::current(prepared.as_bytes());
     }
     if let Ok(edits) = serde_json::from_slice::<Vec<PageEdit>>(input)
-        && let Ok(prepared) = PreparedEdit::pages(source, &edits)
+        && let Ok(prepared) = ops::section_op(source, SectionOp::Pages(edits.to_vec()))
     {
         current::current(prepared.as_bytes());
     }
     if let Ok(pages) = serde_json::from_slice::<Vec<ExGuid>>(input)
-        && let Ok(prepared) = PreparedEdit::delete_pages_permanently(source, &pages)
+        && let Ok(prepared) = ops::section_op(source, SectionOp::Delete(pages.to_vec()))
     {
         current::current(prepared.as_bytes());
     }
@@ -65,7 +68,7 @@ pub fn run(input: &[u8]) {
             .get(usize::from(step[2]) % pages.len().max(1))
             .copied();
         let text = ["", "Same title", "é 🦋 東京", "  spaces  "][usize::from(step[3]) % 4];
-        let existing = if let Some((sid, page)) = selected {
+        let existing = if let Some((sid, _)) = selected {
             let space = &document.spaces[&sid];
             let view = &space.revisions[&space.contexts[&ExGuid::default()]];
             let titles: Vec<_> = view
@@ -91,7 +94,7 @@ pub fn run(input: &[u8]) {
                 let removed: Vec<_> = (0..count)
                     .map(|i| pages[(usize::from(step[2]) + i) % pages.len()].0)
                     .collect();
-                let prepared = PreparedEdit::delete_pages_permanently(source, &removed).unwrap();
+                let prepared = ops::section_op(source, SectionOp::Delete(removed.to_vec())).unwrap();
                 pages.retain(|page| !removed.contains(&page.0));
                 for sid in removed {
                     levels.remove(&sid);
@@ -128,7 +131,7 @@ pub fn run(input: &[u8]) {
                 let restored: Vec<PageEdit> =
                     serde_json::from_value(serde_json::to_value(&edits).unwrap()).unwrap();
                 assert_eq!(edits, restored);
-                let prepared = PreparedEdit::pages(source, &restored);
+                let prepared = ops::section_op(source, SectionOp::Pages(restored.to_vec()));
                 if levels[&pages[0].0] != 1 {
                     assert!(prepared.is_err());
                     continue;
@@ -140,21 +143,15 @@ pub fn run(input: &[u8]) {
                     unreachable!()
                 };
                 Some((
-                    PreparedEdit::text(
-                        source,
-                        sid,
-                        object,
-                        0..u32::try_from(original.encode_utf16().count()).unwrap(),
-                        text,
-                    )
+                    ops::page_op(source, sid, PageOp::Text { text: object, range: 0..u32::try_from(original.encode_utf16().count()).unwrap(), with: text.into() })
                     .unwrap(),
                     Some((sid, object, text)),
                 ))
             } else if step[1] & 16 != 0 {
-                let intent = Insertion::outline(page, 36.0, 36.0, text, "Page fuzz").unwrap();
+                let (add, _, inserted) = ops::new_outline(36.0, 36.0, text);
                 Some((
-                    PreparedEdit::insert(source, sid, &intent).unwrap(),
-                    Some((sid, intent.text_object(), text)),
+                    ops::page_op(source, sid, add).unwrap(),
+                    Some((sid, inserted, text)),
                 ))
             } else {
                 None
@@ -182,7 +179,7 @@ pub fn run(input: &[u8]) {
             let intent = PageCreation::new(before, title, "Page fuzz").unwrap();
             let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
             assert_eq!(intent, restored);
-            let edit = PreparedEdit::create_page(source, &restored).unwrap();
+            let edit = ops::section_op(source, SectionOp::Create(restored.clone())).unwrap();
             let position = before.map_or(pages.len(), |sid| {
                 pages.iter().position(|p| p.0 == sid).unwrap()
             });
@@ -257,7 +254,10 @@ pub fn run(input: &[u8]) {
             write_limit: if step[6] & 1 == 0 { 17 } else { 4096 },
             random: u64::from(step[7]) + 1,
         };
-        let result = edit.commit(&mut disk);
+        let Some(transaction) = &edit.transaction else {
+            continue;
+        };
+        let result = transaction.commit(&mut disk);
         let observed = current::current(&disk.durable);
         match result {
             Ok(()) => assert_eq!(observed, after),

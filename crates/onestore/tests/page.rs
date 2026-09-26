@@ -1,6 +1,7 @@
 use onestore::{
-    ExGuid, Insertion, PageCreation, PreparedEdit, RevisionIndex, Store,
+    ExGuid, PageCreation, RevisionIndex, Store,
     document::{Document, Kind},
+    op::{PageOp, SectionOp},
     page::{Page, PageObject},
 };
 
@@ -8,6 +9,8 @@ use onestore::{
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
 
 const SOURCE: &[u8] =
     include_bytes!("../../../corpus/page-lifecycle/03-renamed/notebook/Lifecycle.one");
@@ -28,7 +31,7 @@ fn native_section_accepts_empty_and_titled_pages_with_preserved_history() {
         let serialized = serde_json::to_vec(&intent).unwrap();
         let retained = serde_json::from_slice(&serialized).unwrap();
         assert_eq!(intent, retained);
-        let prepared = PreparedEdit::create_page(&source, &retained).unwrap();
+        let prepared = ops::section_op(&source, SectionOp::Create(retained.clone())).unwrap();
         let store = Store::parse(prepared.as_bytes()).unwrap();
         assert_eq!(
             store.header.transaction_count,
@@ -78,7 +81,7 @@ fn native_section_accepts_empty_and_titled_pages_with_preserved_history() {
                 assert_eq!(space.labels, index.spaces[sid].labels);
             }
         }
-        assert!(PreparedEdit::create_page(prepared.as_bytes(), &intent).is_err());
+        assert!(ops::section_op(prepared.as_bytes(), SectionOp::Create(intent.clone())).is_err());
         source = prepared.as_bytes().to_vec();
     }
     if let Some(output) = std::env::var_os("ONESTORE_PAGE_CREATION_OUTPUT") {
@@ -92,13 +95,12 @@ fn created_pages_support_title_edits_and_body_insertion() {
     let mut source = onestore::create_section("pages.one", "Original", "Author").unwrap();
     for title in [None, Some(""), Some("Explicit 🦋 é")] {
         let intent = PageCreation::new(None, title, "Author").unwrap();
-        source = PreparedEdit::create_page(&source, &intent)
+        source = ops::section_op(&source, SectionOp::Create(intent.clone()))
             .unwrap()
             .as_bytes()
             .to_vec();
-        let insertion =
-            Insertion::outline(intent.object(), 36.0, 36.0, "Body 🦀 é", "Author").unwrap();
-        source = PreparedEdit::insert(&source, intent.space(), &insertion)
+        let (add, ..) = ops::new_outline(36.0, 36.0, "Body 🦀 é");
+        source = ops::page_op(&source, intent.space(), add)
             .unwrap()
             .as_bytes()
             .to_vec();
@@ -115,13 +117,7 @@ fn created_pages_support_title_edits_and_body_insertion() {
             Some(title.filter(|s| !s.is_empty()).unwrap_or("Body 🦀 é"))
         );
         if let Some(text) = intent.title_object() {
-            source = PreparedEdit::text(
-                &source,
-                intent.space(),
-                text,
-                0..title.unwrap().encode_utf16().count() as u32,
-                "Renamed",
-            )
+            source = ops::page_op(&source, intent.space(), PageOp::Text { text, range: 0..title.unwrap().encode_utf16().count() as u32, with: "Renamed".into() })
             .unwrap()
             .as_bytes()
             .to_vec();
@@ -149,13 +145,13 @@ fn created_body_outlines_carry_the_indentation_table_onenote_writes() {
     let [first] = document.active(space).unwrap().nodes[&page].children[..] else {
         panic!()
     };
-    let insertion = Insertion::outline(page, 72.0, 144.0, "Second", "Author").unwrap();
-    let written = PreparedEdit::insert(&source, space, &insertion).unwrap();
+    let (add, insertion, _) = ops::new_outline(72.0, 144.0, "Second");
+    let written = ops::page_op(&source, space, add).unwrap();
     let store = Store::parse(written.as_bytes()).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
     let view = document.active(space).unwrap();
-    for outline in [first, insertion.object()] {
+    for outline in [first, insertion] {
         let Kind::Outline { indents } = &view.nodes[&outline].kind else {
             panic!()
         };
@@ -167,7 +163,7 @@ fn created_body_outlines_carry_the_indentation_table_onenote_writes() {
 fn a_created_title_outline_is_stored_and_read_as_onenote_stores_it() {
     let source = onestore::create_section("pages.one", "Original", "Author").unwrap();
     let intent = PageCreation::new(None, Some("Title"), "Author").unwrap();
-    let prepared = PreparedEdit::create_page(&source, &intent).unwrap();
+    let prepared = ops::section_op(&source, SectionOp::Create(intent.clone())).unwrap();
     let store = Store::parse(prepared.as_bytes()).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
@@ -222,11 +218,11 @@ fn invalid_page_intents_and_nonleading_anchors_reject_before_publication() {
     let index = RevisionIndex::parse(&store).unwrap();
     let pages = Document::parse(&index).unwrap().pages().unwrap();
     let intent = PageCreation::new(Some(pages[4].0), Some("Child"), "Author").unwrap();
-    assert!(PreparedEdit::create_page(source, &intent).is_err());
+    assert!(ops::section_op(source, SectionOp::Create(intent.clone())).is_err());
     let mut value = serde_json::to_value(PageCreation::new(None, None, "Author").unwrap()).unwrap();
     value["guid"] = serde_json::to_value([0_u8; 16]).unwrap();
     let invalid: PageCreation = serde_json::from_value(value.clone()).unwrap();
-    assert!(PreparedEdit::create_page(source, &invalid).is_err());
+    assert!(ops::section_op(source, SectionOp::Create(invalid.clone())).is_err());
     value["unknown"] = true.into();
     assert!(serde_json::from_value::<PageCreation>(value).is_err());
 }
@@ -235,7 +231,7 @@ fn invalid_page_intents_and_nonleading_anchors_reject_before_publication() {
 fn new_space_and_section_entry_publish_as_one_complete_action() {
     let source = onestore::create_section("pages.one", "Original", "Author").unwrap();
     let intent = PageCreation::new(None, Some("New 🦋 é"), "Author").unwrap();
-    let prepared = PreparedEdit::create_page(&source, &intent).unwrap();
+    let prepared = ops::section_op(&source, SectionOp::Create(intent.clone())).unwrap();
     let old = current::current(&source);
     let new = current::current(prepared.as_bytes());
     assert_eq!(new.len(), old.len() + 1);
@@ -285,7 +281,7 @@ fn repeated_page_creation_crosses_root_fragments_counters_and_section_checkpoint
             "Stress author",
         )
         .unwrap();
-        let prepared = PreparedEdit::create_page(&source, &intent).unwrap();
+        let prepared = ops::section_op(&source, SectionOp::Create(intent.clone())).unwrap();
         let mut unpublished = prepared.as_bytes().to_vec();
         unpublished[96..100].copy_from_slice(&source[96..100]);
         let old_store = Store::parse(&unpublished).unwrap();
@@ -363,7 +359,7 @@ fn native_changes_on_created_pages_accept_rust_followups() {
     let mut source = initial.to_vec();
     for (sid, title, body) in targets {
         for (object, prefix) in [(body, "Rust + "), (title, "Reviewed ")] {
-            source = PreparedEdit::text(&source, sid, object, 0..0, prefix)
+            source = ops::page_op(&source, sid, PageOp::Text { text: object, range: 0..0, with: prefix.into() })
                 .unwrap()
                 .as_bytes()
                 .to_vec();
@@ -400,7 +396,7 @@ fn page_creation_preserves_native_features_and_file_data() {
         let old = RevisionIndex::parse(&before).unwrap();
         let original = Document::parse(&old).unwrap();
         let intent = PageCreation::new(None, Some("Preserved features"), "Author").unwrap();
-        let prepared = PreparedEdit::create_page(source, &intent).unwrap();
+        let prepared = ops::section_op(source, SectionOp::Create(intent.clone())).unwrap();
         let after = Store::parse(prepared.as_bytes()).unwrap();
         let new = RevisionIndex::parse(&after).unwrap();
         let document = Document::parse(&new).unwrap();
@@ -426,4 +422,78 @@ fn page_creation_preserves_native_features_and_file_data() {
             }
         }
     }
+}
+
+/// A page created into an empty section as OneNote 2010 creates one (its title's date and
+/// time fields, then a colour) reads back with both; a page kept from elsewhere keeps its
+/// identity and creation time.
+#[test]
+fn dated_pages_in_an_empty_section_read_back_with_their_date_and_colour() {
+    let source = onestore::create_empty_section("New Section 1.one", Some(0x00e4a88a)).unwrap();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    index.validate_current().unwrap();
+    assert!(Document::parse(&index).unwrap().pages().unwrap().is_empty());
+    let creation = PageCreation::new(None, Some(""), "Rust Author")
+        .unwrap()
+        .dated("Sunday, September 27, 2026", "2:23 AM")
+        .unwrap();
+    let retained: PageCreation =
+        serde_json::from_slice(&serde_json::to_vec(&creation).unwrap()).unwrap();
+    assert_eq!(retained, creation);
+    let space = creation.space();
+    let identity = [7; 16];
+    let kept = PageCreation::new(None, Some("Kept"), "Rust Author")
+        .unwrap()
+        .keeping(identity, 133_700_000_001_234_567)
+        .unwrap();
+    let image = ops::edited(
+        &source,
+        vec![
+            onestore::op::Op::Section(SectionOp::Create(creation.clone())),
+            onestore::op::Op::Page {
+                space,
+                op: PageOp::Color(Some(0x00f2f9d4)),
+            },
+            onestore::op::Op::Section(SectionOp::Create(kept.clone())),
+        ],
+    )
+    .unwrap();
+    let store = Store::parse(&image).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    index.validate_current().unwrap();
+    let document = Document::parse(&index).unwrap();
+    let page = Page::from_space(&document, space).unwrap();
+    assert_eq!(page.color, Some(0x00f2f9d4));
+    assert_eq!(page.created, Some(creation.created()));
+    let [PageObject::Title(title)] = &page.objects[..] else {
+        panic!("{:?}", page.objects)
+    };
+    let shown: Vec<_> = title.outlines[1]
+        .paragraphs
+        .iter()
+        .map(|paragraph| {
+            let text = paragraph.text().unwrap();
+            (text.date_field, text.text.text().to_owned())
+        })
+        .collect();
+    assert_eq!(title.date, Some(title.outlines[1].id));
+    assert_eq!(
+        shown,
+        [
+            // OneNote's own new pages read the same: the fields' order names their roles.
+            (None, "Sunday, September 27, 2026".to_owned()),
+            (None, "2:23 AM".to_owned()),
+        ]
+    );
+    let kept_page = Page::from_space(&document, kept.space()).unwrap();
+    assert_eq!(kept_page.identity, Some(identity));
+    assert_eq!(kept_page.created, Some(133_700_000_001_234_567));
+    assert_eq!(kept_page.color, None);
+    // Clearing the colour stores OneNote's "No color".
+    let cleared = ops::page_edited(&image, space, vec![PageOp::Color(None)]).unwrap();
+    let store = Store::parse(&cleared).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    assert_eq!(Page::from_space(&document, space).unwrap().color, None);
 }

@@ -1,6 +1,7 @@
 //! The background worker: waking, backoff, ownership and error propagation.
 
-use notebook::{ConflictKind, EditStatus, Error, Remote, Replica};
+use notebook::{EditStatus, Error, Remote, Replica};
+use onestore::Stamp;
 use onestore::{
     CommitError, CommitState, ExGuid, RevisionIndex, Store, Transaction, document::Document,
 };
@@ -25,14 +26,14 @@ impl Remote for Shared {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         self.0.lock().unwrap().read()
     }
-    fn stamp(&mut self) -> io::Result<Option<onestore::Stamp>> {
+    fn stamp(&mut self) -> io::Result<Stamp> {
         self.0.lock().unwrap().stamp()
     }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         self.0.lock().unwrap().publish(transaction)
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        self.0.lock().unwrap().confirm(snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        self.0.lock().unwrap().confirm(base)
     }
 }
 
@@ -75,11 +76,17 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
             }
             self.shared.read()
         }
+        fn stamp(&mut self) -> io::Result<Stamp> {
+            if self.fail_read {
+                return Err(io::ErrorKind::ConnectionReset.into());
+            }
+            self.shared.stamp()
+        }
         fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             self.shared.publish(transaction)
         }
-        fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-            self.shared.confirm(snapshot)
+        fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+            self.shared.confirm(base)
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -142,7 +149,7 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
     drop(cache);
     let cache = Replica::open(&path).unwrap();
     assert_eq!(cache.status(id).unwrap(), Some(published));
-    let cached = cache.snapshot().unwrap();
+    let cached = snapshot(&cache);
     // Confirmation changes reader-notification fields without changing the committed graph.
     assert_eq!(cached[..212], server.durable[..212]);
     assert_eq!(cached[252..], server.durable[252..]);
@@ -159,7 +166,7 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
 fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
     let dir = tempfile::tempdir().unwrap();
     let source = onestore::create_section("worker.one", "abc", "Fixture").unwrap();
-    let (_, oid, _) = text(&source);
+    let (sid, oid, _) = text(&source);
     let cache = Arc::new(Replica::create(dir.path().join("cache.sqlite"), &source).unwrap());
     let server = Arc::new(Mutex::new(Server::new(&source)));
     let shared = Shared(Arc::clone(&server));
@@ -190,13 +197,19 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
         (0..12)
             .map(|writer| {
                 let cache = &cache;
+                // Typed as an op: a page read before another writer's edit would lower stale.
                 scope.spawn(move || {
-                    let marker = format!("[{writer}] ");
-                    model_ops::save(cache, oid, |page| {
-                        model_ops::replace_text(page, oid, 0..0, &marker)
-                    })
-                    .unwrap()
-                    .unwrap()
+                    let op = onestore::op::PageOp::Text {
+                        text: oid,
+                        range: 0..0,
+                        with: format!("[{writer}] "),
+                    };
+                    let ops = vec![onestore::op::Op::Page { space: sid, op }];
+                    let edit = onestore::op::Edit {
+                        at: model_ops::now(),
+                        ops,
+                    };
+                    cache.apply(model_ops::AUTHOR, edit).unwrap()
                 })
             })
             .collect::<Vec<_>>()
@@ -221,7 +234,7 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
             Some(EditStatus::Published { .. })
         ));
     }
-    let content = text(&cache.snapshot().unwrap()).2;
+    let content = text(&snapshot(&cache)).2;
     for writer in 0..12 {
         assert_eq!(content.matches(&format!("[{writer}] ")).count(), 1);
     }
@@ -230,7 +243,7 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
     assert_eq!(text(&server.durable).2, content);
     // Edits queued while the worker was busy publish together.
     assert_eq!(server.publications, 1);
-    assert_eq!(cache.snapshot().unwrap(), server.durable);
+    assert_eq!(snapshot(&cache), server.durable);
 }
 
 #[test]
@@ -244,13 +257,16 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
         fn read(&mut self) -> io::Result<Vec<u8>> {
             self.shared.read()
         }
+        fn stamp(&mut self) -> io::Result<Stamp> {
+            self.shared.stamp()
+        }
         fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             self.entered.send(()).unwrap();
             self.resume.recv_timeout(Duration::from_secs(5)).unwrap();
             self.shared.publish(transaction)
         }
-        fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-            self.shared.confirm(snapshot)
+        fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+            self.shared.confirm(base)
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -358,81 +374,65 @@ fn cache_failures_stop_retries_and_return_the_error_without_remote_publication()
     assert!(rx.try_iter().next().is_none());
     assert_eq!(server.lock().unwrap().publications, 0);
     assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-    assert_eq!(text(&cache.snapshot().unwrap()).2, "L abc");
+    assert_eq!(text(&snapshot(&cache)).2, "L abc");
 }
 
 #[test]
-fn polling_reports_a_blocked_queue_once_per_remote_change_without_replay() {
-    for uncertain in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let source = onestore::create_section("worker.one", "abc", "Fixture").unwrap();
-        let (sid, oid, _) = text(&source);
-        let cache = Arc::new(Replica::create(dir.path().join("cache.sqlite"), &source).unwrap());
-        let id = save(&cache, oid, 1..2, "L").unwrap();
-        let local = text(&cache.snapshot().unwrap()).2;
-        let mut server = if uncertain {
-            Server::new(&source)
-        } else {
-            Server::new(&onestore::replace_text(&source, sid, oid, 1..2, "R").unwrap())
-        };
-        if uncertain {
-            server.fault = Fault::UnknownBefore;
-        }
-        let server = Arc::new(Mutex::new(server));
-        let shared = Shared(Arc::clone(&server));
-        let (tx, rx) = mpsc::channel();
-        let worker = cache
-            .start_sync(
-                Duration::from_millis(10),
-                move || Ok(shared.clone()),
-                move |result| {
-                    tx.send(
-                        result
-                            .as_ref()
-                            .map(|synced| synced.edit.clone())
-                            .map_err(|_| ()),
-                    )
-                    .unwrap();
-                },
-            )
-            .unwrap();
-        if uncertain {
-            assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
-        }
-        let expected = |status: &EditStatus| {
-            if uncertain {
-                matches!(status, EditStatus::AwaitingConfirmation { .. })
-            } else {
-                *status == EditStatus::Conflict(ConflictKind::ContentChanged)
-            }
-        };
-        for round in 0..3 {
-            let (actual, status) = rx
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap()
-                .unwrap()
+fn polling_reports_an_uncertain_attempt_once_per_remote_change_without_replay() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = onestore::create_section("worker.one", "abc", "Fixture").unwrap();
+    let (sid, oid, _) = text(&source);
+    let cache = Arc::new(Replica::create(dir.path().join("cache.sqlite"), &source).unwrap());
+    let id = save(&cache, oid, 1..2, "L").unwrap();
+    let local = text(&snapshot(&cache)).2;
+    let mut server = Server::new(&source);
+    server.fault = Fault::UnknownBefore;
+    let server = Arc::new(Mutex::new(server));
+    let shared = Shared(Arc::clone(&server));
+    let (tx, rx) = mpsc::channel();
+    let worker = cache
+        .start_sync(
+            Duration::from_millis(10),
+            move || Ok(shared.clone()),
+            move |result| {
+                tx.send(
+                    result
+                        .as_ref()
+                        .map(|synced| synced.edit.clone())
+                        .map_err(|_| ()),
+                )
                 .unwrap();
-            assert_eq!(actual, id);
-            assert!(expected(&status), "{status:?}");
-            // An unchanged remote is not read or reported again.
-            assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
-            // Another writer's change elsewhere in the text is read and decided again.
-            let mut server = server.lock().unwrap();
-            let changed =
-                onestore::replace_text(&server.visible, sid, oid, 0..0, &round.to_string())
-                    .unwrap();
-            server.visible = changed.clone();
-            server.durable = changed;
-            drop(server);
-            worker.wake();
-        }
-        worker.stop().unwrap();
-        assert_eq!(text(&cache.snapshot().unwrap()).2, local);
-        assert_eq!(cache.pending().unwrap().len(), 1);
-        let server = server.lock().unwrap();
-        assert_eq!(server.publications, usize::from(uncertain));
-        assert_eq!(server.confirmations, 0);
+            },
+        )
+        .unwrap();
+    assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+    for round in 0..3 {
+        let (actual, status) = rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, id);
+        assert!(
+            matches!(status, EditStatus::AwaitingConfirmation { .. }),
+            "{status:?}"
+        );
+        // An unchanged remote is not read or reported again.
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        // Another writer's change elsewhere in the text is read and decided again.
+        let mut server = server.lock().unwrap();
+        let changed = typed(&server.visible, sid, oid, 0..0, &round.to_string());
+        server.visible = changed.clone();
+        server.durable = changed;
+        drop(server);
+        worker.wake();
     }
+    worker.stop().unwrap();
+    assert_eq!(text(&snapshot(&cache)).2, local);
+    assert_eq!(cache.pending().unwrap().len(), 1);
+    let server = server.lock().unwrap();
+    assert_eq!(server.publications, 1);
+    assert_eq!(server.confirmations, 0);
 }
 
 #[test]
@@ -533,51 +533,46 @@ fn invalid_intervals_and_callback_panics_leave_worker_ownership_recoverable() {
         .unwrap();
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), None);
     worker.stop().unwrap();
-    assert_eq!(cache.snapshot().unwrap(), source);
+    assert_eq!(snapshot(&cache), source);
 }
 
+/// A conflict never blocks the worker: one step publishes the remote's version with the
+/// local one as its conflict page.
 #[test]
-fn a_resolved_conflict_wakes_the_worker_and_publishes_the_original_edit_once() {
+fn a_conflict_publishes_its_conflict_page_in_one_worker_step() {
     let dir = tempfile::tempdir().unwrap();
     let source = onestore::create_section("resolve.one", "abc", "Fixture").unwrap();
     let (sid, oid, _) = text(&source);
     let cache = Arc::new(Replica::create(dir.path().join("cache.sqlite"), &source).unwrap());
     let id = save(&cache, oid, 1..2, "L").unwrap();
-    let remote = onestore::replace_text(&source, sid, oid, 1..2, "R").unwrap();
+    let remote = typed(&source, sid, oid, 1..2, "R");
     let server = Arc::new(Mutex::new(Server::new(&remote)));
     let shared = Shared(Arc::clone(&server));
     let (tx, rx) = mpsc::channel();
-    let (resume_tx, resume_rx) = mpsc::channel();
-    let mut first = true;
     let worker = cache
         .start_sync(
             Duration::from_secs(3600),
             move || Ok(shared.clone()),
             move |result| {
                 tx.send(result.as_ref().unwrap().edit.clone()).unwrap();
-                if first {
-                    first = false;
-                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                }
             },
         )
         .unwrap();
-    assert_eq!(
-        rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
-    cache.resolve(id, notebook::Resolution::Mine).unwrap();
-    assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-    resume_tx.send(()).unwrap();
     assert!(
-        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
+        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some((actual, EditStatus::Published { .. })) if actual > id)
     );
     worker.stop().unwrap();
     assert!(cache.pending().unwrap().is_empty());
     let server = server.lock().unwrap();
     assert_eq!(server.publications, 1);
-    assert_eq!(text(&server.durable).2, "aLc");
-    assert_eq!(cache.snapshot().unwrap(), server.durable);
+    assert_eq!(
+        conflicts(&server.durable),
+        [(
+            sid,
+            vec![(model_ops::AUTHOR.to_owned(), vec!["aLc".to_owned()])]
+        )]
+    );
+    assert_eq!(snapshot(&cache), server.durable);
 }
 
 #[test]
@@ -589,11 +584,14 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
     }
     impl Remote for Busy {
         fn read(&mut self) -> io::Result<Vec<u8>> {
+            self.server.read()
+        }
+        fn stamp(&mut self) -> io::Result<Stamp> {
             self.reads += 1;
             match self.reads {
                 1 => Err(io::ErrorKind::WouldBlock.into()),
                 2 => Err(io::ErrorKind::ResourceBusy.into()),
-                _ => self.server.read(),
+                _ => self.server.stamp(),
             }
         }
         fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
@@ -611,8 +609,8 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
                 _ => self.server.publish(transaction),
             }
         }
-        fn confirm(&mut self, source: &[u8]) -> Result<(), CommitError> {
-            self.server.confirm(source)
+        fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+            self.server.confirm(base)
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -648,7 +646,7 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
         matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
     );
     worker.stop().unwrap();
-    assert_eq!(text(&cache.snapshot().unwrap()).2, "L abc");
+    assert_eq!(text(&snapshot(&cache)).2, "L abc");
     assert!(cache.pending().unwrap().is_empty());
 }
 
@@ -658,6 +656,9 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
     impl Remote for BusyOnce {
         fn read(&mut self) -> io::Result<Vec<u8>> {
             self.0.read()
+        }
+        fn stamp(&mut self) -> io::Result<Stamp> {
+            self.0.stamp()
         }
         fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             let server = &mut self.0;
@@ -670,8 +671,8 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
             }
             server.publish(transaction)
         }
-        fn confirm(&mut self, source: &[u8]) -> Result<(), CommitError> {
-            self.0.confirm(source)
+        fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+            self.0.confirm(base)
         }
     }
     let dir = tempfile::tempdir().unwrap();
@@ -714,6 +715,6 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
     }
     worker.stop().unwrap();
     assert!(cache.pending().unwrap().is_empty());
-    assert_eq!(content(&cache.snapshot().unwrap(), oid), "L abc");
-    assert_eq!(pages(&cache.snapshot().unwrap()), 2);
+    assert_eq!(content(&snapshot(&cache), oid), "L abc");
+    assert_eq!(pages(&snapshot(&cache)), 2);
 }

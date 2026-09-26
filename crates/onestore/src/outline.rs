@@ -25,15 +25,6 @@ pub enum OutlineEdit {
 }
 
 impl OutlineEdit {
-    pub(crate) fn apply(
-        self,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-    ) -> Result<Vec<u8>, Error> {
-        crate::active::write(source, space, |active| self.changes(active, object))
-    }
-
     pub(crate) fn changes(self, active: &ActivePage<'_>, object: ExGuid) -> Result<Changes, Error> {
         let invalid = |message| Error { offset: 0, message };
         let values = match self {
@@ -146,8 +137,12 @@ impl OutlineEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::write_revision;
-    use crate::{RevisionIndex, Store, document::Document};
+    use crate::{
+        RevisionIndex, Store,
+        document::Document,
+        op::{PageOp, tests::edited},
+        write::write_revision,
+    };
 
     #[test]
     fn protection_on_the_target_or_ancestor_prevents_layout_edits() {
@@ -184,7 +179,7 @@ mod tests {
                         (paragraph, OutlineEdit::Collapsed(true)),
                     ] {
                         assert_eq!(
-                            edit.apply(&bytes, sid, object).is_err(),
+                            edited(&bytes, sid, vec![PageOp::Outline { object, edit }]).is_err(),
                             enabled,
                             "{target} {property:x} {edit:?}"
                         );
@@ -199,10 +194,10 @@ mod tests {
             Ok(BTreeMap::from([(outline, object)]))
         })
         .unwrap();
-        assert!(
-            OutlineEdit::Collapsed(true)
-                .apply(&duplicated, sid, paragraph)
-                .is_err()
-        );
+        let collapse = PageOp::Outline {
+            object: paragraph,
+            edit: OutlineEdit::Collapsed(true),
+        };
+        assert!(edited(&duplicated, sid, vec![collapse]).is_err());
     }
 }

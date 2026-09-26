@@ -1,15 +1,19 @@
 //! A deterministic multi-actor schedule over page-model saves: several replicas edit one
-//! page offline, publish through a fault-injecting remote, reopen, and review conflicts.
+//! page offline, publish through a fault-injecting remote, reopen, and delete the conflict
+//! pages the merges leave.
 
 use crate::model_ops::{self, AUTHOR};
-use crate::server::{Fault, Server};
-use notebook::{EditStatus, Remote, Replica, Resolution};
+use crate::server::{Fault, Server, remote_snapshot, snapshot};
+use notebook::{EditStatus, Remote, Replica};
 use onestore::{
-    CommitError, ExGuid, PreparedEdit, RevisionIndex, Store, Transaction,
+    CommitError, ExGuid, RevisionIndex, Stamp, Store, Transaction,
     document::Document,
     page::{Outline, Page, PageObject},
 };
 use std::{io, sync::LazyLock};
+
+#[path = "../../../onestore/tests/support/ops.rs"]
+mod ops;
 
 static SOURCE: LazyLock<(Vec<u8>, ExGuid)> = LazyLock::new(|| {
     let source =
@@ -23,9 +27,9 @@ static SOURCE: LazyLock<(Vec<u8>, ExGuid)> = LazyLock::new(|| {
     for at in 1..8 {
         anchor = model_ops::insert_after(&mut page, anchor, &format!("Original 🦀 é {at}")).1;
     }
-    let source = PreparedEdit::page(&source, space, &page, "Author")
+    let source = ops::saved(&source, space, &page)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     (source, space)
 });
@@ -139,6 +143,10 @@ impl Remote for Session<'_> {
         self.server.read()
     }
 
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        self.server.stamp()
+    }
+
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         assert!(!self.retired, "a retired attempt was replayed");
         self.publications += 1;
@@ -146,8 +154,8 @@ impl Remote for Session<'_> {
         self.server.publish(transaction)
     }
 
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        self.server.confirm(snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        self.server.confirm(base)
     }
 }
 
@@ -165,11 +173,17 @@ fn statuses(cache: &Replica) -> Vec<(u64, Option<EditStatus>)> {
         .collect()
 }
 
-/// Fails unless the durable remote holds `revision` in the edited page's space.
+/// Fails unless the durable remote holds `revision`: in the edited page's space, or, for
+/// the edit adding a conflict page, in the space it changed first.
 fn durable(server: &Server, revision: ExGuid) {
     let store = Store::parse(&server.durable).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
-    assert!(index.spaces[&SOURCE.1].revisions.contains_key(&revision));
+    assert!(
+        index
+            .spaces
+            .values()
+            .any(|space| space.revisions.contains_key(&revision))
+    );
 }
 
 pub fn run(input: &[u8]) {
@@ -181,10 +195,10 @@ pub fn run(input: &[u8]) {
         let actor = usize::from(step[0]) % replicas.len();
         let path = directory.path().join(format!("{actor}.sqlite"));
         let cache = replicas[actor].get_or_insert_with(|| Replica::create(&path, source).unwrap());
-        let snapshot = cache.snapshot().unwrap();
+        let image = snapshot(cache);
         let before = local(cache);
         let pending = cache.pending().unwrap();
-        let rows_now = rows(&snapshot);
+        let rows_now = rows(&image);
         match step[1] % 8 {
             0..=2 => {
                 let row = rows_now[usize::from(step[2]) % rows_now.len()].clone();
@@ -266,12 +280,17 @@ pub fn run(input: &[u8]) {
                 };
                 server.fault = Fault::None;
                 let next = cache.pending().unwrap();
-                // Edits leave the queue oldest first, each with a durable receipt.
-                let left = pending.len() - next.len();
-                assert!(
-                    next.iter()
-                        .all(|edit| pending[left..].iter().any(|kept| kept.id == edit.id))
-                );
+                // Edits leave the queue oldest first, each with a durable receipt; a rebase
+                // queues the conflict pages it makes after them.
+                let queued = |edit: &notebook::PendingEdit| pending.iter().any(|kept| kept.id == edit.id);
+                let left = pending.len() - next.iter().filter(|edit| queued(edit)).count();
+                assert!(next.iter().all(|edit| {
+                    pending[left..].iter().any(|kept| kept.id == edit.id)
+                        || matches!(
+                            &edit.edit.ops[..],
+                            [onestore::op::Op::Section(onestore::op::SectionOp::Conflict { .. })]
+                        )
+                }));
                 for edit in &pending[..left] {
                     let Some(EditStatus::Published { revision }) = cache.status(edit.id).unwrap()
                     else {
@@ -283,7 +302,7 @@ pub fn run(input: &[u8]) {
                     assert_eq!(
                         local(cache),
                         shape(&model_ops::page_of(
-                            &cache.remote_snapshot().unwrap(),
+                            &remote_snapshot(cache),
                             *space
                         ))
                     );
@@ -301,31 +320,41 @@ pub fn run(input: &[u8]) {
                         &char::from(b'a' + step[3] % 26).to_string(),
                     );
                     let visible = server.visible.clone();
-                    PreparedEdit::page(&visible, *space, &page, "Remote")
+                    ops::save(&visible, *space, &page)
                         .unwrap()
                         .commit(&mut server)
                         .unwrap();
                 }
             }
             6 => {
-                if let Some(conflict) = cache.conflict().unwrap() {
-                    let keep = if step[2] & 1 == 0 {
-                        Resolution::Mine
-                    } else {
-                        Resolution::Theirs
-                    };
-                    let remote = model_ops::page_of(&cache.remote_snapshot().unwrap(), *space);
-                    cache.resolve(conflict.id, keep).unwrap();
-                    match cache.conflict().unwrap() {
-                        Some(next) => assert_ne!(next.space, conflict.space),
-                        None => assert_eq!(
-                            local(cache),
-                            match keep {
-                                Resolution::Mine => before.clone(),
-                                Resolution::Theirs => shape(&remote),
-                            }
-                        ),
-                    }
+                // The writer merged a conflict page's version by hand and deletes it.
+                let listed = cache.conflicts().unwrap();
+                if let Some(conflict) = listed
+                    .iter()
+                    .find(|(page, _)| page == space)
+                    .map(|(_, pages)| pages[usize::from(step[2]) % pages.len()].space)
+                {
+                    let delete = onestore::op::Op::Section(onestore::op::SectionOp::Delete(vec![
+                        conflict,
+                    ]));
+                    cache
+                        .apply(
+                            AUTHOR,
+                            onestore::op::Edit {
+                                at: model_ops::now(),
+                                ops: vec![delete],
+                            },
+                        )
+                        .unwrap();
+                    assert!(
+                        cache
+                            .conflicts()
+                            .unwrap()
+                            .iter()
+                            .flat_map(|(_, pages)| pages)
+                            .all(|page| page.space != conflict)
+                    );
+                    assert_eq!(local(cache), before);
                     let (result, publications) = {
                         let mut session = Session {
                             retired: false,
@@ -356,6 +385,6 @@ pub fn run(input: &[u8]) {
             }
         }
         rows(&server.durable);
-        rows(&replicas[actor].as_ref().unwrap().snapshot().unwrap());
+        rows(&snapshot(replicas[actor].as_ref().unwrap()));
     }
 }

@@ -1,0 +1,11 @@
+{
+  "cpus": 2,
+  "disk_gb": 16,
+  "hostname": "one-conflict2",
+  "lab_address": "192.168.77.1",
+  "lab_mac": "52:54:04:00:03:8c",
+  "memory_mb": 2048,
+  "samba_port": 14450,
+  "ssh_port": 22000,
+  "wan_mac": "52:54:03:c3:23:a2"
+}

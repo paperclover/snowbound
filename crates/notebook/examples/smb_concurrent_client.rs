@@ -1,5 +1,7 @@
 #[path = "../../onestore/examples/support/concurrent.rs"]
 mod concurrent;
+#[path = "support/edit.rs"]
+mod edit;
 
 use notebook::smb::{Client, Credentials};
 use std::{env, time::Duration};
@@ -16,7 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args,
         |path| client.read(path, 256 * 1024 * 1024),
         |path, source, space, object, range, replacement| {
-            client.commit_text(path, source, space, object, range, replacement)
+            client.commit_transaction(
+                path,
+                &edit::replaced(source, space, object, range, replacement)?,
+            )
         },
     )
 }

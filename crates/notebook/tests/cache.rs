@@ -1,3 +1,5 @@
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
 use notebook::{Error, Replica};
 use onestore::{
     ExGuid, RevisionIndex, Store,
@@ -17,6 +19,7 @@ use std::{
 mod model_ops;
 #[path = "support/server.rs"]
 mod server;
+use server::snapshot;
 
 fn target(source: &[u8]) -> (ExGuid, ExGuid, String) {
     let store = Store::parse(source).unwrap();
@@ -60,7 +63,7 @@ fn cache_reopen_preserves_the_base_and_queued_edits() {
     let path = dir.path().join("section.sqlite");
     let source = onestore::create_section("section.one", "café 🦀", "Fixture").unwrap();
     let replica = Replica::create(&path, &source).unwrap();
-    assert_eq!(replica.snapshot().unwrap(), source);
+    assert_eq!(snapshot(&replica), source);
     assert!(replica.pending().unwrap().is_empty());
     let (sid, oid, _) = target(&source);
     let unchanged = |page: &mut onestore::page::Page| {
@@ -73,7 +76,7 @@ fn cache_reopen_preserves_the_base_and_queued_edits() {
     })
     .unwrap()
     .unwrap();
-    assert_eq!(target(&replica.snapshot().unwrap()).2, "café 🐈 日本語");
+    assert_eq!(target(&snapshot(&replica)).2, "café 🐈 日本語");
     let edits = replica.pending().unwrap();
     assert_eq!(edits.len(), 1);
     assert_eq!(
@@ -99,14 +102,14 @@ fn cache_reopen_preserves_the_base_and_queued_edits() {
         "closing checkpoints and removes the log"
     );
     let replica = Replica::open(&path).unwrap();
-    assert_eq!(target(&replica.snapshot().unwrap()).2, "café 🐈 日本語");
+    assert_eq!(target(&snapshot(&replica)).2, "café 🐈 日本語");
     assert_eq!(replica.pending().unwrap(), edits);
     let second = replica
         .apply(model_ops::AUTHOR, typed(sid, oid, "Recovered "))
         .unwrap();
     assert!(second > first);
     assert_eq!(
-        target(&replica.snapshot().unwrap()).2,
+        target(&snapshot(&replica)).2,
         "Recovered café 🐈 日本語"
     );
     assert_eq!(replica.pending().unwrap().len(), 2);
@@ -160,7 +163,7 @@ fn refused_edits_and_failed_writes_leave_the_queue_as_it_was() {
         replica.apply("Author", typed(ExGuid::default(), oid, "Elsewhere ")),
         Err(Error::Rejected(_))
     ));
-    assert_eq!(replica.snapshot().unwrap(), source);
+    assert_eq!(snapshot(&replica), source);
     assert!(replica.pending().unwrap().is_empty());
     drop(replica);
     let connection = rusqlite::Connection::open(&path).unwrap();
@@ -168,10 +171,10 @@ fn refused_edits_and_failed_writes_leave_the_queue_as_it_was() {
     drop(connection);
     let replica = Replica::open(&path).unwrap();
     assert!(replica.apply("Author", typed(sid, oid, "lost? ")).is_err());
-    assert_eq!(replica.snapshot().unwrap(), source);
+    assert_eq!(snapshot(&replica), source);
     drop(replica);
     let replica = Replica::open(&path).unwrap();
-    assert_eq!(replica.snapshot().unwrap(), source);
+    assert_eq!(snapshot(&replica), source);
     assert!(replica.pending().unwrap().is_empty());
 }
 
@@ -230,7 +233,7 @@ fn concurrent_recovery_exports_capture_one_complete_acknowledged_queue() {
         }
     });
     assert_eq!(replica.pending().unwrap().len(), 60);
-    let content = target(&replica.snapshot().unwrap()).2;
+    let content = target(&snapshot(&replica)).2;
     for writer in 0..3 {
         for edit in 0..20 {
             assert_eq!(content.matches(&format!("[{writer}:{edit}] ")).count(), 1);
@@ -255,7 +258,7 @@ fn ownership_and_foreign_file_rejection_preserve_existing_data() {
         assert!(
             matches!(Replica::create(&path, &source), Err(Error::Io(error)) if error.kind() == ErrorKind::AlreadyExists)
         );
-        assert_eq!(replica.snapshot().unwrap(), source);
+        assert_eq!(snapshot(&replica), source);
     }
     drop(replica);
     let current: u32 = rusqlite::Connection::open(&path)
@@ -264,10 +267,10 @@ fn ownership_and_foreign_file_rejection_preserve_existing_data() {
         .unwrap();
     for sql in [
         "PRAGMA application_id=0".to_owned(),
-        // Schema 14 converts; older caches do not.
+        // Schemas 14 and 15 convert; older caches do not.
         format!(
             "PRAGMA application_id=1330529615; PRAGMA user_version={}",
-            current - 2
+            current - 3
         ),
         format!("PRAGMA user_version={}", current + 1),
     ] {
@@ -348,7 +351,7 @@ fn twelve_local_editors_queue_every_edit_once_in_order() {
     }
     let ids: BTreeSet<_> = outcomes.into_iter().flatten().collect();
     assert_eq!(ids.len(), 240);
-    let content = target(&replica.snapshot().unwrap()).2;
+    let content = target(&snapshot(&replica)).2;
     assert!(content.ends_with("Shared café 🦀"));
     for writer in 0..12 {
         for edit in 0..20 {
@@ -362,7 +365,7 @@ fn twelve_local_editors_queue_every_edit_once_in_order() {
     );
     drop(replica);
     let reopened = Replica::open(&path).unwrap();
-    assert_eq!(target(&reopened.snapshot().unwrap()).2, content);
+    assert_eq!(target(&snapshot(&reopened)).2, content);
     assert_eq!(reopened.pending().unwrap(), pending);
 }
 
@@ -410,7 +413,7 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
         }
         text = expected;
         assert_eq!(
-            target(&replica.snapshot().unwrap()).2,
+            target(&snapshot(&replica)).2,
             text,
             "seed 911, step {step}"
         );
@@ -418,7 +421,7 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
             let pending = replica.pending().unwrap();
             drop(replica);
             replica = Replica::open(&path).unwrap();
-            assert_eq!(target(&replica.snapshot().unwrap()).2, text);
+            assert_eq!(target(&snapshot(&replica)).2, text);
             assert_eq!(replica.pending().unwrap(), pending);
         }
     }
@@ -508,13 +511,10 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
         .flat_map(|(ids, _)| ids.iter().copied())
         .collect();
     assert_eq!(ids.len(), 84);
-    let snapshot = cache.snapshot().unwrap();
+    let image = snapshot(&cache);
     drop(cache);
     let cache = Replica::open(&path).unwrap();
-    assert_eq!(
-        server::pages(&cache.snapshot().unwrap()),
-        server::pages(&snapshot)
-    );
+    assert_eq!(server::pages(&snapshot(&cache)), server::pages(&image));
     assert_eq!(
         cache
             .pending()
@@ -524,7 +524,7 @@ fn twelve_local_clients_preserve_inserted_identities_and_dependent_edits() {
             .collect::<BTreeSet<_>>(),
         ids
     );
-    let store = Store::parse(&snapshot).unwrap();
+    let store = Store::parse(&image).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let doc = Document::parse(&index).unwrap();
     let s = &doc.spaces[&sid];
@@ -559,7 +559,7 @@ fn unrecognized_persisted_ops_are_rejected_without_dropping_fields() {
         let path = directory.path().join("unknown.sqlite");
         let first = onestore::create_section("unknown.one", "Original", "Author").unwrap();
         let second = onestore::PageCreation::new(None, Some("Second"), "Author").unwrap();
-        let source = onestore::PreparedEdit::create_page(&first, &second)
+        let source = ops::section_op(&first, SectionOp::Create(second.clone()))
             .unwrap()
             .as_bytes()
             .to_vec();

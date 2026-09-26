@@ -482,10 +482,6 @@ fn rust_unicode_and_native_latin1_use_utf16_run_offsets() {
     };
     assert_eq!(actual, text);
     assert_eq!(runs[0].end, 7);
-    let bytes = fs::read("../../corpus/m6/ansi/notebook/synthetic.one").unwrap();
-    let store = Store::parse(&bytes).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let document = Document::parse(&index).unwrap();
     let expected = format!(
         "Extended bytes: {}",
         (128u8..=255)
@@ -493,14 +489,23 @@ fn rust_unicode_and_native_latin1_use_utf16_run_offsets() {
             .collect::<Vec<_>>()
             .join(" ")
     );
-    assert!(
-        document
-            .spaces
-            .values()
-            .flat_map(|s| s.revisions.values())
-            .flat_map(|r| r.nodes.values())
-            .any(|n| matches!(&n.kind, Kind::RichText { text, .. } if text == &expected))
-    );
+    // OneNote 2010 reads TextExtendedAscii as Latin-1 whatever the run's language
+    // (corpus/extended-ascii/{en,ru,ja}/cold).
+    for language in ["en", "ru", "ja"] {
+        let path = format!("../../corpus/extended-ascii/{language}/candidate/synthetic.one");
+        let bytes = fs::read(path).unwrap();
+        let store = Store::parse(&bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        assert!(
+            document
+                .spaces
+                .values()
+                .flat_map(|s| s.revisions.values())
+                .flat_map(|r| r.nodes.values())
+                .any(|n| matches!(&n.kind, Kind::RichText { text, .. } if text == &expected))
+        );
+    }
 }
 
 #[test]
@@ -717,11 +722,11 @@ fn malformed_run_boundaries_fail_after_valid_storage_decoding() {
     else {
         unreachable!()
     };
+    // Damage the stored boundaries where they lie, as no writer would store them.
+    let at = boundaries.as_ptr().addr() - bytes.as_ptr().addr();
     for invalid in [5u32, u32::MAX] {
-        let mut changed = boundaries.to_vec();
-        changed[..4].copy_from_slice(&invalid.to_le_bytes());
-        let mutated =
-            onestore::replace_property_bytes(&bytes, sid, oid, 0x1c001e12, &changed).unwrap();
+        let mut mutated = bytes.to_vec();
+        mutated[at..at + 4].copy_from_slice(&invalid.to_le_bytes());
         let store = Store::parse(&mutated).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         index.validate_current().unwrap();

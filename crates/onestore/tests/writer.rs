@@ -1,39 +1,63 @@
+#[path = "support/ops.rs"]
+mod ops;
+
 use onestore::{
-    ExGuid, ObjectData, PropertySets, RevisionIndex, Store, Value, replace_property_bytes,
+    ExGuid, ObjectData, PropertySets, RevisionIndex, Store, TocEdit, Value,
+    document::{Document, Kind},
+    op::{Edit, Op, PageOp},
 };
 use std::fs;
 
+/// The text object holding `text` in `source` and its page space.
+fn text_object(source: &[u8], text: &str) -> (ExGuid, ExGuid) {
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let mut found = document.spaces.iter().flat_map(|(space, view)| {
+        view.active()
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(&node.kind, Kind::RichText { text: stored, .. } if stored == text))
+            .map(|(id, _)| (*space, *id))
+            .collect::<Vec<_>>()
+    });
+    let target = found.next().unwrap();
+    assert!(found.next().is_none());
+    target
+}
+
+/// `source`, a table of contents, with the notebook recoloured.
+fn recolored(source: &[u8], color: u32) -> Vec<u8> {
+    let mut image = source.to_vec();
+    let edit = TocEdit::Color(color);
+    if let Some(transaction) = onestore::edit_table_of_contents(source, &[edit]).unwrap() {
+        transaction.apply(&mut image).unwrap();
+    }
+    image
+}
+
 #[test]
-fn scalar_edit_appends_a_revision_and_preserves_every_prior_object() {
+fn text_edit_appends_a_revision_and_preserves_every_prior_object() {
     let source =
         fs::read("../../corpus/native/20260905-05/snapshots/02-text/notebook/synthetic.one")
             .unwrap();
     let store = Store::parse(&source).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
-    let mut selected = None;
-    for (osid, space) in &index.spaces {
-        let revision = index
-            .resolve(*osid, space.labels[&(ExGuid::default(), 1)])
-            .unwrap();
-        for oid in revision.reachable().unwrap() {
-            let object = &revision.objects[&oid];
-            if let ObjectData::Properties(bytes) = object.data {
-                for property in &PropertySets::parse(bytes).unwrap().sets[0] {
-                    if property.value == Value::Bytes(b"Fictitious plain text.") {
-                        assert!(selected.replace((*osid, oid, property.id)).is_none());
-                    }
-                }
-            }
-        }
-    }
-    let (osid, oid, property) = selected.unwrap();
-    assert_eq!(
-        replace_property_bytes(&source, osid, oid, property, b"Fictitious plain text.").unwrap(),
-        source
-    );
+    let (osid, oid) = text_object(&source, "Fictitious plain text.");
+    let whole = 0.."Fictitious plain text.".encode_utf16().count() as u32;
+    let typed = |with: &str| {
+        let op = PageOp::Text {
+            text: oid,
+            range: whole.clone(),
+            with: with.into(),
+        };
+        ops::page_edited(&source, osid, vec![op]).unwrap()
+    };
+    assert_eq!(typed("Fictitious plain text."), source);
     for length in 0..=40 {
-        let value = vec![b'x'; length];
-        let written = replace_property_bytes(&source, osid, oid, property, &value).unwrap();
+        let value = "x".repeat(length);
+        let written = typed(&value);
         assert_preserved_committed_bytes(&source, &written);
         let parsed = Store::parse(&written).unwrap();
         assert!(parsed.checksum_mismatches.is_empty());
@@ -64,22 +88,11 @@ fn scalar_edit_appends_a_revision_and_preserves_every_prior_object() {
                 }
             }
         }
-        let space = &after.spaces[&osid];
-        let active = after
-            .resolve(osid, space.labels[&(ExGuid::default(), 1)])
-            .unwrap();
-        let ObjectData::Properties(data) = active.objects[&oid].data else {
+        let document = Document::parse(&after).unwrap();
+        let Kind::RichText { text, .. } = &document.active(osid).unwrap().nodes[&oid].kind else {
             panic!()
         };
-        let properties = PropertySets::parse(data).unwrap();
-        assert_eq!(
-            properties.sets[0]
-                .iter()
-                .find(|candidate| candidate.id == property)
-                .unwrap()
-                .value,
-            Value::Bytes(&value)
-        );
+        assert_eq!(*text, value);
     }
 }
 
@@ -93,26 +106,33 @@ fn toc_color_edit_uses_its_native_revision_encoding_and_crc() {
     let index = RevisionIndex::parse(&store).unwrap();
     let rid = index.spaces[&index.root].labels[&(ExGuid::default(), 1)];
     let revision = index.resolve(index.root, rid).unwrap();
-    let oid = revision.roots[&1];
-    let written =
-        replace_property_bytes(&source, index.root, oid, 0x14001cbe, &[0x33, 0x66, 0x99, 0])
-            .unwrap();
+    let written = recolored(&source, 0x996633);
     let after = Store::parse(&written).unwrap();
     assert!(after.checksum_mismatches.is_empty());
     assert_preserved_committed_bytes(&source, &written);
     let current = RevisionIndex::parse(&after).unwrap();
     current.validate_current().unwrap();
-    assert_eq!(
-        current.resolve(index.root, rid).unwrap().objects[&oid].data,
-        revision.objects[&oid].data
-    );
     let active = current
         .resolve(
             index.root,
             current.spaces[&index.root].labels[&(ExGuid::default(), 1)],
         )
         .unwrap();
-    let ObjectData::Properties(blob) = active.objects[&oid].data else {
+    let recoloured: Vec<_> = active
+        .objects
+        .iter()
+        .filter(|(id, object)| {
+            revision
+                .objects
+                .get(id)
+                .is_none_or(|old| old.data != object.data)
+        })
+        .map(|(_, object)| object)
+        .collect();
+    let [entry] = recoloured[..] else {
+        panic!("{} objects changed", recoloured.len())
+    };
+    let ObjectData::Properties(blob) = entry.data else {
         panic!()
     };
     assert!(
@@ -302,13 +322,8 @@ fn toc_writes_cross_fragment_and_counter_boundaries_without_crc_drift() {
         let store = Store::parse(&bytes).unwrap();
         assert!(store.checksum_mismatches.is_empty(), "edit {i}");
         let index = RevisionIndex::parse(&store).unwrap();
-        let root = index.root;
-        let revision = index
-            .resolve(root, index.spaces[&root].labels[&(ExGuid::default(), 1)])
-            .unwrap();
-        let oid = revision.roots[&1];
-        let written =
-            replace_property_bytes(&bytes, root, oid, 0x14001cbe, &i.to_le_bytes()).unwrap();
+        index.validate_current().unwrap();
+        let written = recolored(&bytes, i);
         assert_preserved_committed_bytes(&bytes, &written);
         bytes = written;
     }
@@ -332,31 +347,31 @@ fn checkpoints_bound_dependencies_and_preserve_native_objects_and_history() {
         let mut bytes = fs::read(path).unwrap();
         let initial = Store::parse(&bytes).unwrap();
         let index = RevisionIndex::parse(&initial).unwrap();
+        // A section retypes text objects of one page; a table of contents recolours the notebook.
+        let document = Document::parse(&index).unwrap();
         let mut candidates = Vec::new();
-        for (sid, space) in &index.spaces {
-            let revision = index
-                .resolve(*sid, space.labels[&(ExGuid::default(), 1)])
-                .unwrap();
-            for oid in revision.reachable().unwrap() {
-                let object = &revision.objects[&oid];
-                if object.jcid != if section { 0x6000e } else { 0x20001 } {
-                    continue;
-                }
-                let ObjectData::Properties(blob) = object.data else {
-                    panic!()
-                };
-                let property = if section { 0x14001d7a } else { 0x14001cbe };
-                if PropertySets::parse(blob).unwrap().sets[0]
-                    .iter()
-                    .any(|p| p.id == property)
-                {
-                    candidates.push((*sid, oid, property));
+        for (sid, view) in &document.spaces {
+            for (oid, node) in &view.active().unwrap().nodes {
+                match &node.kind {
+                    Kind::RichText {
+                        text,
+                        boilerplate: false,
+                        ..
+                    } if section && !text.is_empty() => {
+                        candidates.push((*sid, *oid));
+                    }
+                    Kind::Toc { entries, .. } if !section && !entries.is_empty() => {
+                        candidates.push((*sid, *oid));
+                    }
+                    _ => {}
                 }
             }
         }
         assert!(!candidates.is_empty());
         let sid = candidates[0].0;
         candidates.retain(|candidate| candidate.0 == sid);
+        // What each edit rewrites: modification times, or the notebook's colour.
+        let property = if section { 0x14001d7a } else { 0x14001cbe };
         if section {
             let revision = index
                 .resolve(sid, index.spaces[&sid].labels[&(ExGuid::default(), 1)])
@@ -371,12 +386,30 @@ fn checkpoints_bound_dependencies_and_preserve_native_objects_and_history() {
         }
         let mut checkpoints = 0;
         for operation in 0_u32..1025 {
-            let (_, oid, property) = candidates[operation as usize % candidates.len()];
+            let (_, oid) = candidates[operation as usize % candidates.len()];
             let store = Store::parse(&bytes).unwrap();
             let before = RevisionIndex::parse(&store).unwrap();
             let rid = before.spaces[&sid].labels[&(ExGuid::default(), 1)];
-            let value = (1_000_000 + operation).to_le_bytes();
-            let written = replace_property_bytes(&bytes, sid, oid, property, &value).unwrap();
+            let written = if section {
+                let typed = |range, with: &str| Op::Page {
+                    space: sid,
+                    op: PageOp::Text {
+                        text: oid,
+                        range,
+                        with: with.into(),
+                    },
+                };
+                // Modification times count seconds: each edit is a second later.
+                let at = 134_000_000_000_000_000 + u64::from(operation) * 10_000_000;
+                let ops = vec![typed(0..0, "x"), typed(0..1, "")];
+                let arena = onestore::Arena::default();
+                let mut section = onestore::Section::open(&arena, bytes.clone()).unwrap();
+                section.apply("Author", &Edit { at, ops }).unwrap();
+                section.seal().unwrap().unwrap();
+                section.image()
+            } else {
+                recolored(&bytes, 1_000_000 + operation)
+            };
             let updated = Store::parse(&written).unwrap();
             assert!(updated.checksum_mismatches.is_empty());
             assert_eq!(
@@ -412,9 +445,6 @@ fn checkpoints_bound_dependencies_and_preserve_native_objects_and_history() {
                                 .iter()
                                 .all(|(entry, guid)| object.global_ids.get(entry) == Some(guid))
                         );
-                        if *id != oid {
-                            assert_eq!(object.data, same.data);
-                        }
                     }
                     if let (ObjectData::Properties(a), ObjectData::Properties(b)) =
                         (object.data, same.data)
@@ -426,10 +456,9 @@ fn checkpoints_bound_dependencies_and_preserve_native_objects_and_history() {
                             assert_eq!(a.len(), b.len());
                             for (a, b) in a.iter().zip(b) {
                                 assert_eq!(a.id, b.id);
-                                if *id == oid && a.id == property {
-                                    assert_eq!(b.value, Value::Bytes(&value));
-                                } else if !matches!(a.value, Value::References { .. }) {
-                                    assert_eq!(a.value, b.value);
+                                if a.id != property && !matches!(a.value, Value::References { .. })
+                                {
+                                    assert_eq!(a.value, b.value, "{id} {:#x}", a.id);
                                 }
                             }
                         }

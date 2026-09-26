@@ -72,7 +72,15 @@ fn copying_reference_arrays_remaps_every_entry_in_each_stream() {
 #[test]
 fn document_insertions_and_formatting_respect_readonly_ancestors() {
     use super::{PropertyObject, write_revision};
-    use crate::{ExGuid, Insertion, PreparedEdit, RevisionIndex, Store};
+    use crate::{
+        ExGuid, RevisionIndex, Store, TextAttribute,
+        document::{Format, Layout},
+        op::{
+            PageOp,
+            tests::{edited, text_paragraph},
+        },
+        page::{Outline, PageObject, text::new_id},
+    };
     use std::collections::BTreeMap;
     let source = crate::create_section("readonly.one", "Original", "Author").unwrap();
     let store = Store::parse(&source).unwrap();
@@ -97,9 +105,23 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
             ))
         })
         .unwrap();
-    let right = Insertion::paragraph(outline, None, "Right", "Author").unwrap();
-    let expanded = PreparedEdit::insert(&source, sid, &right).unwrap();
-    let source = expanded.as_bytes();
+    let right = text_paragraph("Right", Format::default());
+    let right_text = right.text().unwrap().id;
+    let insert = |container, paragraph| PageOp::Insert {
+        container,
+        before: None,
+        paragraphs: vec![paragraph],
+    };
+    let expanded = edited(&source, sid, vec![insert(outline, right.clone())]).unwrap();
+    let source = expanded.as_slice();
+    let raw = index
+        .resolve(sid, index.spaces[&sid].labels[&(ExGuid::default(), 1)])
+        .unwrap();
+    let text = raw
+        .objects
+        .iter()
+        .find_map(|(id, object)| (object.jcid == 0x6000e).then_some(*id))
+        .unwrap();
     for blocked in [page, outline, paragraph] {
         let protected = write_revision(source, sid, |raw| {
             let mut object = PropertyObject::from_object(&raw.objects[&blocked])?;
@@ -107,47 +129,55 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
             Ok(BTreeMap::from([(blocked, object)]))
         })
         .unwrap();
-        let child = Insertion::paragraph(paragraph, None, "Nested", "Author").unwrap();
-        assert!(PreparedEdit::insert(&protected, sid, &child).is_err());
-        let raw = index
-            .resolve(sid, index.spaces[&sid].labels[&(ExGuid::default(), 1)])
-            .unwrap();
-        let text = raw
-            .objects
-            .iter()
-            .find_map(|(id, object)| (object.jcid == 0x6000e).then_some(*id))
-            .unwrap();
-        let split = crate::ParagraphSplit::new(text, 1, "Author").unwrap();
-        assert!(PreparedEdit::split(&protected, sid, &split).is_err());
-        let join = crate::ParagraphJoin::new(text, right.text_object(), "Author").unwrap();
-        assert!(PreparedEdit::join(&protected, sid, &join).is_err());
-        assert!(
-            PreparedEdit::format(
-                &protected,
-                sid,
-                text,
-                1..3,
-                &[crate::TextAttribute::Bold(true)]
-            )
-            .is_err()
-        );
+        let refused = |op| edited(&protected, sid, vec![op]).is_err();
+        assert!(refused(insert(paragraph, text_paragraph("Nested", Format::default()))));
+        assert!(refused(PageOp::Split {
+            text,
+            at: 1,
+            paragraph: new_id().unwrap(),
+            right: new_id().unwrap(),
+            lists: Vec::new(),
+        }));
+        assert!(refused(PageOp::Join {
+            left: text,
+            right: right_text,
+        }));
+        assert!(refused(PageOp::Format {
+            text,
+            range: 1..3,
+            set: vec![TextAttribute::Bold(true)],
+            clear: Vec::new(),
+        }));
         if blocked == page {
-            let outline = Insertion::outline(page, 36.0, 36.0, "Outline", "Author").unwrap();
-            assert!(PreparedEdit::insert(&protected, sid, &outline).is_err());
+            assert!(refused(PageOp::Add {
+                object: PageObject::Outline(Outline {
+                    id: new_id().unwrap(),
+                    title: false,
+                    min_width: None,
+                    layout: Layout {
+                        x: Some(36.0),
+                        y: Some(36.0),
+                        ..Default::default()
+                    },
+                    indents: Vec::new(),
+                    paragraphs: vec![text_paragraph("Outline", Format::default())],
+                    unsupported: Vec::new(),
+                }),
+                before: None,
+            }));
         }
     }
     let protected = write_revision(source, sid, |raw| {
-        let mut object = PropertyObject::from_object(&raw.objects[&right.object()])?;
+        let mut object = PropertyObject::from_object(&raw.objects[&right.id])?;
         object.set(&[(0x88001cde, &[])])?;
-        Ok(BTreeMap::from([(right.object(), object)]))
+        Ok(BTreeMap::from([(right.id, object)]))
     })
     .unwrap();
-    let document = crate::document::Document::parse(&index).unwrap();
-    let space = &document.spaces[&sid];
-    let view = space.active().unwrap();
-    let text = view.nodes[&paragraph].content[0];
-    let join = crate::ParagraphJoin::new(text, right.text_object(), "Author").unwrap();
-    assert!(PreparedEdit::join(&protected, sid, &join).is_err());
+    let join = PageOp::Join {
+        left: text,
+        right: right_text,
+    };
+    assert!(edited(&protected, sid, vec![join]).is_err());
 }
 
 fn add_paragraph(source: &[u8], number: u32) -> Vec<u8> {
@@ -774,8 +804,9 @@ fn invalid_property_splices_are_rejected() {
 fn character_formatting_preserves_inheritance_and_associated_data() {
     use super::{PropertyObject, write_revision};
     use crate::{
-        ExGuid, PreparedEdit, RevisionIndex, Store, TextAttribute,
+        ExGuid, RevisionIndex, Store, TextAttribute,
         document::{Document, Kind},
+        op::{PageOp, tests::edited},
     };
     use std::collections::BTreeMap;
     let source = crate::create_section("inherited.one", "abcdef", "Author").unwrap();
@@ -858,13 +889,29 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
             Ok(BTreeMap::from([(text, target)]))
         })
         .unwrap();
+        let text_edit = |range, with: &str| {
+            let with = with.to_owned();
+            edited(&fixture, sid, vec![PageOp::Text { text, range, with }])
+        };
+        let bold = |range| {
+            edited(
+                &fixture,
+                sid,
+                vec![PageOp::Format {
+                    text,
+                    range,
+                    set: vec![TextAttribute::Bold(true)],
+                    clear: Vec::new(),
+                }],
+            )
+        };
         if variant == 9 {
-            assert!(PreparedEdit::text(&fixture, sid, text, 0..0, "x").is_err());
+            assert!(text_edit(0..0, "x").is_err());
             continue;
         }
         if variant >= 7 {
-            let edit = PreparedEdit::text(&fixture, sid, text, 1..3, "longer").unwrap();
-            let [before, after] = [&fixture, edit.as_bytes()].map(|bytes| {
+            let edit = text_edit(1..3, "longer").unwrap();
+            let [before, after] = [&fixture, &edit].map(|bytes| {
                 let store = Store::parse(bytes).unwrap();
                 let index = RevisionIndex::parse(&store).unwrap();
                 let document = Document::parse(&index).unwrap();
@@ -877,24 +924,20 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
                 format!("{:?}", view.nodes[&text].extra)
             });
             assert_eq!(before, after);
-            assert!(PreparedEdit::text(&fixture, sid, text, 0..4, "x").is_err());
-            assert_eq!(
-                PreparedEdit::text(&fixture, sid, text, 3..5, "x").is_ok(),
-                variant == 7
-            );
+            assert!(text_edit(0..4, "x").is_err());
+            assert_eq!(text_edit(3..5, "x").is_ok(), variant == 7);
             continue;
         }
         // Hidden and hyperlink runs are ordinary text with flags; associated data,
         // equations and embedded objects are not.
-        let text_edit = PreparedEdit::text(&fixture, sid, text, 1..5, "x");
-        assert_eq!(text_edit.is_ok(), matches!(variant, 0 | 1 | 4));
-        let edit = PreparedEdit::format(&fixture, sid, text, 0..6, &[TextAttribute::Bold(true)]);
+        assert_eq!(text_edit(1..5, "x").is_ok(), matches!(variant, 0 | 1 | 4));
+        let edit = bold(0..6);
         if matches!(variant, 2 | 5 | 6) {
             assert!(edit.is_err());
             continue;
         }
         let edit = edit.unwrap();
-        let store = Store::parse(edit.as_bytes()).unwrap();
+        let store = Store::parse(&edit).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let doc = Document::parse(&index).unwrap();
         let s = &doc.spaces[&sid];
@@ -911,10 +954,7 @@ fn character_formatting_preserves_inheritance_and_associated_data() {
             let data = &view.nodes[&text].extra[runs[0].extra_set.unwrap()];
             assert_eq!(data.len(), 1);
             assert_eq!(data[0].id, 0x14001234);
-            assert!(
-                PreparedEdit::format(&fixture, sid, text, 1..3, &[TextAttribute::Bold(true)])
-                    .is_err()
-            );
+            assert!(bold(1..3).is_err());
             let previous = Store::parse(&fixture).unwrap();
             let previous = RevisionIndex::parse(&previous).unwrap();
             let previous_doc = Document::parse(&previous).unwrap();

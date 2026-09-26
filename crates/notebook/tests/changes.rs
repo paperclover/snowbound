@@ -24,9 +24,9 @@ fn external_structure_changes_are_reported_by_identity() {
     let mut other = Notebook::open(&root, temporary.path().join("other")).unwrap();
     assert_eq!(watcher.refresh().unwrap(), []);
 
-    other.create_section("", "Second", "Author").unwrap();
+    other.create_section("", "Second", &onestore::PageCreation::new(None, Some(""), "Author").unwrap()).unwrap();
     other.create_group("", "Group").unwrap();
-    other.create_section("Group", "Inner", "Author").unwrap();
+    other.create_section("Group", "Inner", &onestore::PageCreation::new(None, Some(""), "Author").unwrap()).unwrap();
     assert_eq!(
         watcher.refresh().unwrap(),
         [

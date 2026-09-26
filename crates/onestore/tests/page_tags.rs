@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Format, Kind, Tag},
     page::{
         Definition, Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id,
@@ -8,7 +10,6 @@ use onestore::{
 
 const TREES: &[u8] =
     include_bytes!("../../../corpus/outline-edit/tree/before/notebook/synthetic.one");
-const AUTHOR: &str = "Tag author";
 
 fn page_by_title(bytes: &[u8], title: &str) -> (ExGuid, Page) {
     let store = Store::parse(bytes).unwrap();
@@ -161,13 +162,13 @@ fn removing_a_tag_leaves_its_definition_and_the_other_paragraphs_untouched() {
         .unwrap()
         .tags
         .clear();
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
+    let written = ops::saved(TREES, space, &after).unwrap();
     let mut expected = after.clone();
     expected.definitions.remove(&definition);
-    let stored = assert_same(written.as_bytes(), space, &expected);
+    let stored = assert_same(written.as_slice(), space, &expected);
     assert!(!stored.definitions.contains_key(&definition));
     assert_eq!(
-        raw_object(written.as_bytes(), space, definition),
+        raw_object(written.as_slice(), space, definition),
         raw_object(TREES, space, definition)
     );
     let count = body_paragraphs(&mut after).len();
@@ -176,7 +177,7 @@ fn removing_a_tag_leaves_its_definition_and_the_other_paragraphs_untouched() {
         .unwrap()
         .id;
     assert_eq!(
-        raw_object(written.as_bytes(), space, other),
+        raw_object(written.as_slice(), space, other),
         raw_object(TREES, space, other)
     );
 }
@@ -195,24 +196,17 @@ fn an_existing_definition_tags_another_paragraph_and_a_task_completes_in_place()
         .unwrap()
         .tags
         .push(tag(definition, false));
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = assert_same(written.as_slice(), space, &after);
     let mut completed = stored.clone();
     let text = body_paragraphs(&mut completed)[other].text_mut().unwrap();
     text.tags[0].status = 1;
     text.tags[0].completed = Some(1_262_405_106);
-    let again = PreparedEdit::page(written.as_bytes(), space, &completed, AUTHOR).unwrap();
-    assert_same(again.as_bytes(), space, &completed);
+    let again = ops::saved(written.as_slice(), space, &completed).unwrap();
+    assert_same(again.as_slice(), space, &completed);
     assert_eq!(
-        PreparedEdit::page(
-            again.as_bytes(),
-            space,
-            &page_in(again.as_bytes(), space),
-            AUTHOR
-        )
-        .unwrap()
-        .as_bytes(),
-        again.as_bytes()
+        ops::saved(&again, space, &page_in(&again, space)).unwrap(),
+        again
     );
 }
 
@@ -225,7 +219,7 @@ fn tags_without_a_known_definition_are_refused() {
         .unwrap()
         .tags
         .push(tag(new_id().unwrap(), false));
-    assert!(PreparedEdit::page(TREES, space, &missing, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &missing).is_err());
     let mut repeated = before.clone();
     let at = tagged(&repeated);
     let existing = body_paragraphs(&mut repeated)[at].text().unwrap().tags[0].clone();
@@ -234,7 +228,7 @@ fn tags_without_a_known_definition_are_refused() {
         .unwrap()
         .tags
         .push(tag(existing.definition.unwrap(), false));
-    assert!(PreparedEdit::page(TREES, space, &repeated, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &repeated).is_err());
     let mut wrong = before.clone();
     let list = wrong
         .definitions
@@ -247,7 +241,7 @@ fn tags_without_a_known_definition_are_refused() {
             .unwrap()
             .tags
             .push(tag(list, false));
-        assert!(PreparedEdit::page(TREES, space, &wrong, AUTHOR).is_err());
+        assert!(ops::saved(TREES, space, &wrong).is_err());
     }
 }
 
@@ -293,13 +287,13 @@ fn new_definitions_and_tags_publish_on_a_fresh_page() {
     both.text_mut().unwrap().tags.push(tag(task, false));
     body_paragraphs(&mut after).push(both);
     body_paragraphs(&mut after).push(plain_paragraph(&template, "Untagged"));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(&source, space, &after).unwrap();
+    assert_same(written.as_slice(), space, &after);
     if let Some(directory) = std::env::var_os("ONESTORE_TAG_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("tags.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("tags.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(

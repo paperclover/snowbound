@@ -26,7 +26,7 @@ notebook before completing inspection. Cold-open the split notebook for the join
 pass. Captured COM IDs belong to their originating sessions; discover fresh IDs
 when regenerating the corpus.
 
-`rust-split` retains twelve `ParagraphSplit` outputs, their cold native captures,
+`rust-split` retains twelve Rust paragraph-split outputs, their cold native captures,
 and a second native session typing into four empty boundary paragraphs. The
 hyperlink case has no output: the operation rejected fields when this row was
 captured, and the writer now splits before a link as OneNote does. The Rust

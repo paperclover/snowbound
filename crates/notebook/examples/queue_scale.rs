@@ -1,8 +1,8 @@
 use notebook::{EditStatus, Remote, Replica};
 use onestore::{
-    CommitError, PageCreation, PreparedEdit, RevisionIndex, Store, Transaction,
-    document::Document,
-    page::{Page, PageObject, Paragraph, text::Edit},
+    Arena, CommitError, ExGuid, PageCreation, Section, Stamp, Transaction,
+    op::{Edit, Op, PageOp, SectionOp},
+    page::PageObject,
 };
 use std::{io, path::PathBuf, time::Instant};
 
@@ -12,11 +12,14 @@ impl Remote for FileRemote {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         onestore::read_file(&self.0)
     }
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        Stamp::of(&self.read()?).map_err(io::Error::other)
+    }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         transaction.commit_file(&self.0)
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        onestore::confirm_file_snapshot(&self.0, snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        onestore::confirm_file(&self.0, base)
     }
 }
 
@@ -29,13 +32,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir(&directory)?;
     let source = onestore::create_section("queue.one", "First", "Fixture")?;
     let creation = PageCreation::new(None, Some("Second"), "Fixture")?;
-    let source = PreparedEdit::create_page(&source, &creation)?
-        .as_bytes()
-        .to_vec();
-    let pages = {
-        let store = Store::parse(&source)?;
-        let index = RevisionIndex::parse(&store)?;
-        Document::parse(&index)?.pages()?
+    let (source, pages) = {
+        let arena = Arena::default();
+        let mut section = Section::open(&arena, source)?;
+        let ops = vec![Op::Section(SectionOp::Create(creation))];
+        section.apply("Fixture", &Edit { at: 133_000_000_000_000_000, ops })?;
+        section.seal()?;
+        let pages: Vec<ExGuid> = section.pages()?.into_iter().map(|(space, ..)| space).collect();
+        (section.image(), pages)
     };
     assert_eq!(pages.len(), 2);
     let path = directory.join("cache.sqlite");
@@ -48,40 +52,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for n in 0..count {
         let edit_start = Instant::now();
         let slot = n % 2;
-        let space = pages[slot].0;
-        let mut page = cache.page(space)?;
+        let space = pages[slot];
+        let page = cache.page(space)?;
         let text = page
             .objects
-            .iter_mut()
+            .iter()
             .find_map(|object| match object {
-                PageObject::Outline(outline) => {
-                    outline.paragraphs.iter_mut().find_map(|p| p.text_mut())
-                }
                 PageObject::Title(title) => title
                     .outlines
-                    .iter_mut()
-                    .flat_map(|outline| &mut outline.paragraphs)
-                    .find_map(|p| p.text_mut().filter(|text| text.date_field.is_none())),
+                    .iter()
+                    .flat_map(|outline| &outline.paragraphs)
+                    .find_map(|p| p.text().filter(|text| text.date_field.is_none())),
                 _ => None,
             })
             .unwrap();
         expected[slot] = format!("Edit {n} 🦀 e\u{301}");
         let end = u32::try_from(text.text.text().encode_utf16().count())?;
-        let format = text.text.format_at(0)?.clone();
-        text.text.apply(Edit {
+        let op = PageOp::Text {
+            text: text.id,
             range: 0..end,
-            replacement: Paragraph::new(expected[slot].clone(), format),
-        })?;
-        let before = cache.page(space)?;
-        let ops = onestore::op::lower_page(&before, &page)?;
+            with: expected[slot].clone(),
+        };
         let id = cache.apply(
             "Fixture",
-            onestore::op::Edit {
+            Edit {
                 at: 133_000_000_000_000_000,
-                ops: ops
-                    .into_iter()
-                    .map(|op| onestore::op::Op::Page { space, op })
-                    .collect(),
+                ops: vec![Op::Page { space, op }],
             },
         )?;
         assert!(ids.last().is_none_or(|previous| *previous < id));
@@ -108,8 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>(),
         ids
     );
-    let source = cache.snapshot()?;
-    verify(&source, &pages, &expected)?;
+    verify(&cache, &pages, &expected)?;
     println!(
         "{}",
         serde_json::json!({"phase":"reopen","seconds":start.elapsed().as_secs_f64()})
@@ -132,9 +127,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         serde_json::json!({"phase":"publish","count":ids.len(),"ms":step.elapsed().as_secs_f64()*1000.0})
     );
     assert!(cache.pending()?.is_empty());
-    let published = cache.snapshot()?;
-    assert_eq!(onestore::read_file(&remote.0)?, published);
-    verify(&published, &pages, &expected)?;
+    let published = onestore::read_file(&remote.0)?;
+    verify(&cache, &pages, &expected)?;
+    let arena = Arena::default();
+    let section = Section::open(&arena, published.clone())?;
+    for space in &pages {
+        assert_eq!(section.page(*space)?, cache.page(*space)?);
+    }
     drop(cache);
     let cache = Replica::open(&path)?;
     for id in &ids {
@@ -152,7 +151,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>(),
         ids
     );
-    verify(&archive.snapshot()?, &pages, &expected)?;
+    let arena = Arena::default();
+    let section = Section::open(&arena, archive.snapshot()?)?;
+    for (slot, space) in pages.iter().enumerate() {
+        assert_eq!(section.page(*space)?.title, expected[slot]);
+    }
     println!(
         "{}",
         serde_json::json!({"phase":"complete","count":count,
@@ -163,17 +166,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn verify(
-    bytes: &[u8],
-    pages: &[(onestore::ExGuid, onestore::ExGuid)],
+    cache: &Replica,
+    pages: &[ExGuid],
     expected: &[String; 2],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let store = Store::parse(bytes)?;
-    assert!(store.checksum_mismatches.is_empty());
-    let index = RevisionIndex::parse(&store)?;
-    index.validate_current()?;
-    let document = Document::parse(&index)?;
-    for (slot, (space, _)) in pages.iter().enumerate() {
-        assert_eq!(Page::from_space(&document, *space)?.title, expected[slot]);
+    for (slot, space) in pages.iter().enumerate() {
+        assert_eq!(cache.page(*space)?.title, expected[slot]);
     }
     Ok(())
 }

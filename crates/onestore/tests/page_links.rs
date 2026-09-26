@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::Document,
     page::{
         Page, PageObject, PageParagraph, Paragraph,
@@ -13,7 +15,6 @@ const OUTLINES: &[u8] =
 const NATIVE_LINKS: &[u8] =
     include_bytes!("../../../corpus/link-edit/native-links/notebook/links.one");
 const NATIVE_BASE_PATH: &str = r"C:\one-tests\runs\capture\notebook\links.one";
-const AUTHOR: &str = "Link author";
 const CODE: &str = "\u{fddf}HYPERLINK \"https://example.invalid/rust\"";
 
 fn page_by_title(bytes: &[u8], title: &str) -> (ExGuid, Page) {
@@ -133,8 +134,8 @@ fn a_native_link_is_removed_leaving_plain_label_text() {
         replacement: Paragraph::new(content[end..].to_owned(), plain),
     })
     .unwrap();
-    let written = PreparedEdit::page(OUTLINES, space, &after, AUTHOR).unwrap();
-    let stored = assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(OUTLINES, space, &after).unwrap();
+    let stored = assert_same(written.as_slice(), space, &after);
     let mut stored = stored;
     let text = &body_paragraphs(&mut stored)[at].text().unwrap().text;
     assert!(text.text().ends_with(" Link label"));
@@ -159,8 +160,8 @@ fn a_link_is_added_to_a_fresh_page_and_reads_back() {
         &mut body_paragraphs(&mut after)[0].text_mut().unwrap().text,
         "the Rust site",
     );
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = assert_same(written.as_slice(), space, &after);
     let mut stored = stored;
     let text = &body_paragraphs(&mut stored)[0].text().unwrap().text;
     let flags: Vec<(Option<bool>, Option<bool>, Option<bool>)> = text
@@ -185,8 +186,8 @@ fn a_link_is_added_to_a_fresh_page_and_reads_back() {
     if let Some(directory) = std::env::var_os("ONESTORE_LINK_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("links.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("links.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -292,10 +293,11 @@ fn internal_links_match_what_onenote_stores() {
 fn a_page_links_to_another_page_and_its_paragraph() {
     let source = onestore::create_section("links.one", "Linking page", "Author").unwrap();
     let creation = onestore::PageCreation::new(None, Some("Link target"), "Author").unwrap();
-    let with_target = onestore::PreparedEdit::create_page(&source, &creation)
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let with_target = ops::edited(
+        &source,
+        vec![onestore::op::Op::Section(onestore::op::SectionOp::Create(creation))],
+    )
+    .unwrap();
     let section = Store::parse(&with_target).unwrap().header.file_id;
     let (_, target) = page_by_title(&with_target, "Link target");
     let (space, before) = page_by_title(&with_target, "Linking page");
@@ -351,12 +353,12 @@ fn a_page_links_to_another_page_and_its_paragraph() {
         replacement: Paragraph::from_runs(runs),
     })
     .unwrap();
-    let written = PreparedEdit::page(&with_target, space, &after, AUTHOR).unwrap();
-    assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(&with_target, space, &after).unwrap();
+    assert_same(written.as_slice(), space, &after);
     if let Some(directory) = std::env::var_os("ONESTORE_INTERNAL_LINK_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("links.one"), written.as_bytes()).unwrap();
+        std::fs::write(directory.join("links.one"), written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents("Open Notebook.onetoc2", &[("links.one", section)])

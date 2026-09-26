@@ -603,6 +603,7 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             }
             page.created = Some(*created);
         }
+        PageOp::Color(color) => page.color = *color,
         PageOp::Text { text, range, with } => {
             let object = text_mut(page, *text)?;
             object.text = replace_text(&object.text, range.clone(), with)?;
@@ -861,13 +862,7 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                 let (path, index) =
                     find(page, *object).ok_or_else(|| invalid("The object is not on the page"))?;
                 let list = list_at(page, &path);
-                let range = subtree(list, index);
-                if !path.cells.is_empty() && range.len() == list.len() {
-                    return Err(invalid(
-                        "A table cell keeps a paragraph; insert its replacement first",
-                    ));
-                }
-                list.drain(range);
+                list.drain(subtree(list, index));
             }
             drop_emptied(page);
             retitle(page, None);

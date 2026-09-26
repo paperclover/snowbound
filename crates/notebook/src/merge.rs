@@ -2,11 +2,16 @@
 //! section when the objects it reads are as the base image had them; text ops on a text
 //! the remote also changed shift past the remote's changes when they stay clear of them;
 //! a move, deletion or outline setting the remote already made is dropped as done.
-//! Anything else is a conflict: the queue stays on its base until it is resolved.
+//! An op on a page the remote changed where it did is dropped, with every later op naming
+//! the objects it named, and the page conflicts: as OneNote 2010 does, the remote's version
+//! stays the page and the local one becomes a conflict page under it (`conflict_page`).
+//! Page-list edits merge as OneNote 2010 merges page series: a page the remote moved keeps
+//! the remote's place, and a page the queue placed goes before the next page in the queue's
+//! order the remote left in place (`corpus/conflict-page/native-pages`, `native-restore`).
 //! Objects the queue itself created are not in the base, so nothing remote can have
 //! changed them.
 
-use crate::{ConflictKind, PendingEdit, Result};
+use crate::{PendingEdit, Result};
 use onestore::{
     ExGuid, OutlineEdit, PageCreation, PageEdit, PagePosition, Section,
     document::{Format, Layout, Tag},
@@ -21,143 +26,113 @@ use std::{
     ops::Range,
 };
 
-/// A conflict being resolved: from edit `first` on, ops on `space` are dropped. Keeping
-/// mine replaces the first of them by the ops rewriting the remote page to `target` (or
-/// putting `target` back as a page where the remote removed it), or, for the section's
-/// page list, keeps what of each section op still applies.
-pub(crate) struct Resolving<'p> {
-    pub first: u64,
-    pub space: ExGuid,
-    pub mine: bool,
-    pub target: Option<&'p Page>,
-}
+/// The remote changed what an op reads: the op does not replay.
+struct Conflicting;
 
-pub(crate) enum Outcome {
-    /// Every edit applied; these edits' ops changed. An edit whose ops were all dropped
-    /// stays, empty, to be published and acknowledged with its batch.
-    Applied(Vec<(u64, Edit)>),
-    Conflict {
-        id: u64,
-        space: ExGuid,
-        kind: ConflictKind,
-    },
+/// The queue replayed on the remote section.
+pub(crate) struct Merged {
+    /// Edits whose ops changed. An edit whose ops were all dropped stays, empty, to be
+    /// published and acknowledged with its batch.
+    pub rewritten: Vec<(u64, Edit)>,
+    /// Pages whose local version the remote could not take, with who made the first edit
+    /// that did not replay and the objects the dropped ops named.
+    pub conflicts: BTreeMap<ExGuid, (String, BTreeSet<ExGuid>)>,
 }
 
 /// Replays `edits` on `new`, the remote section; `old` is the base they were made on.
+/// Ops on the pages in `converged`, which the remote holds as the edits leave them, are done.
 pub(crate) fn rebase(
     old: &mut Section<'_>,
     new: &mut Section<'_>,
     edits: &[PendingEdit],
     converged: &BTreeSet<ExGuid>,
-    resolving: Option<Resolving<'_>>,
-) -> Result<Outcome> {
-    let root = new.root();
+) -> Result<Merged> {
     let before: BTreeMap<ExGuid, ExGuid> = old.revisions().collect();
     let after: BTreeMap<ExGuid, ExGuid> = new.revisions().collect();
     let orders = (order(old)?, order(new)?);
     let mut state = Replay {
         before,
         after,
+        local: orders.0.clone(),
+        unmoved: unmoved(old, new)?,
         orders,
         created: BTreeSet::new(),
         diffs: BTreeMap::new(),
     };
-    let mut rewritten = Vec::new();
-    let mut resolved = false;
+    let mut merged = Merged {
+        rewritten: Vec::new(),
+        conflicts: BTreeMap::new(),
+    };
     for queued in edits {
-        let branch = resolving
-            .as_ref()
-            .filter(|resolving| queued.id >= resolving.first);
         let mut ops = Vec::new();
         let mut changed = false;
         for op in &queued.edit.ops {
-            let conflict = |kind, space| Outcome::Conflict {
-                id: queued.id,
-                space,
-                kind,
+            let apply = |state: &mut Replay, new: &mut Section<'_>, op: &Op| {
+                state.apply(new, &queued.author, queued.edit.at, op)
             };
-            if let Some(resolving) = branch {
-                let dropped = match op {
-                    Op::Page { space, .. } => *space == resolving.space,
-                    Op::Section(_) => resolving.space == root,
-                };
-                if dropped {
-                    changed = true;
-                    let rewrite = match op {
-                        Op::Page { space, .. } if !resolved && resolving.mine => {
-                            resolving.target.map(|target| (*space, target))
-                        }
-                        _ => None,
-                    };
-                    resolved |= matches!(op, Op::Page { .. });
-                    if let Some((space, target)) = rewrite {
-                        if !state.listed(space) {
-                            // Kept while the remote removed it: the page comes back.
-                            match state.restore(
-                                new,
-                                space,
-                                target,
-                                &queued.author,
-                                queued.edit.at,
-                            )? {
-                                Ok(restored) => ops.extend(restored),
-                                Err(kind) => return Ok(conflict(kind, space)),
-                            }
+            match op {
+                Op::Page { space, op: page_op } => {
+                    if converged.contains(space) {
+                        changed = true;
+                        continue;
+                    }
+                    // An op naming what a dropped op named would build on it.
+                    let named = named(page_op);
+                    if let Some((_, dropped)) = merged.conflicts.get_mut(space)
+                        && named.iter().any(|id| dropped.contains(id))
+                    {
+                        dropped.extend(named);
+                        changed = true;
+                        continue;
+                    }
+                    let replayed = match state.check(old, new, *space, page_op)? {
+                        Ok(None) => {
+                            changed = true;
                             continue;
                         }
-                        let current = new.page(space)?;
-                        for op in onestore::op::lower_page(&current, target)
-                            .map_err(|error| OpError::Unsupported(error.message))?
-                        {
-                            let op = Op::Page { space, op };
-                            if let Some(kind) =
-                                state.apply(new, &queued.author, queued.edit.at, &op)?
-                            {
-                                return Ok(conflict(kind, space));
-                            }
-                            ops.push(op);
+                        Ok(Some(mapped)) => {
+                            let mapped = Op::Page {
+                                space: *space,
+                                op: mapped,
+                            };
+                            apply(&mut state, new, &mapped)?.then_some(mapped)
+                        }
+                        Err(Conflicting) => None,
+                    };
+                    match replayed {
+                        Some(mapped) => {
+                            changed |= mapped != *op;
+                            ops.push(mapped);
+                        }
+                        None => {
+                            changed = true;
+                            merged
+                                .conflicts
+                                .entry(*space)
+                                .or_insert_with(|| (queued.author.clone(), BTreeSet::new()))
+                                .1
+                                .extend(named);
                         }
                     }
-                    if let (Op::Section(op), true) = (op, resolving.mine) {
-                        // Keeping mine for the section list: the first form that applies.
-                        for op in state.salvage(new, op) {
-                            let op = Op::Section(op);
-                            if state
-                                .apply(new, &queued.author, queued.edit.at, &op)?
-                                .is_none()
-                            {
-                                ops.push(op);
-                                break;
-                            }
+                }
+                Op::Section(section_op) => {
+                    advance(&mut state.local, section_op);
+                    // The first form of the edit the remote's page list takes, or none.
+                    let mut kept = None;
+                    for form in state.forms(new, section_op)? {
+                        let form = Op::Section(form);
+                        if apply(&mut state, new, &form)? {
+                            kept = Some(form);
+                            break;
                         }
                     }
-                    continue;
+                    changed |= kept.as_ref() != Some(op);
+                    ops.extend(kept);
                 }
             }
-            let space = match op {
-                Op::Page { space, .. } => *space,
-                Op::Section(_) => root,
-            };
-            if matches!(op, Op::Page { .. }) && converged.contains(&space) {
-                changed = true;
-                continue;
-            }
-            let mapped = match state.check(old, new, op)? {
-                Ok(Some(mapped)) => mapped,
-                Ok(None) => {
-                    changed = true;
-                    continue;
-                }
-                Err(kind) => return Ok(conflict(kind, space)),
-            };
-            changed |= mapped != *op;
-            if let Some(kind) = state.apply(new, &queued.author, queued.edit.at, &mapped)? {
-                return Ok(conflict(kind, space));
-            }
-            ops.push(mapped);
         }
         if changed {
-            rewritten.push((
+            merged.rewritten.push((
                 queued.id,
                 Edit {
                     at: queued.edit.at,
@@ -166,7 +141,176 @@ pub(crate) fn rebase(
             ));
         }
     }
-    Ok(Outcome::Applied(rewritten))
+    Ok(merged)
+}
+
+/// The stored objects a page op names; a conflict page marks those it holds.
+fn named(op: &PageOp) -> Vec<ExGuid> {
+    match op {
+        PageOp::Text { text, .. }
+        | PageOp::Format { text, .. }
+        | PageOp::Link { text, .. }
+        | PageOp::Equation { text, .. }
+        | PageOp::Split { text, .. } => vec![*text],
+        PageOp::Date { fields, .. } => fields.iter().map(|(text, _)| *text).collect(),
+        PageOp::Color(_) => Vec::new(),
+        PageOp::Join { left, right } => vec![*left, *right],
+        PageOp::Insert { container, .. } => vec![*container],
+        PageOp::Move { object, .. } | PageOp::Delete { object } | PageOp::Outline { object, .. } => {
+            vec![*object]
+        }
+        PageOp::Level { paragraph, .. }
+        | PageOp::Paragraph { paragraph, .. }
+        | PageOp::Style { paragraph, .. }
+        | PageOp::List { paragraph, .. } => vec![*paragraph],
+        PageOp::Tags { target, .. } => vec![*target],
+        PageOp::Add { object, .. } => vec![object.id()],
+        PageOp::Picture { picture: object, .. }
+        | PageOp::Attachment {
+            attachment: object, ..
+        }
+        | PageOp::Strokes { ink: object, .. } => vec![*object],
+        PageOp::Table { table, edit } => match edit {
+            TableEdit::Cell { cell, .. } => vec![*cell],
+            TableEdit::DeleteRow(row) => vec![*row],
+            _ => vec![*table],
+        },
+    }
+}
+
+/// The edit keeping `page`, the version of page `space` the remote could not take, and
+/// applies it to `new`: a conflict page under the remote's page marking `objects` where
+/// `page` holds them, or, where the remote removed the page, the page put back as a copy
+/// where `local`, the section as the queue leaves it, has it. Content outside the page
+/// model stays on the remote's page only; `at` is now.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn conflict_page(
+    new: &mut Section<'_>,
+    old: &mut Section<'_>,
+    local: &mut Section<'_>,
+    space: ExGuid,
+    page: &Page,
+    author: &str,
+    objects: &BTreeSet<ExGuid>,
+    at: u64,
+) -> Result<Edit> {
+    let mut page = page.clone();
+    page.objects.retain(|object| !matches!(object, PageObject::Unsupported(_)));
+    let listed = order(new)?;
+    let ops = if listed.iter().any(|(listed, _)| *listed == space) {
+        let index = Index::of(&page);
+        let mut marked: Vec<ExGuid> = objects
+            .iter()
+            .copied()
+            .filter(|id| index.nodes.contains_key(id))
+            .collect();
+        let copy = page.copy_with(&mut marked)?;
+        let titled = page
+            .objects
+            .iter()
+            .any(|object| matches!(object, PageObject::Title(_)));
+        vec![Op::Section(SectionOp::Conflict {
+            of: space,
+            creation: PageCreation::new(None, titled.then_some(page.title.as_str()), author)?,
+            page: copy,
+            objects: marked,
+        })]
+    } else {
+        // A copy under fresh identities, as OneNote 2010 puts a removed page back.
+        let (base, unmoved) = (order(old)?, unmoved(old, new)?);
+        let queued = order(local)?;
+        let at = queued.iter().position(|(queued, _)| *queued == space);
+        let before = at
+            .map_or(&[][..], |at| &queued[at + 1..])
+            .iter()
+            .map(|(next, _)| *next)
+            .find(|next| {
+                listed.iter().any(|(listed, _)| listed == next)
+                    && (unmoved.contains(next) || base.iter().all(|(page, _)| page != next))
+            });
+        let creation = PageCreation::new(before, Some(&page.title), author)?;
+        let mut ops = vec![Op::Section(SectionOp::Import {
+            creation: creation.clone(),
+            page: page.copy()?,
+        })];
+        if let Some(level) = at.map(|at| queued[at].1).filter(|level| *level > 1) {
+            ops.push(Op::Section(SectionOp::Pages(vec![PageEdit::set_level(
+                creation.space(),
+                level,
+            )?])));
+        }
+        ops
+    };
+    let edit = Edit { at, ops };
+    new.apply(author, &edit)?;
+    Ok(edit)
+}
+
+/// Pages the base and the remote both list that the remote left in place: in the same
+/// series at the same level, in base order among themselves. OneNote 2010 gives a page it
+/// moves a series of its own; a page moved within its series is out of base order.
+fn unmoved(old: &mut Section<'_>, new: &mut Section<'_>) -> Result<BTreeSet<ExGuid>> {
+    let series = (old.series()?, new.series()?);
+    let base: BTreeMap<ExGuid, (usize, u32)> = order(old)?
+        .into_iter()
+        .enumerate()
+        .map(|(at, (space, level))| (space, (at, level)))
+        .collect();
+    let kept: Vec<(ExGuid, usize)> = order(new)?
+        .into_iter()
+        .filter_map(|(space, level)| {
+            let (at, before) = base.get(&space)?;
+            (*before == level && series.0.get(&space) == series.1.get(&space)).then_some((space, *at))
+        })
+        .collect();
+    // A longest subsequence of `kept` in base order (patience sorting).
+    let mut tails: Vec<usize> = Vec::new();
+    let mut previous = vec![None; kept.len()];
+    for (i, (_, at)) in kept.iter().enumerate() {
+        let k = tails.partition_point(|tail| kept[*tail].1 < *at);
+        previous[i] = k.checked_sub(1).map(|k| tails[k]);
+        if k == tails.len() {
+            tails.push(i);
+        } else {
+            tails[k] = i;
+        }
+    }
+    let mut unmoved = BTreeSet::new();
+    let mut next = tails.last().copied();
+    while let Some(i) = next {
+        unmoved.insert(kept[i].0);
+        next = previous[i];
+    }
+    Ok(unmoved)
+}
+
+/// Applies a queued page-list edit to `local`, the page order as the queue leaves it.
+fn advance(local: &mut Order, op: &SectionOp) {
+    let insert = |local: &mut Order, page: (ExGuid, u32), before: Option<ExGuid>| {
+        let at = before
+            .and_then(|before| local.iter().position(|(space, _)| *space == before))
+            .unwrap_or(local.len());
+        local.insert(at, page);
+    };
+    match op {
+        SectionOp::Create(creation) | SectionOp::Import { creation, .. } => {
+            insert(local, (creation.space(), 1), creation.before());
+        }
+        SectionOp::Pages(edits) => {
+            for edit in edits {
+                let Some(at) = local.iter().position(|(space, _)| *space == edit.space()) else {
+                    continue;
+                };
+                local[at].1 = edit.level();
+                if let PagePosition::Before(before) = edit.position() {
+                    let page = local.remove(at);
+                    insert(local, page, before);
+                }
+            }
+        }
+        SectionOp::Delete(spaces) => local.retain(|(space, _)| !spaces.contains(space)),
+        SectionOp::Conflict { .. } | SectionOp::Color(_) => {}
+    }
 }
 
 fn order(section: &mut Section<'_>) -> Result<Order> {
@@ -186,6 +330,10 @@ struct Replay {
     after: BTreeMap<ExGuid, ExGuid>,
     /// Page order of the base and the remote.
     orders: (Order, Order),
+    /// Page order as the queue leaves it, up to the op replaying.
+    local: Order,
+    /// Pages the remote left in place (`unmoved`).
+    unmoved: BTreeSet<ExGuid>,
     /// Page spaces the replayed edits created.
     created: BTreeSet<ExGuid>,
     /// Per page the remote changed, what it changed; `None` when it left the page alone.
@@ -193,14 +341,8 @@ struct Replay {
 }
 
 impl Replay {
-    /// Applies one op to the remote section; `Some` names why it did not apply.
-    fn apply(
-        &mut self,
-        new: &mut Section<'_>,
-        author: &str,
-        at: u64,
-        op: &Op,
-    ) -> Result<Option<ConflictKind>> {
+    /// Applies one op to the remote section; false when the section refused it.
+    fn apply(&mut self, new: &mut Section<'_>, author: &str, at: u64, op: &Op) -> Result<bool> {
         match new.apply(
             author,
             &Edit {
@@ -210,64 +352,49 @@ impl Replay {
         ) {
             Ok(()) => {
                 if let Op::Section(
-                    SectionOp::Create(creation) | SectionOp::Import { creation, .. },
+                    SectionOp::Create(creation)
+                    | SectionOp::Import { creation, .. }
+                    | SectionOp::Conflict { creation, .. },
                 ) = op
                 {
                     self.created.insert(creation.space());
                 }
-                Ok(None)
+                Ok(true)
             }
             Err(OpError::Failed(error)) => Err(error.into()),
-            Err(error) => Ok(Some(match op {
-                // A page list the remote reordered refuses the op, however it says so.
-                Op::Section(_) => ConflictKind::StructureChanged,
-                Op::Page { .. } if matches!(error, OpError::Unsupported(_)) => {
-                    ConflictKind::UnsupportedEdit
-                }
-                Op::Page { space, .. } if !self.listed(*space) => ConflictKind::TargetUnavailable,
-                Op::Page { .. } => ConflictKind::ContentChanged,
-            })),
+            Err(_) => Ok(false),
         }
     }
 
-    /// The op as it replays on the remote section, or why it cannot.
+    /// The page op as it replays on the remote section; `None` when the remote made it.
     fn check(
         &mut self,
         old: &mut Section<'_>,
         new: &mut Section<'_>,
-        op: &Op,
-    ) -> Result<std::result::Result<Option<Op>, ConflictKind>> {
-        match op {
-            Op::Page { space, op } => {
-                if !self.listed(*space) {
-                    return Ok(Err(ConflictKind::TargetUnavailable));
-                }
-                let diff = match self.diffs.get_mut(space) {
-                    Some(diff) => diff,
-                    None => {
-                        let diff = match (self.before.get(space), self.after.get(space)) {
-                            (Some(before), Some(after)) if before != after => Some(Diff {
-                                old: Index::of(&old.page(*space)?),
-                                new: Index::of(&new.page(*space)?),
-                                regions: BTreeMap::new(),
-                            }),
-                            _ => None,
-                        };
-                        self.diffs.entry(*space).or_insert(diff)
-                    }
-                };
-                Ok(match diff {
-                    None => Ok(Some(Op::Page {
-                        space: *space,
-                        op: op.clone(),
-                    })),
-                    Some(diff) => diff
-                        .check(op)
-                        .map(|op| op.map(|op| Op::Page { space: *space, op })),
-                })
-            }
-            Op::Section(section) => Ok(self.section(section).map(|()| Some(op.clone()))),
+        space: ExGuid,
+        op: &PageOp,
+    ) -> Result<std::result::Result<Option<PageOp>, Conflicting>> {
+        if !self.listed(space) {
+            return Ok(Err(Conflicting));
         }
+        let diff = match self.diffs.get_mut(&space) {
+            Some(diff) => diff,
+            None => {
+                let diff = match (self.before.get(&space), self.after.get(&space)) {
+                    (Some(before), Some(after)) if before != after => Some(Diff {
+                        old: Index::of(&old.page(space)?),
+                        new: Index::of(&new.page(space)?),
+                        regions: BTreeMap::new(),
+                    }),
+                    _ => None,
+                };
+                self.diffs.entry(space).or_insert(diff)
+            }
+        };
+        Ok(match diff {
+            None => Ok(Some(op.clone())),
+            Some(diff) => diff.check(op),
+        })
     }
 
     /// Whether the remote section lists the page, or the replayed edits created it; a page
@@ -276,151 +403,82 @@ impl Replay {
         self.created.contains(&space) || self.orders.1.iter().any(|(page, _)| *page == space)
     }
 
-    /// Puts `page`, which the remote removed, back into the section and returns the ops
-    /// that did: a copy under fresh identities at its level, before the first page after it
-    /// that the remote still has and that can take a page before it, or last.
-    fn restore(
-        &mut self,
-        new: &mut Section<'_>,
-        space: ExGuid,
-        page: &Page,
-        author: &str,
-        at: u64,
-    ) -> Result<std::result::Result<Vec<Op>, ConflictKind>> {
-        let old = self.orders.0.clone();
-        let position = old.iter().position(|(listed, _)| *listed == space);
-        let anchors = position
-            .map_or(&[][..], |position| &old[position + 1..])
-            .iter()
-            .map(|(next, _)| Some(*next))
-            .filter(|next| next.is_some_and(|next| self.listed(next)))
-            .chain([None])
-            .collect::<Vec<_>>();
-        let copy = page.copy()?;
-        let mut refusal = ConflictKind::StructureChanged;
-        for before in anchors {
-            let creation = PageCreation::new(before, Some(&page.title), author)?;
-            let import = Op::Section(SectionOp::Import {
-                creation: creation.clone(),
-                page: copy.clone(),
-            });
-            match self.apply(new, author, at, &import)? {
-                Some(kind) => refusal = kind,
-                None => {
-                    let mut ops = vec![import];
-                    if let Some(level) = position.map(|at| old[at].1).filter(|level| *level > 1) {
-                        let indent = Op::Section(SectionOp::Pages(vec![PageEdit::set_level(
-                            creation.space(),
-                            level,
-                        )?]));
-                        if let Some(kind) = self.apply(new, author, at, &indent)? {
-                            return Ok(Err(kind));
-                        }
-                        ops.push(indent);
-                    }
-                    return Ok(Ok(ops));
-                }
-            }
-        }
-        Ok(Err(refusal))
+    /// Whether the remote moved or re-leveled a page the base listed.
+    fn placed(&self, page: ExGuid) -> bool {
+        !self.unmoved.contains(&page) && self.orders.0.iter().any(|(listed, _)| *listed == page)
     }
 
-    fn section(&self, op: &SectionOp) -> std::result::Result<(), ConflictKind> {
-        let (old, new) = &self.orders;
-        let find =
-            |list: &[(ExGuid, u32)], space: ExGuid| list.iter().position(|(s, _)| *s == space);
-        match op {
-            SectionOp::Create(_) | SectionOp::Import { .. } => Ok(()),
-            SectionOp::Delete(pages) => {
-                for page in pages {
-                    if find(new, *page).is_none() && !self.created.contains(page) {
-                        return Err(ConflictKind::TargetUnavailable);
-                    }
-                    if self.before.get(page) != self.after.get(page) {
-                        return Err(ConflictKind::ContentChanged);
-                    }
+    /// Where a page the queue put before `before` goes on the remote: before the first page
+    /// from `before` on, in the queue's order, that the remote lists where the base had it,
+    /// or last, as OneNote 2010 places a page series only one side changed.
+    fn anchor(&self, listed: &Order, page: ExGuid, before: Option<ExGuid>) -> Option<ExGuid> {
+        let from = self.local.iter().position(|(space, _)| Some(*space) == before)?;
+        self.local[from..].iter().map(|(space, _)| *space).find(|space| {
+            *space != page && !self.placed(*space) && listed.iter().any(|(listed, _)| listed == space)
+        })
+    }
+
+    /// Forms of a section op to try on the remote section, in order: a page placed by
+    /// `anchor`, the page edits of pages the remote still has and did not move, removals of
+    /// pages the remote still has (a page it changed is not removed), a conflict page's
+    /// content as a page of its own where the remote removed its page.
+    fn forms(&self, new: &mut Section<'_>, op: &SectionOp) -> Result<Vec<SectionOp>> {
+        let conflicts: BTreeSet<ExGuid> = new
+            .conflicts()?
+            .into_iter()
+            .flat_map(|(_, pages)| pages.into_iter().map(|page| page.space))
+            .collect();
+        let listed = order(new)?;
+        let placed = |creation: &PageCreation| {
+            creation.reposition(self.anchor(&listed, creation.space(), creation.before()))
+        };
+        Ok(match op {
+            SectionOp::Create(creation) => vec![SectionOp::Create(placed(creation)?)],
+            SectionOp::Import { creation, page } => vec![SectionOp::Import {
+                creation: placed(creation)?,
+                page: page.clone(),
+            }],
+            SectionOp::Color(_) => vec![op.clone()],
+            SectionOp::Conflict {
+                of, creation, page, ..
+            } => vec![if self.listed(*of) {
+                op.clone()
+            } else {
+                SectionOp::Import {
+                    creation: creation.clone(),
+                    page: page.clone(),
                 }
-                Ok(())
-            }
+            }],
+            // A page the remote moved or re-leveled keeps the remote's placement.
             SectionOp::Pages(edits) => {
-                // Where the batch puts each page, from the base order.
-                let mut wanted: Vec<ExGuid> = old.iter().map(|(space, _)| *space).collect();
+                let mut kept = Vec::new();
                 for edit in edits {
-                    if let PagePosition::Before(before) = edit.position()
-                        && let Some(at) = wanted.iter().position(|space| *space == edit.space())
+                    if self.placed(edit.space())
+                        || listed.iter().all(|(listed, _)| *listed != edit.space())
                     {
-                        let space = wanted.remove(at);
-                        let at = before
-                            .and_then(|before| wanted.iter().position(|space| *space == before))
-                            .unwrap_or(wanted.len());
-                        wanted.insert(at, space);
-                    }
-                }
-                let wanted: Vec<(ExGuid, u32)> =
-                    wanted.into_iter().map(|space| (space, 0)).collect();
-                for edit in edits {
-                    let space = edit.space();
-                    let Some(at) = find(old, space) else {
                         continue;
-                    };
-                    let Some(now) = find(new, space) else {
-                        return Err(ConflictKind::TargetUnavailable);
-                    };
-                    if old[at].1 != new[now].1 && new[now].1 != edit.level() {
-                        return Err(ConflictKind::StructureChanged);
                     }
-                    if edit.position() != PagePosition::Keep {
-                        // Each page the remote also has must keep its side of the moved page,
-                        // or already be on the side the batch wants.
-                        let side = |list: &[(ExGuid, u32)], peer: ExGuid| {
-                            Some(find(list, peer)? < find(list, space)?)
-                        };
-                        let conflicting = old.iter().any(|(peer, _)| {
-                            *peer != space
-                                && find(new, *peer).is_some()
-                                && side(new, *peer) != side(old, *peer)
-                                && side(new, *peer) != side(&wanted, *peer)
-                        });
-                        if conflicting {
-                            return Err(ConflictKind::StructureChanged);
-                        }
-                    }
+                    kept.push(match edit.position() {
+                        PagePosition::Keep => edit.clone(),
+                        PagePosition::Before(before) => edit.reposition(
+                            PagePosition::Before(self.anchor(&listed, edit.space(), before)),
+                            edit.level(),
+                        )?,
+                    });
                 }
-                Ok(())
-            }
-        }
-    }
-
-    /// Forms of a section op to try on the remote section list, in order: as it is, a
-    /// creation appended instead, moves and removals of the pages still there.
-    fn salvage(&self, new: &mut Section<'_>, op: &SectionOp) -> Vec<SectionOp> {
-        let pages: BTreeSet<ExGuid> = new
-            .pages()
-            .map(|pages| pages.into_iter().map(|(space, ..)| space).collect())
-            .unwrap_or_default();
-        let present = |space: &ExGuid| pages.contains(space) || self.created.contains(space);
-        match op {
-            SectionOp::Create(creation) => std::iter::once(creation.clone())
-                .chain(creation.reposition(None).ok())
-                .map(SectionOp::Create)
-                .collect(),
-            SectionOp::Import { .. } => vec![op.clone()],
-            SectionOp::Pages(edits) => {
-                let edits: Vec<PageEdit> = edits
-                    .iter()
-                    .filter(|edit| present(&edit.space()))
-                    .cloned()
-                    .collect();
-                if edits.is_empty() {
+                if kept.is_empty() {
                     Vec::new()
                 } else {
-                    vec![SectionOp::Pages(edits)]
+                    vec![SectionOp::Pages(kept)]
                 }
             }
             SectionOp::Delete(deleted) => {
                 let deleted: Vec<ExGuid> = deleted
                     .iter()
-                    .filter(|space| present(space))
+                    .filter(|space| {
+                        self.listed(**space) && self.before.get(space) == self.after.get(space)
+                            || conflicts.contains(space)
+                    })
                     .copied()
                     .collect();
                 if deleted.is_empty() {
@@ -429,7 +487,7 @@ impl Replay {
                     vec![SectionOp::Delete(deleted)]
                 }
             }
-        }
+        })
     }
 }
 
@@ -491,7 +549,7 @@ impl Diff {
 
     /// Where the remote changed a text's characters and formats; its tags and date field
     /// are not positions an op names.
-    fn region(&mut self, text: ExGuid) -> std::result::Result<Option<&mut Changes>, ConflictKind> {
+    fn region(&mut self, text: ExGuid) -> std::result::Result<Option<&mut Changes>, Conflicting> {
         if !self.regions.contains_key(&text) {
             if self.ours(text) {
                 return Ok(None);
@@ -500,7 +558,7 @@ impl Diff {
                 self.old.nodes.get(&text).map(|node| &node.own),
                 self.new.nodes.get(&text).map(|node| &node.own),
             ) else {
-                return Err(ConflictKind::ContentChanged);
+                return Err(Conflicting);
             };
             if a.text == b.text {
                 return Ok(None);
@@ -512,21 +570,20 @@ impl Diff {
     }
 
     /// The op as it replays on the remote page; `None` when the remote already made it.
-    fn check(&mut self, op: &PageOp) -> std::result::Result<Option<PageOp>, ConflictKind> {
-        use ConflictKind::ContentChanged as Changed;
-        let require = |ok: bool| if ok { Ok(()) } else { Err(Changed) };
+    fn check(&mut self, op: &PageOp) -> std::result::Result<Option<PageOp>, Conflicting> {
+        let require = |ok: bool| if ok { Ok(()) } else { Err(Conflicting) };
         let mut op = op.clone();
         match &mut op {
             PageOp::Text { text, range, with } => {
                 if let Some(region) = self.region(*text)? {
-                    let mapped = region.map(range).ok_or(Changed)?;
+                    let mapped = region.map(range).ok_or(Conflicting)?;
                     region.replaced(range, with.encode_utf16().count() as u32);
                     *range = mapped;
                 }
             }
             PageOp::Format { text, range, .. } => {
                 if let Some(region) = self.region(*text)? {
-                    *range = region.map(range).ok_or(Changed)?;
+                    *range = region.map(range).ok_or(Conflicting)?;
                 }
             }
             PageOp::Link { text, .. } | PageOp::Equation { text, .. } => {
@@ -547,7 +604,7 @@ impl Diff {
                 if let Some(region) = self.region(*text)? {
                     // The cut moves with the character after it: text the remote typed at
                     // the cut stays left of it.
-                    let cut = region.map(&(*at..*at + 1)).ok_or(Changed)?;
+                    let cut = region.map(&(*at..*at + 1)).ok_or(Conflicting)?;
                     let right_changes = region.split(*at);
                     if !right_changes.0.is_empty() {
                         self.regions.insert(*right, right_changes);
@@ -565,7 +622,8 @@ impl Diff {
                     self.region(text)?;
                 }
             }
-            PageOp::Insert { .. } | PageOp::Add { .. } => {}
+            // A page's colour is the latest one set, whichever side set it.
+            PageOp::Insert { .. } | PageOp::Add { .. } | PageOp::Color(_) => {}
             PageOp::Move {
                 object,
                 parent,
@@ -633,7 +691,7 @@ impl Diff {
                         }
                         _ => false,
                     };
-                    return if done { Ok(None) } else { Err(Changed) };
+                    return if done { Ok(None) } else { Err(Conflicting) };
                 }
                 require(before.is_some())?
             }

@@ -28,29 +28,21 @@ mod toc;
 mod tree;
 mod write;
 
-pub use commit::{
-    CommitError, CommitIo, CommitState, PreparedEdit, Stamp, Transaction, commit_property_bytes,
-    commit_text, confirm_snapshot, place,
-};
+pub use commit::{CommitError, CommitIo, CommitState, Stamp, Transaction, confirm, place};
 #[cfg(any(unix, windows))]
-pub use commit::{
-    commit_file_property, commit_file_text, confirm_file_snapshot, place_file, read_file,
-    read_file_limited,
-};
-pub use create::{create_section, create_table_of_contents};
-pub use edit::replace_text;
+pub use commit::{confirm_file, place_file, read_file, read_file_limited};
+pub use create::{create_empty_section, create_section, create_table_of_contents};
 pub use files::FileDataReference;
 pub use formatting::{FONT_SIZES, TextAttribute};
-pub use insertion::Insertion;
+pub(crate) use insertion::Insertion;
 pub use objects::{Object, ObjectData, ObjectReferences, ResolvedRevision};
 pub use outline::OutlineEdit;
-pub use pages::{PageCreation, PageEdit, PagePosition};
-pub use paragraph::{ParagraphJoin, ParagraphSplit};
+pub use pages::{ConflictPage, PageCreation, PageEdit, PagePosition};
+pub(crate) use paragraph::{ParagraphJoin, ParagraphSplit};
 pub use properties::{IdStream, Property, PropertySets, Value};
 pub use revisions::{ExGuid, ObjectSpace, Revision, RevisionIndex};
 pub use section::{Arena, Section};
 pub use snapshot::{read_snapshot, read_storage_snapshot};
 pub use store::{Chunk, Error, FileType, Header, Node, NodeList, Reference, Store};
-pub use toc::TocEdit;
-pub use tree::TreeEdit;
-pub use write::replace_property_bytes;
+pub use toc::{TocEdit, edit_table_of_contents};
+pub(crate) use tree::TreeEdit;

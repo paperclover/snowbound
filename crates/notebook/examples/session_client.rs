@@ -1,15 +1,16 @@
-//! Drives a section the way the application does: open it through a session, save
-//! page-model edits, wait for their publication and report the page texts.
+//! Drives a section the way the application does: open it through a session, apply
+//! edits, wait for their publication and report the page texts.
 //! `session_client SECTION CACHE_DIR LABEL` edits the first body paragraph of every
 //! page whose title starts with "Move" and adds one outline per page; each launch
 //! reports the pending queue it found and the receipts it obtained.
 
 use notebook::{
     EditStatus,
-    session::{Event, Save, Section},
+    session::{Event, Section},
 };
 use onestore::{
     ExGuid,
+    op::PageOp,
     page::{Outline, Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id},
 };
 use std::{
@@ -46,28 +47,9 @@ fn texts(page: &Page) -> Vec<String> {
     out
 }
 
-fn edit(page: &mut Page, label: &str) {
+/// Types `label` before the first body paragraph and adds an outline below the body.
+fn edit(page: &Page, label: &str) -> Vec<PageOp> {
     let text = body_text(page).expect("a body paragraph");
-    for object in &mut page.objects {
-        let PageObject::Outline(outline) = object else {
-            continue;
-        };
-        if let Some(paragraph) = outline
-            .paragraphs
-            .iter_mut()
-            .find(|p| p.text().is_some_and(|t| t.id == text))
-        {
-            let target = paragraph.text_mut().unwrap();
-            let format = target.text.format_at(0).unwrap().clone();
-            target
-                .text
-                .apply(onestore::page::text::Edit {
-                    range: 0..0,
-                    replacement: onestore::page::Paragraph::new(format!("{label} "), format),
-                })
-                .unwrap();
-        }
-    }
     let template = page
         .objects
         .iter()
@@ -110,12 +92,21 @@ fn edit(page: &mut Page, label: &str) {
         paragraphs: vec![paragraph],
         unsupported: Vec::new(),
     };
-    let at = page
-        .objects
-        .iter()
-        .position(|o| matches!(o, PageObject::Title(_)))
-        .unwrap_or(page.objects.len());
-    page.objects.insert(at, PageObject::Outline(outline));
+    let title = page.objects.iter().find_map(|object| match object {
+        PageObject::Title(title) => Some(title.id),
+        _ => None,
+    });
+    vec![
+        PageOp::Text {
+            text,
+            range: 0..0,
+            with: format!("{label} "),
+        },
+        PageOp::Add {
+            object: PageObject::Outline(outline),
+            before: title,
+        },
+    ]
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -138,13 +129,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .filter(|(_, title, _)| title.starts_with("Move"))
     {
-        let before = section.page(*space)?;
-        let mut after = before.clone();
-        edit(&mut after, label);
-        match section.save(*space, &before, &after, "session client")? {
-            Save::Queued(id) => queued.push((id, *space, title.clone(), texts(&after))),
-            other => return Err(format!("{title}: {other:?}").into()),
+        let mut page = section.page(*space)?;
+        let ops = edit(&page, label);
+        for op in &ops {
+            onestore::op::predict(&mut page, op)?;
         }
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+        let edit = onestore::op::Edit {
+            at: (unix.as_secs() + 11_644_473_600) * 10_000_000,
+            ops: ops
+                .into_iter()
+                .map(|op| onestore::op::Op::Page { space: *space, op })
+                .collect(),
+        };
+        let id = section.replica().apply("session client", edit)?;
+        queued.push((id, *space, title.clone(), texts(&page)));
     }
     let deadline = Instant::now() + Duration::from_secs(120);
     let mut receipts = Vec::new();
@@ -176,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Event::Failed(error) => return Err(error.into()),
                 Event::Rejected { error, .. } => return Err(error.into()),
-                Event::Refreshed | Event::Changed(_) => {}
+                Event::Changed(_) => {}
             }
         }
         // A batch reports its newest edit; each edit's receipt is its own.

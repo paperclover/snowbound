@@ -1,8 +1,24 @@
 """Traversal of the exported document's referenced revisions."""
 import os
 from pathlib import Path
+import shutil
+import subprocess
 
-EXPORTER = Path(os.environ.get('ONESTORE_DOCUMENT', Path(__file__).resolve().parent.parent / 'target/debug/examples/document'))
+
+def _exporter():
+    """The document exporter built with protected sections, copied aside because a workspace
+    build without the feature overwrites target/debug/examples/document."""
+    if 'ONESTORE_DOCUMENT' in os.environ:
+        return Path(os.environ['ONESTORE_DOCUMENT'])
+    root = Path(__file__).resolve().parent.parent
+    subprocess.run(['cargo', 'build', '--quiet', '-p', 'notebook', '--features', 'protected',
+                    '--example', 'document'], cwd=root, check=True)
+    protected = root / 'target/debug/examples/document-protected'
+    shutil.copy2(root / 'target/debug/examples/document', protected)
+    return protected
+
+
+EXPORTER = _exporter()
 BRIDGE = Path(__file__).resolve().parent.parent / 'target/debug/onestore-diagnostic'
 
 DEFAULT_CONTEXT = '{00000000-0000-0000-0000-000000000000},0'

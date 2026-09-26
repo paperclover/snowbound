@@ -1,8 +1,11 @@
 //! Page-model saves: one intent per page until it is attempted, reconciliation against the
 //! remote page, reviewed conflicts, and independence between pages.
 
-use notebook::{ConflictKind, EditStatus, Replica};
-use onestore::{ExGuid, PreparedEdit, RevisionIndex, Store, document::Document};
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
+
+use notebook::{EditStatus, Replica};
+use onestore::{ExGuid, RevisionIndex, Store, document::Document};
 
 #[path = "support/server.rs"]
 mod server;
@@ -80,7 +83,7 @@ fn a_saved_page_model_publishes_and_reads_back() {
         .unwrap()
         .unwrap();
     assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-    assert_eq!(page_of(&cache.snapshot().unwrap(), space), after);
+    assert_eq!(page_of(&snapshot(&cache), space), after);
     let pending = cache.pending().unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].author, "Model author");
@@ -113,7 +116,7 @@ fn saves_before_an_attempt_publish_together() {
     let id = model_ops::save_as(&cache, space, &after, "Model author")
         .unwrap()
         .unwrap();
-    let mut later = page_of(&cache.snapshot().unwrap(), space);
+    let mut later = page_of(&snapshot(&cache), space);
     append(&mut later, " two");
     let second = model_ops::save_as(&cache, space, &later, "Model author")
         .unwrap()
@@ -133,7 +136,7 @@ fn saves_before_an_attempt_publish_together() {
         first_text(&page_of(&server.durable, space)),
         first_text(&later)
     );
-    let mut third = page_of(&cache.snapshot().unwrap(), space);
+    let mut third = page_of(&snapshot(&cache), space);
     append(&mut third, " three");
     let next = model_ops::save_as(&cache, space, &third, "Model author")
         .unwrap()
@@ -157,7 +160,7 @@ fn an_attempted_save_is_never_rewritten() {
         cache.status(id).unwrap(),
         Some(EditStatus::AwaitingConfirmation { .. })
     ));
-    let mut more = page_of(&cache.snapshot().unwrap(), space);
+    let mut more = page_of(&snapshot(&cache), space);
     append(&mut more, " more");
     let next = model_ops::save_as(&cache, space, &more, "Model author")
         .unwrap()
@@ -165,7 +168,7 @@ fn an_attempted_save_is_never_rewritten() {
     assert!(next > id);
     let pending = cache.pending().unwrap();
     assert_eq!(pending.iter().map(|p| p.id).collect::<Vec<_>>(), [id, next]);
-    assert_eq!(page_of(&cache.snapshot().unwrap(), space), more);
+    assert_eq!(page_of(&snapshot(&cache), space), more);
     assert!(matches!(
         cache.status(id).unwrap(),
         Some(EditStatus::AwaitingConfirmation { .. })
@@ -173,8 +176,10 @@ fn an_attempted_save_is_never_rewritten() {
     assert_eq!(cache.status(next).unwrap(), Some(EditStatus::Pending));
 }
 
+/// A remote change to the saved text keeps the remote's page and the local one as its
+/// conflict page; the writer's change made again publishes over the remote's.
 #[test]
-fn a_remote_change_to_the_saved_page_conflicts_until_reviewed() {
+fn a_remote_change_to_the_saved_page_keeps_a_conflict_page() {
     let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
@@ -184,49 +189,37 @@ fn a_remote_change_to_the_saved_page_conflicts_until_reviewed() {
         .unwrap();
     let mut remote_page = page_of(OUTLINES, space);
     append(&mut remote_page, " remote");
-    let remote = PreparedEdit::page(OUTLINES, space, &remote_page, "Native author").unwrap();
-    let mut server = Server::new(remote.as_bytes());
-    assert_eq!(
+    let remote = ops::saved(OUTLINES, space, &remote_page).unwrap();
+    let mut server = Server::new(remote.as_slice());
+    assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    assert_eq!(server.publications, 1);
+    let published = page_of(&server.durable, space);
+    assert_eq!(first_text(&published), first_text(&remote_page));
+    assert_eq!(
+        conflicts(&server.durable)[0].1[0].0,
+        "Model author",
+        "the conflict page names whose version it is"
     );
-    assert_eq!(server.publications, 0);
-    assert!(cache.pending().unwrap().len() == 1);
-    let observed = cache.remote_snapshot().unwrap();
-    assert_eq!(observed, remote.as_bytes());
-    let mut reviewed = page_of(&observed, space);
-    append(&mut reviewed, " local");
-    assert!(cache.resolve(id + 1, notebook::Resolution::Theirs).is_err());
-    let text = model_ops::paragraph_with(&reviewed, {
-        let outline = reviewed
-            .objects
-            .iter()
-            .find_map(|object| match object {
-                PageObject::Outline(outline) => Some(outline),
-                _ => None,
-            })
-            .unwrap();
-        outline.paragraphs[0].text().unwrap().id
-    })
-    .unwrap()
-    .text()
-    .unwrap()
-    .id;
-    let reviewed_id = model_ops::review(&cache, id, text, |page| append(page, " local"))
+    let text = published
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) => outline.paragraphs[0].text().map(|text| text.id),
+            _ => None,
+        })
+        .unwrap();
+    let again = model_ops::save(&cache, text, |page| append(page, " local"))
         .unwrap()
         .unwrap();
-    // The conflicted edit stays, emptied, and publishes with the reviewed one.
-    assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
-    assert_eq!(
-        cache.status(reviewed_id).unwrap(),
-        Some(EditStatus::Pending)
-    );
     assert!(
-        matches!(cache.sync_once(&mut server).unwrap().edit, Some((n, EditStatus::Published { .. })) if n == reviewed_id)
-    );
-    assert_eq!(
-        first_text(&page_of(&server.durable, space)),
-        first_text(&reviewed)
+        matches!(cache.sync_once(&mut server).unwrap().edit, Some((n, EditStatus::Published { .. })) if n == again)
     );
     assert!(first_text(&page_of(&server.durable, space)).ends_with(" remote local"));
 }
@@ -242,14 +235,14 @@ fn remote_changes_to_other_pages_do_not_conflict() {
         .unwrap()
         .unwrap();
     append(&mut other_page, " elsewhere");
-    let remote = PreparedEdit::page(OUTLINES, other, &other_page, "Native author").unwrap();
-    let mut server = Server::new(remote.as_bytes());
+    let remote = ops::saved(OUTLINES, other, &other_page).unwrap();
+    let mut server = Server::new(remote.as_slice());
     assert!(
         matches!(cache.sync_once(&mut server).unwrap().edit, Some((n, EditStatus::Published { .. })) if n == id)
     );
     assert_eq!(page_of(&server.durable, space), after);
     assert_eq!(page_of(&server.durable, other), other_page);
-    assert_eq!(page_of(&cache.snapshot().unwrap(), other), other_page);
+    assert_eq!(page_of(&snapshot(&cache), other), other_page);
 }
 
 #[test]
@@ -267,7 +260,7 @@ fn pending_saves_survive_reopening_the_cache() {
     let reopened = Replica::open(&path).unwrap();
     assert_eq!(reopened.pending().unwrap(), pending);
     assert_eq!(reopened.status(id).unwrap(), Some(EditStatus::Pending));
-    assert_eq!(page_of(&reopened.snapshot().unwrap(), space), after);
+    assert_eq!(page_of(&snapshot(&reopened), space), after);
 }
 
 /// Edits paragraph `index` of the first body outline: replaces its text range with `replacement`.
@@ -309,11 +302,7 @@ fn texts(page: &Page) -> Vec<String> {
 fn remote_with(space: ExGuid, change: impl FnOnce(&mut Page)) -> Server {
     let mut page = page_of(OUTLINES, space);
     change(&mut page);
-    Server::new(
-        PreparedEdit::page(OUTLINES, space, &page, "Native author")
-            .unwrap()
-            .as_bytes(),
-    )
+    Server::new(ops::saved(OUTLINES, space, &page).unwrap().as_slice())
 }
 
 #[test]
@@ -366,11 +355,16 @@ fn concurrent_edits_to_one_paragraph_merge_unless_their_ranges_overlap() {
         .unwrap()
         .unwrap();
     let mut server = remote_with(space, |page| edit_paragraph(page, 0, 0..6, "Remote"));
-    assert_eq!(
+    assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
-    assert_eq!(server.publications, 0);
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    assert!(conflicted(&server.durable, space));
+    assert_eq!(server.publications, 1);
 }
 
 #[test]
@@ -428,7 +422,7 @@ fn a_local_insertion_merges_with_a_remote_deletion_elsewhere() {
 }
 
 #[test]
-fn a_remote_deletion_of_the_edited_paragraph_conflicts() {
+fn a_remote_deletion_of_the_edited_paragraph_keeps_a_conflict_page() {
     let (space, mut after) = page_titled(OUTLINES, "Move leaf down");
     let directory = tempfile::tempdir().unwrap();
     let cache = Replica::create(directory.path().join("cache.sqlite"), OUTLINES).unwrap();
@@ -447,10 +441,15 @@ fn a_remote_deletion_of_the_edited_paragraph_conflicts() {
             .unwrap();
         outline.paragraphs.pop();
     });
-    assert_eq!(
+    assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    assert!(conflicted(&server.durable, space));
 }
 
 #[test]
@@ -515,10 +514,15 @@ fn outline_moves_merge_with_remote_text_edits_but_not_with_remote_moves() {
         };
         outline.layout.x = Some(50.0);
     });
-    assert_eq!(
+    assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    assert!(conflicted(&server.durable, space));
 }
 
 #[test]

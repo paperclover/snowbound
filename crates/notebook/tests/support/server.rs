@@ -75,8 +75,8 @@ impl Remote for Server {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         Ok(self.visible.clone())
     }
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
-        Ok(Stamp::of(&self.visible).ok())
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        Stamp::of(&self.visible).map_err(io::Error::other)
     }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         self.publications += 1;
@@ -99,13 +99,13 @@ impl Remote for Server {
             _ => Ok(()),
         }
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
         self.confirmations += 1;
         if matches!(self.fault, Fault::Confirm) {
             self.fault = Fault::None;
             return Err(failure(CommitState::Unknown));
         }
-        onestore::confirm_snapshot(self, snapshot)?;
+        onestore::confirm(self, base)?;
         if matches!(self.fault, Fault::ConfirmCommitted) {
             self.fault = Fault::None;
             return Err(failure(CommitState::Committed));
@@ -164,4 +164,101 @@ pub fn section_op(cache: &notebook::Replica, op: onestore::op::SectionOp) -> u64
             },
         )
         .unwrap()
+}
+
+/// The image the queue leaves, as a recovery archive of the cache records it.
+pub fn snapshot(cache: &notebook::Replica) -> Vec<u8> {
+    archived(cache, |recovery| recovery.snapshot())
+}
+
+/// The remote image the cache last observed, as a recovery archive records it.
+pub fn remote_snapshot(cache: &notebook::Replica) -> Vec<u8> {
+    archived(cache, |recovery| recovery.remote_snapshot())
+}
+
+fn archived(
+    cache: &notebook::Replica,
+    image: impl FnOnce(&notebook::Recovery) -> Result<Vec<u8>, notebook::Error>,
+) -> Vec<u8> {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("recovery.sqlite");
+    cache.export_recovery(&path).unwrap();
+    image(&notebook::Recovery::open(&path).unwrap()).unwrap()
+}
+
+/// `image` after another writer replaces `range` of the text object `text` with `with`.
+pub fn typed(
+    image: &[u8],
+    space: ExGuid,
+    text: ExGuid,
+    range: std::ops::Range<u32>,
+    with: &str,
+) -> Vec<u8> {
+    let op = onestore::op::PageOp::Text {
+        text,
+        range,
+        with: with.into(),
+    };
+    edited(image, vec![onestore::op::Op::Page { space, op }]).unwrap()
+}
+
+/// `image` after another writer's `ops`, sealed as one revision per space they change.
+pub fn edited(image: &[u8], ops: Vec<onestore::op::Op>) -> Result<Vec<u8>, onestore::op::OpError> {
+    let arena = onestore::Arena::default();
+    let mut section =
+        onestore::Section::open(&arena, image.to_vec()).map_err(onestore::op::OpError::Failed)?;
+    let edit = onestore::op::Edit {
+        at: 134_000_000_000_000_000,
+        ops,
+    };
+    section.apply("Other writer", &edit)?;
+    section.seal().map_err(onestore::op::OpError::Failed)?;
+    Ok(section.image())
+}
+
+/// A conflict page as the tests compare it: whose version it is and its texts.
+pub type Version = (String, Vec<String>);
+
+/// Each page's conflict pages in list order.
+pub fn conflicts(image: &[u8]) -> Vec<(ExGuid, Vec<Version>)> {
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, image.to_vec()).unwrap();
+    section
+        .conflicts()
+        .unwrap()
+        .into_iter()
+        .map(|(page, conflicts)| {
+            let conflicts = conflicts
+                .into_iter()
+                .map(|conflict| {
+                    let page = section.page(conflict.space).unwrap();
+                    (conflict.user, page_texts(&page))
+                })
+                .collect();
+            (page, conflicts)
+        })
+        .collect()
+}
+
+/// The texts of a page's outlines and title, in page order.
+pub fn page_texts(page: &onestore::page::Page) -> Vec<String> {
+    use onestore::page::PageObject;
+    page.objects
+        .iter()
+        .flat_map(|object| match object {
+            PageObject::Outline(outline) => outline.paragraphs.clone(),
+            PageObject::Title(title) => title
+                .outlines
+                .iter()
+                .flat_map(|outline| outline.paragraphs.clone())
+                .collect(),
+            _ => Vec::new(),
+        })
+        .filter_map(|paragraph| Some(paragraph.text()?.text.text().to_owned()))
+        .collect()
+}
+
+/// Whether `image` lists a conflict page under page `space`.
+pub fn conflicted(image: &[u8], space: ExGuid) -> bool {
+    conflicts(image).iter().any(|(page, _)| *page == space)
 }

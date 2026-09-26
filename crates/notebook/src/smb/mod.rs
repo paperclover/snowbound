@@ -1,9 +1,9 @@
 //! Blocking SMB access to OneNote sections, table-of-contents files and payloads.
 
-use onestore::{CommitError, CommitIo, CommitState, ExGuid};
+use onestore::{CommitError, CommitIo, CommitState};
 use smb2::{
     Session, Tree,
-    client::connection::{Connection, NegotiatedParams},
+    client::connection::{CompoundOp, Connection, Frame, NegotiatedParams},
     msg::{
         close::{CloseRequest, CloseResponse},
         create::{
@@ -22,7 +22,7 @@ use smb2::{
         flags::{Capabilities, FileAccessMask},
     },
 };
-use std::{io, ops::Range, sync::Mutex, time::Duration};
+use std::{io, sync::Mutex, time::Duration};
 use tokio::runtime::{Handle, Runtime};
 
 mod directory;
@@ -149,6 +149,54 @@ impl Client {
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
             .and_then(|result| result.map_err(io::Error::other))
             .inspect_err(|_| self.retire())?;
+        self.unpack(&self.body(command, frame)?)
+    }
+
+    /// Sends `requests` as one related compound request, which the server performs in order,
+    /// and returns each response body or status error. A request after a CREATE names the
+    /// file it opened as `FileId::SENTINEL`; each request fits one credit.
+    fn compound(&self, requests: &[(Command, &dyn Pack)]) -> io::Result<Vec<io::Result<Vec<u8>>>> {
+        if Handle::try_current().is_ok() {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| io::ErrorKind::Other)?
+            .clone()
+            .ok_or(io::ErrorKind::NotConnected)?;
+        let operations: Vec<_> = requests
+            .iter()
+            .map(|(command, body)| CompoundOp::new(*command, *body, Some(self.tree.tree_id)))
+            .collect();
+        let frames = {
+            let runtime = self.runtime.lock().map_err(|_| io::ErrorKind::Other)?;
+            runtime
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .block_on(async {
+                    tokio::time::timeout(self.timeout, connection.execute_compound(&operations))
+                        .await
+                })
+        };
+        let frames = frames
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
+            .and_then(|result| result.map_err(io::Error::other))
+            .inspect_err(|_| self.retire())?;
+        Ok(frames
+            .into_iter()
+            .zip(requests)
+            .map(|(frame, (command, _))| {
+                let frame = frame
+                    .map_err(io::Error::other)
+                    .inspect_err(|_| self.retire())?;
+                self.body(*command, frame)
+            })
+            .collect())
+    }
+
+    /// The body of a response to `command`, or its status as an error.
+    fn body(&self, command: Command, frame: Frame) -> io::Result<Vec<u8>> {
         if frame.header.command != command {
             self.retire();
             return Err(io::ErrorKind::InvalidData.into());
@@ -170,12 +218,17 @@ impl Client {
                 },
             ));
         }
-        T::unpack(&mut ReadCursor::new(&frame.body)).map_err(|error| {
+        Ok(frame.body)
+    }
+
+    fn unpack<T: Unpack>(&self, body: &[u8]) -> io::Result<T> {
+        T::unpack(&mut ReadCursor::new(body)).map_err(|error| {
             self.retire();
             io::Error::new(io::ErrorKind::InvalidData, error)
         })
     }
 
+    /// Opens as OneNote 2010 does: readers share everything, a writer denies other writers.
     fn open(&self, path: &str, write: bool) -> io::Result<File<'_>> {
         self.open_shared(path, write, if write { 5 } else { 7 })
     }
@@ -186,7 +239,7 @@ impl Client {
             if write { 0xc0000000 } else { 0x80000000 },
             sharing,
             CreateDisposition::FileOpen,
-            0x42,
+            0x40,
         )
     }
 
@@ -198,28 +251,11 @@ impl Client {
         disposition: CreateDisposition,
         options: u32,
     ) -> io::Result<File<'_>> {
-        if path.is_empty() || path.contains('\0') || path.encode_utf16().count() > 32767 {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
         let response: CreateResponse = self.request(
             Command::Create,
-            CreateRequest {
-                requested_oplock_level: OplockLevel::None,
-                impersonation_level: ImpersonationLevel::Impersonation,
-                desired_access: FileAccessMask::new(access),
-                file_attributes: 0,
-                share_access: ShareAccess(sharing),
-                create_disposition: disposition,
-                create_options: options,
-                name: smb2::encode_path(&path.replace('\\', "/")),
-                create_contexts: Vec::new(),
-            },
+            create_request(path, access, sharing, disposition, options)?,
         )?;
-        Ok(File {
-            client: self,
-            id: Some(response.file_id),
-            length: response.end_of_file,
-        })
+        Ok(File::new(self, &response))
     }
 
     /// Creates a file holding `bytes`; an existing file is an error.
@@ -286,7 +322,7 @@ impl Client {
     /// Names a section or TOC file for its notebook (`onestore::place`) under native
     /// writer coordination.
     pub fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<(), CommitError> {
-        self.commit(path, |file| {
+        self.commit(path, &[(0, 1024)], |file| {
             onestore::place(file, ancestor, name).map_err(|error| CommitError {
                 state: CommitState::NotCommitted,
                 error,
@@ -338,7 +374,9 @@ impl Client {
         path: &str,
         snapshot: impl FnOnce(&mut File<'_>) -> io::Result<Option<Vec<u8>>>,
     ) -> io::Result<Vec<u8>> {
-        let mut file = self.open(path, false)?.coordinate(path, false)?;
+        let mut file = self
+            .open(path, false)?
+            .coordinate(path, false, &[(0, 1024)])?;
         let result = snapshot(&mut file)
             .and_then(|snapshot| snapshot.ok_or_else(|| io::ErrorKind::WouldBlock.into()));
         let closed = file.close();
@@ -347,79 +385,67 @@ impl Client {
         Ok(snapshot)
     }
 
-    pub fn commit_text(
-        &self,
-        path: &str,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-        range: Range<u32>,
-        replacement: &str,
-    ) -> Result<(), CommitError> {
-        self.commit(path, |file| {
-            onestore::commit_text(file, source, space, object, range, replacement)
-        })
-    }
-
-    pub fn commit_property_bytes(
-        &self,
-        path: &str,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-        property: u32,
-        value: &[u8],
-    ) -> Result<(), CommitError> {
-        self.commit(path, |file| {
-            onestore::commit_property_bytes(file, source, space, object, property, value)
-        })
-    }
-
     /// Publishes a transaction using the same native writer coordination as text commits.
     pub fn commit_transaction(
         &self,
         path: &str,
         transaction: &onestore::Transaction,
     ) -> Result<(), CommitError> {
-        self.commit(path, |file| transaction.commit(file))
+        self.commit(path, &checked(transaction.base()), |file| {
+            transaction.commit(file)
+        })
     }
 
-    /// The header and length of a revision store, read without writer coordination or path
-    /// identity checks: a change detector for polling, never a snapshot to edit.
+    /// The header and length of a revision store, in one round trip, without writer
+    /// coordination or path identity checks: a change detector for polling, never a snapshot
+    /// to edit.
     pub fn stamp(&self, path: &str) -> io::Result<onestore::Stamp> {
-        let mut file = self.open(path, false)?;
-        let mut header = [0; 1024];
-        let mut read = 0;
-        let result = loop {
-            match file.read_at(read as u64, &mut header[read..]) {
-                Ok(0) => break Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(count) => read += count,
-                Err(error) => break Err(error),
-            }
-            if read == header.len() {
-                break Ok(());
-            }
+        let create = create_request(path, 0x80000000, 7, CreateDisposition::FileOpen, 0x40)?;
+        let read = read_request(FileId::SENTINEL, 0, 1024);
+        let close = CloseRequest {
+            file_id: FileId::SENTINEL,
+            flags: 0,
         };
-        let length = file.length;
-        let closed = file.close();
-        result?;
+        let [created, read, closed]: [_; 3] = self
+            .compound(&[
+                (Command::Create, &create),
+                (Command::Read, &read),
+                (Command::Close, &close),
+            ])?
+            .try_into()
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        let created: CreateResponse = self.unpack(&created?)?;
+        if closed.is_err() {
+            self.retire();
+        }
+        let read: ReadResponse = self.unpack(&read?)?;
         closed?;
-        Ok(onestore::Stamp { header, length })
+        let header = read
+            .data
+            .try_into()
+            .map_err(|_| io::ErrorKind::UnexpectedEof)?;
+        Ok(onestore::Stamp {
+            header,
+            length: created.end_of_file,
+        })
     }
 
-    /// Confirms an observed snapshot's durability under native writer coordination.
-    pub fn confirm_snapshot(&self, path: &str, source: &[u8]) -> Result<(), CommitError> {
-        self.commit(path, |file| onestore::confirm_snapshot(file, source))
+    /// Confirms that the file still has `base`'s stamp and is durable, then refreshes its
+    /// version, under native writer coordination.
+    pub fn confirm(&self, path: &str, base: &onestore::Stamp) -> Result<(), CommitError> {
+        self.commit(path, &checked(base), |file| onestore::confirm(file, base))
     }
 
+    /// Opens `path` for writing under OneNote's coordination, making `reads` with the locks.
     fn commit(
         &self,
         path: &str,
+        reads: &[(u64, usize)],
         operation: impl FnOnce(&mut File<'_>) -> Result<(), CommitError>,
     ) -> Result<(), CommitError> {
         let mut file = self
             .open(path, true)
-            .and_then(|file| file.coordinate(path, true))
+            .and_then(|file| file.coordinate(path, true, reads))
             .map_err(|error| CommitError {
                 state: CommitState::NotCommitted,
                 error,
@@ -443,24 +469,103 @@ impl Drop for Client {
 struct File<'a> {
     client: &'a Client,
     id: Option<FileId>,
-    /// The end of file when opened.
-    length: u64,
+    /// Writes `flush` sends ahead of its flush, in order.
+    writes: Vec<(u64, Vec<u8>)>,
+    /// Reads made under the coordination locks, each returned once to the same `read_at`.
+    prefetched: Vec<(u64, usize, Vec<u8>)>,
 }
-impl File<'_> {
-    fn coordinate(self, path: &str, write: bool) -> io::Result<Self> {
-        self.lock(0xfffffffb, 0x11)?;
-        if write {
-            self.lock(0xfffffffd, 0x12)?;
+impl<'a> File<'a> {
+    fn new(client: &'a Client, created: &CreateResponse) -> Self {
+        Self {
+            client,
+            id: Some(created.file_id),
+            writes: Vec::new(),
+            prefetched: Vec::new(),
         }
-        let current = self.client.open(path, false)?;
-        let same = self.identity()? == current.identity()?;
-        current.close()?;
-        if !same {
+    }
+
+    /// Takes OneNote 2010's coordination locks in one request (the shared reader byte, and
+    /// to write the exclusive writer byte), makes `reads` under them, then checks that the
+    /// handle is still the file at `path`: maintenance replaces a file while holding its
+    /// locks.
+    fn coordinate(mut self, path: &str, write: bool, reads: &[(u64, usize)]) -> io::Result<Self> {
+        let id = self.id.unwrap();
+        let mut locks = vec![LockElement {
+            offset: 0xfffffffb,
+            length: 1,
+            flags: 0x11,
+        }];
+        if write {
+            locks.push(LockElement {
+                offset: 0xfffffffd,
+                length: 1,
+                flags: 0x12,
+            });
+        }
+        let lock = LockRequest {
+            file_id: id,
+            lock_sequence: 0,
+            locks,
+        };
+        let [index, volume] = identity_requests(id);
+        let reading: Vec<_> = reads
+            .iter()
+            .map(|(offset, length)| read_request(id, *offset, *length))
+            .collect();
+        let mut requests: Vec<(Command, &dyn Pack)> = vec![
+            (Command::Lock, &lock),
+            (Command::QueryInfo, &index),
+            (Command::QueryInfo, &volume),
+        ];
+        requests.extend(
+            reading
+                .iter()
+                .map(|read| (Command::Read, read as &dyn Pack)),
+        );
+        let mut responses = self.client.compound(&requests)?.into_iter();
+        let mut next = || responses.next().ok_or(io::ErrorKind::InvalidData);
+        let _: LockResponse = self.client.unpack(&next()??)?;
+        let own = self.client.identity(next()?, next()?)?;
+        for (offset, length) in reads {
+            let data = match next()? {
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Vec::new(),
+                body => self.client.unpack::<ReadResponse>(&body?)?.data,
+            };
+            if data.len() > *length {
+                self.client.retire();
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+            self.prefetched.push((*offset, *length, data));
+        }
+        let create = create_request(path, 0x80, 7, CreateDisposition::FileOpen, 0)?;
+        let [index, volume] = identity_requests(FileId::SENTINEL);
+        let close = CloseRequest {
+            file_id: FileId::SENTINEL,
+            flags: 0,
+        };
+        let [created, index, volume, closed]: [_; 4] = self
+            .client
+            .compound(&[
+                (Command::Create, &create),
+                (Command::QueryInfo, &index),
+                (Command::QueryInfo, &volume),
+                (Command::Close, &close),
+            ])?
+            .try_into()
+            .map_err(|_| io::ErrorKind::InvalidData)?;
+        created?;
+        if closed.is_err() {
+            self.client.retire();
+        }
+        let current = self.client.identity(index, volume)?;
+        closed?;
+        if own != current {
             return Err(io::ErrorKind::ResourceBusy.into());
         }
         Ok(self)
     }
 
+    #[cfg(test)]
     fn lock(&self, offset: u64, flags: u32) -> io::Result<()> {
         let _: LockResponse = self.client.request(
             Command::Lock,
@@ -475,47 +580,6 @@ impl File<'_> {
             },
         )?;
         Ok(())
-    }
-
-    fn identity(&self) -> io::Result<(u64, u32)> {
-        let index: QueryInfoResponse = self.client.request(
-            Command::QueryInfo,
-            QueryInfoRequest {
-                info_type: InfoType::File,
-                file_info_class: 6,
-                output_buffer_length: 8,
-                additional_information: 0,
-                flags: 0,
-                file_id: self.id.unwrap(),
-                input_buffer: Vec::new(),
-            },
-        )?;
-        let index = u64::from_le_bytes(
-            index
-                .output_buffer
-                .try_into()
-                .map_err(|_| io::ErrorKind::InvalidData)?,
-        );
-        if index == 0 {
-            return Err(io::ErrorKind::Unsupported.into());
-        }
-        let volume: QueryInfoResponse = self.client.request(
-            Command::QueryInfo,
-            QueryInfoRequest {
-                info_type: InfoType::Filesystem,
-                file_info_class: 1,
-                output_buffer_length: 1024,
-                additional_information: 0,
-                flags: 0,
-                file_id: self.id.unwrap(),
-                input_buffer: Vec::new(),
-            },
-        )?;
-        let serial = volume
-            .output_buffer
-            .get(8..12)
-            .ok_or(io::ErrorKind::InvalidData)?;
-        Ok((index, u32::from_le_bytes(serial.try_into().unwrap())))
     }
 
     fn close(mut self) -> io::Result<()> {
@@ -540,6 +604,87 @@ impl Drop for File<'_> {
         let _ = self.release();
     }
 }
+
+impl Client {
+    /// A file's volume serial number and index, from the responses to `identity_requests`.
+    fn identity(
+        &self,
+        index: io::Result<Vec<u8>>,
+        volume: io::Result<Vec<u8>>,
+    ) -> io::Result<(u64, u32)> {
+        let index: QueryInfoResponse = self.unpack(&index?)?;
+        let index = u64::from_le_bytes(
+            index
+                .output_buffer
+                .try_into()
+                .map_err(|_| io::ErrorKind::InvalidData)?,
+        );
+        if index == 0 {
+            return Err(io::ErrorKind::Unsupported.into());
+        }
+        let volume: QueryInfoResponse = self.unpack(&volume?)?;
+        let serial = volume
+            .output_buffer
+            .get(8..12)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        Ok((index, u32::from_le_bytes(serial.try_into().unwrap())))
+    }
+}
+
+/// FileInternalInformation and FileFsVolumeInformation queries.
+fn identity_requests(file_id: FileId) -> [QueryInfoRequest; 2] {
+    let query = |info_type, file_info_class, output_buffer_length| QueryInfoRequest {
+        info_type,
+        file_info_class,
+        output_buffer_length,
+        additional_information: 0,
+        flags: 0,
+        file_id,
+        input_buffer: Vec::new(),
+    };
+    [
+        query(InfoType::File, 6, 8),
+        query(InfoType::Filesystem, 1, 1024),
+    ]
+}
+
+fn create_request(
+    path: &str,
+    access: u32,
+    sharing: u32,
+    disposition: CreateDisposition,
+    options: u32,
+) -> io::Result<CreateRequest> {
+    if path.is_empty() || path.contains('\0') || path.encode_utf16().count() > 32767 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(CreateRequest {
+        requested_oplock_level: OplockLevel::None,
+        impersonation_level: ImpersonationLevel::Impersonation,
+        desired_access: FileAccessMask::new(access),
+        file_attributes: 0,
+        share_access: ShareAccess(sharing),
+        create_disposition: disposition,
+        create_options: options,
+        name: smb2::encode_path(&path.replace('\\', "/")),
+        create_contexts: Vec::new(),
+    })
+}
+
+fn read_request(file_id: FileId, offset: u64, length: usize) -> ReadRequest {
+    ReadRequest {
+        file_id,
+        offset,
+        length: length as u32,
+        minimum_count: 1,
+        flags: 0,
+        padding: 0,
+        channel: 0,
+        remaining_bytes: 0,
+        read_channel_info: Vec::new(),
+    }
+}
+
 fn read_size(params: &NegotiatedParams, credits: u16, requested: usize) -> usize {
     let budget = if params.dialect != Dialect::Smb2_0_2
         && params.capabilities.contains(Capabilities::LARGE_MTU)
@@ -558,6 +703,15 @@ impl CommitIo for File<'_> {
     fn read_at(&mut self, offset: u64, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() {
             return Ok(0);
+        }
+        if let Some(at) = self
+            .prefetched
+            .iter()
+            .position(|(start, length, _)| *start == offset && *length == output.len())
+        {
+            let (_, _, data) = self.prefetched.swap_remove(at);
+            output[..data.len()].copy_from_slice(&data);
+            return Ok(data.len());
         }
         let mut size = 0;
         let response: io::Result<ReadResponse> =
@@ -595,39 +749,70 @@ impl CommitIo for File<'_> {
         output[..response.data.len()].copy_from_slice(&response.data);
         Ok(response.data.len())
     }
+    /// Queues at most one request's worth of `bytes`; `flush` sends it.
     fn write_at(&mut self, offset: u64, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.is_empty() {
-            return Ok(0);
-        }
         let size = bytes.len().min(65536);
-        let response: WriteResponse = self.client.request(
-            Command::Write,
-            WriteRequest {
-                file_id: self.id.unwrap(),
+        if size > 0 {
+            self.writes.push((offset, bytes[..size].to_vec()));
+        }
+        Ok(size)
+    }
+
+    /// Sends the queued writes and then the flush in related compound requests of at most
+    /// sixteen, awaiting each: the server performs a compound in order, and answers the flush
+    /// once every write before it is durable.
+    fn flush(&mut self) -> io::Result<()> {
+        let file_id = self.id.unwrap();
+        let writes: Vec<_> = self
+            .writes
+            .drain(..)
+            .map(|(offset, data)| WriteRequest {
+                file_id,
                 offset,
-                data: bytes[..size].to_vec(),
+                data,
                 data_offset: 112,
-                flags: 1,
+                flags: 0,
                 channel: 0,
                 remaining_bytes: 0,
                 write_channel_info_offset: 0,
                 write_channel_info_length: 0,
-            },
-        )?;
-        if response.count as usize > size {
-            return Err(io::ErrorKind::InvalidData.into());
+            })
+            .collect();
+        let flush = FlushRequest { file_id };
+        let mut requests: Vec<(Command, &dyn Pack)> = writes
+            .iter()
+            .map(|write| (Command::Write, write as &dyn Pack))
+            .collect();
+        requests.push((Command::Flush, &flush));
+        let mut sizes = writes.iter().map(|write| write.data.len());
+        for compound in requests.chunks(16) {
+            for (response, (command, _)) in
+                self.client.compound(compound)?.into_iter().zip(compound)
+            {
+                let body = response?;
+                if *command == Command::Flush {
+                    let _: FlushResponse = self.client.unpack(&body)?;
+                    continue;
+                }
+                let written: WriteResponse = self.client.unpack(&body)?;
+                let size = sizes.next().ok_or(io::ErrorKind::InvalidData)?;
+                if written.count as usize != size {
+                    return Err(if (written.count as usize) < size {
+                        io::ErrorKind::WriteZero
+                    } else {
+                        io::ErrorKind::InvalidData
+                    }
+                    .into());
+                }
+            }
         }
-        Ok(response.count as usize)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        let _: FlushResponse = self.client.request(
-            Command::Flush,
-            FlushRequest {
-                file_id: self.id.unwrap(),
-            },
-        )?;
         Ok(())
     }
+}
+
+/// The reads `Stamp::check` makes: the header and a probe of the last byte.
+fn checked(stamp: &onestore::Stamp) -> [(u64, usize); 2] {
+    [(0, 1024), (stamp.length.saturating_sub(1), 2)]
 }
 
 #[cfg(test)]

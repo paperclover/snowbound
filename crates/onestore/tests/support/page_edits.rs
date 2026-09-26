@@ -1,8 +1,11 @@
-//! Drives random page-model mutations through the page writer and checks its contract:
-//! a published model reads back as written, and objects outside the edit keep their bytes.
+//! Drives random page-model mutations through `op::lower_page` and a `Section` and checks
+//! the contract: the page the section holds is what the model oracle predicts from the ops,
+//! the sealed image reads back as the edited model, and objects outside the edit keep their
+//! bytes.
 
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    Arena, ExGuid, RevisionIndex, Section, Store,
+    op::{self, Op},
     document::{Document, Format, Layout},
     page::{
         Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent,
@@ -564,13 +567,31 @@ pub fn run(input: &[u8]) {
     let Some(mut after) = model(source, space) else {
         return;
     };
+    let before = after.clone();
     mutate(&mut after, &mut bytes);
-    let Ok(edit) = PreparedEdit::page(source, space, &after, "Fuzz author") else {
+    let Ok(ops) = onestore::op::lower_page(&before, &after) else {
         return;
     };
-    let written = edit.as_bytes();
-    if written == source.as_slice() {
-        let before = model(source, space).unwrap();
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.clone()).unwrap();
+    let edit = op::Edit {
+        at: 134_000_000_000_000_000,
+        ops: ops.iter().map(|op| Op::Page { space, op: op.clone() }).collect(),
+    };
+    if section.apply("Fuzz author", &edit).is_err() {
+        assert_eq!(section.page(space).unwrap(), before, "a refused edit changes nothing");
+        return;
+    }
+    let mut predicted = before.clone();
+    for op in &ops {
+        onestore::op::predict(&mut predicted, op).unwrap();
+    }
+    assert_eq!(
+        projection(&section.page(space).unwrap()),
+        projection(&predicted),
+        "the model oracle"
+    );
+    if section.seal().unwrap().is_none() {
         assert_eq!(
             projection(&before),
             projection(&after),
@@ -578,6 +599,7 @@ pub fn run(input: &[u8]) {
         );
         return;
     }
+    let written = &section.image();
     current::current(written);
     let stored = model(written, space).expect("the written page reads back");
     let (stored, expected) = (projection(&stored), projection(&after));

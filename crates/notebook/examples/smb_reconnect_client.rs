@@ -1,9 +1,11 @@
 #[path = "../../onestore/examples/support/concurrent.rs"]
 mod concurrent;
+#[path = "support/edit.rs"]
+mod edit;
 
 use notebook::smb::{Client, Credentials};
 use onestore::{
-    CommitError, CommitState, ExGuid, RevisionIndex, Store,
+    CommitError, CommitState, ExGuid, RevisionIndex, Stamp, Store,
     document::{Document, Kind},
 };
 use serde_json::json;
@@ -155,14 +157,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args,
         read,
         |path, source, space, object, range, replacement| {
-            let outcome = client.borrow().as_ref().unwrap().commit_text(
-                path,
-                source,
-                space,
-                object,
-                range,
-                replacement,
-            );
+            let outcome =
+                edit::replaced(source, space, object, range, replacement).and_then(|transaction| {
+                    client
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .commit_transaction(path, &transaction)
+                });
             let Err(error) = outcome else {
                 return Ok(());
             };
@@ -209,14 +211,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error: io::Error::other(failure.to_string()),
                     })?;
                 if published {
-                    let confirmation = client.borrow().as_ref().unwrap().commit_text(
-                        path,
-                        &current,
-                        space,
-                        object,
-                        0..0,
-                        "",
-                    );
+                    let confirmation = Stamp::of(&current)
+                        .map_err(|failure| CommitError {
+                            state: CommitState::NotCommitted,
+                            error: io::Error::other(failure.to_string()),
+                        })
+                        .and_then(|base| client.borrow().as_ref().unwrap().confirm(path, &base));
                     if let Err(failure) = confirmation
                         && failure.state != CommitState::Committed
                     {

@@ -1,10 +1,10 @@
 mod support {
     pub mod view;
 }
-use support::view::view;
+use support::view::{cached, view};
 
 use notebook::{EditStatus, Remote, Replica};
-use onestore::{CommitError, CommitIo, Transaction};
+use onestore::{CommitError, CommitIo, Stamp, Transaction};
 use serde_json::json;
 use std::{
     env,
@@ -73,16 +73,19 @@ impl Remote for Disk {
         phase("publish-after");
         result
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        Stamp::of(&self.read()?).map_err(io::Error::other)
+    }
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
         phase("confirm-before");
-        let result = onestore::confirm_snapshot(self, snapshot);
+        let result = onestore::confirm(self, base);
         phase("confirm-after");
         result
     }
 }
 
 fn report(cache: &Replica, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let local = view(&cache.snapshot()?)?;
+    let (_, _, local) = cached(cache)?;
     let remote = view(&fs::read(root.join("remote.one"))?)?;
     let (status, revision) = match cache.status(1)? {
         Some(EditStatus::Pending) => ("pending", None),
@@ -90,14 +93,13 @@ fn report(cache: &Replica, root: &Path) -> Result<(), Box<dyn std::error::Error>
             ("uncertain", Some(revision.to_string()))
         }
         Some(EditStatus::Published { revision }) => ("published", Some(revision.to_string())),
-        Some(EditStatus::Conflict(_)) => ("conflict", None),
         Some(EditStatus::Archived { archive }) => ("archived", Some(archive)),
         None => ("missing", None),
     };
     println!(
         "{}",
         json!({"event":"state", "status":status, "revision":revision,
-        "local_text":local.text, "remote_text":remote.text, "remote_revision":remote.revision.to_string(),
+        "local_text":local, "remote_text":remote.text, "remote_revision":remote.revision.to_string(),
         "pending":cache.pending()?.iter().map(|pending| match &pending.edit.ops[..] {
             [onestore::op::Op::Page { op: onestore::op::PageOp::Text { range, with, .. }, .. }] =>
                 json!({"id":pending.id,"replacement":with,"range":[range.start,range.end]}),

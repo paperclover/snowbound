@@ -1,8 +1,11 @@
 //! A rewritten object stores the global id table entries it names, not the table of the
 //! revision it was read from.
 
+#[path = "support/ops.rs"]
+mod ops;
+
 use onestore::{
-    PreparedEdit, RevisionIndex, Store,
+    RevisionIndex, Store,
     document::Document,
     page::{Page, PageObject, Paragraph},
 };
@@ -64,17 +67,17 @@ fn a_text_edit_stores_the_table_entries_it_names() {
         text.text
             .append(Paragraph::new(" and a few more words".to_owned(), format))
             .unwrap();
-        let written = PreparedEdit::page(&bytes, space, &page, "Rust")
+        let written = ops::saved(&bytes, space, &page)
             .unwrap()
-            .as_bytes()
+            .as_slice()
             .to_vec();
         for (entries, span) in tables(&written, bytes.len()) {
             sparse |= (entries as u32) < span;
         }
         assert_eq!(
-            PreparedEdit::page(&written, space, &page, "Rust")
+            ops::saved(&written, space, &page)
                 .unwrap()
-                .as_bytes(),
+                .as_slice(),
             written
         );
         bytes = written;

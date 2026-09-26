@@ -1,9 +1,12 @@
 //! Paragraph splits and joins expressed as page-model differences: reconciliation against
 //! native OneNote captures, dependent edits, uncertain attempts and competing clients.
 
-use notebook::{ConflictKind, EditStatus, Replica};
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
+
+use notebook::{EditStatus, Replica};
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::Document,
     page::{Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id},
 };
@@ -11,7 +14,7 @@ use std::path::Path;
 
 #[path = "support/server.rs"]
 mod server;
-use server::{Fault, Server, pages};
+use server::{Fault, Server, conflicts, pages, snapshot, typed};
 #[path = "support/model_ops.rs"]
 mod model_ops;
 use model_ops::{AUTHOR, outlines_mut, page_of, replace_text};
@@ -175,16 +178,25 @@ fn save_page(
     text: ExGuid,
     edit: impl FnOnce(&mut Page),
 ) -> Result<Option<u64>, notebook::Error> {
-    let source = cache.snapshot()?;
+    let source = snapshot(cache);
     let (space, mut page) = holder(&source, text);
     edit(&mut page);
     model_ops::save_as(cache, space, &page, AUTHOR)
 }
 
-/// Resolves a conflict by taking the remote page, then saves `edit` of it.
-fn review_page(cache: &Replica, id: u64, text: ExGuid, edit: impl FnOnce(&mut Page)) {
-    cache.resolve(id, notebook::Resolution::Theirs).unwrap();
+/// Makes `edit` again on the page as the remote's version left it, as a writer does after
+/// a conflict page kept the first try.
+fn redo_page(cache: &Replica, text: ExGuid, edit: impl FnOnce(&mut Page)) {
     save_page(cache, text, edit).unwrap().unwrap();
+}
+
+/// The conflict pages `image` lists under page `space`.
+fn conflict_pages(image: &[u8], space: ExGuid) -> usize {
+    conflicts(image)
+        .into_iter()
+        .filter(|(page, _)| *page == space)
+        .map(|(_, pages)| pages.len())
+        .sum()
 }
 
 /// The styled text of an object anywhere on a page.
@@ -250,12 +262,15 @@ fn reconcile_controls() -> (Vec<u8>, Vec<serde_json::Value>) {
         drop(cache);
         cache = Replica::open(&path).unwrap();
         assert_eq!(cache.pending().unwrap(), pending);
-        let (actual, status) = cache.sync_once(&mut server).unwrap().edit.unwrap();
-        assert_eq!(actual, id);
-        let reviewed = matches!(status, EditStatus::Conflict(_));
+        let kept = conflict_pages(&server.visible, space);
+        let (_, status) = cache.sync_once(&mut server).unwrap().edit.unwrap();
+        assert!(matches!(
+            cache.status(id).unwrap(),
+            Some(EditStatus::Published { .. })
+        ));
+        let reviewed = conflict_pages(&server.visible, space) > kept;
         let receipt = if reviewed {
-            assert_eq!(cache.pending().unwrap(), pending);
-            review_page(&cache, id, left, apply);
+            redo_page(&cache, left, apply);
             cache.sync_once(&mut server).unwrap().edit.unwrap().1
         } else {
             automatic += 1;
@@ -301,7 +316,7 @@ fn reconcile_controls() -> (Vec<u8>, Vec<serde_json::Value>) {
             panic!("{name} dependent: {status:?}")
         };
         assert!(cache.pending().unwrap().is_empty());
-        assert_eq!(cache.snapshot().unwrap(), server.durable);
+        assert_eq!(snapshot(&cache), server.durable);
         recorded.push(
             serde_json::json!({"case": name, "space": space, "intent": intent,
             "outcome": if reviewed { "reviewed" } else { "automatic" },
@@ -309,12 +324,13 @@ fn reconcile_controls() -> (Vec<u8>, Vec<serde_json::Value>) {
         );
     }
     assert_eq!((recorded.len(), automatic), (16, 8));
-    assert_eq!(server.publications, 32);
+    // Each edit and its dependent, and each conflict page before its edit made again.
+    assert_eq!(server.publications, 32 + 16 - automatic);
     (server.durable, recorded)
 }
 
 #[test]
-fn native_keyboard_edits_merge_with_offline_splits_and_joins_or_survive_review() {
+fn native_keyboard_edits_merge_with_offline_splits_and_joins_or_keep_a_conflict_page() {
     let (durable, cases) = reconcile_controls();
     let expected = [
         ("Split remote prefix", "automatic", vec!["Xab", "🦀Cd"]),
@@ -349,8 +365,9 @@ fn native_keyboard_edits_merge_with_offline_splits_and_joins_or_survive_review()
 }
 
 #[test]
-fn a_native_text_object_replacement_conflicts_with_every_offline_split_and_join() {
+fn a_native_text_object_replacement_keeps_a_conflict_page_for_every_offline_split_and_join() {
     let mut server = Server::new(REPLACED);
+    let mut count = 0;
     for (space, name, split) in controls() {
         let original = page_of(BEFORE, space);
         let left = body(&original)[0].text().unwrap().id;
@@ -366,24 +383,23 @@ fn a_native_text_object_replacement_conflicts_with_every_offline_split_and_join(
         let id = model_ops::save_as(&cache, space, &after, AUTHOR)
             .unwrap()
             .unwrap();
-        let local = cache.snapshot().unwrap();
-        let pending = cache.pending().unwrap();
-        assert_eq!(
-            cache.sync_once(&mut server).unwrap().edit,
-            Some((id, EditStatus::Conflict(ConflictKind::ContentChanged))),
+        let remote = page_of(&server.visible, space);
+        assert!(
+            matches!(
+                cache.sync_once(&mut server).unwrap().edit,
+                Some((_, EditStatus::Published { .. }))
+            ),
             "{name}"
         );
-        drop(cache);
-        let cache = Replica::open(&path).unwrap();
-        assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
-        assert_eq!(cache.pending().unwrap(), pending);
-        assert_eq!(
-            cache.status(id).unwrap(),
-            Some(EditStatus::Conflict(ConflictKind::ContentChanged))
+        assert!(
+            matches!(cache.status(id).unwrap(), Some(EditStatus::Published { .. })),
+            "{name}"
         );
+        assert_eq!(page_of(&server.visible, space), remote, "{name}");
+        assert_eq!(conflict_pages(&server.visible, space), 1, "{name}");
+        count += 1;
     }
-    assert_eq!(server.publications, 0);
-    assert_eq!(server.visible, REPLACED);
+    assert_eq!(server.publications, count);
 }
 
 /// Replays a recorded native split or join intent as a page-model difference.
@@ -459,7 +475,7 @@ fn offline_paragraphs(output: Option<&Path>) {
         {
             let intent = &case["intent"];
             let left = origin(intent, split);
-            let (space, page) = holder(&cache.snapshot().unwrap(), left);
+            let (space, page) = holder(&snapshot(&cache), left);
             let offset = if split {
                 intent["offset"].as_u64().unwrap()
             } else {
@@ -468,7 +484,7 @@ fn offline_paragraphs(output: Option<&Path>) {
             let prefixed = offset > 0 && !content(&page, left).text().is_empty();
             if prefixed {
                 server.visible =
-                    onestore::replace_text(&server.visible, space, left, 0..0, "\u{2602}").unwrap();
+                    typed(&server.visible, space, left, 0..0, "\u{2602}");
                 server.durable.clone_from(&server.visible);
             }
             let Ok(queued) = save_page(&cache, left, |page| replay(page, intent, split)) else {
@@ -484,6 +500,8 @@ fn offline_paragraphs(output: Option<&Path>) {
             let case = entry["case"].as_str().unwrap().to_owned();
             let intent = entry["intent"].clone();
             let mut uncertain = id % 2 == 0;
+            let mut kept = conflict_pages(&server.visible, space);
+            let mut id = id;
             let revision = loop {
                 if uncertain {
                     server.fault = Fault::UnknownAfter;
@@ -501,7 +519,7 @@ fn offline_paragraphs(output: Option<&Path>) {
                     Ok(notebook::Synced {
                         edit: Some((_, EditStatus::Published { revision })),
                         ..
-                    }) => {
+                    }) if conflict_pages(&server.visible, space) == kept => {
                         assert!(matches!(
                             cache.status(id).unwrap(),
                             Some(EditStatus::Published { .. })
@@ -509,20 +527,21 @@ fn offline_paragraphs(output: Option<&Path>) {
                         break revision;
                     }
                     Ok(notebook::Synced {
-                        edit: Some((actual, EditStatus::Conflict(_))),
+                        edit: Some((_, EditStatus::Published { .. })),
                         ..
                     }) => {
-                        assert_eq!(actual, id);
+                        kept += 1;
                         server.fault = Fault::None;
                         reviewed.push(case.clone());
-                        // The reviewed split sits after the remote's one-unit prefix.
+                        // The split made again sits after the remote's one-unit prefix.
                         let mut placed = intent.clone();
                         if split && entry["remote_prefix"] == true {
                             placed["offset"] = (intent["offset"].as_u64().unwrap() + 1).into();
                         }
-                        review_page(&cache, id, origin(&intent, split), |page| {
+                        redo_page(&cache, origin(&intent, split), |page| {
                             replay(page, &placed, split)
                         });
+                        id = cache.pending().unwrap().last().unwrap().id;
                     }
                     other => panic!("{name} {case}: {other:?}"),
                 }
@@ -543,7 +562,7 @@ fn offline_paragraphs(output: Option<&Path>) {
         );
         assert_eq!(server.publications, entries.len());
         assert_eq!(cache.sync_once(&mut server).unwrap().edit, None);
-        assert_eq!(cache.snapshot().unwrap(), server.durable);
+        assert_eq!(snapshot(&cache), server.durable);
         if output.is_some() {
             cache
                 .export_recovery(folder.join("recovery.sqlite"))
@@ -573,9 +592,9 @@ fn remote_with(space: ExGuid, change: impl FnOnce(&mut Page)) -> Server {
     let mut page = page_of(BEFORE, space);
     change(&mut page);
     Server::new(
-        PreparedEdit::page(BEFORE, space, &page, "Native author")
+        ops::saved(BEFORE, space, &page)
             .unwrap()
-            .as_bytes(),
+            .as_slice(),
     )
 }
 
@@ -611,7 +630,7 @@ fn a_split_publishes_two_paragraphs_and_a_join_puts_them_back() {
         ["ab\u{1f980}cd", "Right", "Preserved sibling"]
     );
     assert_eq!(server.publications, 2);
-    assert_eq!(cache.snapshot().unwrap(), server.durable);
+    assert_eq!(snapshot(&cache), server.durable);
 }
 
 #[test]
@@ -637,7 +656,7 @@ fn a_split_merges_with_a_remote_edit_to_another_paragraph() {
 }
 
 #[test]
-fn a_join_conflicts_when_the_remote_changed_the_paragraph_it_removes() {
+fn a_join_keeps_a_conflict_page_when_the_remote_changed_the_paragraph_it_removes() {
     let (space, page) = control("Join remote prefix");
     let (left, right) = (
         body(&page)[0].text().unwrap().id,
@@ -649,12 +668,16 @@ fn a_join_conflicts_when_the_remote_changed_the_paragraph_it_removes() {
         .unwrap()
         .unwrap();
     let mut server = remote_with(space, |page| replace_text(page, right, 0..0, "Remote "));
-    assert_eq!(
+    assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
-    assert_eq!(server.publications, 0);
-    review_page(&cache, id, left, |page| join_paragraphs(page, left, right));
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(matches!(
+        cache.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    assert_eq!(conflict_pages(&server.durable, space), 1);
+    redo_page(&cache, left, |page| join_paragraphs(page, left, right));
     assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
         Some((_, EditStatus::Published { .. }))
@@ -680,7 +703,7 @@ fn edits_dependent_on_a_published_split_survive_reopen() {
         .unwrap()
         .unwrap();
     cache.sync_once(&mut server).unwrap().edit.unwrap();
-    let tail = body(&page_of(&cache.snapshot().unwrap(), space))[1]
+    let tail = body(&page_of(&snapshot(&cache), space))[1]
         .text()
         .unwrap()
         .id;
@@ -689,17 +712,17 @@ fn edits_dependent_on_a_published_split_survive_reopen() {
     })
     .unwrap()
     .unwrap();
-    let local = cache.snapshot().unwrap();
+    let local = snapshot(&cache);
     let pending = cache.pending().unwrap();
     drop(cache);
     cache = Replica::open(&path).unwrap();
-    assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+    assert_eq!(pages(&snapshot(&cache)), pages(&local));
     assert_eq!(cache.pending().unwrap(), pending);
     let mut remote = page_of(&server.durable, space);
     replace_text(&mut remote, other, 0..0, "Remote ");
-    server.visible = PreparedEdit::page(&server.durable, space, &remote, "Native author")
+    server.visible = ops::saved(&server.durable, space, &remote)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     server.durable.clone_from(&server.visible);
     assert!(
@@ -742,7 +765,7 @@ fn uncertain_splits_and_joins_keep_the_original_attempt_across_reopen() {
             })
             .unwrap()
             .unwrap();
-            let local = cache.snapshot().unwrap();
+            let local = snapshot(&cache);
             let pending = cache.pending().unwrap();
             let mut server = Server::new(BEFORE);
             server.fault = fault;
@@ -764,7 +787,7 @@ fn uncertain_splits_and_joins_keep_the_original_attempt_across_reopen() {
                 Fault::UnknownBefore => {
                     assert!(matches!(state, EditStatus::AwaitingConfirmation { .. }));
                     assert_eq!(cache.pending().unwrap(), pending);
-                    assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+                    assert_eq!(pages(&snapshot(&cache)), pages(&local));
                     for _ in 0..3 {
                         assert_eq!(
                             cache.sync_once(&mut server).unwrap().edit,
@@ -777,7 +800,7 @@ fn uncertain_splits_and_joins_keep_the_original_attempt_across_reopen() {
                 }
                 Fault::UnknownAfter => {
                     assert!(matches!(state, EditStatus::AwaitingConfirmation { .. }));
-                    assert_eq!(pages(&cache.snapshot().unwrap()), pages(&local));
+                    assert_eq!(pages(&snapshot(&cache)), pages(&local));
                     assert!(matches!(
                         cache.sync_once(&mut server).unwrap().edit.unwrap().1,
                         EditStatus::Published { .. }
@@ -797,13 +820,13 @@ fn uncertain_splits_and_joins_keep_the_original_attempt_across_reopen() {
             };
             assert_eq!(texts(&page_of(&server.durable, space)), expected);
             assert_eq!(cache.sync_once(&mut server).unwrap().edit, None);
-            assert_eq!(cache.snapshot().unwrap(), server.durable);
+            assert_eq!(snapshot(&cache), server.durable);
         }
     }
 }
 
 #[test]
-fn a_competing_join_leaves_the_other_client_a_reviewable_split() {
+fn a_competing_join_leaves_the_other_client_its_split_on_a_conflict_page() {
     let (space, page) = control("Join remote prefix");
     let (left, right) = (
         body(&page)[0].text().unwrap().id,
@@ -819,27 +842,24 @@ fn a_competing_join_leaves_the_other_client_a_reviewable_split() {
     let id = save_page(&second, right, |page| split_paragraph(page, right, 2))
         .unwrap()
         .unwrap();
-    let local = second.snapshot().unwrap();
-    let pending = second.pending().unwrap();
     let mut server = Server::new(BEFORE);
     assert!(matches!(
         first.sync_once(&mut server).unwrap().edit.unwrap().1,
         EditStatus::Published { .. }
     ));
-    assert_eq!(
+    assert!(matches!(
         second.sync_once(&mut server).unwrap().edit,
-        Some((id, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
-    assert_eq!(server.publications, 1);
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert_eq!(server.publications, 2);
+    assert_eq!(conflict_pages(&server.durable, space), 1);
     drop(second);
     let second = Replica::open(&path).unwrap();
-    assert_eq!(pages(&second.snapshot().unwrap()), pages(&local));
-    assert_eq!(second.pending().unwrap(), pending);
-    assert_eq!(
+    assert!(matches!(
         second.status(id).unwrap(),
-        Some(EditStatus::Conflict(ConflictKind::ContentChanged))
-    );
-    review_page(&second, id, left, |page| {
+        Some(EditStatus::Published { .. })
+    ));
+    redo_page(&second, left, |page| {
         split_paragraph(page, left, 2);
     });
     assert!(matches!(

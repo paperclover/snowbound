@@ -35,11 +35,7 @@ impl Client {
                 create_contexts: Vec::new(),
             },
         )?;
-        let file = File {
-            client: self,
-            id: Some(response.file_id),
-            length: response.end_of_file,
-        };
+        let file = File::new(self, &response);
         let mut entries = BTreeMap::new();
         loop {
             let response: io::Result<QueryDirectoryResponse> =

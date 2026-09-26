@@ -7,7 +7,11 @@
 
 mod crypto;
 
-use crate::{ExGuid, FileDataReference, ObjectData, Reference, RevisionIndex, document::Document};
+use crate::{
+    ExGuid, FileDataReference, ObjectData, Reference, RevisionIndex, Transaction,
+    document::Document,
+    op::{Edit, Op, OpError},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -107,7 +111,18 @@ pub struct UnlockedSection<'a> {
 impl<'a> UnlockedSection<'a> {
     /// Verifies the password and every labeled revision before exposing a view.
     /// Metadata and password input are each bounded to 64 KiB.
-    pub fn open(index: &'a RevisionIndex<'a>, password: &str, mut limits: Limits) -> Result<Self> {
+    pub fn open(index: &'a RevisionIndex<'a>, password: &str, limits: Limits) -> Result<Self> {
+        Self::unlock(index, limits, |metadata, rounds| {
+            crypto::Key::open(metadata, password, rounds)
+        })
+    }
+
+    /// `open` with each distinct encryption metadata's key from `key`.
+    fn unlock(
+        index: &'a RevisionIndex<'a>,
+        mut limits: Limits,
+        mut key: impl FnMut(&[u8], &mut u64) -> Result<crypto::Key>,
+    ) -> Result<Self> {
         if index.store.header.file_type != crate::FileType::Section {
             return Err(Error::Unsupported);
         }
@@ -163,10 +178,7 @@ impl<'a> UnlockedSection<'a> {
             let metadata =
                 metadata.ok_or_else(|| invalid("Protected object space has no revision"))?;
             if !keys.contains_key(metadata) {
-                keys.insert(
-                    metadata,
-                    crypto::Key::open(metadata, password, &mut limits.kdf_rounds)?,
-                );
+                keys.insert(metadata, key(metadata, &mut limits.kdf_rounds)?);
             }
             let key = &keys[metadata];
             for rid in space.labels.values().copied().collect::<BTreeSet<_>>() {
@@ -294,8 +306,10 @@ impl UnlockedSection<'_> {
         use crate::write::{PropertyObject, RevisionEdit, append_revisions};
         let copy = |space: ExGuid, revision: ExGuid| {
             let revision = self.resolve(space, revision)?;
+            // A revision still declares objects its edits detached; a new one holds live ones.
+            let live = revision.reachable()?;
             let mut objects = BTreeMap::new();
-            for (id, object) in &revision.objects {
+            for (id, object) in revision.objects.iter().filter(|(id, _)| live.contains(id)) {
                 let copy = match object.data {
                     ObjectData::File {
                         reference,
@@ -390,60 +404,66 @@ impl UnlockedSection<'_> {
     }
 }
 
-/// An edited page of a protected section as one stored revision per changed space, the
-/// protected counterpart of [`crate::PreparedEdit::page`].
-pub(crate) fn write_page(
-    source: &[u8],
-    password: &str,
-    space: ExGuid,
-    page: &crate::page::Page,
-    author: &str,
-) -> Result<Vec<u8>> {
-    let store = crate::Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    let unlocked = UnlockedSection::open(&index, password, Limits::default())?;
-    if unlocked.keys.len() != 1 {
-        return Err(Error::Unsupported);
-    }
-    let twin = unlocked.twin()?;
-    let applied = Zeroizing::new(crate::page::write::write_page(&twin, space, page, author)?);
-    let applied_store = crate::Store::parse(&applied)?;
-    let applied_index = RevisionIndex::parse(&applied_store)?;
-    let twin_store = crate::Store::parse(&twin)?;
-    if RevisionIndex::parse(&twin_store)?
-        .spaces
-        .keys()
-        .ne(applied_index.spaces.keys())
-    {
-        return Err(invalid("Page edits cannot create object spaces"));
-    }
-    // The twin's scaffold spaces are not the section's.
-    let mut edited = Vec::new();
-    for (sid, space) in &index.spaces {
-        let rid = applied_index.active(*sid)?;
-        if space.labels.get(&(ExGuid::default(), 1)) != Some(&rid) {
-            edited.push((*sid, applied_index.resolve(*sid, rid)?));
+impl UnlockedSection<'_> {
+    /// Applies `edit` to this section as `Section::apply` applies it to an ordinary one and
+    /// seals the result as one revision per changed space, stored under the section's key.
+    /// Page ops only: a protected section's page list is not edited.
+    pub fn apply(&self, author: &str, edit: &Edit) -> std::result::Result<Transaction, OpError> {
+        let failed = |error: crate::Error| OpError::Failed(error);
+        if self.keys.len() != 1 {
+            return Err(OpError::Unsupported(
+                "Only a section under one key takes edits",
+            ));
         }
+        if edit.ops.iter().any(|op| matches!(op, Op::Section(_))) {
+            return Err(OpError::Unsupported("A protected section's page list is not edited"));
+        }
+        let twin = self.twin().map_err(failed)?;
+        let arena = crate::Arena::default();
+        let mut section = crate::Section::open(&arena, twin.to_vec()).map_err(failed)?;
+        section.apply(author, edit)?;
+        section.seal().map_err(failed)?;
+        let applied = Zeroizing::new(section.image());
+        drop(section);
+        let applied_store = crate::Store::parse(&applied).map_err(failed)?;
+        let applied_index = RevisionIndex::parse(&applied_store).map_err(failed)?;
+        // The twin's scaffold spaces are not the section's.
+        let edited = self
+            .index
+            .spaces
+            .keys()
+            .map(|space| Ok((*space, applied_index.resolve_active(*space)?)))
+            .collect::<std::result::Result<Vec<_>, crate::Error>>()
+            .map_err(failed)?;
+        let edited: Vec<_> = edited.iter().map(|(space, after)| (*space, after)).collect();
+        let payloads = crate::write::declared_payloads(&applied_store)
+            .into_iter()
+            .map(|guid| Ok((guid, applied_store.file_data(guid)?)))
+            .collect::<std::result::Result<Vec<_>, crate::Error>>()
+            .map_err(failed)?;
+        let transaction = crate::write::squash(self.index, &edited, &payloads, Some(self))
+            .map_err(failed)?
+            .ok_or(OpError::Unsupported("The edit changes nothing"))?;
+        let written = crate::write::applied(self.index.store.data, Some(&transaction))
+            .map_err(failed)?;
+        let store = crate::Store::parse(&written).map_err(failed)?;
+        let index = RevisionIndex::parse(&store).map_err(failed)?;
+        UnlockedSection::unlock(&index, Limits::default(), |metadata, _| {
+            self.keys.get(metadata).cloned().ok_or(Error::PasswordMismatch)
+        })
+        .map_err(|error| match error {
+            Error::Invalid(error) => failed(error),
+            _ => failed(crate::Error {
+                offset: 0,
+                message: "The written section does not unlock under its key",
+            }),
+        })?;
+        Ok(transaction)
     }
-    let edited: Vec<_> = edited.iter().map(|(sid, after)| (*sid, after)).collect();
-    let payloads = crate::page::write::declared_payloads(&applied_store)
-        .into_iter()
-        .map(|guid| Ok((guid, applied_store.file_data(guid)?)))
-        .collect::<std::result::Result<Vec<_>, crate::Error>>()?;
-    let written = crate::page::write::squash(
-        &index,
-        &edited,
-        &payloads,
-        &BTreeMap::new(),
-        Some(&unlocked),
-    )?;
-    let store = crate::Store::parse(&written)?;
-    UnlockedSection::open(&RevisionIndex::parse(&store)?, password, Limits::default())?;
-    Ok(written)
 }
 
 impl UnlockedSection<'_> {
-    /// The section key; `write_page` admits sections with exactly one.
+    /// The section key; `apply` admits sections with exactly one.
     fn key(&self) -> &crypto::Key {
         self.keys.values().next().expect("one section key")
     }

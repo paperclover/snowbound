@@ -297,7 +297,7 @@ fn live_message_loss() {
             &source,
         )
         .unwrap();
-        let (sid, oid, before) = text(&source);
+        let (_, _, before) = text(&source);
         let after = if fixture == "chunked" {
             "After café 🦀 ".repeat(6000)
         } else {
@@ -318,15 +318,11 @@ fn live_message_loss() {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        let expected = onestore::replace_text(
+        let everything = 0..before.encode_utf16().count() as u32;
+        let new = snapshot(&applied(
             &source,
-            sid,
-            oid,
-            0..before.encode_utf16().count() as u32,
-            &after,
-        )
-        .unwrap();
-        let new = snapshot(&expected);
+            &replaced(&source, everything.clone(), &after),
+        ));
         let baseline_path = format!("fault-{prefix}-{fixture}-baseline.one");
         create(&observer, &baseline_path, &source);
         configure(&output, json!({"phase":format!("{fixture}-setup")}));
@@ -340,13 +336,9 @@ fn live_message_loss() {
         let start = configure(&output, json!({"phase":format!("{fixture}-baseline")}));
         let began = stamp();
         baseline
-            .commit_text(
+            .commit_transaction(
                 &baseline_path,
-                &source,
-                sid,
-                oid,
-                0..before.encode_utf16().count() as u32,
-                &after,
+                &replaced(&source, everything.clone(), &after),
             )
             .unwrap();
         let events = records(&output);
@@ -397,15 +389,9 @@ fn live_message_loss() {
                 json!({"phase":name, "direction":direction, "cut":command, "status":status, "occurrence":occurrence}),
             );
             let began = stamp();
+            let transaction = replaced(&source, everything.clone(), &after);
             let error = interrupted
-                .commit_text(
-                    &path,
-                    &source,
-                    sid,
-                    oid,
-                    0..before.encode_utf16().count() as u32,
-                    &after,
-                )
+                .commit_transaction(&path, &transaction)
                 .unwrap_err();
             assert_eq!(
                 interrupted.read(&path, 1 << 20).unwrap_err().kind(),
@@ -429,7 +415,7 @@ fn live_message_loss() {
             loop {
                 match fresh
                     .open(&path, true)
-                    .and_then(|file| file.coordinate(&path, true))
+                    .and_then(|file| file.coordinate(&path, true, &[]))
                 {
                     Ok(file) => {
                         file.close().unwrap();
@@ -458,14 +444,7 @@ fn live_message_loss() {
             }
             if !visible {
                 fresh
-                    .commit_text(
-                        &path,
-                        &saved,
-                        sid,
-                        oid,
-                        0..before.encode_utf16().count() as u32,
-                        &after,
-                    )
+                    .commit_transaction(&path, &replaced(&saved, everything.clone(), &after))
                     .unwrap();
             }
             let saved = fresh.read(&path, 1 << 20).unwrap();
@@ -475,7 +454,7 @@ fn live_message_loss() {
             );
             let end = after.encode_utf16().count() as u32;
             fresh
-                .commit_text(&path, &saved, sid, oid, end..end, suffix)
+                .commit_transaction(&path, &replaced(&saved, end..end, suffix))
                 .unwrap();
             let recovered = fresh.read(&path, 1 << 20).unwrap();
             assert_eq!(text(&recovered).2, format!("{after}{suffix}"));

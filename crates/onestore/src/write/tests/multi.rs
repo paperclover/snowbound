@@ -1,7 +1,8 @@
 use crate::{
     ExGuid, RevisionIndex, Store,
     document::{Document, Kind},
-    write::{PropertyObject, RevisionEdit, write_revisions},
+    Transaction,
+    write::{PropertyObject, RevisionEdit, applied, revisions, write_revisions},
 };
 use std::collections::BTreeMap;
 
@@ -18,8 +19,8 @@ mod current {
 const SOURCE: &[u8] =
     include_bytes!("../../../../../corpus/page-lifecycle/03-renamed/notebook/Lifecycle.one");
 
-fn nest(source: &[u8]) -> Vec<u8> {
-    write_revisions(source, |index| {
+fn nest(source: &[u8]) -> Option<Transaction> {
+    revisions(source, |index| {
         let document = Document::parse(index)?;
         let pages = document.pages()?;
         assert_eq!(pages.len(), 9);
@@ -100,7 +101,7 @@ fn nest(source: &[u8]) -> Vec<u8> {
 
 #[test]
 fn nesting_publishes_section_order_and_page_levels_in_one_transaction() {
-    let written = nest(SOURCE);
+    let written = applied(SOURCE, nest(SOURCE).as_ref()).unwrap();
     let before = Store::parse(SOURCE).unwrap();
     let after = Store::parse(&written).unwrap();
     assert_eq!(
@@ -160,7 +161,7 @@ fn nesting_publishes_section_order_and_page_levels_in_one_transaction() {
             .collect::<Vec<_>>(),
         [1, 1, 1, 3, 1, 1, 1]
     );
-    assert_eq!(nest(&written), written);
+    assert_eq!(nest(&written), None);
     if let Some(output) = std::env::var_os("ONESTORE_PAGE_BATCH_OUTPUT") {
         std::fs::create_dir(&output).unwrap();
         std::fs::write(
@@ -173,7 +174,8 @@ fn nesting_publishes_section_order_and_page_levels_in_one_transaction() {
 
 #[test]
 fn interrupted_multi_space_publication_never_exposes_a_partial_nesting() {
-    let written = nest(SOURCE);
+    let transaction = nest(SOURCE).unwrap();
+    let written = applied(SOURCE, Some(&transaction)).unwrap();
     let old = current::current(SOURCE);
     let new = current::current(&written);
     assert_ne!(old, new);
@@ -186,9 +188,7 @@ fn interrupted_multi_space_publication_never_exposes_a_partial_nesting() {
             write_limit,
             random: 1951,
         };
-        crate::commit::Transaction::between(SOURCE, &written)
-            .commit(&mut complete)
-            .unwrap();
+        transaction.commit(&mut complete).unwrap();
         assert_eq!(complete.durable, written);
         for fail_at in 1..=complete.operation {
             let mut interrupted = disk::Disk {
@@ -199,9 +199,7 @@ fn interrupted_multi_space_publication_never_exposes_a_partial_nesting() {
                 write_limit,
                 random: 1951 + fail_at as u64,
             };
-            crate::commit::Transaction::between(SOURCE, &written)
-                .commit(&mut interrupted)
-                .unwrap_err();
+            transaction.commit(&mut interrupted).unwrap_err();
             let observed = current::current(&interrupted.durable);
             assert!(
                 observed == old || observed == new,
@@ -234,7 +232,7 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
     let initial_index = RevisionIndex::parse(&initial_store).unwrap();
     let mut checkpoints = BTreeMap::new();
     for step in 1_u32..=514 {
-        let written = write_revisions(&source, |index| {
+        let transaction = revisions(&source, |index| {
             let mut changes = BTreeMap::new();
             for (sid, space) in &index.spaces {
                 let raw = index.resolve(*sid, space.labels[&(ExGuid::default(), 1)])?;
@@ -259,7 +257,9 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
                 .map(|(sid, objects)| (sid, RevisionEdit::Update(objects)))
                 .collect())
         })
+        .unwrap()
         .unwrap();
+        let written = applied(&source, Some(&transaction)).unwrap();
         let store = Store::parse(&written).unwrap();
         assert_eq!(
             store.header.transaction_count,
@@ -290,9 +290,7 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
                 write_limit: 4096,
                 random: 1952,
             };
-            crate::commit::Transaction::between(&source, &written)
-                .commit(&mut complete)
-                .unwrap();
+            transaction.commit(&mut complete).unwrap();
             for fail_at in 1..=complete.operation {
                 let mut interrupted = disk::Disk {
                     visible: source.clone(),
@@ -302,9 +300,7 @@ fn repeated_multi_space_edits_cross_counter_carries_and_checkpoint_each_space() 
                     write_limit: 4096,
                     random: 1952 + fail_at as u64,
                 };
-                crate::commit::Transaction::between(&source, &written)
-                    .commit(&mut interrupted)
-                    .unwrap_err();
+                transaction.commit(&mut interrupted).unwrap_err();
                 let observed = current::current(&interrupted.durable);
                 assert!(observed == old || observed == new, "{step}:{fail_at}");
             }

@@ -44,6 +44,7 @@ pub fn lower(
         identity: None,
         created: None,
         margin_origin: [0.0; 2],
+        color: None,
         objects: vec![PageObject::Outline(Outline {
             id: container,
             title: false,
@@ -161,16 +162,6 @@ impl<'a> View<'a> {
 
     pub(crate) fn text(&self, paragraph: ExGuid) -> Option<&'a TextObject> {
         self.paragraphs.get(&paragraph).and_then(|p| p.text())
-    }
-
-    /// How much deeper than `container` each of its children lies: their outline levels
-    /// less the paragraph's, or less nothing in an outline or cell.
-    pub(crate) fn depths(&self, container: ExGuid, children: &[ExGuid]) -> Option<Vec<u32>> {
-        let base = self.paragraphs.get(&container).map_or(0, |p| p.level);
-        children
-            .iter()
-            .map(|id| self.paragraphs.get(id)?.level.checked_sub(base))
-            .collect()
     }
 
     /// Each outline's paragraphs in document order, a table's cells following its paragraph.
@@ -675,11 +666,6 @@ pub(crate) fn paragraph_fields(
         line_spacing: field!(line_spacing),
         language: field!(language),
     })
-}
-
-/// `paragraph_fields` encoded, as the page writer stores them.
-pub(crate) fn paragraph_change(stored: &Paragraph, target: &Paragraph) -> Result<Values, Error> {
-    paragraph_fields(stored, target)?.values()
 }
 
 /// Whether two tag lists store the same tags.
@@ -1555,6 +1541,9 @@ impl Lowering {
         let shown = fields.iter().all(|(id, shown)| {
             model::paragraph_text(&self.current, *id).is_some_and(|text| text.text.text() == shown)
         });
+        if before.color != after.color {
+            self.emit(PageOp::Color(after.color))?;
+        }
         if before.created == after.created && shown {
             return Ok(());
         }

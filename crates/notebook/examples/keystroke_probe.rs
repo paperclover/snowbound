@@ -66,15 +66,15 @@ impl Remote for Memory {
         self.read += self.bytes.len() as u64;
         Ok(self.bytes.clone())
     }
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+    fn stamp(&mut self) -> io::Result<Stamp> {
         self.read += 1024;
-        Ok(Stamp::of(&self.bytes).ok())
+        Stamp::of(&self.bytes).map_err(io::Error::other)
     }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         transaction.commit(self)
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        onestore::confirm_snapshot(self, snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        onestore::confirm(self, base)
     }
 }
 
@@ -135,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             identity: None,
             created: None,
             margin_origin: [0.0; 2],
+            color: None,
             objects: vec![PageObject::Outline(Outline {
                 id: new_id()?,
                 title: false,

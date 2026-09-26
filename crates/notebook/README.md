@@ -11,7 +11,7 @@ each by hash. Local success does not acknowledge publication to a shared noteboo
 editor ── Edit ──► section thread ─ Section::apply, INSERT edit ─┐
                    (the parsed section: base + sealed + open)     │ one fsync per burst
 sync thread: remote.stamp() == base ? publish(sealed batch) ──────┤ base chunks += transaction
-             otherwise read once, replay the queue on it ─────────┘ conflict, or base := remote
+             otherwise read once, replay the queue on it ─────────┘ base := remote, conflict pages queued
 ```
 
 ## Edits
@@ -56,14 +56,10 @@ same queue after a relaunch. A section is `Send + Sync`: `apply(author, edit)`
 returns at once and reports a refusal as `Event::Rejected`; `events()` drains
 remote changes (`Changed(spaces)`), publication outcomes, unreachable files and
 failures; `notify` runs on a background thread whenever an event waits.
-`conflict()`, `remote_page(space)` and `resolve(id, Resolution)` present and end a
-conflict; `release(id, archive, Resolution)` ends an uncertain attempt.
+`conflicts()` lists each page's conflict pages, which `page` reads and `delete_pages`
+removes; `release(id, archive, Resolution)` ends an uncertain attempt. The author an
+edit names is the host's: the app passes the account's full name.
 `import_page` creates a page holding a copy of another; `delete_pages` removes pages.
-
-Until the application emits ops, `save`, `queue_save`, `saved`, `saving`,
-`conflicts`, `queue`, `review` and `Event::Refreshed` keep the whole-page API: a
-save lowers the page it is given against the stored page (`onestore::op::lower_page`)
-and applies the ops.
 
 `Section::resume(file, replica, notify)` starts from an owned `Replica` without
 consulting the remote file; with the `smb` feature, `Section::resume_smb(path,
@@ -81,10 +77,15 @@ queue replays on it (`merge.rs`): an op whose objects the remote left alone appl
 as it is; a text op shifts past the remote's changes to the same text when its
 range stays clear of them; a move, deletion or property the remote already made is
 done; a page the remote already holds as the local edits leave it drops their ops.
-Anything else is a `Conflict` on the batch: the queue stays on its base and the
-remote image is kept for review. `resolve(id, Mine)` rewrites the remote page to the
-local one (`lower_page`, once), `Theirs` drops the local ops on that page; either
-applies from the conflicted batch on.
+Anything else conflicts, as in OneNote 2010: the op is dropped with every later op naming
+what it named, the remote's version stays the page, and the local version becomes a
+conflict page under it (`SectionOp::Conflict`, queued as one more edit and published with
+the rest), its conflicting objects marked, named for the author of the first edit that did
+not replay. Page lists merge as OneNote 2010 merges page series: a page the remote moved
+keeps the remote's place, a page moved here goes before the next page in the local order
+the remote left in place, or last, and a page the remote removed comes back as a new copy
+of the local one, placed the same way (`corpus/conflict-page/native-pages`,
+`native-restore`). Nothing blocks the queue.
 
 Publication attempts are recorded before network I/O. An attempt confirms only
 when the remote holds its revisions, or every page it changed as it changed them,
@@ -96,7 +97,9 @@ A durable `Published` receipt survives reopening.
 A schema-14 cache is converted when opened: it is exported to
 `<cache>.v14-recovery`, each queued page is lowered against the page the conversion
 has so far, and every converted page must equal the page in the old working image,
-or the conversion rolls back and the open fails naming the archive.
+or the conversion rolls back and the open fails naming the archive; a page it held in
+conflict becomes a conflict page. A schema-15 cache's batches lose the review conflict
+they recorded when opened.
 
 With the optional `smb` feature, `SmbRemote::new(client, path, limit)` binds an
 `notebook::smb::Client` to one share-relative file and snapshot limit. Remote identity uses the logical root
@@ -161,7 +164,7 @@ conflict policy lives in the client.
 ## Recovery archives
 
 `export_recovery(new_path)` captures the base and remote images, the edit queue,
-uncertain attempts, conflicts, receipts, downloaded media and the edit-ID sequence in one
+uncertain attempts, receipts, downloaded media and the edit-ID sequence in one
 SQLite snapshot. It refuses existing destinations and leaves the live queue
 unchanged. Export to a local directory from a background thread: copying holds
 the cache mutex while capturing the database. Failure after the final rename can
@@ -261,16 +264,16 @@ targets are `None`.
 
 With the optional `protected` feature, `Notebook::unlock(path, password)`
 reads a `Locked` section as `Unlocked { pages, .. }`, and
-`Notebook::save_unlocked(path, password, &mut unlocked, space, page, author)`
-saves an edited page under the section's key, straight to the file: nothing of
-a protected section is cached or queued, a section written since `unlocked`
-was read fails the save, and a wrong password is
+`Notebook::apply_unlocked(path, password, &mut unlocked, author, edit)`
+applies page ops and stores them under the section's key, straight to the file:
+nothing of a protected section is cached or queued, a section written since
+`unlocked` was read refuses the edit, and a wrong password is
 `Error::Protected(PasswordMismatch)`.
 
 `Section::import_page(page, author)` copies a page, usually read from another
-section, to the end of this one as a page creation and a save queued like the
+section, to the end of this one as one `SectionOp::Import` queued like the
 user's own edits, under fresh identities (`Page::copy`); payloads travel with
-the model, so the copy publishes offline later like any save. Content outside
+the model, so the copy publishes offline later like any edit. Content outside
 the model refuses to copy. A move is an import here followed by
 `Section::delete_pages` there.
 
@@ -309,15 +312,20 @@ let document = onestore::document::Document::parse(&revisions)?;
 ```
 
 Paths are relative to the share. The read limit bounds the complete physical
-snapshot. Call from a background thread outside a Tokio runtime. Use identities
-from the document and the same snapshot with `Client::commit_text` or
-`Client::commit_property_bytes`; their errors retain `onestore::CommitState`.
-`PreparedEdit::page` separates preparation from I/O: inspect the immutable image
-and persist the intended revision identity before `Client::commit_transaction` publishes
-its `transaction()`. `Client::stamp` reads a file's header and length without coordination,
-for polling. `Client::confirm_snapshot` checks and flushes an observed image's stamp, then refreshes
-its header version metadata without adding a revision. The caller must first
-establish which intents that image contains and reread before another commit.
+snapshot. Call from a background thread outside a Tokio runtime.
+`Client::commit_transaction` publishes a `Transaction` from `Section::seal`; its errors
+retain `onestore::CommitState`. `Client::stamp` reads a file's header and length in one
+round trip without coordination, for polling. `Client::confirm` checks and flushes a
+stamp, then refreshes its header version metadata without adding a revision. The caller
+must first establish which intents that image contains and reread before another commit.
+
+A commit is eight round trips while its appended bytes and patches fit fifteen 64 KiB
+writes: open; the coordination locks, identity queries and the stamp check's reads as one
+compound request; the path's identity; the appended bytes and patches, the header, the
+counter (twice at a carry) and the version, each as its writes and a flush in one
+compound; close. The server
+performs a compound in order and answers its flush once the writes are durable, so the
+writes carry no write-through flag.
 
 Readers use shared native guards while writers publish under native write-open
 and byte-lock exclusion. Maintenance is excluded during each operation; pathname

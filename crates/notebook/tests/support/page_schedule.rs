@@ -1,14 +1,21 @@
-use crate::{disk, model_ops};
-use notebook::{EditStatus, Remote, Replica, Resolution};
+use crate::{
+    disk, model_ops,
+    server::{remote_snapshot, snapshot},
+};
+use notebook::{Remote, Replica};
 use onestore::{
-    CommitError, ExGuid, PageEdit, PreparedEdit, RevisionIndex, Store, Transaction,
+    CommitError, ExGuid, PageEdit, RevisionIndex, Stamp, Store, Transaction,
     document::{Document, Format, Kind, Layout},
+    op::SectionOp,
     page::{
         Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
         text::new_id,
     },
 };
 use std::{io, sync::LazyLock};
+
+#[path = "../../../onestore/tests/support/ops.rs"]
+mod ops;
 
 const BODY: &str = "Body 🦋 é";
 
@@ -19,7 +26,7 @@ static SOURCE: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let mut source = onestore::create_section("page-schedule.one", "Original", "Author").unwrap();
     for _ in 0..3 {
         let page = onestore::PageCreation::new(None, Some("Same title"), "Author").unwrap();
-        source = PreparedEdit::create_page(&source, &page)
+        source = ops::section_op(&source, SectionOp::Create(page.clone()))
             .unwrap()
             .as_bytes()
             .to_vec();
@@ -107,6 +114,10 @@ impl Remote for Session<'_> {
         Ok(self.disk.visible.clone())
     }
 
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        Stamp::of(&self.disk.visible).map_err(io::Error::other)
+    }
+
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         let mut image = self.disk.visible.clone();
         transaction.apply(&mut image).unwrap();
@@ -121,8 +132,8 @@ impl Remote for Session<'_> {
         result
     }
 
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        onestore::confirm_snapshot(self.disk, snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        onestore::confirm(self.disk, base)
     }
 }
 
@@ -152,8 +163,8 @@ pub fn run(input: &[u8]) {
         let actor = usize::from(step[0]) % replicas.len();
         let path = directory.path().join(format!("{actor}.sqlite"));
         let cache = replicas[actor].get_or_insert_with(|| Replica::create(&path, &SOURCE).unwrap());
-        let snapshot = cache.snapshot().unwrap();
-        let listed = pages(&snapshot);
+        let image = snapshot(cache);
+        let listed = pages(&image);
         let pending = cache.pending().unwrap();
         match step[1] % 8 {
             0 | 1 => {
@@ -183,7 +194,7 @@ pub fn run(input: &[u8]) {
                     .collect();
                 replicas[actor] = None;
                 let cache = Replica::open(&path).unwrap();
-                assert_eq!(pages(&cache.snapshot().unwrap()), listed);
+                assert_eq!(pages(&snapshot(&cache)), listed);
                 assert_eq!(cache.pending().unwrap(), pending);
                 assert_eq!(
                     pending
@@ -200,24 +211,9 @@ pub fn run(input: &[u8]) {
                 disk.fail_at =
                     (step[2] != 0).then_some(usize::from(u16::from_le_bytes([step[2], step[3]])));
                 disk.random = u64::from(step[4]) + 1;
-                let prior = pending
-                    .first()
-                    .and_then(|edit| cache.status(edit.id).unwrap());
                 let result = cache.sync_once(&mut Session { disk: &mut disk });
-                if matches!(prior, Some(EditStatus::AwaitingConfirmation { .. })) {
-                    assert!(
-                        result.is_err()
-                            || !matches!(
-                                result.as_ref().unwrap().edit,
-                                Some((_, EditStatus::Conflict(_)))
-                            )
-                    );
-                }
                 if result.is_ok() && cache.pending().unwrap().is_empty() {
-                    assert_eq!(
-                        pages(&cache.snapshot().unwrap()),
-                        pages(&cache.remote_snapshot().unwrap())
-                    );
+                    assert_eq!(pages(&snapshot(cache)), pages(&remote_snapshot(cache)));
                 }
             }
             5 => {
@@ -244,36 +240,34 @@ pub fn run(input: &[u8]) {
                         }
                     })
                     .collect();
-                let expected = PreparedEdit::pages(&snapshot, &edits);
+                let expected = ops::section_op(&image, SectionOp::Pages(edits.to_vec()));
                 match section_op(cache, onestore::op::SectionOp::Pages(edits)) {
                     Ok(_) => assert_eq!(
-                        pages(&cache.snapshot().unwrap()),
+                        pages(&snapshot(cache)),
                         pages(expected.unwrap().as_bytes())
                     ),
                     Err(_) => {
                         assert!(expected.is_err());
-                        assert_eq!(pages(&cache.snapshot().unwrap()), listed);
+                        assert_eq!(pages(&snapshot(cache)), listed);
                         assert_eq!(cache.pending().unwrap(), pending);
                     }
                 }
             }
             7 => {
-                if let Some(conflict) = cache.conflict().unwrap() {
-                    // Taking theirs for the page list would drop the pages this actor made.
-                    let root = listed.iter().all(|(sid, ..)| *sid != conflict.space);
-                    let keep = if root || step[2] & 1 == 0 {
-                        Resolution::Mine
-                    } else {
-                        Resolution::Theirs
-                    };
-                    if cache.resolve(conflict.id, keep).is_err() {
-                        assert_eq!(cache.pending().unwrap(), pending);
-                    }
+                // The actor merged a conflict page's version by hand and deletes it.
+                if let Some(conflict) = cache
+                    .conflicts()
+                    .unwrap()
+                    .first()
+                    .map(|(_, pages)| pages[usize::from(step[2]) % pages.len()].space)
+                {
+                    section_op(cache, onestore::op::SectionOp::Delete(vec![conflict])).unwrap();
+                    assert_eq!(pages(&snapshot(cache)), listed);
                 }
             }
             _ => unreachable!(),
         }
-        let local = pages(&replicas[actor].as_ref().unwrap().snapshot().unwrap());
+        let local = pages(&snapshot(replicas[actor].as_ref().unwrap()));
         for page in &owned[actor] {
             assert!(local.iter().any(|(sid, oid, _)| (*sid, *oid) == *page));
         }

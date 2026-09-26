@@ -1,4 +1,11 @@
-use onestore::{ExGuid, Insertion, PreparedEdit, TextAttribute};
+use onestore::{
+    Arena, ExGuid, Section, TextAttribute,
+    document::{Format, Layout},
+    op::{Op, PageOp},
+    page::{
+        Outline, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject, text::new_id,
+    },
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -40,6 +47,33 @@ enum Action {
     },
 }
 
+/// A new paragraph holding `text` in OneNote's default text style.
+fn paragraph(text: String) -> Result<PageParagraph, Box<dyn std::error::Error>> {
+    let format = Format {
+        font: Some("Calibri".into()),
+        font_size: Some(11.0),
+        language: Some(0x409),
+        ..Default::default()
+    };
+    Ok(PageParagraph {
+        id: new_id()?,
+        parent: None,
+        level: 1,
+        style: None,
+        format: Format::default(),
+        content: ParagraphContent::Text(TextObject {
+            id: new_id()?,
+            date_field: None,
+            text: Paragraph::new(text, format),
+            tags: Vec::new(),
+        }),
+        lists: Vec::new(),
+        tags: Vec::new(),
+        media: Default::default(),
+        collapsed: false,
+    })
+}
+
 fn run(args: &[std::ffi::OsString]) -> Result<Value, Box<dyn std::error::Error>> {
     if let [mode, root] = args
         && mode == "catalog"
@@ -79,34 +113,93 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value, Box<dyn std::error::Error>>
     let edit: Edit = serde_json::from_reader(io::stdin().lock())?;
     let sid = edit.space;
     let oid = edit.object;
-    let prepared = match edit.action {
+    let (op, author) = match edit.action {
         Action::Text {
             start,
             end,
             replacement,
-        } => PreparedEdit::text(&bytes, sid, oid, start..end, &replacement)?,
+        } => (
+            PageOp::Text {
+                text: oid,
+                range: start..end,
+                with: replacement,
+            },
+            String::new(),
+        ),
         Action::Format {
             start,
             end,
             attributes,
-        } => PreparedEdit::format(&bytes, sid, oid, start..end, &attributes)?,
+        } => (
+            PageOp::Format {
+                text: oid,
+                range: start..end,
+                set: attributes,
+                clear: Vec::new(),
+            },
+            String::new(),
+        ),
         Action::Paragraph {
             before,
             text,
             author,
-        } => PreparedEdit::insert(
-            &bytes,
-            sid,
-            &Insertion::paragraph(oid, before, &text, &author)?,
-        )?,
+        } => (
+            PageOp::Insert {
+                container: oid,
+                before,
+                paragraphs: vec![paragraph(text)?],
+            },
+            author,
+        ),
         Action::Outline { x, y, text, author } => {
-            PreparedEdit::insert(&bytes, sid, &Insertion::outline(oid, x, y, &text, &author)?)?
+            let store = onestore::Store::parse(&bytes)?;
+            let index = onestore::RevisionIndex::parse(&store)?;
+            if !onestore::document::Document::parse(&index)?
+                .pages()?
+                .contains(&(sid, oid))
+            {
+                return Err("Choose the page to hold the outline".into());
+            }
+            (
+                PageOp::Add {
+                    object: PageObject::Outline(Outline {
+                        id: new_id()?,
+                        title: false,
+                        min_width: None,
+                        layout: Layout {
+                            x: Some(x),
+                            y: Some(y),
+                            ..Default::default()
+                        },
+                        indents: Vec::new(),
+                        paragraphs: vec![paragraph(text)?],
+                        unsupported: Vec::new(),
+                    }),
+                    before: None,
+                },
+                author,
+            )
         }
     };
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, bytes)?;
+    let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?;
+    let at = (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100);
+    section.apply(
+        &author,
+        &onestore::op::Edit {
+            at,
+            ops: vec![Op::Page { space: sid, op }],
+        },
+    )?;
+    let transaction = section.seal()?;
     if check {
         return Ok(json!({"ok": true}));
     }
-    Ok(match prepared.commit_file(&args[1]) {
+    let Some(transaction) = transaction else {
+        return Ok(json!({"ok": true, "state": "Unchanged"}));
+    };
+    Ok(match transaction.commit_file(&args[1]) {
         Ok(()) => json!({"ok": true, "state": "Committed"}),
         Err(error) => json!({"ok": false, "state": format!("{:?}", error.state),
             "kind": format!("{:?}", error.error.kind()), "error": error.error.to_string()}),

@@ -28,26 +28,6 @@ pub(crate) fn automatic_title(text: &str) -> &str {
 /// Insertion at a run boundary uses the following run, except at the end of text.
 /// The final run retains its insertion style even when emptied.
 /// Replacing a range with identical text leaves its existing formatting unchanged.
-/// Returns a complete file image without I/O; use `commit_file_text` to update an existing file.
-pub fn replace_text(
-    source: &[u8],
-    space: ExGuid,
-    object: ExGuid,
-    range: Range<u32>,
-    replacement: &str,
-) -> Result<Vec<u8>, Error> {
-    if range.start > range.end || replacement.contains(['\0', '\n', '\r', '\u{fffc}']) {
-        return Err(Error {
-            offset: 0,
-            message: "Use a valid text range and ordinary paragraph text",
-        });
-    }
-    crate::active::write(source, space, |active| {
-        text_changes(active, object, range, replacement)
-    })
-}
-
-/// `replace_text` on an active page.
 pub(crate) fn text_changes(
     active: &ActivePage<'_>,
     object: ExGuid,
@@ -312,7 +292,9 @@ fn rewrite(
         .roots
         .get(&2)
         .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-    let Kind::Metadata { title, .. } = &revision.nodes[metadata].kind else {
+    let (Kind::Metadata { title, .. } | Kind::ConflictMetadata { title, .. }) =
+        &revision.nodes[metadata].kind
+    else {
         return Err(invalid("Page title metadata is unavailable"));
     };
     let cached: Vec<_> = title_text
@@ -544,7 +526,7 @@ pub(crate) fn update_title(
             .roots
             .get(&2)
             .ok_or_else(|| invalid("Page title metadata is unavailable"))?;
-        if raw.objects[metadata].jcid != 0x20030 {
+        if ![0x20030, 0x20038].contains(&raw.objects[metadata].jcid) {
             return Err(invalid("Page title metadata is unavailable"));
         }
         let title = string(&title);

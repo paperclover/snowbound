@@ -28,8 +28,8 @@ fn a_locked_section_unlocks_for_reading() {
     ));
 }
 
-/// An unlocked page is edited and saved under the section's key, then reads back with the
-/// same password. `ONESTORE_PROTECTED_EXPORT` names a directory receiving the notebook for
+/// An unlocked page is edited as ops stored under the section's key, then reads back with
+/// the same password. `ONESTORE_PROTECTED_EXPORT` names a directory receiving the notebook for
 /// a cold reopen in OneNote.
 #[test]
 fn an_unlocked_page_is_saved_under_the_section_key() {
@@ -59,6 +59,7 @@ fn an_unlocked_page_is_saved_under_the_section_key() {
         .clone();
     let mut unlocked = notebook.unlock(&section, password).unwrap();
     let (space, mut page) = unlocked.pages[0].clone();
+    let before = page.clone();
     let paragraphs = page
         .objects
         .iter_mut()
@@ -95,20 +96,28 @@ fn an_unlocked_page_is_saved_under_the_section_key() {
             format,
         ))
         .unwrap();
+    let edit = onestore::op::Edit {
+        at: 134_000_000_000_000_000,
+        ops: onestore::op::lower_page(&before, &page)
+            .unwrap()
+            .into_iter()
+            .map(|op| onestore::op::Op::Page { space, op })
+            .collect(),
+    };
     assert!(matches!(
-        notebook.save_unlocked(&section, "wrong", &mut unlocked, space, &page, "Rust"),
+        notebook.apply_unlocked(&section, "wrong", &mut unlocked, "Rust", &edit),
         Err(notebook::Error::Protected(
             onestore::protected::Error::PasswordMismatch
         ))
     ));
     let mut stale = notebook.unlock(&section, password).unwrap();
     notebook
-        .save_unlocked(&section, password, &mut unlocked, space, &page, "Rust")
+        .apply_unlocked(&section, password, &mut unlocked, "Rust", &edit)
         .unwrap();
-    // A view read before that save no longer matches the file.
+    // A view read before that edit no longer matches the file.
     assert!(
         notebook
-            .save_unlocked(&section, password, &mut stale, space, &page, "Rust")
+            .apply_unlocked(&section, password, &mut stale, "Rust", &edit)
             .is_err()
     );
     let (_, stored) = notebook.unlock(&section, password).unwrap().pages.remove(0);

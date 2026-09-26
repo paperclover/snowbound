@@ -2,11 +2,11 @@
 //! publishes their edits to the section file in the background.
 
 use crate::{
-    Conflict, ConflictKind, EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result,
+    EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result,
     SyncWorker, discover,
 };
 use onestore::{
-    CommitError, ExGuid, PageCreation, PreparedEdit, RevisionIndex, Stamp, Store, Transaction,
+    CommitError, ExGuid, PageCreation, RevisionIndex, Stamp, Store, Transaction,
     document::Document,
     op::{Edit, Op, SectionOp},
     page::Page,
@@ -18,7 +18,6 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, Sender},
     },
     time::Duration,
@@ -81,25 +80,19 @@ pub trait Storage: Send + Sync {
     fn create_directory(&self, path: &str) -> Result<()>;
     /// Renames or moves a file or directory; an existing target is an error.
     fn rename(&self, from: &str, to: &str) -> Result<()>;
+    /// Deletes a file or an empty directory.
+    fn delete(&self, path: &str) -> Result<()>;
     /// Names a section or TOC file for its notebook, as `onestore::place`.
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()>;
-    fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()>;
-    fn set_property(
-        &self,
-        path: &str,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-        property: u32,
-        value: &[u8],
-    ) -> Result<()>;
+    /// Publishes a transaction made on the file's current image.
+    fn commit(&self, path: &str, transaction: &Transaction) -> Result<()>;
 }
 
 /// A password-protected section as `Notebook::unlock` read it.
 #[cfg(feature = "protected")]
 pub struct Unlocked {
     pub pages: Vec<(ExGuid, Page)>,
-    /// The stored section the pages came from, which a save must still find in place.
+    /// The stored section the pages came from, which an edit must still find in place.
     snapshot: Vec<u8>,
 }
 
@@ -145,31 +138,21 @@ impl Storage for Directory {
         Ok(std::fs::rename(self.path(from), self.path(to))?)
     }
 
+    fn delete(&self, path: &str) -> Result<()> {
+        let path = self.path(path);
+        Ok(if path.is_dir() {
+            std::fs::remove_dir(path)?
+        } else {
+            std::fs::remove_file(path)?
+        })
+    }
+
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()> {
         Ok(onestore::place_file(self.path(path), ancestor, name)?)
     }
 
-    fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()> {
-        Ok(edit.commit_file(self.path(path))?)
-    }
-
-    fn set_property(
-        &self,
-        path: &str,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-        property: u32,
-        value: &[u8],
-    ) -> Result<()> {
-        Ok(onestore::commit_file_property(
-            self.path(path),
-            source,
-            space,
-            object,
-            property,
-            value,
-        )?)
+    fn commit(&self, path: &str, transaction: &Transaction) -> Result<()> {
+        Ok(transaction.commit_file(self.path(path))?)
     }
 }
 
@@ -225,33 +208,18 @@ impl Storage for Share {
         Ok(self.client.rename(&self.path(from), &self.path(to))?)
     }
 
+    fn delete(&self, path: &str) -> Result<()> {
+        Ok(self.client.delete(&self.path(path))?)
+    }
+
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()> {
         Ok(self.client.place(&self.path(path), ancestor, name)?)
     }
 
-    fn commit(&self, path: &str, edit: &PreparedEdit<'_>) -> Result<()> {
+    fn commit(&self, path: &str, transaction: &Transaction) -> Result<()> {
         Ok(self
             .client
-            .commit_transaction(&self.path(path), &edit.transaction())?)
-    }
-
-    fn set_property(
-        &self,
-        path: &str,
-        source: &[u8],
-        space: ExGuid,
-        object: ExGuid,
-        property: u32,
-        value: &[u8],
-    ) -> Result<()> {
-        Ok(self.client.commit_property_bytes(
-            &self.path(path),
-            source,
-            space,
-            object,
-            property,
-            value,
-        )?)
+            .commit_transaction(&self.path(path), transaction)?)
     }
 }
 
@@ -277,6 +245,22 @@ impl Notebook {
     pub fn open(root: impl AsRef<Path>, cache: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().canonicalize()?;
         Self::with(Box::new(Directory(root.clone())), Some(root), cache)
+    }
+
+    /// Creates a notebook in the new folder `root`, as OneNote 2010 creates one: a table of
+    /// contents in the notebook colour `color` (COLORREF) and "New Section 1" holding the
+    /// page `page` creates.
+    pub fn create(
+        root: impl AsRef<Path>,
+        cache: impl AsRef<Path>,
+        color: u32,
+        page: &PageCreation,
+    ) -> Result<Self> {
+        std::fs::create_dir(root.as_ref())?;
+        let mut notebook = Self::open(root, cache)?;
+        notebook.edit_toc("", &[onestore::TocEdit::Color(color)])?;
+        notebook.create_section("", "New Section 1", page)?;
+        Ok(notebook)
     }
 
     /// Opens the notebook at `root` on the share `client` is connected to. Sections open
@@ -393,18 +377,38 @@ impl Notebook {
 
     fn edit_toc(&self, folder: &str, edits: &[onestore::TocEdit]) -> Result<()> {
         let (toc, _) = self.toc(folder)?;
-        let source = self.storage.read(&toc)?;
-        self.storage
-            .commit(&toc, &PreparedEdit::table_of_contents(&source, edits)?)
+        self.commit_toc(&toc, edits)
     }
 
-    /// Creates `name.one` in `folder` with one empty page and lists it last in the folder's
-    /// TOC, as OneNote creates a section. Returns the new catalog path.
-    pub fn create_section(&mut self, folder: &str, name: &str, author: &str) -> Result<String> {
+    fn commit_toc(&self, toc: &str, edits: &[onestore::TocEdit]) -> Result<()> {
+        let source = self.storage.read(toc)?;
+        match onestore::edit_table_of_contents(&source, edits)? {
+            Some(transaction) => self.storage.commit(toc, &transaction),
+            None => Ok(()),
+        }
+    }
+
+    /// Creates `name.one` in `folder` holding the page `page` creates, in the next of
+    /// OneNote's section colours, and lists it last in the folder's TOC, as OneNote creates
+    /// a section. Returns the new catalog path.
+    pub fn create_section(&mut self, folder: &str, name: &str, page: &PageCreation) -> Result<String> {
         let filename = format!("{name}.one");
-        self.folder(folder)?;
+        let color = next_color(self.folder(folder)?);
         let (_, ancestor) = self.toc(folder)?;
-        let bytes = onestore::create_section(&filename, "", author)?;
+        let mut bytes = onestore::create_empty_section(&filename, Some(color))?;
+        let transaction = {
+            let arena = onestore::Arena::default();
+            let mut section = onestore::Section::open(&arena, bytes.clone())?;
+            let edit = Edit {
+                at: crate::now(),
+                ops: vec![Op::Section(SectionOp::Create(page.clone()))],
+            };
+            section.apply(page.author(), &edit)?;
+            section.seal()?
+        };
+        if let Some(transaction) = transaction {
+            transaction.apply(&mut bytes)?;
+        }
         let path = catalog_path(folder, &filename);
         self.storage.create(&path, &bytes)?;
         self.storage.place(&path, ancestor, &filename)?;
@@ -483,23 +487,16 @@ impl Notebook {
     /// Sets a section's colour (COLORREF) in its own metadata, where OneNote keeps it.
     pub fn set_section_color(&mut self, path: &str, color: Option<u32>) -> Result<()> {
         let path = self.section_path(path)?.path.clone();
-        let source = self.storage.read(&path)?;
-        let store = onestore::Store::parse(&source)?;
-        let index = onestore::RevisionIndex::parse(&store)?;
-        let document = Document::parse(&index)?;
-        let revision = document.active(document.root)?;
-        let metadata = *revision
-            .roots
-            .get(&2)
-            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
-        self.storage.set_property(
-            &path,
-            &source,
-            document.root,
-            metadata,
-            0x14001cbe,
-            &color.unwrap_or(0xffff_ffff).to_le_bytes(),
-        )?;
+        let arena = onestore::Arena::default();
+        let mut section = onestore::Section::open(&arena, self.storage.read(&path)?)?;
+        let edit = Edit {
+            at: crate::now(),
+            ops: vec![Op::Section(SectionOp::Color(color))],
+        };
+        section.apply("", &edit)?;
+        if let Some(transaction) = section.seal()? {
+            self.storage.commit(&path, &transaction)?;
+        }
         self.refresh()?;
         Ok(())
     }
@@ -518,15 +515,51 @@ impl Notebook {
         self.refresh().map(drop)
     }
 
-    /// Deletes a section the way OneNote does: the file moves into the notebook's
-    /// `OneNote_RecycleBin` folder, a section group with its own TOC that lists it (and that
-    /// the root TOC lists), and its own folder's TOC entry goes.
+    /// Deletes a section or section group the way OneNote 2010 does. A section's file moves
+    /// into the notebook's `OneNote_RecycleBin` folder, a section group with its own TOC that
+    /// lists it (and that the root TOC lists). A group's sections, in its groups too, move
+    /// there the same way, then its folders go. Either way its folder's TOC entry goes.
     pub fn delete(&mut self, path: &str) -> Result<()> {
         let (folder, entry) = split(path);
         let (filename, identity) = self.entry(folder, entry)?;
-        if !filename.to_ascii_lowercase().ends_with(".one") {
+        if path == RECYCLE_BIN {
             return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
         }
+        if filename.to_ascii_lowercase().ends_with(".one") {
+            self.bin_section(path, &filename, identity)?;
+        } else {
+            // Sections first, then each folder once it is empty, deepest first.
+            let mut sections = Vec::new();
+            let mut folders = Vec::new();
+            let mut pending = vec![self.folder(path)?];
+            while let Some(group) = pending.pop() {
+                sections.extend(
+                    group
+                        .sections
+                        .iter()
+                        .map(|section| (section.path.clone(), section.file_id)),
+                );
+                folders.push((group.path.clone(), group.toc.as_ref().map(|toc| toc.filename.clone())));
+                pending.extend(&group.groups);
+            }
+            for (section, identity) in sections {
+                let (_, name) = split(&section);
+                self.bin_section(&section, name, identity)?;
+            }
+            for (group, toc) in folders.into_iter().rev() {
+                if let Some(toc) = toc {
+                    self.storage.delete(&catalog_path(&group, &toc))?;
+                }
+                self.storage.delete(&group)?;
+            }
+        }
+        self.edit_toc(folder, &[onestore::TocEdit::Remove { identity }])?;
+        self.refresh().map(drop)
+    }
+
+    /// The recycle bin's TOC path and file identity, creating the bin as OneNote does: a
+    /// section group the root TOC lists.
+    fn bin(&self) -> Result<(String, [u8; 16])> {
         let bin_toc = catalog_path(RECYCLE_BIN, TOC);
         if !self.storage.exists(&bin_toc) {
             if !self.storage.exists(RECYCLE_BIN) {
@@ -545,35 +578,114 @@ impl Notebook {
                 }],
             )?;
         }
-        let mut target = filename.clone();
+        let source = self.storage.read(&bin_toc)?;
+        Ok((bin_toc, onestore::Store::parse(&source)?.header.file_id))
+    }
+
+    /// Moves the section file at `path` into the recycle bin, under a name no binned
+    /// section has, and lists it there; its own folder's TOC is the caller's.
+    fn bin_section(&self, path: &str, filename: &str, identity: [u8; 16]) -> Result<()> {
+        let (bin_toc, bin_identity) = self.bin()?;
+        let mut target = filename.to_owned();
         let mut attempt = 1;
         while self.storage.exists(&catalog_path(RECYCLE_BIN, &target)) {
             attempt += 1;
-            let (stem, extension) = filename.rsplit_once('.').unwrap_or((&filename, ""));
+            let (stem, extension) = filename.rsplit_once('.').unwrap_or((filename, ""));
             target = format!("{stem} ({attempt}).{extension}");
         }
         let binned = catalog_path(RECYCLE_BIN, &target);
-        self.storage
-            .rename(&catalog_path(folder, &filename), &binned)?;
-        let source = self.storage.read(&bin_toc)?;
-        self.storage.place(
-            &binned,
-            onestore::Store::parse(&source)?.header.file_id,
-            &target,
-        )?;
-        self.storage.commit(
+        self.storage.rename(path, &binned)?;
+        self.storage.place(&binned, bin_identity, &target)?;
+        self.commit_toc(
             &bin_toc,
-            &PreparedEdit::table_of_contents(
-                &source,
+            &[onestore::TocEdit::Add {
+                filename: target,
+                identity,
+                group: false,
+            }],
+        )
+    }
+
+    /// Keeps copies of `pages` in the notebook's recycle bin, as OneNote 2010 does with a
+    /// page it deletes: in `OneNote_RecycleBin/OneNote_DeletedPages.one`, each at the top
+    /// level with its identity, title, date and creation time. The caller then deletes the
+    /// pages from their section.
+    pub fn recycle_pages(&mut self, pages: &[Page], author: &str) -> Result<()> {
+        const DELETED: &str = "OneNote_DeletedPages.one";
+        let (bin_toc, bin_identity) = self.bin()?;
+        let path = catalog_path(RECYCLE_BIN, DELETED);
+        if !self.storage.exists(&path) {
+            // OneNote's "Deleted Pages" section is grey.
+            let bytes = onestore::create_empty_section(DELETED, Some(0x00e1e1e1))?;
+            self.storage.create(&path, &bytes)?;
+            self.storage.place(&path, bin_identity, DELETED)?;
+            self.commit_toc(
+                &bin_toc,
                 &[onestore::TocEdit::Add {
-                    filename: target,
-                    identity,
+                    filename: DELETED.into(),
+                    identity: onestore::Store::parse(&bytes)?.header.file_id,
                     group: false,
                 }],
-            )?,
-        )?;
-        self.edit_toc(folder, &[onestore::TocEdit::Remove { identity }])?;
+            )?;
+        }
+        let arena = onestore::Arena::default();
+        let mut section = onestore::Section::open(&arena, self.storage.read(&path)?)?;
+        let mut ops = Vec::new();
+        for page in pages {
+            let mut creation = PageCreation::new(None, Some(&page.title), author)?;
+            if let (Some(identity), Some(created)) = (page.identity, page.created) {
+                creation = creation.keeping(identity, created)?;
+            }
+            if let Some([date, time]) = page.date_text() {
+                creation = creation.dated(&date, &time)?;
+            }
+            ops.push(Op::Section(SectionOp::Import {
+                creation,
+                page: page.copy()?,
+            }));
+        }
+        section.apply(author, &Edit { at: crate::now(), ops })?;
+        if let Some(transaction) = section.seal()? {
+            self.storage.commit(&path, &transaction)?;
+        }
         self.refresh().map(drop)
+    }
+
+    /// Moves a section or section group into the folder at catalog path `folder`, last, as
+    /// OneNote moves one dragged onto a group: the file or folder moves and each TOC's
+    /// entry follows it. Returns its new catalog path.
+    pub fn move_entry(&mut self, path: &str, folder: &str) -> Result<String> {
+        let (from, entry) = split(path);
+        let (filename, identity) = self.entry(from, entry)?;
+        self.folder(folder)?;
+        let group = !filename.to_ascii_lowercase().ends_with(".one");
+        let target = catalog_path(folder, &filename);
+        if from == folder
+            || path == RECYCLE_BIN
+            || group && (folder == path || folder.starts_with(&format!("{path}/")))
+            || self.storage.exists(&target)
+        {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        let (_, ancestor) = self.toc(folder)?;
+        self.storage.rename(path, &target)?;
+        let placed = if group {
+            catalog_path(&target, TOC)
+        } else {
+            target.clone()
+        };
+        self.storage.place(&placed, ancestor, &filename)?;
+        self.edit_toc(
+            folder,
+            &[onestore::TocEdit::Add {
+                filename,
+                identity,
+                group,
+            }],
+        )?;
+        self.edit_toc(from, &[onestore::TocEdit::Remove { identity }])?;
+        self.refresh()?;
+        Ok(target)
     }
 
     /// The stored filename and TOC identity of a folder's section or group.
@@ -660,30 +772,31 @@ impl Notebook {
         Ok(Unlocked { pages, snapshot })
     }
 
-    /// Saves an edited page of `unlocked` under the section's key, straight to the file:
-    /// nothing of a protected section is cached or queued. A section written since
-    /// `unlocked` was read fails the save; unlock again for its pages.
+    /// Applies `edit` to pages of `unlocked` and stores it under the section's key, straight
+    /// to the file: nothing of a protected section is cached or queued. A section written
+    /// since `unlocked` was read refuses the edit; unlock again for its pages.
     #[cfg(feature = "protected")]
-    pub fn save_unlocked(
+    pub fn apply_unlocked(
         &self,
         path: &str,
         password: &str,
         unlocked: &mut Unlocked,
-        space: ExGuid,
-        page: &Page,
         author: &str,
+        edit: &Edit,
     ) -> Result<()> {
         let path = self.section_path(path)?.path.clone();
-        let edit = onestore::PreparedEdit::page_protected(
-            &unlocked.snapshot,
-            password,
-            space,
-            page,
-            author,
-        )?;
-        self.storage.commit(&path, &edit)?;
-        let written = edit.as_bytes().to_vec();
-        unlocked.snapshot = written;
+        let transaction = {
+            let store = Store::parse(&unlocked.snapshot)?;
+            let index = RevisionIndex::parse(&store)?;
+            onestore::protected::UnlockedSection::open(
+                &index,
+                password,
+                onestore::protected::Limits::default(),
+            )?
+            .apply(author, edit)?
+        };
+        self.storage.commit(&path, &transaction)?;
+        transaction.apply(&mut unlocked.snapshot)?;
         Ok(())
     }
 
@@ -704,6 +817,27 @@ impl Notebook {
         }
         Section::open(file, &self.cache, notify)
     }
+}
+
+/// The section colours OneNote 2010 gives new sections, COLORREF, in the order it gives
+/// them (`evidence/notebook-management/new-notebook`).
+const SECTION_COLORS: [u32; 3] = [0x00e4a88a, 0x0078b0f6, 0x00bba4d5];
+
+/// The colour OneNote gives a new section in `folder`: the first of its colours none of
+/// the folder's sections has, or the next in turn when all are taken.
+fn next_color(folder: &discover::Folder) -> u32 {
+    let taken: Vec<u32> = folder
+        .sections
+        .iter()
+        .filter_map(|section| match section.state {
+            discover::SectionState::Readable { color, .. } => color,
+            _ => None,
+        })
+        .collect();
+    SECTION_COLORS
+        .into_iter()
+        .find(|color| !taken.contains(color))
+        .unwrap_or(SECTION_COLORS[folder.sections.len() % SECTION_COLORS.len()])
 }
 
 fn component(name: &str) -> bool {
@@ -733,33 +867,12 @@ pub enum Event {
     /// The section refused an edit `apply` handed it; the pages it names are as they were
     /// before it, so an editor showing them should reload them.
     Rejected { spaces: Vec<ExGuid>, error: String },
-    /// Old session API, until the application reloads on `Changed`: pages changed remotely.
-    Refreshed,
     /// A publication attempt finished with this durable state.
     Attempt { id: u64, status: EditStatus },
     /// The section file could not be reached; the replica keeps its state.
     Unreachable(io::Error),
     /// The replica itself failed; the worker has stopped.
     Failed(String),
-}
-
-/// The outcome of saving an edited page (old session API).
-#[derive(Debug, PartialEq, Eq)]
-pub enum Save {
-    /// The model equals the stored page.
-    Unchanged,
-    /// The edit is durable locally under this id.
-    Queued(u64),
-    /// The stored page no longer matches `before`; reload it before saving again.
-    Stale,
-}
-
-/// A queued edit and its durable state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueuedEdit {
-    pub id: u64,
-    pub space: ExGuid,
-    pub status: EditStatus,
 }
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
@@ -773,10 +886,6 @@ pub struct Section {
     events: Mutex<Receiver<Event>>,
     sender: Sender<Event>,
     notify: Notify,
-    saved: Mutex<Receiver<(ExGuid, std::result::Result<Save, String>)>>,
-    saves: Sender<(ExGuid, std::result::Result<Save, String>)>,
-    /// Saves queued and not yet reported.
-    unsaved: Arc<AtomicUsize>,
 }
 
 impl Section {
@@ -850,7 +959,6 @@ impl Section {
     ) -> Result<Self> {
         let replica = Arc::new(replica);
         let (sender, events) = mpsc::channel();
-        let (saves, saved) = mpsc::channel();
         let notify = Mutex::new(notify);
         let notify: Notify = Arc::new(move || {
             if let Ok(notify) = notify.lock() {
@@ -865,7 +973,6 @@ impl Section {
                     Ok(synced) => {
                         if !synced.changed.is_empty() {
                             events.push(Event::Changed(synced.changed.clone()));
-                            events.push(Event::Refreshed);
                         }
                         if let Some((id, status)) = &synced.edit {
                             events.push(Event::Attempt {
@@ -899,9 +1006,6 @@ impl Section {
             events: Mutex::new(events),
             sender,
             notify,
-            saved: Mutex::new(saved),
-            saves,
-            unsaved: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -971,8 +1075,8 @@ impl Section {
         Ok(space)
     }
 
-    /// Removes pages permanently, queued like the user's own edits (a move across
-    /// sections is `import_page` there, then this here).
+    /// Removes pages or conflict pages permanently, queued like the user's own edits (a
+    /// move across sections is `import_page` there, then this here).
     pub fn delete_pages(&self, pages: &[ExGuid]) -> Result<u64> {
         self.replica.apply(
             "",
@@ -991,23 +1095,10 @@ impl Section {
         self.replica.pending()
     }
 
-    /// The unpublished batch the remote no longer accepts, if any. Show `remote_page`
-    /// against `page` for its space, then `resolve`.
-    pub fn conflict(&self) -> Result<Option<Conflict>> {
-        self.replica.conflict()
-    }
-
-    /// The page as last observed in the section file, for reviewing a conflict.
-    pub fn remote_page(&self, space: ExGuid) -> Result<Page> {
-        let snapshot = self.replica.remote_snapshot()?;
-        let arena = onestore::Arena::default();
-        Ok(onestore::Section::open(&arena, snapshot)?.page(space)?)
-    }
-
-    /// Ends a conflict: `Mine` publishes the local page over the remote change, `Theirs`
-    /// drops the local edits to the conflicted page (and its later ones).
-    pub fn resolve(&self, id: u64, resolution: Resolution) -> Result<()> {
-        self.replica.resolve(id, resolution)
+    /// The conflict pages of each page that has them, as the local edits leave them
+    /// (`onestore::Section::conflicts`); `page` reads one, `delete_pages` removes it.
+    pub fn conflicts(&self) -> Result<Vec<(ExGuid, Vec<onestore::ConflictPage>)>> {
+        self.replica.conflicts()
     }
 
     /// Retires an uncertain attempt after review, exporting the queue to `archive` first:
@@ -1056,114 +1147,6 @@ impl Section {
             None => Ok(()),
         }
     }
-
-    // Old whole-page session API, kept until the application emits ops.
-
-    /// Saves an edited page. `before` is the model the edit started from; a stored page
-    /// that differs from it means the section changed underneath the editor.
-    pub fn save(&self, space: ExGuid, before: &Page, after: &Page, author: &str) -> Result<Save> {
-        let outcome = self.replica.ask(|reply| crate::working::Request::Save {
-            space,
-            before: before.clone(),
-            after: after.clone(),
-            author: author.to_owned(),
-            reply,
-        })?;
-        Ok(outcome.unwrap_or(Save::Unchanged))
-    }
-
-    /// `save` on the section thread, returning at once; `saved` reports the outcome.
-    /// Saves queue in order, and one whose `before` is the previous save's `after`
-    /// continues it: pass each save's `after` as the next one's `before`.
-    pub fn queue_save(&self, space: ExGuid, before: Page, after: Page, author: &str) -> Result<()> {
-        let (saves, notify, unsaved) = (
-            self.saves.clone(),
-            Arc::clone(&self.notify),
-            Arc::clone(&self.unsaved),
-        );
-        self.unsaved.fetch_add(1, Ordering::Relaxed);
-        self.replica.send(crate::working::Request::Save {
-            space,
-            before,
-            after,
-            author: author.to_owned(),
-            reply: Box::new(move |outcome| {
-                unsaved.fetch_sub(1, Ordering::Release);
-                let outcome = match outcome {
-                    Ok(None) => return,
-                    Ok(Some(save)) => Ok(save),
-                    Err(error) => Err(error.to_string()),
-                };
-                if saves.send((space, outcome)).is_ok() {
-                    notify();
-                }
-            }),
-        })
-    }
-
-    /// Whether a queued save has yet to report, so the stored page may trail the editor's.
-    pub fn saving(&self) -> bool {
-        self.unsaved.load(Ordering::Acquire) > 0
-    }
-
-    /// Outcomes of queued saves since the last poll, oldest first; `notify` runs for each.
-    /// Consecutive saves continuing one another finish as one, reported once.
-    pub fn saved(&self) -> Vec<(ExGuid, std::result::Result<Save, String>)> {
-        self.saved
-            .lock()
-            .map(|saved| saved.try_iter().collect())
-            .unwrap_or_default()
-    }
-
-    /// Every queued edit with its state: pending, awaiting confirmation of a retained
-    /// attempt, or a conflict awaiting review. `space` is the first page it edits.
-    pub fn queue(&self) -> Result<Vec<QueuedEdit>> {
-        self.replica
-            .pending()?
-            .into_iter()
-            .map(|edit| {
-                Ok(QueuedEdit {
-                    id: edit.id,
-                    space: edit
-                        .edit
-                        .ops
-                        .iter()
-                        .find_map(|op| match op {
-                            Op::Page { space, .. } => Some(*space),
-                            Op::Section(_) => None,
-                        })
-                        .unwrap_or(self.replica.root),
-                    status: self.replica.status(edit.id)?.unwrap_or(EditStatus::Pending),
-                })
-            })
-            .collect()
-    }
-
-    /// The conflict as a queue entry, for the review dialog.
-    pub fn conflicts(&self) -> Result<Vec<(QueuedEdit, ConflictKind)>> {
-        Ok(self
-            .replica
-            .conflict()?
-            .map(|conflict| {
-                (
-                    QueuedEdit {
-                        id: conflict.id,
-                        space: conflict.space,
-                        status: EditStatus::Conflict(conflict.kind),
-                    },
-                    conflict.kind,
-                )
-            })
-            .into_iter()
-            .collect())
-    }
-
-    /// Resolves the conflict holding `id` with a page reviewed against `remote_page`: the
-    /// remote page is rewritten to `after`.
-    pub fn review(&self, id: u64, after: &Page) -> Result<()> {
-        self.replica
-            .resolve_with(id, Resolution::Mine, Some(after.clone()))
-    }
 }
 
 /// The section file itself as the publication target, under OneNote-compatible exclusion.
@@ -1176,21 +1159,21 @@ impl Remote for FileRemote {
 
     /// Read without the whole-file lock, which would block OneNote's readers: a change
     /// detector, never a snapshot to edit.
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+    fn stamp(&mut self) -> io::Result<Stamp> {
         use std::io::Read;
         let mut file = std::fs::File::open(&self.0)?;
         let mut header = [0; 1024];
         file.read_exact(&mut header)?;
         let length = file.metadata()?.len();
-        Ok(Some(Stamp { header, length }))
+        Ok(Stamp { header, length })
     }
 
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError> {
         transaction.commit_file(&self.0)
     }
 
-    fn confirm(&mut self, snapshot: &[u8]) -> std::result::Result<(), CommitError> {
-        onestore::confirm_file_snapshot(&self.0, snapshot)
+    fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError> {
+        onestore::confirm_file(&self.0, base)
     }
 }
 

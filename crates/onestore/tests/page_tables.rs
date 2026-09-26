@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Format},
     page::{
         Page, PageObject, PageParagraph, ParagraphContent, Table, TableCell, TableColumn, TableRow,
@@ -9,7 +11,6 @@ use onestore::{
 
 const TREES: &[u8] =
     include_bytes!("../../../corpus/outline-edit/tree/before/notebook/synthetic.one");
-const AUTHOR: &str = "Table author";
 
 fn page_by_title(bytes: &[u8], title: &str) -> (ExGuid, Page) {
     let store = Store::parse(bytes).unwrap();
@@ -174,19 +175,19 @@ fn a_row_and_a_column_are_added_to_a_native_table_and_removed_again() {
             new_cell(&template, "Second row, third column"),
         ],
     });
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = assert_same(written.as_slice(), space, &after);
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
     if let Some(directory) = std::env::var_os("ONESTORE_TABLE_EDIT_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("synthetic.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -204,8 +205,8 @@ fn a_row_and_a_column_are_added_to_a_native_table_and_removed_again() {
         row.cells.remove(1);
     }
     table.rows.remove(0);
-    let again = PreparedEdit::page(written.as_bytes(), space, &smaller, AUTHOR).unwrap();
-    let mut stored = assert_same(again.as_bytes(), space, &smaller);
+    let again = ops::saved(written.as_slice(), space, &smaller).unwrap();
+    let mut stored = assert_same(again.as_slice(), space, &smaller);
     let table = table_mut(&mut stored);
     assert_eq!((table.rows.len(), table.columns.len()), (1, 2));
 }
@@ -218,8 +219,8 @@ fn column_widths_locks_and_borders_change_in_place() {
     table.columns[0].width = 300.0;
     table.columns[1].locked = false;
     table.borders = Some(false);
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    assert_same(written.as_slice(), space, &after);
 }
 
 #[test]
@@ -232,17 +233,17 @@ fn cell_shading_and_indents_change_in_place() {
     cell.shading = Some(0x0000ffff);
     let original_indents = cell.indents.clone();
     cell.indents.clear();
-    assert!(PreparedEdit::page(TREES, space, &after, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &after).is_err());
     let cell = &mut table_mut(&mut after).rows[0].cells[0];
     cell.indents = vec![18.0, 0.0, 27.0, 27.0];
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = assert_same(written.as_bytes(), space, &after);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = assert_same(written.as_slice(), space, &after);
     let mut reset = stored.clone();
     let cell = &mut table_mut(&mut reset).rows[0].cells[0];
     cell.shading = None;
     cell.indents = original_indents;
-    let again = PreparedEdit::page(written.as_bytes(), space, &reset, AUTHOR).unwrap();
-    assert_eq!(assert_same(again.as_bytes(), space, &reset), before);
+    let again = ops::saved(written.as_slice(), space, &reset).unwrap();
+    assert_eq!(assert_same(again.as_slice(), space, &reset), before);
 }
 
 /// `ONESTORE_NESTED_TABLE_EXPORT` names a new directory receiving the candidate for a cold reopen.
@@ -286,7 +287,7 @@ fn a_table_nests_inside_a_cell_and_is_removed_again() {
     table_mut(&mut after).rows[0].cells[1]
         .paragraphs
         .push(holder);
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
+    let written = ops::saved(TREES, space, &after).unwrap();
     let ParagraphContent::Table(nested) = &mut table_mut(&mut after).rows[0].cells[1]
         .paragraphs
         .last_mut()
@@ -296,12 +297,12 @@ fn a_table_nests_inside_a_cell_and_is_removed_again() {
         panic!()
     };
     with_native_indents(nested);
-    let stored = assert_same(written.as_bytes(), space, &after);
+    let stored = assert_same(written.as_slice(), space, &after);
     if let Some(directory) = std::env::var_os("ONESTORE_NESTED_TABLE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("synthetic.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -316,8 +317,8 @@ fn a_table_nests_inside_a_cell_and_is_removed_again() {
     table_mut(&mut removed).rows[0].cells[1]
         .paragraphs
         .retain(|paragraph| paragraph.id != holder_id);
-    let again = PreparedEdit::page(written.as_bytes(), space, &removed, AUTHOR).unwrap();
-    assert_eq!(assert_same(again.as_bytes(), space, &removed), before);
+    let again = ops::saved(written.as_slice(), space, &removed).unwrap();
+    assert_eq!(assert_same(again.as_slice(), space, &removed), before);
 }
 
 #[test]
@@ -328,20 +329,17 @@ fn inconsistent_tables_are_refused() {
     table_mut(&mut ragged).rows[0]
         .cells
         .push(new_cell(&template, "Extra"));
-    assert!(PreparedEdit::page(TREES, space, &ragged, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &ragged).is_err());
+    // A cell keeps a paragraph.
     let mut empty = before.clone();
     table_mut(&mut empty).rows[0].cells[0].paragraphs.clear();
-    let written = PreparedEdit::page(TREES, space, &empty, AUTHOR).unwrap();
-    let mut stored = page_in(written.as_bytes(), space);
-    let cell = &table_mut(&mut stored).rows[0].cells[0];
-    assert_eq!(cell.paragraphs.len(), 1);
-    assert_eq!(cell.paragraphs[0].text().unwrap().text.text(), "");
+    assert!(ops::saved(TREES, space, &empty).is_err());
     let mut narrow = before.clone();
     table_mut(&mut narrow).columns[0].width = 10.0;
-    assert!(PreparedEdit::page(TREES, space, &narrow, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &narrow).is_err());
     let mut rowless = before.clone();
     table_mut(&mut rowless).rows.clear();
-    assert!(PreparedEdit::page(TREES, space, &rowless, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &rowless).is_err());
 }
 
 /// `ONESTORE_TABLE_EXPORT` names a new directory receiving the candidate for a cold reopen.
@@ -394,14 +392,14 @@ fn a_new_table_is_created_on_a_fresh_page() {
     holder.format = Format::default();
     body_paragraphs(&mut after).push(holder);
     body_paragraphs(&mut after).push(cell_paragraph(&template, "After the table"));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
+    let written = ops::saved(&source, space, &after).unwrap();
     with_native_indents(table_mut(&mut after));
-    assert_same(written.as_bytes(), space, &after);
+    assert_same(written.as_slice(), space, &after);
     if let Some(directory) = std::env::var_os("ONESTORE_TABLE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("tables.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("tables.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(

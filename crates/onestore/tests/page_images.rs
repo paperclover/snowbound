@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Format, Layout},
     page::{Image, Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id},
 };
@@ -11,7 +13,6 @@ const NATIVE_RESIZE: &[u8] =
     include_bytes!("../../../corpus/picture-edit/native-resize/notebook/pictures.one");
 const NATIVE_PAGE_LEVEL: &[u8] =
     include_bytes!("../../../corpus/picture-edit/native-page-level/notebook/pictures.one");
-const AUTHOR: &str = "Picture author";
 /// A one-pixel PNG.
 const PNG: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
@@ -120,8 +121,8 @@ fn a_picture_inserted_on_a_fresh_page_reads_back_and_can_be_removed() {
     holder.content = ParagraphContent::Image(image.clone());
     body_paragraphs(&mut after).push(holder.clone());
     body_paragraphs(&mut after).push(plain_paragraph(&template, "After the picture"));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
@@ -131,16 +132,16 @@ fn a_picture_inserted_on_a_fresh_page_reads_back_and_can_be_removed() {
     };
     assert_eq!(picture.bytes.as_deref(), Some(PNG));
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
     if let Some(directory) = std::env::var_os("ONESTORE_IMAGE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("pictures.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("pictures.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -153,8 +154,8 @@ fn a_picture_inserted_on_a_fresh_page_reads_back_and_can_be_removed() {
     }
     let mut removed = stored.clone();
     body_paragraphs(&mut removed).retain(|p| p.id != holder.id);
-    let again = PreparedEdit::page(written.as_bytes(), space, &removed, AUTHOR).unwrap();
-    let stored = page_in(again.as_bytes(), space);
+    let again = ops::saved(written.as_slice(), space, &removed).unwrap();
+    let stored = page_in(again.as_slice(), space);
     assert!(pictures(&stored).is_empty());
     assert_eq!(body_paragraphs(&mut stored.clone()).len(), 2);
 }
@@ -187,20 +188,20 @@ fn a_native_picture_is_resized_and_described_then_reset() {
         ..Default::default()
     };
     resize(&mut resized, layout, Some("Resized in Rust"));
-    let written = PreparedEdit::page(NATIVE, space, &resized, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(NATIVE, space, &resized).unwrap();
+    let stored = page_in(written.as_slice(), space);
     assert_eq!(stored, resized);
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
     if let Some(directory) = std::env::var_os("ONESTORE_IMAGE_RESIZE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("synthetic.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("synthetic.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -213,8 +214,8 @@ fn a_native_picture_is_resized_and_described_then_reset() {
     }
     let mut reset = stored.clone();
     resize(&mut reset, Layout::default(), None);
-    let again = PreparedEdit::page(written.as_bytes(), space, &reset, AUTHOR).unwrap();
-    assert_eq!(page_in(again.as_bytes(), space), native);
+    let again = ops::saved(written.as_slice(), space, &reset).unwrap();
+    assert_eq!(page_in(again.as_slice(), space), native);
 }
 
 #[test]
@@ -234,8 +235,8 @@ fn a_rust_picture_resized_natively_reads_back_with_its_size_and_description() {
     let mut layout = picture.layout.clone();
     layout.max_width = Some(200.0);
     resize(&mut wider, layout, Some("Wider in Rust"));
-    let written = PreparedEdit::page(NATIVE_RESIZE, space, &wider, AUTHOR).unwrap();
-    assert_eq!(page_in(written.as_bytes(), space), wider);
+    let written = ops::saved(NATIVE_RESIZE, space, &wider).unwrap();
+    assert_eq!(page_in(written.as_slice(), space), wider);
 }
 
 fn page_pictures(page: &Page) -> Vec<&Image> {
@@ -270,8 +271,8 @@ fn a_page_level_picture_placed_natively_reads_as_a_page_object() {
             image.layout.y = Some(400.0);
         }
     }
-    let written = PreparedEdit::page(NATIVE_PAGE_LEVEL, space, &moved, AUTHOR).unwrap();
-    assert_eq!(page_in(written.as_bytes(), space), moved);
+    let written = ops::saved(NATIVE_PAGE_LEVEL, space, &moved).unwrap();
+    assert_eq!(page_in(written.as_slice(), space), moved);
 }
 
 /// `ONESTORE_PAGE_IMAGE_EXPORT` names a new directory receiving the candidate for a cold reopen.
@@ -296,23 +297,23 @@ fn a_page_level_picture_is_inserted_moved_and_removed() {
         background: false,
     };
     after.objects.push(PageObject::Image(image.clone()));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
     assert_eq!(page_pictures(&stored)[0].bytes.as_deref(), Some(PNG));
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
     if let Some(directory) = std::env::var_os("ONESTORE_PAGE_IMAGE_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("pictures.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("pictures.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -330,19 +331,19 @@ fn a_page_level_picture_is_inserted_moved_and_removed() {
             image.alt = None;
         }
     }
-    let again = PreparedEdit::page(written.as_bytes(), space, &moved, AUTHOR).unwrap();
-    assert_eq!(page_in(again.as_bytes(), space), moved);
+    let again = ops::saved(written.as_slice(), space, &moved).unwrap();
+    assert_eq!(page_in(again.as_slice(), space), moved);
     let mut removed = moved.clone();
     removed.objects.retain(|object| object.id() != image.id);
-    let last = PreparedEdit::page(again.as_bytes(), space, &removed, AUTHOR).unwrap();
-    let stored = page_in(last.as_bytes(), space);
+    let last = ops::saved(again.as_slice(), space, &removed).unwrap();
+    let stored = page_in(last.as_slice(), space);
     assert!(page_pictures(&stored).is_empty());
     assert_eq!(stored, removed);
     let mut unplaced = stored.clone();
     let mut nowhere = image.clone();
     nowhere.layout = Layout::default();
     unplaced.objects.push(PageObject::Image(nowhere));
-    assert!(PreparedEdit::page(last.as_bytes(), space, &unplaced, AUTHOR).is_err());
+    assert!(ops::saved(last.as_slice(), space, &unplaced).is_err());
 }
 
 #[test]
@@ -361,7 +362,7 @@ fn pictures_need_a_recognised_payload_and_stored_ones_stay_fixed() {
         background: false,
     });
     body_paragraphs(&mut after).push(holder);
-    assert!(PreparedEdit::page(&source, space, &after, AUTHOR).is_err());
+    assert!(ops::saved(&source, space, &after).is_err());
     let (space, native) = first_page(NATIVE);
     let mut resized = native.clone();
     let mut found = 0;
@@ -376,5 +377,5 @@ fn pictures_need_a_recognised_payload_and_stored_ones_stay_fixed() {
         }
     }
     assert_eq!(found, 1);
-    assert!(PreparedEdit::page(NATIVE, space, &resized, AUTHOR).is_err());
+    assert!(ops::saved(NATIVE, space, &resized).is_err());
 }

@@ -19,7 +19,7 @@ pub(crate) mod model;
 pub(crate) mod properties;
 pub(crate) mod table;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use lower::{lower, lower_page};
 /// `op` applied to `page`, the model of what the section holds: the page `Section::apply`
@@ -29,7 +29,7 @@ pub use model::apply as predict;
 /// Property identifiers with their encoded values.
 pub(crate) type Values = Vec<(u32, Vec<u8>)>;
 
-/// One user action, applied whole or not at all.
+/// One user action, applied whole or not at all; it leaves every table cell a paragraph.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edit {
@@ -80,6 +80,8 @@ pub enum PageOp {
         created: u64,
         fields: Vec<(ExGuid, String)>,
     },
+    /// The page's colour (View, Page Color), COLORREF; `None` is OneNote's "No color".
+    Color(Option<u32>),
     /// Inserts paragraphs before a direct child of `container`, or last. Children follow
     /// their parents in `paragraphs`; levels are absolute. Text keeps its spans' formats;
     /// lists, tags, styles and collapse state are set by their own ops.
@@ -108,7 +110,7 @@ pub enum PageOp {
         parent: Option<ExGuid>,
         before: Option<ExGuid>,
     },
-    /// Removes a subtree; an emptied table cell receives an empty paragraph.
+    /// Removes a subtree.
     Delete { object: ExGuid },
     /// Sets a paragraph's absolute outline level, regrouping its container.
     Level { paragraph: ExGuid, level: u32 },
@@ -204,10 +206,23 @@ pub enum SectionOp {
     /// A page created with `creation` holding `page`'s content under the identities it
     /// carries (`Page::copy` gives fresh ones); the created title stays.
     Import { creation: PageCreation, page: Page },
+    /// A read-only conflict page of the listed page `of`, as OneNote 2010 keeps the version of
+    /// a page a merge could not take: created with `creation` (not placed, its author the user
+    /// whose version it is, a title only where `page` has one) and holding `page` as `Import`
+    /// does, with `objects`, identities on `page`, marked as the conflicting ones.
+    Conflict {
+        of: ExGuid,
+        creation: PageCreation,
+        page: Page,
+        objects: Vec<ExGuid>,
+    },
     /// Page moves and indentation, in order.
     Pages(Vec<PageEdit>),
-    /// Removes pages permanently; their revisions stay stored.
+    /// Removes pages permanently, listed or conflict pages; their revisions stay stored.
     Delete(Vec<ExGuid>),
+    /// The section's colour as COLORREF, kept in its own metadata; `None` is OneNote's
+    /// "no colour".
+    Color(Option<u32>),
 }
 
 /// A character property that `PageOp::Format` can clear so the text inherits it.

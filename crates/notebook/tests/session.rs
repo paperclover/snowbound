@@ -1,8 +1,14 @@
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
 use notebook::{
-    ConflictKind, EditStatus, Recovery, Resolution,
-    session::{Event, Notebook, QueuedEdit, Save, Section},
+    EditStatus, Recovery, Resolution,
+    session::{Event, Notebook, Section},
 };
-use onestore::{ExGuid, PreparedEdit, page::Page};
+use onestore::{
+    ExGuid,
+    op::{Edit, Op, PageOp},
+    page::Page,
+};
 use std::{
     path::Path,
     sync::{
@@ -33,6 +39,21 @@ fn edited(page: &Page, text: &str) -> Page {
     let id = first_text(page);
     model_ops::replace_text(&mut after, id, 0..0, text);
     after
+}
+
+/// Replaces `range` of the page's first body text as the editor does: the edit's id once
+/// it is durable.
+fn typed(section: &Section, space: ExGuid, page: &Page, range: std::ops::Range<u32>, text: &str) -> u64 {
+    let op = PageOp::Text {
+        text: first_text(page),
+        range,
+        with: text.into(),
+    };
+    let edit = Edit {
+        at: model_ops::now(),
+        ops: vec![Op::Page { space, op }],
+    };
+    section.replica().apply("Editor", edit).unwrap()
 }
 
 fn open(file: &Path, cache: &Path) -> (Section, Arc<AtomicUsize>) {
@@ -105,14 +126,8 @@ fn a_section_opens_through_its_replica_and_a_save_reaches_the_file_and_survives_
     assert_eq!(pages.len(), 1);
     let space = pages[0].0;
     let before = section.page(space).unwrap();
-    assert_eq!(
-        section.save(space, &before, &before, "Editor").unwrap(),
-        Save::Unchanged
-    );
     let after = edited(&before, "Saved ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Saved ");
     assert_same(section.page(space).unwrap(), &after);
     published(&section, id);
     // The worker reports the step after writing its receipt.
@@ -167,9 +182,7 @@ fn saves_wait_for_an_unreachable_file_and_publish_after_relaunch() {
     let permissions = std::fs::metadata(&file).unwrap().permissions();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
     let after = edited(&before, "Offline ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Offline ");
     wait(&section, |event| matches!(event, Event::Unreachable(_)));
     section.close().unwrap();
     assert_eq!(
@@ -198,7 +211,7 @@ fn saves_wait_for_an_unreachable_file_and_publish_after_relaunch() {
 }
 
 #[test]
-fn an_external_change_refreshes_the_page_and_stales_a_save_from_the_old_model() {
+fn an_external_change_reloads_the_page_and_later_edits_apply_to_it() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("notes.one");
     let cache = directory.path().join("cache");
@@ -214,7 +227,7 @@ fn an_external_change_refreshes_the_page_and_stales_a_save_from_the_old_model() 
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let bytes = onestore::read_file(&file).unwrap();
-        match PreparedEdit::page(&bytes, space, &native, "Native")
+        match ops::save(&bytes, space, &native)
             .unwrap()
             .commit_file(&file)
         {
@@ -227,29 +240,18 @@ fn an_external_change_refreshes_the_page_and_stales_a_save_from_the_old_model() 
         }
     }
     section.wake();
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while section.page(space).unwrap().title == before.title {
-        assert!(Instant::now() < deadline, "the refresh did not arrive");
-        wait(&section, |event| matches!(event, Event::Refreshed));
-    }
+    wait(&section, |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)));
     assert_same(section.page(space).unwrap(), &native);
-    let native = section.page(space).unwrap();
-    let stale = edited(&before, "Local ");
-    assert_eq!(
-        section.save(space, &before, &stale, "Editor").unwrap(),
-        Save::Stale
-    );
+    // An edit made on the page shown before the change applies to the page as it is now.
+    let id = typed(&section, space, &before, 0..0, "Local ");
     let after = edited(&native, "Local ");
-    let Save::Queued(id) = section.save(space, &native, &after, "Editor").unwrap() else {
-        panic!()
-    };
     published(&section, id);
     assert_same(stored_page(&file, space), &after);
     section.close().unwrap();
 }
 
 #[test]
-fn queued_saves_continue_each_other_detect_stale_pages_and_finish_before_close() {
+fn edits_apply_in_order_without_waiting_and_finish_before_close() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("notes.one");
     let cache = directory.path().join("cache");
@@ -260,36 +262,44 @@ fn queued_saves_continue_each_other_detect_stale_pages_and_finish_before_close()
     .unwrap();
     let (section, _) = open(&file, &cache);
     let space = section.pages().unwrap()[0].0;
-    let mut before = section.page(space).unwrap();
+    let original = section.page(space).unwrap();
+    let text = first_text(&original);
+    let apply = |word: &str| {
+        let op = PageOp::Text {
+            text,
+            range: 0..0,
+            with: word.into(),
+        };
+        let edit = Edit {
+            at: model_ops::now(),
+            ops: vec![Op::Page { space, op }],
+        };
+        section.apply("Editor", edit).unwrap();
+    };
+    let mut expected = original.clone();
     for word in ["one ", "two ", "three ", "four ", "five "] {
-        let after = edited(&before, word);
-        section
-            .queue_save(space, before, after.clone(), "Editor")
-            .unwrap();
-        before = after;
+        apply(word);
+        expected = edited(&expected, word);
     }
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let mut stored = section.page(space).unwrap();
-        stored.title = before.title.clone();
-        if stored == before {
+        stored.title = expected.title.clone();
+        if stored == expected {
             break;
         }
-        assert!(Instant::now() < deadline, "the saves did not arrive");
-        for (_, save) in section.saved() {
-            assert!(matches!(save, Ok(Save::Queued(_))), "{save:?}");
-        }
+        assert!(Instant::now() < deadline, "the edits did not arrive");
         std::thread::sleep(Duration::from_millis(20));
     }
     while !section.pending().unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "the saves were not published");
+        assert!(Instant::now() < deadline, "the edits were not published");
         std::thread::sleep(Duration::from_millis(20));
     }
     let native = edited(&section.page(space).unwrap(), "Native ");
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let bytes = onestore::read_file(&file).unwrap();
-        match PreparedEdit::page(&bytes, space, &native, "Native")
+        match ops::save(&bytes, space, &native)
             .unwrap()
             .commit_file(&file)
         {
@@ -302,29 +312,11 @@ fn queued_saves_continue_each_other_detect_stale_pages_and_finish_before_close()
         }
     }
     section.wake();
-    while !section.page(space).unwrap().objects.eq(&native.objects) {
-        assert!(Instant::now() < deadline, "the refresh did not arrive");
-        wait(&section, |event| matches!(event, Event::Refreshed));
-    }
-    let stale = edited(&before, "Local ");
-    section.queue_save(space, before, stale, "Editor").unwrap();
-    // Outcomes of the earlier saves may still be arriving.
-    while !section
-        .saved()
-        .into_iter()
-        .any(|saved| saved == (space, Ok(Save::Stale)))
-    {
-        assert!(Instant::now() < deadline, "the stale save was not reported");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let native = section.page(space).unwrap();
-    let after = edited(&native, "Local ");
-    section
-        .queue_save(space, native, after.clone(), "Editor")
-        .unwrap();
+    wait(&section, |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)));
+    apply("Local ");
     section.close().unwrap();
     let (section, _) = open(&file, &cache);
-    assert_same(section.page(space).unwrap(), &after);
+    assert_same(section.page(space).unwrap(), &edited(&native, "Local "));
     section.close().unwrap();
 }
 
@@ -426,9 +418,7 @@ fn an_absent_remote_does_not_prevent_local_relaunch_or_further_saves() {
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let after = edited(&before, "First ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "First ");
     wait(
         &section,
         |event| matches!(event, Event::Unreachable(error) if error.kind() == std::io::ErrorKind::NotFound),
@@ -442,9 +432,7 @@ fn an_absent_remote_does_not_prevent_local_relaunch_or_further_saves() {
     assert_eq!(section.status(id).unwrap(), Some(EditStatus::Pending));
     let before = section.page(space).unwrap();
     let after = edited(&before, "Second ");
-    let Save::Queued(next) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let next = typed(&section, space, &before, 0..0, "Second ");
     assert!(!file.exists());
     let restored = directory.path().join("restored.one");
     std::fs::write(&restored, &source).unwrap();
@@ -470,9 +458,7 @@ fn resuming_against_another_document_preserves_both_remote_and_pending_edit() {
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let after = edited(&before, "Local ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Local ");
     wait(&section, |event| matches!(event, Event::Unreachable(_)));
     section.close().unwrap();
 
@@ -499,10 +485,7 @@ fn offline_save_process() {
     let section = Section::resume(root.join("absent.one"), replica, || {}).unwrap();
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
-    let after = edited(&before, "Durable ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Durable ");
     std::fs::write(root.join("acknowledged"), id.to_string()).unwrap();
     // Terminate without running Session or SQLite destructors after acknowledgement.
     std::process::exit(0);
@@ -562,9 +545,7 @@ fn smb_connection_failure_keeps_the_session_locally_editable_and_retries() {
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let after = edited(&before, "Offline SMB ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Offline SMB ");
     section.wake();
     wait(
         &section,
@@ -611,9 +592,7 @@ fn live_smb_session_save_publishes_and_reopens() {
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let after = edited(&before, "Session SMB ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Session SMB ");
     published(&section, id);
     let remote = client.read("session.one", 1024 * 1024).unwrap();
     assert_same(model_ops::page_of(&remote, space), &after);
@@ -661,9 +640,7 @@ fn dropping_during_connection_keeps_cache_owned_until_the_worker_finishes() {
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let after = edited(&before, "Saved during connection ");
-    let Save::Queued(id) = section.save(space, &before, &after, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..0, "Saved during connection ");
     let (dropped, finished) = mpsc::channel();
     let owner = std::thread::spawn(move || {
         drop(section);
@@ -692,14 +669,14 @@ fn dropping_during_connection_keeps_cache_owned_until_the_worker_finishes() {
     };
     assert_eq!(replica.status(id).unwrap(), Some(EditStatus::Pending));
     assert_same(
-        model_ops::page_of(&replica.snapshot().unwrap(), space),
+        model_ops::page_of(&server::snapshot(&replica), space),
         &after,
     );
     assert!(connecting.try_recv().is_err());
 }
 
 #[test]
-fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recovery() {
+fn a_conflicting_save_keeps_the_native_page_and_a_conflict_page_the_session_deletes() {
     let directory = tempfile::tempdir().unwrap();
     let file = directory.path().join("notes.one");
     let cache = directory.path().join("cache");
@@ -717,9 +694,7 @@ fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recov
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
     let mut local = before.clone();
     model_ops::replace_text(&mut local, text, 0..8, "Local");
-    let Save::Queued(id) = section.save(space, &before, &local, "Editor").unwrap() else {
-        panic!()
-    };
+    let id = typed(&section, space, &before, 0..8, "Local");
     wait(&section, |event| matches!(event, Event::Unreachable(_)));
     std::fs::set_permissions(&file, permissions).unwrap();
     let mut native = before.clone();
@@ -727,7 +702,7 @@ fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recov
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let bytes = onestore::read_file(&file).unwrap();
-        match PreparedEdit::page(&bytes, space, &native, "Native")
+        match ops::save(&bytes, space, &native)
             .unwrap()
             .commit_file(&file)
         {
@@ -740,40 +715,38 @@ fn a_conflicting_save_is_reviewed_against_the_remote_page_and_archived_for_recov
         }
     }
     section.wake();
-    wait(
-        &section,
-        |event| matches!(event, Event::Attempt { id: n, status: EditStatus::Conflict(ConflictKind::ContentChanged) } if *n == id),
-    );
-    let conflicts = section.conflicts().unwrap();
+    wait(&section, |event| {
+        matches!(event, Event::Attempt { id: n, status: EditStatus::Published { .. } } if *n > id)
+    });
+    assert!(matches!(
+        section.status(id).unwrap(),
+        Some(EditStatus::Published { .. })
+    ));
+    // As OneNote does, the native version stays the page and the local one is kept beside it.
+    assert_same(section.page(space).unwrap(), &native);
+    assert_same(stored_page(&file, space), &native);
+    let listed = section.conflicts().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].0, space);
+    let conflict = &listed[0].1[0];
+    assert_eq!(conflict.user, "Editor");
+    let kept = section.page(conflict.space).unwrap();
     assert_eq!(
-        conflicts,
-        [(
-            QueuedEdit {
-                id,
-                space,
-                status: EditStatus::Conflict(ConflictKind::ContentChanged)
-            },
-            ConflictKind::ContentChanged
-        )]
+        model_ops::paragraph_with(&kept, first_text(&kept))
+            .and_then(|paragraph| paragraph.text())
+            .map(|text| text.text.text().to_owned()),
+        Some("Local".to_owned())
     );
-    assert_same(section.page(space).unwrap(), &local);
-    let remote = section.remote_page(space).unwrap();
-    assert_same(remote.clone(), &native);
-    let archive = directory.path().join("review.sqlite");
-    section.export_recovery(&archive).unwrap();
-    let recovery = Recovery::open(&archive).unwrap();
-    assert_eq!(recovery.pending().unwrap().len(), 1);
     assert_eq!(
-        recovery.status(id).unwrap(),
-        Some(EditStatus::Conflict(ConflictKind::ContentChanged))
+        server::conflicts(&onestore::read_file(&file).unwrap())[0].1,
+        [("Editor".to_owned(), vec!["Local".to_owned()])]
     );
-    let mut reviewed = remote.clone();
-    model_ops::replace_text(&mut reviewed, text, 0..6, "Native and local");
-    section.review(id, &reviewed).unwrap();
-    assert_eq!(section.status(id).unwrap(), Some(EditStatus::Pending));
-    published(&section, id);
-    assert_same(stored_page(&file, space), &reviewed);
-    assert!(section.queue().unwrap().is_empty());
+    // Merged by hand, the conflict page is deleted.
+    let deleted = section.delete_pages(&[conflict.space]).unwrap();
+    published(&section, deleted);
+    assert!(section.conflicts().unwrap().is_empty());
+    assert!(server::conflicts(&onestore::read_file(&file).unwrap()).is_empty());
+    assert!(section.pending().unwrap().is_empty());
     section.close().unwrap();
 }
 
@@ -819,7 +792,7 @@ fn an_uncertain_attempt_is_released_after_restart_by_review() {
         );
         assert_eq!(
             section
-                .queue()
+                .pending()
                 .unwrap()
                 .iter()
                 .map(|edit| edit.id)
@@ -850,7 +823,7 @@ fn an_uncertain_attempt_is_released_after_restart_by_review() {
             recovery.status(id).unwrap(),
             Some(EditStatus::AwaitingConfirmation { .. })
         ));
-        assert!(section.queue().unwrap().is_empty());
+        assert!(section.pending().unwrap().is_empty());
         assert!(
             section
                 .release(

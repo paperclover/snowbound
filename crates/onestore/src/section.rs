@@ -226,15 +226,108 @@ impl<'a> Section<'a> {
         }
     }
 
+    /// The conflict pages of each page that has them, in section order, each page's in the
+    /// order OneNote 2010 lists them under it: the last stored first. Read from the pages'
+    /// manifests and the conflict pages' metadata alone.
+    pub fn conflicts(&mut self) -> Result<Vec<(ExGuid, Vec<crate::ConflictPage>)>> {
+        let listed: Vec<ExGuid> = self.pages()?.into_iter().map(|(space, ..)| space).collect();
+        let element = |object: &crate::Object<'a>| {
+            crate::document::Element::parse_with(object, FileType::Section, &mut |_| {
+                Err(Error {
+                    offset: 0,
+                    message: "Page metadata holds no payload",
+                })
+            })
+        };
+        let mut conflicts = Vec::new();
+        for page in listed {
+            let revision = self.revision(page)?;
+            let Some(manifest) = revision
+                .roots
+                .get(&1)
+                .and_then(|id| revision.objects.get(id))
+            else {
+                continue;
+            };
+            let mut pages = Vec::new();
+            for space in element(manifest)?.spaces.into_iter().rev() {
+                let Some(metadata) = self.revision(space).ok().and_then(|revision| {
+                    revision
+                        .roots
+                        .get(&2)
+                        .and_then(|id| revision.objects.get(id))
+                }) else {
+                    continue;
+                };
+                let metadata = element(metadata)?;
+                let crate::document::Kind::ConflictMetadata { title, author, .. } = metadata.kind
+                else {
+                    continue;
+                };
+                let created = metadata.extra[0]
+                    .iter()
+                    .find_map(|field| match field.value {
+                        crate::document::FieldValue::Bytes(bytes) if field.id == 0x18001c65 => {
+                            bytes.try_into().ok().map(u64::from_le_bytes)
+                        }
+                        _ => None,
+                    });
+                let mut objects = Vec::new();
+                for (id, object) in &self.revision(space)?.objects {
+                    let ObjectData::Properties(bytes) = object.data else {
+                        continue;
+                    };
+                    if crate::PropertySets::parse(bytes)?.sets[0]
+                        .iter()
+                        .any(|property| property.id == 0x88001d96)
+                    {
+                        objects.push(*id);
+                    }
+                }
+                pages.push(crate::ConflictPage {
+                    space,
+                    title: title.unwrap_or_default(),
+                    user: author.unwrap_or_default(),
+                    created,
+                    objects,
+                });
+            }
+            if !pages.is_empty() {
+                conflicts.push((page, pages));
+            }
+        }
+        Ok(conflicts)
+    }
+
+    /// The page series holding each listed page. Moving a page gives it a series of its
+    /// own, so a page in another series than before was moved.
+    pub fn series(&mut self) -> Result<BTreeMap<ExGuid, ExGuid>> {
+        let view = &self.active(self.root)?.view;
+        let section = view.roots.get(&1).and_then(|id| view.nodes.get(id)).ok_or(Error {
+            offset: 0,
+            message: "Section root is unavailable",
+        })?;
+        Ok(section
+            .children
+            .iter()
+            .filter_map(|series| Some((*series, view.nodes.get(series)?)))
+            .flat_map(|(series, node)| node.spaces.iter().map(move |page| (*page, series)))
+            .collect())
+    }
+
     /// Page spaces in section order with the title and outline level (1 at the top) the
     /// page list shows, read from each page's metadata alone.
     pub fn pages(&mut self) -> Result<Vec<(ExGuid, String, u32)>> {
         let root = self.root;
         let view = &self.active(root)?.view;
-        let section = view.roots.get(&1).and_then(|id| view.nodes.get(id)).ok_or(Error {
-            offset: 0,
-            message: "Section root is unavailable",
-        })?;
+        let section = view
+            .roots
+            .get(&1)
+            .and_then(|id| view.nodes.get(id))
+            .ok_or(Error {
+                offset: 0,
+                message: "Section root is unavailable",
+            })?;
         let spaces: Vec<ExGuid> = section
             .children
             .iter()
@@ -253,7 +346,10 @@ impl<'a> Section<'a> {
         for space in spaces {
             let revision = self.revision(space)?;
             let (mut title, mut level) = (None, 1);
-            if let Some(metadata) = revision.roots.get(&2).and_then(|id| revision.objects.get(id))
+            if let Some(metadata) = revision
+                .roots
+                .get(&2)
+                .and_then(|id| revision.objects.get(id))
                 && let crate::document::Kind::Metadata {
                     title: stored,
                     level: stored_level,
@@ -263,7 +359,10 @@ impl<'a> Section<'a> {
                 level = stored_level.unwrap_or(1);
             }
             if title.is_none() {
-                let manifest = revision.roots.get(&1).and_then(|id| revision.objects.get(id));
+                let manifest = revision
+                    .roots
+                    .get(&1)
+                    .and_then(|id| revision.objects.get(id));
                 if let Some(manifest) = manifest
                     && let Some(page) = element(manifest)?
                         .content
@@ -695,6 +794,17 @@ mod tests {
         result
     }
 
+    /// The image the image writer leaves: the `edited` revisions squashed onto the source
+    /// `index` parsed.
+    fn squashed(
+        index: &RevisionIndex<'_>,
+        edited: &[(ExGuid, &ResolvedRevision<'_>)],
+        payloads: &[([u8; 16], &[u8])],
+    ) -> Vec<u8> {
+        let transaction = crate::write::squash(index, edited, payloads, None).unwrap();
+        crate::write::applied(index.store.data, transaction.as_ref()).unwrap()
+    }
+
     /// The page spaces of an image, fullest first.
     fn page_spaces(image: &[u8]) -> Vec<ExGuid> {
         let store = Store::parse(image).unwrap();
@@ -729,65 +839,62 @@ mod tests {
         GUIDS.set(Some(1 << 62 | seed << 40));
         let (mut sealed, mut checkpoints) = (0, 0);
         for batch in 0..batches {
-            let space = spaces[batch % spaces.len().min(pages)];
-            let store = Store::parse(&image).unwrap();
-            let index = RevisionIndex::parse(&store).unwrap();
-            let bump = Bump::new();
-            let mut legacy = ActivePage::parse(&index, space).unwrap();
-            for _ in 0..1 + (writes.0 as usize >> 40) % largest {
-                let Ok(changes) = writes.next(section.active(space).unwrap()) else {
-                    continue;
-                };
-                let stored = legacy.write(&bump, &[], changes.clone()).unwrap();
-                assert_eq!(
-                    section.apply_changes(space, &[], changes).unwrap(),
-                    stored,
-                    "batch {batch}"
-                );
-            }
-            let guids = (batch as u64 + 1) << 32;
-            let expected = seeded(guids, || {
-                crate::page::write::squash(
-                    &index,
-                    &[(space, &legacy.live.revision)],
-                    &legacy.payloads,
-                    &BTreeMap::new(),
-                    None,
-                )
-                .unwrap()
-            });
-            let before = section.stamp().clone();
-            let chains = depths(&section);
-            let transaction = seeded(guids, || section.seal().unwrap());
-            checkpoints += depths(&section)
-                .iter()
-                .filter(|(id, depth)| chains.get(id).is_some_and(|before| before > depth))
-                .count();
-            let mut written = image.clone();
-            if let Some(transaction) = &transaction {
-                assert_eq!(transaction.base, before);
-                transaction.apply(&mut written).unwrap();
-                sealed += 1;
-            }
-            assert!(written == expected, "batch {batch}");
-            assert_eq!(Stamp::of(&written).unwrap(), *section.stamp());
-            drop(legacy);
-            drop(index);
-            drop(store);
-            image = expected;
-            if batch % 25 == 0 || batch + 1 == batches {
-                assert!(section.image() == image);
+            // The writers stamp modification times; a fixed clock keeps the batches alike.
+            let at = 134_000_000_000_000_000 + batch as u64 * 10_000_000;
+            crate::create::at(at, || {
+                let space = spaces[batch % spaces.len().min(pages)];
                 let store = Store::parse(&image).unwrap();
                 let index = RevisionIndex::parse(&store).unwrap();
-                index.validate_current().unwrap();
-                let document = Document::parse(&index).unwrap();
-                for space in &spaces {
+                let bump = Bump::new();
+                let mut legacy = ActivePage::parse(&index, space).unwrap();
+                for _ in 0..1 + (writes.0 as usize >> 40) % largest {
+                    let Ok(changes) = writes.next(section.active(space).unwrap()) else {
+                        continue;
+                    };
+                    let stored = legacy.write(&bump, &[], changes.clone()).unwrap();
                     assert_eq!(
-                        section.page(*space).unwrap(),
-                        Page::from_space(&document, *space).unwrap()
+                        section.apply_changes(space, &[], changes).unwrap(),
+                        stored,
+                        "batch {batch}"
                     );
                 }
-            }
+                let guids = (batch as u64 + 1) << 32;
+                let expected = seeded(guids, || {
+                    squashed(&index, &[(space, &legacy.live.revision)], &legacy.payloads)
+                });
+                let before = section.stamp().clone();
+                let chains = depths(&section);
+                let transaction = seeded(guids, || section.seal().unwrap());
+                checkpoints += depths(&section)
+                    .iter()
+                    .filter(|(id, depth)| chains.get(id).is_some_and(|before| before > depth))
+                    .count();
+                let mut written = image.clone();
+                if let Some(transaction) = &transaction {
+                    assert_eq!(transaction.base, before);
+                    transaction.apply(&mut written).unwrap();
+                    sealed += 1;
+                }
+                assert!(written == expected, "batch {batch}");
+                assert_eq!(Stamp::of(&written).unwrap(), *section.stamp());
+                drop(legacy);
+                drop(index);
+                drop(store);
+                image = expected;
+                if batch % 25 == 0 || batch + 1 == batches {
+                    assert!(section.image() == image);
+                    let store = Store::parse(&image).unwrap();
+                    let index = RevisionIndex::parse(&store).unwrap();
+                    index.validate_current().unwrap();
+                    let document = Document::parse(&index).unwrap();
+                    for space in &spaces {
+                        assert_eq!(
+                            section.page(*space).unwrap(),
+                            Page::from_space(&document, *space).unwrap()
+                        );
+                    }
+                }
+            });
         }
         GUIDS.set(None);
         assert!(sealed * 3 > batches, "{sealed} of {batches} batches sealed");
@@ -932,14 +1039,7 @@ mod tests {
             legacy.write(&bump, &[], changes).unwrap();
             let expected = seeded(guids, || {
                 let revision = &legacy.live.revision;
-                crate::page::write::squash(
-                    &index,
-                    &[(space, revision)],
-                    &[],
-                    &BTreeMap::new(),
-                    None,
-                )
-                .unwrap()
+                squashed(&index, &[(space, revision)], &[])
             });
             drop(legacy);
             drop(index);
@@ -971,14 +1071,7 @@ mod tests {
             let legacy = ActivePage::parse(&index, space).unwrap();
             let expected = seeded(seed, || {
                 let revision = &legacy.live.revision;
-                crate::page::write::squash(
-                    &index,
-                    &[(space, revision)],
-                    &[payload],
-                    &BTreeMap::new(),
-                    None,
-                )
-                .unwrap()
+                squashed(&index, &[(space, revision)], &[payload])
             });
             let transaction = seeded(seed, || section.seal().unwrap());
             assert_eq!(transaction.is_some(), expected != image);
@@ -1036,8 +1129,12 @@ mod tests {
                         && page.parents.contains_key(id)
                 })
                 .find_map(|(outline, _)| {
+                    let paragraph = crate::page::text::new_id().ok()?;
+                    let text = crate::page::text::new_id().ok()?;
                     Insertion::paragraph(*outline, None, "Tampered text", "Author")
-                        .and_then(|insertion| insertion.changes(page))
+                        .and_then(|insertion| {
+                            insertion.changes_as(page, paragraph, paragraph, text)
+                        })
                         .ok()
                 })
                 .unwrap();
@@ -1127,8 +1224,7 @@ mod probe {
         (space, texts[texts.len() / 2], texts.len())
     }
 
-    /// One-character edits of a large page through the image writer and through a
-    /// `Section`: `SECTION_PROBE=path cargo test --release -p onestore --lib probe -- --ignored --nocapture`.
+    /// One-character edits of a large page through a `Section`: `SECTION_PROBE=path cargo test --release -p onestore --lib probe -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn keystrokes() {
@@ -1139,57 +1235,6 @@ mod probe {
             "{path}: {} bytes, {count} text objects on the page",
             image.len()
         );
-
-        let mut samples = Vec::new();
-        let mut written = 0;
-        for _ in 0..9 {
-            let start = Instant::now();
-            let edit = crate::PreparedEdit::text(&image, space, text, 0..0, "x").unwrap();
-            samples.push(start.elapsed());
-            let transaction = edit.transaction();
-            written = transaction.append.len()
-                + transaction
-                    .patches
-                    .iter()
-                    .map(|(_, bytes)| bytes.len())
-                    .sum::<usize>();
-        }
-        println!(
-            "image writer, one keystroke: {:?}, {written} bytes written",
-            median(samples)
-        );
-
-        let before = {
-            let store = Store::parse(&image).unwrap();
-            let index = RevisionIndex::parse(&store).unwrap();
-            Page::from_space(&crate::document::Document::parse(&index).unwrap(), space).unwrap()
-        };
-        let mut after = before.clone();
-        let edited = after
-            .objects
-            .iter_mut()
-            .filter_map(|object| match object {
-                crate::page::PageObject::Outline(outline) => Some(outline),
-                _ => None,
-            })
-            .flat_map(|outline| &mut outline.paragraphs)
-            .find_map(|paragraph| paragraph.text_mut().filter(|object| object.id == text))
-            .unwrap();
-        let format = edited.text.format_at(0).unwrap().clone();
-        edited
-            .text
-            .apply(crate::page::text::Edit {
-                range: 0..0,
-                replacement: crate::page::Paragraph::new("x".into(), format),
-            })
-            .unwrap();
-        let mut samples = Vec::new();
-        for _ in 0..9 {
-            let start = Instant::now();
-            crate::PreparedEdit::page(&image, space, &after, "Probe").unwrap();
-            samples.push(start.elapsed());
-        }
-        println!("page-model writer, one keystroke: {:?}", median(samples));
 
         let arena = Arena::default();
         let start = Instant::now();

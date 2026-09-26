@@ -17,6 +17,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "support/server.rs"]
+mod server;
+use server::snapshot;
+
 fn client() -> Client {
     Client::connect(
         &std::env::var("ONESTORE_SMB_LAB").unwrap(),
@@ -49,15 +53,15 @@ impl Remote for Counted {
         self.reads += 1;
         self.remote.read()
     }
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
+    fn stamp(&mut self) -> io::Result<Stamp> {
         self.stamps += 1;
         self.remote.stamp()
     }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         self.remote.publish(transaction)
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        self.remote.confirm(snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        self.remote.confirm(base)
     }
 }
 
@@ -140,7 +144,7 @@ fn live_keystrokes_publish_reading_only_the_header_and_a_native_change_merges() 
     assert_eq!(remote.stamps, 20);
     assert_eq!(
         lab.read(&path, 1 << 24).unwrap(),
-        replica.snapshot().unwrap()
+        snapshot(&replica)
     );
     for _ in 0..5 {
         assert_eq!(replica.sync_once(&mut remote).unwrap().edit, None);
@@ -173,7 +177,7 @@ fn live_keystrokes_publish_reading_only_the_header_and_a_native_change_merges() 
     assert!(merged.ends_with(" local"), "{merged}");
     assert_eq!(
         lab.read(&path, 1 << 24).unwrap(),
-        replica.snapshot().unwrap()
+        snapshot(&replica)
     );
     lab.delete(&path).unwrap();
 }
@@ -244,6 +248,6 @@ fn live_session_applies_edits_through_the_embedded_client_and_reopens() {
     section.close().unwrap();
     let replica = Replica::open(&cache).unwrap();
     assert_eq!(text_of(&replica, space, text), "0123456789Session");
-    assert_eq!(replica.snapshot().unwrap(), published);
+    assert_eq!(snapshot(&replica), published);
     lab.delete(&path).unwrap();
 }

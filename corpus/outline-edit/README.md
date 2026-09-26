@@ -46,7 +46,7 @@ The controller selects the target again after activating the native window and
 transfers XML as UTF-8 data. Captured authoring scripts retain their exact source;
 identical immutable artifacts link to one canonical corpus copy.
 
-`layout/candidate` applies `PreparedEdit::outline` to the five geometry and saved
+`layout/candidate` applies Rust outline edits to the five geometry and saved
 collapse cases in `before`. `layout/cold` captures that Rust output through a fresh
 OneNote cache. Every active identity, child/content/structure reference, child level,
 and collapse default survives; text, fields, tags and explicit formatting compare

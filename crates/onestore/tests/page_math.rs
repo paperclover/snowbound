@@ -1,3 +1,5 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
     RevisionIndex, Store,
     document::Document,
@@ -272,8 +274,8 @@ fn equations_are_written_and_read_back() {
         }
         outline.paragraphs.push(paragraph);
     }
-    let written = onestore::PreparedEdit::page(&source, space, &after, "Math author").unwrap();
-    let store = Store::parse(written.as_bytes()).unwrap();
+    let written = ops::saved(&source, space, &after).unwrap();
+    let store = Store::parse(written.as_slice()).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
     let stored = Page::from_space(&document, space).unwrap();
@@ -305,13 +307,13 @@ fn equations_are_written_and_read_back() {
     }
     assert_eq!(stored, expected);
     assert_eq!(
-        rendered_equations(written.as_bytes(), &stored.title),
+        rendered_equations(written.as_slice(), &stored.title),
         expected_mathml
     );
     if let Some(directory) = std::env::var_os("ONESTORE_MATH_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("math.one"), written.as_bytes()).unwrap();
+        std::fs::write(directory.join("math.one"), written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(
@@ -361,8 +363,8 @@ fn a_paragraph_emptied_of_its_inline_math_saves() {
     let plain = text.text.spans()[0].format.clone();
     assert_ne!(plain.math, Some(true));
     text.text = onestore::page::Paragraph::new(String::new(), plain);
-    let written = onestore::PreparedEdit::page(NATIVE, space, &after, "Author").unwrap();
-    let store = Store::parse(written.as_bytes()).unwrap();
+    let written = ops::saved(NATIVE, space, &after).unwrap();
+    let store = Store::parse(written.as_slice()).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
     assert_eq!(Page::from_space(&document, space).unwrap(), after);

@@ -1,5 +1,6 @@
-//! Ops against the page-model writer: for random edits of corpus pages, lowering the edit
-//! and applying the ops through a `Section` stores what `PreparedEdit::page` stores.
+//! Ops against the model: for random edits of corpus pages, lowering the edit and applying
+//! the ops through a `Section` stores the edited page, as the model oracle predicts and as
+//! the sealed image reads back.
 
 use super::*;
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     },
     write::GUIDS,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SOURCES: &[(&str, &[u8])] = &[
     ("outline-edit", include_bytes!("../../../../corpus/outline-edit/before/notebook/synthetic.one")),
@@ -85,20 +86,25 @@ fn read(image: &[u8], space: ExGuid) -> Page {
 }
 
 /// `page` with writer-chosen identities replaced in document order: list nodes, which a
-/// copy for a second owner gets, and tag field indices.
+/// copy for a second owner gets (so equal definitions become one), tag field indices, and ink
+/// coordinates at the resolution they are stored in.
 pub(super) fn normalize(page: &Page) -> Page {
     let mut page = page.clone();
     let mut lists = BTreeMap::new();
+    let mut canonical = BTreeMap::new();
     let mut paths: Vec<_> = model::lists(&page).into_iter().map(|(path, _, _)| path).collect();
     paths.sort_by_key(|path| format!("{path:?}"));
+    let definitions = page.definitions.clone();
     for path in &paths {
         for paragraph in model::list_at(&mut page, path).iter_mut() {
             for list in &mut paragraph.lists {
                 let next = ExGuid {
                     guid: [0xee; 16],
-                    n: 1 + lists.len() as u32,
+                    n: 1 + canonical.len() as u32,
                 };
-                *list = *lists.entry(*list).or_insert(next);
+                let content = definitions.get(list).map_or(format!("{list:?}"), |d| format!("{d:?}"));
+                let id = *canonical.entry(content).or_insert(next);
+                *list = *lists.entry(*list).or_insert(id);
             }
             for tag in paragraph.tags.iter_mut() {
                 tag.extra_set = 0;
@@ -136,7 +142,111 @@ pub(super) fn normalize(page: &Page) -> Page {
             _ => Some((id, definition)),
         })
         .collect();
+    fn quantize(ink: &mut Ink) {
+        for stroke in &mut ink.strokes {
+            for point in &mut stroke.points {
+                *point = point.map(|value| (value * 10.0).round() / 10.0);
+            }
+        }
+        ink.groups.iter_mut().for_each(quantize);
+    }
+    for object in &mut page.objects {
+        if let PageObject::Ink(ink) = object {
+            quantize(ink);
+        }
+    }
+    for path in &paths {
+        for paragraph in model::list_at(&mut page, path).iter_mut() {
+            if let ParagraphContent::Ink(ink) = &mut paragraph.content {
+                quantize(ink);
+            }
+        }
+    }
     page
+}
+
+/// `after` with what the writers derive rather than store as given: the title from the
+/// title text, the values they give new objects where the model leaves them unset, and only
+/// the definitions something uses.
+fn as_written(after: &Page, before: &Page, stored: &Page) -> Page {
+    use serde_json::Value;
+    fn ids(value: &Value, out: &mut BTreeSet<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(id)) = map.get("id") {
+                    out.insert(id.clone());
+                }
+                map.values().for_each(|value| ids(value, out));
+            }
+            Value::Array(values) => values.iter().for_each(|value| ids(value, out)),
+            _ => {}
+        }
+    }
+    fn adopt(after: &mut Value, stored: &Value, old: &BTreeSet<String>, new: bool) {
+        match (after, stored) {
+            (Value::Object(after), Value::Object(stored)) => {
+                let new = new
+                    || matches!(after.get("id"), Some(Value::String(id)) if !old.contains(id));
+                for (key, value) in after.iter_mut() {
+                    let Some(written) = stored.get(key) else {
+                        continue;
+                    };
+                    // Ink coordinates are stored at a coarser resolution.
+                    let near = |a: &Value, b: &Value| {
+                        a.as_f64().zip(b.as_f64()).is_some_and(|(a, b)| (a - b).abs() < 0.05)
+                    };
+                    let close_points = key == "points"
+                        && value.as_array().zip(written.as_array()).is_some_and(|(a, b)| {
+                            a.len() == b.len()
+                                && a.iter().zip(b).all(|(a, b)| {
+                                    a.as_array().zip(b.as_array()).is_some_and(|(a, b)| {
+                                        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| near(a, b))
+                                    })
+                                })
+                        });
+                    let unset = new && (value.is_null() || value.as_array().is_some_and(Vec::is_empty));
+                    if close_points || unset {
+                        *value = written.clone();
+                    } else {
+                        adopt(value, written, old, new);
+                    }
+                }
+            }
+            (Value::Array(after), Value::Array(stored)) if after.len() == stored.len() => {
+                for (value, written) in after.iter_mut().zip(stored) {
+                    adopt(value, written, old, new);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut old = BTreeSet::new();
+    ids(&serde_json::to_value(before).unwrap(), &mut old);
+    let mut value = serde_json::to_value(after).unwrap();
+    adopt(&mut value, &serde_json::to_value(stored).unwrap(), &old, false);
+    let mut page: Page = serde_json::from_value(value).unwrap();
+    page.title = stored.title.clone();
+    unused_dropped(&mut page);
+    page
+}
+
+/// Drops the definitions nothing on `page` uses, as reading a page leaves them out.
+fn unused_dropped(page: &mut Page) {
+    let mut used = BTreeSet::new();
+    for (_, _, list) in model::lists(page) {
+        for paragraph in list {
+            used.extend(paragraph.style);
+            used.extend(paragraph.lists.iter().copied());
+            used.extend(paragraph.tags.iter().filter_map(|tag| tag.definition));
+            if let ParagraphContent::Table(table) = &paragraph.content {
+                used.extend(table.tags.iter().filter_map(|tag| tag.definition));
+            }
+            if let Some(text) = paragraph.text() {
+                used.extend(text.tags.iter().filter_map(|tag| tag.definition));
+            }
+        }
+    }
+    page.definitions.retain(|id, _| used.contains(id));
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -224,7 +334,17 @@ fn id() -> ExGuid {
     new_id().unwrap()
 }
 
-fn text_paragraph(text: &str, format: Format) -> PageParagraph {
+/// `ops` on page `space` of `source` as one edit, sealed: the image they leave.
+pub(crate) fn edited(source: &[u8], space: ExGuid, ops: Vec<PageOp>) -> Result<Vec<u8>, OpError> {
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.to_vec()).map_err(OpError::Failed)?;
+    let ops = ops.into_iter().map(|op| Op::Page { space, op }).collect();
+    section.apply("Author", &Edit { at: AT, ops })?;
+    section.seal().map_err(OpError::Failed)?;
+    Ok(section.image())
+}
+
+pub(crate) fn text_paragraph(text: &str, format: Format) -> PageParagraph {
     PageParagraph {
         id: id(),
         parent: None,
@@ -473,8 +593,10 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 }
                 inserted.push(paragraph);
             }
-            // Children follow their parent; keep them after the first inserted paragraph.
-            inserted.sort_by_key(|p| p.parent.is_some());
+            // Children follow their parent, the first inserted paragraph, directly.
+            let (children, mut inserted): (Vec<_>, Vec<_>) =
+                inserted.into_iter().partition(|p| p.parent.is_some());
+            inserted.splice(1..1, children);
             let cell_level = list.first().map_or(1, |p| p.level);
             for paragraph in &mut inserted {
                 if paragraph.parent.is_none() {
@@ -993,125 +1115,70 @@ fn stroke(rng: &mut Rng) -> InkStroke {
     }
 }
 
-/// How one differential case came out.
+/// How one lowered edit came out.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub(super) enum Outcome {
     /// The edit made no change the writers store.
     Unchanged,
-    /// Both refused the edit.
+    /// Lowering or the section refused the edit; the section is as it was.
     Refused,
-    /// The page writer refused; the ops were written.
-    OnlyOps,
-    /// Identical bytes.
-    Bytes,
-    /// Equal pages, both images valid, the op revision no larger.
-    Model,
-    /// The op revision declares more than the page writer's.
-    Larger,
+    /// The sealed image reads back as the edited page.
+    Stored,
     Mismatch(String),
 }
 
-/// Objects the space's active revision declares in `image`.
-pub(super) fn declared(image: &[u8], space: ExGuid) -> usize {
-    let store = Store::parse(image).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let rid = index.active(space).unwrap();
-    index.spaces[&space].revisions[&rid]
-        .nodes
-        .iter()
-        .filter_map(|node| match node.reference {
-            Some(crate::Reference::NodeList(chunk)) if node.id == 0xb0 => Some(chunk),
-            _ => None,
-        })
-        .map(|chunk| {
-            store
-                .lists
-                .values()
-                .find(|list| list.fragments.first().is_some_and(|f| f.offset == chunk.offset))
-                .map_or(0, |list| {
-                    list.nodes
-                        .iter()
-                        .filter(|n| {
-                            matches!(n.id, 0x2d | 0x2e | 0x41 | 0x42 | 0xa4 | 0xa5 | 0xc4 | 0xc5 | 0x72 | 0x73)
-                        })
-                        .count()
-                })
-        })
-        .sum()
-}
-
-/// Writes `after` over page `space` of `source` both ways and compares the images.
-pub(super) fn differential(source: &[u8], space: ExGuid, after: &Page, seed: u64) -> Outcome {
+/// Lowers `after` over page `space` of `source`, applies and seals the ops, and compares
+/// the page the section holds with the edited page, with the model oracle's prediction and
+/// with the page the sealed image reads back as.
+pub(super) fn stored(source: &[u8], space: ExGuid, after: &Page, seed: u64) -> Outcome {
     let before = read(source, space);
-    let oracle = seeded(seed, || {
-        crate::create::at(AT, || crate::PreparedEdit::page(source, space, after, "Author"))
-    });
     let arena = Arena::default();
     let mut section = Section::open(&arena, source.to_vec()).unwrap();
-    let ops = lower_page(&before, after);
-    let written = ops.as_ref().ok().map(|ops| {
-        seeded(seed, || {
-            let edit = Edit {
-                at: AT,
-                ops: ops
-                    .iter()
-                    .map(|op| Op::Page {
-                        space,
-                        op: op.clone(),
-                    })
-                    .collect(),
-            };
-            section.apply("Author", &edit).map(|()| {
-                let predicted = {
-                    let mut page = before.clone();
-                    for op in ops {
-                        model::apply(&mut page, op).unwrap();
-                    }
-                    page
-                };
-                (section.seal().unwrap(), predicted)
-            })
-        })
-    });
-    let image = section.image();
-    match (oracle, written) {
-        (Err(_), None | Some(Err(_))) => Outcome::Refused,
-        (Err(_), Some(Ok(_))) => Outcome::OnlyOps,
-        (Ok(_), None) => Outcome::Mismatch(format!("lowering refused: {:?}", ops.unwrap_err())),
-        (Ok(_), Some(Err(error))) => Outcome::Mismatch(format!("apply refused: {error:?} for {:?}", ops.unwrap())),
-        (Ok(edit), Some(Ok((transaction, predicted)))) => {
-            let stored = normalize(&read(&image, space));
-            if normalize(&predicted) != stored {
-                return Outcome::Mismatch(format!(
-                    "the model predicts otherwise: {}",
-                    first_difference(&stored, &normalize(&predicted))
-                ));
-            }
-            let expected = edit.as_bytes();
-            if expected == source && transaction.is_none() {
-                return Outcome::Unchanged;
-            }
-            if expected == image.as_slice() {
-                return Outcome::Bytes;
-            }
-            let store = Store::parse(&image).unwrap();
-            let index = RevisionIndex::parse(&store).unwrap();
-            if let Err(error) = index.validate_current() {
-                return Outcome::Mismatch(format!("invalid image: {error:?}"));
-            }
-            let (ours, theirs) = (normalize(&read(&image, space)), normalize(&read(expected, space)));
-            if ours != theirs {
-                return Outcome::Mismatch(first_difference(&theirs, &ours));
-            }
-            if expected == source {
-                return Outcome::Model;
-            }
-            if declared(&image, space) > declared(expected, space) {
-                return Outcome::Larger;
-            }
-            Outcome::Model
+    let Ok(ops) = lower_page(&before, after) else {
+        return Outcome::Refused;
+    };
+    let edit = Edit {
+        at: AT,
+        ops: ops.iter().map(|op| Op::Page { space, op: op.clone() }).collect(),
+    };
+    if seeded(seed, || section.apply("Author", &edit)).is_err() {
+        if section.page(space).unwrap() != before {
+            return Outcome::Mismatch("a refused edit changed the page".into());
         }
+        return Outcome::Refused;
     }
+    let mut predicted = before.clone();
+    for op in &ops {
+        model::apply(&mut predicted, op).unwrap();
+    }
+    let live = section.page(space).unwrap();
+    if normalize(&predicted) != normalize(&live) {
+        return Outcome::Mismatch(format!(
+            "the model predicts otherwise: {}",
+            first_difference(&normalize(&live), &normalize(&predicted))
+        ));
+    }
+    let Some(_) = seeded(seed, || section.seal().unwrap()) else {
+        return if live == before { Outcome::Unchanged } else {
+            Outcome::Mismatch("the page changed and the seal stored nothing".into())
+        };
+    };
+    let image = section.image();
+    let store = Store::parse(&image).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    if let Err(error) = index.validate_current() {
+        return Outcome::Mismatch(format!("invalid image: {error:?}"));
+    }
+    let reread = read(&image, space);
+    if reread != live {
+        return Outcome::Mismatch(format!("reads back otherwise: {}", first_difference(&live, &reread)));
+    }
+    let written = as_written(after, &before, &reread);
+    let (stored, wanted) = (normalize(&reread), normalize(&written));
+    if stored != wanted {
+        return Outcome::Mismatch(format!("stores another page: {}", first_difference(&wanted, &stored)));
+    }
+    Outcome::Stored
 }
 
 fn spans(text: &Paragraph) -> String {
@@ -1155,7 +1222,7 @@ pub(super) fn first_difference(expected: &Page, actual: &Page) -> String {
 
 /// Every family on every corpus page it applies to, several seeds each.
 #[test]
-fn ops_store_what_the_page_writer_stores() {
+fn lowered_edits_store_the_edited_page() {
     let mut tally: BTreeMap<(Family, String), usize> = BTreeMap::new();
     let mut mismatches = Vec::new();
     let seeds = std::env::var("OP_SEEDS").map_or(3, |s| s.parse().unwrap());
@@ -1170,7 +1237,7 @@ fn ops_store_what_the_page_writer_stores() {
                         continue;
                     }
                     GUIDS.set(None);
-                    let outcome = differential(source, space, &after, 1 << 40 | seed);
+                    let outcome = stored(source, space, &after, 1 << 40 | seed);
                     let key = match &outcome {
                         Outcome::Mismatch(_) => "Mismatch".to_owned(),
                         other => format!("{other:?}"),
@@ -1192,7 +1259,6 @@ fn ops_store_what_the_page_writer_stores() {
         println!("{mismatch}\n");
     }
     assert!(mismatches.is_empty(), "{} mismatches", mismatches.len());
-    assert!(!tally.keys().any(|(_, outcome)| outcome == "Larger"));
 }
 
 #[test]
@@ -1674,42 +1740,34 @@ fn random_ops_read_back_as_the_model_predicts() {
     assert!(applied > refused);
 }
 
-/// Page creation, moves, indentation and removal through a section store what the image
-/// writers store, and the section lists the pages the document does.
+/// Page creation, moves, indentation and removal through a section leave the page list
+/// they describe, and the sealed image lists the pages the section does.
 #[test]
-fn section_ops_store_what_the_image_writers_store() {
+fn section_ops_leave_the_page_list_they_describe() {
     let sources: Vec<Vec<u8>> = vec![
         crate::create_section("pages.one", "First", "Author").unwrap(),
         include_bytes!("../../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one").to_vec(),
         SOURCES[3].1.to_vec(),
     ];
-    let (mut bytes, mut total) = (0, 0);
+    let mut applied = 0;
     for (n, source) in sources.iter().enumerate() {
         let arena = Arena::default();
         let mut section = Section::open(&arena, source.to_vec()).unwrap();
-        let mut image = source.clone();
         let mut rng = Rng(n as u64 + 17);
         for step in 0..12u64 {
-            let spaces = pages(&image);
+            let listed = section.pages().unwrap();
+            let spaces: Vec<ExGuid> = listed.iter().map(|(space, ..)| *space).collect();
+            let anchor = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied().filter(|_| rng.coin());
             let op = match step % 4 {
-                0 => SectionOp::Create(
-                    seeded(1 << 50 | step << 20, || {
-                        crate::PageCreation::new(
-                            spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied().filter(|_| rng.coin()),
-                            Some("Created"),
-                            "Author",
-                        )
-                    })
-                    .unwrap(),
-                ),
+                0 => SectionOp::Create(crate::PageCreation::new(anchor, Some("Created"), "Author").unwrap()),
                 1 => {
                     let Some(space) = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied() else { continue };
                     let level = if spaces[0] == space { 1 } else { 1 + (rng.next() % 2) as u32 };
-                    SectionOp::Pages(vec![seeded(1 << 51 | step << 20, || crate::PageEdit::set_level(space, level)).unwrap()])
+                    SectionOp::Pages(vec![crate::PageEdit::set_level(space, level).unwrap()])
                 }
                 2 => {
                     let Some(space) = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied() else { continue };
-                    SectionOp::Pages(vec![seeded(1 << 52 | step << 20, || crate::PageEdit::move_to(space, None, 1)).unwrap()])
+                    SectionOp::Pages(vec![crate::PageEdit::move_to(space, None, 1).unwrap()])
                 }
                 _ => {
                     if spaces.len() < 2 {
@@ -1718,63 +1776,71 @@ fn section_ops_store_what_the_image_writers_store() {
                     SectionOp::Delete(vec![spaces[rng.pick(spaces.len()).unwrap()]])
                 }
             };
-            let expected = seeded(1 << 40 | step << 16, || {
-                crate::create::at(AT, || match &op {
-                    SectionOp::Create(creation) => crate::PreparedEdit::create_page(&image, creation),
-                    SectionOp::Pages(edits) => crate::PreparedEdit::pages(&image, edits),
-                    SectionOp::Delete(spaces) => crate::PreparedEdit::delete_pages_permanently(&image, spaces),
-                    SectionOp::Import { .. } => unreachable!(),
-                })
-                .map(|edit| edit.as_bytes().to_vec())
-            });
-            let applied = seeded(1 << 40 | step << 16, || {
-                section
-                    .apply("Author", &Edit { at: AT, ops: vec![Op::Section(op.clone())] })
-                    .map(|()| section.seal().unwrap())
-            });
-            match (expected, applied) {
-                (Err(_), Err(_)) => continue,
-                (Ok(expected), Ok(_)) => {
-                    total += 1;
-                    let written = section.image();
-                    if written == expected {
-                        bytes += 1;
-                    } else {
-                        let store = Store::parse(&written).unwrap();
-                        RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
-                        let spaces = pages(&expected);
-                        assert_eq!(pages(&written), spaces, "{n} step {step} {op:?}");
-                        for space in spaces {
-                            assert_eq!(read(&written, space), read(&expected, space), "{n} step {step}");
-                        }
+            let edit = Edit { at: AT, ops: vec![Op::Section(op.clone())] };
+            if section.apply("Author", &edit).is_err() {
+                assert_eq!(section.pages().unwrap(), listed, "{n} step {step} {op:?}");
+                continue;
+            }
+            section.seal().unwrap();
+            applied += 1;
+            let after = section.pages().unwrap();
+            let order = |list: &[(ExGuid, String, u32)], without: ExGuid| -> Vec<ExGuid> {
+                list.iter().map(|(space, ..)| *space).filter(|space| *space != without).collect()
+            };
+            match &op {
+                SectionOp::Create(creation) => {
+                    let at = after.iter().position(|(space, ..)| *space == creation.space()).unwrap();
+                    assert_eq!(after[at].1, "Created");
+                    assert_eq!(order(&after, creation.space()), spaces, "{n} step {step}");
+                    match anchor {
+                        Some(before) => assert_eq!(after[at + 1].0, before),
+                        None => assert_eq!(at + 1, after.len()),
                     }
-                    image = expected;
-                    let store = Store::parse(&image).unwrap();
-                    let index = RevisionIndex::parse(&store).unwrap();
-                    let document = Document::parse(&index).unwrap();
-                    let listed: Vec<(ExGuid, String, u32)> = document
-                        .pages()
-                        .unwrap()
-                        .into_iter()
-                        .map(|(space, page)| {
-                            let (title, level) = Page::heading(document.active(space).unwrap(), page);
-                            (space, title, level)
-                        })
-                        .collect();
-                    assert_eq!(section.pages().unwrap(), listed, "{n} step {step}");
                 }
-                (expected, applied) => panic!("{n} step {step} {op:?}: {:?} vs {:?}", expected.err(), applied.err()),
+                SectionOp::Pages(edits) => {
+                    let space = edits[0].space();
+                    let at = after.iter().position(|(listed, ..)| *listed == space).unwrap();
+                    assert_eq!(after[at].2, edits[0].level(), "{n} step {step} {op:?}");
+                    if edits[0].position() == crate::PagePosition::Keep {
+                        assert_eq!(order(&after, space), order(&listed, space));
+                        assert_eq!(after.iter().map(|(s, ..)| *s).collect::<Vec<_>>(), spaces);
+                    } else {
+                        assert_eq!(after.last().unwrap().0, space, "{n} step {step}");
+                    }
+                }
+                SectionOp::Delete(deleted) => {
+                    assert_eq!(after.iter().map(|(s, ..)| *s).collect::<Vec<_>>(), order(&listed, deleted[0]));
+                }
+                SectionOp::Import { .. } | SectionOp::Conflict { .. } | SectionOp::Color(_) => {
+                    unreachable!()
+                }
+            }
+            let image = section.image();
+            let store = Store::parse(&image).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            index.validate_current().unwrap();
+            let document = Document::parse(&index).unwrap();
+            let reread: Vec<(ExGuid, String, u32)> = document
+                .pages()
+                .unwrap()
+                .into_iter()
+                .map(|(space, page)| {
+                    let (title, level) = Page::heading(document.active(space).unwrap(), page);
+                    (space, title, level)
+                })
+                .collect();
+            assert_eq!(reread, after, "{n} step {step}");
+            for (space, ..) in &after {
+                assert_eq!(read(&image, *space), section.page(*space).unwrap(), "{n} step {step}");
             }
         }
     }
-    println!("{bytes} of {total} section edits byte-identical");
-    assert!(total > 12);
+    assert!(applied > 12, "{applied} section edits applied");
 }
 
-/// Importing a page stores what creating it and writing its copy through the page writer
-/// does.
+/// An imported page reads back as its copy under the created page's title.
 #[test]
-fn an_imported_page_reads_as_the_page_writer_leaves_it() {
+fn an_imported_page_reads_back_as_its_copy() {
     let target = crate::create_section("import.one", "First", "Author").unwrap();
     let mut imported = 0;
     for (name, source) in SOURCES {
@@ -1783,48 +1849,45 @@ fn an_imported_page_reads_as_the_page_writer_leaves_it() {
                 continue;
             };
             let creation = crate::PageCreation::new(None, Some(&copy.title), "Author").unwrap();
-            let created = crate::PreparedEdit::create_page(&target, &creation).unwrap();
-            let created = created.as_bytes();
-            let mut after = read(created, creation.space());
-            after.objects.retain(|object| matches!(object, PageObject::Title(_)));
-            after.objects.extend(
+            let arena = Arena::default();
+            let mut section = Section::open(&arena, target.clone()).unwrap();
+            let import = |section: &mut Section<'_>, op: SectionOp| {
+                section.apply("Author", &Edit { at: AT, ops: vec![Op::Section(op)] })
+            };
+            import(&mut section, SectionOp::Create(creation.clone())).unwrap();
+            let created = section.page(creation.space()).unwrap();
+            let mut expected = created.clone();
+            let arena = Arena::default();
+            let mut section = Section::open(&arena, target.clone()).unwrap();
+            if import(&mut section, SectionOp::Import { creation: creation.clone(), page: copy.clone() }).is_err() {
+                continue;
+            }
+            section.seal().unwrap();
+            let image = section.image();
+            let store = Store::parse(&image).unwrap();
+            RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
+            expected.objects.retain(|object| matches!(object, PageObject::Title(_)));
+            expected.objects.extend(
                 copy.objects
                     .iter()
                     .filter(|object| !matches!(object, PageObject::Title(_)))
                     .cloned(),
             );
-            after.definitions = copy.definitions.clone();
-            let expected = crate::create::at(AT, || {
-                crate::PreparedEdit::page(created, creation.space(), &after, "Author")
-            });
-            let arena = Arena::default();
-            let mut section = Section::open(&arena, target.clone()).unwrap();
-            let applied = section.apply(
-                "Author",
-                &Edit {
-                    at: AT,
-                    ops: vec![Op::Section(SectionOp::Import {
-                        creation: creation.clone(),
-                        page: copy.clone(),
-                    })],
-                },
-            );
-            match (expected, applied) {
-                (Err(_), Err(_)) => continue,
-                (Ok(expected), Ok(())) => {
-                    section.seal().unwrap();
-                    let image = section.image();
-                    let store = Store::parse(&image).unwrap();
-                    RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
-                    let (ours, theirs) = (
-                        normalize(&read(&image, creation.space())),
-                        normalize(&read(expected.as_bytes(), creation.space())),
-                    );
-                    assert!(ours == theirs, "{name}: {}", first_difference(&theirs, &ours));
-                    imported += 1;
+            expected.definitions.extend(copy.definitions.clone());
+            let stored = read(&image, creation.space());
+            // New page children stack as the writers add them.
+            let order: Vec<ExGuid> = stored.objects.iter().map(PageObject::id).collect();
+            expected.objects.sort_by_key(|object| order.iter().position(|id| *id == object.id()));
+            let mut expected = as_written(&expected, &created, &stored);
+            // An outline's height follows its content; no op carries it.
+            for (object, stored) in expected.objects.iter_mut().zip(&stored.objects) {
+                if let (PageObject::Outline(outline), PageObject::Outline(stored)) = (object, stored) {
+                    outline.layout.max_height = stored.layout.max_height;
                 }
-                (expected, applied) => panic!("{name}: {:?} vs {:?}", expected.err(), applied.err()),
             }
+            let (ours, theirs) = (normalize(&stored), normalize(&expected));
+            assert!(ours == theirs, "{name}: {}", first_difference(&theirs, &ours));
+            imported += 1;
         }
     }
     assert!(imported > 10, "{imported} pages imported");

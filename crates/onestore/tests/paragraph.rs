@@ -1,6 +1,8 @@
 use onestore::{
-    ExGuid, ParagraphJoin, ParagraphSplit, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Kind, Revision},
+    op::{Op, OpError, PageOp},
+    page::text::new_id,
 };
 use serde_json::Value;
 
@@ -10,6 +12,40 @@ mod checkpoint;
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
+
+/// Enter at `at` in `text`, with fresh identities for the new paragraph, its text and a
+/// copy of each list node of the paragraph: the op, the new paragraph and its text.
+fn split(source: &[u8], space: ExGuid, text: ExGuid, at: u32) -> (Op, ExGuid, ExGuid) {
+    let store = Store::parse(source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let lists = document.spaces[&space]
+        .active()
+        .unwrap()
+        .nodes
+        .values()
+        .find_map(|node| match &node.kind {
+            Kind::Paragraph { lists, .. } if node.content == [text] => Some(lists.len()),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let (paragraph, right) = (new_id().unwrap(), new_id().unwrap());
+    let op = PageOp::Split {
+        text,
+        at,
+        paragraph,
+        right,
+        lists: (0..lists).map(|_| new_id().unwrap()).collect(),
+    };
+    (Op::Page { space, op }, paragraph, right)
+}
+
+/// `source` after joining the paragraph of text `right` to the one of text `left`.
+fn join(source: &[u8], space: ExGuid, left: ExGuid, right: ExGuid) -> Result<Vec<u8>, OpError> {
+    ops::edited(source, vec![Op::Page { space, op: PageOp::Join { left, right } }])
+}
 
 const SOURCE: &[u8] =
     include_bytes!("../../../corpus/paragraph-edit/before/notebook/synthetic.one");
@@ -114,12 +150,9 @@ fn joins_match_native_graphs_tags_and_inherited_character_styles() {
                         .contains_key(&left)
                 })
                 .unwrap();
-            let intent = ParagraphJoin::new(left, right, "Join author").unwrap();
-            let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
-            assert_eq!(intent, restored);
-            let edited = PreparedEdit::join(source, *sid, &restored)
-                .unwrap_or_else(|error| panic!("{name}: {error}"));
-            let current_store = Store::parse(edited.as_bytes()).unwrap();
+            let edited =
+                join(source, *sid, left, right).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let current_store = Store::parse(&edited).unwrap();
             assert_eq!(
                 current_store.header.transaction_count,
                 store.header.transaction_count + 1
@@ -276,7 +309,7 @@ fn joins_match_native_graphs_tags_and_inherited_character_styles() {
                     }
                 }
             }
-            assert!(PreparedEdit::join(edited.as_bytes(), *sid, &intent).is_err());
+            assert!(join(&edited, *sid, left, right).is_err());
             assert_eq!(
                 space.contexts.len(),
                 current_document.spaces[sid].contexts.len()
@@ -321,10 +354,8 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
             }))
             .collect();
         for (position, offset) in offsets.iter().enumerate() {
-            let intent = ParagraphSplit::new(text, *offset, "Split author").unwrap();
-            let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
-            assert_eq!(intent, restored);
-            let edited = PreparedEdit::split(SOURCE, *sid, &restored);
+            let (op, new_paragraph, new_text) = split(SOURCE, *sid, text, *offset);
+            let edited = ops::edited(SOURCE, vec![op.clone()]);
             // OneNote 2010 splits before or after a hyperlink and ignores Enter inside one.
             let link = |at: usize| {
                 expected
@@ -341,7 +372,7 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
             }
             let edited =
                 edited.unwrap_or_else(|error| panic!("{} at {offset}: {error}", case["case"]));
-            let current_store = Store::parse(edited.as_bytes()).unwrap();
+            let current_store = Store::parse(&edited).unwrap();
             assert_eq!(
                 current_store.header.transaction_count,
                 store.header.transaction_count + 1
@@ -384,7 +415,7 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
                 case["case"]
             );
             assert_eq!(
-                characters(after, intent.text_object()),
+                characters(after, new_text),
                 expected[position..],
                 "{} suffix at {offset}",
                 case["case"]
@@ -392,7 +423,7 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
             if case["offset_utf16"] == *offset {
                 let native = &native_document.spaces[sid];
                 let native = &native.revisions[&native.contexts[&ExGuid::default()]];
-                let new_text = serde_json::from_value(case["new_text"].clone()).unwrap();
+                let native_text = serde_json::from_value(case["new_text"].clone()).unwrap();
                 assert_eq!(
                     characters(after, text),
                     characters(native, text),
@@ -400,8 +431,8 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
                     case["case"]
                 );
                 assert_eq!(
-                    characters(after, intent.text_object()),
-                    characters(native, new_text),
+                    characters(after, new_text),
+                    characters(native, native_text),
                     "{}",
                     case["case"]
                 );
@@ -409,31 +440,31 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
             let mut children = parent_node.children.clone();
             children.insert(
                 children.iter().position(|id| *id == paragraph).unwrap() + 1,
-                intent.object(),
+                new_paragraph,
             );
             assert_eq!(after.nodes[parent].children, children);
             assert_eq!(after.nodes[&paragraph].content, [text]);
             assert!(after.nodes[&paragraph].children.is_empty());
             assert_eq!(
-                after.nodes[&intent.object()].content,
-                [intent.text_object()]
+                after.nodes[&new_paragraph].content,
+                [new_text]
             );
             assert_eq!(
-                after.nodes[&intent.object()].children,
+                after.nodes[&new_paragraph].children,
                 before.nodes[&paragraph].children
             );
             assert_eq!(
                 serde_json::to_value(&after.nodes[&text].tags).unwrap(),
                 serde_json::to_value(&before.nodes[&text].tags).unwrap()
             );
-            assert!(after.nodes[&intent.text_object()].tags.is_empty());
+            assert!(after.nodes[&new_text].tags.is_empty());
             let Kind::Paragraph {
                 lists: old_lists, ..
             } = &before.nodes[&paragraph].kind
             else {
                 panic!()
             };
-            let Kind::Paragraph { lists, .. } = &after.nodes[&intent.object()].kind else {
+            let Kind::Paragraph { lists, .. } = &after.nodes[&new_paragraph].kind else {
                 panic!()
             };
             assert_eq!(old_lists.len(), lists.len());
@@ -453,26 +484,23 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
                     }
                 }
             }
-            assert!(PreparedEdit::split(edited.as_bytes(), *sid, &intent).is_err());
+            assert!(ops::edited(&edited, vec![op]).is_err());
         }
         for offset in 0..=*offsets.last().unwrap() + 1 {
             if offsets.contains(&offset) {
                 continue;
             }
-            let intent = ParagraphSplit::new(text, offset, "Author").unwrap();
-            assert!(PreparedEdit::split(SOURCE, *sid, &intent).is_err());
+            assert!(ops::edited(SOURCE, vec![split(SOURCE, *sid, text, offset).0]).is_err());
         }
     }
 }
 
 #[test]
 fn invalid_split_identities_and_title_targets_are_rejected() {
-    assert!(ParagraphSplit::new(ExGuid::default(), 0, "Author").is_err());
     let manifest: Value =
         serde_json::from_str(include_str!("../../../corpus/paragraph-edit/manifest.json")).unwrap();
     let text: ExGuid =
         serde_json::from_value(manifest["cases"][0]["original_text"].clone()).unwrap();
-    assert!(ParagraphSplit::new(text, 0, "a\0b").is_err());
     let store = Store::parse(SOURCE).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
@@ -486,18 +514,19 @@ fn invalid_split_identities_and_title_targets_are_rejected() {
         })
         .unwrap()
         .0;
-    let intent = ParagraphSplit::new(text, 1, "Author").unwrap();
-    for (field, value) in [
-        ("guid", serde_json::to_value([0_u8; 16]).unwrap()),
-        ("guid", serde_json::to_value(text.guid).unwrap()),
-        ("text", serde_json::to_value(ExGuid::default()).unwrap()),
-        ("author", serde_json::json!("a\0b")),
-        ("offset", serde_json::json!(u32::MAX)),
+    let (op, ..) = split(SOURCE, sid, text, 1);
+    assert!(ops::transaction(SOURCE, "a\0b", vec![op.clone()]).is_err());
+    let Op::Page { op: PageOp::Split { paragraph, right, lists, .. }, .. } = op else {
+        unreachable!()
+    };
+    for (text, at, paragraph) in [
+        (ExGuid::default(), 1, paragraph),
+        (text, u32::MAX, paragraph),
+        (text, 1, ExGuid::default()),
+        (text, 1, text),
     ] {
-        let mut encoded = serde_json::to_value(&intent).unwrap();
-        encoded[field] = value;
-        let forged = serde_json::from_value(encoded).unwrap();
-        assert!(PreparedEdit::split(SOURCE, sid, &forged).is_err());
+        let op = PageOp::Split { text, at, paragraph, right, lists: lists.clone() };
+        assert!(ops::page_edited(SOURCE, sid, vec![op]).is_err());
     }
     let mut titles = 0;
     for (sid, _) in document.pages().unwrap() {
@@ -516,8 +545,7 @@ fn invalid_split_identities_and_title_targets_are_rejected() {
             let node = &view.nodes[&id];
             pending.extend(node.children.iter().chain(&node.content).copied());
             if matches!(node.kind, Kind::RichText { .. }) {
-                let intent = ParagraphSplit::new(id, 0, "Author").unwrap();
-                assert!(PreparedEdit::split(SOURCE, sid, &intent).is_err());
+                assert!(ops::edited(SOURCE, vec![split(SOURCE, sid, id, 0).0]).is_err());
                 titles += 1;
             }
         }
@@ -551,16 +579,14 @@ fn export_native_paragraph_splits() {
             })
             .unwrap()
             .0;
-        let intent = ParagraphSplit::new(
-            text,
-            serde_json::from_value(case["offset_utf16"].clone()).unwrap(),
-            "Rust split author",
-        )
-        .unwrap();
-        let edited = PreparedEdit::split(&source, sid, &intent).unwrap();
-        written.push(serde_json::json!({"case": case["case"], "intent": intent,
-            "new_paragraph": intent.object(), "new_text": intent.text_object()}));
-        source = edited.as_bytes().to_vec();
+        let at = serde_json::from_value(case["offset_utf16"].clone()).unwrap();
+        let (op, new_paragraph, new_text) = split(&source, sid, text, at);
+        let transaction = ops::transaction(&source, "Rust split author", vec![op.clone()])
+            .unwrap()
+            .unwrap();
+        written.push(serde_json::json!({"case": case["case"], "op": op,
+            "new_paragraph": new_paragraph, "new_text": new_text}));
+        transaction.apply(&mut source).unwrap();
     }
     let candidate = output.join("candidate");
     fs::create_dir(&candidate).unwrap();
@@ -587,18 +613,36 @@ fn interrupted_splits_publish_a_complete_graph_or_retain_the_original() {
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
     let paragraph = view.nodes[outline].children[0];
-    let insertion = onestore::Insertion::paragraph(paragraph, None, "a🦀b", "Author")
-        .unwrap()
-        .with_formatting(1..3, &[onestore::TextAttribute::Bold(true)])
-        .unwrap();
-    let inserted = PreparedEdit::insert(&original, sid, &insertion).unwrap();
-    let source = inserted.as_bytes();
-    let checkpoint = checkpoint::pending(source, sid, insertion.text_object(), 0x14001d7a);
+    let mut child = ops::paragraph("a🦀b");
+    child.level = 2;
+    let text = child.text().unwrap().id;
+    let inserted = ops::page_edited(
+        &original,
+        sid,
+        vec![
+            PageOp::Insert {
+                container: paragraph,
+                before: None,
+                paragraphs: vec![child],
+            },
+            PageOp::Format {
+                text,
+                range: 1..3,
+                set: vec![onestore::TextAttribute::Bold(true)],
+                clear: Vec::new(),
+            },
+        ],
+    )
+    .unwrap();
+    let source = inserted.as_slice();
+    let checkpoint = checkpoint::pending(source, sid, text);
     for source in [source, &checkpoint] {
-        let intent = ParagraphSplit::new(insertion.text_object(), 1, "Author").unwrap();
-        let edit = PreparedEdit::split(source, sid, &intent).unwrap();
+        let (op, ..) = split(source, sid, text, 1);
+        let edit = ops::transaction(source, "Author", vec![op]).unwrap().unwrap();
+        let mut written = source.to_vec();
+        edit.apply(&mut written).unwrap();
         let before = current::current(source);
-        let after = current::current(edit.as_bytes());
+        let after = current::current(&written);
         for write_limit in [17, 4096] {
             let disk = |fail_at| disk::Disk {
                 visible: source.to_vec(),
@@ -610,7 +654,7 @@ fn interrupted_splits_publish_a_complete_graph_or_retain_the_original() {
             };
             let mut successful = disk(None);
             edit.commit(&mut successful).unwrap();
-            assert_eq!(successful.durable, edit.as_bytes());
+            assert_eq!(successful.durable, written);
             for at in 1..=successful.operation {
                 let mut interrupted = disk(Some(at));
                 let error = edit.commit(&mut interrupted).unwrap_err();
@@ -654,10 +698,12 @@ fn export_native_paragraph_joins() {
                 })
                 .unwrap()
                 .0;
-            let intent = ParagraphJoin::new(left, right, "Rust join author").unwrap();
-            let edit = PreparedEdit::join(&source, sid, &intent).unwrap();
-            source = edit.as_bytes().to_vec();
-            manifest.push(serde_json::json!({"case":name,"space":sid,"intent":intent}));
+            let op = Op::Page { space: sid, op: PageOp::Join { left, right } };
+            let transaction = ops::transaction(&source, "Rust join author", vec![op.clone()])
+                .unwrap()
+                .unwrap();
+            transaction.apply(&mut source).unwrap();
+            manifest.push(serde_json::json!({"case":name,"space":sid,"op":op}));
         }
         let folder = output.join(["split", "inheritance", "tags"][number]);
         fs::create_dir_all(folder.join("candidate")).unwrap();
@@ -685,22 +731,48 @@ fn interrupted_joins_preserve_complete_graphs_and_empty_text_adoption() {
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
     let left = view.nodes[&view.nodes[&outline].children[0]].content[0];
-    let right = onestore::Insertion::paragraph(outline, None, "Right 🦀", "Author")
-        .unwrap()
-        .with_formatting(0..5, &[onestore::TextAttribute::Bold(true)])
-        .unwrap();
-    let inserted = PreparedEdit::insert(&source, sid, &right).unwrap();
-    let child =
-        onestore::Insertion::paragraph(right.object(), None, "Retained child", "Author").unwrap();
-    let original = PreparedEdit::insert(inserted.as_bytes(), sid, &child).unwrap();
-    let original = original.as_bytes();
-    let empty = onestore::replace_text(original, sid, left, 0..4, "").unwrap();
-    let checkpoint = checkpoint::pending(original, sid, left, 0x14001d7a);
+    let right = ops::paragraph("Right 🦀");
+    let right_text = right.text().unwrap().id;
+    let mut child = ops::paragraph("Retained child");
+    child.parent = Some(right.id);
+    child.level = 2;
+    let original = ops::page_edited(
+        &source,
+        sid,
+        vec![
+            PageOp::Insert {
+                container: outline,
+                before: None,
+                paragraphs: vec![right, child],
+            },
+            PageOp::Format {
+                text: right_text,
+                range: 0..5,
+                set: vec![onestore::TextAttribute::Bold(true)],
+                clear: Vec::new(),
+            },
+        ],
+    )
+    .unwrap();
+    let original = original.as_slice();
+    let empty = ops::page_edited(
+        original,
+        sid,
+        vec![PageOp::Text {
+            text: left,
+            range: 0..4,
+            with: String::new(),
+        }],
+    )
+    .unwrap();
+    let checkpoint = checkpoint::pending(original, sid, left);
     for source in [original, &empty, &checkpoint] {
-        let intent = ParagraphJoin::new(left, right.text_object(), "Join author").unwrap();
-        let edit = PreparedEdit::join(source, sid, &intent).unwrap();
+        let op = Op::Page { space: sid, op: PageOp::Join { left, right: right_text } };
+        let edit = ops::transaction(source, "Join author", vec![op]).unwrap().unwrap();
+        let mut written = source.to_vec();
+        edit.apply(&mut written).unwrap();
         let before = current::current(source);
-        let after = current::current(edit.as_bytes());
+        let after = current::current(&written);
         for write_limit in [17, 4096] {
             let disk = |fail_at| disk::Disk {
                 visible: source.to_vec(),
@@ -712,8 +784,8 @@ fn interrupted_joins_preserve_complete_graphs_and_empty_text_adoption() {
             };
             let mut successful = disk(None);
             edit.commit(&mut successful).unwrap();
-            assert_eq!(successful.durable, edit.as_bytes());
-            for at in std::iter::once(1).chain(source.len().div_ceil(193)..=successful.operation) {
+            assert_eq!(successful.durable, written);
+            for at in 1..=successful.operation {
                 let mut interrupted = disk(Some(at));
                 let error = edit.commit(&mut interrupted).unwrap_err();
                 let recovered = current::current(&interrupted.durable);
@@ -748,26 +820,16 @@ fn joins_reject_invalid_identities_wrong_order_and_unrelated_pages() {
                 .contains_key(left)
         })
         .unwrap();
-    assert!(ParagraphJoin::new(*left, *left, "Author").is_err());
-    assert!(ParagraphJoin::new(ExGuid::default(), *right, "Author").is_err());
-    assert!(ParagraphJoin::new(*left, *right, "a\0b").is_err());
-    let intent = ParagraphJoin::new(*left, *right, "Author").unwrap();
-    for (field, value) in [
-        ("left", serde_json::to_value(ExGuid::default()).unwrap()),
-        ("right", serde_json::to_value(left).unwrap()),
-        ("author", serde_json::json!("a\0b")),
+    for (a, b) in [
+        (*left, *left),
+        (ExGuid::default(), *right),
+        (*right, *left),
+        (*left, cases[1].2),
     ] {
-        let mut encoded = serde_json::to_value(&intent).unwrap();
-        encoded[field] = value;
-        let invalid = serde_json::from_value(encoded).unwrap();
-        assert!(PreparedEdit::join(source, *sid, &invalid).is_err());
+        assert!(join(source, *sid, a, b).is_err());
     }
-    for intent in [
-        ParagraphJoin::new(*right, *left, "Author").unwrap(),
-        ParagraphJoin::new(*left, cases[1].2, "Author").unwrap(),
-    ] {
-        assert!(PreparedEdit::join(source, *sid, &intent).is_err());
-    }
+    let op = Op::Page { space: *sid, op: PageOp::Join { left: *left, right: *right } };
+    assert!(ops::transaction(source, "a\0b", vec![op]).is_err());
     let view = &space.revisions[&space.contexts[&ExGuid::default()]];
     let paragraph = *view
         .nodes
@@ -781,8 +843,7 @@ fn joins_reject_invalid_identities_wrong_order_and_unrelated_pages() {
         .find(|node| node.children.contains(&paragraph))
         .unwrap();
     let last = view.nodes[parent.children.last().unwrap()].content[0];
-    let nonadjacent = ParagraphJoin::new(*left, last, "Author").unwrap();
-    assert!(PreparedEdit::join(source, *sid, &nonadjacent).is_err());
+    assert!(join(source, *sid, *left, last).is_err());
     let title = view
         .nodes
         .iter()
@@ -794,8 +855,7 @@ fn joins_reject_invalid_identities_wrong_order_and_unrelated_pages() {
         let node = &view.nodes[&id];
         pending.extend(node.children.iter().chain(&node.content).copied());
         if matches!(node.kind, Kind::RichText { .. }) {
-            let intent = ParagraphJoin::new(id, *right, "Author").unwrap();
-            assert!(PreparedEdit::join(source, *sid, &intent).is_err());
+            assert!(join(source, *sid, id, *right).is_err());
             rejected += 1;
         }
     }

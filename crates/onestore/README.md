@@ -49,32 +49,27 @@ harness also accepts `--client-profile release`.
 | `page::Page`, `page::Paragraph`, `page::Ink`, `page::Math` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments, ink drawings and handwriting decoded to stroke polylines in page points) with stored identities; equations parse from their linear text and run data into a tree that renders the MathML OneNote exports; content outside the model is retained as `Unsupported` |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
-| `PageCreation`, `PreparedEdit::create_page` | Add an empty top-level page and its section entry atomically, retaining page identities across retries |
-| `PageEdit`, `PreparedEdit::pages` | Publish explicitly selected page moves and indentation changes together, preserving page content and historical revisions |
-| `PreparedEdit::delete_pages_permanently` | Remove explicit pages and their section references atomically while retaining stored revisions |
+| `PageCreation`, `SectionOp::Create` | Add an empty top-level page and its section entry atomically, under identities the intent retains across retries |
+| `PageEdit`, `SectionOp::Pages` | Publish explicitly selected page moves and indentation changes together, preserving page content and historical revisions |
+| `SectionOp::Delete` | Remove explicit pages and their section references atomically while retaining stored revisions |
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
-| `TocEdit`, `PreparedEdit::table_of_contents` | Add, rename, colour, order and remove a table of contents' section and group entries as one revision |
+| `TocEdit`, `edit_table_of_contents` | Add, rename, order and remove a table of contents' section and group entries, and colour the notebook, as one revision's `Transaction`; a section's colour is `SectionOp::Color` in its own metadata |
 | `place`, `place_file` | Name a file for its notebook as OneNote does on adoption (parent TOC identity and name CRC in the header), so OneNote keeps its identity, on any `CommitIo` or under the filesystem adapter |
-| `replace_property_bytes` | Append one scalar-property revision; preserve prior revisions and unrelated property values and references |
-| `replace_text`, `commit_text`, `commit_file_text` | Replace a UTF-16 range across ordinary text runs; publish text, run boundaries and modification time together |
-| `Insertion`, `PreparedEdit::insert` | Insert paragraphs into editable containers or positioned outlines into a page, retaining intent identities across rebases |
-| `ParagraphSplit`, `PreparedEdit::split` | Split ordinary text at a UTF-16 scalar boundary, retaining the original left identities and moving children to the right |
-| `ParagraphJoin`, `PreparedEdit::join` | Join adjacent ordinary text while preserving inherited character styles and native text-identity rules |
-| `TextAttribute`, `PreparedEdit::format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
-| `OutlineEdit`, `PreparedEdit::outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
-| `PreparedEdit::page` | Publish an edited `page::Page` as one revision per changed space: text, character and paragraph formatting, hyperlinks (external and, via `page::link`, to pages, paragraphs and sections), bullets and numbering, note tags, table rows, columns, cell shading and indents, nested tables, inserted pictures (in paragraphs or on the page) and attachments, picture position, size and description, a stored attachment's shown name, source path and icon size, paragraph styles on new paragraphs, ink drawings and handwriting (strokes added and erased), equations (built from `page::Math` trees), paragraph insertion/split/join/move/deletion, outline insertion/deletion/position/width and saved collapse state, lowered onto the typed writers with the model's identities |
-| `TreeEdit`, `PreparedEdit::tree` | Move or delete a subtree on one page, normalize surviving containers, and replace an emptied table cell's paragraph atomically |
-| `Transaction`, `Stamp`, `PreparedEdit::transaction` | The bytes a commit writes (appended data, in-place list-tail and log patches, header) and the header and length it requires unchanged; `commit` under caller-held exclusion, `commit_file` under the conservative filesystem adapter, `apply` to the base image in memory; serializable for queues |
+| `TextAttribute`, `PageOp::Format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
+| `OutlineEdit`, `PageOp::Outline` | Change ordinary outline position/width or a paragraph's saved expansion default, preserving identities and content |
+| `Transaction`, `Stamp` | The bytes a commit writes (appended data, in-place list-tail and log patches, header) and the header and length it requires unchanged; `commit` under caller-held exclusion, `commit_file` under the conservative filesystem adapter, `apply` to the base image in memory; serializable for queues |
 | `Arena`, `Section` | Keep a section parsed across edits: `open` validates an image once; `seal` appends one revision per changed space as a `Transaction` on `stamp`, checking only what it appends; `replay` applies a queued transaction; `image` and `page` read the result |
-| `op::{Edit, Op, PageOp, TableEdit, SectionOp}`, `Section::apply` | Object-level edits (text, formatting, links, equations, paragraph insertion/split/join/move/deletion/levels, outlines, lists, tags, styles, paragraph formatting, tables, pictures, attachments, ink, page creation/import/moves/removal) applied whole or not to a kept-open section with emitter-chosen identities, UTF-16 ranges and the edit's time; refusals name the target, identity or structure at fault |
-| `op::lower`, `op::lower_page`, `Section::apply_page` | The ops turning a range of paragraphs, or a whole page model, into another, computed from the models alone |
+| `op::{Edit, Op, PageOp, TableEdit, SectionOp}`, `Section::apply` | Object-level edits (text, formatting, links, equations, paragraph insertion/split/join/move/deletion/levels, outlines, lists, tags, styles, paragraph formatting, tables, pictures, attachments, ink, page creation/import/moves/removal, conflict pages) applied whole or not to a kept-open section with emitter-chosen identities, UTF-16 ranges and the edit's time; refusals name the target, identity or structure at fault |
+| `SectionOp::Conflict`, `Section::conflicts`, `ConflictPage` | Keep the version of a page a merge could not take as OneNote 2010 does: a read-only conflict page (`jcidConflictPageMetaData`, `IsConflictPage`, conflict objects marked) under the page's manifest, which says it has conflict pages; list each page's, newest first, and delete one (`SectionOp::Delete`) as OneNote's Delete Conflict Page does |
+| `op::lower`, `op::lower_page` | The ops turning a range of paragraphs, or a whole page model, into another, computed from the models alone, for editors and imports |
+| `op::predict` | The page an op leaves, as the section stores it and reading it back shows it |
 | `read_file` | Read a snapshot under whole-file exclusion |
 | `read_snapshot` | Read a validated snapshot through fresh positioned I/O while the caller excludes maintenance |
-| `commit_file_property` | Lock, check the source snapshot's stamp, append and flush, then publish the revision |
-| `CommitIo`, `commit_property_bytes` | Supply another storage backend with equivalent exclusion and ordered durability |
+| `CommitIo`, `confirm`, `confirm_file` | Supply another storage backend with equivalent exclusion and ordered durability; check that a stamp still holds |
 
-Scalar edits accept encoded values and require the caller to maintain MS-ONE
-semantics. Text edits maintain run boundaries, inherit the insertion run's formatting,
+Edits enter a kept-open `Section` as ops and leave as one appended revision per
+changed space; only section and page creation, imports and opening files handle
+whole images. Text edits maintain run boundaries, inherit the insertion run's formatting,
 and promote legacy text to Unicode when needed. Explicit and body-derived
 navigation titles update in the same transaction; unsupported fields,
 protected objects and split surrogate pairs are
@@ -85,19 +80,19 @@ sections retain their encrypted structure and payloads. With the optional
 `protected` feature, `protected::UnlockedSection` opens native OneNote 2010
 AES-128/CBC, SHA-1 password wrappers into a borrowed document view. Incorrect
 passwords, unsupported protection profiles and work-limit failures remain distinct.
-The source stays encrypted. `PreparedEdit::page_protected` publishes a page-model
-edit stored under the section's key (fresh IV per object, payloads under the file
-IV); the other writers reject protected sections.
+The source stays encrypted. `UnlockedSection::apply` applies page ops and seals them
+under the section's key (fresh IV per object, payloads under the file IV); `Section`
+rejects protected sections.
 `PageCreation::new` appends, or inserts before the first page space of an existing
 series. `Some("")` creates an empty title field; `None` omits the title node.
 The page has no body outlines, generated date/time text or applied template.
 Retain the intent to preserve its page, title and space identities; existing
 identities require reconciliation before retry. Body insertion and title edits
-use those identities through the existing APIs. [Native page-creation fixtures](../../corpus/page-lifecycle/creation/README.md)
+use those identities through page ops. [Native page-creation fixtures](../../corpus/page-lifecycle/creation/README.md)
 cover duplicate Unicode titles, native edits and Rust follow-up edits.
 `PageEdit::set_level` changes one page's indentation in place. `PageEdit::move_to`
 moves before an existing page space, or appends for `None`, and sets its level.
-`PreparedEdit::pages` applies moves in slice order and publishes the final order,
+`SectionOp::Pages` applies moves in slice order and publishes the final order,
 series membership and metadata levels in one transaction. Each page occurs once;
 levels are 1–3 and the final first page must have level 1. A following deeper-level
 page remains in place unless explicitly selected. To move a group, supply all its
@@ -105,40 +100,39 @@ pages in order. Retain the intents across retries so newly formed series keep
 their identities; `reposition(PagePosition, level)` revises their placement while
 preserving those identities. [Native page-edit fixtures](../../corpus/page-lifecycle/page-edits/README.md)
 cover individual tabs, selected and collapsed groups, nesting and promotion.
-`PreparedEdit::delete_pages_permanently` removes exactly the supplied page spaces,
+`SectionOp::Delete` removes exactly the supplied page spaces,
 including subpages only when selected explicitly. The first remaining page becomes
 top-level; other page levels and surviving content are retained. The operation
 creates no recycle-bin copies and preserves prior revisions, so it is not secure
 erasure. Duplicate, missing or non-page identities reject the entire batch;
-an empty selection leaves the file unchanged. Commit uses the exact source
-snapshot and rejects a stale prepared removal before writing.
-Insertions update child references, reference counts, modification times and automatic
-titles atomically. Paragraphs can be nested or inserted into table cells; outline
-coordinates use points. `Insertion::with_formatting` includes nonoverlapping UTF-16
-spans in that same publication; gaps keep the default insertion style. Empty text
-accepts one `0..0` span for subsequent typing. Retain the `Insertion` value for rebasing: creating another
-value creates different object identities. Duplicate insertion identities require
-reconciliation. Formatting accepts explicit attributes, preserves inherited values,
+an empty selection leaves the file unchanged.
+`PageOp::Insert` and `PageOp::Add` update child references, reference counts,
+modification times and automatic titles atomically. Paragraphs can be nested or
+inserted into table cells; outline coordinates use points. Inserted text keeps its
+spans' formats; `PageOp::Format` over an empty text's `0..0` sets its insertion style.
+New objects carry the emitter's identities, so a queued edit replays onto another
+image unchanged; an identity already on the page refuses the edit. Formatting accepts explicit attributes, preserves inherited values,
 and gives retired immutable styles zero current references while retaining history.
 Outline layout edits use points. Width is at least 36 points; an explicit user width
 and an automatic maximum-width hint remain distinct. Native layout generates the
 rendered height. Saved paragraph collapse defaults can be overridden by the native
 client's cached view. [Native layout captures](../../corpus/outline-edit/README.md)
 verify these edits through a fresh OneNote cache, including fields and nested content.
-`TreeEdit::move_to` takes an existing parent and an optional direct sibling to insert
+`PageOp::Move` takes an existing parent and an optional direct sibling to insert
 before; `None` appends. Paragraphs retain their descendants and explicit list styles.
 Outlines remain page children, so reordering changes their stacking order while
-retaining coordinates. `TreeEdit::delete` removes the selected subtree from the active
+retaining coordinates. `PageOp::Delete` removes the selected subtree from the active
 graph and preserves historical objects. Empty outlines/groups are removed; surviving
-group indentation is normalized without shifting other paragraphs. Empty table cells
-receive new empty paragraph/text objects with identities retained in the intent.
+group indentation is normalized without shifting other paragraphs. An edit that
+leaves a table cell without a paragraph is refused; insert its replacement in the
+same edit.
 Title/protected content, ambiguous ancestry, cycles, and incompatible destinations
 reject before publication. Modification times, move attribution and automatic titles
 publish with the tree change. These explicit destinations differ from keyboard list
 indentation, which can also substitute list markers.
 Paragraph splits preserve character formatting, retain tags on the left, and clone
-mutable list objects without restarting numbering. The new right paragraph/text
-identities belong to the retained `ParagraphSplit` intent. Its publication includes
+mutable list objects without restarting numbering. `PageOp::Split` names
+the new right paragraph/text identities. Its publication includes
 the complete child graph and title metadata; repeating an existing identity requires
 reconciliation. Title containers, generated fields, recording-linked text and
 associated run metadata are rejected before I/O. Native split controls and subsequent
@@ -206,9 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `Store::parse` exposes checksum mismatches for diagnostic readers; the writer
-rejects them. The resolved graph borrows the snapshot. Select the object-space ID,
-object ID, and property from that graph, then pass those IDs, the same snapshot,
-and the replacement's encoded bytes to `commit_file_property`. The
+rejects them. The resolved graph borrows the snapshot. Open it as a `Section`,
+apply ops naming objects from that graph, seal, and commit the `Transaction`. The
 `edit_property` example demonstrates selection by JCID/property/expected bytes,
 with optional explicit IDs when conflict copies contain identical text.
 
@@ -228,7 +221,7 @@ the header (MS-ONESTORE 2.3.1), so the body is never compared. Live readers must
 equivalent exclusion.
 Native conflict creation can still expose cross-space references before their
 targets are saved; such snapshots must be rejected and reread while synchronization
-proceeds. `read_file` and `commit_file_property` serialize within the process because
+proceeds. `read_file` and `Transaction::commit_file` serialize within the process because
 macOS SMB locks can be reentrant. The lock is nonblocking across processes;
 contention requires a fresh read and a later retry.
 
@@ -245,13 +238,16 @@ native acceptance captures. A no-op still flushes; a failed flush has an unknown
 durability outcome.
 
 The filesystem adapter uses whole-file locking. On macOS it acquires the lock
-as part of opening the file (`O_EXLOCK | O_NONBLOCK`): separate open and `flock`
-calls allowed overlapping exclusive holders and stranded server locks under
-multi-process SMB contention. `tools/smb_lock_race.py` reproduces that failure
-without notebook parsing or writing. On the tested macOS SMB mount,
-POSIX byte-range locks returned `ENOTSUP`; whole-file locks excluded native
-OneNote's lock ranges. This adapter serializes readers and writers during each
-operation; it does not reproduce native reader/writer concurrency. The
+as part of opening the file (`O_EXLOCK` to commit, `O_SHLOCK` to read, with
+`O_NONBLOCK`): separate open and `flock` calls allowed overlapping exclusive holders
+and stranded server locks under multi-process SMB contention.
+`tools/smb_lock_race.py` reproduces that failure without notebook parsing or writing,
+and with `--shared-reads` checks that shared readers never overlap a writer. On the
+tested macOS SMB mount, POSIX byte-range locks returned `ENOTSUP`, and `flock` of
+either kind became an exclusive lock over the whole file, which fails OneNote's reads.
+smbfs sends `O_SHLOCK` and `O_EXLOCK` as share modes: a read excludes writers,
+OneNote's included, but not OneNote's readers; a commit excludes everyone. It does not
+reproduce native reader/writer concurrency. The
 [locking audit](../../evidence/LOCKING.md) records native coordination bytes, write-open share
 modes, and a working macOS SMB-specific byte-range lock probe. `sync_all` falls
 back to `fsync` on macOS only when `F_FULLFSYNC` is unsupported. Successful SMB FLUSH replies were observed on the

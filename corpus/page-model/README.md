@@ -1,6 +1,6 @@
 # Page-model edits through a cold native reopen
 
-`candidate` is `corpus/outline-edit/before` after eight compound `PreparedEdit::page`
+`candidate` is `corpus/outline-edit/before` after eight compound page-model
 publications, one per edited page, each combining several kinds of change in a single
 transaction: paragraph reorder and Unicode replacement with a bold range; a subtree
 move with a new nested child and an italic/colored/resized range; a subtree deletion

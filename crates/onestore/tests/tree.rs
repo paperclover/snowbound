@@ -1,6 +1,7 @@
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store, TreeEdit,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Kind, Revision},
+    op::{Op, PageOp},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -8,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
 #[path = "support/tree_model.rs"]
 mod tree_model;
 
@@ -55,7 +58,35 @@ fn active(view: &Revision<'_>, page: ExGuid) -> BTreeSet<ExGuid> {
     ids
 }
 
-fn operation(view: &Revision<'_>, page: ExGuid) -> Option<(String, ExGuid, TreeEdit)> {
+/// The container `id` lies in, outline groups passed over.
+fn container(view: &Revision<'_>, ids: &BTreeSet<ExGuid>, id: ExGuid) -> ExGuid {
+    let mut at = *ids
+        .iter()
+        .find(|parent| view.nodes[parent].children.contains(&id))
+        .unwrap();
+    while matches!(view.nodes[&at].kind, Kind::OutlineGroup) {
+        at = container(view, ids, at);
+    }
+    at
+}
+
+/// The outline level of each paragraph in `outline`.
+fn levels(view: &Revision<'_>, outline: ExGuid) -> BTreeMap<ExGuid, u32> {
+    let mut levels = BTreeMap::new();
+    let mut pending = vec![(outline, 0)];
+    while let Some((id, level)) = pending.pop() {
+        let node = &view.nodes[&id];
+        if matches!(node.kind, Kind::Paragraph { .. }) {
+            levels.insert(id, level);
+        }
+        let child = level + u32::from(node.child_level.unwrap_or(1));
+        pending.extend(node.children.iter().map(|id| (*id, child)));
+    }
+    levels
+}
+
+/// The named edit of a fixture page as ops, with the object it acts on.
+fn operation(view: &Revision<'_>, page: ExGuid) -> Option<(String, ExGuid, Vec<PageOp>)> {
     let Kind::Metadata {
         title: Some(name), ..
     } = &view.nodes[&view.roots[&2]].kind
@@ -85,32 +116,46 @@ fn operation(view: &Revision<'_>, page: ExGuid) -> Option<(String, ExGuid, TreeE
         .iter()
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
-    let parent = *ids
-        .iter()
-        .find(|id| view.nodes[id].children.contains(&target))
-        .unwrap();
+    let parent = container(view, &ids, target);
+    let move_to = |parent, before| PageOp::Move {
+        object: target,
+        parent: Some(parent),
+        before,
+    };
     let edit = match name.as_str() {
-        "Delete outline" => TreeEdit::delete(outline, "Tree author"),
-        name if name.starts_with("Delete") => TreeEdit::delete(target, "Tree author"),
+        "Delete outline" => vec![PageOp::Delete { object: outline }],
+        "Delete sole cell paragraph" => vec![
+            PageOp::Insert {
+                container: parent,
+                before: None,
+                paragraphs: vec![ops::paragraph("")],
+            },
+            PageOp::Delete { object: target },
+        ],
+        name if name.starts_with("Delete") => vec![PageOp::Delete { object: target }],
         "Move leaf down"
         | "Move subtree down"
         | "Move numbered subtree down"
-        | "Move cell subtree down" => TreeEdit::move_to(target, parent, None, "Tree author"),
-        "Move subtree up" => {
-            TreeEdit::move_to(target, parent, Some(paragraphs["Anchor"]), "Tree author")
+        | "Move cell subtree down" => vec![move_to(parent, None)],
+        "Move subtree up" => vec![move_to(parent, Some(paragraphs["Anchor"]))],
+        "Indent subtree" | "Indent bullet subtree" => vec![move_to(paragraphs["Anchor"], None)],
+        "Outdent subtree" | "Outdent first group" => {
+            // Levels are absolute: the subtree moves up to the outline's first level.
+            let levels = levels(view, outline);
+            let shift = levels[&target] - 1;
+            let mut ops = vec![move_to(outline, Some(paragraphs["Trailing sibling"]))];
+            let mut pending = vec![target];
+            while let Some(paragraph) = pending.pop() {
+                ops.push(PageOp::Level {
+                    paragraph,
+                    level: levels[&paragraph] - shift,
+                });
+                pending.extend(view.nodes[&paragraph].children.iter().rev());
+            }
+            ops
         }
-        "Indent subtree" | "Indent bullet subtree" => {
-            TreeEdit::move_to(target, paragraphs["Anchor"], None, "Tree author")
-        }
-        "Outdent subtree" | "Outdent first group" => TreeEdit::move_to(
-            target,
-            outline,
-            Some(paragraphs["Trailing sibling"]),
-            "Tree author",
-        ),
         _ => return None,
-    }
-    .unwrap();
+    };
     Some((
         name.clone(),
         if name == "Delete outline" {
@@ -139,9 +184,9 @@ fn native_subtree_controls_match_with_preserved_fields_and_history() {
             let Some((name, object, edit)) = operation(before, page) else {
                 continue;
             };
-            let restored = serde_json::from_value(serde_json::to_value(&edit).unwrap()).unwrap();
-            assert_eq!(edit, restored);
-            let prepared = PreparedEdit::tree(source, sid, &restored).unwrap();
+            let edit: Vec<Op> = edit.into_iter().map(|op| Op::Page { space: sid, op }).collect();
+            let prepared = ops::apply(source, "Tree author", edit.clone())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
             let after_store = Store::parse(prepared.as_bytes()).unwrap();
             assert!(after_store.checksum_mismatches.is_empty());
             let after_index = RevisionIndex::parse(&after_store).unwrap();
@@ -267,11 +312,19 @@ fn native_subtree_controls_match_with_preserved_fields_and_history() {
                         serde_json::to_value(&old.tags).unwrap(),
                         "{name}: tags {id}"
                     );
-                } else if matches!(node.kind, Kind::RichText { .. }) {
-                    assert_eq!(
-                        serde_json::to_value(&node.kind).unwrap(),
-                        serde_json::to_value(&wanted.kind).unwrap()
-                    );
+                } else if let (
+                    Kind::RichText {
+                        text, boilerplate, ..
+                    },
+                    Kind::RichText {
+                        text: native,
+                        boilerplate: native_boilerplate,
+                        ..
+                    },
+                ) = (&node.kind, &wanted.kind)
+                {
+                    // A new run carries the language MS-ONE requires, which OneNote omits.
+                    assert_eq!((text, boilerplate), (native, native_boilerplate));
                 }
             }
             for (sid, space) in &index.spaces {
@@ -284,7 +337,7 @@ fn native_subtree_controls_match_with_preserved_fields_and_history() {
                     }
                 }
             }
-            let another = PreparedEdit::tree(source, sid, &edit).unwrap();
+            let another = ops::apply(source, "Tree author", edit.clone()).unwrap();
             let second_store = Store::parse(another.as_bytes()).unwrap();
             let second_index = RevisionIndex::parse(&second_store).unwrap();
             let second_doc = Document::parse(&second_index).unwrap();
@@ -293,10 +346,7 @@ fn native_subtree_controls_match_with_preserved_fields_and_history() {
                 actual,
                 active(&space.revisions[&space.contexts[&ExGuid::default()]], page)
             );
-            candidate = PreparedEdit::tree(&candidate, sid, &edit)
-                .unwrap()
-                .as_bytes()
-                .to_vec();
+            candidate = ops::apply(&candidate, "Tree author", edit).unwrap().image;
             count += 1;
         }
         if let Some(output) = std::env::var_os("ONESTORE_TREE_OUTPUT") {
@@ -329,22 +379,24 @@ fn moves_reject_cycles_wrong_parents_and_stale_siblings() {
         .unwrap();
     let paragraph = view.nodes[&outline].children[0];
     let text = view.nodes[&paragraph].content[0];
-    for intent in [
-        TreeEdit::delete(page, "Author"),
-        TreeEdit::delete(text, "Author"),
-        TreeEdit::move_to(outline, paragraph, None, "Author"),
-        TreeEdit::move_to(paragraph, paragraph, None, "Author"),
-        TreeEdit::move_to(paragraph, text, None, "Author"),
-        TreeEdit::move_to(paragraph, outline, Some(page), "Author"),
+    let move_to = |object, parent, before| PageOp::Move {
+        object,
+        parent: Some(parent),
+        before,
+    };
+    for op in [
+        PageOp::Delete { object: page },
+        PageOp::Delete { object: text },
+        move_to(outline, paragraph, None),
+        move_to(paragraph, paragraph, None),
+        move_to(paragraph, text, None),
+        move_to(paragraph, outline, Some(page)),
     ] {
-        assert!(PreparedEdit::tree(&source, sid, &intent.unwrap()).is_err());
+        assert!(ops::page_op(&source, sid, op).is_err());
     }
     for before in [None, Some(paragraph)] {
-        let edit = TreeEdit::move_to(paragraph, outline, before, "Author").unwrap();
-        assert_eq!(
-            PreparedEdit::tree(&source, sid, &edit).unwrap().as_bytes(),
-            source
-        );
+        let op = move_to(paragraph, outline, before);
+        assert_eq!(ops::page_op(&source, sid, op).unwrap().as_bytes(), source);
     }
 }
 
@@ -370,7 +422,8 @@ fn publication_interruptions_expose_complete_old_or_new_trees() {
         ) {
             continue;
         }
-        let edit = PreparedEdit::tree(source, sid, &intent).unwrap();
+        let intent = intent.into_iter().map(|op| Op::Page { space: sid, op }).collect();
+        let edit = ops::apply(source, "Tree author", intent).unwrap();
         let after = current::current(edit.as_bytes());
         for write_limit in [17, 4096] {
             let disk = |fail_at| disk::Disk {
@@ -453,8 +506,24 @@ fn cross_container_moves_keep_tables_and_replace_emptied_cells() {
             "Move cell subtree down" => (target, outlines[1]),
             _ => (view.nodes[&outlines[0]].children[0], outlines[1]),
         };
-        let intent = TreeEdit::move_to(object, destination, None, "Tree author").unwrap();
-        let edit = PreparedEdit::tree(source, sid, &intent).unwrap();
+        let mut intent = vec![Op::Page {
+            space: sid,
+            op: PageOp::Move {
+                object,
+                parent: Some(destination),
+                before: None,
+            },
+        }];
+        // A cell keeps a paragraph: its replacement goes in first.
+        if name == "Delete sole cell paragraph" {
+            let op = PageOp::Insert {
+                container: parents[&target],
+                before: None,
+                paragraphs: vec![ops::paragraph("")],
+            };
+            intent.insert(0, Op::Page { space: sid, op });
+        }
+        let edit = ops::apply(source, "Tree author", intent.clone()).unwrap();
         let store = Store::parse(edit.as_bytes()).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
@@ -503,10 +572,7 @@ fn cross_container_moves_keep_tables_and_replace_emptied_cells() {
             "Delete cell subtree" => assert!(!actual.contains(&outlines[0])),
             _ => assert_eq!(after.nodes[&parents[&target]].children.len(), 1),
         }
-        candidate = PreparedEdit::tree(&candidate, sid, &intent)
-            .unwrap()
-            .as_bytes()
-            .to_vec();
+        candidate = ops::apply(&candidate, "Tree author", intent).unwrap().image;
         count += 1;
     }
     assert_eq!(count, 4);

@@ -1,7 +1,4 @@
-use notebook::{
-    EditStatus,
-    session::{Event, Section},
-};
+use notebook::session::{Event, Section};
 use onestore::{
     RevisionIndex, Store,
     document::Document,
@@ -197,13 +194,7 @@ fn pages_copy_into_another_section_with_their_content_and_fresh_identities() {
         ]
     );
     let deadline = Instant::now() + Duration::from_secs(120);
-    while section
-        .queue()
-        .unwrap()
-        .iter()
-        .any(|edit| !matches!(edit.status, EditStatus::Published { .. }))
-        || !section.queue().unwrap().is_empty()
-    {
+    while !section.pending().unwrap().is_empty() {
         for event in section.events() {
             if let Event::Failed(message) = event {
                 panic!("{message}");
@@ -212,7 +203,7 @@ fn pages_copy_into_another_section_with_their_content_and_fresh_identities() {
         assert!(
             Instant::now() < deadline,
             "publication did not finish: {:?}",
-            section.queue().unwrap()
+            section.pending().unwrap()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -233,7 +224,7 @@ fn pages_copy_into_another_section_with_their_content_and_fresh_identities() {
     }
     section.delete_pages(&[expected.last().unwrap().0]).unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
-    while !section.queue().unwrap().is_empty() {
+    while !section.pending().unwrap().is_empty() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(50));
     }

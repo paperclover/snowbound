@@ -1,7 +1,8 @@
 //! Converts a schema-14 cache, whose queue holds whole-page edits over a working image,
 //! to this schema's op queue. The cache is exported first; each queued page is lowered to
 //! ops against the page the conversion has so far, and every converted page must equal
-//! the page in the old working image, or nothing changes.
+//! the page in the old working image, or nothing changes. A page edit schema 14 held in
+//! conflict becomes the conflict page a merge makes now, the remote's page staying.
 
 use crate::{Result, base, queue, schema};
 use onestore::{
@@ -87,7 +88,6 @@ struct Converted {
     edit: Edit,
     /// Schema 14's publication evidence, when this edit was attempted.
     attempted: Option<String>,
-    conflict: Option<(i64, ExGuid)>,
 }
 
 pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<()> {
@@ -107,6 +107,53 @@ pub(crate) fn migrate(connection: &mut Connection, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The conflict page keeping `local`, the version of page `space` its merge with `remote`
+/// did not take, marking the texts `remote` does not hold as they are.
+fn conflict(space: ExGuid, remote: &Page, local: &Page, author: &str) -> Result<Op> {
+    let texts = |page: &Page| -> BTreeMap<ExGuid, String> {
+        let mut texts = BTreeMap::new();
+        let mut pending: Vec<&onestore::page::PageParagraph> = Vec::new();
+        for object in &page.objects {
+            match object {
+                onestore::page::PageObject::Outline(outline) => pending.extend(&outline.paragraphs),
+                onestore::page::PageObject::Title(title) => {
+                    pending.extend(title.outlines.iter().flat_map(|outline| &outline.paragraphs))
+                }
+                _ => {}
+            }
+        }
+        while let Some(paragraph) = pending.pop() {
+            match &paragraph.content {
+                onestore::page::ParagraphContent::Text(text) => {
+                    texts.insert(text.id, format!("{:?}", text.text));
+                }
+                onestore::page::ParagraphContent::Table(table) => pending.extend(
+                    table.rows.iter().flat_map(|row| &row.cells).flat_map(|cell| &cell.paragraphs),
+                ),
+                _ => {}
+            }
+        }
+        texts
+    };
+    let kept = texts(remote);
+    let mut objects: Vec<ExGuid> = texts(local)
+        .into_iter()
+        .filter(|(id, text)| kept.get(id) != Some(text))
+        .map(|(id, _)| id)
+        .collect();
+    let page = local.copy_with(&mut objects)?;
+    let titled = local
+        .objects
+        .iter()
+        .any(|object| matches!(object, onestore::page::PageObject::Title(_)));
+    Ok(Op::Section(SectionOp::Conflict {
+        of: space,
+        creation: PageCreation::new(None, titled.then_some(local.title.as_str()), author)?,
+        page,
+        objects,
+    }))
+}
+
 fn convert(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
     let (base, patch): (Vec<u8>, Vec<u8>) =
         transaction.query_row("SELECT base, working FROM replica WHERE id=1", [], |row| {
@@ -118,9 +165,9 @@ fn convert(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
             Ok((row.get(0)?, row.get(1)?))
         })
         .optional()?;
-    let conflicts: BTreeMap<i64, i64> = transaction
-        .prepare("SELECT edit_id, kind FROM conflicts")?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+    let conflicts: std::collections::BTreeSet<i64> = transaction
+        .prepare("SELECT edit_id FROM conflicts")?
+        .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let queued: Vec<(i64, String, String)> = transaction
         .prepare("SELECT id, space, operation FROM edits ORDER BY id")?
@@ -146,6 +193,11 @@ fn convert(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
         let operation: Operation = serde_json::from_str(&operation)
             .map_err(|error| invalid(format!("Queued edit {id} is unreadable: {error}")))?;
         let (author, ops) = match operation {
+            Operation::Page(intent) if conflicts.contains(&id) => {
+                let current = section.page(space)?;
+                let op = conflict(space, &current, &intent.after, &intent.author)?;
+                (intent.author, vec![op])
+            }
             Operation::Page(intent) => {
                 let current = section.page(space)?;
                 let ops = onestore::op::lower_page(&current, &intent.after)?;
@@ -185,17 +237,12 @@ fn convert(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
             }
             sealed = Some(section.seal()?);
         }
-        // A conflicting page-list edit is the section's conflict, whichever page it names.
-        let conflicted = match edit.ops.first() {
-            Some(Op::Section(_)) => section.root(),
-            _ => space,
-        };
+        // A schema-14 conflict is queued work: the next rebase keeps both versions.
         converted.push(Converted {
             id,
             author,
             edit,
             attempted,
-            conflict: conflicts.get(&id).map(|kind| (*kind, conflicted)),
         });
     }
     let listed = |image: &[u8]| -> Result<Vec<ExGuid>> {
@@ -257,12 +304,6 @@ fn convert(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
             batch = None;
         } else {
             batch = Some(current);
-        }
-        if let Some((kind, space)) = edit.conflict {
-            transaction.execute(
-                "UPDATE batches SET conflict=?1, space=?2 WHERE id=?3",
-                params![kind, space.to_string(), current],
-            )?;
         }
         queue::insert(
             transaction,

@@ -1,21 +1,38 @@
-use onestore::{ExGuid, RevisionIndex, Store};
+use onestore::{
+    Arena, ExGuid, RevisionIndex, Section, Store,
+    op::{Edit, Op, PageOp},
+};
 
-pub fn pending(source: &[u8], sid: ExGuid, oid: ExGuid, property: u32) -> Vec<u8> {
-    let mut source = source.to_vec();
-    for value in 1_000_000_u32.. {
-        let store = Store::parse(&source).unwrap();
+/// `source` with revisions of `space` appended until its chain is 512 deep, so its next
+/// revision is a checkpoint. Each retouches the text object `text`, typing a character and
+/// removing it again.
+pub fn pending(source: &[u8], space: ExGuid, text: ExGuid) -> Vec<u8> {
+    let depth = |image: &[u8]| {
+        let store = Store::parse(image).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
-        let rid = index.spaces[&sid].labels[&(ExGuid::default(), 1)];
-        let depth =
-            std::iter::successors(Some(rid), |id| index.spaces[&sid].revisions[id].dependency)
-                .count();
-        assert!(depth <= 512);
-        if depth == 512 {
-            return source;
-        }
-        source =
-            onestore::replace_property_bytes(&source, sid, oid, property, &value.to_le_bytes())
-                .unwrap();
+        let rid = index.spaces[&space].labels[&(ExGuid::default(), 1)];
+        std::iter::successors(Some(rid), |id| {
+            index.spaces[&space].revisions[id].dependency
+        })
+        .count()
+    };
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.to_vec()).unwrap();
+    let retouch = |range, with: &str| Op::Page {
+        space,
+        op: PageOp::Text {
+            text,
+            range,
+            with: with.into(),
+        },
+    };
+    for at in 0..512 - depth(source) as u64 {
+        let ops = vec![retouch(0..0, "x"), retouch(0..1, "")];
+        let at = 134_000_000_000_000_000 + at * 10_000_000;
+        section.apply("Author", &Edit { at, ops }).unwrap();
+        section.seal().unwrap().unwrap();
     }
-    unreachable!()
+    let image = section.image();
+    assert_eq!(depth(&image), 512);
+    image
 }

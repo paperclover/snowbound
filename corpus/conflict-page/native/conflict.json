@@ -1,0 +1,15 @@
+{
+  "{64183EF4-4E19-0CBE-3D3B-88FF17D58B1C},1": [
+    "Client A disjoint edit.",
+    "Client B conflicting edit.",
+    "Client B disjoint cell.",
+    "Right cell"
+  ],
+  "{9C2E0DE1-2E23-094F-3F9F-A919195FC40D},1": [
+    "",
+    "Client A conflicting edit.",
+    "Client A disjoint edit.",
+    "Left cell",
+    "Right cell"
+  ]
+}

@@ -28,14 +28,14 @@ impl Remote for Memory {
     fn read(&mut self) -> io::Result<Vec<u8>> {
         Ok(self.0.clone())
     }
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
-        Ok(Stamp::of(&self.0).ok())
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        Stamp::of(&self.0).map_err(io::Error::other)
     }
     fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
         transaction.commit(self)
     }
-    fn confirm(&mut self, snapshot: &[u8]) -> Result<(), CommitError> {
-        onestore::confirm_snapshot(self, snapshot)
+    fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
+        onestore::confirm(self, base)
     }
 }
 
@@ -72,11 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let pending = replica.pending()?;
                 let summary = replica.recovery_summary()?;
                 println!(
-                    "{path}: converted in {:.1} ms; {} edits; {:?}; conflict {:?}",
+                    "{path}: converted in {:.1} ms; {} edits; {:?}; conflict pages {:?}",
                     elapsed.as_secs_f64() * 1e3,
                     pending.len(),
                     summary,
-                    replica.conflict()?
+                    replica.conflicts()?
                 );
                 for edit in &pending {
                     println!(
@@ -89,11 +89,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for (space, title, level) in replica.pages()? {
                     println!("  page {space} {level} {title:?}");
                 }
-                let blocked = replica.conflict()?.is_some()
-                    || replica.recovery_summary()?.uncertain_edits > 0;
+                let blocked = replica.recovery_summary()?.uncertain_edits > 0;
                 if !pending.is_empty() && !blocked {
                     let local = pages(&replica)?;
-                    let mut remote = Memory(replica.remote_snapshot()?);
+                    // The remote the queue was made on, as a recovery archive records it.
+                    let archive = copy.with_extension("probe-recovery");
+                    replica.export_recovery(&archive)?;
+                    let mut remote =
+                        Memory(notebook::Recovery::open(&archive)?.remote_snapshot()?);
+                    std::fs::remove_file(&archive)?;
                     let synced = replica.sync_once(&mut remote)?;
                     let published = {
                         let arena = onestore::Arena::default();

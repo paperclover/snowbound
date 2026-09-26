@@ -1,8 +1,12 @@
 //! Converting schema-14 caches: whole-page edits become ops, verified page by page against
-//! the old working image, with a recovery archive first and nothing changed on a mismatch.
+//! the old working image, with a recovery archive first and nothing changed on a mismatch;
+//! and schema-15 caches, whose batches lose the review conflict.
 
-use notebook::{ConflictKind, EditStatus, Replica, Resolution};
-use onestore::{ExGuid, PageCreation, PageEdit, PreparedEdit, page::Page};
+#[path = "../../onestore/tests/support/ops.rs"]
+mod ops;
+
+use notebook::{EditStatus, Replica};
+use onestore::{ExGuid, PageCreation, PageEdit, op::SectionOp, page::Page};
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::path::Path;
@@ -48,17 +52,17 @@ fn v14(path: &Path, base: &[u8], queue: &[Queued], working: Option<&[u8]>) -> Ve
         let (space, operation, next) = match entry {
             Queued::Page(space, after) => {
                 let before = model_ops::page_of(&image, *space);
-                let next = PreparedEdit::page(&image, *space, after, "Author").unwrap();
+                let next = ops::saved(&image, *space, after).unwrap();
                 (
                     *space,
                     json!({"Page": {"before": before, "after": after, "author": "Author"}}),
-                    next.as_bytes().to_vec(),
+                    next.as_slice().to_vec(),
                 )
             }
             Queued::Create(creation) => (
                 creation.space(),
                 json!({"CreatePage": creation}),
-                PreparedEdit::create_page(&image, creation)
+                ops::section_op(&image, SectionOp::Create(creation.clone()))
                     .unwrap()
                     .as_bytes()
                     .to_vec(),
@@ -71,7 +75,7 @@ fn v14(path: &Path, base: &[u8], queue: &[Queued], working: Option<&[u8]>) -> Ve
                 (
                     root(&image),
                     json!({"Pages": {"edits": batch, "observed": observed}}),
-                    PreparedEdit::pages(&image, batch)
+                    ops::section_op(&image, SectionOp::Pages(batch.to_vec()))
                         .unwrap()
                         .as_bytes()
                         .to_vec(),
@@ -80,7 +84,7 @@ fn v14(path: &Path, base: &[u8], queue: &[Queued], working: Option<&[u8]>) -> Ve
             Queued::Delete(spaces) => (
                 root(&image),
                 json!({"DeletePages": spaces}),
-                PreparedEdit::delete_pages_permanently(&image, spaces)
+                ops::section_op(&image, SectionOp::Delete(spaces.to_vec()))
                     .unwrap()
                     .as_bytes()
                     .to_vec(),
@@ -187,9 +191,9 @@ fn a_schema_14_queue_converts_to_ops_that_reach_its_working_pages_and_publish() 
             Queued::Page(
                 a,
                 appended(
-                    PreparedEdit::page(SOURCE, a, &first, "Author")
+                    ops::saved(SOURCE, a, &first)
                         .unwrap()
-                        .as_bytes(),
+                        .as_slice(),
                     a,
                     a_text,
                     " two",
@@ -216,12 +220,12 @@ fn a_schema_14_queue_converts_to_ops_that_reach_its_working_pages_and_publish() 
             }
         })
     );
-    let local = pages(&cache.snapshot().unwrap());
+    let local = pages(&snapshot(&cache));
     assert_eq!(local, pages(&working));
     drop(cache);
     // A converted cache opens as it is.
     let cache = Replica::open(&path).unwrap();
-    assert_eq!(pages(&cache.snapshot().unwrap()), local);
+    assert_eq!(pages(&snapshot(&cache)), local);
     let next = cache
         .apply(
             "Author",
@@ -245,7 +249,7 @@ fn a_schema_14_queue_converts_to_ops_that_reach_its_working_pages_and_publish() 
         Some((id, EditStatus::Published { .. })) if id == next
     ));
     let published = pages(&server.durable);
-    assert_eq!(published, pages(&cache.snapshot().unwrap()));
+    assert_eq!(published, pages(&snapshot(&cache)));
     assert!(
         published
             .iter()
@@ -255,7 +259,7 @@ fn a_schema_14_queue_converts_to_ops_that_reach_its_working_pages_and_publish() 
 }
 
 #[test]
-fn an_uncertain_attempt_and_a_conflict_keep_their_states() {
+fn an_uncertain_attempt_keeps_its_state_and_a_conflict_becomes_a_conflict_page() {
     let body = body_pages(SOURCE);
     let (a, a_text) = body[0];
     let directory = tempfile::tempdir().unwrap();
@@ -263,9 +267,9 @@ fn an_uncertain_attempt_and_a_conflict_keep_their_states() {
     // The oldest edit was attempted: its schema-14 evidence names the revision it published.
     let path = directory.path().join("attempted.sqlite");
     let after = appended(SOURCE, a, a_text, " attempted");
-    let published = PreparedEdit::page(SOURCE, a, &after, "Author").unwrap();
+    let published = ops::saved(SOURCE, a, &after).unwrap();
     let revision =
-        onestore::RevisionIndex::parse(&onestore::Store::parse(published.as_bytes()).unwrap())
+        onestore::RevisionIndex::parse(&onestore::Store::parse(published.as_slice()).unwrap())
             .unwrap()
             .active(a)
             .unwrap();
@@ -286,7 +290,7 @@ fn an_uncertain_attempt_and_a_conflict_keep_their_states() {
         Some((2, awaiting))
     );
     assert_eq!(unchanged.publications, 0);
-    let mut landed = Server::new(published.as_bytes());
+    let mut landed = Server::new(published.as_slice());
     assert_eq!(
         cache.sync_once(&mut landed).unwrap().edit,
         Some((2, EditStatus::Published { revision }))
@@ -294,17 +298,17 @@ fn an_uncertain_attempt_and_a_conflict_keep_their_states() {
     assert_eq!(landed.publications, 0);
     drop(cache);
 
-    // The oldest edit was in conflict: the conversion lowered it onto the remote page the
-    // conflict was recorded against, and keeping mine publishes it.
+    // The oldest edit was in conflict: the conversion keeps the remote page the conflict was
+    // recorded against and queues the local version as its conflict page.
     let path = directory.path().join("conflicted.sqlite");
-    let remote = PreparedEdit::page(SOURCE, a, &appended(SOURCE, a, a_text, " remote"), "Native")
+    let remote = ops::saved(SOURCE, a, &appended(SOURCE, a, a_text, " remote"))
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     let local = appended(SOURCE, a, a_text, " local");
-    let working = PreparedEdit::page(SOURCE, a, &local, "Author")
+    let working = ops::saved(SOURCE, a, &local)
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     {
         // Schema 14 stored the remote as the base and kept the local working image.
@@ -324,27 +328,26 @@ fn an_uncertain_attempt_and_a_conflict_keep_their_states() {
             .unwrap();
     }
     let cache = Replica::open(&path).unwrap();
+    assert_eq!(cache.status(2).unwrap(), Some(EditStatus::Pending));
     assert_eq!(
-        cache.status(2).unwrap(),
-        Some(EditStatus::Conflict(ConflictKind::ContentChanged))
-    );
-    assert_eq!(
-        model_ops::page_of(&cache.snapshot().unwrap(), a),
-        model_ops::page_of(&working, a)
+        model_ops::page_of(&snapshot(&cache), a),
+        model_ops::page_of(&remote, a)
     );
     let mut server = Server::new(&remote);
-    assert_eq!(
-        cache.sync_once(&mut server).unwrap().edit,
-        Some((2, EditStatus::Conflict(ConflictKind::ContentChanged)))
-    );
-    cache.resolve(2, Resolution::Mine).unwrap();
     assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
         Some((2, EditStatus::Published { .. }))
     ));
     assert_eq!(
         model_ops::page_of(&server.durable, a),
-        model_ops::page_of(&working, a)
+        model_ops::page_of(&remote, a)
+    );
+    assert_eq!(
+        conflicts(&server.durable),
+        [(
+            a,
+            vec![("Author".to_owned(), page_texts(&model_ops::page_of(&working, a)))]
+        )]
     );
 }
 
@@ -355,9 +358,9 @@ fn a_page_the_conversion_cannot_reproduce_leaves_the_cache_untouched() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("cache.sqlite");
     // The working image holds a page the queued edit does not reach.
-    let stray = PreparedEdit::page(SOURCE, a, &appended(SOURCE, a, a_text, " stray"), "Author")
+    let stray = ops::saved(SOURCE, a, &appended(SOURCE, a, a_text, " stray"))
         .unwrap()
-        .as_bytes()
+        .as_slice()
         .to_vec();
     v14(
         &path,
@@ -381,4 +384,76 @@ fn a_page_the_conversion_cannot_reproduce_leaves_the_cache_untouched() {
     // A second open tries again from the same untouched cache.
     assert!(Replica::open(&path).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A schema-15 cache upgrades in place: its queue, receipts and recovery archives stay, and
+/// a conflict it recorded is queued work the next sync keeps as a conflict page.
+#[test]
+fn a_schema_15_cache_upgrades_in_place_and_its_conflict_becomes_a_conflict_page() {
+    let (space, text) = body_pages(SOURCE)[0];
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let cache = Replica::create(&path, SOURCE).unwrap();
+    let id = model_ops::save(&cache, text, |page| {
+        model_ops::replace_text(page, text, 0..0, "Local ")
+    })
+    .unwrap()
+    .unwrap();
+    let pending = cache.pending().unwrap();
+    let archive = directory.path().join("before.sqlite");
+    drop(cache);
+    {
+        // Schema 15 recorded the review conflict and its page on the batch.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys=OFF;
+                BEGIN;
+                CREATE TABLE old (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT CHECK(id>0),
+                    sealed TEXT,
+                    revisions TEXT,
+                    attempted INTEGER NOT NULL DEFAULT 0 CHECK(attempted IN (0,1)),
+                    conflict INTEGER CHECK(conflict BETWEEN 0 AND 3),
+                    space TEXT,
+                    CHECK((sealed IS NULL) = (revisions IS NULL)),
+                    CHECK(attempted=0 OR sealed IS NOT NULL),
+                    CHECK((conflict IS NULL) = (space IS NULL))
+                ) STRICT;
+                INSERT INTO old SELECT id, sealed, revisions, attempted, 3, '{space}' FROM batches;
+                DROP TABLE batches;
+                ALTER TABLE old RENAME TO batches;
+                PRAGMA user_version=15;
+                COMMIT;"
+            ))
+            .unwrap();
+    }
+    let cache = Replica::open(&path).unwrap();
+    assert_eq!(cache.pending().unwrap(), pending);
+    assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
+    cache.export_recovery(&archive).unwrap();
+    drop(cache);
+    let connection = Connection::open(&path).unwrap();
+    let version: u32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let columns: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('batches')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(version, 16);
+    assert_eq!(columns, ["id", "sealed", "revisions", "attempted"]);
+    drop(connection);
+    assert_eq!(notebook::Recovery::open(&archive).unwrap().pending().unwrap(), pending);
+    let cache = Replica::open(&path).unwrap();
+    let remote = typed(SOURCE, space, text, 0..0, "Remote ");
+    let mut server = Server::new(&remote);
+    assert!(matches!(
+        cache.sync_once(&mut server).unwrap().edit,
+        Some((_, EditStatus::Published { .. }))
+    ));
+    assert!(conflicted(&server.durable, space));
 }

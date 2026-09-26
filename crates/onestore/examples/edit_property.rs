@@ -1,9 +1,15 @@
+//! Changes one stored property value: a text object's text (`6000e 1c001c22`, UTF-16LE,
+//! a trailing NUL dropped) as a text op, the notebook's colour on the table of contents root
+//! (`20001 14001cbe`) as a TOC edit, each appending a revision; any other value of the same
+//! length only in a copy, patched where it is stored, as a fixture that is no edit.
+
 #[path = "../src/flush.rs"]
 mod flush;
+#[path = "support/typing.rs"]
+mod typing;
 
 use onestore::{
-    ExGuid, ObjectData, PropertySets, RevisionIndex, Store, Value, commit_file_property,
-    replace_property_bytes,
+    ExGuid, ObjectData, PropertySets, RevisionIndex, Store, TocEdit, Transaction, Value,
 };
 use std::{env, fs, io::Write};
 
@@ -59,16 +65,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let (space, object) = selected.ok_or("No matching object")?;
+    let transaction: Option<Transaction> = match (jcid, id) {
+        (0x6000e, 0x1c001c22) => {
+            let units = |bytes: &[u8]| -> Vec<u16> {
+                let mut units: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                if units.last() == Some(&0) {
+                    units.pop();
+                }
+                units
+            };
+            let length = u32::try_from(units(&expected).len())?;
+            let text = String::from_utf16(&units(&value))?;
+            let edit = typing::text(space, object, 0..length, &text);
+            typing::sealed(&bytes, "Property editor", &edit)?
+        }
+        (0x20001, 0x14001cbe) => {
+            if index.resolve_active(space)?.roots.get(&1) != Some(&object) {
+                return Err("Only the notebook's colour, on the TOC root, changes".into());
+            }
+            let color = u32::from_le_bytes(value.as_slice().try_into()?);
+            onestore::edit_table_of_contents(&bytes, &[TocEdit::Color(color)])?
+        }
+        _ if args[1] != "--in-place" && value.len() == expected.len() => {
+            let revision = index.resolve_active(space)?;
+            let ObjectData::Properties(data) = revision.objects[&object].data else {
+                return Err("The object stores no properties".into());
+            };
+            let properties = PropertySets::parse(data)?;
+            let Some(Value::Bytes(stored)) = properties.sets[0]
+                .iter()
+                .find(|property| property.id == id)
+                .map(|property| &property.value)
+            else {
+                return Err("The property stores no bytes".into());
+            };
+            let at = stored.as_ptr().addr() - bytes.as_ptr().addr();
+            let mut patched = bytes.clone();
+            patched[at..at + value.len()].copy_from_slice(&value);
+            write(&args[1], &patched)?;
+            return Ok(());
+        }
+        _ => return Err("Only text and TOC colours change as edits; other values are patched into a copy of equal length".into()),
+    };
+    let transaction = transaction.ok_or("The value is already stored")?;
     if args[1] == "--in-place" {
-        commit_file_property(&args[0], &bytes, space, object, id, &value)?;
+        transaction.commit_file(&args[0])?;
         return Ok(());
     }
-    let written = replace_property_bytes(&bytes, space, object, id, &value)?;
+    let mut written = bytes.clone();
+    transaction.apply(&mut written)?;
+    write(&args[1], &written)
+}
+
+fn write(path: &str, written: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     let mut output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&args[1])?;
-    output.write_all(&written)?;
+        .open(path)?;
+    output.write_all(written)?;
     flush::flush(&output)?;
     Ok(())
 }

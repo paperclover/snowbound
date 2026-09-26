@@ -1,15 +1,34 @@
-//! The page writer must publish the same graph the typed writers publish for the same edit,
-//! in one transaction, and must round-trip the model it was given.
+//! A page edit lowered whole (`op::lower_page`) must publish the same graph its ops applied
+//! one by one publish, in one transaction, and must round-trip the model it was given.
+
+#[path = "support/ops.rs"]
+mod ops;
 
 use onestore::{
-    ExGuid, Insertion, OutlineEdit, ParagraphJoin, ParagraphSplit, PreparedEdit, RevisionIndex,
-    Store, TextAttribute, TreeEdit,
+    ExGuid, OutlineEdit, RevisionIndex, Store, TextAttribute,
     document::{Document, Element, Kind, Revision},
+    op::PageOp,
     page::{Page, PageObject, ParagraphContent, text::new_id},
 };
 use std::collections::BTreeSet;
 
-const AUTHOR: &str = "Page author";
+/// `source` after `ops` on the page in `space`.
+fn edited(source: &[u8], space: ExGuid, ops: Vec<PageOp>) -> Vec<u8> {
+    ops::page_edited(source, space, ops).unwrap()
+}
+
+/// A plain paragraph of `text` inserted in `container` before `before`, at `level`.
+fn insert(container: ExGuid, before: Option<ExGuid>, text: &str, level: u32) -> PageOp {
+    let mut paragraph = ops::paragraph(text);
+    paragraph.level = level;
+    PageOp::Insert {
+        container,
+        before,
+        paragraphs: vec![paragraph],
+    }
+}
+
+const AUTHOR: &str = "Author";
 const PARAGRAPHS: &[u8] =
     include_bytes!("../../../corpus/paragraph-edit/before/notebook/synthetic.one");
 const OUTLINES: &[u8] =
@@ -144,7 +163,7 @@ fn same_element(revision_a: &Revision<'_>, revision_b: &Revision<'_>, id: ExGuid
     }
 }
 
-/// Every active revision the typed writers produced is reproduced by the page writer,
+/// Every active revision the ops produced one by one is reproduced by the page lowered whole,
 /// ignoring writer-allocated immutable styles and author records. Modification times are
 /// not compared: a reorder can be attributed to either sibling, and the model cannot say which.
 fn equivalent(reference: &[u8], written: &[u8]) {
@@ -182,11 +201,11 @@ fn equivalent(reference: &[u8], written: &[u8]) {
     }
 }
 
-/// Runs the page writer on the model the typed writers produced and checks both contracts.
+/// Lowers the page the ops produced whole and checks both contracts.
 fn oracle(source: &[u8], space: ExGuid, reference: &[u8]) -> Vec<u8> {
     let after = page_in(reference, space);
-    let prepared = PreparedEdit::page(source, space, &after, AUTHOR).unwrap();
-    let written = prepared.as_bytes().to_vec();
+    let prepared = ops::saved(source, space, &after).unwrap();
+    let written = prepared.as_slice().to_vec();
     assert_eq!(page_in(&written, space), after, "model round trip");
     equivalent(reference, &written);
     let transactions = |bytes: &[u8]| Store::parse(bytes).unwrap().header.transaction_count;
@@ -209,9 +228,12 @@ fn text_replacement_matches_replace_text() {
         (end..end, " end"),
         (0..end, ""),
     ] {
-        let reference =
-            onestore::replace_text(PARAGRAPHS, space, text, range, replacement).unwrap();
-        oracle(PARAGRAPHS, space, &reference);
+        let op = PageOp::Text {
+            text,
+            range,
+            with: replacement.into(),
+        };
+        oracle(PARAGRAPHS, space, &edited(PARAGRAPHS, space, vec![op]));
     }
 }
 
@@ -220,28 +242,16 @@ fn formatting_matches_format_text() {
     let (space, page) = page_by_title(PARAGRAPHS, "Split style boundary");
     let (_, text, content) = text_ids(body(&page)[0])[0].clone();
     let end = u32::try_from(content.encode_utf16().count()).unwrap();
-    let reference = PreparedEdit::format(
-        PARAGRAPHS,
-        space,
-        text,
-        1..end.min(4),
-        &[
+    let reference = ops::page_op(PARAGRAPHS, space, PageOp::Format { text, range: 1..end.min(4), set: vec![
             TextAttribute::Bold(true),
             TextAttribute::Color(Some([255, 0, 0])),
             TextAttribute::FontSize(14.0),
-        ],
-    )
+        ], clear: Vec::new() })
     .unwrap();
-    let reference = PreparedEdit::format(
-        reference.as_bytes(),
-        space,
-        text,
-        0..1,
-        &[
+    let reference = ops::page_op(reference.as_bytes(), space, PageOp::Format { text, range: 0..1, set: vec![
             TextAttribute::Italic(true),
             TextAttribute::Font("Consolas".into()),
-        ],
-    )
+        ], clear: Vec::new() })
     .unwrap();
     oracle(PARAGRAPHS, space, reference.as_bytes());
 }
@@ -257,14 +267,13 @@ fn paragraph_insertions_match_insertion() {
         .find(|p| p.parent.is_none())
         .unwrap()
         .id;
-    for intent in [
-        Insertion::paragraph(outline.id, None, "Appended 🦋 é", AUTHOR).unwrap(),
-        Insertion::paragraph(outline.id, Some(paragraphs[0].0), "First", AUTHOR).unwrap(),
-        Insertion::paragraph(parent, None, "Nested child", AUTHOR).unwrap(),
-        Insertion::paragraph(outline.id, None, "", AUTHOR).unwrap(),
+    for op in [
+        insert(outline.id, None, "Appended 🦋 é", 1),
+        insert(outline.id, Some(paragraphs[0].0), "First", 1),
+        insert(parent, None, "Nested child", 2),
+        insert(outline.id, None, "", 1),
     ] {
-        let reference = PreparedEdit::insert(OUTLINES, space, &intent).unwrap();
-        oracle(OUTLINES, space, reference.as_bytes());
+        oracle(OUTLINES, space, &edited(OUTLINES, space, vec![op]));
     }
 }
 
@@ -281,27 +290,23 @@ fn cell_insertion_and_deletion_match() {
         })
         .unwrap();
     let cell = &table.rows[0].cells[0];
-    let intent = Insertion::paragraph(cell.id, None, "Cell text", AUTHOR).unwrap();
-    let reference = PreparedEdit::insert(TREES, space, &intent).unwrap();
-    oracle(TREES, space, reference.as_bytes());
+    let reference = edited(TREES, space, vec![insert(cell.id, None, "Cell text", 1)]);
+    oracle(TREES, space, &reference);
     let victim = cell
         .paragraphs
         .iter()
         .find(|p| p.parent.is_none())
         .unwrap()
         .id;
-    let reference =
-        PreparedEdit::tree(TREES, space, &TreeEdit::delete(victim, AUTHOR).unwrap()).unwrap();
-    oracle(TREES, space, reference.as_bytes());
+    let reference = edited(&reference, space, vec![PageOp::Delete { object: victim }]);
+    oracle(TREES, space, &reference);
 }
 
 #[test]
 fn outline_insertion_matches_insertion() {
     let (space, _) = page_by_title(OUTLINES, "Move leaf down");
-    let page = page_id(OUTLINES, space);
-    let intent = Insertion::outline(page, 144.0, 200.0, "New outline 東京", AUTHOR).unwrap();
-    let reference = PreparedEdit::insert(OUTLINES, space, &intent).unwrap();
-    oracle(OUTLINES, space, reference.as_bytes());
+    let (add, ..) = ops::new_outline(144.0, 200.0, "New outline 東京");
+    oracle(OUTLINES, space, &edited(OUTLINES, space, vec![add]));
 }
 
 #[test]
@@ -325,16 +330,24 @@ fn splits_and_joins_match_their_writers() {
                     .is_none_or(|u| !(0xd800..=0xdbff).contains(&u))
             })
             .unwrap();
-        let split = ParagraphSplit::new(text, offset, AUTHOR).unwrap();
-        let reference = PreparedEdit::split(PARAGRAPHS, space, &split).unwrap();
-        oracle(PARAGRAPHS, space, reference.as_bytes());
+        let lists = body(&page)[0].paragraphs[0].lists.len();
+        let split = PageOp::Split {
+            text,
+            at: offset,
+            paragraph: new_id().unwrap(),
+            right: new_id().unwrap(),
+            lists: (0..lists).map(|_| new_id().unwrap()).collect(),
+        };
+        oracle(PARAGRAPHS, space, &edited(PARAGRAPHS, space, vec![split]));
     }
     for title in ["Split middle", "Split empty"] {
         let (space, page) = page_by_title(PARAGRAPHS, title);
         let paragraphs = text_ids(body(&page)[0]);
-        let join = ParagraphJoin::new(paragraphs[0].1, paragraphs[1].1, AUTHOR).unwrap();
-        let reference = PreparedEdit::join(PARAGRAPHS, space, &join).unwrap();
-        oracle(PARAGRAPHS, space, reference.as_bytes());
+        let join = PageOp::Join {
+            left: paragraphs[0].1,
+            right: paragraphs[1].1,
+        };
+        oracle(PARAGRAPHS, space, &edited(PARAGRAPHS, space, vec![join]));
     }
 }
 
@@ -357,18 +370,28 @@ fn subtree_moves_and_deletions_match_tree_edits() {
             .filter(|p| p.parent.is_none())
             .map(|p| p.id)
             .collect();
-        let edit = match build {
-            0 | 1 => TreeEdit::move_to(top[0], outline.id, top.get(2).copied(), AUTHOR).unwrap(),
-            2 | 3 => TreeEdit::delete(top[0], AUTHOR).unwrap(),
-            4 => TreeEdit::move_to(outline.id, page_id(OUTLINES, space), None, AUTHOR).unwrap(),
-            _ => TreeEdit::delete(outline.id, AUTHOR).unwrap(),
+        let op = match build {
+            0 | 1 => PageOp::Move {
+                object: top[0],
+                parent: Some(outline.id),
+                before: top.get(2).copied(),
+            },
+            2 | 3 => PageOp::Delete { object: top[0] },
+            4 => PageOp::Move {
+                object: outline.id,
+                parent: None,
+                before: None,
+            },
+            _ => PageOp::Delete { object: outline.id },
         };
-        let reference = PreparedEdit::tree(OUTLINES, space, &edit).unwrap();
-        oracle(OUTLINES, space, reference.as_bytes());
+        oracle(OUTLINES, space, &edited(OUTLINES, space, vec![op]));
         if outlines.len() > 1 && build == 0 {
-            let across = TreeEdit::move_to(top[1], outlines[1].id, None, AUTHOR).unwrap();
-            let reference = PreparedEdit::tree(OUTLINES, space, &across).unwrap();
-            oracle(OUTLINES, space, reference.as_bytes());
+            let across = PageOp::Move {
+                object: top[1],
+                parent: Some(outlines[1].id),
+                before: None,
+            };
+            oracle(OUTLINES, space, &edited(OUTLINES, space, vec![across]));
         }
     }
 }
@@ -401,7 +424,7 @@ fn outline_layout_and_collapse_match_outline_edits() {
         ),
         (parent, OutlineEdit::Collapsed(true)),
     ] {
-        let reference = PreparedEdit::outline(OUTLINES, space, object, edit).unwrap();
+        let reference = ops::page_op(OUTLINES, space, PageOp::Outline { object, edit }).unwrap();
         oracle(OUTLINES, space, reference.as_bytes());
     }
 }
@@ -411,38 +434,41 @@ fn composed_edits_publish_one_transaction() {
     let (space, page) = page_by_title(OUTLINES, "Move subtree up");
     let outline = body(&page)[0];
     let paragraphs = text_ids(outline);
-    let mut reference =
-        onestore::replace_text(OUTLINES, space, paragraphs[0].1, 0..0, "Lead ").unwrap();
-    let insertion =
-        Insertion::paragraph(outline.id, Some(paragraphs[1].0), "Inserted", AUTHOR).unwrap();
-    reference = PreparedEdit::insert(&reference, space, &insertion)
-        .unwrap()
-        .as_bytes()
-        .to_vec();
-    reference = PreparedEdit::format(
+    let mut reference = edited(
+        OUTLINES,
+        space,
+        vec![PageOp::Text {
+            text: paragraphs[0].1,
+            range: 0..0,
+            with: "Lead ".into(),
+        }],
+    );
+    let insertion = insert(outline.id, Some(paragraphs[1].0), "Inserted", 1);
+    let PageOp::Insert { paragraphs: inserted, .. } = &insertion else {
+        unreachable!()
+    };
+    let inserted = inserted[0].text().unwrap().id;
+    reference = edited(&reference, space, vec![insertion]);
+    reference = edited(
         &reference,
         space,
-        insertion.text_object(),
-        0..3,
-        &[TextAttribute::Bold(true)],
-    )
-    .unwrap()
-    .as_bytes()
-    .to_vec();
+        vec![PageOp::Format {
+            text: inserted,
+            range: 0..3,
+            set: vec![TextAttribute::Bold(true)],
+            clear: Vec::new(),
+        }],
+    );
     let last = paragraphs.last().unwrap().0;
-    reference = PreparedEdit::tree(&reference, space, &TreeEdit::delete(last, AUTHOR).unwrap())
-        .unwrap()
-        .as_bytes()
-        .to_vec();
-    reference = PreparedEdit::outline(
+    reference = edited(&reference, space, vec![PageOp::Delete { object: last }]);
+    reference = edited(
         &reference,
         space,
-        outline.id,
-        OutlineEdit::Position { x: 60.0, y: 60.0 },
-    )
-    .unwrap()
-    .as_bytes()
-    .to_vec();
+        vec![PageOp::Outline {
+            object: outline.id,
+            edit: OutlineEdit::Position { x: 60.0, y: 60.0 },
+        }],
+    );
     let written = oracle(OUTLINES, space, &reference);
     assert_eq!(
         Store::parse(&reference).unwrap().header.transaction_count,
@@ -535,8 +561,8 @@ fn model_edits_round_trip_and_leave_other_objects_untouched() {
     );
     outline.paragraphs.push(paragraph);
     after.objects.push(PageObject::Outline(outline));
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let normalize = |page: &Page| -> Vec<(ExGuid, Vec<(ExGuid, String)>)> {
         body(page)
             .iter()
@@ -565,7 +591,7 @@ fn model_edits_round_trip_and_leave_other_objects_untouched() {
     let store = Store::parse(TREES).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let raw_before = index.resolve_active(space).unwrap();
-    let store = Store::parse(written.as_bytes()).unwrap();
+    let store = Store::parse(written.as_slice()).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let raw_after = index.resolve_active(space).unwrap();
     let touched: BTreeSet<ExGuid> = body(&after)
@@ -604,7 +630,7 @@ fn unsupported_model_edits_are_rejected_before_writing() {
             }
         }
     }
-    assert!(PreparedEdit::page(TREES, space, &widened, AUTHOR).is_ok());
+    assert!(ops::saved(TREES, space, &widened).is_ok());
     let mut relisted = page_in(TREES, space);
     let outline = body(&page)[0];
     for object in &mut relisted.objects {
@@ -614,11 +640,33 @@ fn unsupported_model_edits_are_rejected_before_writing() {
             o.paragraphs[0].lists.push(new_id().unwrap());
         }
     }
-    assert!(PreparedEdit::page(TREES, space, &relisted, AUTHOR).is_err());
-    let mut renamed = page_in(TREES, space);
-    renamed.created = Some(1);
-    assert!(PreparedEdit::page(TREES, space, &renamed, AUTHOR).is_err());
-    assert!(PreparedEdit::page(TREES, space, &page, "a\0b").is_err());
+    assert!(ops::saved(TREES, space, &relisted).is_err());
+    // A page's date is an op of its own now.
+    let mut redated = page_in(TREES, space);
+    redated.created = Some(1);
+    let written = ops::saved(TREES, space, &redated).unwrap();
+    assert_eq!(page_in(&written, space).created, Some(1));
+    let text = page
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Title(title) => title
+                .outlines
+                .iter()
+                .flat_map(|outline| &outline.paragraphs)
+                .find_map(|paragraph| paragraph.text().map(|text| text.id)),
+            _ => None,
+        })
+        .unwrap();
+    let op = onestore::op::Op::Page {
+        space,
+        op: PageOp::Text {
+            text,
+            range: 0..0,
+            with: "x".into(),
+        },
+    };
+    assert!(ops::transaction(TREES, "a\0b", vec![op]).is_err());
 }
 
 /// Unset run values stay unset; only the language, which MS-ONE requires on every run, comes
@@ -655,8 +703,8 @@ fn a_new_paragraph_with_unspecified_formatting_rereads_with_only_the_required_la
         unsupported: Vec::new(),
     };
     page.objects.insert(0, PageObject::Outline(outline));
-    let written = PreparedEdit::page(OUTLINES, space, &page, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(OUTLINES, space, &page).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let read_back = body(&stored)
         .iter()
         .flat_map(|outline| outline.paragraphs.iter())
@@ -673,18 +721,18 @@ fn a_new_paragraph_with_unspecified_formatting_rereads_with_only_the_required_la
         }
     );
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
 }
 
 #[test]
 fn an_unchanged_model_publishes_nothing() {
     let (space, page) = page_by_title(OUTLINES, "Resize outline");
-    let prepared = PreparedEdit::page(OUTLINES, space, &page, AUTHOR).unwrap();
-    assert_eq!(prepared.as_bytes(), OUTLINES);
+    let prepared = ops::saved(OUTLINES, space, &page).unwrap();
+    assert_eq!(prepared.as_slice(), OUTLINES);
 }
 
 const JOIN_PAGE: &str = "Bold 🦀 italic e\u{301} color 東京";
@@ -1001,8 +1049,8 @@ fn export_native_page_model_candidates() {
                 });
             }
         }
-        let edit = PreparedEdit::page(&bytes, space, &after, "Rust page writer").unwrap();
-        bytes = edit.as_bytes().to_vec();
+        let edit = ops::saved(&bytes, space, &after).unwrap();
+        bytes = edit.as_slice().to_vec();
         let stored = page_in(&bytes, space);
         let index = {
             let store = Store::parse(&bytes).unwrap();

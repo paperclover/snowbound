@@ -29,7 +29,7 @@ mod schema;
 pub mod session;
 pub use recovery::{Recovery, RecoverySummary};
 mod sync;
-pub use sync::{ConflictKind, EditStatus, Remote, Synced};
+pub use sync::{EditStatus, Remote, Synced};
 mod worker;
 mod working;
 #[cfg(feature = "smb")]
@@ -72,19 +72,8 @@ pub struct PendingEdit {
     pub edit: Edit,
 }
 
-/// Unpublished work the remote section no longer accepts: the batch holding edit `id`
-/// changed page `space` where the remote changed it too.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Conflict {
-    pub id: u64,
-    pub space: ExGuid,
-    pub kind: ConflictKind,
-}
-
-/// How a conflict or an uncertain attempt ends. `Mine` keeps the local pages: a conflicted
-/// page is rewritten from the remote page to the local one; a released attempt publishes
-/// again. `Theirs` drops the local edits to the conflicted page, or the whole unpublished
-/// branch of a released attempt.
+/// How an uncertain attempt ends after review: `Mine` publishes it again, `Theirs` drops
+/// the whole unpublished branch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resolution {
     Mine,
@@ -161,6 +150,7 @@ impl Replica {
         // the file as it was.
         match version {
             migrate::VERSION => migrate::migrate(&mut connection, path)?,
+            schema::PREVIOUS => schema::upgrade(&mut connection)?,
             schema::VERSION => {}
             _ => {
                 return Err(io::Error::new(
@@ -248,9 +238,14 @@ impl Replica {
         self.ask(|reply| working::Request::Pages { reply })
     }
 
+    /// The conflict pages of each page that has them (`onestore::Section::conflicts`).
+    pub fn conflicts(&self) -> Result<Vec<(ExGuid, Vec<onestore::ConflictPage>)>> {
+        self.ask(|reply| working::Request::Conflicts { reply })
+    }
+
     /// The section image the queued edits leave, the unsealed ones sealed as one more
-    /// revision whose identities differ per call: O(section), for tests and diagnostics.
-    pub fn snapshot(&self) -> Result<Vec<u8>> {
+    /// revision whose identities differ per call: O(section).
+    pub(crate) fn snapshot(&self) -> Result<Vec<u8>> {
         self.ask(|reply| working::Request::Flush { reply })?;
         working::image(&*self.lock()?)
     }

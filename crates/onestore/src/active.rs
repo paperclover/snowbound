@@ -1,7 +1,13 @@
 use crate::{
-    Error, ExGuid, FileType, Object, RevisionIndex, Store,
-    document::{Document, Element, Kind, Revision, Space},
-    write::{Commit, LiveRevision, PropertyObject, chain_depth, declared, differing},
+    Error, ExGuid, FileType, Object,
+    document::{Element, Kind, Revision},
+    write::{Commit, LiveRevision, PropertyObject, declared, differing},
+};
+#[cfg(test)]
+use crate::{
+    RevisionIndex, Store,
+    document::{Document, Space},
+    write::chain_depth,
 };
 use bumpalo::Bump;
 use std::{
@@ -35,6 +41,8 @@ pub(crate) struct ActivePage<'a> {
 }
 
 impl<'a> ActivePage<'a> {
+    /// The active page of `space`, for tests comparing writers.
+    #[cfg(test)]
     pub(crate) fn parse(index: &'a RevisionIndex<'a>, space: ExGuid) -> Result<Self> {
         index.validate_current()?;
         let mut document = Document::parse(index)?;
@@ -131,6 +139,7 @@ impl<'a> ActivePage<'a> {
 
     /// Stores a writer's objects and payloads as the next revision; false when it stores
     /// nothing, as appending it would leave the image unchanged.
+    #[cfg(test)]
     pub(crate) fn write(
         &mut self,
         arena: &'a Bump,
@@ -328,25 +337,18 @@ fn is_title(node: &Element<'_>) -> bool {
         .is_some_and(|fields| fields.iter().any(|field| field.id == 0x88001cb4))
 }
 
-/// Writes one revision of a page space: `changes` computes its objects from the active page.
-pub(crate) fn write(
-    source: &[u8],
-    space: ExGuid,
-    changes: impl FnOnce(&ActivePage<'_>) -> Result<Changes>,
-) -> Result<Vec<u8>> {
-    let store = Store::parse(source)?;
-    let index = RevisionIndex::parse(&store)?;
-    let changes = changes(&ActivePage::parse(&index, space)?)?;
-    if changes.is_empty() {
-        return Ok(source.to_vec());
-    }
-    crate::write::write_revision_on(&index, space, |_| Ok(changes))
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::{Insertion, ParagraphSplit, TextAttribute, TreeEdit, document::Kind};
+
+    /// An identity from `fresh_guid`, which seeded tests draw deterministically per thread.
+    fn new_id() -> Result<ExGuid> {
+        Ok(ExGuid {
+            guid: crate::write::fresh_guid()?,
+            n: 1,
+        })
+    }
 
     /// A seeded source of the typed writers' changes: insertions, moves, deletions, splits
     /// and formatting of what a page holds.
@@ -392,15 +394,31 @@ pub(crate) mod tests {
             let text = *texts.get(self.pick(texts.len())).ok_or(unavailable)?;
             let words = ["", "a", "Two words", "東京 🦀", "longer text here"];
             let word = words[self.pick(words.len())];
-            match self.pick(8) {
-                0..=3 => Insertion::paragraph(container, anchor, word, "Author")
-                    .and_then(|insertion| insertion.changes(active)),
+            // `Section::apply` refuses an edit ending with a table cell emptied.
+            let fills_a_cell = active.parents[&paragraph].iter().any(|parent| {
+                matches!(nodes[parent].kind, Kind::Cell { .. })
+                    && nodes[parent].children == [paragraph]
+            });
+            let choice = match self.pick(8) {
+                4 | 5 if fills_a_cell => 0,
+                choice => choice,
+            };
+            match choice {
+                0..=3 => Insertion::paragraph(container, anchor, word, "Author").and_then(
+                    |insertion| {
+                        let paragraph = new_id()?;
+                        insertion.changes_as(active, paragraph, paragraph, new_id()?)
+                    },
+                ),
                 4 => TreeEdit::move_to(paragraph, container, anchor, "Author")
                     .and_then(|edit| edit.changes(active)),
                 5 => TreeEdit::delete(paragraph, "Author").and_then(|edit| edit.changes(active)),
                 6 => {
                     let at = self.pick(3) as u32;
-                    ParagraphSplit::new(text, at, "Author").and_then(|split| split.changes(active))
+                    let lists = (0..8).map(|_| new_id()).collect::<Result<Vec<_>>>()?;
+                    ParagraphSplit::new(text, at, "Author").and_then(|split| {
+                        split.changes_as(active, new_id()?, new_id()?, &lists)
+                    })
                 }
                 _ => {
                     let end = self.pick(2) as u32;

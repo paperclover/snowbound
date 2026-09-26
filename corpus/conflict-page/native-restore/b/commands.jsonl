@@ -1,0 +1,16 @@
+{"command": "mkdir C:\\one-tests\\runs\\capture", "exit": 0, "stdout": "", "stderr": "", "error": null}
+{"command": "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\one-tests\\network.ps1 -LabMac 52:54:02:7b:1a:4d", "exit": 0, "stdout": "{\"renewalResult\":0,\"releaseResult\":0,\"mac\":\"52:54:02:7b:1a:4d\",\"address\":\"192.168.77.40\"}\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0001.tmp C:\\one-tests\\runs\\capture\\inbox\\0001.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0002.tmp C:\\one-tests\\runs\\capture\\inbox\\0002.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0003.tmp C:\\one-tests\\runs\\capture\\inbox\\0003.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0004.tmp C:\\one-tests\\runs\\capture\\inbox\\0004.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0005.tmp C:\\one-tests\\runs\\capture\\inbox\\0005.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0006.tmp C:\\one-tests\\runs\\capture\\inbox\\0006.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0007.tmp C:\\one-tests\\runs\\capture\\inbox\\0007.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0008.tmp C:\\one-tests\\runs\\capture\\inbox\\0008.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0009.tmp C:\\one-tests\\runs\\capture\\inbox\\0009.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0010.tmp C:\\one-tests\\runs\\capture\\inbox\\0010.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0011.tmp C:\\one-tests\\runs\\capture\\inbox\\0011.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0012.tmp C:\\one-tests\\runs\\capture\\inbox\\0012.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0013.tmp C:\\one-tests\\runs\\capture\\inbox\\0013.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}
+{"command": "move C:\\one-tests\\runs\\capture\\inbox\\0014.tmp C:\\one-tests\\runs\\capture\\inbox\\0014.json", "exit": 0, "stdout": "        1 file(s) moved.\r\n", "stderr": "", "error": null}

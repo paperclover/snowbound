@@ -1,12 +1,11 @@
 use crate::{
     Error, ExGuid,
     active::{ActivePage, Changes},
-    create::{current_timestamps, properties, string},
+    create::{current_timestamps, properties},
     document::{Kind, Revision},
     edit::{editable_parents, update_title},
     write::{PropertyObject, fresh_guid},
 };
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -16,8 +15,7 @@ fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq)]
 enum Placement {
     Delete,
     Move {
@@ -27,40 +25,25 @@ enum Placement {
 }
 
 /// An atomic subtree move or deletion on one active page.
-/// Retain the intent across retries so an emptied cell's replacement keeps its identity.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TreeEdit {
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TreeEdit {
     guid: [u8; 16],
     object: ExGuid,
     placement: Placement,
     author: String,
-    created: u32,
 }
 
 impl TreeEdit {
-    pub fn object(&self) -> ExGuid {
-        self.object
-    }
-
-    /// Move destination and direct sibling anchor; deletion has no destination.
-    pub fn destination(&self) -> Option<(ExGuid, Option<ExGuid>)> {
-        match self.placement {
-            Placement::Delete => None,
-            Placement::Move { parent, before } => Some((parent, before)),
-        }
-    }
-
     /// Removes a paragraph or ordinary outline and its descendants from the active tree.
-    /// Historical objects remain available; an emptied table cell receives an empty paragraph.
-    pub fn delete(object: ExGuid, author: &str) -> Result<Self, Error> {
+    /// Historical objects remain available.
+    pub(crate) fn delete(object: ExGuid, author: &str) -> Result<Self, Error> {
         Self::new(object, Placement::Delete, author)
     }
 
     /// Moves before a direct child, or appends when `before` is None.
     /// Paragraph destinations are outlines, groups, paragraphs or cells on the same page.
     /// Outlines remain direct page children. Content and explicit list formatting are preserved.
-    pub fn move_to(
+    pub(crate) fn move_to(
         object: ExGuid,
         parent: ExGuid,
         before: Option<ExGuid>,
@@ -75,7 +58,6 @@ impl TreeEdit {
             object,
             placement,
             author: author.to_owned(),
-            created: current_timestamps()?.0,
         };
         intent.validate()?;
         Ok(intent)
@@ -93,11 +75,6 @@ impl TreeEdit {
             return Err(invalid("Choose a destination and sibling on the same page"));
         }
         Ok(())
-    }
-
-    pub(crate) fn apply(&self, source: &[u8], space: ExGuid) -> Result<Vec<u8>, Error> {
-        self.validate()?;
-        crate::active::write(source, space, |active| self.changes(active))
     }
 
     pub(crate) fn changes(&self, active: &ActivePage<'_>) -> Result<Changes, Error> {
@@ -164,7 +141,6 @@ impl TreeEdit {
                 .retain(|id| *id != self.object);
         }
 
-        let mut empty_cell = None;
         let mut at = source_parent;
         loop {
             let node = &view.nodes[&at];
@@ -174,8 +150,8 @@ impl TreeEdit {
                 break;
             }
             if node.children.is_empty() {
+                // `Section::apply` refuses an edit that ends with the cell still empty.
                 if matches!(node.kind, Kind::Cell { .. }) {
-                    empty_cell = Some(at);
                     break;
                 }
                 if !matches!(node.kind, Kind::Outline { .. } | Kind::OutlineGroup) {
@@ -278,53 +254,14 @@ impl TreeEdit {
             guid: self.guid,
             n: 3,
         };
-        if let Some(cell) = empty_cell {
-            let paragraph = ExGuid {
-                guid: self.guid,
-                n: 1,
-            };
-            let text = ExGuid {
-                guid: self.guid,
-                n: 2,
-            };
-            view.nodes.get_mut(&cell).unwrap().children.push(paragraph);
-            for (id, jcid, values) in [
-                (
-                    paragraph,
-                    0x6000d,
-                    vec![
-                        (0x24001c1f, 2_u32.to_le_bytes().to_vec()),
-                        (0x0c001c03, vec![1]),
-                        (0x14001d09, self.created.to_le_bytes().to_vec()),
-                        (0x14001d7a, modified.to_vec()),
-                        (0x20001d78, 3_u32.to_le_bytes().to_vec()),
-                        (0x20001d79, 3_u32.to_le_bytes().to_vec()),
-                    ],
-                ),
-                (
-                    text,
-                    0x6000e,
-                    vec![(0x1c001c22, Vec::new()), (0x14001d7a, modified.to_vec())],
-                ),
-            ] {
-                changed.insert(
-                    id,
-                    PropertyObject {
-                        jcid,
-                        bytes: properties(&values)?,
-                        global_ids: Arc::new(BTreeMap::from([(0, self.guid)])),
-                    },
-                );
-            }
-        }
         let moved_paragraph = matches!(self.placement, Placement::Move { .. })
             && matches!(view.nodes[&self.object].kind, Kind::Paragraph { .. });
-        if empty_cell.is_some() || moved_paragraph {
+        if moved_paragraph {
             changed.insert(
                 author_id,
                 PropertyObject {
                     jcid: 0x120001,
-                    bytes: properties(&[(0x1c001d75, string(&self.author))])?,
+                    bytes: properties(&crate::create::author_properties(&self.author))?,
                     global_ids: Arc::new(BTreeMap::from([(0, self.guid)])),
                 },
             );
@@ -413,47 +350,15 @@ fn checked_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::write_revision;
-    use crate::{Insertion, PreparedEdit, RevisionIndex, Store, document::Document};
-
-    #[test]
-    fn a_retained_move_intent_can_reuse_its_immutable_author_after_another_move() {
-        let source = crate::create_section("move.one", "First", "Author").unwrap();
-        let store = Store::parse(&source).unwrap();
-        let index = RevisionIndex::parse(&store).unwrap();
-        let document = Document::parse(&index).unwrap();
-        let (sid, page) = document.pages().unwrap()[0];
-        let view = document.active(sid).unwrap();
-        let outline = *view.nodes[&page]
-            .children
-            .iter()
-            .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
-            .unwrap();
-        let first = view.nodes[&outline].children[0];
-        let second = Insertion::paragraph(outline, None, "Second", "Author").unwrap();
-        let source = PreparedEdit::insert(&source, sid, &second)
-            .unwrap()
-            .as_bytes()
-            .to_vec();
-        let retained = TreeEdit::move_to(first, outline, None, "Tree author").unwrap();
-        let moved = PreparedEdit::tree(&source, sid, &retained).unwrap();
-        let reversed =
-            TreeEdit::move_to(first, outline, Some(second.object()), "Tree author").unwrap();
-        let reversed = PreparedEdit::tree(moved.as_bytes(), sid, &reversed).unwrap();
-        let repeated = PreparedEdit::tree(reversed.as_bytes(), sid, &retained).unwrap();
-        let store = Store::parse(repeated.as_bytes()).unwrap();
-        let index = RevisionIndex::parse(&store).unwrap();
-        let document = Document::parse(&index).unwrap();
-        let view = document.active(sid).unwrap();
-        assert_eq!(view.nodes[&outline].children, [second.object(), first]);
-        assert_eq!(
-            view.nodes[&first].latest_author,
-            Some(ExGuid {
-                guid: retained.guid,
-                n: 3
-            })
-        );
-    }
+    use crate::{
+        RevisionIndex, Store,
+        document::{Document, Format},
+        op::{
+            PageOp,
+            tests::{edited, text_paragraph},
+        },
+        write::write_revision,
+    };
 
     #[test]
     fn group_normalization_preserves_unequal_indentation_and_overlapping_moves() {
@@ -469,22 +374,23 @@ mod tests {
             .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
             .unwrap();
         let first = view.nodes[&outline].children[0];
-        let second = Insertion::paragraph(outline, None, "Second", "Author").unwrap();
-        let third = Insertion::paragraph(outline, None, "Third", "Author").unwrap();
-        let source = PreparedEdit::insert(&source, sid, &second)
-            .unwrap()
-            .as_bytes()
-            .to_vec();
-        let source = PreparedEdit::insert(&source, sid, &third)
-            .unwrap()
-            .as_bytes()
-            .to_vec();
+        let paragraphs = vec![
+            text_paragraph("Second", Format::default()),
+            text_paragraph("Third", Format::default()),
+        ];
+        let (second, third) = (paragraphs[0].id, paragraphs[1].id);
+        let insert = PageOp::Insert {
+            container: outline,
+            before: None,
+            paragraphs,
+        };
+        let source = edited(&source, sid, vec![insert]).unwrap();
         let guid = fresh_guid().unwrap();
         let a = ExGuid { guid, n: 1 };
         let b = ExGuid { guid, n: 2 };
         let source = write_revision(&source, sid, |raw| {
             let mut changed = BTreeMap::new();
-            for (id, child, level) in [(a, first, 2), (b, second.object(), 1)] {
+            for (id, child, level) in [(a, first, 2), (b, second, 1)] {
                 let mut group = PropertyObject {
                     jcid: 0x60019,
                     bytes: properties(&[(0x0c001c03, vec![level])])?,
@@ -496,7 +402,7 @@ mod tests {
             }
             let mut object = PropertyObject::from_object(&raw.objects[&outline])?;
             let mut references = Vec::new();
-            for id in [a, b, third.object()] {
+            for id in [a, b, third] {
                 references.extend_from_slice(&object.reference(id)?);
             }
             object.set(&[(0x24001c20, &references)])?;
@@ -504,38 +410,37 @@ mod tests {
             Ok(changed)
         })
         .unwrap();
-        for moving in [false, true] {
-            let intent = if moving {
-                TreeEdit::move_to(third.object(), a, Some(first), "Author")
-            } else {
-                TreeEdit::delete(third.object(), "Author")
-            }
-            .unwrap();
-            let edit = PreparedEdit::tree(&source, sid, &intent).unwrap();
-            let store = Store::parse(edit.as_bytes()).unwrap();
+        let page = |image: &[u8]| {
+            let store = Store::parse(image).unwrap();
             let index = RevisionIndex::parse(&store).unwrap();
             index.validate_current().unwrap();
-            let document = Document::parse(&index).unwrap();
-            let view = document.active(sid).unwrap();
-            assert_eq!(view.nodes[&outline].children, [a, second.object()]);
-            assert_eq!(view.nodes[&outline].child_level, Some(2));
-            assert_eq!(view.nodes[&a].child_level, Some(1));
-            assert_eq!(
-                view.nodes[&a].children,
-                if moving {
-                    vec![third.object(), first]
-                } else {
-                    vec![first]
-                }
-            );
-            if !moving && let Some(output) = std::env::var_os("ONESTORE_TREE_OUTPUT") {
-                let output = std::path::PathBuf::from(output).join("unequal-groups");
-                assert!(output.is_absolute());
-                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
-                std::fs::create_dir(&output).unwrap();
-                std::fs::write(output.join("groups.one"), edit.as_bytes()).unwrap();
-            }
+            crate::page::Page::from_space(&Document::parse(&index).unwrap(), sid).unwrap()
+        };
+        let written = edited(&source, sid, vec![PageOp::Delete { object: third }]).unwrap();
+        let store = Store::parse(&written).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let view = document.active(sid).unwrap();
+        assert_eq!(view.nodes[&outline].children, [a, second]);
+        assert_eq!(view.nodes[&outline].child_level, Some(2));
+        assert_eq!(view.nodes[&a].child_level, Some(1));
+        assert_eq!(view.nodes[&a].children, [first]);
+        if let Some(output) = std::env::var_os("ONESTORE_TREE_OUTPUT") {
+            let output = std::path::PathBuf::from(output).join("unequal-groups");
+            assert!(output.is_absolute());
+            std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+            std::fs::create_dir(&output).unwrap();
+            std::fs::write(output.join("groups.one"), &written).unwrap();
         }
+        // A move keeps the paragraph's level; the writers regroup the outline around it.
+        let moved = PageOp::Move {
+            object: third,
+            parent: Some(outline),
+            before: Some(first),
+        };
+        let mut predicted = page(&source);
+        crate::op::predict(&mut predicted, &moved).unwrap();
+        assert_eq!(page(&edited(&source, sid, vec![moved]).unwrap()), predicted);
     }
 
     #[test]
@@ -553,7 +458,9 @@ mod tests {
             .unwrap();
         let paragraph = view.nodes[&outline].children[0];
         let text = view.nodes[&paragraph].content[0];
-        let deletion = TreeEdit::delete(paragraph, "Author").unwrap();
+        let deleted = |bytes: &[u8]| {
+            edited(bytes, sid, vec![PageOp::Delete { object: paragraph }]).is_ok()
+        };
         for target in [page, outline, paragraph, text] {
             for property in [0x08001cde, 0x08001cb4, 0x08001cf9, 0x08001cb2] {
                 for enabled in [false, true] {
@@ -563,11 +470,7 @@ mod tests {
                         Ok(BTreeMap::from([(target, object)]))
                     })
                     .unwrap();
-                    assert_eq!(
-                        PreparedEdit::tree(&bytes, sid, &deletion).is_err(),
-                        enabled,
-                        "{target}: {property:#x}"
-                    );
+                    assert_eq!(deleted(&bytes), !enabled, "{target}: {property:#x}");
                 }
             }
         }
@@ -578,7 +481,7 @@ mod tests {
                 Ok(BTreeMap::from([(protected, object)]))
             })
             .unwrap();
-            assert!(PreparedEdit::tree(&bytes, sid, &deletion).is_err());
+            assert!(!deleted(&bytes));
         }
         let bytes = write_revision(&source, sid, |raw| {
             let mut object = PropertyObject::from_object(&raw.objects[&outline])?;
@@ -587,10 +490,6 @@ mod tests {
             Ok(BTreeMap::from([(outline, object)]))
         })
         .unwrap();
-        assert!(PreparedEdit::tree(&bytes, sid, &deletion).is_err());
-        let mut value = serde_json::to_value(&deletion).unwrap();
-        value["guid"] = serde_json::to_value([0_u8; 16]).unwrap();
-        let restored = serde_json::from_value(value).unwrap();
-        assert!(PreparedEdit::tree(&source, sid, &restored).is_err());
+        assert!(!deleted(&bytes));
     }
 }

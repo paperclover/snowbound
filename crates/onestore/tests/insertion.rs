@@ -4,11 +4,65 @@ mod checkpoint;
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
 
 use onestore::{
-    ExGuid, Insertion, PreparedEdit, RevisionIndex, Store, TextAttribute as A,
+    ExGuid, RevisionIndex, Store, TextAttribute as A,
     document::{Document, Kind},
+    op::{Edit, Op, PageOp},
 };
+use std::ops::Range;
+
+/// Where an insertion goes: a paragraph in a container before a child of it, or last; or a
+/// new outline at a point on the page.
+#[derive(Clone, Copy)]
+enum Place {
+    In(ExGuid, Option<ExGuid>),
+    Outline(f32, f32),
+}
+
+/// The ops inserting `text` at `place` with `formats` set over UTF-16 ranges of it, and the
+/// identities of the new paragraph (or outline) and text.
+fn insertion(
+    space: ExGuid,
+    place: Place,
+    text: &str,
+    formats: &[(Range<u32>, Vec<A>)],
+) -> (Vec<Op>, ExGuid, ExGuid) {
+    let paragraph = ops::paragraph(text);
+    let text = paragraph.text().unwrap().id;
+    let (op, object) = match place {
+        Place::In(container, before) => {
+            let id = paragraph.id;
+            let paragraphs = vec![paragraph];
+            (
+                PageOp::Insert {
+                    container,
+                    before,
+                    paragraphs,
+                },
+                id,
+            )
+        }
+        Place::Outline(x, y) => {
+            let object = ops::outline(x, y, vec![paragraph]);
+            let id = object.id();
+            (PageOp::Add { object, before: None }, id)
+        }
+    };
+    let mut result = vec![Op::Page { space, op }];
+    for (range, set) in formats {
+        let op = PageOp::Format {
+            text,
+            range: range.clone(),
+            set: set.clone(),
+            clear: Vec::new(),
+        };
+        result.push(Op::Page { space, op });
+    }
+    (result, object, text)
+}
 
 fn targets(source: &[u8]) -> (ExGuid, ExGuid, ExGuid, ExGuid, ExGuid) {
     let store = Store::parse(source).unwrap();
@@ -34,23 +88,15 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
     let source = onestore::create_section("rich.one", "Original", "Author").unwrap();
     let (sid, page, outline, _, _) = targets(&source);
     let text = "ab🦀 e\u{301} 東京\rEnd\t!";
-    let plain = Insertion::paragraph(outline, None, text, "Author").unwrap();
-    assert!(
-        serde_json::to_value(&plain)
-            .unwrap()
-            .get("formats")
-            .is_none()
-    );
-    let restored: Insertion = serde_json::from_slice(&serde_json::to_vec(&plain).unwrap()).unwrap();
-    assert_eq!(plain, restored);
-    let base = PreparedEdit::insert(&source, sid, &plain).unwrap();
-    let base_store = Store::parse(base.as_bytes()).unwrap();
+    let (plain, _, plain_text) = insertion(sid, Place::In(outline, None), text, &[]);
+    let base = ops::edited(&source, plain).unwrap();
+    let base_store = Store::parse(&base).unwrap();
     let base_index = RevisionIndex::parse(&base_store).unwrap();
     let base_doc = Document::parse(&base_index).unwrap();
     let base_space = &base_doc.spaces[&sid];
     let base_view = &base_space.revisions[&base_space.contexts[&ExGuid::default()]];
     let default =
-        serde_json::to_value(&base_view.text_runs(plain.text_object()).unwrap()[0].format).unwrap();
+        serde_json::to_value(&base_view.text_runs(plain_text).unwrap()[0].format).unwrap();
     let offsets: Vec<u32> = std::iter::once(0)
         .chain(text.chars().scan(0, |n, c| {
             *n += c.len_utf16() as u32;
@@ -62,12 +108,8 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
     for seed in 1..=48_u64 {
         let mut random = seed;
         let mut expected: Vec<_> = text.chars().map(|c| (c, default.clone())).collect();
-        let mut intent = if seed % 2 == 0 {
-            Insertion::outline(page, 72.0, 144.0, text, "Author").unwrap()
-        } else {
-            plain.clone()
-        };
-        // Descending construction also exercises persisted ordering independently of call order.
+        let mut formats = Vec::new();
+        // Descending construction also exercises the order formats apply in.
         for i in (0..expected.len()).rev() {
             random ^= random << 13;
             random ^= random >> 7;
@@ -106,18 +148,22 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
                     json!({"bold":false,"color":0xff000000_u32,"highlight":0xff000000_u32}),
                 ),
             };
-            intent = intent
-                .with_formatting(offsets[i]..offsets[i + 1], &attributes)
-                .unwrap();
+            formats.push((offsets[i]..offsets[i + 1], attributes));
             for (key, value) in values.as_object().unwrap() {
                 expected[i].1[key] = value.clone();
             }
         }
-        let restored: Insertion =
-            serde_json::from_slice(&serde_json::to_vec(&intent).unwrap()).unwrap();
-        assert_eq!(restored, intent);
-        let edited = PreparedEdit::insert(&source, sid, &restored).unwrap();
-        let store = Store::parse(edited.as_bytes()).unwrap();
+        let place = if seed % 2 == 0 {
+            Place::Outline(72.0, 144.0)
+        } else {
+            Place::In(outline, None)
+        };
+        let (ops, _, inserted) = insertion(sid, place, text, &formats);
+        let edit = Edit { at: ops::now(), ops };
+        let restored: Edit = serde_json::from_slice(&serde_json::to_vec(&edit).unwrap()).unwrap();
+        assert_eq!(restored, edit);
+        let edited = ops::edited(&source, restored.ops).unwrap();
+        let store = Store::parse(&edited).unwrap();
         assert_eq!(
             store.header.transaction_count,
             old_store.header.transaction_count + 1
@@ -139,8 +185,11 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
         let document = Document::parse(&index).unwrap();
         let space = &document.spaces[&sid];
         let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        if let Place::Outline(..) = place {
+            assert!(view.nodes[&page].children.len() > 1);
+        }
         let actual: Vec<_> = view
-            .text_runs(intent.text_object())
+            .text_runs(inserted)
             .unwrap()
             .into_iter()
             .flat_map(|run| {
@@ -153,87 +202,33 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
 }
 
 #[test]
-fn invalid_or_forged_insertion_formats_fail_before_source_parsing() {
-    use serde_json::json;
-    let source = onestore::create_section("invalid-rich.one", "Original", "Author").unwrap();
-    let (sid, _, outline, _, _) = targets(&source);
-    let plain = Insertion::paragraph(outline, None, "a🦀e\u{301}b", "Author").unwrap();
-    for (start, end) in [(0, 0), (2, 3), (1, 2), (4, 3), (0, 7)] {
-        let range = start..end;
-        assert!(plain.with_formatting(range, &[A::Bold(true)]).is_err());
-    }
-    for attributes in [
-        vec![],
-        vec![A::Bold(true), A::Bold(false)],
-        vec![A::FontSize(f32::NAN)],
-        vec![A::FontSize(5.5)],
-        vec![A::Font("a\0b".into())],
-        vec![A::Superscript(true), A::Subscript(true)],
-    ] {
-        assert!(plain.with_formatting(1..3, &attributes).is_err());
-    }
-    let formatted = plain.with_formatting(1..3, &[A::Bold(true)]).unwrap();
-    for range in [0..3, 1..3, 1..4] {
-        assert!(
-            formatted
-                .with_formatting(range, &[A::Italic(true)])
-                .is_err()
-        );
-    }
-    let encoded = serde_json::to_value(&formatted).unwrap();
-    for mutate in 0..6 {
-        let mut value = encoded.clone();
-        match mutate {
-            0 => value["formats"][0]["guid"] = serde_json::to_value([0; 16]).unwrap(),
-            1 => value["formats"][0]["guid"] = value["guid"].clone(),
-            2 => {
-                let duplicate = value["formats"][0].clone();
-                value["formats"].as_array_mut().unwrap().push(duplicate);
-            }
-            3 => value["formats"][0]["range"] = json!({"start":2,"end":3}),
-            4 => value["formats"][0]["attributes"] = json!([]),
-            _ => value["formats"][0]["range"] = json!({"start":0,"end":u32::MAX}),
-        }
-        let forged: Insertion = serde_json::from_value(value).unwrap();
-        let error = PreparedEdit::insert(&[], sid, &forged).err().unwrap();
-        assert_eq!(
-            error,
-            PreparedEdit::insert(&source, sid, &forged).err().unwrap()
-        );
-    }
-}
-
-#[test]
 fn formatted_empty_insertions_preserve_the_insertion_style_for_later_typing() {
     let source = onestore::create_section("empty-rich.one", "Original", "Author").unwrap();
-    let (sid, page, outline, _, _) = targets(&source);
-    for plain in [
-        Insertion::outline(page, 72.0, 144.0, "", "Author").unwrap(),
-        Insertion::paragraph(outline, None, "", "Author").unwrap(),
-    ] {
-        let intent = plain
-            .with_formatting(0..0, &[A::Italic(true), A::FontSize(18.0)])
-            .unwrap();
-        assert!(intent.with_formatting(0..0, &[A::Bold(true)]).is_err());
-        let inserted = PreparedEdit::insert(&source, sid, &intent).unwrap();
-        let typed = PreparedEdit::text(
-            inserted.as_bytes(),
+    let (sid, _, outline, _, _) = targets(&source);
+    for place in [Place::Outline(72.0, 144.0), Place::In(outline, None)] {
+        let style = [(0..0, vec![A::Italic(true), A::FontSize(18.0)])];
+        let (ops, _, text) = insertion(sid, place, "", &style);
+        let inserted = ops::edited(&source, ops).unwrap();
+        let typed = ops::page_edited(
+            &inserted,
             sid,
-            intent.text_object(),
-            0..0,
-            "Typed 🦀",
+            vec![PageOp::Text {
+                text,
+                range: 0..0,
+                with: "Typed 🦀".into(),
+            }],
         )
         .unwrap();
-        for (bytes, text) in [(inserted.as_bytes(), ""), (typed.as_bytes(), "Typed 🦀")] {
+        for (bytes, expected) in [(&inserted, ""), (&typed, "Typed 🦀")] {
             let store = Store::parse(bytes).unwrap();
             let index = RevisionIndex::parse(&store).unwrap();
             index.validate_current().unwrap();
             let document = Document::parse(&index).unwrap();
             let space = &document.spaces[&sid];
             let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-            let runs = view.text_runs(intent.text_object()).unwrap();
+            let runs = view.text_runs(text).unwrap();
             assert_eq!(runs.len(), 1);
-            assert_eq!(runs[0].text, text);
+            assert_eq!(runs[0].text, expected);
             assert_eq!(runs[0].format.italic, Some(true));
             assert_eq!(runs[0].format.font_size, Some(18.0));
         }
@@ -263,11 +258,9 @@ fn export_native_formatted_insertions() {
         ("empty", generated.as_slice(), true),
         ("empty-typed", generated.as_slice(), true),
     ] {
-        let (sid, page, outline, paragraph, _) = targets(source);
-        let insertion = match name {
-            "native-paragraph" => {
-                Insertion::paragraph(outline, Some(paragraph), text, "Rich author")
-            }
+        let (sid, _, outline, paragraph, _) = targets(source);
+        let place = match name {
+            "native-paragraph" => Place::In(outline, Some(paragraph)),
             "native-cell" => {
                 let store = Store::parse(source).unwrap();
                 let index = RevisionIndex::parse(&store).unwrap();
@@ -280,24 +273,14 @@ fn export_native_formatted_insertions() {
                     .find(|(_, node)| matches!(node.kind, Kind::Cell { .. }))
                     .unwrap()
                     .0;
-                Insertion::paragraph(cell, None, text, "Rich author")
+                Place::In(cell, None)
             }
-            _ => Insertion::outline(
-                page,
-                72.0,
-                144.0,
-                if empty { "" } else { text },
-                "Rich author",
-            ),
-        }
-        .unwrap();
-        let mut intent = insertion;
-        if empty {
-            intent = intent
-                .with_formatting(0..0, &[A::Italic(true), A::FontSize(18.0)])
-                .unwrap();
+            _ => Place::Outline(72.0, 144.0),
+        };
+        let formats = if empty {
+            vec![(0..0, vec![A::Italic(true), A::FontSize(18.0)])]
         } else {
-            for (label, attributes) in [
+            [
                 ("Bold", vec![A::Bold(true), A::Underline(true)]),
                 ("🦀", vec![A::Font("Arial".into()), A::FontSize(13.5)]),
                 ("italic", vec![A::Italic(true), A::Strike(true)]),
@@ -319,36 +302,33 @@ fn export_native_formatted_insertions() {
                         A::Highlight(None),
                     ],
                 ),
-            ] {
+            ]
+            .into_iter()
+            .map(|(label, attributes)| {
                 let start = text[..text.find(label).unwrap()].encode_utf16().count() as u32;
-                intent = intent
-                    .with_formatting(
-                        start..start + label.encode_utf16().count() as u32,
-                        &attributes,
-                    )
-                    .unwrap();
-            }
-        }
-        let inserted = PreparedEdit::insert(source, sid, &intent).unwrap();
-        let bytes = if name == "empty-typed" {
-            PreparedEdit::text(
-                inserted.as_bytes(),
-                sid,
-                intent.text_object(),
-                0..0,
-                "Typed café 🦀",
-            )
-            .unwrap()
-            .as_bytes()
-            .to_vec()
-        } else {
-            inserted.as_bytes().to_vec()
+                (start..start + label.encode_utf16().count() as u32, attributes)
+            })
+            .collect()
         };
+        let (mut ops, object, inserted) =
+            insertion(sid, place, if empty { "" } else { text }, &formats);
+        if name == "empty-typed" {
+            let op = PageOp::Text {
+                text: inserted,
+                range: 0..0,
+                with: "Typed café 🦀".into(),
+            };
+            ops.push(Op::Page { space: sid, op });
+        }
+        let edit = Edit { at: ops::now(), ops };
+        let bytes = ops::edited(source, edit.ops.clone()).unwrap();
         current::current(&bytes);
         let notebook = output.join(name);
         fs::create_dir(&notebook).unwrap();
         fs::write(notebook.join("synthetic.one"), &bytes).unwrap();
-        manifest.push(serde_json::json!({"name":name,"space":sid,"intent":intent}));
+        manifest.push(serde_json::json!({
+            "name": name, "space": sid, "object": object, "text": inserted, "edit": edit
+        }));
     }
     fs::write(
         output.join("manifest.json"),
@@ -361,23 +341,15 @@ fn export_native_formatted_insertions() {
 fn paragraph_and_outline_insertions_publish_metadata_and_references_together() {
     let source = onestore::create_section("insertion.one", "Original", "Original author").unwrap();
     let (sid, page, outline, paragraph, original_text) = targets(&source);
-    for (intent, expected_parent, expected_x, expected_y) in [
-        (
-            Insertion::paragraph(outline, Some(paragraph), "First 🦀\rSecond", "New author")
-                .unwrap(),
-            outline,
-            None,
-            None,
-        ),
-        (
-            Insertion::outline(page, 144.0, 18.0, "First 🦀\rSecond", "New author").unwrap(),
-            page,
-            Some(144.0),
-            Some(18.0),
-        ),
+    for (place, expected_parent, expected_x, expected_y) in [
+        (Place::In(outline, Some(paragraph)), outline, None, None),
+        (Place::Outline(144.0, 18.0), page, Some(144.0), Some(18.0)),
     ] {
-        let prepared = PreparedEdit::insert(&source, sid, &intent).unwrap();
-        let store = Store::parse(prepared.as_bytes()).unwrap();
+        let (ops, object, text) = insertion(sid, place, "First 🦀\rSecond", &[]);
+        let transaction = ops::transaction(&source, "New author", ops).unwrap().unwrap();
+        let mut written = source.clone();
+        transaction.apply(&mut written).unwrap();
+        let store = Store::parse(&written).unwrap();
         assert_eq!(
             store.header.transaction_count,
             Store::parse(&source).unwrap().header.transaction_count + 1
@@ -387,18 +359,14 @@ fn paragraph_and_outline_insertions_publish_metadata_and_references_together() {
         let document = Document::parse(&index).unwrap();
         let space = &document.spaces[&sid];
         let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-        assert!(
-            view.nodes[&expected_parent]
-                .children
-                .contains(&intent.object())
-        );
-        assert_eq!(view.nodes[&intent.object()].layout.x, expected_x);
-        assert_eq!(view.nodes[&intent.object()].layout.y, expected_y);
+        assert!(view.nodes[&expected_parent].children.contains(&object));
+        assert_eq!(view.nodes[&object].layout.x, expected_x);
+        assert_eq!(view.nodes[&object].layout.y, expected_y);
         assert!(
             matches!(&view.nodes[&original_text].kind, Kind::RichText { text, .. } if text == "Original")
         );
         assert!(
-            matches!(&view.nodes[&intent.text_object()].kind, Kind::RichText { text, .. } if text == "First 🦀\rSecond")
+            matches!(&view.nodes[&text].kind, Kind::RichText { text, .. } if text == "First 🦀\rSecond")
         );
         assert!(
             matches!(&view.nodes[&page].kind, Kind::Page { alternate_title, .. } if alternate_title.as_deref() == Some("First 🦀"))
@@ -411,7 +379,7 @@ fn paragraph_and_outline_insertions_publish_metadata_and_references_together() {
                 .values()
                 .any(|node| matches!(&node.kind, Kind::Author { name } if name.as_deref() == Some("New author")))
         );
-        let runs = view.text_runs(intent.text_object()).unwrap();
+        let runs = view.text_runs(text).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].format.font.as_deref(), Some("Calibri"));
         assert_eq!(runs[0].format.font_size, Some(11.0));
@@ -434,26 +402,20 @@ fn repeated_insertions_and_formatting_share_immutable_objects() {
     let (sid, _, outline, _, _) = targets(&source);
     let mut texts = Vec::new();
     for _ in 0..12 {
-        let insertion =
-            Insertion::paragraph(outline, None, "Repeated paragraph", "Same author").unwrap();
-        source = PreparedEdit::insert(&source, sid, &insertion)
+        let (ops, _, text) = insertion(sid, Place::In(outline, None), "Repeated paragraph", &[]);
+        let transaction = ops::transaction(&source, "Same author", ops).unwrap().unwrap();
+        transaction.apply(&mut source).unwrap();
+        let bold = PageOp::Format {
+            text,
+            range: 1..8,
+            set: vec![A::Bold(true), A::FontSize(20.0)],
+            clear: Vec::new(),
+        };
+        let transaction = ops::transaction(&source, "Same author", vec![Op::Page { space: sid, op: bold }])
             .unwrap()
-            .as_bytes()
-            .to_vec();
-        source = PreparedEdit::format(
-            &source,
-            sid,
-            insertion.text_object(),
-            1..8,
-            &[
-                onestore::TextAttribute::Bold(true),
-                onestore::TextAttribute::FontSize(20.0),
-            ],
-        )
-        .unwrap()
-        .as_bytes()
-        .to_vec();
-        texts.push(insertion.text_object());
+            .unwrap();
+        transaction.apply(&mut source).unwrap();
+        texts.push(text);
     }
     let store = Store::parse(&source).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
@@ -494,103 +456,54 @@ fn repeated_insertions_and_formatting_share_immutable_objects() {
 fn serialized_insertions_rebase_with_the_same_objects_and_preserve_remote_edits() {
     let source = onestore::create_section("rebase.one", "Original", "Author").unwrap();
     let (sid, _, outline, paragraph, text) = targets(&source);
-    let intent = Insertion::paragraph(outline, Some(paragraph), "Inserted", "Author")
-        .unwrap()
-        .with_formatting(0..3, &[A::Bold(true), A::Color(Some([12, 34, 56]))])
-        .unwrap();
-    let encoded = serde_json::to_vec(&intent).unwrap();
-    let restored: Insertion = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(intent.object(), restored.object());
-    assert_eq!(intent.text_object(), restored.text_object());
-    assert_eq!(intent, restored);
-    let original_preparation = PreparedEdit::insert(&source, sid, &intent).unwrap();
-    let remote = PreparedEdit::text(&source, sid, text, 0..0, "Remote ").unwrap();
-    let updated = PreparedEdit::insert(remote.as_bytes(), sid, &restored).unwrap();
-    let store = Store::parse(updated.as_bytes()).unwrap();
+    let formats = [(0..3, vec![A::Bold(true), A::Color(Some([12, 34, 56]))])];
+    let (ops, object, inserted) =
+        insertion(sid, Place::In(outline, Some(paragraph)), "Inserted", &formats);
+    let encoded = serde_json::to_vec(&ops).unwrap();
+    let restored: Vec<Op> = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(ops, restored);
+    let original = ops::edited(&source, ops).unwrap();
+    let remote = ops::page_edited(
+        &source,
+        sid,
+        vec![PageOp::Text {
+            text,
+            range: 0..0,
+            with: "Remote ".into(),
+        }],
+    )
+    .unwrap();
+    let updated = ops::edited(&remote, restored.clone()).unwrap();
+    let store = Store::parse(&updated).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
     let space = &document.spaces[&sid];
     let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-    assert_eq!(
-        view.nodes[&outline].children,
-        [restored.object(), paragraph]
-    );
+    assert_eq!(view.nodes[&outline].children, [object, paragraph]);
     assert!(
         matches!(&view.nodes[&text].kind, Kind::RichText { text, .. } if text == "Remote Original")
     );
     assert!(
-        matches!(&view.nodes[&restored.text_object()].kind, Kind::RichText { text, .. } if text == "Inserted")
+        matches!(&view.nodes[&inserted].kind, Kind::RichText { text, .. } if text == "Inserted")
     );
-    let runs = view.text_runs(restored.text_object()).unwrap();
+    let runs = view.text_runs(inserted).unwrap();
     assert_eq!(runs[0].text, "Ins");
     assert_eq!(runs[0].format.bold, Some(true));
     assert_eq!(runs[0].format.color, Some(0x38220c));
     assert_eq!(runs[1].text, "erted");
     assert_ne!(runs[1].format.bold, Some(true));
-    assert!(PreparedEdit::insert(original_preparation.as_bytes(), sid, &restored).is_err());
-    assert!(PreparedEdit::insert(updated.as_bytes(), sid, &restored).is_err());
-}
-
-#[test]
-fn repositioning_preserves_intent_identity_and_kind() {
-    let source = onestore::create_section("placement.one", "Original", "Author").unwrap();
-    let (sid, page, outline, paragraph, _) = targets(&source);
-    let p = Insertion::paragraph(outline, Some(paragraph), "Inserted", "Author")
-        .unwrap()
-        .with_formatting(1..4, &[A::Italic(true)])
-        .unwrap();
-    let o = Insertion::outline(page, 144.0, 144.0, "Inserted", "Author")
-        .unwrap()
-        .with_formatting(0..8, &[A::FontSize(18.0)])
-        .unwrap();
-    assert!(p.reposition_outline(page, 72.0, 72.0).is_err());
-    assert!(o.reposition_paragraph(outline, None).is_err());
-    assert!(p.reposition_paragraph(ExGuid::default(), None).is_err());
-    assert!(o.reposition_outline(page, f32::NAN, 72.0).is_err());
-    for (original, moved) in [
-        (&p, p.reposition_paragraph(outline, None).unwrap()),
-        (&o, o.reposition_outline(page, 288.0, 360.0).unwrap()),
-    ] {
-        let mut before = serde_json::to_value(original).unwrap();
-        let mut after = serde_json::to_value(&moved).unwrap();
-        for name in ["parent", "placement"] {
-            before.as_object_mut().unwrap().remove(name);
-            after.as_object_mut().unwrap().remove(name);
-        }
-        assert_eq!(before, after);
-        assert_eq!(original.object(), moved.object());
-        assert_eq!(original.text_object(), moved.text_object());
-        let restored: Insertion =
-            serde_json::from_value(serde_json::to_value(&moved).unwrap()).unwrap();
-        let prepared = PreparedEdit::insert(&source, sid, &restored).unwrap();
-        let store = Store::parse(prepared.as_bytes()).unwrap();
-        let index = RevisionIndex::parse(&store).unwrap();
-        index.validate_current().unwrap();
-        let doc = Document::parse(&index).unwrap();
-        let space = &doc.spaces[&sid];
-        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
-        if original == &p {
-            assert_eq!(view.nodes[&outline].children, [paragraph, moved.object()]);
-        } else {
-            assert_eq!(
-                (
-                    view.nodes[&moved.object()].layout.x,
-                    view.nodes[&moved.object()].layout.y
-                ),
-                (Some(288.0), Some(360.0))
-            );
-        }
-    }
+    assert!(ops::edited(&original, restored.clone()).is_err());
+    assert!(ops::edited(&updated, restored).is_err());
 }
 
 #[test]
 #[cfg(any(unix, windows))]
-fn filesystem_insertion_uses_the_prepared_identity_and_rejects_stale_replay() {
+fn filesystem_insertion_commits_once_and_rejects_stale_replay() {
     use std::{fs, io::Write};
     let source = onestore::create_section("file.one", "Original", "Author").unwrap();
     let (sid, _, outline, _, _) = targets(&source);
-    let intent = Insertion::paragraph(outline, None, "File insertion", "Author").unwrap();
-    let path = std::env::temp_dir().join(format!("onestore-insertion-{}.one", intent.object()));
+    let (ops, object, _) = insertion(sid, Place::In(outline, None), "File insertion", &[]);
+    let path = std::env::temp_dir().join(format!("onestore-insertion-{object}.one"));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -599,60 +512,71 @@ fn filesystem_insertion_uses_the_prepared_identity_and_rejects_stale_replay() {
     file.write_all(&source).unwrap();
     file.sync_all().unwrap();
     drop(file);
-    let edit = PreparedEdit::insert(&source, sid, &intent).unwrap();
-    let result = edit.commit_file(&path);
+    let transaction = ops::transaction(&source, "Author", ops).unwrap().unwrap();
+    let result = transaction.commit_file(&path);
     let written = onestore::read_file(&path).unwrap();
-    let repeated = edit.commit_file(&path).unwrap_err();
+    let repeated = transaction.commit_file(&path).unwrap_err();
     fs::remove_file(path).unwrap();
     result.unwrap();
-    assert_eq!(written, edit.as_bytes());
+    let mut expected = source.clone();
+    transaction.apply(&mut expected).unwrap();
+    assert_eq!(written, expected);
     assert_eq!(repeated.state, onestore::CommitState::NotCommitted);
     assert_eq!(repeated.error.kind(), std::io::ErrorKind::ResourceBusy);
 }
 
 #[test]
-fn anchors_targets_serialized_identities_and_text_are_validated_before_publication() {
+fn anchors_targets_identities_and_text_are_validated_before_publication() {
     let source = onestore::create_section("invalid.one", "Original", "Author").unwrap();
-    let (sid, page, outline, paragraph, text) = targets(&source);
-    assert!(Insertion::outline(page, f32::NAN, 0.0, "Text", "Author").is_err());
-    assert!(Insertion::outline(page, 0.0, f32::INFINITY, "Text", "Author").is_err());
+    let (sid, page, outline, _, text) = targets(&source);
+    let refused = |source: &[u8], place, content: &str| {
+        ops::edited(source, insertion(sid, place, content, &[]).0).is_err()
+    };
+    assert!(refused(&source, Place::Outline(f32::NAN, 0.0), "Text"));
+    assert!(refused(&source, Place::Outline(0.0, f32::INFINITY), "Text"));
     for content in ["a\0b", "a\nb", "a\u{fffc}b"] {
-        assert!(Insertion::paragraph(outline, None, content, "Author").is_err());
+        assert!(refused(&source, Place::In(outline, None), content));
     }
-    assert!(Insertion::paragraph(outline, None, "Text", "a\0b").is_err());
-    for intent in [
-        Insertion::paragraph(outline, Some(text), "Text", "Author").unwrap(),
-        Insertion::paragraph(text, None, "Text", "Author").unwrap(),
-        Insertion::paragraph(page, None, "Text", "Author").unwrap(),
-        Insertion::outline(paragraph, 0.0, 0.0, "Text", "Author").unwrap(),
+    assert!(
+        ops::transaction(&source, "a\0b", insertion(sid, Place::In(outline, None), "Text", &[]).0)
+            .is_err()
+    );
+    for place in [
+        Place::In(outline, Some(text)),
+        Place::In(text, None),
+        Place::In(page, None),
     ] {
-        assert!(PreparedEdit::insert(&source, sid, &intent).is_err());
+        assert!(refused(&source, place, "Text"));
     }
-    let intent = Insertion::paragraph(outline, None, "Text", "Author").unwrap();
-    let created = PreparedEdit::insert(&source, sid, &intent).unwrap();
-    let before_missing =
-        Insertion::paragraph(outline, Some(intent.object()), "Anchored", "Author").unwrap();
-    assert!(PreparedEdit::insert(&source, sid, &before_missing).is_err());
-    assert!(PreparedEdit::insert(created.as_bytes(), sid, &before_missing).is_ok());
-    let mut encoded = serde_json::to_value(&intent).unwrap();
-    encoded["parent"] = serde_json::to_value(intent.object()).unwrap();
-    let collision: Insertion = serde_json::from_value(encoded).unwrap();
-    assert!(PreparedEdit::insert(created.as_bytes(), sid, &collision).is_err());
+    let (ops, object, _) = insertion(sid, Place::In(outline, None), "Text", &[]);
+    let created = ops::edited(&source, ops.clone()).unwrap();
+    let before_created = Place::In(outline, Some(object));
+    assert!(refused(&source, before_created, "Anchored"));
+    assert!(!refused(&created, before_created, "Anchored"));
+    // A new object's identity may not already be on the page.
+    assert!(ops::edited(&created, ops).is_err());
 }
 
 #[test]
 fn insertions_into_nested_paragraphs_and_native_table_cells_preserve_structure() {
     let source = onestore::create_section("nested.one", "Original", "Author").unwrap();
     let (sid, _, outline, paragraph, _) = targets(&source);
-    let child = Insertion::paragraph(paragraph, None, "Nested", "Author").unwrap();
-    let changed = PreparedEdit::insert(&source, sid, &child).unwrap();
-    let store = Store::parse(changed.as_bytes()).unwrap();
+    let mut nested = ops::paragraph("Nested");
+    nested.level = 2;
+    let child = nested.id;
+    let insert = PageOp::Insert {
+        container: paragraph,
+        before: None,
+        paragraphs: vec![nested],
+    };
+    let changed = ops::page_edited(&source, sid, vec![insert]).unwrap();
+    let store = Store::parse(&changed).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
     let space = &document.spaces[&sid];
     let view = &space.revisions[&space.contexts[&ExGuid::default()]];
     assert_eq!(view.nodes[&outline].children, [paragraph]);
-    assert_eq!(view.nodes[&paragraph].children, [child.object()]);
+    assert_eq!(view.nodes[&paragraph].children, [child]);
     let source = include_bytes!(
         "../../../corpus/native/20260905-05/snapshots/07-table/notebook/synthetic.one"
     );
@@ -669,34 +593,32 @@ fn insertions_into_nested_paragraphs_and_native_table_cells_preserve_structure()
             })
         })
         .unwrap();
-    let insertion = Insertion::paragraph(cell, None, "Added to cell", "Author").unwrap();
-    let changed = PreparedEdit::insert(source, sid, &insertion).unwrap();
-    current::current(changed.as_bytes());
+    let (ops, _, _) = insertion(sid, Place::In(cell, None), "Added to cell", &[]);
+    current::current(&ops::edited(source, ops).unwrap());
 }
 
 #[test]
 fn insertion_publication_faults_expose_only_complete_graphs_and_title_caches() {
     let original = onestore::create_section("atomic.one", "Original", "Author").unwrap();
     let (sid, _, _, _, text) = targets(&original);
-    let checkpoint = checkpoint::pending(&original, sid, text, 0x14001d7a);
+    let checkpoint = checkpoint::pending(&original, sid, text);
     for source in [
         original.as_slice(),
         include_bytes!("../../../corpus/append/round-01/tx-255/notebook/synthetic.one"),
         &checkpoint,
     ] {
-        let (sid, page, outline, paragraph, _) = targets(source);
-        for intent in [
-            Insertion::paragraph(outline, Some(paragraph), "First 🦀", "New author").unwrap(),
-            Insertion::outline(page, 0.0, 0.0, "First 🦀", "New author").unwrap(),
-        ] {
-            let intent = intent
-                .with_formatting(0..3, &[A::Bold(true), A::FontSize(18.0)])
-                .unwrap()
-                .with_formatting(6..8, &[A::Italic(true), A::Highlight(Some([255, 255, 0]))])
-                .unwrap();
-            let edit = PreparedEdit::insert(source, sid, &intent).unwrap();
+        let (sid, _, outline, paragraph, _) = targets(source);
+        for place in [Place::In(outline, Some(paragraph)), Place::Outline(0.0, 0.0)] {
+            let formats = [
+                (0..3, vec![A::Bold(true), A::FontSize(18.0)]),
+                (6..8, vec![A::Italic(true), A::Highlight(Some([255, 255, 0]))]),
+            ];
+            let (ops, _, _) = insertion(sid, place, "First 🦀", &formats);
+            let edit = ops::transaction(source, "New author", ops).unwrap().unwrap();
+            let mut written = source.to_vec();
+            edit.apply(&mut written).unwrap();
             let before = current::current(source);
-            let after = current::current(edit.as_bytes());
+            let after = current::current(&written);
             for write_limit in [17, 4096] {
                 let disk = |fail_at| disk::Disk {
                     visible: source.to_vec(),
@@ -708,7 +630,7 @@ fn insertion_publication_faults_expose_only_complete_graphs_and_title_caches() {
                 };
                 let mut successful = disk(None);
                 edit.commit(&mut successful).unwrap();
-                assert_eq!(successful.durable, edit.as_bytes());
+                assert_eq!(successful.durable, written);
                 for at in 1..=successful.operation {
                     let mut interrupted = disk(Some(at));
                     let failure = edit.commit(&mut interrupted).unwrap_err();

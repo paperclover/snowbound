@@ -1,0 +1,2 @@
+{"command": "mkdir /srv/agent/m6-conflict", "exit": 0, "stdout": "", "stderr": ""}
+{"command": "chmod u+w /srv/agent/m6-conflict/*", "exit": 0, "stdout": "", "stderr": ""}

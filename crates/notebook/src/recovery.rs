@@ -8,7 +8,6 @@ const RECOVERY_ID: u32 = 0x4f4e4552;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct RecoverySummary {
     pub queued_edits: u64,
-    pub conflicts: u64,
     pub uncertain_edits: u64,
     pub published_receipts: u64,
     /// Bytes of the image the queued edits apply to.
@@ -38,7 +37,8 @@ impl Recovery {
                 io::Error::new(io::ErrorKind::InvalidData, "Not a recovery archive").into(),
             );
         }
-        if version != schema::VERSION {
+        // A schema-15 archive differs only in columns nothing reads.
+        if ![schema::PREVIOUS, schema::VERSION].contains(&version) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -166,18 +166,16 @@ fn summary(connection: &Connection) -> Result<RecoverySummary> {
     let length = |image| -> Result<u64> {
         Ok(base::stamp(connection, image)?.map_or(0, |stamp| stamp.length))
     };
-    let (queued_edits, conflicts, uncertain_edits, published_receipts): (i64, i64, i64, i64) =
+    let (queued_edits, uncertain_edits, published_receipts): (i64, i64, i64) =
         connection.query_row(
             "SELECT (SELECT count(*) FROM edits),
-                    (SELECT count(*) FROM edits JOIN batches ON batches.id=edits.batch WHERE conflict IS NOT NULL),
                     (SELECT count(*) FROM edits JOIN batches ON batches.id=edits.batch WHERE attempted=1),
                     (SELECT count(*) FROM receipts)",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
     Ok(RecoverySummary {
         queued_edits: unsigned(queued_edits)?,
-        conflicts: unsigned(conflicts)?,
         uncertain_edits: unsigned(uncertain_edits)?,
         published_receipts: unsigned(published_receipts)?,
         base_bytes: length(base::Image::Base)?,

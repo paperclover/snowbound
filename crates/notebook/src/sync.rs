@@ -1,5 +1,5 @@
 use super::*;
-use crate::working::{Rebased, Request, Resolve, Sealed};
+use crate::working::{Request, Sealed};
 use onestore::{CommitError, CommitState, RevisionIndex, Stamp, Store, Transaction};
 use rusqlite::OptionalExtension;
 use std::{
@@ -12,44 +12,12 @@ use std::{
 /// cached readers.
 pub trait Remote {
     fn read(&mut self) -> io::Result<Vec<u8>>;
-    /// The file's stamp without reading its body, when the remote can tell. While it is the
-    /// last observed image's, synchronization neither reads nor revalidates the file.
-    fn stamp(&mut self) -> io::Result<Option<Stamp>> {
-        Ok(None)
-    }
+    /// The file's stamp without reading its body or coordinating with writers. While it is
+    /// the last observed image's, synchronization neither reads nor revalidates the file.
+    fn stamp(&mut self) -> io::Result<Stamp>;
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError>;
-    fn confirm(&mut self, snapshot: &[u8]) -> std::result::Result<(), CommitError>;
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i64)]
-pub enum ConflictKind {
-    /// The edited page or a selected page no longer exists remotely.
-    TargetUnavailable = 0,
-    /// The remote section no longer accepts the edit.
-    UnsupportedEdit = 1,
-    /// Page order or indentation changed remotely in a way the batch cannot absorb.
-    StructureChanged = 2,
-    /// The remote page changed where the local edits changed it too; review is required.
-    ContentChanged = 3,
-}
-
-impl ConflictKind {
-    fn from_stored(kind: i64) -> Result<Self> {
-        Ok(match kind {
-            0 => Self::TargetUnavailable,
-            1 => Self::UnsupportedEdit,
-            2 => Self::StructureChanged,
-            3 => Self::ContentChanged,
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unknown cached conflict kind",
-                )
-                .into());
-            }
-        })
-    }
+    /// Confirms that the file still has `base`'s stamp and is durable (`onestore::confirm`).
+    fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +27,6 @@ pub enum EditStatus {
     AwaitingConfirmation {
         revision: ExGuid,
     },
-    Conflict(ConflictKind),
     /// Historical confirmation; later remote edits or restores may remove the effect.
     Published {
         revision: ExGuid,
@@ -84,15 +51,13 @@ struct State {
     base: Stamp,
     /// The observed remote image's stamp while it is not the base.
     remote: Option<Stamp>,
-    /// The first batch waiting on a remote answer: sealed, attempted, or in conflict.
+    /// The first batch waiting on a remote answer to an attempt.
     blocked: Option<Blocked>,
     queued: bool,
 }
 
 struct Blocked {
     batch: i64,
-    attempted: bool,
-    conflict: Option<ConflictKind>,
     revisions: Option<BTreeMap<ExGuid, ExGuid>>,
 }
 
@@ -101,24 +66,14 @@ fn state(connection: &Connection) -> Result<State> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
     let blocked = connection
         .query_row(
-            "SELECT id, attempted, conflict, revisions FROM batches
-             WHERE attempted=1 OR conflict IS NOT NULL ORDER BY id LIMIT 1",
+            "SELECT id, revisions FROM batches WHERE attempted=1 ORDER BY id LIMIT 1",
             [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, bool>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            },
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?
-        .map(|(batch, attempted, conflict, revisions)| {
+        .map(|(batch, revisions)| {
             Ok::<_, Error>(Blocked {
                 batch,
-                attempted,
-                conflict: conflict.map(ConflictKind::from_stored).transpose()?,
                 revisions: revisions
                     .map(|revisions| decode_revisions(&revisions))
                     .transpose()?,
@@ -186,7 +141,7 @@ impl Replica {
 
     /// The last observed remote image. Observation alone does not acknowledge any pending
     /// edit's remote durability.
-    pub fn remote_snapshot(&self) -> Result<Vec<u8>> {
+    pub(crate) fn remote_snapshot(&self) -> Result<Vec<u8>> {
         let connection = self.lock()?;
         let image = match base::read(&connection, base::Image::Remote)? {
             Some(image) => Some(image),
@@ -197,26 +152,6 @@ impl Replica {
         })?)
     }
 
-    /// The unpublished batch the remote no longer accepts, if any.
-    pub fn conflict(&self) -> Result<Option<Conflict>> {
-        let connection = self.lock()?;
-        let row: Option<(i64, i64, String)> = connection
-            .query_row(
-                "SELECT id, conflict, space FROM batches WHERE conflict IS NOT NULL ORDER BY id LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        row.map(|(batch, kind, space)| {
-            Ok(Conflict {
-                id: newest(&connection, batch)?,
-                space: space.parse()?,
-                kind: ConflictKind::from_stored(kind)?,
-            })
-        })
-        .transpose()
-    }
-
     /// Publishes the oldest unpublished batch, rebasing the queue first when the remote
     /// changed. Reads the remote image only when its stamp moved; network I/O holds
     /// synchronization ownership without holding the cache mutex. Uncertain attempts are
@@ -225,8 +160,8 @@ impl Replica {
         let _owner = self.sync_owner()?;
         let state = state(&*self.lock()?)?;
         let observed = remote.stamp().map_err(Error::RemoteIo)?;
-        if let (Some(observed), Some(blocked)) = (&observed, &state.blocked)
-            && Some(observed) == state.remote.as_ref().or(Some(&state.base))
+        if let Some(blocked) = &state.blocked
+            && observed == *state.remote.as_ref().unwrap_or(&state.base)
         {
             // Nothing new to decide: the remote is as it was when the batch blocked.
             let id = newest(&*self.lock()?, blocked.batch)?;
@@ -239,7 +174,7 @@ impl Replica {
             });
         }
         let image = match observed {
-            Some(observed) if observed == state.base => None,
+            observed if observed == state.base => None,
             _ => {
                 let image = remote.read().map_err(Error::RemoteIo)?;
                 // A read image is compared whole: a stamp stands for it only when read alone.
@@ -249,13 +184,7 @@ impl Replica {
         };
         let mut changed = Vec::new();
         if let Some(image) = image {
-            if let Some(Blocked {
-                batch,
-                attempted: true,
-                revisions,
-                ..
-            }) = &state.blocked
-            {
+            if let Some(Blocked { batch, revisions }) = &state.blocked {
                 let id = newest(&*self.lock()?, *batch)?;
                 let revisions = revisions.clone().unwrap_or_default();
                 let store = Store::parse(&image)?;
@@ -308,7 +237,7 @@ impl Replica {
                             .collect(),
                     )
                 };
-                if let Err(error) = remote.confirm(&image) {
+                if let Err(error) = remote.confirm(&Stamp::of(&image)?) {
                     if error.state == CommitState::Committed {
                         self.acknowledge(*batch, sealed.as_ref(), receipts.as_ref())?;
                     }
@@ -316,49 +245,26 @@ impl Replica {
                 }
                 self.acknowledge(*batch, sealed.as_ref(), receipts.as_ref())?;
                 let revision = self.receipt(id)?;
-                changed = self.rebase(Some(image), None)?.unwrap_or_default();
+                changed = self.rebase(Some(image))?;
                 return Ok(Synced {
                     edit: Some((id, EditStatus::Published { revision })),
                     changed,
                 });
             }
-            match self.rebase(Some(image), None)? {
-                Ok(spaces) => changed = spaces,
-                Err(conflict) => {
-                    return Ok(Synced {
-                        edit: Some((conflict.id, EditStatus::Conflict(conflict.kind))),
-                        changed,
-                    });
-                }
-            }
+            changed = self.rebase(Some(image))?;
         } else if let Some(blocked) = &state.blocked {
             if state.remote.is_some() {
                 // The remote is back at the base: what blocked the queue is gone.
-                let connection = self.lock()?;
-                base::clear(&connection, base::Image::Remote)?;
-                if blocked.conflict.is_some() {
-                    connection.execute("UPDATE batches SET conflict=NULL, space=NULL", [])?;
-                }
+                base::clear(&*self.lock()?, base::Image::Remote)?;
             }
-            if blocked.attempted {
-                let id = newest(&*self.lock()?, blocked.batch)?;
-                return Ok(Synced {
-                    edit: Some((
-                        id,
-                        status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
-                    )),
-                    changed,
-                });
-            }
-            if let Some(kind) = blocked.conflict
-                && state.remote.is_none()
-            {
-                let id = newest(&*self.lock()?, blocked.batch)?;
-                return Ok(Synced {
-                    edit: Some((id, EditStatus::Conflict(kind))),
-                    changed,
-                });
-            }
+            let id = newest(&*self.lock()?, blocked.batch)?;
+            return Ok(Synced {
+                edit: Some((
+                    id,
+                    status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                )),
+                changed,
+            });
         } else if !state.queued {
             return Ok(Synced::default());
         }
@@ -383,7 +289,9 @@ impl Replica {
         let id = newest(&*self.lock()?, batch)?;
         let Some(transaction) = transaction else {
             // Edits that changed nothing are published once the remote's image is durable.
-            let base = base::read(&*self.lock()?, base::Image::Base)?.unwrap_or_default();
+            let base = base::stamp(&*self.lock()?, base::Image::Base)?.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "The cache holds no base image")
+            })?;
             if let Err(error) = remote.confirm(&base) {
                 if error.state == CommitState::Committed {
                     self.acknowledge(batch, None, None)?;
@@ -439,22 +347,10 @@ impl Replica {
         ))
     }
 
-    /// Asks the section thread to replay the queue on `image`; `Err` is the conflict found.
-    fn rebase(
-        &self,
-        image: Option<Vec<u8>>,
-        resolve: Option<Resolve>,
-    ) -> Result<std::result::Result<Vec<ExGuid>, Conflict>> {
-        Ok(
-            match self.ask(|reply| Request::Rebase {
-                image,
-                resolve,
-                reply,
-            })? {
-                Rebased::Applied { changed } => Ok(changed),
-                Rebased::Conflict { id, space, kind } => Err(Conflict { id, space, kind }),
-            },
-        )
+    /// Asks the section thread to replay the queue on `image`, returning the pages the
+    /// remote changed.
+    fn rebase(&self, image: Option<Vec<u8>>) -> Result<Vec<ExGuid>> {
+        self.ask(|reply| Request::Rebase { image, reply })
     }
 
     fn receipt(&self, id: u64) -> Result<ExGuid> {
@@ -498,49 +394,6 @@ impl Replica {
         database.execute("DELETE FROM batches WHERE id=?1", [batch])?;
         queue::collect(&database)?;
         database.commit()?;
-        Ok(())
-    }
-
-    /// Resolves the conflict holding edit `id`: the batch and everything queued after it
-    /// drop their ops on the conflicted page; `Mine` rewrites the remote page to the local
-    /// one first. A conflict on another page may follow.
-    pub fn resolve(&self, id: u64, resolution: Resolution) -> Result<()> {
-        self.resolve_with(id, resolution, None)
-    }
-
-    pub(crate) fn resolve_with(&self, id: u64, keep: Resolution, page: Option<Page>) -> Result<()> {
-        let owner = self.sync_owner()?;
-        let (first, space) = {
-            let connection = self.lock()?;
-            let row: Option<(i64, String)> = connection
-                .query_row(
-                    "SELECT (SELECT min(id) FROM edits WHERE batch=batches.id), space FROM batches
-                     WHERE conflict IS NOT NULL AND id=(SELECT batch FROM edits WHERE id=?1)",
-                    [signed(id)?],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            let Some((first, space)) = row else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "The edit is not in conflict",
-                )
-                .into());
-            };
-            (unsigned(first)?, space.parse()?)
-        };
-        // A conflict on another page is recorded like any other.
-        let _ = self.rebase(
-            None,
-            Some(Resolve {
-                first,
-                space,
-                keep,
-                page,
-            }),
-        )?;
-        drop(owner);
-        self.wake_sync();
         Ok(())
     }
 
@@ -620,10 +473,7 @@ impl Replica {
             None if !state.queued => state.base,
             None => return Ok(false),
         };
-        let Some(stamp) = remote.stamp().map_err(Error::RemoteIo)? else {
-            return Ok(false);
-        };
-        Ok(stamp == expected)
+        Ok(remote.stamp().map_err(Error::RemoteIo)? == expected)
     }
 }
 
@@ -651,26 +501,23 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
     {
         return Ok(Some(EditStatus::Archived { archive }));
     }
-    let record: Option<(bool, Option<i64>, Option<String>, String)> = connection
+    let record: Option<(bool, Option<String>, String)> = connection
         .query_row(
-            "SELECT batches.attempted, batches.conflict, batches.revisions, edits.edit
+            "SELECT batches.attempted, batches.revisions, edits.edit
              FROM edits JOIN batches ON batches.id=edits.batch WHERE edits.id=?1",
             [id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     Ok(match record {
         None => None,
-        Some((true, _, revisions, edit)) => {
+        Some((true, revisions, edit)) => {
             let revisions = decode_revisions(revisions.as_deref().unwrap_or("{}"))?;
             let edit: onestore::op::Edit = serde_json::from_str(&edit)
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             let revision = revision_of(&edit, &revisions)?;
             Some(EditStatus::AwaitingConfirmation { revision })
         }
-        Some((false, Some(kind), ..)) => {
-            Some(EditStatus::Conflict(ConflictKind::from_stored(kind)?))
-        }
-        Some((false, None, ..)) => Some(EditStatus::Pending),
+        Some((false, ..)) => Some(EditStatus::Pending),
     })
 }

@@ -1,5 +1,7 @@
 #[path = "../src/flush.rs"]
 mod flush;
+#[path = "support/typing.rs"]
+mod typing;
 
 use onestore::{
     ExGuid, RevisionIndex, Store,
@@ -111,13 +113,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             end
         };
         let range = offset + boundaries[start]..offset + boundaries[end];
-        let written = match onestore::replace_text(&source, sid, oid, range.clone(), replacement) {
-            Ok(written) => written,
+        let edit = typing::text(sid, oid, range.clone(), replacement);
+        let transaction = match typing::sealed(&source, "Random editor", &edit) {
+            Ok(Some(transaction)) => transaction,
+            Ok(None) => {
+                rejected.push("The edit stores nothing".into());
+                continue;
+            }
             Err(error) => {
                 rejected.push(error.to_string());
                 continue;
             }
         };
+        let mut written = source.clone();
+        transaction.apply(&mut written)?;
         let space = &document.spaces[&sid];
         let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
         let Kind::RichText { runs, .. } = &revision.nodes[&oid].kind else {
@@ -133,7 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "run_before": actual[selected].text, "run_start": runs[selected].start, "source_md5": format!("{:x}", md5::compute(&source)),
             "started_ms": started, "rejected_candidates": rejected});
         let failed = if args[1] == "--in-place" {
-            match onestore::commit_file_text(&args[0], &source, sid, oid, range, replacement) {
+            match transaction.commit_file(&args[0]) {
                 Ok(()) => {
                     record["state"] = "Committed".into();
                     false

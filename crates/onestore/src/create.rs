@@ -17,6 +17,21 @@ pub(crate) fn string(value: &str) -> Vec<u8> {
         .collect()
 }
 
+/// An author's initials as OneNote 2010 stores them beside the name (`0x1c001df8`, with
+/// no MS-ONE entry): Office's default, the first letter of each word of the name.
+pub(crate) fn initials(author: &str) -> String {
+    author
+        .split_whitespace()
+        .filter_map(|word| word.chars().next())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// An author object's properties as OneNote 2010 writes them: initials, then the name.
+pub(crate) fn author_properties(name: &str) -> Vec<(u32, Vec<u8>)> {
+    vec![(0x1c001df8, string(&initials(name))), (0x1c001d75, string(name))]
+}
+
 pub(crate) fn default_text_style() -> Vec<(u32, Vec<u8>)> {
     vec![
         (0x14001c3b, 0x409_u32.to_le_bytes().to_vec()),
@@ -249,6 +264,7 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
                             last_modified(),
                             (0x24001c20, id(23)),
                             (0x1c001d75, string(author)),
+                            (0x1c001df8, string(&initials(author))),
                             (0x1c001d3c, string(crate::edit::automatic_title(text))),
                         ],
                         page_margins(),
@@ -294,7 +310,7 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
                 NewObject {
                     id: 26,
                     jcid: 0x120001,
-                    properties: vec![(0x1c001d75, string(author))],
+                    properties: author_properties(author),
                 },
                 NewObject {
                     id: 27,
@@ -304,6 +320,44 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
             ],
         },
     ];
+    create(file_name, FileType::Section, spaces)
+}
+
+/// Creates a section without pages, coloured `color` (COLORREF, `None` for no colour), as
+/// OneNote 2010 leaves one whose pages are all deleted: its section node lists no pages.
+/// Pages come as `op::SectionOp::Create` edits.
+pub fn create_empty_section(file_name: &str, color: Option<u32>) -> Result<Vec<u8>> {
+    if file_name.contains(['/', '\\', '\0']) || !file_name.to_ascii_lowercase().ends_with(".one") {
+        return Err(Error {
+            offset: 0,
+            message: "Invalid section name",
+        });
+    }
+    let timestamp = current_timestamps()?.1.to_le_bytes().to_vec();
+    let id = |value: u32| value.to_le_bytes().to_vec();
+    let spaces = vec![NewSpace {
+        id: 1,
+        roots: vec![(1, 10), (2, 11)],
+        objects: vec![
+            NewObject {
+                id: 10,
+                jcid: 0x60007,
+                properties: vec![
+                    (0x1c001c30, fresh_guid()?.to_vec()),
+                    (0x18001c65, timestamp),
+                ],
+            },
+            NewObject {
+                id: 11,
+                jcid: 0x20031,
+                properties: vec![
+                    (0x14001d82, id(40)),
+                    (0x1400348b, id(40)),
+                    (0x14001cbe, id(color.unwrap_or(0xffff_ffff))),
+                ],
+            },
+        ],
+    }];
     create(file_name, FileType::Section, spaces)
 }
 

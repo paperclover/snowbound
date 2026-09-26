@@ -4,6 +4,8 @@ use current::current;
 
 #[path = "support/checkpoint.rs"]
 mod checkpoint;
+#[path = "support/ops.rs"]
+mod ops;
 #[path = "support/trace.rs"]
 mod trace;
 
@@ -14,6 +16,26 @@ use onestore::{
 };
 use std::{fs, io};
 use trace::{Event, Trace};
+
+/// Types `with` over `range` of the text object in `source` and commits it to `io`.
+fn commit_text(
+    io: &mut impl onestore::CommitIo,
+    source: &[u8],
+    space: ExGuid,
+    text: ExGuid,
+    range: std::ops::Range<u32>,
+    with: &str,
+) -> Result<(), onestore::CommitError> {
+    let op = onestore::op::PageOp::Text {
+        text,
+        range,
+        with: with.into(),
+    };
+    ops::transaction(source, "Author", vec![onestore::op::Op::Page { space, op }])
+        .unwrap()
+        .unwrap()
+        .commit(io)
+}
 
 #[test]
 fn storage_inspection_preserves_opaque_images_without_claiming_edit_readiness() {
@@ -111,7 +133,7 @@ fn version_cached_readers_cannot_miss_a_completed_publication() {
             bytes: source.clone(),
             events: Vec::new(),
         };
-        onestore::commit_text(&mut trace, &source, sid, oid, end..end, " [cached reader]").unwrap();
+        commit_text(&mut trace, &source, sid, oid, end..end, " [cached reader]").unwrap();
         let final_content = current(&trace.bytes);
         let mut visible = source;
         for event in &trace.events {
@@ -168,7 +190,7 @@ fn published_snapshots_survive_interleaved_commit_io() {
         let mut source = fs::read(format!("../../corpus/{path}")).unwrap();
         let (sid, oid, _) = target(&source);
         if name == "checkpoint" {
-            source = checkpoint::pending(&source, sid, oid, 0x14001d7a);
+            source = checkpoint::pending(&source, sid, oid);
         }
         let (_, _, end) = target(&source);
         let before = current(&source);
@@ -176,7 +198,7 @@ fn published_snapshots_survive_interleaved_commit_io() {
             bytes: source.clone(),
             events: Vec::new(),
         };
-        onestore::commit_text(&mut trace, &source, sid, oid, end..end, " [reader café 🦀]")
+        commit_text(&mut trace, &source, sid, oid, end..end, " [reader café 🦀]")
             .unwrap();
         let after = current(&trace.bytes);
         assert_ne!(before, after);
@@ -407,7 +429,7 @@ fn unpublished_append_remains_available_for_retry() {
         bytes: source.clone(),
         events: Vec::new(),
     };
-    onestore::commit_text(&mut trace, &source, sid, oid, end..end, " abandoned").unwrap();
+    commit_text(&mut trace, &source, sid, oid, end..end, " abandoned").unwrap();
     let Event::Write(offset, append) = &trace.events[0] else {
         panic!()
     };
@@ -432,7 +454,7 @@ fn unpublished_append_remains_available_for_retry() {
             bytes: persisted,
             events: Vec::new(),
         };
-        onestore::commit_text(&mut retry, &snapshot, sid, oid, end..end, " retry").unwrap();
+        commit_text(&mut retry, &snapshot, sid, oid, end..end, " retry").unwrap();
         assert_ne!(current(&retry.bytes), current(&source));
     }
 }

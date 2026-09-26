@@ -1,10 +1,11 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::Document,
     page::{Ink, InkStroke, Page, PageObject, text::new_id},
 };
 
-const AUTHOR: &str = "Ink author";
 
 /// Two drawings made with the mouse in OneNote 2010 (`tools/native/ink.ahk`): a diamond and a
 /// diagonal line, whose native read reports their positions and sizes.
@@ -142,8 +143,8 @@ fn an_ink_drawing_is_written_erased_stroke_by_stroke_and_removed() {
     let mut after = before.clone();
     let ink = drawing();
     after.objects.push(PageObject::Ink(ink.clone()));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
@@ -157,12 +158,12 @@ fn an_ink_drawing_is_written_erased_stroke_by_stroke_and_removed() {
         ]
     ));
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
-    export("ONESTORE_INK_EXPORT", "ink.one", written.as_bytes());
+    export("ONESTORE_INK_EXPORT", "ink.one", written.as_slice());
     let mut erased = stored.clone();
     for object in &mut erased.objects {
         if let PageObject::Ink(ink) = object {
@@ -171,13 +172,13 @@ fn an_ink_drawing_is_written_erased_stroke_by_stroke_and_removed() {
                 .push(stroke(&[[330.0, 100.0], [330.0, 200.0]], Some(0xff0000)));
         }
     }
-    let again = PreparedEdit::page(written.as_bytes(), space, &erased, AUTHOR).unwrap();
-    let stored = page_in(again.as_bytes(), space);
+    let again = ops::saved(written.as_slice(), space, &erased).unwrap();
+    let stored = page_in(again.as_slice(), space);
     assert_eq!(stored, erased);
     let mut removed = stored.clone();
     removed.objects.retain(|object| object.id() != ink.id);
-    let last = PreparedEdit::page(again.as_bytes(), space, &removed, AUTHOR).unwrap();
-    let stored = page_in(last.as_bytes(), space);
+    let last = ops::saved(again.as_slice(), space, &removed).unwrap();
+    let stored = page_in(last.as_slice(), space);
     assert!(drawings(&stored).is_empty());
     assert_eq!(stored, removed);
 }
@@ -209,15 +210,15 @@ fn handwriting_is_written_as_paragraph_content() {
     paragraph.format = Default::default();
     paragraph.content = ParagraphContent::Ink(drawing());
     outline.paragraphs.push(paragraph);
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
     export(
         "ONESTORE_INK_PARAGRAPH_EXPORT",
         "ink.one",
-        written.as_bytes(),
+        written.as_slice(),
     );
 }
 
@@ -230,5 +231,5 @@ fn stored_strokes_keep_their_paths() {
             ink.strokes[0].points[0][0] += 1.0;
         }
     }
-    assert!(PreparedEdit::page(NATIVE, space, &moved, AUTHOR).is_err());
+    assert!(ops::saved(NATIVE, space, &moved).is_err());
 }

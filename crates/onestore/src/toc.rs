@@ -1,14 +1,15 @@
 //! Edits to a notebook's table of contents: the documented `jcidPersistablePropertyContainerForTOC`
-//! root lists section and section-group entries, each carrying a file identity, an ordering
-//! number, a filename and (for sections) a colour.
+//! root carries the notebook's colour and lists section and section-group entries, each
+//! carrying a file identity, an ordering number and a filename. A section's colour lives in
+//! its own metadata (`op::SectionOp::Color`); its entry keeps 0xffffffff, as OneNote writes.
 
 use crate::{
-    Error, ExGuid, PropertySets, Store, Value,
+    Error, ExGuid, PropertySets, Store, Transaction, Value,
     document::{Document, Kind},
     revisions::RevisionIndex,
-    write::{PropertyObject, fresh_guid, write_revision},
+    write::{PropertyObject, RevisionEdit, applied, build_on, check, fresh_guid},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
@@ -27,11 +28,8 @@ pub enum TocEdit {
         identity: [u8; 16],
         filename: String,
     },
-    /// Section colour as COLORREF; `None` restores OneNote's "undefined" 0xffffffff.
-    Color {
-        identity: [u8; 16],
-        color: Option<u32>,
-    },
+    /// The notebook's colour as COLORREF.
+    Color(u32),
     /// Every entry, in the wanted order; entries left out keep their relative order after these.
     Order(Vec<[u8; 16]>),
     Remove {
@@ -43,15 +41,19 @@ fn component(name: &str) -> bool {
     !name.is_empty() && !name.contains(['/', '\\', '\0']) && name != "." && name != ".."
 }
 
-/// The table of contents with `edits` applied in order.
-type PropertyChange = (u32, Option<Vec<u8>>);
-
-pub(crate) fn edit_table_of_contents(source: &[u8], edits: &[TocEdit]) -> Result<Vec<u8>, Error> {
+/// Applies table-of-contents edits (sections and section groups: add, rename, order,
+/// remove; the notebook's colour) in order as one revision of a `.onetoc2` file; none when they change
+/// nothing.
+pub fn edit_table_of_contents(
+    source: &[u8],
+    edits: &[TocEdit],
+) -> Result<Option<Transaction>, Error> {
     let store = Store::parse(source)?;
     if store.header.file_type != crate::FileType::TableOfContents {
         return Err(invalid("Choose a table-of-contents file"));
     }
     let index = RevisionIndex::parse(&store)?;
+    index.validate_current()?;
     let document = Document::parse(&index)?;
     let space = document.root;
     let revision = document.active(space)?;
@@ -76,8 +78,8 @@ pub(crate) fn edit_table_of_contents(source: &[u8], edits: &[TocEdit]) -> Result
         listed.push((*id, *identity, filename.clone().unwrap_or_default()));
     }
     let mut created: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
-    // Property values to set (or remove, `None`) on each existing entry.
-    let mut changes: BTreeMap<ExGuid, Vec<PropertyChange>> = BTreeMap::new();
+    let mut renamed = BTreeSet::new();
+    let mut color = None;
     for edit in edits {
         let position = |identity: &[u8; 16]| {
             listed
@@ -143,18 +145,9 @@ pub(crate) fn edit_table_of_contents(source: &[u8], edits: &[TocEdit]) -> Result
                 }
                 let id = listed[at].0;
                 listed[at].2 = filename.clone();
-                changes
-                    .entry(id)
-                    .or_default()
-                    .push((0x1c001d6b, Some(crate::create::string(filename))));
+                renamed.insert(id);
             }
-            TocEdit::Color { identity, color } => {
-                let id = listed[position(identity)?].0;
-                changes.entry(id).or_default().push((
-                    0x14001cbe,
-                    Some(color.unwrap_or(0xffff_ffff).to_le_bytes().to_vec()),
-                ));
-            }
+            TocEdit::Color(value) => color = Some(*value),
             TocEdit::Order(wanted) => {
                 let mut ordered: Vec<(ExGuid, [u8; 16], String)> = Vec::new();
                 for identity in wanted {
@@ -175,17 +168,17 @@ pub(crate) fn edit_table_of_contents(source: &[u8], edits: &[TocEdit]) -> Result
             TocEdit::Remove { identity } => {
                 let at = position(identity)?;
                 let (id, _, _) = listed.remove(at);
-                changes.remove(&id);
                 created.remove(&id);
             }
         }
     }
     let listed = listed;
-    write_revision(source, space, |raw| {
+    let transaction = build_on(&index, &[], None, |index| {
+        let raw = index.resolve_active(space)?;
         let mut changed = BTreeMap::new();
         let mut root_object = PropertyObject::from_object(&raw.objects[&root])?;
         let mut references = Vec::new();
-        for (order, (id, _, _)) in listed.iter().enumerate() {
+        for (order, (id, _, filename)) in listed.iter().enumerate() {
             let mut object = match created.remove(id) {
                 Some(object) => object,
                 None => PropertyObject::from_object(&raw.objects[id])?,
@@ -201,11 +194,8 @@ pub(crate) fn edit_table_of_contents(source: &[u8], edits: &[TocEdit]) -> Result
             if stored_order != Some(order as u32 + 1) {
                 updates.push((0x14001cb9, (order as u32 + 1).to_le_bytes().to_vec()));
             }
-            for (property, value) in changes.get(id).into_iter().flatten() {
-                match value {
-                    Some(bytes) => updates.push((*property, bytes.clone())),
-                    None => object.remove(&[*property])?,
-                }
+            if renamed.contains(id) {
+                updates.push((0x1c001d6b, crate::create::string(filename)));
             }
             let updates: Vec<(u32, &[u8])> = updates
                 .iter()
@@ -220,7 +210,12 @@ pub(crate) fn edit_table_of_contents(source: &[u8], edits: &[TocEdit]) -> Result
             }
         }
         root_object.set(&[(0x24001cf6, &references)])?;
+        if let Some(color) = color {
+            root_object.set(&[(0x14001cbe, &color.to_le_bytes())])?;
+        }
         changed.insert(root, root_object);
-        Ok(changed)
-    })
+        Ok(BTreeMap::from([(space, RevisionEdit::Update(changed))]))
+    })?;
+    check(&applied(source, transaction.as_ref())?, true)?;
+    Ok(transaction)
 }

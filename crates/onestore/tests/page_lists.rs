@@ -1,5 +1,7 @@
+#[path = "support/ops.rs"]
+mod ops;
 use onestore::{
-    ExGuid, PreparedEdit, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store,
     document::{Document, Format, Kind},
     page::{
         Definition, Page, PageObject, PageParagraph, ParagraphContent, TextObject, text::new_id,
@@ -9,7 +11,6 @@ use std::collections::BTreeMap;
 
 const TREES: &[u8] =
     include_bytes!("../../../corpus/outline-edit/tree/before/notebook/synthetic.one");
-const AUTHOR: &str = "List author";
 
 fn page_by_title(bytes: &[u8], title: &str) -> (ExGuid, Page) {
     let store = Store::parse(bytes).unwrap();
@@ -114,8 +115,8 @@ fn a_numbered_paragraph_becomes_plain_while_its_neighbours_keep_their_nodes() {
     assert!(numbered.len() >= 2, "{lists:?}");
     let mut after = before.clone();
     body_paragraphs(&mut after)[numbered[0]].lists.clear();
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     expected.definitions.remove(&lists[numbered[0]][0]);
@@ -123,16 +124,16 @@ fn a_numbered_paragraph_becomes_plain_while_its_neighbours_keep_their_nodes() {
     for other in &numbered[1..] {
         for node in &lists[*other] {
             assert_eq!(
-                raw_object(written.as_bytes(), space, *node),
+                raw_object(written.as_slice(), space, *node),
                 raw_object(TREES, space, *node)
             );
         }
     }
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
 }
 
@@ -157,16 +158,16 @@ fn bullets_and_numbering_write_from_definitions_and_read_back() {
     let mut fresh = plain_paragraph(&template, "Numbered from three");
     fresh.lists = vec![number];
     body_paragraphs(&mut after).push(fresh);
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
     assert_eq!(
-        PreparedEdit::page(written.as_bytes(), space, &stored, AUTHOR)
+        ops::saved(written.as_slice(), space, &stored)
             .unwrap()
-            .as_bytes(),
-        written.as_bytes()
+            .as_slice(),
+        written.as_slice()
     );
 }
 
@@ -183,8 +184,8 @@ fn a_list_definition_changes_in_place() {
     };
     *restart = Some(7);
     definition.format.bold = Some(true);
-    let written = PreparedEdit::page(TREES, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(TREES, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
@@ -199,8 +200,8 @@ fn a_definition_shared_between_paragraphs_becomes_a_node_per_paragraph() {
     let plain = (0..lists.len()).find(|i| lists[*i].is_empty()).unwrap();
     let mut shared = before.clone();
     body_paragraphs(&mut shared)[plain].lists = lists[numbered].clone();
-    let written = PreparedEdit::page(TREES, space, &shared, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(TREES, space, &shared).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let after = list_ids(&stored);
     assert_eq!(after[numbered], lists[numbered]);
     assert_eq!(after[plain].len(), 1);
@@ -218,12 +219,12 @@ fn missing_and_foreign_list_definitions_are_refused() {
     let plain = (0..lists.len()).find(|i| lists[*i].is_empty()).unwrap();
     let mut missing = before.clone();
     body_paragraphs(&mut missing)[plain].lists = vec![new_id().unwrap()];
-    assert!(PreparedEdit::page(TREES, space, &missing, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &missing).is_err());
     let mut foreign = before.clone();
     let paragraph = body_paragraphs(&mut foreign)[plain].id;
     foreign.definitions.insert(paragraph, bullet_definition());
     body_paragraphs(&mut foreign)[plain].lists = vec![paragraph];
-    assert!(PreparedEdit::page(TREES, space, &foreign, AUTHOR).is_err());
+    assert!(ops::saved(TREES, space, &foreign).is_err());
     let mut style: BTreeMap<ExGuid, Definition> = before.definitions.clone();
     if let Some((id, definition)) = style
         .iter_mut()
@@ -232,7 +233,7 @@ fn missing_and_foreign_list_definitions_are_refused() {
         definition.format.bold = Some(true);
         let mut edited = before.clone();
         edited.definitions.insert(*id, definition.clone());
-        assert!(PreparedEdit::page(TREES, space, &edited, AUTHOR).is_err());
+        assert!(ops::saved(TREES, space, &edited).is_err());
     }
 }
 
@@ -299,16 +300,16 @@ fn bullets_numbering_nesting_and_restarts_publish_on_a_fresh_page() {
         body_paragraphs(&mut after).push(paragraph);
     }
     body_paragraphs(&mut after).push(plain_paragraph(&template, "Plain again"));
-    let written = PreparedEdit::page(&source, space, &after, AUTHOR).unwrap();
-    let stored = page_in(written.as_bytes(), space);
+    let written = ops::saved(&source, space, &after).unwrap();
+    let stored = page_in(written.as_slice(), space);
     let mut expected = after.clone();
     expected.title = stored.title.clone();
     assert_eq!(stored, expected);
     if let Some(directory) = std::env::var_os("ONESTORE_LIST_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("lists.one"), written.as_bytes()).unwrap();
-        let written_store = Store::parse(written.as_bytes()).unwrap();
+        std::fs::write(directory.join("lists.one"), written.as_slice()).unwrap();
+        let written_store = Store::parse(written.as_slice()).unwrap();
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents(

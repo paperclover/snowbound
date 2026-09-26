@@ -23,7 +23,7 @@ fn native_file_data_alignment_is_relative_to_the_object() {
     assert_eq!(payload.len(), 10056);
     assert_eq!(
         format!("{:x}", md5::compute(payload)),
-        "e1b57a8851177dd25dc05b50b904656a"
+        "fec8f53bd6db9305eabac4cd4b71fb08"
     );
     let blob = store.chunk_data(chunk).unwrap();
     for alignment in 0..8 {

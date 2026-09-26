@@ -32,6 +32,17 @@ fn content(bytes: &[u8]) -> (ExGuid, ExGuid, String) {
         .unwrap()
 }
 
+/// The images the queue leaves and started from, as a recovery archive records them.
+fn images(cache: &Replica, path: &Path) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    let archive = path.with_extension(format!("probe-{}", std::process::id()));
+    cache.export_recovery(&archive)?;
+    let recovery = notebook::Recovery::open(&archive)?;
+    let images = (recovery.snapshot()?, recovery.remote_snapshot()?);
+    drop(recovery);
+    std::fs::remove_file(&archive)?;
+    Ok(images)
+}
+
 fn payload(operation: u64, size: usize) -> String {
     format!("{operation}:🦀{}", "x".repeat(size))
 }
@@ -73,8 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let cache = Replica::open(path)?;
     if mode == "read" {
-        let snapshot = cache.snapshot()?;
-        let base = cache.remote_snapshot()?;
+        let (snapshot, base) = images(&cache, path)?;
         let (sid, target, mut expected) = content(&base);
         let store = Store::parse(&snapshot)?;
         assert!(store.checksum_mismatches.is_empty());
@@ -164,8 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instruction = lines.next().unwrap()?;
     let (operation, acknowledgement) = instruction.split_once(' ').unwrap();
     let operation: u64 = operation.parse()?;
-    let source = cache.snapshot()?;
-    let (sid, oid, text) = content(&source);
+    let (sid, oid, text) = content(&images(&cache, path)?.0);
     let replacement = payload(operation, size);
     println!("editing {operation}");
     io::stdout().flush()?;
