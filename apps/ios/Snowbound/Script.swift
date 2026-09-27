@@ -5,8 +5,10 @@ extension CanvasView {
     /// Replays `SNOWBOUND_SCRIPT` through the calls touch and the keyboard make, to check
     /// input without a finger: steps joined by `|`, such as
     /// `tap:120,300|type:hi|mark:かな|unmark|return|delete|select:2,9|scroll:0,600|zoom:1.5|shot:a`.
-    /// `tap` takes points from the view's corner, `select` text offsets, `scroll` a content
-    /// offset; `shot:a` saves the window to Documents/a.png, as a device has no screenshot command.
+    /// `tap` and `doubletap` take points from the view's corner, `select` text offsets,
+    /// `scroll` a content offset; `done` ends editing, `tree` saves the view hierarchy to
+    /// Documents/tree.txt, and `shot:a` the window to Documents/a.png, as a device has no
+    /// screenshot command.
     func runScript() {
         guard let script = ProcessInfo.processInfo.environment["SNOWBOUND_SCRIPT"] else { return }
         for (index, step) in script.split(separator: "|").enumerated() {
@@ -32,6 +34,9 @@ extension CanvasView {
         case "unmark": unmarkText()
         case "select":
             let values = argument.split(separator: ",").compactMap { Int($0) }
+            // As a gesture would, the change reaches the system's text interaction.
+            inputDelegate?.selectionWillChange(self)
+            defer { inputDelegate?.selectionDidChange(self) }
             selectedTextRange = textRange(
                 from: position(from: beginningOfDocument, offset: values[0])!,
                 to: position(from: beginningOfDocument, offset: values[1])!)
@@ -39,6 +44,14 @@ extension CanvasView {
             let values = argument.split(separator: ",").compactMap { Double($0) }
             setContentOffset(CGPoint(x: values[0], y: values[1]), animated: true)
         case "zoom": setZoomScale(Double(argument) ?? 1, animated: false)
+        case "doubletap":
+            let values = argument.split(separator: ",").compactMap { Double($0) }
+            zoom(at: CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y))
+        case "done": _ = resignFirstResponder()
+        case "tree":
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            try? "\(value(forKey: "recursiveDescription") ?? "")".write(
+                to: documents.appendingPathComponent("tree.txt"), atomically: true, encoding: .utf8)
         case "shot":
             guard let window else { break }
             let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in

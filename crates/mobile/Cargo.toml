@@ -11,8 +11,10 @@ crate-type = ["staticlib"]
 [dependencies]
 canvas = { path = "../canvas", features = ["interaction"] }
 draw = { path = "../draw" }
+notebook = { path = "../notebook" }
 onestore = { path = "../onestore" }
 wgpu.workspace = true
 parley.workspace = true
 pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"

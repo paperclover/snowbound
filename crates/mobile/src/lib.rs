@@ -1,6 +1,6 @@
-//! A canvas page behind a C surface for native mobile shells: a section's pages, one drawn
-//! into a `CAMetalLayer`, and the active outline's text as flat UTF-16 offsets, paragraphs
-//! joined by `\n`, the model UIKit's `UITextInput` speaks.
+//! A canvas page behind a C surface for native mobile shells: a notebook's sections, a
+//! section's pages, one page drawn into a `CAMetalLayer`, and the active outline's text as
+//! the flat UTF-16 model UIKit's `UITextInput` speaks (see `TextOutline::shown_text`).
 //!
 //! Lengths and positions are in the host's points; the view converts through its display
 //! scale. Calls returning `bool` report whether the page or selection changed, after which
@@ -8,12 +8,13 @@
 
 use canvas::{
     document::TextPosition,
-    editor::Selection,
+    editor::{Formatting, Selection, TextOutline, Toggle},
     gpu::{Paper, Viewport, page::PageScene},
-    interaction::{Hit, PageView, Response, TextColors, page_hit_test},
+    interaction::{Hit, PageView, Response, TextColors},
     layout::TextEngine,
 };
 use draw::edit::{Key, NamedKey, SelectionUnit};
+use notebook::discover::{self, Folder, SectionState};
 use onestore::{
     ExGuid, RevisionIndex, Store,
     document::Document,
@@ -24,6 +25,7 @@ use parley::{Affinity, BoundingBox};
 use std::{
     error::Error,
     ffi::{CStr, CString, c_char, c_void},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -37,17 +39,99 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 /// Host points per document point at 100% zoom, as OneNote's 96 pixels per inch.
 const POINT: f32 = 96.0 / 72.0;
 
-/// The platform's text interaction draws the caret and selection.
-const COLORS: TextColors = TextColors {
-    caret: [0.0; 4],
-    selection: [0.0; 4],
-    paper: Paper::WHITE,
-};
+/// The tab colour OneNote gives a section that stores none, as the desktop shows it.
+const SECTION_COLOR: u32 = 0x00e4_a88a;
+
+#[derive(serde::Serialize)]
+struct Listing {
+    name: String,
+    sections: Vec<Tab>,
+}
+
+#[derive(serde::Serialize)]
+struct Tab {
+    name: String,
+    /// The section file's absolute path, for `sb_section_open`.
+    path: String,
+    /// The section group holding it, `/`-separated; empty at the notebook's top.
+    group: String,
+    /// The tab colour in sRGB.
+    color: [u8; 3],
+    /// Password-protected or unreadable sections list but do not open.
+    readable: bool,
+}
+
+/// A notebook folder's sections in its order, or a lone section file as a notebook of one.
+fn listing(path: &Path) -> Result<Listing> {
+    let stem = |path: &Path| {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    if path.is_file() {
+        return Ok(Listing {
+            name: stem(path),
+            sections: vec![Tab {
+                name: stem(path),
+                path: path.to_string_lossy().into_owned(),
+                group: String::new(),
+                color: rgb(SECTION_COLOR),
+                readable: true,
+            }],
+        });
+    }
+    let folder = discover::discover(
+        &mut discover::Local::open(path)?,
+        discover::Limits {
+            entries: 10_000,
+            bytes_per_file: 1 << 30,
+            depth: 16,
+        },
+    )?;
+    let mut sections = Vec::new();
+    fn walk(folder: &Folder, root: &Path, sections: &mut Vec<Tab>) {
+        for section in &folder.sections {
+            let file = root.join(&section.path);
+            let (name, color, readable) = match &section.state {
+                SectionState::Readable { name, color } => (name.clone(), *color, true),
+                SectionState::Locked | SectionState::Unreadable(_) => (None, None, false),
+            };
+            sections.push(Tab {
+                name: name.unwrap_or_else(|| {
+                    file.file_stem()
+                        .map(|stem| stem.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                }),
+                path: file.to_string_lossy().into_owned(),
+                group: folder.path.clone(),
+                color: rgb(color.unwrap_or(SECTION_COLOR)),
+                readable,
+            });
+        }
+        for group in &folder.groups {
+            // OneNote keeps deleted sections and pages here, out of the notebook's view.
+            if !group.path.ends_with("OneNote_RecycleBin") {
+                walk(group, root, sections);
+            }
+        }
+    }
+    walk(&folder, path, &mut sections);
+    Ok(Listing {
+        name: stem(path),
+        sections,
+    })
+}
+
+fn rgb(colorref: u32) -> [u8; 3] {
+    let [red, green, blue, _] = colorref.to_le_bytes();
+    [red, green, blue]
+}
 
 pub struct Section {
     /// Each page with the object space holding it.
     pages: Vec<(ExGuid, Page)>,
-    titles: Vec<CString>,
+    /// The page list's title and outline level (1 at the top) for each page.
+    headings: Vec<(CString, u32)>,
 }
 
 impl Section {
@@ -55,16 +139,17 @@ impl Section {
         let store = Store::parse(bytes)?;
         let index = RevisionIndex::parse(&store)?;
         let document = Document::parse(&index)?;
-        let pages = document
-            .pages()?
-            .into_iter()
-            .map(|(space, id)| Ok((space, Page::from_revision(document.active(space)?, id)?)))
-            .collect::<std::result::Result<Vec<_>, onestore::Error>>()?;
-        let titles = pages
-            .iter()
-            .map(|(_, page)| CString::new(page.title.replace('\0', "")))
-            .collect::<std::result::Result<_, _>>()?;
-        Ok(Self { pages, titles })
+        let mut pages = Vec::new();
+        let mut headings = Vec::new();
+        for (space, id) in document.pages()? {
+            let revision = document.active(space)?;
+            let (title, level) = Page::heading(revision, id);
+            pages.push((space, Page::from_revision(revision, id)?));
+            // Titles keep OneNote's line breaks, which a one-line list shows as spaces.
+            let title = title.replace(|char: char| char.is_control(), " ");
+            headings.push((CString::new(title)?, level));
+        }
+        Ok(Self { pages, headings })
     }
 }
 
@@ -78,16 +163,6 @@ impl Wake for Frame {
     }
 }
 
-pub struct View {
-    page: PageView,
-    /// The object space of the page shown, which its edits name.
-    space: ExGuid,
-    surface: wgpu::Surface<'static>,
-    config: wgpu::SurfaceConfiguration,
-    renderer: draw::Renderer,
-    frame: Arc<Frame>,
-}
-
 fn report<T>(result: Result<T>) -> Option<T> {
     result.map_err(|error| eprintln!("snowbound: {error}")).ok()
 }
@@ -96,51 +171,68 @@ fn moved(response: Response) -> bool {
     response.changed || response.moved
 }
 
-impl View {
-    fn new(
-        layer: *mut c_void,
-        (space, page): (ExGuid, Page),
-        size: [f32; 2],
-        scale: f32,
-    ) -> Result<Self> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        // SAFETY: the host passes a live CAMetalLayer that outlives the view.
-        let surface = unsafe {
-            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer))
-        }?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))?;
-        // The simulator's adapter falls short of wgpu's default limits.
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                required_limits: adapter.limits(),
-                ..Default::default()
-            }))?;
-        let pixels = size.map(|side| (side * scale).round().max(1.0) as u32);
-        let config = surface
-            .get_default_config(&adapter, pixels[0], pixels[1])
-            .ok_or("No supported surface configuration")?;
-        surface.configure(&device, &config);
-        let renderer = draw::Renderer::new(device, queue, config.format);
+/// What a touch lands on, so the host routes it before its gesture starts.
+#[repr(u8)]
+#[derive(Debug, PartialEq)]
+enum Target {
+    /// Empty page, a picture, a check box or the date: the canvas takes a tap.
+    Page = 0,
+    /// The text taking input, where the platform's text interaction works.
+    ActiveText = 1,
+    /// Another outline's text, which a touch focuses before the platform's text interaction
+    /// takes over.
+    Text = 2,
+    /// The focused outline's move or width grip.
+    Grip = 3,
+}
+
+/// The page and its text model, apart from the surface it is drawn on.
+struct Canvas {
+    page: PageView,
+    /// The object space of the page shown, which its edits name.
+    space: ExGuid,
+    paper: Paper,
+}
+
+impl Canvas {
+    fn new((space, page): (ExGuid, Page), pixels: [u32; 2], scale: f32) -> Result<Self> {
         let mut engine = TextEngine::default();
         let (scene, editor) = PageScene::from_page(page, &mut engine)?;
+        let mut page = PageView::new(
+            editor,
+            engine,
+            Some((scene, [0.0; 2])),
+            pixels,
+            scale,
+            Duration::from_millis(350),
+        );
+        page.touch = true;
         Ok(Self {
-            page: PageView::new(
-                editor,
-                engine,
-                Some((scene, [0.0; 2])),
-                pixels,
-                scale,
-                Duration::from_millis(350),
-            ),
+            page,
             space,
-            surface,
-            config,
-            renderer,
-            frame: Arc::default(),
+            paper: Paper::WHITE,
         })
+    }
+
+    /// The platform's text interaction draws the caret and selection.
+    fn colors(&self) -> TextColors {
+        TextColors {
+            caret: [0.0; 4],
+            selection: [0.0; 4],
+            paper: self.paper,
+        }
+    }
+
+    /// The desktop's dark page, or white paper.
+    fn set_dark(&mut self, dark: bool) {
+        self.paper = if dark {
+            Paper {
+                color: draw::srgb(0x1f, 0x20, 0x22),
+                ink: draw::srgb(0xe6, 0xe6, 0xe6),
+            }
+        } else {
+            Paper::WHITE
+        };
     }
 
     /// What the page took since the last call as one edit, or none when it took nothing.
@@ -173,31 +265,6 @@ impl View {
         point.map(|value| value * self.display_scale())
     }
 
-    fn render(&mut self) -> Result<()> {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.renderer.device, &self.config);
-                return Ok(());
-            }
-            _ => return Ok(()),
-        };
-        self.page
-            .update_pictures(COLORS.paper, &Waker::from(self.frame.clone()));
-        let primitives = self.page.primitives(COLORS)?;
-        self.renderer
-            .draw(
-                &frame.texture.create_view(&Default::default()),
-                [self.config.width, self.config.height],
-                COLORS.paper.color,
-                &[self.page.viewport.layer(&primitives)],
-            )
-            .map_err(|error| format!("Page drawing failed: {error:?}"))?;
-        self.renderer.queue.present(frame);
-        Ok(())
-    }
-
     /// The page content's extent in document points: the scroll limits of a view with no
     /// size at scale 1.
     fn content(&mut self) -> [f32; 4] {
@@ -218,97 +285,134 @@ impl View {
         self.page.viewport.origin = corner.map(|value| -value * scale * zoom);
     }
 
-    fn tap(&mut self, point: [f32; 2]) -> Result<bool> {
-        let mut changed = moved(self.page.pointer_moved(self.device(point))?);
-        changed |= moved(self.page.pointer_pressed(Instant::now())?);
-        changed |= moved(self.page.pointer_released()?);
-        // A finger leaves no hover behind.
-        let _ = self.page.pointer_left();
-        Ok(changed)
+    fn outline(&self, id: ExGuid) -> Option<&TextOutline> {
+        let editor = &self.page.editor;
+        editor
+            .visible_outlines()
+            .chain(editor.caret_outline())
+            .find(|outline| outline.id == id)
     }
 
-    /// Whether `point` lands on the text of the outline taking input, where the platform's
-    /// own text interaction places the caret.
-    fn in_active_text(&self, point: [f32; 2]) -> bool {
-        let point = self.page.viewport.document_point(self.device(point));
-        let pixel = self.display_scale() / self.page.viewport.scale;
-        matches!(
-            page_hit_test(&self.page.editor, self.page.scene.as_ref(), point, pixel),
-            Some(Hit::Text { id, .. }) if id == self.page.editor.active_outline().id
-        )
-    }
-
-    /// UTF-16 lengths of the active outline's text paragraphs.
-    fn lengths(&self) -> Result<Vec<u32>> {
-        self.page
-            .editor
-            .active_outline()
-            .document()
-            .paragraphs()
-            .map(|paragraph| Ok(paragraph.utf16_offset(paragraph.text().len())?))
-            .collect()
-    }
-
-    fn position(&self, flat: u32) -> Result<TextPosition> {
-        let lengths = self.lengths()?;
-        let mut rest = flat;
-        for (paragraph, length) in lengths.iter().enumerate() {
-            if rest <= *length {
-                return Ok(TextPosition {
-                    paragraph,
-                    offset: rest,
-                });
+    fn target(&self, point: [f32; 2]) -> Target {
+        match self.page.hit(self.device(point)) {
+            Some(Hit::Handle { .. } | Hit::Resize { .. }) => Target::Grip,
+            Some(Hit::Text { id, point })
+                if !self
+                    .outline(id)
+                    .is_some_and(|outline| outline.contains_extension(point)) =>
+            {
+                if id == self.page.editor.active_outline().id {
+                    Target::ActiveText
+                } else {
+                    Target::Text
+                }
             }
-            rest -= length + 1;
+            _ => Target::Page,
         }
-        Ok(TextPosition {
-            paragraph: lengths.len() - 1,
-            offset: lengths[lengths.len() - 1],
+    }
+
+    /// Runs `change` on the page, then puts the view back where the host's scroll view has
+    /// it: the canvas clamps and reveals knowing neither the navigation bar nor the keyboard,
+    /// and the host reveals the caret itself.
+    fn hold<T>(&mut self, change: impl FnOnce(&mut PageView) -> Result<T>) -> Result<T> {
+        let Viewport { scale, origin, .. } = self.page.viewport;
+        let result = change(&mut self.page);
+        self.page.viewport.scale = scale;
+        self.page.viewport.origin = origin;
+        result
+    }
+
+    /// A finger down at `point`: the start of a tap or of a grip drag.
+    fn press(&mut self, point: [f32; 2]) -> Result<bool> {
+        let point = self.device(point);
+        self.hold(|page| {
+            let changed = moved(page.pointer_moved(point)?);
+            Ok(moved(page.pointer_pressed(Instant::now())?) || changed)
         })
     }
 
-    fn flat(&self, position: TextPosition) -> Result<u32> {
-        let before: u32 = self.lengths()?[..position.paragraph]
-            .iter()
-            .map(|length| length + 1)
-            .sum();
-        Ok(before + position.offset)
+    fn drag(&mut self, point: [f32; 2]) -> Result<bool> {
+        let point = self.device(point);
+        self.hold(|page| Ok(moved(page.pointer_moved(point)?)))
     }
 
-    fn length(&self) -> Result<u32> {
-        let lengths = self.lengths()?;
-        Ok(lengths.iter().sum::<u32>() + lengths.len() as u32 - 1)
+    fn release(&mut self) -> Result<bool> {
+        self.hold(|page| {
+            let changed = moved(page.pointer_released()?);
+            // A finger leaves no hover behind.
+            let _ = page.pointer_left();
+            Ok(changed)
+        })
     }
 
-    fn text(&self, range: [u32; 2]) -> Result<String> {
-        let range = self.position(range[0])?..self.position(range[1])?;
-        Ok(self
+    /// The outline nearest `point`, framed as its chrome is, in points at 100% zoom.
+    fn block(&self, point: [f32; 2]) -> Option<[f32; 4]> {
+        let [x, y] = self
+            .page
+            .viewport
+            .document_point(self.device(point))
+            .map(f64::from);
+        let distance = |rect: &BoundingBox| {
+            let dx = (rect.x0 - x).max(x - rect.x1).max(0.0);
+            let dy = (rect.y0 - y).max(y - rect.y1).max(0.0);
+            dx.hypot(dy)
+        };
+        let rect = self
             .page
             .editor
-            .active_outline()
-            .document()
-            .slice(range)?
-            .iter()
-            .map(|paragraph| paragraph.text())
-            .collect::<Vec<_>>()
-            .join("\n"))
+            .visible_outlines()
+            .map(TextOutline::bounds)
+            .min_by(|a, b| distance(a).total_cmp(&distance(b)))?;
+        Some([rect.x0, rect.y0, rect.x1, rect.y1].map(|value| value as f32 * POINT))
+    }
+
+    fn active(&self) -> &TextOutline {
+        self.page.editor.active_outline()
+    }
+
+    fn text(&self, range: [u32; 2]) -> String {
+        let units: Vec<u16> = self.active().shown_text().encode_utf16().collect();
+        let [start, end] = range.map(|offset| (offset as usize).min(units.len()));
+        String::from_utf16_lossy(&units[start..end.max(start)])
+    }
+
+    fn length(&self) -> u32 {
+        self.active().shown_text().encode_utf16().count() as u32
     }
 
     fn selection(&self) -> Result<[u32; 2]> {
         let [anchor, focus] = self.page.editor.selection().positions;
-        Ok([self.flat(anchor.min(focus))?, self.flat(anchor.max(focus))?])
+        let outline = self.active();
+        Ok([
+            outline.utf16_offset(anchor.min(focus))?,
+            outline.utf16_offset(anchor.max(focus))?,
+        ])
+    }
+
+    fn positions(&self, range: [u32; 2]) -> Result<[TextPosition; 2]> {
+        let outline = self.active();
+        Ok([
+            outline.utf16_position(range[0])?,
+            outline.utf16_position(range[1])?,
+        ])
     }
 
     fn select(&mut self, range: [u32; 2]) -> Result<()> {
-        let positions = [self.position(range[0])?, self.position(range[1])?];
+        let positions = self.positions(range)?;
         Ok(self.page.editor.select(Selection::from(positions))?)
     }
 
     fn marked(&self) -> Result<Option<[u32; 2]>> {
+        let outline = self.active();
         self.page
             .editor
             .marked_range()
-            .map(|range| Ok([self.flat(range.start)?, self.flat(range.end)?]))
+            .map(|range| {
+                Ok([
+                    outline.utf16_offset(range.start)?,
+                    outline.utf16_offset(range.end)?,
+                ])
+            })
             .transpose()
     }
 
@@ -325,23 +429,25 @@ impl View {
                 .map_or(text.len(), |(byte, _)| byte)
         };
         let cursor = (byte(selected[0]), byte(selected[1]));
-        Ok(moved(self.page.compose(text, Some(cursor))?))
+        self.hold(|page| Ok(moved(page.compose(text, Some(cursor))?)))
     }
 
     fn insert(&mut self, text: String) -> Result<bool> {
-        let response = if text == "\n" {
-            self.page.key(&Key::Named(NamedKey::Enter), None)?
-        } else {
-            self.page.commit_text(text)?
-        };
-        Ok(moved(response))
+        self.hold(|page| {
+            Ok(moved(if text == "\n" {
+                page.key(&Key::Named(NamedKey::Enter), None)?
+            } else {
+                page.commit_text(text)?
+            }))
+        })
     }
 
-    /// A document rectangle in the active outline, in the view's points as `[x, y, width,
-    /// height]`.
-    fn view_rect(&self, rect: BoundingBox, origin: [f32; 2]) -> [f32; 4] {
+    /// A rectangle in the active outline's coordinates, in the view's points as `[x, y,
+    /// width, height]`.
+    fn view_rect(&self, rect: BoundingBox) -> [f32; 4] {
         let viewport = self.page.viewport;
         let points = self.display_scale();
+        let origin = self.active().origin();
         let [x, y] = [rect.x0 as f32 + origin[0], rect.y0 as f32 + origin[1]];
         [
             (x * viewport.scale + viewport.origin[0]) / points,
@@ -351,88 +457,135 @@ impl View {
         ]
     }
 
-    fn caret_rect(&self, flat: u32) -> Result<[f32; 4]> {
-        let position = self.position(flat)?;
-        let outline = self.page.editor.active_outline();
-        let paragraph = outline.paragraph_layout(position.paragraph)?;
-        let visible = paragraph.projection.visible_offset(position.offset)?;
-        let byte = paragraph.projection.text().byte_offset(visible)?;
-        let caret = paragraph
-            .text
-            .caret(paragraph.text.cursor(byte, Affinity::Downstream), 1.0);
-        let origin = outline.origin();
-        Ok(self.view_rect(
-            caret,
-            [
-                origin[0] + paragraph.origin[0],
-                origin[1] + paragraph.origin[1],
-            ],
-        ))
+    fn caret_rect(&self, offset: u32) -> Result<[f32; 4]> {
+        let position = self.active().utf16_position(offset)?;
+        let caret = self
+            .page
+            .editor
+            .caret_at(position, Affinity::Downstream, 1.0)?;
+        Ok(self.view_rect(caret))
     }
 
     /// The selection rectangles of a range, one or more per line.
     fn range_rects(&self, range: [u32; 2]) -> Result<Vec<[f32; 4]>> {
-        let [start, end] = [self.position(range[0])?, self.position(range[1])?];
-        let outline = self.page.editor.active_outline();
-        let origin = outline.origin();
-        let mut rects = Vec::new();
-        for (index, paragraph) in outline.layouts() {
-            if index < start.paragraph || index > end.paragraph {
-                continue;
-            }
-            let cursor = |offset: u32, affinity| -> Result<_> {
-                let visible = paragraph.projection.visible_offset(offset)?;
-                let byte = paragraph.projection.text().byte_offset(visible)?;
-                Ok(paragraph.text.cursor(byte, affinity))
-            };
-            let first = cursor(
-                if index == start.paragraph {
-                    start.offset
-                } else {
-                    0
-                },
-                Affinity::Downstream,
-            )?;
-            let last = if index == end.paragraph {
-                cursor(end.offset, Affinity::Upstream)?
-            } else {
-                paragraph
-                    .text
-                    .cursor(paragraph.projection.text().text().len(), Affinity::Upstream)
-            };
-            let origin = [
-                origin[0] + paragraph.origin[0],
-                origin[1] + paragraph.origin[1],
-            ];
-            for rect in paragraph
-                .text
-                .selection(parley::editing::Selection::new(first, last))
-            {
-                rects.push(self.view_rect(rect, origin));
-            }
-        }
-        Ok(rects)
+        let rects = self.page.editor.range_rects(Selection {
+            positions: self.positions(range)?,
+            affinities: [Affinity::Downstream, Affinity::Upstream],
+        })?;
+        Ok(rects.into_iter().map(|rect| self.view_rect(rect)).collect())
     }
 
     fn closest(&self, point: [f32; 2]) -> Result<u32> {
         let point = self.page.viewport.document_point(self.device(point));
-        let origin = self.page.editor.active_outline().origin();
+        let origin = self.active().origin();
         let selection = self.page.editor.selection_at(
             point[0] - origin[0],
             point[1] - origin[1],
             SelectionUnit::Grapheme,
         )?;
-        self.flat(selection.positions[1])
+        Ok(self.active().utf16_offset(selection.positions[1])?)
     }
 }
 
+pub struct View {
+    canvas: Canvas,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    renderer: draw::Renderer,
+    frame: Arc<Frame>,
+}
+
+impl View {
+    fn new(layer: *mut c_void, page: (ExGuid, Page), size: [f32; 2], scale: f32) -> Result<Self> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        // SAFETY: the host passes a live CAMetalLayer that outlives the view.
+        let surface = unsafe {
+            instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer))
+        }?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))?;
+        // The simulator's adapter falls short of wgpu's default limits.
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_limits: adapter.limits(),
+                ..Default::default()
+            }))?;
+        let pixels = size.map(|side| (side * scale).round().max(1.0) as u32);
+        let config = surface
+            .get_default_config(&adapter, pixels[0], pixels[1])
+            .ok_or("No supported surface configuration")?;
+        surface.configure(&device, &config);
+        let renderer = draw::Renderer::new(device, queue, config.format);
+        Ok(Self {
+            canvas: Canvas::new(page, pixels, scale)?,
+            surface,
+            config,
+            renderer,
+            frame: Arc::default(),
+        })
+    }
+
+    fn render(&mut self) -> Result<()> {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.renderer.device, &self.config);
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
+        let canvas = &mut self.canvas;
+        canvas
+            .page
+            .update_pictures(canvas.paper, &Waker::from(self.frame.clone()));
+        let primitives = canvas.page.primitives(canvas.colors())?;
+        self.renderer
+            .draw(
+                &frame.texture.create_view(&Default::default()),
+                [self.config.width, self.config.height],
+                canvas.paper.color,
+                &[canvas.page.viewport.layer(&primitives)],
+            )
+            .map_err(|error| format!("Page drawing failed: {error:?}"))?;
+        self.renderer.queue.present(frame);
+        Ok(())
+    }
+}
+
+fn string(text: *const c_char) -> String {
+    // SAFETY: every caller's contract makes `text` NUL-terminated.
+    unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn owned(text: String) -> *mut c_char {
+    CString::new(text.replace('\0', "")).map_or(std::ptr::null_mut(), CString::into_raw)
+}
+
+/// The notebook folder at `path`, or the lone section file there, as JSON: `name`, and
+/// `sections` in the notebook's order, each with `name`, `path`, `group`, `color` as sRGB
+/// bytes and `readable`. Freed with `sb_string_free`; null if it cannot be read.
+///
 /// # Safety
-/// `path` is a NUL-terminated path.
+/// `path` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_notebook(path: *const c_char) -> *mut c_char {
+    report(
+        listing(Path::new(&string(path))).and_then(|listing| Ok(serde_json::to_string(&listing)?)),
+    )
+    .map_or(std::ptr::null_mut(), owned)
+}
+
+/// # Safety
+/// `path` is NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sb_section_open(path: *const c_char) -> *mut Section {
-    let path = unsafe { CStr::from_ptr(path) };
     report(
-        std::fs::read(path.to_str().unwrap_or_default())
+        std::fs::read(string(path))
             .map_err(Into::into)
             .and_then(|bytes| Section::open(&bytes)),
     )
@@ -449,7 +602,13 @@ pub extern "C" fn sb_section_count(section: &Section) -> usize {
 /// The page's title, alive as long as the section.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_section_title(section: &Section, index: usize) -> *const c_char {
-    section.titles[index].as_ptr()
+    section.headings[index].0.as_ptr()
+}
+
+/// The page's level in the page list: 1 at the top, 2 for a subpage and so on.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_section_level(section: &Section, index: usize) -> u32 {
+    section.headings[index].1
 }
 
 /// # Safety
@@ -492,10 +651,11 @@ pub unsafe extern "C" fn sb_view_free(view: *mut View) {
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_resize(view: &mut View, width: f32, height: f32, scale: f32) {
     let pixels = [width, height].map(|side| (side * scale).round().max(1.0) as u32);
-    if scale != view.display_scale() {
-        let _ = report(view.page.scale_factor_changed(scale));
+    if scale != view.canvas.display_scale() {
+        let _ = report(view.canvas.page.scale_factor_changed(scale));
     }
-    let _ = report(view.page.resized(pixels));
+    let page = &mut view.canvas.page;
+    let _ = report(page.resized(pixels));
     view.config.width = pixels[0];
     view.config.height = pixels[1];
     view.surface.configure(&view.renderer.device, &view.config);
@@ -512,42 +672,96 @@ pub extern "C" fn sb_view_frame_pending(view: &View) -> bool {
     view.frame.0.swap(false, Ordering::Acquire)
 }
 
+/// Draws the page on the desktop's dark paper, or on white.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_set_dark(view: &mut View, dark: bool) {
+    view.canvas.set_dark(dark);
+}
+
+/// Whether the view has input focus: the focused outline shows its frame and grips only then.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_focus(view: &mut View, focused: bool) {
+    let _ = report(view.canvas.hold(|page| page.focus_changed(focused)));
+}
+
 /// The page content's `[left, top, right, bottom]` in points at 100% zoom, bottom and right
 /// including the margin OneNote scrolls past the last object.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_content(view: &mut View, bounds: &mut [f32; 4]) {
-    *bounds = view.content().map(|value| value * POINT);
+    *bounds = view.canvas.content().map(|value| value * POINT);
+}
+
+/// The frame of the outline nearest the view point `x`, `y`, as `[left, top, right,
+/// bottom]` in points at 100% zoom; false on a page with none.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_block(view: &View, x: f32, y: f32, rect: &mut [f32; 4]) -> bool {
+    view.canvas
+        .block([x, y])
+        .map(|block| *rect = block)
+        .is_some()
 }
 
 /// Zooms and scrolls so the page point `x`, `y` sits at the view's corner; the host's
 /// scroll view owns the limits and rubber-banding.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_set_transform(view: &mut View, zoom: f32, x: f32, y: f32) {
-    view.set_transform(zoom, [x, y]);
+    view.canvas.set_transform(zoom, [x, y]);
 }
 
-/// A tap: places the caret, focuses an outline or starts a new one.
+/// What the view point `x`, `y` lands on: 0 for the page, where the canvas takes a tap; 1
+/// for the text taking input; 2 for another outline's text; 3 for the focused outline's
+/// move or width grip.
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_view_tap(view: &mut View, x: f32, y: f32) -> bool {
-    report(view.tap([x, y])).unwrap_or(false)
+pub extern "C" fn sb_view_target(view: &View, x: f32, y: f32) -> u8 {
+    view.canvas.target([x, y]) as u8
+}
+
+/// A finger down: with `sb_view_release` a tap, which places the caret, focuses an outline
+/// or starts a new one; with `sb_view_drag` between, a grip moves or widens an outline.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_press(view: &mut View, x: f32, y: f32) -> bool {
+    report(view.canvas.press([x, y])).unwrap_or(false)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_view_in_active_text(view: &View, x: f32, y: f32) -> bool {
-    view.in_active_text([x, y])
+pub extern "C" fn sb_view_drag(view: &mut View, x: f32, y: f32) -> bool {
+    report(view.canvas.drag([x, y])).unwrap_or(false)
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_text_length(view: &View) -> u32 {
-    report(view.length()).unwrap_or(0)
+pub extern "C" fn sb_view_release(view: &mut View) -> bool {
+    report(view.canvas.release()).unwrap_or(false)
 }
 
-/// The text in `start..end`, freed with `sb_string_free`.
+/// Undoes the last edit, or with `redo` redoes the last undone one.
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_text(view: &View, start: u32, end: u32) -> *mut c_char {
-    report(view.text([start, end]))
-        .and_then(|text| CString::new(text.replace('\0', "")).ok())
-        .map_or(std::ptr::null_mut(), CString::into_raw)
+pub extern "C" fn sb_view_undo(view: &mut View, redo: bool) -> bool {
+    report(view.canvas.hold(|page| page.undo(redo).map(moved))).unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_can_undo(view: &View, redo: bool) -> bool {
+    let editor = &view.canvas.page.editor;
+    if redo {
+        editor.can_redo()
+    } else {
+        editor.can_undo()
+    }
+}
+
+/// Toggles 0 bold, 1 italic or 2 underline on the selection.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_toggle(view: &mut View, toggle: u8) -> bool {
+    let toggle = match toggle {
+        0 => Toggle::Bold,
+        1 => Toggle::Italic,
+        _ => Toggle::Underline,
+    };
+    report(
+        view.canvas
+            .hold(|page| page.format(Formatting::Toggle(toggle)).map(moved)),
+    )
+    .unwrap_or(false)
 }
 
 /// The edit the page took since the last call, as `onestore::op::Edit` JSON for the
@@ -555,34 +769,45 @@ pub extern "C" fn sb_text(view: &View, start: u32, end: u32) -> *mut c_char {
 /// stored, in which case the page should be opened again.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_edit(view: &mut View) -> *mut c_char {
-    report(view.edit())
+    report(view.canvas.edit())
         .flatten()
-        .and_then(|edit| CString::new(serde_json::to_string(&edit).ok()?).ok())
-        .map_or(std::ptr::null_mut(), CString::into_raw)
+        .and_then(|edit| serde_json::to_string(&edit).ok())
+        .map_or(std::ptr::null_mut(), owned)
 }
 
 /// # Safety
-/// `text` came from `sb_text` or `sb_view_edit` and is not used again.
+/// `text` came from this library and is not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sb_string_free(text: *mut c_char) {
     drop(unsafe { CString::from_raw(text) });
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn sb_text_length(view: &View) -> u32 {
+    view.canvas.length()
+}
+
+/// The text in `start..end`, freed with `sb_string_free`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_text(view: &View, start: u32, end: u32) -> *mut c_char {
+    owned(view.canvas.text([start, end]))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn sb_selection(view: &View, range: &mut [u32; 2]) {
-    if let Some(selection) = report(view.selection()) {
+    if let Some(selection) = report(view.canvas.selection()) {
         *range = selection;
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_select(view: &mut View, start: u32, end: u32) -> bool {
-    report(view.select([start, end])).is_some()
+    report(view.canvas.select([start, end])).is_some()
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_marked(view: &View, range: &mut [u32; 2]) -> bool {
-    report(view.marked())
+    report(view.canvas.marked())
         .flatten()
         .map(|marked| *range = marked)
         .is_some()
@@ -597,15 +822,16 @@ pub unsafe extern "C" fn sb_set_marked(
     selected_start: u32,
     selected_end: u32,
 ) -> bool {
-    let text = unsafe { CStr::from_ptr(text) }
-        .to_string_lossy()
-        .into_owned();
-    report(view.set_marked(text, [selected_start, selected_end])).unwrap_or(false)
+    report(
+        view.canvas
+            .set_marked(string(text), [selected_start, selected_end]),
+    )
+    .unwrap_or(false)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_unmark(view: &mut View) {
-    view.page.editor.finish_composition();
+    view.canvas.page.editor.finish_composition();
 }
 
 /// Types `text`, a lone `\n` as the Return key.
@@ -614,13 +840,10 @@ pub extern "C" fn sb_unmark(view: &mut View) {
 /// `text` is NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sb_insert(view: &mut View, text: *const c_char) -> bool {
-    let text = unsafe { CStr::from_ptr(text) }
-        .to_string_lossy()
-        .into_owned();
-    report(view.insert(text)).unwrap_or(false)
+    report(view.canvas.insert(string(text))).unwrap_or(false)
 }
 
-/// Replaces `start..end` with `text`, as autocorrection and dictation do.
+/// Replaces `start..end` with `text`, as autocorrection, dictation and cutting do.
 ///
 /// # Safety
 /// `text` is NUL-terminated UTF-8.
@@ -631,12 +854,11 @@ pub unsafe extern "C" fn sb_replace(
     end: u32,
     text: *const c_char,
 ) -> bool {
-    let text = unsafe { CStr::from_ptr(text) }
-        .to_string_lossy()
-        .into_owned();
+    let canvas = &mut view.canvas;
     report(
-        view.select([start, end])
-            .and_then(|()| Ok(moved(view.page.commit_text(text)?))),
+        canvas
+            .select([start, end])
+            .and_then(|()| canvas.hold(|page| Ok(moved(page.commit_text(string(text))?)))),
     )
     .unwrap_or(false)
 }
@@ -651,12 +873,10 @@ pub unsafe extern "C" fn sb_paste(
     text: *const c_char,
     language: *const c_char,
 ) -> bool {
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    let language = unsafe { CStr::from_ptr(language) }.to_string_lossy();
+    let (text, language) = (string(text), canvas::language::lcid(&string(language)));
     report(
-        view.page
-            .paste(&text, canvas::language::lcid(&language))
-            .map(moved),
+        view.canvas
+            .hold(|page| page.paste(&text, language).map(moved)),
     )
     .unwrap_or(false)
 }
@@ -664,9 +884,8 @@ pub unsafe extern "C" fn sb_paste(
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_delete_backward(view: &mut View) -> bool {
     report(
-        view.page
-            .key(&Key::Named(NamedKey::Backspace), None)
-            .map(moved),
+        view.canvas
+            .hold(|page| page.key(&Key::Named(NamedKey::Backspace), None).map(moved)),
     )
     .unwrap_or(false)
 }
@@ -674,7 +893,7 @@ pub extern "C" fn sb_delete_backward(view: &mut View) -> bool {
 /// The caret at `offset` as `[x, y, width, height]` in the view's points.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_caret_rect(view: &View, offset: u32, rect: &mut [f32; 4]) -> bool {
-    report(view.caret_rect(offset))
+    report(view.canvas.caret_rect(offset))
         .map(|caret| *rect = caret)
         .is_some()
 }
@@ -691,7 +910,7 @@ pub unsafe extern "C" fn sb_range_rects(
     rects: *mut [f32; 4],
     capacity: usize,
 ) -> usize {
-    let found = report(view.range_rects([start, end])).unwrap_or_default();
+    let found = report(view.canvas.range_rects([start, end])).unwrap_or_default();
     for (index, rect) in found.iter().take(capacity).enumerate() {
         unsafe { rects.add(index).write(*rect) };
     }
@@ -700,23 +919,8 @@ pub unsafe extern "C" fn sb_range_rects(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_closest(view: &View, x: f32, y: f32) -> u32 {
-    report(view.closest([x, y])).unwrap_or(0)
+    report(view.canvas.closest([x, y])).unwrap_or(0)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn corpus_section_lists_its_pages() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../corpus/media-edit/candidate/Features.one"
-        );
-        let section = Section::open(&std::fs::read(path).unwrap()).unwrap();
-        for title in &section.titles {
-            eprintln!("{title:?}");
-        }
-        assert!(!section.pages.is_empty());
-    }
-}
+mod tests;

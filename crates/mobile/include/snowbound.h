@@ -8,9 +8,12 @@
 typedef struct Section Section;
 typedef struct View View;
 
+char *sb_notebook(const char *path);
+
 Section *sb_section_open(const char *path);
 size_t sb_section_count(const Section *section);
 const char *sb_section_title(const Section *section, size_t index);
+uint32_t sb_section_level(const Section *section, size_t index);
 void sb_section_free(Section *section);
 
 View *sb_view_new(void *layer, const Section *section, size_t index, float width, float height, float scale);
@@ -18,15 +21,23 @@ void sb_view_free(View *view);
 void sb_view_resize(View *view, float width, float height, float scale);
 bool sb_view_render(View *view);
 bool sb_view_frame_pending(const View *view);
+void sb_view_set_dark(View *view, bool dark);
+void sb_view_focus(View *view, bool focused);
 void sb_view_content(View *view, float bounds[4]);
+bool sb_view_block(const View *view, float x, float y, float rect[4]);
 void sb_view_set_transform(View *view, float zoom, float x, float y);
-bool sb_view_tap(View *view, float x, float y);
-bool sb_view_in_active_text(const View *view, float x, float y);
+uint8_t sb_view_target(const View *view, float x, float y);
+bool sb_view_press(View *view, float x, float y);
+bool sb_view_drag(View *view, float x, float y);
+bool sb_view_release(View *view);
+bool sb_view_undo(View *view, bool redo);
+bool sb_view_can_undo(const View *view, bool redo);
+bool sb_view_toggle(View *view, uint8_t toggle);
 char *sb_view_edit(View *view);
+void sb_string_free(char *text);
 
 uint32_t sb_text_length(const View *view);
 char *sb_text(const View *view, uint32_t start, uint32_t end);
-void sb_string_free(char *text);
 void sb_selection(const View *view, uint32_t range[2]);
 bool sb_select(View *view, uint32_t start, uint32_t end);
 bool sb_marked(const View *view, uint32_t range[2]);

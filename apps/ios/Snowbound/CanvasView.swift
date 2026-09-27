@@ -4,7 +4,8 @@ private final class MetalView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
 }
 
-/// An offset into the active outline's text in UTF-16 units, paragraphs joined by a newline.
+/// An offset into the active outline's shown text in UTF-16 units, paragraphs joined by a
+/// newline; collapsed paragraphs are not part of it.
 private final class Position: UITextPosition {
     let value: Int
     init(_ value: Int) { self.value = value }
@@ -37,13 +38,31 @@ private extension UITextRange {
     var upper: Int { (self as! Range).hi }
 }
 
+/// What a touch lands on; see `sb_view_target`.
+private enum Target: UInt8 {
+    case page, activeText, text, grip
+}
+
+/// Routes the system's undo (shake, three-finger swipe, the keyboard's undo key) to the
+/// canvas's history.
+private final class CanvasUndoManager: UndoManager {
+    weak var canvas: CanvasView?
+    override var canUndo: Bool { canvas?.canUndo(redo: false) ?? false }
+    override var canRedo: Bool { canvas?.canUndo(redo: true) ?? false }
+    override func undo() { canvas?.undo(redo: false) }
+    override func redo() { canvas?.undo(redo: true) }
+}
+
 /// A canvas page: a scroll view whose pan and pinch drive the canvas viewport, with the page
 /// drawn into a Metal layer pinned to the visible bounds, and the active outline's text
-/// behind `UITextInput` so the system keyboard, marked text, autocorrection, dictation,
-/// selection handles and loupe work on it.
+/// behind `UITextInput` so the system keyboard, marked text, autocorrection, dictation, text
+/// interaction, loupe and edit menu work on it.
 final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextInteractionDelegate,
-    UITextSelectionDisplayInteractionDelegate
+    UITextSelectionDisplayInteractionDelegate, UIGestureRecognizerDelegate
 {
+    /// The zoom a page opens at once the reader has pinched one.
+    private static let zoomKey = "zoom"
+
     private let section: Section
     private let page: Int
     private let metal = MetalView()
@@ -56,38 +75,74 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     private var origin = CGPoint.zero
     private var syncing = false
     private var scrolled = false
+    /// How far right of the content's corner a page opens.
+    private var left: CGFloat = 0
+    /// The zoom a double tap returns to.
+    private var resting: CGFloat = 1
+    private var tapZooming = false
     private lazy var tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+    private lazy var doubleTap: UITapGestureRecognizer = {
+        let recognizer = UITapGestureRecognizer(target: self, action: #selector(doubleTapped))
+        recognizer.numberOfTapsRequired = 2
+        return recognizer
+    }()
+    /// Moves or widens the focused outline from its grips.
+    private lazy var grip = UIPanGestureRecognizer(target: self, action: #selector(gripped))
+    /// Where the touch the grip and handle drags look at came down.
+    private var touchStart = CGPoint.zero
+    /// Drags a selection handle, which the text interaction leaves to the view drawing it.
+    private lazy var handleDrag = UIPanGestureRecognizer(target: self, action: #selector(handleDragged))
+    /// The selection end a handle drag keeps, and the loupe following the other.
+    private var handleAnchor = 0
+    private var loupe: UITextLoupeSession?
+    private lazy var editMenu = UIEditMenuInteraction(delegate: nil)
     private let interaction = UITextInteraction(for: .editable)
-    /// Draws the system caret, selection highlight and handles; the canvas paints neither.
+    /// Draws the caret, selection highlight and handles, which the text interaction's
+    /// gestures move; the canvas paints neither.
     private lazy var display = UITextSelectionDisplayInteraction(textInput: self, delegate: self)
+    private let history = CanvasUndoManager()
 
     weak var inputDelegate: UITextInputDelegate?
-    lazy var tokenizer: UITextInputTokenizer = UITextInputStringTokenizer(textInput: self)
+    lazy var tokenizer: UITextInputTokenizer = LineTokenizer(canvas: self)
+    /// Called when editing starts or stops and after each change, for the bar buttons.
+    var onChange: (() -> Void)?
 
     init(section: Section, page: Int) {
         self.section = section
         self.page = page
         super.init(frame: .zero)
-        backgroundColor = .white
+        backgroundColor = .systemBackground
         delegate = self
         minimumZoomScale = 0.25
         maximumZoomScale = 4
         keyboardDismissMode = .interactive
         addSubview(content)
         insertSubview(metal, at: 0)
+        // Touches land on the scroll view itself, where the text interaction looks for them.
         metal.isUserInteractionEnabled = false
+        content.isUserInteractionEnabled = false
         let layer = metal.layer as! CAMetalLayer
         layer.isOpaque = true
         // Frames reach the screen with the transaction that moves UIKit's caret and handles.
         layer.presentsWithTransaction = true
-        addGestureRecognizer(tap)
+        for recognizer in [tap, doubleTap, grip, handleDrag] {
+            recognizer.delegate = self
+            addGestureRecognizer(recognizer)
+        }
+        tap.require(toFail: doubleTap)
+        panGestureRecognizer.require(toFail: grip)
+        panGestureRecognizer.require(toFail: handleDrag)
         interaction.textInput = self
         interaction.delegate = self
         addInteraction(interaction)
         addInteraction(display)
+        display.isActivated = false
+        addInteraction(editMenu)
+        history.canvas = self
         NotificationCenter.default.addObserver(
             self, selector: #selector(keyboardChanged), name: UIResponder.keyboardWillChangeFrameNotification,
             object: nil)
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: CanvasView, _) in view.paper() }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -102,6 +157,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     override func layoutSubviews() {
         super.layoutSubviews()
         metal.frame = bounds
+        // Selection views go in at the back, where the opaque page would hide them.
+        sendSubviewToBack(metal)
         let scale = window?.screen.scale ?? 3
         metal.layer.contentsScale = scale
         guard bounds.width > 0, bounds.height > 0 else { return }
@@ -116,9 +173,13 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
                 Unmanaged.passUnretained(metal.layer).toOpaque(), sectionHandle, page,
                 Float(bounds.width), Float(bounds.height), Float(scale))
             guard let handle else { return }
+            sb_view_focus(handle, false)
+            paper()
             sync()
-            let fit = (bounds.width - safeAreaInsets.left - safeAreaInsets.right) / content.bounds.width
-            zoomScale = min(1, max(0.5, fit))
+            let skip = margin
+            resting = openingZoom()
+            zoomScale = resting
+            left = skip * resting
             home()
             #if DEBUG
             runScript()
@@ -143,6 +204,13 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         guard dirty else { return }
         dirty = false
         sb_view_render(handle)
+    }
+
+    /// The page follows the system's appearance, on the desktop's dark paper in dark mode.
+    private func paper() {
+        guard let handle else { return }
+        sb_view_set_dark(handle, traitCollection.userInterfaceStyle == .dark)
+        dirty = true
     }
 
     // MARK: Scrolling and zoom
@@ -173,7 +241,25 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             Float(origin.y + contentOffset.y / zoomScale))
         metal.frame = bounds
         dirty = true
-        display.setNeedsSelectionUpdate()
+    }
+
+    /// The zoom the reader last pinched to, within reason; before that, OneNote's 100%, where its 11 pt
+    /// body text shows at 15 points, or up to 140% where the whole page fits across.
+    private func openingZoom() -> CGFloat {
+        if let zoom = UserDefaults.standard.object(forKey: Self.zoomKey) as? Double {
+            // A page opens readable however far the last one was pinched.
+            return min(2, max(0.75, zoom))
+        }
+        let width = bounds.inset(by: safeAreaInsets).width
+        return min(1.4, max(1, width / (content.bounds.width - margin)))
+    }
+
+    /// The empty page left of its first outline, which a phone skips on opening.
+    private var margin: CGFloat {
+        guard let handle else { return 0 }
+        var block: [Float] = [0, 0, 0, 0]
+        guard sb_view_block(handle, 0, 0, &block) else { return 0 }
+        return max(0, CGFloat(block[0]) - origin.x - 12)
     }
 
     /// Until the reader scrolls, the page's corner stays below the navigation bar as its
@@ -184,13 +270,54 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     }
 
     private func home() {
-        if !scrolled { contentOffset = CGPoint(x: -adjustedContentInset.left, y: -adjustedContentInset.top) }
+        if !scrolled { contentOffset = CGPoint(x: left - adjustedContentInset.left, y: -adjustedContentInset.top) }
     }
 
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { scrolled = true }
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { scrolled = true }
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { content }
     func scrollViewDidScroll(_ scrollView: UIScrollView) { transform() }
-    func scrollViewDidZoom(_ scrollView: UIScrollView) { transform() }
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        transform()
+        // Scrolling carries the caret and handles along; zooming moves them within the page.
+        display.setNeedsSelectionUpdate()
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        if tapZooming {
+            tapZooming = false
+        } else {
+            resting = scale
+            UserDefaults.standard.set(Double(scale), forKey: Self.zoomKey)
+        }
+    }
+
+    @objc private func doubleTapped(_ recognizer: UITapGestureRecognizer) {
+        zoom(at: recognizer.location(in: self))
+    }
+
+    /// Zooms to fit the outline nearest `point` across the view, or back out, as a double
+    /// tap does in Safari.
+    func zoom(at point: CGPoint) {
+        guard let handle else { return }
+        tapZooming = true
+        var block: [Float] = [0, 0, 0, 0]
+        let local = visible(point)
+        guard zoomScale <= resting * 1.05, sb_view_block(handle, Float(local.x), Float(local.y), &block) else {
+            setZoomScale(resting, animated: true)
+            return
+        }
+        let width = bounds.inset(by: safeAreaInsets).width
+        let margin: CGFloat = 12
+        let scale = min(maximumZoomScale, (width - 2 * margin) / (CGFloat(block[2] - block[0])))
+        guard scale > zoomScale * 1.05 else {
+            setZoomScale(resting, animated: true)
+            return
+        }
+        let x = CGFloat(block[0]) - origin.x - margin / scale
+        let y = point.y / zoomScale - bounds.height / scale / 2
+        zoom(to: CGRect(x: x, y: y, width: width / scale, height: bounds.height / scale), animated: true)
+    }
 
     @objc private func keyboardChanged(_ notification: Notification) {
         guard let frame = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect,
@@ -205,33 +332,125 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
 
     // MARK: Touch
 
-    /// The canvas places the caret, focuses outlines and starts new ones; the system's text
-    /// interaction takes over inside the outline already taking input.
-    private func inActiveText(_ point: CGPoint) -> Bool {
-        guard let handle else { return false }
+    private func target(_ point: CGPoint) -> Target {
+        guard let handle else { return .page }
         let local = visible(point)
-        return isFirstResponder && sb_view_in_active_text(handle, Float(local.x), Float(local.y))
+        return Target(rawValue: sb_view_target(handle, Float(local.x), Float(local.y))) ?? .page
+    }
+
+    func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if recognizer === grip || recognizer === handleDrag { touchStart = touch.location(in: self) }
+        return true
     }
 
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
-        recognizer === tap
-            ? !inActiveText(recognizer.location(in: self)) : super.gestureRecognizerShouldBegin(recognizer)
+        switch recognizer {
+        case tap:
+            [.page, .grip].contains(target(recognizer.location(in: self))) && !onHandle(recognizer.location(in: self))
+        case doubleTap: target(recognizer.location(in: self)) == .page
+        case grip: target(touchStart) == .grip
+        case handleDrag: onHandle(touchStart)
+        default: super.gestureRecognizerShouldBegin(recognizer)
+        }
     }
 
+    /// The system's text interaction works in the outline taking input; a touch on another
+    /// outline's text focuses it first, as a tap there would.
     func interactionShouldBegin(_ interaction: UITextInteraction, at point: CGPoint) -> Bool {
-        inActiveText(point)
+        if onHandle(point) { return true }
+        switch target(point) {
+        case .activeText: break
+        case .text: press(at: point)
+        case .page, .grip: return false
+        }
+        if !isFirstResponder { _ = becomeFirstResponder() }
+        return true
+    }
+
+    /// Whether `point` is on a selection handle, whose knob hangs off the text.
+    private func onHandle(_ point: CGPoint) -> Bool {
+        guard isFirstResponder, let range = selectedTextRange, !range.isEmpty else { return false }
+        return [range.start, range.end].contains {
+            caretRect(for: $0).insetBy(dx: -22, dy: -22).contains(point)
+        }
     }
 
     @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
         tap(at: recognizer.location(in: self))
     }
 
-    /// A tap at `point` in the scroll view's bounds.
+    /// A tap at `point` in the scroll view's bounds: places the caret, focuses an outline or
+    /// starts a new one.
     func tap(at point: CGPoint) {
+        press(at: point)
+        if !isFirstResponder { _ = becomeFirstResponder() }
+    }
+
+    private func press(at point: CGPoint) {
         guard let handle else { return }
         let point = visible(point)
-        edit(external: true) { sb_view_tap(handle, Float(point.x), Float(point.y)) }
-        if !isFirstResponder { _ = becomeFirstResponder() }
+        edit(external: true) {
+            let pressed = sb_view_press(handle, Float(point.x), Float(point.y))
+            return sb_view_release(handle) || pressed
+        }
+    }
+
+    @objc private func handleDragged(_ recognizer: UIPanGestureRecognizer) {
+        guard let range = selectedTextRange else { return }
+        // The finger sits below the knob; aim at the text line above it.
+        let point = recognizer.location(in: self)
+        let aim = CGPoint(x: point.x, y: point.y - 16)
+        switch recognizer.state {
+        case .began:
+            let start = caretRect(for: range.start)
+            let end = caretRect(for: range.end)
+            let nearStart = hypot(start.midX - touchStart.x, start.midY - touchStart.y)
+                < hypot(end.midX - touchStart.x, end.midY - touchStart.y)
+            handleAnchor = nearStart ? range.upper : range.lower
+            let handle = display.handleViews.min {
+                hypot($0.center.x - touchStart.x, $0.center.y - touchStart.y)
+                    < hypot($1.center.x - touchStart.x, $1.center.y - touchStart.y)
+            }
+            loupe = UITextLoupeSession.begin(at: aim, fromSelectionWidgetView: handle, in: self)
+            editMenu.dismissMenu()
+            fallthrough
+        case .changed:
+            guard let position = closestPosition(to: aim) else { return }
+            // A handle stops one character short of the other.
+            let step = position.offset < handleAnchor || (position.offset == handleAnchor && handleAnchor > 0) ? -1 : 1
+            let end = position.offset == handleAnchor ? handleAnchor + step : position.offset
+            let moved = Range(handleAnchor, min(max(end, 0), endOfDocument.offset))
+            edit(external: true) { choose(moved) }
+            let caret = caretRect(for: position)
+            loupe?.move(to: CGPoint(x: caret.midX, y: caret.midY), withCaretRect: caret, trackingCaret: false)
+        default:
+            loupe?.invalidate()
+            loupe = nil
+            let end = caretRect(for: range.end)
+            editMenu.presentEditMenu(with: UIEditMenuConfiguration(
+                identifier: nil, sourcePoint: CGPoint(x: end.midX, y: caretRect(for: range.start).minY)))
+        }
+    }
+
+    @objc private func gripped(_ recognizer: UIPanGestureRecognizer) {
+        guard let handle else { return }
+        let point = visible(recognizer.location(in: self))
+        switch recognizer.state {
+        case .began:
+            let start = visible(touchStart)
+            _ = sb_view_press(handle, Float(start.x), Float(start.y))
+            _ = sb_view_drag(handle, Float(point.x), Float(point.y))
+            // The caret and handles stay behind until the outline lands.
+            display.isActivated = false
+            editMenu.dismissMenu()
+            dirty = true
+        case .changed:
+            _ = sb_view_drag(handle, Float(point.x), Float(point.y))
+            dirty = true
+        default:
+            display.isActivated = isFirstResponder
+            edit(external: true) { sb_view_release(handle) }
+        }
     }
 
     /// Runs a change to the page, telling the system when it did not ask for it.
@@ -246,10 +465,13 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             inputDelegate?.textDidChange(self)
             inputDelegate?.selectionDidChange(self)
         }
+        dirty = true
         if changed {
             sync()
             revealCaret()
         }
+        display.setNeedsSelectionUpdate()
+        onChange?()
     }
 
     /// Takes the edit the page recorded, so its ops do not pile up; the host drops it
@@ -260,31 +482,100 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     }
 
     private func revealCaret() {
-        guard let handle, isFirstResponder else { return }
-        var range: [UInt32] = [0, 0]
-        sb_selection(handle, &range)
-        let caret = caretRect(for: Position(Int(range[1])))
+        guard handle != nil, isFirstResponder, let range = selectedTextRange else { return }
+        let caret = caretRect(for: range.end)
         scrollRectToVisible(caret.insetBy(dx: -8, dy: -16), animated: false)
     }
+
+    // MARK: Responder
 
     override var canBecomeFirstResponder: Bool { handle != nil }
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
+        if let handle { sb_view_focus(handle, true) }
         display.isActivated = true
+        dirty = true
+        onChange?()
         return true
     }
 
     override func resignFirstResponder() -> Bool {
         guard super.resignFirstResponder() else { return false }
+        if let handle { sb_view_focus(handle, false) }
         display.isActivated = false
+        dirty = true
+        onChange?()
         return true
+    }
+
+    override var undoManager: UndoManager? { history }
+
+    func canUndo(redo: Bool) -> Bool { handle.map { sb_view_can_undo($0, redo) } ?? false }
+
+    func undo(redo: Bool) {
+        guard let handle else { return }
+        edit(external: true) { sb_view_undo(handle, redo) }
+    }
+
+    private var selection: (lo: Int, hi: Int) {
+        guard let range = selectedTextRange else { return (0, 0) }
+        return (range.lower, range.upper)
+    }
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        let (lo, hi) = selection
+        switch action {
+        case #selector(copy(_:)), #selector(cut(_:)), #selector(delete(_:)),
+            #selector(toggleBoldface(_:)), #selector(toggleItalics(_:)), #selector(toggleUnderline(_:)):
+            return lo < hi
+        case #selector(paste(_:)): return UIPasteboard.general.hasStrings
+        case #selector(select(_:)): return lo == hi && hasText
+        case #selector(selectAll(_:)): return hasText && (lo > 0 || hi < endOfDocument.offset)
+        default: return super.canPerformAction(action, withSender: sender)
+        }
+    }
+
+    override func copy(_ sender: Any?) {
+        guard let range = selectedTextRange, let text = text(in: range) else { return }
+        UIPasteboard.general.string = text
+    }
+
+    override func cut(_ sender: Any?) {
+        copy(sender)
+        delete(sender)
+    }
+
+    override func delete(_ sender: Any?) {
+        guard let range = selectedTextRange else { return }
+        edit(external: true) { replacing(range, with: "") }
     }
 
     /// Pasted text takes the keyboard's language, as Windows gives the clipboard.
     override func paste(_ sender: Any?) {
         guard let handle, let text = UIPasteboard.general.string else { return }
         edit(external: true) { sb_paste(handle, text, textInputMode?.primaryLanguage ?? "") }
+    }
+
+    override func select(_ sender: Any?) {
+        guard let caret = selectedTextRange?.start,
+            let word = tokenizer.rangeEnclosingPosition(caret, with: .word, inDirection: .storage(.backward))
+                ?? tokenizer.rangeEnclosingPosition(caret, with: .word, inDirection: .storage(.forward))
+        else { return }
+        edit(external: true) { choose(word) }
+    }
+
+    override func selectAll(_ sender: Any?) {
+        edit(external: true) { choose(Range(0, endOfDocument.offset)) }
+    }
+
+    override func toggleBoldface(_ sender: Any?) { toggle(0) }
+    override func toggleItalics(_ sender: Any?) { toggle(1) }
+    override func toggleUnderline(_ sender: Any?) { toggle(2) }
+
+    private func toggle(_ style: UInt8) {
+        guard let handle else { return }
+        edit(external: true) { sb_view_toggle(handle, style) }
     }
 
     // MARK: Coordinates
@@ -322,9 +613,18 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         return String(cString: text)
     }
 
+    private func replacing(_ range: UITextRange, with text: String) -> Bool {
+        guard let handle else { return false }
+        return sb_replace(handle, UInt32(range.lower), UInt32(range.upper), text)
+    }
+
     func replace(_ range: UITextRange, withText text: String) {
-        guard let handle else { return }
-        edit { sb_replace(handle, UInt32(range.lower), UInt32(range.upper), text) }
+        edit { replacing(range, with: text) }
+    }
+
+    private func choose(_ range: UITextRange) -> Bool {
+        guard let handle else { return false }
+        return sb_select(handle, UInt32(range.lower), UInt32(range.upper))
     }
 
     var selectedTextRange: UITextRange? {
@@ -335,10 +635,11 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             return Range(Int(range[0]), Int(range[1]))
         }
         set {
-            guard let handle, let newValue else { return }
-            _ = sb_select(handle, UInt32(newValue.lower), UInt32(newValue.upper))
-            dirty = true
+            guard let newValue else { return }
+            _ = choose(newValue)
             display.setNeedsSelectionUpdate()
+            dirty = true
+            onChange?()
         }
     }
 
@@ -425,14 +726,16 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         var rect: [Float] = [0, 0, 0, 0]
         guard sb_caret_rect(handle, UInt32(position.offset), &rect) else { return .zero }
         var caret = bounded(rect)
+        caret.origin.x -= 1
         caret.size.width = 2
         return caret
     }
 
     func selectionRects(for range: UITextRange) -> [UITextSelectionRect] {
         guard let handle else { return [] }
-        var rects = [(Float, Float, Float, Float)](repeating: (0, 0, 0, 0), count: 64)
-        let count = min(64, sb_range_rects(handle, UInt32(range.lower), UInt32(range.upper), &rects, 64))
+        let capacity = 256
+        var rects = [(Float, Float, Float, Float)](repeating: (0, 0, 0, 0), count: capacity)
+        let count = min(capacity, sb_range_rects(handle, UInt32(range.lower), UInt32(range.upper), &rects, capacity))
         return (0..<count).map {
             let rect = rects[$0]
             return SelectionRect(
@@ -454,5 +757,69 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     func characterRange(at point: CGPoint) -> UITextRange? {
         guard let position = closestPosition(to: point) else { return nil }
         return Range(position.offset, min(position.offset + 1, endOfDocument.offset))
+    }
+}
+
+/// Words and sentences come from the text; lines come from the canvas's layout, which the
+/// string tokenizer cannot see, so a tap after a line's last word stays on that line.
+private final class LineTokenizer: UITextInputStringTokenizer {
+    private unowned let canvas: CanvasView
+
+    init(canvas: CanvasView) {
+        self.canvas = canvas
+        super.init(textInput: canvas)
+    }
+
+    private func forward(_ direction: UITextDirection) -> Bool {
+        [UITextStorageDirection.forward.rawValue, UITextLayoutDirection.right.rawValue,
+         UITextLayoutDirection.down.rawValue].contains(direction.rawValue)
+    }
+
+    private func line(_ offset: Int) -> CGFloat { canvas.caretRect(for: Position(offset)).minY.rounded() }
+
+    private func atEdge(_ offset: Int, forward: Bool) -> Bool {
+        let end = canvas.endOfDocument.offset
+        return forward
+            ? offset >= end || line(offset + 1) != line(offset)
+            : offset <= 0 || line(offset - 1) != line(offset)
+    }
+
+    private func edge(_ offset: Int, forward: Bool) -> Int {
+        var offset = offset
+        while !atEdge(offset, forward: forward) { offset += forward ? 1 : -1 }
+        return offset
+    }
+
+    override func isPosition(
+        _ position: UITextPosition, atBoundary granularity: UITextGranularity, inDirection direction: UITextDirection
+    ) -> Bool {
+        guard granularity == .line else {
+            return super.isPosition(position, atBoundary: granularity, inDirection: direction)
+        }
+        return atEdge(position.offset, forward: forward(direction))
+    }
+
+    override func position(
+        from position: UITextPosition, toBoundary granularity: UITextGranularity, inDirection direction: UITextDirection
+    ) -> UITextPosition? {
+        guard granularity == .line else {
+            return super.position(from: position, toBoundary: granularity, inDirection: direction)
+        }
+        return Position(edge(position.offset, forward: forward(direction)))
+    }
+
+    override func rangeEnclosingPosition(
+        _ position: UITextPosition, with granularity: UITextGranularity, inDirection direction: UITextDirection
+    ) -> UITextRange? {
+        guard granularity == .line else {
+            return super.rangeEnclosingPosition(position, with: granularity, inDirection: direction)
+        }
+        return Range(edge(position.offset, forward: false), edge(position.offset, forward: true))
+    }
+
+    override func isPosition(
+        _ position: UITextPosition, withinTextUnit granularity: UITextGranularity, inDirection direction: UITextDirection
+    ) -> Bool {
+        granularity == .line || super.isPosition(position, withinTextUnit: granularity, inDirection: direction)
     }
 }

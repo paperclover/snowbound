@@ -7,12 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		5B0000000000000000000101 /* Features.one in Resources */ = {isa = PBXBuildFile; fileRef = 5B0000000000000000000201 /* Features.one */; };
+		5B0000000000000000000101 /* Sample in Resources */ = {isa = PBXBuildFile; fileRef = 5B0000000000000000000201 /* Sample */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		5B0000000000000000000200 /* Snowbound.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Snowbound.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		5B0000000000000000000201 /* Features.one */ = {isa = PBXFileReference; lastKnownFileType = file; name = Features.one; path = "../../corpus/media-edit/candidate/Features.one"; sourceTree = SOURCE_ROOT; };
+		5B0000000000000000000201 /* Sample */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Sample; path = "../../corpus/m6/native-features-01/notebook"; sourceTree = SOURCE_ROOT; };
 		5B0000000000000000000202 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5B0000000000000000000203 /* Snowbound-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Snowbound-Bridging-Header.h"; sourceTree = "<group>"; };
 		5B0000000000000000000204 /* build-rust.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "build-rust.sh"; sourceTree = "<group>"; };
@@ -41,7 +41,7 @@
 			isa = PBXGroup;
 			children = (
 				5B0000000000000000000300 /* Snowbound */,
-				5B0000000000000000000201 /* Features.one */,
+				5B0000000000000000000201 /* Sample */,
 				5B0000000000000000000202 /* Info.plist */,
 				5B0000000000000000000203 /* Snowbound-Bridging-Header.h */,
 				5B0000000000000000000204 /* build-rust.sh */,
@@ -120,7 +120,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				5B0000000000000000000101 /* Features.one in Resources */,
+				5B0000000000000000000101 /* Sample in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
