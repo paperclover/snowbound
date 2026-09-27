@@ -10,7 +10,7 @@ draw = { path = "../draw" }
 ui = { path = "../ui" }
 png = "0.18"
 onestore = { path = "../onestore" }
-notebook = { path = "../notebook" }
+notebook = { path = "../notebook", features = ["smb"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pollster = "0.4"
@@ -22,6 +22,7 @@ accesskit = "0.25.0"
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["rwh_06"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell", "NSOpenPanel", "NSPanel", "NSSavePanel"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray"] }

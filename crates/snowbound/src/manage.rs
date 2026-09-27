@@ -12,19 +12,35 @@ use std::{error::Error, sync::Arc};
 
 /// A change to a notebook's sections and groups, by catalog path.
 pub enum Structure {
-    NewSection { folder: String },
-    NewGroup { folder: String },
-    Rename { path: String, name: String },
+    NewSection {
+        folder: String,
+    },
+    NewGroup {
+        folder: String,
+    },
+    Rename {
+        path: String,
+        name: String,
+    },
     /// Moves a section or group to the recycle bin.
-    Delete { path: String },
+    Delete {
+        path: String,
+    },
     /// Moves a section or group into another folder.
-    Move { path: String, folder: String },
+    Move {
+        path: String,
+        folder: String,
+    },
     /// Orders a folder's sections and groups.
-    Reorder { folder: String, paths: Vec<String> },
+    Reorder {
+        folder: String,
+        paths: Vec<String>,
+    },
 }
 
-/// Notebook colours for new notebooks, in turn: OneNote 2010's section colours.
-const NOTEBOOK_COLORS: [u32; 3] = [0x00e4a88a, 0x0078b0f6, 0x00bba4d5];
+/// The colour OneNote 2010 gave each new notebook beside its default one, COLORREF
+/// (`corpus/notebook-management/native/new-notebook`).
+const NOTEBOOK_COLOR: u32 = 0x00aeba91;
 
 /// `current`, the path of a section, after `from` moved to `to`: a section moved itself,
 /// or one inside a moved group.
@@ -56,18 +72,18 @@ impl State {
         Ok(creation.dated(&date, &time)?)
     }
 
-    /// Adds a page at the end of the open section, or a subpage after the open page, and
-    /// opens it with its title ready for typing, as OneNote's New Page and New Subpage do.
-    pub(crate) fn new_page(&mut self, subpage: bool) -> Result<(), Box<dyn Error>> {
+    /// Adds a page at the end of the open section, or a subpage of page `under`, and opens
+    /// it with its title ready for typing, as OneNote's New Page and New Subpage do.
+    pub(crate) fn new_page(&mut self, under: Option<ExGuid>) -> Result<(), Box<dyn Error>> {
         self.persist()?;
         let session = self.session.as_ref().ok_or("No section is open")?;
-        // A subpage follows the open page and the subpages already under it.
-        let (before, level) = if subpage {
+        // A subpage follows its page and the subpages already under it.
+        let (before, level) = if let Some(under) = under {
             let at = session
                 .pages
                 .iter()
-                .position(|(space, ..)| *space == session.space)
-                .ok_or("The open page is not listed")?;
+                .position(|(space, ..)| *space == under)
+                .ok_or("That page is not listed")?;
             let level = session.pages[at].2;
             let next = session.pages[at + 1..]
                 .iter()
@@ -80,7 +96,7 @@ impl State {
         let creation = self.dated_page(None)?;
         let space = creation.space();
         let mut ops = vec![Op::Section(SectionOp::Create(creation))];
-        if subpage {
+        if under.is_some() {
             ops.push(Op::Section(SectionOp::Pages(vec![PageEdit::move_to(
                 space, before, level,
             )?])));
@@ -105,59 +121,12 @@ impl State {
         &mut self,
         choice: crate::templates::Choice,
     ) -> Result<(), Box<dyn Error>> {
-        use crate::templates::Choice;
         self.persist()?;
         let session = self.session.as_ref().ok_or("No section is open")?;
         let space = session.space;
-        let page = session.section.page(space)?;
-        let mut ops: Vec<PageOp> = page
-            .objects
-            .iter()
-            .filter(|object| matches!(object, PageObject::Image(image) if image.background))
-            .map(|object| PageOp::Delete {
-                object: object.id(),
-            })
-            .collect();
-        match choice {
-            Choice::Template(name) => {
-                let template =
-                    canvas::template::find(name).ok_or("That template is not available")?;
-                if page.color.is_some() {
-                    ops.push(PageOp::Color(None));
-                }
-                // Art lies under everything else on the page, first in its order.
-                let under = page
-                    .objects
-                    .iter()
-                    .find(|object| !matches!(object, PageObject::Image(image) if image.background))
-                    .map(PageObject::id);
-                for art in template.art {
-                    let bytes = canvas::gpu::page::template_picture(art.art)
-                        .ok_or("That template's art is missing")?;
-                    ops.push(PageOp::Add {
-                        object: PageObject::Image(Image {
-                            id: onestore::page::text::new_id()?,
-                            layout: onestore::document::Layout {
-                                x: Some(art.position[0]),
-                                y: Some(art.position[1]),
-                                max_width: art.size.map(|size| size[0]),
-                                max_height: art.size.map(|size| size[1]),
-                                width_set_by_user: art.size.map(|_| true),
-                                ..Default::default()
-                            },
-                            size: art.size,
-                            bytes: Some(bytes.into()),
-                            alt: None,
-                            background: true,
-                        }),
-                        before: under,
-                    });
-                }
-            }
-            Choice::Color(index) => {
-                ops.push(PageOp::Color(Some(canvas::template::PAGE_COLORS[index].1)))
-            }
-            Choice::More | Choice::Dismiss | Choice::Colors => return Ok(()),
+        let ops = template_ops(&session.section.page(space)?, choice)?;
+        if ops.is_empty() {
+            return Ok(());
         }
         session.section.apply(
             &self.author,
@@ -175,18 +144,17 @@ impl State {
             return Ok(());
         };
         let page = self.dated_page(None)?;
-        let color = NOTEBOOK_COLORS[self.notebooks.len() % NOTEBOOK_COLORS.len()];
         let (cache, notify) = (self.cache.clone(), notify(self.proxy.clone()));
         self.load(move || {
             let location = std::path::absolute(&root)?.to_string_lossy().into_owned();
-            let notebook = Notebook::create(&location, &cache, color, &page)?;
-            let library = Arc::new(Library::open_notebook(&location, notebook, &cache));
+            let notebook = Notebook::create(&location, &cache, NOTEBOOK_COLOR, &page)?;
+            let library = Arc::new(Library::created(&location, notebook, &cache));
             let path = library
                 .first_section()
                 .ok_or("The new notebook has no section")?;
             let section = library.open(&path, notify)?;
             let (session, page) = read_session(section, library, path, None)?;
-            Ok((Loaded::Section(Box::new(session)), page))
+            Ok(Loaded::Section(Box::new(session), page))
         });
         Ok(())
     }
@@ -220,7 +188,9 @@ impl State {
         let page = match change {
             Structure::NewSection { .. } => match self.dated_page(None) {
                 Ok(page) => Some(page),
-                Err(error) => return platform::alert("Couldn't add the section", &error.to_string()),
+                Err(error) => {
+                    return platform::alert("Couldn't add the section", &error.to_string());
+                }
             },
             _ => None,
         };
@@ -229,9 +199,9 @@ impl State {
             .as_ref()
             .filter(|session| Arc::ptr_eq(&session.library, &library))
             .map(|session| session.tabs[session.tab].path.clone());
-        let (cache, notify) = (self.cache.clone(), notify(self.proxy.clone()));
+        let notify = notify(self.proxy.clone());
         self.load(move || {
-            let mut notebook = Notebook::open(&library.location, &cache)?;
+            let mut notebook = library.reopen()?;
             let names = |notebook: &Notebook, folder: &str| -> Vec<String> {
                 let mut folders = vec![notebook.catalog()];
                 while let Some(candidate) = folders.pop() {
@@ -251,43 +221,56 @@ impl State {
                 }
                 Vec::new()
             };
-            let open = match change {
+            // The open section where the change leaves it, and the section to show.
+            let (followed, created) = match change {
                 Structure::NewSection { folder } => {
                     let name = unused(&names(&notebook, &folder), "New Section", true);
                     let page = page.ok_or("The new section has no page")?;
-                    Some(notebook.create_section(&folder, &name, &page)?)
+                    (
+                        current,
+                        Some(notebook.create_section(&folder, &name, &page)?),
+                    )
                 }
                 Structure::NewGroup { folder } => {
                     let name = unused(&names(&notebook, &folder), "New Section Group", false);
                     notebook.create_group(&folder, &name)?;
-                    current
+                    (current, None)
                 }
                 Structure::Rename { path, name } => {
                     let renamed = notebook.rename(&path, &name)?;
-                    current.map(|current| follow(&current, &path, &renamed))
+                    (
+                        current.map(|current| follow(&current, &path, &renamed)),
+                        None,
+                    )
                 }
                 Structure::Delete { path } => {
                     notebook.delete(&path)?;
-                    current
+                    (current, None)
                 }
                 Structure::Move { path, folder } => {
                     let moved = notebook.move_entry(&path, &folder)?;
-                    current.map(|current| follow(&current, &path, &moved))
+                    (current.map(|current| follow(&current, &path, &moved)), None)
                 }
                 Structure::Reorder { folder, paths } => {
                     let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
                     notebook.reorder(&folder, &paths)?;
-                    current
+                    (current, None)
                 }
             };
-            let library = Arc::new(Library::open_notebook(&library.location, notebook, &cache));
+            let open = created.or(followed.clone());
+            let library = Arc::new(library.with(notebook));
             let path = open
                 .filter(|path| library.contains(path))
                 .or_else(|| library.first_section())
                 .ok_or("The notebook has no sections left")?;
+            // The open section, perhaps renamed or moved, stays open: its replica is this
+            // thread's to reopen only where no section holds it.
+            if followed.as_deref() == Some(path.as_str()) {
+                return Ok(Loaded::Library(library, path));
+            }
             let section = library.open(&path, notify)?;
             let (session, page) = read_session(section, library, path, None)?;
-            Ok((Loaded::Section(Box::new(session)), page))
+            Ok(Loaded::Section(Box::new(session), page))
         });
     }
 
@@ -327,15 +310,13 @@ impl State {
                 space
             }
         };
-        let notebook = match &session.library.notebook {
-            Ok(Some(_)) => Some((session.library.location.clone(), self.cache.clone())),
-            _ => None,
-        };
+        let notebook =
+            matches!(session.library.notebook, Ok(Some(_))).then(|| Arc::clone(&session.library));
         let replica = Arc::clone(session.section.replica());
         let author = self.author.clone();
         self.load(move || {
-            if let Some((location, cache)) = notebook {
-                Notebook::open(&location, &cache)?.recycle_pages(&pages, &author)?;
+            if let Some(library) = notebook {
+                library.reopen()?.recycle_pages(&pages, &author)?;
             }
             replica.apply(
                 &author,
@@ -344,7 +325,59 @@ impl State {
                     ops,
                 },
             )?;
-            Ok((Loaded::Page(next), replica.page(next)?))
+            Ok(Loaded::Page(next, replica.page(next)?))
+        });
+        Ok(())
+    }
+
+    /// Moves page `space` of the open section to the end of the section at catalog `path`,
+    /// as OneNote moves a page dropped on a section's tab: the page keeps its identity,
+    /// title, date and content there and leaves this section.
+    pub(crate) fn move_page(&mut self, space: ExGuid, path: String) -> Result<(), Box<dyn Error>> {
+        self.persist()?;
+        let session = self.session.as_ref().ok_or("No section is open")?;
+        let import = notebook::session::moved(&session.section.page(space)?, &self.author)?;
+        let at = session
+            .pages
+            .iter()
+            .position(|(listed, ..)| *listed == space)
+            .unwrap_or_default();
+        let next = session.pages[at + 1..]
+            .iter()
+            .chain(session.pages[..at].iter().rev())
+            .map(|(listed, ..)| *listed)
+            .next();
+        let mut ops = vec![Op::Section(SectionOp::Delete(vec![space]))];
+        let next = match next {
+            Some(next) => next,
+            None => {
+                let fresh = self.dated_page(None)?;
+                let space = fresh.space();
+                ops.push(Op::Section(SectionOp::Create(fresh)));
+                space
+            }
+        };
+        let library = Arc::clone(&session.library);
+        let replica = Arc::clone(session.section.replica());
+        let author = self.author.clone();
+        self.load(move || {
+            let target = library.open(&path, || {})?;
+            target.replica().apply(
+                &author,
+                Edit {
+                    at: crate::filetime(),
+                    ops: vec![import],
+                },
+            )?;
+            target.close()?;
+            replica.apply(
+                &author,
+                Edit {
+                    at: crate::filetime(),
+                    ops,
+                },
+            )?;
+            Ok(Loaded::Page(next, replica.page(next)?))
         });
         Ok(())
     }
@@ -366,9 +399,371 @@ impl State {
     }
 }
 
+/// The ops giving `page` `choice`'s background: its template art (OneNote's pictures'
+/// places, our recreations' bytes) or a page colour, in place of the background it had.
+pub fn template_ops(
+    page: &Page,
+    choice: crate::templates::Choice,
+) -> Result<Vec<PageOp>, Box<dyn Error>> {
+    use crate::templates::Choice;
+    let mut ops: Vec<PageOp> = page
+        .objects
+        .iter()
+        .filter(|object| matches!(object, PageObject::Image(image) if image.background))
+        .map(|object| PageOp::Delete {
+            object: object.id(),
+        })
+        .collect();
+    match choice {
+        Choice::Template(name) => {
+            let template = canvas::template::find(name).ok_or("That template is not available")?;
+            if page.color.is_some() {
+                ops.push(PageOp::Color(None));
+            }
+            // Art lies under everything else on the page, first of its children (the title
+            // is no child).
+            let under = page
+                .objects
+                .iter()
+                .find(|object| match object {
+                    PageObject::Title(_) => false,
+                    PageObject::Image(image) => !image.background,
+                    _ => true,
+                })
+                .map(PageObject::id);
+            for art in template.art {
+                let bytes = canvas::gpu::page::template_picture(art.art)
+                    .ok_or("That template's art is missing")?;
+                ops.push(PageOp::Add {
+                    object: PageObject::Image(Image {
+                        id: onestore::page::text::new_id()?,
+                        layout: onestore::document::Layout {
+                            x: Some(art.position[0]),
+                            y: Some(art.position[1]),
+                            max_width: art.size.map(|size| size[0]),
+                            max_height: art.size.map(|size| size[1]),
+                            width_set_by_user: art.size.map(|_| true),
+                            ..Default::default()
+                        },
+                        size: art.size,
+                        bytes: Some(bytes.into()),
+                        alt: None,
+                        background: true,
+                    }),
+                    before: under,
+                });
+            }
+            // The one template with content worth keeping.
+            if name == "Informal Meeting Notes" {
+                ops.extend(onestore::op::lower_page(
+                    page,
+                    &crate::meeting::content(page)?,
+                )?);
+            }
+        }
+        Choice::Color(index) => {
+            ops.push(PageOp::Color(Some(canvas::template::PAGE_COLORS[index].1)))
+        }
+        Choice::More | Choice::Dismiss | Choice::Colors => return Ok(Vec::new()),
+    }
+    Ok(ops)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::templates::Choice;
+    use std::path::Path;
+
+    const AUTHOR: &str = "Rust Author";
+
+    fn dated() -> PageCreation {
+        let creation = PageCreation::new(None, Some(""), AUTHOR).unwrap();
+        let [date, time] = platform::date_text(creation.created());
+        creation.dated(&date, &time).unwrap()
+    }
+
+    /// Applies `ops` to the section file at `file` as one edit, as the section thread does,
+    /// and publishes it.
+    fn edit(file: &Path, ops: Vec<Op>) {
+        let arena = onestore::Arena::default();
+        let mut section =
+            onestore::Section::open(&arena, onestore::read_file(file).unwrap()).unwrap();
+        section
+            .apply(
+                AUTHOR,
+                &Edit {
+                    at: crate::filetime(),
+                    ops,
+                },
+            )
+            .unwrap();
+        if let Some(transaction) = section.seal().unwrap() {
+            transaction.commit_file(file).unwrap();
+        }
+    }
+
+    fn pages(file: &Path) -> Vec<(ExGuid, String, u32)> {
+        let arena = onestore::Arena::default();
+        onestore::Section::open(&arena, onestore::read_file(file).unwrap())
+            .unwrap()
+            .pages()
+            .unwrap()
+    }
+
+    fn page(file: &Path, space: ExGuid) -> Page {
+        let arena = onestore::Arena::default();
+        onestore::Section::open(&arena, onestore::read_file(file).unwrap())
+            .unwrap()
+            .page(space)
+            .unwrap()
+    }
+
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    /// A notebook made and changed the way the app makes and changes one: created with a
+    /// dated first page; sections and groups added, renamed, moved, reordered and deleted to
+    /// the recycle bin; pages titled, given a template's art or a colour, made subpages and
+    /// deleted to the recycle bin. `SNOWBOUND_MANAGEMENT_EXPORT` names a new directory that
+    /// receives it for a cold reopen in OneNote 2010.
+    #[test]
+    fn a_notebook_is_managed_as_onenote_manages_one() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-manage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        std::fs::create_dir_all(&temporary).unwrap();
+        let root = temporary.join("Managed");
+        let cache = temporary.join("cache");
+        let mut notebook = Notebook::create(&root, &cache, NOTEBOOK_COLOR, &dated()).unwrap();
+        for (folder, name) in [("", "New Section 2"), ("", "Binned")] {
+            notebook.create_section(folder, name, &dated()).unwrap();
+        }
+        for (group, section) in [("Kept", "Inner"), ("Doomed", "Gone")] {
+            notebook.create_group("", group).unwrap();
+            notebook.create_section(group, section, &dated()).unwrap();
+        }
+
+        // Pages of the first section, each titled.
+        let file = root.join("New Section 1.one");
+        let first = pages(&file)[0].0;
+        let title = |space: ExGuid, text: &str| {
+            let page = page(&file, space);
+            let title = page
+                .objects
+                .iter()
+                .find_map(|object| match object {
+                    PageObject::Title(title) => title.outlines[0].paragraphs[0].text(),
+                    _ => None,
+                })
+                .unwrap()
+                .id;
+            Op::Page {
+                space,
+                op: PageOp::Text {
+                    text: title,
+                    range: 0..0,
+                    with: text.to_owned(),
+                },
+            }
+        };
+        edit(&file, vec![title(first, "Garden plan")]);
+        let mut spaces = Vec::new();
+        for text in [
+            "Ivy page",
+            "Teal page",
+            "Subpage",
+            "Deleted page",
+            "Meeting page",
+        ] {
+            let creation = dated();
+            let space = creation.space();
+            edit(&file, vec![Op::Section(SectionOp::Create(creation))]);
+            edit(&file, vec![title(space, text)]);
+            spaces.push(space);
+        }
+        let [ivy, teal, subpage, deleted, meeting] = spaces[..] else {
+            unreachable!()
+        };
+        let background = |space: ExGuid, choice: Choice| {
+            template_ops(&page(&file, space), choice)
+                .unwrap()
+                .into_iter()
+                .map(|op| Op::Page { space, op })
+                .collect::<Vec<_>>()
+        };
+        edit(&file, background(ivy, Choice::Template("Ivy")));
+        edit(
+            &file,
+            background(meeting, Choice::Template("Informal Meeting Notes")),
+        );
+        let teal_index = canvas::template::PAGE_COLORS
+            .iter()
+            .position(|(name, _)| *name == "Teal")
+            .unwrap();
+        edit(&file, background(teal, Choice::Color(teal_index)));
+        edit(
+            &file,
+            vec![Op::Section(SectionOp::Pages(vec![
+                PageEdit::set_level(subpage, 2).unwrap(),
+            ]))],
+        );
+        let recycled = page(&file, deleted);
+        notebook
+            .recycle_pages(std::slice::from_ref(&recycled), AUTHOR)
+            .unwrap();
+        edit(&file, vec![Op::Section(SectionOp::Delete(vec![deleted]))]);
+
+        // A page moved to another section, as a drop on its tab moves it.
+        let moved_space = {
+            let creation = dated();
+            let space = creation.space();
+            edit(&file, vec![Op::Section(SectionOp::Create(creation))]);
+            edit(&file, vec![title(space, "Moved page")]);
+            space
+        };
+        let moving = page(&file, moved_space);
+        let other = root.join("New Section 2.one");
+        edit(
+            &other,
+            vec![notebook::session::moved(&moving, AUTHOR).unwrap()],
+        );
+        edit(
+            &file,
+            vec![Op::Section(SectionOp::Delete(vec![moved_space]))],
+        );
+        let arrived = pages(&other).last().unwrap().0;
+        let arrived = page(&other, arrived);
+        assert_eq!(
+            (
+                arrived.title.as_str(),
+                arrived.identity,
+                arrived.date_text()
+            ),
+            ("Moved page", moving.identity, moving.date_text())
+        );
+
+        // Structure.
+        assert_eq!(
+            notebook.rename("New Section 2.one", "Kitchen").unwrap(),
+            "Kitchen.one"
+        );
+        assert_eq!(
+            notebook.move_entry("Kitchen.one", "Kept").unwrap(),
+            "Kept/Kitchen.one"
+        );
+        assert_eq!(notebook.rename("Kept", "Archive").unwrap(), "Archive");
+        notebook.delete("Doomed").unwrap();
+        notebook.delete("Binned.one").unwrap();
+        notebook
+            .reorder("", &["Archive", "New Section 1.one"])
+            .unwrap();
+
+        let catalog = notebook.catalog();
+        let names = |folder: &notebook::discover::Folder| {
+            folder
+                .sections
+                .iter()
+                .map(|section| section.path.clone())
+                .chain(folder.groups.iter().map(|group| group.path.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(catalog),
+            ["New Section 1.one", "Archive", "OneNote_RecycleBin"]
+        );
+        assert_eq!(
+            names(&catalog.groups[0]),
+            ["Archive/Inner.one", "Archive/Kitchen.one"]
+        );
+        let mut binned = names(&catalog.groups[1]);
+        binned.sort();
+        assert_eq!(
+            binned,
+            [
+                "OneNote_RecycleBin/Binned.one",
+                "OneNote_RecycleBin/Gone.one",
+                "OneNote_RecycleBin/OneNote_DeletedPages.one",
+            ]
+        );
+        assert!(!root.join("Doomed").exists());
+
+        let listed = pages(&file);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|(_, title, level)| (title.as_str(), *level))
+                .collect::<Vec<_>>(),
+            [
+                ("Garden plan", 1),
+                ("Ivy page", 1),
+                ("Teal page", 1),
+                ("Subpage", 2),
+                ("Meeting page", 1)
+            ]
+        );
+        let shown = page(&file, teal);
+        assert_eq!(
+            shown.color,
+            Some(canvas::template::PAGE_COLORS[teal_index].1)
+        );
+        assert!(shown.date_text().is_some());
+        assert!(
+            page(&file, ivy)
+                .objects
+                .iter()
+                .any(|object| matches!(object, PageObject::Image(image) if image.background))
+        );
+        let written = page(&file, meeting);
+        let outlines: Vec<_> = written
+            .objects
+            .iter()
+            .filter_map(|object| match object {
+                PageObject::Outline(outline) => Some(outline),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outlines.len(), 4);
+        let lines: Vec<&str> = outlines
+            .iter()
+            .flat_map(|outline| &outline.paragraphs)
+            .filter_map(|paragraph| paragraph.text())
+            .map(|text| text.text.text())
+            .collect();
+        assert!(lines.contains(&"Meeting Details") && lines.contains(&"Attendees:"));
+        assert!(
+            outlines
+                .iter()
+                .flat_map(|outline| &outline.paragraphs)
+                .filter_map(|paragraph| paragraph.text())
+                .any(|text| !text.tags.is_empty())
+        );
+        let bin = root.join("OneNote_RecycleBin/OneNote_DeletedPages.one");
+        let [(space, title, 1)] = &pages(&bin)[..] else {
+            panic!("{:?}", pages(&bin))
+        };
+        assert_eq!(title, "Deleted page");
+        let kept = page(&bin, *space);
+        assert_eq!(
+            (kept.identity, kept.created),
+            (recycled.identity, recycled.created)
+        );
+        assert_eq!(kept.date_text(), recycled.date_text());
+
+        if let Some(directory) = std::env::var_os("SNOWBOUND_MANAGEMENT_EXPORT") {
+            copy(&root, Path::new(&directory));
+        }
+        std::fs::remove_dir_all(&temporary).unwrap();
+    }
 
     #[test]
     fn moved_sections_are_followed_and_new_names_take_the_next_number() {
@@ -379,7 +774,11 @@ mod tests {
         assert_eq!(unused(&taken, "New Section", true), "New Section 3");
         assert_eq!(unused(&[], "New Section Group", false), "New Section Group");
         assert_eq!(
-            unused(&["New Section Group".to_owned()], "New Section Group", false),
+            unused(
+                &["New Section Group".to_owned()],
+                "New Section Group",
+                false
+            ),
             "New Section Group 2"
         );
     }

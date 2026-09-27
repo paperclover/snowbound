@@ -17,17 +17,17 @@ pub const TOOL: f32 = 22.0;
 
 /// Section tabs in a row `height` tall, as OneNote draws them: each leans over the next
 /// at 45°, and the open one lies on top in `section`'s colours, rising to meet the frame
-/// below as its outline and shadow fade in. `tabs` are names and section colours. Returns
-/// the tab clicked, the tab whose context menu was asked for and where, and the open tab's
-/// id, for `tab_base`.
+/// below as its outline and shadow fade in. `tabs` are names and section colours; `lit`
+/// shows as hovered, as a tab something is dragged onto.
 pub fn section_tabs(
     ui: &mut Ui,
     part: impl Hash,
     tabs: &[(&str, [f32; 4])],
     active: usize,
+    lit: Option<usize>,
     section: &Section,
     height: f32,
-) -> (Option<usize>, Option<(usize, [f32; 2])>, Id) {
+) -> Tabs {
     let theme = ui.theme.clone();
     ui.open(
         part,
@@ -47,7 +47,7 @@ pub fn section_tabs(
             (left - width, width)
         })
         .collect();
-    let (mut clicked, mut context) = (None, None);
+    let (mut clicked, mut context, mut held) = (None, None, None);
     // Earlier tabs lie over later ones; the open tab over all.
     let order = (0..tabs.len())
         .rev()
@@ -70,7 +70,11 @@ pub fn section_tabs(
                 position: [x, height - tall],
                 text: Some(name),
                 color: Some(mix(mix(theme.ink, fill, 0.2), theme.ink, open)),
-                fill: Some(mix(fill, [1.0; 4], 0.08)),
+                fill: Some(if lit == Some(index) {
+                    mix(colors.frame[0], [1.0; 4], 0.08)
+                } else {
+                    mix(fill, [1.0; 4], 0.08)
+                }),
                 gradient: Some(fill),
                 hover_fill: (index != active).then(|| mix(colors.frame[0], [1.0; 4], 0.08)),
                 border: Some(fade(section.edge, open)),
@@ -87,10 +91,34 @@ pub fn section_tabs(
         if let Some(point) = signal.context {
             context = Some((index, point));
         }
+        if signal.dragging {
+            held = Some(index);
+        }
     }
     let open_tab = ui.id(("tab", active));
     ui.close();
-    (clicked, context, open_tab)
+    Tabs {
+        clicked,
+        context,
+        held,
+        open: open_tab,
+    }
+}
+
+/// The id of tab `index` of the section tabs built as `row`.
+pub fn tab_id(row: Id, index: usize) -> Id {
+    row.child(("tab", index))
+}
+
+/// What the section tabs were asked this frame.
+pub struct Tabs {
+    pub clicked: Option<usize>,
+    /// The tab whose context menu was asked for, and where.
+    pub context: Option<(usize, [f32; 2])>,
+    /// The tab held down, which a drag moves.
+    pub held: Option<usize>,
+    /// The open tab's id, for `tab_base`.
+    pub open: Id,
 }
 
 /// Where the tab laid out at `tab` in a row `height` tall meets the edge below it: from its

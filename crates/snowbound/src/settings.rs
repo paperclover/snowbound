@@ -51,7 +51,8 @@ impl crate::State {
         let Some(path) = &self.settings else {
             return;
         };
-        let kept = |library: &&std::sync::Arc<crate::Library>| !matches!(library.notebook, Ok(None));
+        let kept =
+            |library: &&std::sync::Arc<crate::Library>| !matches!(library.notebook, Ok(None));
         let settings = Settings {
             notebooks: self
                 .notebooks
@@ -74,6 +75,15 @@ impl crate::State {
     }
 }
 
+/// What a launch starts from besides its input.
+pub struct Launch {
+    /// Where the settings are saved; `None` leaves them as they were read.
+    pub file: Option<PathBuf>,
+    pub saved: Settings,
+    /// The directory holding the sections' replicas.
+    pub cache: PathBuf,
+}
+
 /// Where the settings live unless `--settings` names a file.
 pub fn default_path() -> Option<PathBuf> {
     Some(crate::platform::settings_dir()?.join("settings.json"))
@@ -85,11 +95,15 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_tolerate_missing_fields() {
-        let directory = std::env::temp_dir().join(format!("snowbound-settings-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("snowbound-settings-{}", std::process::id()));
         let path = directory.join("nested/settings.json");
         assert_eq!(Settings::load(&path), Settings::default());
         let settings = Settings {
-            notebooks: vec!["/notebooks/Personal".into(), "smb://server/share/Work".into()],
+            notebooks: vec![
+                "/notebooks/Personal".into(),
+                "smb://server/share/Work".into(),
+            ],
             current: Some("/notebooks/Personal".into()),
             sidebar: true,
             recent_fonts: vec!["Georgia".into()],

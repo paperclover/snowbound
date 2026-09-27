@@ -22,7 +22,10 @@ pub enum Action {
     /// Shows a notebook where it was left.
     Notebook(usize),
     /// Opens a notebook's section by catalog path.
-    Open { notebook: usize, path: String },
+    Open {
+        notebook: usize,
+        path: String,
+    },
     /// Folds or unfolds a notebook's or section group's rows, by `fold_key`.
     Fold(String),
     NewNotebook,
@@ -51,7 +54,7 @@ pub fn fold_key(library: &Library, path: &str) -> String {
 }
 
 /// What the tree's rows read and what they were asked.
-struct Tree<'a> {
+pub struct Tree<'a> {
     theme: &'a Theme,
     /// The open section's notebook index and catalog path.
     open: Option<(usize, &'a str)>,
@@ -62,6 +65,25 @@ struct Tree<'a> {
     rows: Vec<Entry>,
     /// The section or group held down, which a drag moves.
     held: Option<Entry>,
+}
+
+impl<'a> Tree<'a> {
+    fn new(
+        theme: &'a Theme,
+        open: Option<(usize, &'a str)>,
+        folded: &'a HashSet<String>,
+        renaming: Option<&'a mut Renaming>,
+    ) -> Self {
+        Self {
+            theme,
+            open,
+            folded,
+            renaming,
+            action: None,
+            rows: Vec::new(),
+            held: None,
+        }
+    }
 }
 
 /// A section or group row, for dragging one onto or between the others.
@@ -79,26 +101,10 @@ impl Entry {
     }
 }
 
-/// The sidebar under a header row `header` tall, listing `notebooks` with the open section
-/// marked.
-pub fn sidebar(
-    ui: &mut Ui,
-    theme: &Theme,
-    notebooks: &[Arc<Library>],
-    open: Option<(usize, &str)>,
-    folded: &HashSet<String>,
-    renaming: Option<&mut Renaming>,
-    header: f32,
-) -> (Option<Action>, Vec<Entry>, Option<Entry>) {
-    let mut tree = Tree {
-        theme,
-        open,
-        folded,
-        renaming,
-        action: None,
-        rows: Vec::new(),
-        held: None,
-    };
+/// The sidebar's header row, `header` tall, then with `rows` the tree of `notebooks` with
+/// the open section marked.
+fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32, rows: bool) {
+    let (theme, open, folded) = (tree.theme, tree.open, tree.folded);
     ui.open(
         "header",
         Spec {
@@ -121,6 +127,9 @@ pub fn sidebar(
         },
     );
     ui.close();
+    if !rows {
+        return;
+    }
     ui.open(
         "notebooks",
         Spec {
@@ -136,7 +145,7 @@ pub fn sidebar(
         let unfolded = !folded.contains(&key);
         let (row, fold) = tree_row(
             ui,
-            &mut tree,
+            tree,
             ("notebook", index),
             Row {
                 label: &library.name,
@@ -157,7 +166,7 @@ pub fn sidebar(
             tree.action = Some(Action::Menu(Target::Notebook(Arc::clone(library)), point));
         }
         if unfolded && let Some(catalog) = library.catalog() {
-            folder(ui, &mut tree, library, index, catalog, 1);
+            folder(ui, tree, library, index, catalog, 1);
         }
     }
     ui.close();
@@ -176,7 +185,7 @@ pub fn sidebar(
     ] {
         let (row, _) = tree_row(
             ui,
-            &mut tree,
+            tree,
             part,
             Row {
                 label,
@@ -193,7 +202,6 @@ pub fn sidebar(
         }
     }
     ui.close();
-    (tree.action, tree.rows, tree.held)
 }
 
 /// A notebook's or group's sections, then its groups, as OneNote lists them.
@@ -210,9 +218,9 @@ fn folder(
         .filter(|(index, _)| *index == notebook)
         .map(|(_, path)| path);
     let renamed = |tree: &Tree, path: &str| {
-        tree.renaming
-            .as_ref()
-            .is_some_and(|renaming| Arc::ptr_eq(&renaming.library, library) && renaming.path == path)
+        tree.renaming.as_ref().is_some_and(|renaming| {
+            Arc::ptr_eq(&renaming.library, library) && renaming.path == path
+        })
     };
     for section in &folder.sections {
         let (name, color, readable) = match &section.state {
@@ -299,7 +307,8 @@ fn folder(
 
 /// Records a section or group row for dragging.
 fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, group: bool, row: &Signal) {
-    let Some(rect) = ui.rect(ui.id(("section", notebook, path)))
+    let Some(rect) = ui
+        .rect(ui.id(("section", notebook, path)))
         .or_else(|| ui.rect(ui.id(("group", notebook, path))))
     else {
         return;
@@ -454,9 +463,10 @@ impl crate::State {
         if self.temporary {
             return;
         }
-        let width = self
-            .ui
-            .animate(self.ui.id("sidebar"), if self.sidebar { WIDTH } else { RAIL });
+        let width = self.ui.animate(
+            self.ui.id("sidebar"),
+            if self.sidebar { WIDTH } else { RAIL },
+        );
         self.ui.open(
             "sidebar",
             Spec {
@@ -483,15 +493,18 @@ impl crate::State {
                 .position(|library| Arc::ptr_eq(library, &session.library))?;
             Some((index, session.tabs[session.tab].path.as_str()))
         });
-        let (action, rows, held) = sidebar(
+        let mut tree = Tree::new(theme, open, &self.folded, self.renaming.as_mut());
+        // The collapsed rail shows only its button.
+        sidebar(
             &mut self.ui,
-            theme,
+            &mut tree,
             &self.notebooks,
-            open,
-            &self.folded,
-            self.renaming.as_mut(),
             crate::TAB_ROW,
+            width > RAIL + 0.5,
         );
+        let Tree {
+            action, rows, held, ..
+        } = tree;
         let corner = self.ui.rect(rows_id).unwrap_or_default();
         self.drag_entries(held, &rows, corner, theme);
         self.ui.close();
@@ -509,12 +522,14 @@ impl crate::State {
             Some(Action::Notebook(index)) => {
                 let library = Arc::clone(&self.notebooks[index]);
                 if let Some(path) = library.first_section() {
-                    self.commands.push(crate::Command::OpenSection(library, path));
+                    self.commands
+                        .push(crate::Command::OpenSection(library, path));
                 }
             }
             Some(Action::Open { notebook, path }) => {
                 let library = Arc::clone(&self.notebooks[notebook]);
-                self.commands.push(crate::Command::OpenSection(library, path));
+                self.commands
+                    .push(crate::Command::OpenSection(library, path));
             }
             Some(Action::Menu(target, point)) => {
                 self.menu = Some((target, point));
@@ -548,9 +563,23 @@ impl crate::State {
     /// group, as OneNote moves one dropped on a group's tab; between rows of its folder it
     /// takes that place; between rows of another folder it moves there, last. `corner` is
     /// the rows' box.
-    fn drag_entries(&mut self, held: Option<Entry>, rows: &[Entry], corner: [f32; 4], theme: &Theme) {
-        let dragged = held.clone().or(self.dragging_entry.take());
-        self.dragging_entry = held.clone();
+    fn drag_entries(
+        &mut self,
+        held: Option<Entry>,
+        rows: &[Entry],
+        corner: [f32; 4],
+        theme: &Theme,
+    ) {
+        let dragged = match (&self.drag, &held) {
+            (_, Some(entry)) => Some(entry.clone()),
+            (Some(crate::menus::Drag::Entry(entry)), None) => Some(entry.clone()),
+            _ => None,
+        };
+        if let Some(entry) = &held {
+            self.drag = Some(crate::menus::Drag::Entry(entry.clone()));
+        } else if matches!(self.drag, Some(crate::menus::Drag::Entry(_))) {
+            self.drag = None;
+        }
         let (Some(dragged), Some([_, y])) = (dragged, self.ui.pointer()) else {
             return;
         };
@@ -620,118 +649,162 @@ impl crate::State {
             if into {
                 let [left, top, right, bottom] = under.rect;
                 self.ui.mark(
-                    [left - corner[0], top - corner[1], right - corner[0], bottom - corner[1]],
+                    [
+                        left - corner[0],
+                        top - corner[1],
+                        right - corner[0],
+                        bottom - corner[1],
+                    ],
                     [accent[0], accent[1], accent[2], 0.3],
                     4.0,
                 );
             } else {
-                let line = if before == Some(under.path.as_str()) { top } else { bottom } - corner[1];
+                let line = if before == Some(under.path.as_str()) {
+                    top
+                } else {
+                    bottom
+                } - corner[1];
                 self.ui.mark(
-                    [under.rect[0] - corner[0], line - 1.5, under.rect[2] - corner[0], line + 1.5],
+                    [
+                        under.rect[0] - corner[0],
+                        line - 1.5,
+                        under.rect[2] - corner[0],
+                        line + 1.5,
+                    ],
                     accent,
                     1.5,
                 );
             }
         } else {
             let library = std::sync::Arc::clone(&self.notebooks[dragged.notebook]);
-            self.commands.push(crate::Command::Structure(library, change));
+            self.commands
+                .push(crate::Command::Structure(library, change));
         }
     }
 
-    /// Shows the notebook at `location` at its first section, opening it unless it is open.
-    pub(crate) fn open_notebook(&mut self, location: String) {
+    /// Opens what the open panel chose: a notebook folder, a notebook's table of contents,
+    /// or a section, in its notebook where it has one.
+    pub(crate) fn open_path(&mut self, path: &std::path::Path) {
+        match crate::library::locate(path) {
+            crate::library::Located::Notebook { root, section } => {
+                self.open_notebook(root.to_string_lossy().into_owned(), section)
+            }
+            crate::library::Located::Section(file) => {
+                let library = Arc::new(Library::section(&file, &self.cache));
+                let path = library.location.clone();
+                self.commands
+                    .push(crate::Command::OpenSection(library, path));
+            }
+            crate::library::Located::Nothing => crate::platform::alert(
+                "Couldn't open",
+                "Choose a notebook folder, its Open Notebook file, or a section file.",
+            ),
+        }
+    }
+
+    /// Shows the notebook at `location` at `section`, or its first section, opening it
+    /// unless it is open.
+    pub(crate) fn open_notebook(&mut self, location: String, section: Option<String>) {
         let open = self
             .notebooks
             .iter()
             .find(|library| library.location == location)
             .cloned();
+        // The notebook shown already shows a section, which only one reader may hold.
+        if let Some(session) = &self.session
+            && session.library.location == location
+            && section
+                .as_ref()
+                .is_none_or(|section| *section == session.tabs[session.tab].path)
+        {
+            return;
+        }
         let (cache, notify) = (self.cache.clone(), crate::notify(self.proxy.clone()));
         self.load(move || {
             let library = open.unwrap_or_else(|| Arc::new(Library::notebook(&location, &cache)));
             if let Err(error) = &library.notebook {
                 return Err(error.clone().into());
             }
-            let path = library
-                .first_section()
+            let path = section
+                .filter(|path| library.contains(path))
+                .or_else(|| library.first_section())
                 .ok_or("This folder holds no notebook sections.")?;
             let section = library.open(&path, notify)?;
             let (session, page) = crate::read_session(section, library, path, None)?;
-            Ok((crate::Loaded::Section(Box::new(session)), page))
+            Ok(crate::Loaded::Section(Box::new(session), page))
         });
     }
 
-    /// The page's place on the first run, or once every notebook is closed.
+    /// The window below the title bar on the first run, or once every notebook is closed:
+    /// what is missing, and the two ways to start.
     pub(crate) fn welcome(&mut self, theme: &Theme) {
-        const SIZE: [f32; 2] = [420.0, 120.0];
-        let [left, top, right, bottom] = self.ui.rect(crate::page()).unwrap_or_default();
-        self.ui.open_as(
-            crate::page(),
-            Spec {
-                size: [fill(), fill()],
-                fill: Some(theme.paper),
-                ..Spec::default()
-            },
-        );
+        const BUTTON: [f32; 2] = [200.0, 32.0];
+        let [left, top, right, bottom] = self.ui.rect(self.ui.id("welcome")).unwrap_or_default();
         self.ui.open(
             "welcome",
             Spec {
-                flags: Flags::FLOAT,
-                axis: Axis::Y,
-                size: [px(SIZE[0]), px(SIZE[1])],
-                position: [
-                    ((right - left - SIZE[0]) / 2.0).max(0.0),
-                    ((bottom - top) * 0.4 - SIZE[1] / 2.0).max(0.0),
-                ],
-                gap: 4.0,
+                size: [fill(), fill()],
+                fill: Some(theme.base),
                 ..Spec::default()
             },
         );
-        let ink = theme.paper_ink;
-        for (part, text, color) in [
-            ("title", "No notebooks open", ink),
-            (
-                "description",
-                "Open a notebook folder, or start a new notebook.",
-                ui::mix(ink, theme.paper, 0.45),
-            ),
-        ] {
-            self.ui.leaf(
-                part,
-                Spec {
-                    size: [fill(), px(26.0)],
-                    text: Some(text),
-                    color: Some(color),
-                    center: true,
-                    ..Spec::default()
-                },
-            );
-        }
-        let labels = ["Open Notebook…", "New Notebook…"];
-        let pad = 0.75 * theme.font_size;
-        let width: f32 = labels
-            .iter()
-            .map(|label| self.ui.measure(label)[0] + 2.0 * pad)
-            .sum::<f32>()
-            + 8.0;
         self.ui.open(
-            "actions",
+            "content",
             Spec {
-                size: [fill(), ui::children()],
-                pad: [((SIZE[0] - width) / 2.0).max(0.0), 12.0],
-                gap: 8.0,
+                flags: Flags::FLOAT,
+                axis: Axis::Y,
+                size: [px(BUTTON[0]), ui::children()],
+                position: [
+                    ((right - left - BUTTON[0]) / 2.0).max(0.0),
+                    ((bottom - top) * 0.4 - 60.0).max(0.0),
+                ],
+                gap: 10.0,
+                ..Spec::default()
+            },
+        );
+        self.ui.leaf(
+            "title",
+            Spec {
+                size: [fill(), px(28.0)],
+                text: Some("No notebooks open"),
+                center: true,
                 ..Spec::default()
             },
         );
         let mut chosen = None;
-        for (label, command) in labels
-            .into_iter()
-            .zip([crate::Command::OpenNotebook, crate::Command::NewNotebook])
-        {
-            if ui::button(&mut self.ui, label, label).clicked {
+        for (part, icon, label, command) in [
+            (
+                "new",
+                art::PLUS,
+                "New Notebook",
+                crate::Command::NewNotebook,
+            ),
+            (
+                "open",
+                art::NOTEBOOK,
+                "Open Existing",
+                crate::Command::OpenNotebook,
+            ),
+        ] {
+            let button = self.ui.leaf(
+                part,
+                Spec {
+                    flags: Flags::CLICKABLE,
+                    size: [fill(), px(BUTTON[1])],
+                    icon: Some(icon),
+                    text: Some(label),
+                    fill: Some(theme.chip),
+                    hover_fill: Some(theme.hover()),
+                    hover_border: Some(theme.accent),
+                    radius: 6.0,
+                    center: true,
+                    ..Spec::default()
+                },
+            );
+            if button.clicked {
                 chosen = Some(command);
             }
         }
-        self.ui.close();
         self.commands.extend(chosen);
         self.ui.close();
         self.ui.close();

@@ -12,7 +12,7 @@ pen and drawing tools, recording audio and video, revision history, multi-machin
 live collaboration, and much more.
 
 <!-- Regenerate from the sample notebook (edit it freely in OneNote or Snowbound):
-python3 tools/canvas/build_macos.py --release && d=$(mktemp -d) && cp -R docs/sample-notebook/Personal "$d" && target/Snowbound.app/Contents/MacOS/Snowbound --notebook "$d/Personal" --cache "$d/cache" --screenshot docs/screenshot
+python3 tools/canvas/build_macos.py --release && d=$(mktemp -d) && cp -R docs/sample-notebook/Personal "$d" && target/Snowbound.app/Contents/MacOS/Snowbound --notebook "$d/Personal" --cache "$d/cache" --settings "$d/settings.json" --screenshot docs/screenshot
 -->
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshot-dark.png">

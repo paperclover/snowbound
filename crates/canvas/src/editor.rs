@@ -1095,6 +1095,11 @@ impl CanvasEditor {
         ]
     }
 
+    /// The page's colour (View, Page Color), COLORREF.
+    pub fn page_color(&self) -> Option<u32> {
+        self.header.color
+    }
+
     /// Where the page's first body line starts, in points, under its title.
     pub fn body_start(&self) -> Option<[f32; 2]> {
         let title = self
@@ -1757,6 +1762,41 @@ impl CanvasEditor {
         };
         self.move_selection(engine, edge, false)?;
         Ok(true)
+    }
+
+    /// Puts `image` in the active outline's flow after the caret's paragraph, as OneNote
+    /// inserts a picture into an outline; the caret stays.
+    pub fn insert_picture(
+        &mut self,
+        engine: &mut TextEngine,
+        image: onestore::page::Image,
+    ) -> Result<(), EditorError> {
+        let selection = self.selection();
+        let caret = selection.positions[0].max(selection.positions[1]);
+        let (container, index, node) = self
+            .active_outline()
+            .document
+            .leaf(caret.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let picture = PageParagraph {
+            id: onestore::page::text::new_id()?,
+            content: ParagraphContent::Image(image),
+            style: None,
+            lists: Vec::new(),
+            tags: Vec::new(),
+            collapsed: false,
+            ..node.clone()
+        };
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index + 1..index + 1,
+                replacement: vec![picture],
+            },
+            selection,
+        )
     }
 
     pub fn remove_image(&mut self, engine: &mut TextEngine, id: ExGuid) -> Result<(), EditorError> {

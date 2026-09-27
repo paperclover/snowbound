@@ -6,6 +6,15 @@ use onestore::{ExGuid, PageEdit};
 use std::sync::Arc;
 use ui::{Anchor, Id, popup::Item};
 
+/// What a drag holds.
+pub enum Drag {
+    Page(ExGuid),
+    /// A sidebar row.
+    Entry(crate::sidebar::Entry),
+    /// A section tab, by index.
+    Tab(usize),
+}
+
 /// What a context menu was opened on.
 pub enum Target {
     Page(ExGuid),
@@ -55,6 +64,8 @@ impl State {
                         separated: true,
                         ..item("New Page")
                     },
+                    // OneNote offers this beside New Page, which is a plain + here.
+                    item("New Subpage"),
                     Item {
                         separated: true,
                         disabled: level > above || level >= 3,
@@ -93,7 +104,8 @@ impl State {
         };
         let command = match (target, items[chosen].text) {
             (Target::Page(space), "Delete") => Some(Command::DeletePages(vec![space])),
-            (Target::Page(_), "New Page") => Some(Command::NewPage { subpage: false }),
+            (Target::Page(_), "New Page") => Some(Command::NewPage { under: None }),
+            (Target::Page(space), "New Subpage") => Some(Command::NewPage { under: Some(space) }),
             (Target::Page(space), text) => self.session.as_ref().and_then(|session| {
                 let level = session
                     .pages
@@ -151,14 +163,33 @@ impl State {
         self.commands.extend(command);
     }
 
+    /// The section tab, of those built as `row`, under the pointer while a page is dragged
+    /// there, which a drop moves the page into.
+    pub(crate) fn page_drop(&self, row: Id) -> Option<usize> {
+        let (Some(Drag::Page(_)), Some(session), Some([x, y])) =
+            (&self.drag, &self.session, self.ui.pointer())
+        else {
+            return None;
+        };
+        (0..session.tabs.len())
+            .filter(|tab| *tab != session.tab)
+            .find(|tab| {
+                self.ui.rect(ui::shell::tab_id(row, *tab)).is_some_and(
+                    |[left, top, right, bottom]| x >= left && x < right && y >= top && y < bottom,
+                )
+            })
+    }
+
     /// Moves a page by dragging its tab: while `held`, a line shows where it would go; let
-    /// go, it moves there at its level, or under a page at most one level above it.
-    /// `panel` is the page list's rectangle.
+    /// go, it moves there at its level, or under a page at most one level above it. Onto a
+    /// section tab of those built as `row`, it moves to the end of that section, as
+    /// OneNote moves a page dropped on a section's tab. `panel` is the page list's rectangle.
     pub(crate) fn drag_pages(
         &mut self,
         held: Option<ExGuid>,
         section: &ui::Section,
         panel: [f32; 4],
+        row: Id,
     ) {
         let Some(session) = &self.session else {
             return;
@@ -166,17 +197,35 @@ impl State {
         if held.is_some() && !self.filter.is_empty() {
             return;
         }
-        let dragged = held.or(self.dragging.take());
-        self.dragging = held;
-        let (Some(space), Some([_, y])) = (dragged, self.ui.pointer()) else {
+        let dropped = match (&self.drag, held) {
+            (_, Some(space)) => Some(space),
+            (Some(Drag::Page(space)), None) => Some(*space),
+            _ => None,
+        };
+        let target = self.page_drop(row);
+        if let Some(space) = held {
+            self.drag = Some(Drag::Page(space));
+        } else if matches!(self.drag, Some(Drag::Page(_))) {
+            self.drag = None;
+        }
+        let (Some(space), Some([_, y])) = (dropped, self.ui.pointer()) else {
             return;
         };
+        if let Some(tab) = target {
+            if held.is_none() {
+                let path = session.tabs[tab].path.clone();
+                self.commands.push(Command::MovePage { space, path });
+            }
+            return;
+        }
         // Rows other than the dragged one, with where each lies.
         let rows: Vec<(ExGuid, u32, [f32; 4])> = session
             .pages
             .iter()
             .filter(|(listed, ..)| *listed != space)
-            .filter_map(|(listed, _, level)| Some((*listed, *level, self.ui.rect(self.ui.id(listed))?)))
+            .filter_map(|(listed, _, level)| {
+                Some((*listed, *level, self.ui.rect(self.ui.id(listed))?))
+            })
             .collect();
         let Some(level) = session
             .pages
@@ -217,9 +266,72 @@ impl State {
                 section.accent,
                 1.5,
             );
-            self.dragging = held;
         } else if let Ok(edit) = PageEdit::move_to(space, before, level) {
             self.commands.push(Command::Pages(vec![edit]));
+        }
+    }
+
+    /// Reorders section tabs by dragging one: while `held`, a line shows where it would go
+    /// among the tabs built as `row` in the tab row `bar`; let go, the folder takes that
+    /// order.
+    pub(crate) fn drag_tabs(
+        &mut self,
+        held: Option<usize>,
+        row: Id,
+        bar: [f32; 4],
+        accent: [f32; 4],
+    ) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let dragged = match (&self.drag, held) {
+            (_, Some(tab)) => Some(tab),
+            (Some(Drag::Tab(tab)), None) => Some(*tab),
+            _ => None,
+        };
+        if let Some(tab) = held {
+            self.drag = Some(Drag::Tab(tab));
+        } else if matches!(self.drag, Some(Drag::Tab(_))) {
+            self.drag = None;
+        }
+        let (Some(tab), Some([x, _])) = (dragged, self.ui.pointer()) else {
+            return;
+        };
+        let others: Vec<(usize, [f32; 4])> = (0..session.tabs.len())
+            .filter(|other| *other != tab)
+            .filter_map(|other| Some((other, self.ui.rect(ui::shell::tab_id(row, other))?)))
+            .collect();
+        let at = others
+            .iter()
+            .position(|(_, rect)| x < (rect[0] + rect[2]) / 2.0)
+            .unwrap_or(others.len());
+        let mut order: Vec<usize> = others.iter().map(|(other, _)| *other).collect();
+        order.insert(at, tab);
+        if order.iter().copied().eq(0..session.tabs.len()) {
+            return;
+        }
+        if held.is_some() {
+            let edge = match (
+                at.checked_sub(1).map(|before| others[before].1),
+                others.get(at),
+            ) {
+                (_, Some((_, after))) => after[0],
+                (Some(before), None) => before[2],
+                (None, None) => return,
+            } - bar[0];
+            self.ui
+                .mark([edge - 1.5, 4.0, edge + 1.5, bar[3] - bar[1]], accent, 1.5);
+        } else {
+            let path = &session.tabs[tab].path;
+            let folder = folder(path);
+            let paths = order
+                .into_iter()
+                .map(|index| session.tabs[index].path.clone())
+                .collect();
+            self.commands.push(Command::Structure(
+                Arc::clone(&session.library),
+                Structure::Reorder { folder, paths },
+            ));
         }
     }
 }

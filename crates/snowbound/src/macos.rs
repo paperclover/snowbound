@@ -117,6 +117,92 @@ pub fn cache_dir() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/snowbound"))
 }
 
+/// The share holding `path` where macOS mounted it from an SMB server.
+pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut mount: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(name.as_ptr(), &mut mount) } != 0 {
+        return None;
+    }
+    let text = |chars: &[libc::c_char]| {
+        unsafe { std::ffi::CStr::from_ptr(chars.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    if text(&mount.f_fstypename) != "smbfs" {
+        return None;
+    }
+    let within = path.strip_prefix(text(&mount.f_mntonname)).ok()?;
+    crate::library::Mount::parse(&text(&mount.f_mntfromname), &within.to_string_lossy(), "")
+}
+
+#[link(name = "Security", kind = "framework")]
+unsafe extern "C" {
+    fn SecKeychainFindInternetPassword(
+        keychain: *const std::ffi::c_void,
+        server_length: u32,
+        server: *const u8,
+        domain_length: u32,
+        domain: *const u8,
+        account_length: u32,
+        account: *const u8,
+        path_length: u32,
+        path: *const u8,
+        port: u16,
+        protocol: u32,
+        authentication: u32,
+        password_length: *mut u32,
+        password: *mut *mut std::ffi::c_void,
+        item: *mut *const std::ffi::c_void,
+    ) -> i32;
+    fn SecKeychainItemFreeContent(list: *const std::ffi::c_void, data: *mut std::ffi::c_void) -> i32;
+}
+
+/// The password the keychain keeps for `mount`'s account on its server, as macOS saved it
+/// when the share was mounted; the system asks the user to allow the app to read it.
+pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login, String> {
+    let Some(user) = &mount.user else {
+        return Ok(crate::library::Login::guest(mount));
+    };
+    // kSecProtocolTypeSMB is 'smb '.
+    const SMB: u32 = u32::from_be_bytes(*b"smb ");
+    let (mut length, mut data) = (0, std::ptr::null_mut());
+    let status = unsafe {
+        SecKeychainFindInternetPassword(
+            std::ptr::null(),
+            mount.server.len() as u32,
+            mount.server.as_ptr(),
+            0,
+            std::ptr::null(),
+            user.len() as u32,
+            user.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            SMB,
+            0,
+            &mut length,
+            &mut data,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(format!(
+            "The keychain has no password for {user} on {} ({status})",
+            mount.server
+        ));
+    }
+    let password = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length as usize) };
+    let password = String::from_utf8_lossy(password).into_owned();
+    unsafe { SecKeychainItemFreeContent(std::ptr::null(), data) };
+    Ok(crate::library::Login {
+        user: user.clone(),
+        password,
+        domain: mount.domain.clone(),
+    })
+}
+
 pub fn settings_dir() -> Option<std::path::PathBuf> {
     Some(
         std::path::PathBuf::from(std::env::var_os("HOME")?)

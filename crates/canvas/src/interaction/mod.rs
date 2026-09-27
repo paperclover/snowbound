@@ -199,6 +199,9 @@ pub struct PageView {
     /// Input is by finger: the focused outline's grips reach further, and outline chrome
     /// shows only while the view is focused, as there is no hover to reveal it.
     pub touch: bool,
+    /// A platform scroll view owns the viewport: changes neither clamp it nor reveal the
+    /// caret, which the host does knowing its bars and keyboard.
+    pub host_viewport: bool,
     /// The caret's opacity in its blink.
     caret: f32,
     /// When the caret last moved, which restarts its blink.
@@ -256,6 +259,7 @@ impl PageView {
             modifiers: Modifiers::default(),
             focused: true,
             touch: false,
+            host_viewport: false,
             caret: 1.0,
             blink_from: Instant::now(),
         };
@@ -403,7 +407,12 @@ impl PageView {
     fn hit_test(&self, point: [f32; 2]) -> Option<Hit> {
         if let Some(ObjectFocus::Image(id)) = self.object_focus
             && let Some((origin, size)) = self.editor.image_placement(id)
-            && let Some(handle) = image_handle_at(image_rect(origin, size), self.pixel(), point)
+            && let Some(handle) = image_handle_at(
+                image_rect(origin, size),
+                self.pixel(),
+                point,
+                if self.touch { TOUCH_REACH } else { 0.0 },
+            )
         {
             return Some(Hit::Image { id, handle });
         }
@@ -456,14 +465,18 @@ impl PageView {
 
     /// Keeps the view in bounds and restarts the caret blink after a change.
     fn changed(&mut self) -> Result<Response> {
-        self.scroll().clamp(&mut self.viewport);
+        if !self.host_viewport {
+            self.scroll().clamp(&mut self.viewport);
+        }
         self.caret = 1.0;
         self.blink_from = Instant::now();
         Ok(Response::changed())
     }
 
     fn moved(&mut self) -> Result<Response> {
-        self.scroll().clamp(&mut self.viewport);
+        if !self.host_viewport {
+            self.scroll().clamp(&mut self.viewport);
+        }
         Ok(Response {
             moved: true,
             redraw: true,
@@ -563,7 +576,9 @@ impl PageView {
 
     /// Reveals the caret or focused object after an edit, then reports the change.
     fn edited(&mut self) -> Result<Response> {
-        self.reveal_focus()?;
+        if !self.host_viewport {
+            self.reveal_focus()?;
+        }
         self.changed()
     }
 
@@ -1641,9 +1656,13 @@ fn image_handles(rect: [f32; 4], pixel: f32) -> impl Iterator<Item = ([i8; 2], [
         })
 }
 
-fn image_handle_at(rect: [f32; 4], pixel: f32, point: [f32; 2]) -> Option<[i8; 2]> {
+/// The handle of a picture at `rect` under `point`, each reaching `reach` pixels beyond its
+/// drawn square.
+fn image_handle_at(rect: [f32; 4], pixel: f32, point: [f32; 2], reach: f32) -> Option<[i8; 2]> {
     image_handles(rect, pixel)
-        .find(|(_, center)| (0..2).all(|axis| (point[axis] - center[axis]).abs() <= 5.0 * pixel))
+        .find(|(_, center)| {
+            (0..2).all(|axis| (point[axis] - center[axis]).abs() <= (5.0 + reach) * pixel)
+        })
         .map(|(handle, _)| handle)
 }
 

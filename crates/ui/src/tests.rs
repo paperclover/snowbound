@@ -162,7 +162,7 @@ fn a_click_within_one_frame_starts_an_animation_read_before_it() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut open = false;
     let mut width = 0.0;
-    let mut build = |ui: &mut Ui, open: &mut bool, width: &mut f32| {
+    let build = |ui: &mut Ui, open: &mut bool, width: &mut f32| {
         *width = ui.animate(Id::ROOT.child("panel"), if *open { 100.0 } else { 0.0 });
         if button(ui, "toggle", "Toggle").clicked {
             *open = true;

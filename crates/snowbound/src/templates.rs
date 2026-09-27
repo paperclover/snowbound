@@ -50,9 +50,12 @@ pub enum View {
     Gallery,
 }
 
+/// A thumbnail's art: each raster and where it lies in the tile.
+type Art = Vec<(RasterImage, [f32; 4])>;
+
 /// Rasters of each template's art for its thumbnail, by template and paper.
 #[derive(Default)]
-pub struct Thumbnails(HashMap<(&'static str, bool), Vec<(RasterImage, [f32; 4])>>);
+pub struct Thumbnails(HashMap<(&'static str, bool), Art>);
 
 impl Thumbnails {
     /// `template`'s art and where it lies in a `TILE`, drawn at `scale` for `paper`.
@@ -69,12 +72,8 @@ impl Thumbnails {
                 .art
                 .iter()
                 .filter_map(|art| {
-                    let (image, size) = canvas::gpu::page::template_art(
-                        art.art,
-                        art.size,
-                        points * scale,
-                        paper,
-                    )?;
+                    let (image, size) =
+                        canvas::gpu::page::template_art(art.art, art.size, points * scale, paper)?;
                     let [x, y] = [
                         (art.position[0] - REGION[0]) * points,
                         (art.position[1] - REGION[1]) * points,
@@ -86,7 +85,10 @@ impl Thumbnails {
     }
 }
 
-/// The strip at `position` in the page box, with the page colours beneath while `colors`.
+/// The strip at `position` in the page box, `room` wide at most, with the page colours
+/// beneath while `colors`. Picks that do not fit give way from the end; More templates
+/// stays.
+#[allow(clippy::too_many_arguments)]
 fn strip(
     ui: &mut Ui,
     theme: &Theme,
@@ -94,8 +96,20 @@ fn strip(
     paper: Paper,
     dark: bool,
     position: [f32; 2],
+    room: f32,
     colors: bool,
 ) -> Option<Choice> {
+    let more = (Choice::More, "More templates");
+    let mut used = 2.0 * PAD + tile_width(ui, more.1);
+    let mut shown = Vec::new();
+    for pick in STRIP {
+        used += GAP + tile_width(ui, pick.1);
+        if used > room {
+            break;
+        }
+        shown.push(pick);
+    }
+    shown.push(more);
     let mut chosen = None;
     ui.open(
         "templates",
@@ -120,22 +134,27 @@ fn strip(
             ..Spec::default()
         },
     );
-    for (index, (choice, label)) in STRIP.into_iter().chain([(Choice::More, "More templates")]).enumerate() {
+    for (index, (choice, label)) in shown.into_iter().enumerate() {
         if tile(ui, theme, thumbnails, paper, dark, index, choice, label) {
             chosen = Some(choice);
         }
     }
     ui.close();
-    if colors {
+    let per_row = (((room - 2.0 * PAD + 6.0) / (SWATCH + 6.0)).floor() as usize).max(1);
+    for (row, swatches) in PAGE_COLORS.chunks(per_row).enumerate().filter(|_| colors) {
         ui.open(
-            "colors",
+            ("colors", row),
             Spec {
                 size: [ui::children(), px(SWATCH)],
                 gap: 6.0,
                 ..Spec::default()
             },
         );
-        for (index, (name, color)) in PAGE_COLORS.iter().enumerate() {
+        for (index, (name, color)) in swatches
+            .iter()
+            .enumerate()
+            .map(|(index, color)| (row * per_row + index, color))
+        {
             let swatch = ui.leaf(
                 (index, *name),
                 Spec {
@@ -154,7 +173,9 @@ fn strip(
         }
         ui.close();
     }
-    let width = ui.rect(ui.id("tiles")).map_or(0.0, |rect| rect[2] - rect[0]);
+    let width = ui
+        .rect(ui.id("tiles"))
+        .map_or(0.0, |rect| rect[2] - rect[0]);
     let close = ui.leaf(
         "dismiss",
         Spec {
@@ -279,6 +300,11 @@ fn page_color(color: u32, paper: Paper, dark: bool) -> [f32; 4] {
     [red, green, blue, 1.0]
 }
 
+/// How wide a tile labelled `label` stands: its thumbnail, or the label where it is wider.
+fn tile_width(ui: &mut Ui, label: &str) -> f32 {
+    TILE[0].max(ui.measure(label)[0] + 4.0)
+}
+
 /// One template's thumbnail over its label, as wide as the thumbnail or the label; true
 /// when clicked.
 #[allow(clippy::too_many_arguments)]
@@ -293,7 +319,7 @@ fn tile(
     label: &str,
 ) -> bool {
     let scale = ui.scale();
-    let width = TILE[0].max(ui.measure(label)[0] + 4.0);
+    let width = tile_width(ui, label);
     let fill_color = match choice {
         Choice::Color(index) => page_color(PAGE_COLORS[index].1, paper, dark),
         Choice::More | Choice::Dismiss => theme.base,
@@ -405,11 +431,12 @@ impl crate::State {
             (viewport.origin[0] + start[0] * viewport.scale) / scale,
             (viewport.origin[1] + (start[1] + LINES_ABOVE) * viewport.scale) / scale,
         ];
+        // Thumbnails show templates on plain paper, not the page's colour.
         let paper = Paper {
-            color: theme.paper,
-            ink: theme.paper_ink,
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
         };
-        let dark = theme.paper_ink[0] > theme.paper[0];
+        let dark = paper.ink[0] > paper.color[0];
         let chosen = match self.templates {
             View::Gallery => {
                 let size = [rect[2] - rect[0], rect[3] - rect[1]];
@@ -422,6 +449,7 @@ impl crate::State {
                 paper,
                 dark,
                 position,
+                rect[2] - rect[0] - position[0] - 24.0,
                 view == View::Colors,
             ),
         };

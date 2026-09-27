@@ -40,10 +40,7 @@ impl State {
             self.ui.theme = theme(appearance);
             // The page's box sizes the view whose pictures settle.
             self.layout(SIZE, SCALE)?;
-            let paper = canvas::gpu::Paper {
-                color: self.ui.theme.paper,
-                ink: self.ui.theme.paper_ink,
-            };
+            let paper = self.paper();
             if let Some((scene, _)) = &mut self.view.scene {
                 scene.settle(Some(&self.view.editor), self.view.viewport.scale, paper);
             }

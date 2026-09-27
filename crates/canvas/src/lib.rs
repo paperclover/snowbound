@@ -1,9 +1,11 @@
+pub mod conflict;
 pub mod document;
 pub mod editor;
 pub mod language;
 pub mod layout;
 pub mod math;
 pub mod outline;
+pub mod search;
 pub mod template;
 
 pub mod date;

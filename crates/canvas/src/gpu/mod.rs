@@ -52,6 +52,20 @@ impl Paper {
         ink: [0.0, 0.0, 0.0, 1.0],
     };
 
+    /// This paper under a page coloured `color` (COLORREF, OneNote's View, Page Color): the
+    /// colour as OneNote paints it on white paper, moved onto this paper as a fill is, so
+    /// dark paper takes the colour's hue at its own depth. Text keeps its ink; template art
+    /// lies over the colour.
+    pub fn colored(self, color: Option<u32>) -> Self {
+        match color {
+            Some(color) => Self {
+                color: self.tint(colorref(color)),
+                ..self
+            },
+            None => self,
+        }
+    }
+
     /// A fill OneNote draws on white paper, moved onto this paper: as far from it in
     /// OKLab lightness as from white, in the same hue and chroma, so text keeps its
     /// contrast on it.
@@ -170,6 +184,26 @@ mod tests {
     use onestore::document::Format;
     use onestore::page::text::Paragraph;
     use std::time::Duration;
+
+    /// A page colour paints as OneNote paints it on white paper, and on dark paper as a
+    /// dark paper of its hue; no colour leaves the paper as it was.
+    #[test]
+    fn page_colours_colour_the_paper() {
+        let teal = 0x00f2f9d4;
+        assert_eq!(Paper::WHITE.colored(Some(teal)).color.map(|c| (c * 1000.0).round()), colorref(teal).map(|c| (c * 1000.0).round()));
+        let dark = Paper {
+            color: draw::srgb(0x1f, 0x20, 0x22),
+            ink: draw::srgb(0xe6, 0xe6, 0xe6),
+        };
+        let colored = dark.colored(Some(teal));
+        let [lightness, a, b] = draw::oklab(colored.color);
+        let [paper, ..] = draw::oklab(dark.color);
+        let [_, ta, tb] = draw::oklab(colorref(teal));
+        assert!(lightness > paper && lightness < 0.5);
+        assert!((a - ta).abs() < 1e-3 && (b - tb).abs() < 1e-3);
+        assert_eq!(colored.ink, dark.ink);
+        assert_eq!(dark.colored(None).color, dark.color);
+    }
 
     #[test]
     fn runs_carry_their_highlight_as_what_lies_behind_them() {

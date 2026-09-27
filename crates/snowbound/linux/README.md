@@ -21,8 +21,13 @@ Edits save to the notebook folder as you type. Settings live in
 puts the latter elsewhere.
 
 Run `./install.sh` to add Snowbound to your app launcher; it copies the app
-into `~/.local`. On Wayland the taskbar finds Snowbound's icon only through
-this launcher entry, so without it the taskbar shows a generic icon.
+into `~/.local`. On Wayland the taskbar, dock and KDE's title bar find
+Snowbound's icon only through this launcher entry, so without it they show a
+generic icon.
+
+The window's title bar is your desktop's own: KDE's on KDE, and on GNOME and
+other desktops without server-side decorations an Adwaita-style one drawn by
+Snowbound.
 `./install.sh ~/Notebooks/MyNotebook` makes the launcher open that notebook as
 well.
 

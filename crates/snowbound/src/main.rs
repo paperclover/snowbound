@@ -3,6 +3,7 @@ mod art;
 mod conflict_render;
 mod library;
 mod manage;
+mod meeting;
 mod menus;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
@@ -80,8 +81,6 @@ const FONT_COLORS: [u32; 20] = [
 /// while the gaps still take the pointer.
 const ROW: f32 = 29.0;
 const ROW_GAP: f32 = 3.0;
-/// OneNote's highlight for conflicting changes on a conflict page, COLORREF.
-const CONFLICTING: u32 = 0xd6d6ff;
 /// Space between the page and a page tab that isn't open.
 const PILL_MARGIN: f32 = 3.0;
 /// Rounding where the open page tab meets the page, concentric with its neighbours'.
@@ -122,6 +121,7 @@ enum Replay {
     /// A frame during a wait, as a visible window's display would ask for.
     Tick,
     Appearance(winit::window::Theme),
+    Quit,
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -165,9 +165,8 @@ struct App {
     interface_font: Vec<Vec<u8>>,
     /// Where `--screenshot` writes its PNGs, drawn from a window never shown.
     screenshot: Option<PathBuf>,
-    /// Where settings are saved, and what they held at launch, until the window opens.
-    settings: Option<(Option<PathBuf>, settings::Settings)>,
-    cache: PathBuf,
+    /// What the window starts from besides its input, until it opens.
+    launch: Option<settings::Launch>,
     state: Option<State>,
     startup_error: Option<Box<dyn Error>>,
 }
@@ -226,6 +225,16 @@ enum Bar {
 }
 
 impl Session {
+    /// Saving's state, and that the notebook opened through the system's mount of its
+    /// share where Snowbound's own SMB client could not sign in.
+    fn status(&self) -> String {
+        match (&self.library.notice, self.status) {
+            (None, status) => status.to_owned(),
+            (Some(_), "") => "Via mounted share".to_owned(),
+            (Some(_), status) => format!("{status} · Via mounted share"),
+        }
+    }
+
     fn title(&self) -> &str {
         match self.conflict(self.space) {
             Some((_, version)) => &version.title,
@@ -285,26 +294,35 @@ impl Session {
         move || {
             let page = replica.page(space)?;
             Ok(match objects {
-                Some(objects) => highlighted(page, &objects),
+                Some(objects) => canvas::conflict::highlighted(page, &objects),
                 None => page,
             })
         }
     }
 }
 
-/// What a loader thread opened: a section, or another page of the open one.
+/// What a loader thread read: a section and its page to show, another page of the open
+/// section, or a notebook read again after a change, with the catalog path the open
+/// section has in it.
 enum Loaded {
+    Section(Box<Session>, Page),
+    Page(ExGuid, Page),
+    Library(Arc<Library>, String),
+}
+
+/// What an opening page replaces: the section, or the page of the open one.
+enum Shown {
     Section(Box<Session>),
     Page(ExGuid),
 }
 
-/// A loader thread's request number, what it opened and the page it read.
-type Read = (u64, Result<(Loaded, Page), String>);
+/// A loader thread's request number and what it read.
+type Read = (u64, Result<Loaded, String>);
 
 /// The newest page read, laid out and waiting for the pictures it shows first, so it
 /// never appears without them.
 struct Opening {
-    loaded: Loaded,
+    loaded: Shown,
     scene: (PageScene, [f32; 2]),
     editor: CanvasEditor,
     since: Instant,
@@ -325,13 +343,15 @@ enum Command {
     CloseNotebook(Arc<Library>),
     /// Changes a notebook's sections and groups.
     Structure(Arc<Library>, manage::Structure),
-    /// Adds a page at the end of the open section, or a subpage after the open page, and
-    /// edits its title.
-    NewPage { subpage: bool },
+    /// Adds a page at the end of the open section, or a subpage of a page, and edits its
+    /// title.
+    NewPage { under: Option<ExGuid> },
     /// Deletes pages of the open section to the notebook's recycle bin.
     DeletePages(Vec<ExGuid>),
     /// Moves or indents pages of the open section.
     Pages(Vec<onestore::PageEdit>),
+    /// Moves a page of the open section to the end of another section of its folder.
+    MovePage { space: ExGuid, path: String },
     /// Gives the open page a template's background or colour.
     Template(templates::Choice),
     OpenPage(ExGuid),
@@ -386,10 +406,8 @@ struct State {
     menu: Option<(menus::Target, [f32; 2])>,
     /// A section or group being renamed in the sidebar.
     renaming: Option<sidebar::Renaming>,
-    /// The page whose tab is being dragged.
-    dragging: Option<ExGuid>,
-    /// The section or group whose sidebar row is being dragged.
-    dragging_entry: Option<sidebar::Entry>,
+    /// What the pointer is dragging: a page's tab, a section tab or a sidebar row.
+    drag: Option<menus::Drag>,
     /// Pages whose template strip was dismissed this run.
     dismissed: HashSet<ExGuid>,
     /// A page just created, whose title takes the caret once it opens.
@@ -461,8 +479,11 @@ impl State {
         substitutes: &[PathBuf],
         interface_font: Vec<Vec<u8>>,
         visible: bool,
-        (settings, stored): (Option<PathBuf>, settings::Settings),
-        cache: PathBuf,
+        settings::Launch {
+            file: settings,
+            saved: stored,
+            cache,
+        }: settings::Launch,
     ) -> Result<Self, Box<dyn Error>> {
         let window = Arc::new(
             event_loop.create_window(
@@ -652,8 +673,7 @@ impl State {
             title_focus: None,
             menu: None,
             renaming: None,
-            dragging: None,
-            dragging_entry: None,
+            drag: None,
             templates: templates::View::Strip,
             thumbnails: templates::Thumbnails::default(),
             filter: String::new(),
@@ -795,7 +815,9 @@ impl State {
                 self.ui.theme.inactive_selection,
             ] = platform::text_colors(&self.window);
         }
-        let theme = self.ui.theme.clone();
+        // The page, and the open page's tab joined to it, take the page's colour.
+        let mut theme = self.ui.theme.clone();
+        theme.paper = self.paper().color;
         if !platform::system_titlebar(&self.window) {
             self.title_bar(&theme);
         }
@@ -820,7 +842,7 @@ impl State {
                 ..Spec::default()
             },
         );
-        self.ui.open(
+        let tab_row = self.ui.open(
             "tabs",
             Spec {
                 size: [fill(), px(TAB_ROW)],
@@ -836,6 +858,7 @@ impl State {
                 ..Spec::default()
             },
         );
+        let row = self.ui.id("sections");
         let (clicked, open_tab) = match &self.session {
             Some(session) => {
                 let tabs: Vec<_> = session
@@ -843,14 +866,26 @@ impl State {
                     .iter()
                     .map(|tab| (tab.name.as_str(), section_color(tab.color)))
                     .collect();
-                let (clicked, context, open_tab) = ui::shell::section_tabs(
+                let lit = self.page_drop(row);
+                let ui::shell::Tabs {
+                    clicked,
+                    context,
+                    held,
+                    open: open_tab,
+                } = ui::shell::section_tabs(
                     &mut self.ui,
                     "sections",
                     &tabs,
                     session.tab,
+                    lit,
                     &section,
                     TAB_ROW,
                 );
+                let bar = self.ui.rect(tab_row).unwrap_or_default();
+                self.drag_tabs(held, row, bar, section.accent);
+                let Some(session) = &self.session else {
+                    unreachable!("The tabs are the session's")
+                };
                 let open = |tab: usize| {
                     Command::OpenSection(Arc::clone(&session.library), session.tabs[tab].path.clone())
                 };
@@ -869,8 +904,16 @@ impl State {
             None => {
                 let tabs = [("Temporary page", section_color(None))];
                 let shown = if self.temporary { &tabs[..] } else { &[] };
-                let (_, _, open_tab) =
-                    ui::shell::section_tabs(&mut self.ui, "sections", shown, 0, &section, TAB_ROW);
+                let open_tab = ui::shell::section_tabs(
+                    &mut self.ui,
+                    "sections",
+                    shown,
+                    0,
+                    None,
+                    &section,
+                    TAB_ROW,
+                )
+                .open;
                 (None, open_tab)
             }
         };
@@ -949,7 +992,7 @@ impl State {
         }
         self.page_events(signal.events)?;
         self.ui.close();
-        let open_page = self.page_list(&theme, &section);
+        let open_page = self.page_list(&theme, &section, row);
         self.ui.close();
         self.ui.close();
         self.ui.close();
@@ -1008,7 +1051,7 @@ impl State {
         }
         outline.push(([left, bottom], ROUNDING));
         let height = (frame[3] - frame[1]).max(1.0);
-        let paper = self.ui.theme.paper;
+        let paper = self.paper().color;
         self.ui.round_corners(&outline, paper, |y| {
             ui::mix(section.frame[0], section.frame[1], (y - frame[1]) / height)
         });
@@ -1092,7 +1135,7 @@ impl State {
                 "status",
                 Spec {
                     size: [fit(), px(TITLE)],
-                    text: Some(session.status),
+                    text: Some(&session.status()),
                     color: Some(theme.text_dim),
                     pad: [12.0, 0.0],
                     ..Spec::default()
@@ -1126,7 +1169,7 @@ impl State {
         let engine = &self.view.engine;
         // Under the system's title bar the save status joins the toolbar.
         let status = platform::system_titlebar(&self.window)
-            .then(|| self.session.as_ref().map(|session| session.status))
+            .then(|| self.session.as_ref().map(Session::status))
             .flatten();
         let ui = &mut self.ui;
         let text = theme.text;
@@ -1446,8 +1489,8 @@ impl State {
             ui.leaf(
                 "status",
                 Spec {
-                    size: [fit(), fill()],
-                    text: Some(status),
+                    size: [fit(), px(ui::shell::TOOL)],
+                    text: Some(&status),
                     color: Some(theme.text_dim),
                     center: true,
                     ..Spec::default()
@@ -1579,7 +1622,7 @@ impl State {
             }
         }
         if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, false).clicked {
-            self.commands.push(Command::NewPage { subpage: false });
+            self.commands.push(Command::NewPage { under: None });
         }
         let toggle = if self.pages_open {
             art::SIDEBAR_COLLAPSE
@@ -1594,7 +1637,7 @@ impl State {
 
     /// The section's pages as tabs down the frame's right side, returning the open page's
     /// tab, which is the page's colour and joins it.
-    fn page_list(&mut self, theme: &Theme, section: &ui::Section) -> Option<Id> {
+    fn page_list(&mut self, theme: &Theme, section: &ui::Section, tabs: Id) -> Option<Id> {
         let session = self.session.as_ref()?;
         let panel = self.ui.id("panel");
         let width = self
@@ -1616,7 +1659,7 @@ impl State {
             self.ui.open_popup(menus::id());
         }
         let rect = self.ui.rect(panel).unwrap_or_default();
-        self.drag_pages(rows.held, section, rect);
+        self.drag_pages(rows.held, section, rect, tabs);
         self.ui.close();
         rows.open
     }
@@ -1681,6 +1724,13 @@ impl State {
                         self.ui.set_focus(Some(filter()));
                         continue;
                     }
+                    // OneNote's New Page is Ctrl+N.
+                    let new = matches!(&key, Key::Character(character)
+                        if character.eq_ignore_ascii_case("n"));
+                    if modifiers.command && !modifiers.shift && new && self.session.is_some() {
+                        self.commands.push(Command::NewPage { under: None });
+                        continue;
+                    }
                     self.view.key(&ui::edit_key(&key), text.as_deref())?
                 }
                 ui::Event::Ime(Ime::Preedit(text, cursor)) => self.view.compose(text, cursor)?,
@@ -1715,13 +1765,13 @@ impl State {
                 self.load(move || {
                     let section = library.open(&path, notify)?;
                     let (session, page) = read_session(section, library, path, last)?;
-                    Ok((Loaded::Section(Box::new(session)), page))
+                    Ok(Loaded::Section(Box::new(session), page))
                 });
             }
             Command::OpenPage(space) => {
                 let session = self.session.as_ref().ok_or("No section is open")?;
                 let read = session.reader(space);
-                self.load(move || Ok((Loaded::Page(space), read()?)));
+                self.load(move || Ok(Loaded::Page(space, read()?)));
             }
             Command::Versions { page, show } => {
                 let session = self.session.as_mut().ok_or("No section is open")?;
@@ -1769,9 +1819,10 @@ impl State {
             Command::NewNotebook => self.new_notebook()?,
             Command::CloseNotebook(library) => self.close_notebook(&library),
             Command::Structure(library, change) => self.restructure(library, change),
-            Command::NewPage { subpage } => self.new_page(subpage)?,
+            Command::NewPage { under } => self.new_page(under)?,
             Command::DeletePages(pages) => self.delete_pages(pages)?,
             Command::Pages(edits) => self.edit_pages(edits)?,
+            Command::MovePage { space, path } => self.move_page(space, path)?,
             Command::Template(choice) => self.apply_template(choice)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
             Command::Page(Request::Copy(text)) => self.clipboard.set_text(text)?,
@@ -1790,7 +1841,7 @@ impl State {
     /// read was asked for meanwhile.
     fn load(
         &mut self,
-        read: impl FnOnce() -> Result<(Loaded, Page), Box<dyn Error>> + Send + 'static,
+        read: impl FnOnce() -> Result<Loaded, Box<dyn Error>> + Send + 'static,
     ) {
         self.loading += 1;
         let (id, sender, redraw) = (self.loading, self.loads.0.clone(), self.redraw.clone());
@@ -1803,13 +1854,20 @@ impl State {
     /// Lays out the newest page read, and shows it once the pictures it shows first are
     /// drawn, or after `HOLD`.
     fn open_loaded(&mut self) -> Result<(), Box<dyn Error>> {
-        for (id, loaded) in self.loads.1.try_iter() {
+        let reads: Vec<Read> = self.loads.1.try_iter().collect();
+        for (id, loaded) in reads {
             if id != self.loading {
                 continue;
             }
             let (loaded, page) = match loaded {
-                Ok(loaded) => loaded,
+                Ok(Loaded::Section(session, page)) => (Shown::Section(session), page),
+                Ok(Loaded::Page(space, page)) => (Shown::Page(space), page),
+                Ok(Loaded::Library(library, path)) => {
+                    self.adopt(library, &path)?;
+                    continue;
+                }
                 Err(error) => {
+                    eprintln!("{error}");
                     platform::alert("Couldn't open", &error);
                     continue;
                 }
@@ -1828,7 +1886,8 @@ impl State {
         let paper = canvas::gpu::Paper {
             color: self.ui.theme.paper,
             ink: self.ui.theme.paper_ink,
-        };
+        }
+        .colored(opening.editor.page_color());
         if !self
             .view
             .prepare(&mut opening.scene, &opening.editor, paper, &self.redraw)
@@ -1845,7 +1904,7 @@ impl State {
             self.last_pages.insert(key, session.space);
         }
         match opening.loaded {
-            Loaded::Section(session) => {
+            Shown::Section(session) => {
                 // A notebook read again after a change replaces the one it was.
                 match self
                     .notebooks
@@ -1859,7 +1918,7 @@ impl State {
                 self.filter.clear();
                 self.save_settings();
             }
-            Loaded::Page(space) => {
+            Shown::Page(space) => {
                 let session = self.session.as_mut().ok_or("No section is open")?;
                 session.space = space;
                 session.change = None;
@@ -1883,6 +1942,46 @@ impl State {
             let response = self.view.focus_text()?;
             self.respond(response);
         }
+        Ok(())
+    }
+
+    /// Takes `library`, a notebook read again after a change, in place of the one it was;
+    /// the open section, now at catalog `path` in it, stays open, reopened where it moved.
+    fn adopt(&mut self, library: Arc<Library>, path: &str) -> Result<(), Box<dyn Error>> {
+        match self
+            .notebooks
+            .iter_mut()
+            .find(|open| open.location == library.location)
+        {
+            Some(open) => *open = Arc::clone(&library),
+            None => self.notebooks.push(Arc::clone(&library)),
+        }
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+        let space = session.space;
+        if session.tabs[session.tab].path == path {
+            session.tabs = library.tabs(folder);
+            session.tab = session
+                .tabs
+                .iter()
+                .position(|tab| tab.path == path)
+                .ok_or("The section is not in its notebook")?;
+            session.library = library;
+        } else {
+            // Its file moved: the replica it holds reopens on the file's new path.
+            self.persist()?;
+            if let Some(session) = self.session.take() {
+                session.section.close()?;
+            }
+            let section = library.open(path, notify(self.proxy.clone()))?;
+            let (session, page) = read_session(section, library, path.to_owned(), Some(space))?;
+            self.session = Some(session);
+            let response = self.view.refresh(page)?;
+            self.respond(response);
+        }
+        self.save_settings();
         Ok(())
     }
 
@@ -2064,6 +2163,10 @@ impl State {
             },
         )?;
         session.status = "Saving";
+        // The page list shows the title as it is typed.
+        if self.view.editor.active_outline().title {
+            session.pages = session.section.pages()?;
+        }
         Ok(())
     }
 
@@ -2316,13 +2419,19 @@ impl State {
         Ok(())
     }
 
+    /// The paper the open page lies on: the theme's, in the page's colour.
+    fn paper(&self) -> canvas::gpu::Paper {
+        canvas::gpu::Paper {
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
+        }
+        .colored(self.view.editor.page_color())
+    }
+
     /// Paints the interface with the page in its box.
     fn paint(&mut self, target: &wgpu::TextureView) -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
-        let paper = canvas::gpu::Paper {
-            color: self.ui.theme.paper,
-            ink: self.ui.theme.paper_ink,
-        };
+        let paper = self.paper();
         self.view.update_pictures(paper, &self.redraw);
         let theme = &self.ui.theme;
         let page_primitives = self.view.primitives(TextColors {
@@ -2356,7 +2465,7 @@ impl State {
                         viewport.origin[1] + corner[1] * scale,
                     ],
                     clip: Some(rect.map(|value| value * scale)),
-                    backdrop: Some(self.ui.theme.paper),
+                    backdrop: Some(paper.color),
                     primitives: &page_primitives,
                 },
             })
@@ -2790,41 +2899,6 @@ fn page_tab(
     ui.signal(row)
 }
 
-/// `page` with its conflict objects marked as OneNote shows a conflict page's: a band
-/// across each conflicting paragraph's outline.
-fn highlighted(mut page: Page, objects: &[ExGuid]) -> Page {
-    use onestore::page::{PageObject, PageParagraph, ParagraphContent};
-    fn mark(paragraphs: &mut [PageParagraph], objects: &[ExGuid]) {
-        for paragraph in paragraphs {
-            match &mut paragraph.content {
-                ParagraphContent::Table(table) => {
-                    for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
-                        mark(&mut cell.paragraphs, objects);
-                    }
-                }
-                ParagraphContent::Text(text)
-                    if objects.contains(&paragraph.id) || objects.contains(&text.id) =>
-                {
-                    paragraph.format.highlight = Some(CONFLICTING);
-                }
-                _ => {}
-            }
-        }
-    }
-    for object in &mut page.objects {
-        match object {
-            PageObject::Outline(outline) => mark(&mut outline.paragraphs, objects),
-            PageObject::Title(title) => {
-                for outline in &mut title.outlines {
-                    mark(&mut outline.paragraphs, objects);
-                }
-            }
-            _ => {}
-        }
-    }
-    page
-}
-
 /// The pages whose titles contain `filter`, ignoring case.
 fn matching<'a>(
     pages: &'a [(ExGuid, String, u32)],
@@ -3025,6 +3099,10 @@ impl ApplicationHandler<UserEvent> for App {
                             state.window.set_theme(Some(appearance));
                             state.ui.theme = theme(appearance);
                         }
+                        Replay::Quit => {
+                            self.close(event_loop);
+                            return;
+                        }
                     }
                     // A covered window gets no redraws, so each step draws its own frame.
                     if let Err(error) = state.frame() {
@@ -3072,15 +3150,15 @@ impl ApplicationHandler<UserEvent> for App {
             &self.substitutes,
             std::mem::take(&mut self.interface_font),
             self.screenshot.is_none(),
-            self.settings.take().unwrap_or_default(),
-            self.cache.clone(),
+            self.launch.take().expect("The window opens once"),
         )) {
             Ok(mut state) => match &self.screenshot {
-                Some(prefix) => {
+                // A replay drives the hidden window instead, its snapshots capturing it.
+                Some(prefix) if std::env::var_os("SNOWBOUND_REPLAY").is_none() => {
                     self.startup_error = state.screenshot(prefix).err();
                     event_loop.exit();
                 }
-                None => self.state = Some(state),
+                _ => self.state = Some(state),
             },
             Err(error) => {
                 self.startup_error = Some(error);
@@ -3217,9 +3295,9 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 /// Feeds a development script to the window from another thread, one command per line
-/// in logical pixels: `move X Y`, `press`, `release`, `wheel DX DY`, `key NAME`, `type
-/// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH` and
-/// `appearance light|dark`.
+/// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `key NAME`, `type
+/// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`,
+/// `appearance light|dark` and `quit`.
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
     let mut steps = Vec::new();
     for line in script.lines().filter(|line| !line.trim().is_empty()) {
@@ -3228,7 +3306,11 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
             rest.split_whitespace().map(str::parse).collect()
         };
         let button = |pressed| ui::Event::Button {
-            button: MouseButton::Left,
+            button: if rest == "right" {
+                MouseButton::Right
+            } else {
+                MouseButton::Left
+            },
             pressed,
             at: Instant::now(),
         };
@@ -3269,6 +3351,7 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                     .try_fold(ModifiersState::empty(), |all, one| one.map(|one| all | one))?,
             ))),
             "wait" => Err(std::time::Duration::from_millis(rest.parse()?)),
+            "quit" => Ok(Replay::Quit),
             "snapshot" => Ok(Replay::Snapshot(rest.into())),
             "appearance" => Ok(Replay::Appearance(match rest {
                 "light" => winit::window::Theme::Light,
@@ -3467,8 +3550,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         proxy: event_loop.create_proxy(),
         input: Some(input),
         // A screenshot leaves the settings as it found them.
-        settings: Some((settings_file.filter(|_| screenshot.is_none()), saved)),
-        cache,
+        launch: Some(settings::Launch {
+            file: settings_file.filter(|_| screenshot.is_none()),
+            saved,
+            cache,
+        }),
         substitutes,
         interface_font,
         screenshot,

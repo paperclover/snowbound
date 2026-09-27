@@ -603,7 +603,7 @@ pub const TEMPLATES: &[Template] = &[
 
 /// OneNote 2010's page colours in its View, Page Color menu order, with the names its
 /// tooltips give them; COLORREF, as the page XML reports each
-/// (evidence/notebook-management/page-colors).
+/// (`corpus/notebook-management/native/page-color`).
 pub const PAGE_COLORS: &[(&str, u32)] = &[
     ("Blue", 0xfef5ed),
     ("Red", 0xefeeff),

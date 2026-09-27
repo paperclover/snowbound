@@ -15,6 +15,7 @@ onestore = { path = "../onestore" }
 parley.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+icu_normalizer = "2.3"
 skrifa = "0.44.0"
 
 accesskit = { version = "0.25.0", optional = true }

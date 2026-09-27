@@ -691,14 +691,14 @@ fn picture_handles_resize_as_onenote_does() {
     let pixel = 0.75;
     let rect = image_rect(origin, size);
     assert_eq!(
-        image_handle_at(rect, pixel, [468.0 - 3.75, 86.4 - 3.75]),
+        image_handle_at(rect, pixel, [468.0 - 3.75, 86.4 - 3.75], 0.0),
         Some([-1, -1])
     );
     assert_eq!(
-        image_handle_at(rect, pixel, [468.0 + 166.5, 286.5 + 3.75]),
+        image_handle_at(rect, pixel, [468.0 + 166.5, 286.5 + 3.75], 0.0),
         Some([0, 1])
     );
-    assert_eq!(image_handle_at(rect, pixel, [600.0, 150.0]), None);
+    assert_eq!(image_handle_at(rect, pixel, [600.0, 150.0], 0.0), None);
 }
 
 const DEFAULT_MARGIN: [f32; 2] = [36.0, 14.4];

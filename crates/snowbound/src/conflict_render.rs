@@ -254,7 +254,7 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
     let highlighted = kept.objects.iter().any(|object| match object {
         onestore::page::PageObject::Outline(outline) => outline.paragraphs.iter().any(|paragraph| {
             paragraph.text().is_some_and(|text| marked.contains(&text.id))
-                && paragraph.format.highlight == Some(CONFLICTING)
+                && paragraph.format.highlight == Some(canvas::conflict::CONFLICTING)
         }),
         _ => false,
     });

@@ -221,6 +221,64 @@ pub fn cache_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")
 }
 
+/// The share holding `path` where it is mounted from an SMB server (CIFS or SMB 3).
+pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
+    // The mount holding the path is the one at its longest ancestor.
+    let (source, point, options) = mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let (source, point, kind, options) =
+                (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+            let point = point.replace("\\040", " ");
+            (matches!(kind, "cifs" | "smb3") && path.starts_with(&point))
+                .then(|| (source.replace("\\040", " "), point, options.to_owned()))
+        })
+        .max_by_key(|(_, point, _)| point.len())?;
+    let within = path.strip_prefix(&point).ok()?.to_string_lossy().into_owned();
+    crate::library::Mount::parse(&source, &within, &options)
+}
+
+/// The password the Secret Service keeps for `mount`'s account, as GNOME's file manager
+/// saves one, or what the user types when it keeps none.
+pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login, String> {
+    let user = mount.user.clone().unwrap_or_default();
+    let mut lookup = Command::new("secret-tool");
+    lookup.args(["lookup", "protocol", "smb", "server", &mount.server]);
+    if !user.is_empty() {
+        lookup.args(["user", &user]);
+    }
+    if let Ok(output) = lookup.output()
+        && output.status.success()
+        && !output.stdout.is_empty()
+    {
+        return Ok(crate::library::Login {
+            user,
+            password: String::from_utf8_lossy(&output.stdout).trim_end_matches('\n').to_owned(),
+            domain: mount.domain.clone(),
+        });
+    }
+    let title = format!("Sign in to {}", mount.server);
+    let asked = dialog(
+        ["--password", "--username", &format!("--title={title}")],
+        ["--password", &title],
+    )
+    .map_err(str::to_owned)?
+    .ok_or_else(|| "Signing in was cancelled".to_owned())?;
+    // zenity answers "user|password"; kdialog only the password.
+    let (typed, password) = asked
+        .split_once('|')
+        .map_or((user.clone(), asked.clone()), |(typed, password)| {
+            (typed.to_owned(), password.to_owned())
+        });
+    Ok(crate::library::Login {
+        user: if typed.is_empty() { user } else { typed },
+        password,
+        domain: mount.domain.clone(),
+    })
+}
+
 pub fn settings_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
