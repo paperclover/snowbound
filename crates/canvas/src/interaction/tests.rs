@@ -20,6 +20,7 @@ pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint {
         pixel: display_scale / scale,
         colors: COLORS,
         visible: [f32::NEG_INFINITY, f32::INFINITY],
+        chrome: true,
     }
 }
 
@@ -47,6 +48,7 @@ fn date_buttons_keep_accessibility_identity_and_match_mouse_hits_after_reflow() 
         title: "Header".into(),
         created: Some(1),
         margin_origin: [36.0, 14.4],
+        color: None,
         definitions: Default::default(),
         objects: vec![onestore::page::PageObject::Title(onestore::page::Title {
             id: onestore::ExGuid::default(),
@@ -530,6 +532,7 @@ fn extension_hits_yield_to_objects_and_keep_their_source_coordinate_frame() {
         title: String::new(),
         created: None,
         margin_origin: [0.0; 2],
+        color: None,
         definitions: Default::default(),
         objects: vec![onestore::page::PageObject::Outline(source)],
     };
@@ -652,6 +655,7 @@ fn a_picture_in_an_outline_takes_the_click_over_its_text() {
             identity: None,
             created: None,
             margin_origin: [36.0, 14.4],
+            color: None,
             definitions: Default::default(),
             objects: vec![PageObject::Outline(source)],
         },
@@ -828,6 +832,7 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
             pixel: 1.0,
             colors: COLORS,
             visible: [f32::NEG_INFINITY, f32::INFINITY],
+            chrome: true,
         },
         &mut primitives,
     )
@@ -899,6 +904,7 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
             pixel: 1.0,
             colors: COLORS,
             visible: [f32::NEG_INFINITY, f32::INFINITY],
+            chrome: true,
         },
         &mut primitives,
     )
@@ -1157,6 +1163,7 @@ fn overlapping_objects_follow_paint_order_through_creation_movement_and_undo() {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: Default::default(),
             objects,
         };
@@ -1389,6 +1396,7 @@ fn read_only_focus_retires_text_overlays_and_draws_a_scaled_focus_border() {
         created: None,
         title: String::new(),
         margin_origin: [0.0; 2],
+        color: None,
         definitions: Default::default(),
         objects: vec![PageObject::Unsupported(Unsupported {
             id: Default::default(),
@@ -1503,6 +1511,7 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
             identity: None,
             created: None,
             margin_origin: [36.0, 14.4],
+            color: None,
             definitions: Default::default(),
             objects: vec![PageObject::Outline(source)],
         },
@@ -1539,6 +1548,7 @@ fn a_page_outline_emptied_by_backspace_still_draws() {
         identity: None,
         created: None,
         margin_origin: [36.0, 14.4],
+        color: None,
         definitions: Default::default(),
         objects,
     };
@@ -1659,6 +1669,16 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
     let _ = view.pointer_released().unwrap();
     let origin = view.editor.active_outline().origin();
     assert_eq!(origin, [72.0, 50.4]);
+
+    // Dropped outside the view, as past the window's corner, it stays where it was.
+    let bounds = view.editor.active_outline().bounds();
+    let header = [(bounds.x0 + bounds.x1) as f32 / 2.0, bounds.y0 as f32 - 8.0];
+    let _ = view.pointer_moved(header).unwrap();
+    let _ = view.pointer_pressed(now + Duration::from_secs(4)).unwrap();
+    let _ = view.pointer_moved([-200.0, -150.0]).unwrap();
+    assert!(view.outline_preview().is_some());
+    let _ = view.pointer_released().unwrap();
+    assert_eq!(view.editor.active_outline().origin(), origin);
 
     // An empty spot places a new caret there, 7 px above the pointer on the grid.
     click(&mut view, [400.0, 300.0], now + Duration::from_secs(3));
@@ -1835,7 +1855,7 @@ fn a_dragged_outline_snaps_to_the_margin_grid_as_onenote_stores_it() {
 
 /// OneNote 2010 at 75 to 150% opens a page scrolled fully left and up: 11 px beyond 7.5 pt
 /// left of text, a list marker, 0.75 pt into a tag's slot, or 6 pt above an outline, never
-/// right of or below the page origin; then down until the caret's outline clears the bottom.
+/// right of or below the page origin, even when the only outline lies below the view.
 #[test]
 fn a_page_opens_where_onenote_places_the_view() {
     use crate::editor::{Formatting, NoteTag};
@@ -1880,7 +1900,133 @@ fn a_page_opens_where_onenote_places_the_view() {
             "{origin:?} {view:?}"
         );
     }
-    // Content far down scrolls into view, 9 pt and 9 px above the bottom.
     let (_, view) = open([50.0, 900.0], false);
-    assert!(view[1] < -600.0);
+    assert_eq!(view, [0.0, 0.0]);
+}
+
+/// OneNote 2010 returns to a page at the scroll, in device pixels whatever the zoom, and the
+/// selection it was left with, without revealing the selection.
+#[test]
+fn a_page_reopens_where_it_was_left() {
+    use crate::document::TextPosition;
+    let mut engine = TextEngine::default();
+    let outlines: Vec<TextOutline> = [("First", [0.0, 0.0]), ("Far below", [50.0, 900.0])]
+        .into_iter()
+        .map(|(text, origin)| {
+            let paragraph = Paragraph::new(text.into(), Format::default());
+            let document = TextDocument::new(vec![paragraph]).unwrap();
+            TextOutline::new(&mut engine, document, 468.0, origin).unwrap()
+        })
+        .collect();
+    let editor = |count: usize| {
+        CanvasEditor::from_text_outlines(outlines[..count].to_vec(), Default::default(), None)
+            .unwrap()
+    };
+    let mut view = PageView::new(
+        editor(2),
+        engine,
+        None,
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    let far = outlines[1].id;
+    view.editor.focus_outline(far).unwrap();
+    let selection = Selection::from([2, 5].map(|offset| TextPosition {
+        paragraph: 0,
+        offset,
+    }));
+    view.editor.select(selection).unwrap();
+    let _ = view.scroll_to(1, 300.0).unwrap();
+    let place = view.place();
+
+    view.open(editor(2), None, None);
+    assert_eq!(view.viewport.origin, [21.0, 19.0]);
+    let _ = view.set_zoom(2.0).unwrap();
+    view.open(editor(2), None, Some(place));
+    assert_eq!(view.viewport.origin, [21.0, -300.0]);
+    assert_eq!(view.editor.active_outline().id, far);
+    assert_eq!(view.editor.selection(), selection);
+
+    // A place past the page's content is kept within it, here 6 pt above the outline at 200%.
+    view.open(editor(1), None, Some(place));
+    assert_eq!(view.viewport.origin, [21.0, 27.0]);
+    assert_eq!(view.editor.active_outline().id, outlines[0].id);
+}
+
+#[test]
+fn page_keys_scroll_or_carry_the_caret_as_the_platform_does() {
+    let mut engine = TextEngine::default();
+    let lines = (0..100)
+        .map(|line| Paragraph::new(format!("Line {line}"), Default::default()))
+        .collect();
+    let outline = TextOutline::new(
+        &mut engine,
+        TextDocument::new(lines).unwrap(),
+        240.0,
+        [36.0, 36.0],
+    )
+    .unwrap();
+    let editor = CanvasEditor::from_page(
+        Page {
+            title: String::new(),
+            identity: None,
+            created: None,
+            margin_origin: [36.0, 14.4],
+            color: None,
+            definitions: Default::default(),
+            objects: vec![onestore::page::PageObject::Outline(outline.snapshot())],
+        },
+        &mut engine,
+    )
+    .unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        None,
+        [800, 200],
+        1.0,
+        Duration::from_millis(500),
+    );
+    view.viewport.scale = 1.0;
+    let page_down = Key::Named(NamedKey::PageDown);
+    let option = Modifiers {
+        option: true,
+        ..Modifiers::default()
+    };
+    for modifiers in [Modifiers::default(), option] {
+        view.viewport.origin = [0.0; 2];
+        view.editor
+            .move_selection(&mut view.engine, Movement::DocumentStart, false)
+            .unwrap();
+        let _ = view.modifiers_changed(modifiers).unwrap();
+        let caret = view.caret_area().unwrap()[1];
+        let _ = view.key(&page_down, None).unwrap();
+        let scrolled = -view.viewport.origin[1];
+        let shown = view.caret_area().unwrap()[1];
+        match Command::from_key(&page_down, modifiers) {
+            Some(Command::ScrollPage { up: false }) => {
+                assert_eq!(scrolled, 190.0, "a page less AppKit's ten points");
+                assert_eq!(shown, caret - scrolled, "the caret stays in the text");
+            }
+            Some(Command::MovePage { up: false }) => {
+                assert!(scrolled >= 200.0, "{scrolled}");
+                assert_eq!(shown, caret, "the caret keeps its place on screen");
+            }
+            None => assert_eq!((scrolled, shown), (0.0, caret)),
+            other => panic!("Page Down is {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn an_empty_preedit_without_a_composition_changes_nothing() {
+    let (mut view, _) = picture_view();
+    assert_eq!(
+        view.compose(String::new(), None).unwrap(),
+        Response::default()
+    );
+    assert!(view.compose("k".into(), Some((1, 1))).unwrap().changed);
+    assert!(view.compose(String::new(), None).unwrap().changed);
+    assert!(view.editor.marked_range().is_none());
 }

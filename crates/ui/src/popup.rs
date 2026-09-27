@@ -6,6 +6,11 @@ use crate::{
     Anchor, Axis, Event, Flags, ICON, ICON_GAP, Id, List, Popup, Row, Rows, Spec, Ui, children,
     fill, fit, list::GUTTER, mix, px, text_field,
 };
+use nucleo_matcher::{
+    Config, Matcher, Utf32Str,
+    pattern::{AtomKind, CaseMatching, Normalization, Pattern},
+};
+use std::cell::RefCell;
 use winit::keyboard::{Key, NamedKey};
 
 const CHECK: &[&str] = &[include_str!("../assets/check.svg")];
@@ -20,6 +25,12 @@ const NARROWEST: f32 = 140.0;
 const PALETTE: f32 = 560.0;
 /// A colour grid's cell, around its swatch.
 const CELL: f32 = 22.0;
+/// Seconds a popup takes to ease to the height of its results.
+const RESIZE: f32 = 0.15;
+thread_local! {
+    /// Scratch space for ranking, a few hundred kilobytes, reused across frames.
+    static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::new(Config::DEFAULT));
+}
 /// The keys a menu's list takes, and Enter to choose.
 const KEYS: [NamedKey; 7] = [
     NamedKey::ArrowUp,
@@ -44,9 +55,13 @@ pub struct Item<'a> {
     pub shortcut: &'a str,
     /// Marked with a check in place of its icon.
     pub checked: bool,
+    /// Starts highlighted when the menu opens, as a checked item does.
+    pub current: bool,
     pub disabled: bool,
     /// Starts a group, ruled off from the one above while unfiltered.
     pub separated: bool,
+    /// Names the group it starts: shown only while unfiltered, never chosen.
+    pub heading: bool,
 }
 
 /// Builds popup `id` as a menu of `items` beside `anchor` while it is open, under a
@@ -160,15 +175,39 @@ fn choose(
         }
     }
     let matches = Matches::new(items, &query);
-    // Unfiltered, the checked item starts highlighted; filtered, the best match.
+    // Unfiltered, the current or checked item starts highlighted; filtered, the best match.
     highlight = highlight.or_else(|| {
         let first = if query.is_empty() {
-            matches.order.iter().position(|index| items[*index].checked)
+            matches.order.iter().position(|index| items[*index].current || items[*index].checked)
         } else {
             (0..matches.count()).find(|row| matches.selectable(*row))
         };
         first.map(|row| matches.key(row))
     });
+    let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
+    let field = if filter.is_some() { ROW + PAD } else { 0.0 };
+    let content = matches.count() as f32 * ROW + matches.space_before(matches.count());
+    let view = content
+        .max(ROW)
+        .min((ROWS * ROW).min(window - 4.0 * PAD - field).max(ROW));
+    // The popup eases to its new height as the results change; the rows do not move.
+    let dt = ui.dt;
+    let [from, to, elapsed] = state(ui, id).height.get_or_insert([view, view, RESIZE]);
+    *elapsed = (*elapsed + dt).min(RESIZE);
+    let height = *to - (*to - *from) * (1.0 - *elapsed / RESIZE).powi(3);
+    if *to != view {
+        [*from, *to, *elapsed] = [height, view, 0.0];
+    }
+    ui.animating |= height != view;
+    ui.open(
+        "results",
+        Spec {
+            flags: Flags::CLIP,
+            axis: Axis::Y,
+            size: [fill(), px(height)],
+            ..Spec::default()
+        },
+    );
     let chosen = if matches.count() == 0 {
         ui.leaf(
             "empty",
@@ -182,10 +221,6 @@ fn choose(
         );
         None
     } else {
-        let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
-        let field = if filter.is_some() { ROW + PAD } else { 0.0 };
-        let content = matches.count() as f32 * ROW + matches.space_before(matches.count());
-        let view = content.min((ROWS * ROW).min(window - 4.0 * PAD - field).max(ROW));
         let list = List {
             rows: &matches,
             row: ROW,
@@ -212,6 +247,7 @@ fn choose(
         })
     };
     ui.close();
+    ui.close();
     if let Some(row) = chosen {
         ui.close_popup(id);
         return Some(matches.order[row]);
@@ -226,10 +262,7 @@ fn choose(
 /// highlight when selected, under a rule when it starts a group.
 fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
     let item = &matches.items[row.key as usize];
-    if row
-        .index
-        .is_some_and(|index| index > 0 && matches.ruled && item.separated)
-    {
+    if row.index > 0 && matches.ruled && item.separated {
         ui.leaf(
             "rule",
             Spec {
@@ -241,7 +274,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
             },
         );
     }
-    let color = if item.disabled {
+    let color = if item.disabled || item.heading {
         theme.text_dim
     } else {
         theme.text
@@ -283,6 +316,8 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
             size: [fill(), px(ROW)],
             text: Some(item.text),
             font: item.font,
+            font_size: item.heading.then_some(theme.font_size - 2.0),
+            bold: item.heading,
             color: Some(color),
             ..Spec::default()
         },
@@ -485,10 +520,11 @@ fn navigation(ui: &mut Ui, owners: &[Id], keys: &[NamedKey]) -> Vec<NamedKey> {
     taken
 }
 
-/// The items matching a query, most relevant first, keyed by their index in `items`.
-struct Matches<'a> {
+/// The items fuzzily matching a query as fzf does, best first, keyed by their index in
+/// `items`.
+pub(crate) struct Matches<'a> {
     items: &'a [Item<'a>],
-    order: Vec<usize>,
+    pub(crate) order: Vec<usize>,
     /// Each item's row, or None when it does not match.
     rows: Vec<Option<usize>>,
     /// Rules above each row and the end, counted from the top; only while unfiltered.
@@ -498,14 +534,32 @@ struct Matches<'a> {
 }
 
 impl<'a> Matches<'a> {
-    fn new(items: &'a [Item<'a>], query: &str) -> Self {
-        let mut ranked: Vec<_> = items
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| Some((score(query, item.text)?, index)))
-            .collect();
-        ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        let order: Vec<usize> = ranked.into_iter().map(|(_, index)| index).collect();
+    pub(crate) fn new(items: &'a [Item<'a>], query: &str) -> Self {
+        let pattern = Pattern::new(
+            query,
+            CaseMatching::Ignore,
+            Normalization::Smart,
+            AtomKind::Fuzzy,
+        );
+        let order: Vec<usize> = if pattern.atoms.is_empty() {
+            (0..items.len()).collect()
+        } else {
+            let mut chars = Vec::new();
+            let mut ranked: Vec<_> = MATCHER.with_borrow_mut(|matcher| {
+                items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| !item.heading)
+                    .filter_map(|(index, item)| {
+                        let text = Utf32Str::new(item.text, &mut chars);
+                        Some((pattern.score(text, matcher)?, index))
+                    })
+                    .collect()
+            });
+            // Stable, so equal matches keep the items' order.
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            ranked.into_iter().map(|(_, index)| index).collect()
+        };
         let mut rows = vec![None; items.len()];
         for (row, index) in order.iter().enumerate() {
             rows[*index] = Some(row);
@@ -542,30 +596,11 @@ impl Rows for Matches<'_> {
     }
 
     fn selectable(&self, index: usize) -> bool {
-        !self.items[self.order[index]].disabled
+        let item = &self.items[self.order[index]];
+        !item.disabled && !item.heading
     }
 
     fn space_before(&self, index: usize) -> f32 {
         self.rules[index] as f32 * RULE
-    }
-}
-
-/// How well `text` matches `query`, ignoring case: 3 at its start, 2 at a word's, 1
-/// anywhere, 0 with the query's characters in order among others; None otherwise.
-fn score(query: &str, text: &str) -> Option<u8> {
-    let [query, text] = [query, text].map(str::to_lowercase);
-    let at_word = |(at, _): (usize, &str)| text[..at].ends_with(|c: char| !c.is_alphanumeric());
-    if text.starts_with(&query) {
-        Some(3)
-    } else if text.match_indices(&query).any(at_word) {
-        Some(2)
-    } else if text.contains(&query) {
-        Some(1)
-    } else {
-        let mut chars = text.chars();
-        query
-            .chars()
-            .all(|wanted| chars.any(|c| c == wanted))
-            .then_some(0)
     }
 }

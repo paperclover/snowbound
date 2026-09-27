@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Snowbound
+GenericName=Note Taking
+Comment=Type and draw notes in OneNote notebooks
+Exec=snowbound
+Icon=snowbound
+Terminal=false
+Categories=Office;
+StartupWMClass=snowbound

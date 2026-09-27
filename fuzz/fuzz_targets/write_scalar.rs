@@ -1,58 +1,66 @@
 #![no_main]
+//! Replaces a native text with arbitrary text: the edit either refuses it or appends a
+//! revision storing it, leaving the old header's view of the file intact.
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    ExGuid, ObjectData, PropertySets, RevisionIndex, Store, Value, replace_property_bytes,
+    ExGuid, RevisionIndex, Store,
+    document::{Document, Kind},
+    op::{Op, PageOp},
 };
 use std::sync::LazyLock;
 
+#[path = "../../crates/onestore/tests/support/ops.rs"]
+mod ops;
+
 const SOURCE: &[u8] =
     include_bytes!("../../corpus/native/20260905-05/snapshots/02-text/notebook/synthetic.one");
-static TARGET: LazyLock<(ExGuid, ExGuid, u32)> = LazyLock::new(|| {
-    let store = Store::parse(SOURCE).unwrap();
+
+fn text(bytes: &[u8], target: Option<(ExGuid, ExGuid)>) -> Vec<(ExGuid, ExGuid, String)> {
+    let store = Store::parse(bytes).unwrap();
+    assert!(store.checksum_mismatches.is_empty());
     let index = RevisionIndex::parse(&store).unwrap();
-    for (osid, space) in &index.spaces {
-        let revision = index
-            .resolve(*osid, space.labels[&(ExGuid::default(), 1)])
-            .unwrap();
-        for (oid, object) in revision.objects {
-            if let ObjectData::Properties(data) = object.data {
-                for property in &PropertySets::parse(data).unwrap().sets[0] {
-                    if property.value == Value::Bytes(b"Fictitious plain text.") {
-                        return (*osid, oid, property.id);
-                    }
-                }
+    index.validate_current().unwrap();
+    let document = Document::parse(&index).unwrap();
+    let mut found = Vec::new();
+    for (sid, space) in &document.spaces {
+        let revision = &space.revisions[&space.contexts[&ExGuid::default()]];
+        for (oid, node) in &revision.nodes {
+            if let Kind::RichText { text, .. } = &node.kind
+                && target.is_none_or(|target| target == (*sid, *oid))
+            {
+                found.push((*sid, *oid, text.clone()));
             }
         }
     }
-    panic!("Missing native seed property")
+    found
+}
+
+static TARGET: LazyLock<(ExGuid, ExGuid)> = LazyLock::new(|| {
+    text(SOURCE, None)
+        .into_iter()
+        .find_map(|(sid, oid, text)| (text == "Fictitious plain text.").then_some((sid, oid)))
+        .expect("Missing native seed text")
 });
 
 fuzz_target!(|value: &[u8]| {
-    let (osid, oid, property) = *TARGET;
-    let bytes = replace_property_bytes(SOURCE, osid, oid, property, value).unwrap();
+    let (sid, oid) = *TARGET;
+    let value = String::from_utf8_lossy(value);
+    let op = PageOp::Text {
+        text: oid,
+        range: 0.."Fictitious plain text.".len() as u32,
+        with: value.to_string(),
+    };
+    let edited = ops::apply(SOURCE, "Fuzz", vec![Op::Page { space: sid, op }]);
+    if value.contains(['\0', '\n', '\u{fffc}']) {
+        assert!(edited.is_err());
+        return;
+    }
+    let bytes = edited.unwrap().image;
     let mut before_commit = bytes.clone();
     before_commit[..1024].copy_from_slice(&SOURCE[..1024]);
-    let old = Store::parse(&before_commit).unwrap();
-    assert!(old.checksum_mismatches.is_empty());
-    RevisionIndex::parse(&old)
-        .unwrap()
-        .validate_current()
-        .unwrap();
-    let store = Store::parse(&bytes).unwrap();
-    assert!(store.checksum_mismatches.is_empty());
-    let index = RevisionIndex::parse(&store).unwrap();
-    let rid = index.spaces[&osid].labels[&(ExGuid::default(), 1)];
-    let current = index.resolve(osid, rid).unwrap();
-    let ObjectData::Properties(data) = current.objects[&oid].data else {
-        panic!()
-    };
-    let properties = PropertySets::parse(data).unwrap();
     assert_eq!(
-        properties.sets[0]
-            .iter()
-            .find(|candidate| candidate.id == property)
-            .unwrap()
-            .value,
-        Value::Bytes(value)
+        text(&before_commit, Some((sid, oid)))[0].2,
+        "Fictitious plain text."
     );
+    assert_eq!(text(&bytes, Some((sid, oid)))[0].2, value);
 });

@@ -1,5 +1,5 @@
-//! Text editing shared by the page and interface text: keys, macOS editing chords, click
-//! counting and caret movement within one parley layout.
+//! Text editing shared by the page and interface text: keys, each platform's editing chords
+//! and caret, click counting and caret movement within one parley layout.
 
 use parley::{
     Affinity, Brush, Layout,
@@ -30,6 +30,8 @@ pub enum NamedKey {
     ArrowDown,
     Home,
     End,
+    PageUp,
+    PageDown,
     /// Shift, Control, Option or Command pressed alone.
     Modifier,
     Other,
@@ -39,7 +41,10 @@ pub enum NamedKey {
 pub struct Modifiers {
     pub shift: bool,
     pub control: bool,
+    /// Option, or Alt.
     pub option: bool,
+    /// The shortcut modifier: Command on macOS, Control elsewhere, where it comes with
+    /// `control`.
     pub command: bool,
 }
 
@@ -67,7 +72,7 @@ pub enum SelectionUnit {
     Paragraph,
 }
 
-/// What a key does to text under macOS conventions.
+/// What a key does to text under the platform's conventions.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
     /// Moves the focus, extending the selection with Shift.
@@ -78,72 +83,285 @@ pub enum Command {
     DeleteTo(Movement),
     /// Control-K: deletes to the line's end, or the break after it when already there.
     Kill,
+    /// Scrolls the view a page, leaving the caret, as Page Up and Page Down do on macOS.
+    ScrollPage { up: bool },
+    /// Moves the caret a page and the view with it, extending the selection with Shift.
+    MovePage { up: bool },
 }
 
 impl Command {
     pub fn from_key(key: &Key, modifiers: Modifiers) -> Option<Self> {
-        let Modifiers {
-            shift,
-            control,
-            option,
-            command,
-        } = modifiers;
-        let pick = |plain, with_option, with_command| {
-            Some(Self::Move(if command {
-                with_command
-            } else if option {
-                with_option
-            } else {
-                plain
-            }))
-        };
-        match key {
-            Key::Named(NamedKey::ArrowLeft) => {
-                pick(Movement::Left, Movement::WordLeft, Movement::LineStart)
-            }
-            Key::Named(NamedKey::ArrowRight) => {
-                pick(Movement::Right, Movement::WordRight, Movement::LineEnd)
-            }
-            Key::Named(NamedKey::ArrowUp) => pick(
-                Movement::Up,
-                Movement::ParagraphStart,
-                Movement::DocumentStart,
-            ),
-            Key::Named(NamedKey::ArrowDown) => pick(
-                Movement::Down,
-                Movement::ParagraphEnd,
-                Movement::DocumentEnd,
-            ),
-            Key::Named(NamedKey::Home) if shift => Some(Self::Move(Movement::DocumentStart)),
-            Key::Named(NamedKey::End) if shift => Some(Self::Move(Movement::DocumentEnd)),
-            Key::Named(NamedKey::Backspace) if command || option => {
-                Some(Self::DeleteTo(if command {
-                    Movement::LineStart
-                } else {
-                    Movement::WordLeft
-                }))
-            }
-            Key::Named(NamedKey::Delete) if command || option => Some(Self::DeleteTo(if command {
-                Movement::LineEnd
-            } else {
-                Movement::WordRight
-            })),
-            Key::Named(NamedKey::Backspace) => Some(Self::Delete { backward: true }),
-            Key::Named(NamedKey::Delete) => Some(Self::Delete { backward: false }),
-            Key::Character(key) if control && !option => match key.as_str() {
-                "a" => Some(Self::Move(Movement::LineStart)),
-                "e" => Some(Self::Move(Movement::LineEnd)),
-                "b" => Some(Self::Move(Movement::Left)),
-                "f" => Some(Self::Move(Movement::Right)),
-                "p" => Some(Self::Move(Movement::Up)),
-                "n" => Some(Self::Move(Movement::Down)),
-                "h" => Some(Self::Delete { backward: true }),
-                "d" => Some(Self::Delete { backward: false }),
-                "k" => Some(Self::Kill),
-                _ => None,
-            },
-            _ => None,
+        Platform::CURRENT.command(key, modifiers)
+    }
+}
+
+/// A desktop's text editing conventions: its chords, and how its caret looks and blinks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Platform {
+    MacOs,
+    /// GTK, as GNOME and most Linux desktops edit text.
+    Gtk,
+    Windows,
+}
+
+/// A caret's blink, in microseconds: solid for `delay` after it moves, then repeating
+/// `phases` of fading out, off, fading in and on, each fade in `steps` equal steps, until
+/// `timeout` after the move leaves it solid.
+struct Blink {
+    delay: u64,
+    phases: [u64; 4],
+    steps: u64,
+    timeout: Option<u64>,
+}
+
+impl Platform {
+    pub const CURRENT: Platform = if cfg!(target_vendor = "apple") {
+        Platform::MacOs
+    } else if cfg!(windows) {
+        Platform::Windows
+    } else {
+        Platform::Gtk
+    };
+
+    pub fn command(self, key: &Key, modifiers: Modifiers) -> Option<Command> {
+        match self {
+            Platform::MacOs => mac_command(key, modifiers),
+            Platform::Gtk | Platform::Windows => pc_command(key, modifiers),
         }
+    }
+
+    /// The caret's width in logical pixels: AppKit's insertion indicator, GTK's stem at
+    /// its 0.04 aspect ratio for body text, and Windows' default caret.
+    pub const fn caret_width(self) -> f32 {
+        match self {
+            Platform::MacOs => 2.0,
+            Platform::Gtk | Platform::Windows => 1.0,
+        }
+    }
+
+    fn blink(self) -> Blink {
+        match self {
+            // AppKit's insertion indicator: 350 ms off and 650 ms on, each opening with a
+            // fade in four 37.5 ms steps.
+            Platform::MacOs => Blink {
+                delay: 650_000,
+                phases: [150_000, 200_000, 150_000, 500_000],
+                steps: 4,
+                timeout: None,
+            },
+            // GtkText at the default 1200 ms blink time: half a cycle's pause after a
+            // move, then quarters of on, fading out, off and fading in, stopping after the
+            // default 10 s; its per-frame fade is taken in 60 Hz steps.
+            Platform::Gtk => Blink {
+                delay: 900_000,
+                phases: [300_000; 4],
+                steps: 18,
+                timeout: Some(10_000_000),
+            },
+            // GetCaretBlinkTime's default 530 ms, without fades, until CaretTimeout's 5 s.
+            Platform::Windows => Blink {
+                delay: 530_000,
+                phases: [0, 530_000, 0, 530_000],
+                steps: 1,
+                timeout: Some(5_000_000),
+            },
+        }
+    }
+
+    /// The caret's opacity `since` it last moved, and how long that opacity holds; None
+    /// once it has stopped blinking.
+    pub fn caret_blink(self, since: Duration) -> (f32, Option<Duration>) {
+        let Blink {
+            delay,
+            phases,
+            steps,
+            timeout,
+        } = self.blink();
+        let period: u64 = phases.iter().sum();
+        // The opacity at `time` and when it next may change.
+        let at = |time: u64| -> (f32, u64) {
+            if time < delay {
+                return (1.0, delay);
+            }
+            let mut within = (time - delay) % period;
+            let mut start = time - within;
+            for (phase, length) in phases.into_iter().enumerate() {
+                if within < length {
+                    return match phase {
+                        1 => (0.0, start + length),
+                        3 => (1.0, start + length),
+                        _ => {
+                            let step = within * steps / length;
+                            let shown = step as f32 / steps as f32;
+                            (
+                                if phase == 0 { 1.0 - shown } else { shown },
+                                start + ((step + 1) * length).div_ceil(steps),
+                            )
+                        }
+                    };
+                }
+                within -= length;
+                start += length;
+            }
+            unreachable!("a time within the period falls in a phase")
+        };
+        let now = u64::try_from(since.as_micros()).unwrap_or(u64::MAX);
+        if timeout.is_some_and(|timeout| now >= timeout) {
+            return (1.0, None);
+        }
+        let (opacity, mut until) = at(now);
+        // A settled phase holds into the next one's first step, which shows the same.
+        for _ in 0..2 * (steps + 2) {
+            let (next, end) = at(until);
+            if next != opacity {
+                break;
+            }
+            until = end;
+        }
+        match timeout {
+            Some(timeout) if until >= timeout && opacity == 1.0 => (opacity, None),
+            Some(timeout) if until >= timeout => {
+                (opacity, Some(Duration::from_micros(timeout - now)))
+            }
+            _ => (opacity, Some(Duration::from_micros(until - now))),
+        }
+    }
+
+    /// The caret's colour and selected text's fill with and without keyboard focus as sRGB
+    /// and alpha, for a light or `dark` appearance: AppKit's system colours, libadwaita's
+    /// text colour and translucent accent, and Windows' Highlight made translucent, as
+    /// selected text keeps its colour here.
+    pub fn text_colors(self, dark: bool) -> [([u8; 3], f32); 3] {
+        match (self, dark) {
+            (Platform::MacOs, false) => [
+                ([0x00, 0x7a, 0xff], 1.0),
+                ([0xb3, 0xd7, 0xff], 1.0),
+                ([0xdc, 0xdc, 0xdc], 1.0),
+            ],
+            (Platform::MacOs, true) => [
+                ([0x00, 0x7a, 0xff], 1.0),
+                ([0x3f, 0x63, 0x8b], 1.0),
+                ([0x46, 0x46, 0x46], 1.0),
+            ],
+            (Platform::Gtk, false) => [
+                ([0x00, 0x00, 0x06], 0.8),
+                ([0x35, 0x84, 0xe4], 0.3),
+                ([0x00, 0x00, 0x06], 0.08),
+            ],
+            (Platform::Gtk, true) => [
+                ([0xff, 0xff, 0xff], 1.0),
+                ([0x35, 0x84, 0xe4], 0.3),
+                ([0xff, 0xff, 0xff], 0.1),
+            ],
+            (Platform::Windows, false) => [
+                ([0x00, 0x00, 0x00], 1.0),
+                ([0x00, 0x78, 0xd7], 0.4),
+                ([0x00, 0x00, 0x00], 0.1),
+            ],
+            (Platform::Windows, true) => [
+                ([0xff, 0xff, 0xff], 1.0),
+                ([0x00, 0x78, 0xd7], 0.5),
+                ([0xff, 0xff, 0xff], 0.15),
+            ],
+        }
+    }
+}
+
+/// AppKit's key bindings, including its Emacs chords on Control.
+fn mac_command(key: &Key, modifiers: Modifiers) -> Option<Command> {
+    let Modifiers {
+        shift,
+        control,
+        option,
+        command,
+    } = modifiers;
+    let pick = |plain, with_option, with_command| {
+        Some(Command::Move(if command {
+            with_command
+        } else if option {
+            with_option
+        } else {
+            plain
+        }))
+    };
+    match key {
+        Key::Named(NamedKey::ArrowLeft) => {
+            pick(Movement::Left, Movement::WordLeft, Movement::LineStart)
+        }
+        Key::Named(NamedKey::ArrowRight) => {
+            pick(Movement::Right, Movement::WordRight, Movement::LineEnd)
+        }
+        Key::Named(NamedKey::ArrowUp) => pick(
+            Movement::Up,
+            Movement::ParagraphStart,
+            Movement::DocumentStart,
+        ),
+        Key::Named(NamedKey::ArrowDown) => pick(
+            Movement::Down,
+            Movement::ParagraphEnd,
+            Movement::DocumentEnd,
+        ),
+        Key::Named(NamedKey::Home) if shift => Some(Command::Move(Movement::DocumentStart)),
+        Key::Named(NamedKey::End) if shift => Some(Command::Move(Movement::DocumentEnd)),
+        Key::Named(NamedKey::PageUp) if option => Some(Command::MovePage { up: true }),
+        Key::Named(NamedKey::PageDown) if option => Some(Command::MovePage { up: false }),
+        Key::Named(NamedKey::PageUp) => Some(Command::ScrollPage { up: true }),
+        Key::Named(NamedKey::PageDown) => Some(Command::ScrollPage { up: false }),
+        Key::Named(NamedKey::Backspace) if command || option => {
+            Some(Command::DeleteTo(if command {
+                Movement::LineStart
+            } else {
+                Movement::WordLeft
+            }))
+        }
+        Key::Named(NamedKey::Delete) if command || option => Some(Command::DeleteTo(if command {
+            Movement::LineEnd
+        } else {
+            Movement::WordRight
+        })),
+        Key::Named(NamedKey::Backspace) => Some(Command::Delete { backward: true }),
+        Key::Named(NamedKey::Delete) => Some(Command::Delete { backward: false }),
+        Key::Character(key) if control && !option => match key.as_str() {
+            "a" => Some(Command::Move(Movement::LineStart)),
+            "e" => Some(Command::Move(Movement::LineEnd)),
+            "b" => Some(Command::Move(Movement::Left)),
+            "f" => Some(Command::Move(Movement::Right)),
+            "p" => Some(Command::Move(Movement::Up)),
+            "n" => Some(Command::Move(Movement::Down)),
+            "h" => Some(Command::Delete { backward: true }),
+            "d" => Some(Command::Delete { backward: false }),
+            "k" => Some(Command::Kill),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// GTK's and Windows' shared bindings: Control moves and deletes by words, and with Home
+/// and End reaches the document's ends; Control with Up and Down moves by paragraphs.
+fn pc_command(key: &Key, modifiers: Modifiers) -> Option<Command> {
+    let Modifiers {
+        control, option, ..
+    } = modifiers;
+    if option {
+        return None;
+    }
+    let pick =
+        |plain, with_control| Some(Command::Move(if control { with_control } else { plain }));
+    match key {
+        Key::Named(NamedKey::ArrowLeft) => pick(Movement::Left, Movement::WordLeft),
+        Key::Named(NamedKey::ArrowRight) => pick(Movement::Right, Movement::WordRight),
+        Key::Named(NamedKey::ArrowUp) => pick(Movement::Up, Movement::ParagraphStart),
+        Key::Named(NamedKey::ArrowDown) => pick(Movement::Down, Movement::ParagraphEnd),
+        Key::Named(NamedKey::Home) => pick(Movement::LineStart, Movement::DocumentStart),
+        Key::Named(NamedKey::End) => pick(Movement::LineEnd, Movement::DocumentEnd),
+        Key::Named(NamedKey::PageUp) if !control => Some(Command::MovePage { up: true }),
+        Key::Named(NamedKey::PageDown) if !control => Some(Command::MovePage { up: false }),
+        Key::Named(NamedKey::Backspace) if control => Some(Command::DeleteTo(Movement::WordLeft)),
+        Key::Named(NamedKey::Delete) if control => Some(Command::DeleteTo(Movement::WordRight)),
+        Key::Named(NamedKey::Backspace) => Some(Command::Delete { backward: true }),
+        Key::Named(NamedKey::Delete) => Some(Command::Delete { backward: false }),
+        _ => None,
     }
 }
 
@@ -183,35 +401,12 @@ impl Clicks {
     }
 }
 
-/// The caret's width in logical pixels, as AppKit's insertion indicator draws it.
-pub const CARET_WIDTH: f32 = 2.0;
+/// The caret's width in logical pixels on this platform.
+pub const CARET_WIDTH: f32 = Platform::CURRENT.caret_width();
 
-/// The caret's opacity `since` it last moved, and how long that opacity holds. As AppKit's
-/// insertion indicator: solid for 650 ms, then 350 ms off and 650 ms on, each phase
-/// opening with a fade in four 37.5 ms steps.
-pub fn caret_blink(since: Duration) -> (f32, Duration) {
-    const STEP: u64 = 37_500;
-    const ON: u64 = 650_000;
-    const OFF: u64 = 350_000;
-    let micros = u64::try_from(since.as_micros()).unwrap_or(u64::MAX);
-    let Some(cycle) = micros.checked_sub(ON) else {
-        return (1.0, Duration::from_micros(ON + STEP - micros));
-    };
-    let (into, length, fading_in) = match cycle % (ON + OFF) {
-        phase if phase < OFF => (phase, OFF, false),
-        phase => (phase - OFF, ON, true),
-    };
-    let step = into / STEP;
-    // A settled phase holds into the next one's first step, which shows the same.
-    let (faded, hold) = if step < 4 {
-        (step as f32 / 4.0, STEP * (step + 1) - into)
-    } else {
-        (1.0, length - into + STEP)
-    };
-    (
-        if fading_in { faded } else { 1.0 - faded },
-        Duration::from_micros(hold),
-    )
+/// The caret's opacity `since` it last moved on this platform; see [`Platform::caret_blink`].
+pub fn caret_blink(since: Duration) -> (f32, Option<Duration>) {
+    Platform::CURRENT.caret_blink(since)
 }
 
 /// `caret`, linear RGBA, with the alpha that shows it at `opacity` over `backdrop` as bright
@@ -451,10 +646,106 @@ mod tests {
         ];
         for (key, modifiers, command) in cases {
             assert_eq!(
-                Command::from_key(&key, modifiers),
+                Platform::MacOs.command(&key, modifiers),
                 command,
                 "{key:?} {modifiers:?}"
             );
+        }
+    }
+
+    #[test]
+    fn keys_follow_gtk_and_windows_editing_chords() {
+        // Control arrives as the shortcut modifier too.
+        let control = Modifiers {
+            control: true,
+            command: true,
+            ..Modifiers::default()
+        };
+        let plain = Modifiers::default();
+        let alt = Modifiers {
+            option: true,
+            ..Modifiers::default()
+        };
+        let named = |named| Key::Named(named);
+        let cases = [
+            (
+                named(NamedKey::ArrowLeft),
+                control,
+                Some(Command::Move(Movement::WordLeft)),
+            ),
+            (
+                named(NamedKey::ArrowRight),
+                control,
+                Some(Command::Move(Movement::WordRight)),
+            ),
+            (
+                named(NamedKey::ArrowUp),
+                control,
+                Some(Command::Move(Movement::ParagraphStart)),
+            ),
+            (
+                named(NamedKey::ArrowDown),
+                plain,
+                Some(Command::Move(Movement::Down)),
+            ),
+            (
+                named(NamedKey::Home),
+                plain,
+                Some(Command::Move(Movement::LineStart)),
+            ),
+            (
+                named(NamedKey::End),
+                plain,
+                Some(Command::Move(Movement::LineEnd)),
+            ),
+            (
+                named(NamedKey::Home),
+                control,
+                Some(Command::Move(Movement::DocumentStart)),
+            ),
+            (
+                named(NamedKey::End),
+                control,
+                Some(Command::Move(Movement::DocumentEnd)),
+            ),
+            (
+                named(NamedKey::PageUp),
+                plain,
+                Some(Command::MovePage { up: true }),
+            ),
+            (
+                named(NamedKey::PageDown),
+                plain,
+                Some(Command::MovePage { up: false }),
+            ),
+            (
+                named(NamedKey::Backspace),
+                control,
+                Some(Command::DeleteTo(Movement::WordLeft)),
+            ),
+            (
+                named(NamedKey::Delete),
+                control,
+                Some(Command::DeleteTo(Movement::WordRight)),
+            ),
+            (
+                named(NamedKey::Backspace),
+                plain,
+                Some(Command::Delete { backward: true }),
+            ),
+            (named(NamedKey::ArrowLeft), alt, None),
+            // No Emacs chords: Control-A and Control-E are shortcuts.
+            (Key::Character("a".into()), control, None),
+            (Key::Character("e".into()), control, None),
+        ];
+        for platform in [Platform::Gtk, Platform::Windows] {
+            for (key, modifiers, command) in &cases {
+                assert_eq!(
+                    platform.command(key, *modifiers),
+                    *command,
+                    "{platform:?} {key:?} {modifiers:?}"
+                );
+            }
         }
     }
 
@@ -532,30 +823,99 @@ mod tests {
         assert!((green - linear(167.5)).abs() < 0.02, "{alpha}");
     }
 
+    /// The opacity and hold in milliseconds `millis` after the caret moved.
+    fn blink_at(platform: Platform, millis: f64) -> (f32, Option<f64>) {
+        let (opacity, hold) = platform.caret_blink(Duration::from_secs_f64(millis / 1000.0));
+        (opacity, hold.map(|hold| hold.as_secs_f64() * 1000.0))
+    }
+
+    fn assert_blink(platform: Platform, millis: f64, expected: (f32, Option<f64>)) {
+        let (opacity, hold) = blink_at(platform, millis);
+        assert_eq!(opacity, expected.0, "{platform:?} at {millis} ms");
+        match (hold, expected.1) {
+            (Some(hold), Some(expected)) => {
+                assert!(
+                    (hold - expected).abs() < 0.01,
+                    "{platform:?} at {millis} ms holds {hold} ms, not {expected}"
+                )
+            }
+            (hold, expected) => assert_eq!(hold, expected, "{platform:?} at {millis} ms"),
+        }
+    }
+
+    /// How often the opacity changes over `span` milliseconds from `from`.
+    fn blink_changes(platform: Platform, from: u32, span: u32) -> usize {
+        let mut previous = blink_at(platform, f64::from(from)).0;
+        (from + 1..=from + span)
+            .filter(|&millis| {
+                let opacity = blink_at(platform, f64::from(millis)).0;
+                std::mem::replace(&mut previous, opacity) != opacity
+            })
+            .count()
+    }
+
     #[test]
     fn caret_blinks_on_appkit_s_timing() {
-        let at = |millis: f64| {
-            let (opacity, hold) = caret_blink(Duration::from_secs_f64(millis / 1000.0));
-            (opacity, hold.as_secs_f64() * 1000.0)
-        };
-        let close = |(opacity, hold): (f32, f64), expected: (f32, f64)| {
-            assert_eq!(opacity, expected.0);
-            assert!((hold - expected.1).abs() < 0.01, "{hold} ms, not {}", expected.1);
-        };
-        close(at(0.0), (1.0, 687.5));
-        close(at(687.5), (0.75, 37.5));
-        close(at(760.0), (0.5, 2.5));
-        close(at(800.0), (0.0, 237.5));
-        close(at(1037.5), (0.25, 37.5));
-        close(at(1150.0), (1.0, 537.5));
-        close(at(1687.5), (0.75, 37.5));
-        let mut changes = 0;
-        let mut previous = at(1000.0).0;
-        for millis in 1001..2001 {
-            let opacity = at(f64::from(millis)).0;
-            changes += usize::from(opacity != previous);
-            previous = opacity;
+        let mac = Platform::MacOs;
+        assert_blink(mac, 0.0, (1.0, Some(687.5)));
+        assert_blink(mac, 687.5, (0.75, Some(37.5)));
+        assert_blink(mac, 760.0, (0.5, Some(2.5)));
+        assert_blink(mac, 800.0, (0.0, Some(237.5)));
+        assert_blink(mac, 1037.5, (0.25, Some(37.5)));
+        assert_blink(mac, 1150.0, (1.0, Some(537.5)));
+        assert_blink(mac, 1687.5, (0.75, Some(37.5)));
+        assert_blink(mac, 3_600_200.0, (1.0, Some(487.5)));
+        assert_eq!(
+            blink_changes(mac, 1000, 1000),
+            8,
+            "four fade steps each way per second"
+        );
+    }
+
+    #[test]
+    fn caret_blinks_on_gtk_s_timing() {
+        let gtk = Platform::Gtk;
+        // Solid for half the 1200 ms cycle and its visible quarter, then fades out over 300 ms.
+        assert_blink(gtk, 0.0, (1.0, Some(900.0 + 1000.0 / 60.0)));
+        assert_blink(gtk, 1200.0, (0.0, Some(300.0 + 1000.0 / 60.0)));
+        assert_blink(gtk, 1800.0, (1.0, Some(300.0 + 1000.0 / 60.0)));
+        let (fading, _) = blink_at(gtk, 1050.0);
+        assert!((fading - 0.5).abs() <= 1.0 / 18.0, "{fading}");
+        // A fade each way per 1.2 s cycle, in 60 Hz steps.
+        assert_eq!(blink_changes(gtk, 900, 1200), 2 * 18);
+        // Ten seconds without moving leave it solid, cutting short the fade in.
+        assert_blink(gtk, 9_700.0, (0.0, Some(216.667)));
+        assert_blink(gtk, 9_990.0, (5.0 / 18.0, Some(10.0)));
+        assert_blink(gtk, 10_000.0, (1.0, None));
+    }
+
+    #[test]
+    fn caret_blinks_on_windows_timing() {
+        let windows = Platform::Windows;
+        assert_blink(windows, 0.0, (1.0, Some(530.0)));
+        assert_blink(windows, 530.0, (0.0, Some(530.0)));
+        assert_blink(windows, 1100.0, (1.0, Some(490.0)));
+        assert_eq!(blink_changes(windows, 530, 1060), 2, "no fades");
+        assert_blink(windows, 4800.0, (0.0, Some(200.0)));
+        assert_blink(windows, 5000.0, (1.0, None));
+    }
+
+    #[test]
+    fn carets_and_selections_match_each_platform() {
+        assert_eq!(
+            [Platform::MacOs, Platform::Gtk, Platform::Windows].map(Platform::caret_width),
+            [2.0, 1.0, 1.0]
+        );
+        for platform in [Platform::MacOs, Platform::Gtk, Platform::Windows] {
+            for dark in [false, true] {
+                let [caret, focused, unfocused] = platform.text_colors(dark);
+                assert!(caret.1 >= 0.8, "{platform:?} carets stand out");
+                assert!(focused.1 > unfocused.1 || focused.0 != unfocused.0);
+            }
         }
-        assert_eq!(changes, 8, "four fade steps each way per second");
+        // libadwaita tints selections with the accent at 30% and follows the text colour.
+        let [caret, selection, _] = Platform::Gtk.text_colors(false);
+        assert_eq!(selection, ([0x35, 0x84, 0xe4], 0.3));
+        assert_eq!(caret, ([0x00, 0x00, 0x06], 0.8));
     }
 }

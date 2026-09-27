@@ -1544,8 +1544,8 @@ mod tests {
         }
         let state = editor.format_state().unwrap();
         let edited = settled(editor.page().unwrap());
-        let written = onestore::PreparedEdit::page(SECTION, space, &edited, "Author").unwrap();
-        let (_, reread) = page(written.as_bytes());
+        let written = super::ops::saved(SECTION, space, &mut editor);
+        let (_, reread) = page(&written);
         let reread = settled(reread);
         assert_eq!(reread.objects, edited.objects);
         let mut editor = CanvasEditor::from_page(reread, &mut engine).unwrap();

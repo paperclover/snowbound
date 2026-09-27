@@ -19,8 +19,9 @@ use std::{cell::Cell, sync::OnceLock};
 use winit::{
     error::EventLoopError,
     event_loop::{EventLoop, EventLoopProxy},
+    platform::macos::WindowAttributesExtMacOS,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
-    window::Window,
+    window::{Window, WindowAttributes},
 };
 
 static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
@@ -68,6 +69,109 @@ fn ns_window(window: &Window) -> Retained<AnyObject> {
         let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
         msg_send_id![view, window]
     }
+}
+
+/// Room the traffic lights take at the title bar's leading edge.
+pub const LEADING: f32 = 78.0;
+/// How far AppKit rounds a window's corners.
+pub const CORNER_RADIUS: f32 = 10.0;
+
+/// A transparent title bar over the content, where the window draws its own.
+pub fn window_attributes() -> WindowAttributes {
+    Window::default_attributes()
+        .with_titlebar_transparent(true)
+        .with_title_hidden(true)
+        .with_fullsize_content_view(true)
+}
+
+pub struct Clipboard(arboard::Clipboard);
+
+impl Clipboard {
+    pub fn new(_: &Window) -> Result<Self, arboard::Error> {
+        arboard::Clipboard::new().map(Self)
+    }
+
+    pub fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
+        self.0.set_text(text)
+    }
+
+    pub fn get_text(&mut self) -> Result<String, arboard::Error> {
+        self.0.get_text()
+    }
+}
+
+/// AppKit draws the traffic lights.
+pub fn window_controls(_: &mut ui::Ui, _: &Window) {}
+
+/// The app draws the title bar around the traffic lights.
+pub fn system_titlebar(_: &Window) -> bool {
+    false
+}
+
+/// AppKit's window frame takes resizing presses.
+pub fn resize_direction(_: &Window, _: [f32; 2]) -> Option<winit::window::ResizeDirection> {
+    None
+}
+
+pub fn cache_dir() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Caches/snowbound"))
+}
+
+pub fn settings_dir() -> Option<std::path::PathBuf> {
+    Some(
+        std::path::PathBuf::from(std::env::var_os("HOME")?)
+            .join("Library/Application Support/Snowbound"),
+    )
+}
+
+/// Asks for a notebook folder or a notebook file with the system's open panel, titled
+/// `title`.
+pub fn pick_notebook(title: &str) -> Option<std::path::PathBuf> {
+    let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
+    unsafe {
+        let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
+        panel.setCanChooseDirectories(true);
+        panel.setCanChooseFiles(true);
+        panel.setCanCreateDirectories(true);
+        panel.setTitle(Some(&NSString::from_str(title)));
+        panel.setPrompt(Some(&NSString::from_str("Open")));
+        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+            return None;
+        }
+        let path = panel.URLs().firstObject()?.path()?;
+        Some(path.to_string().into())
+    }
+}
+
+/// Asks where to create something named `name` by default, with the system's save panel.
+pub fn pick_new(title: &str, name: &str) -> Option<std::path::PathBuf> {
+    let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
+    unsafe {
+        let panel = objc2_app_kit::NSSavePanel::savePanel(mtm);
+        panel.setCanCreateDirectories(true);
+        panel.setTitle(Some(&NSString::from_str(title)));
+        panel.setPrompt(Some(&NSString::from_str("Create")));
+        panel.setNameFieldStringValue(&NSString::from_str(name));
+        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+            return None;
+        }
+        Some(panel.URL()?.path()?.to_string().into())
+    }
+}
+
+/// Tells the user something they asked for could not be done: `message`, then what to do.
+pub fn alert(message: &str, detail: &str) {
+    let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
+    unsafe {
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&NSString::from_str(message));
+        alert.setInformativeText(&NSString::from_str(detail));
+        alert.runModal();
+    }
+}
+
+pub fn appearance(window: &Window) -> winit::window::Theme {
+    window.theme().unwrap_or(winit::window::Theme::Dark)
 }
 
 /// Zooms the window once the current event is handled: AppKit's zoom animation runs its
@@ -124,6 +228,7 @@ pub fn show_character_palette() {
 pub fn edit_date(
     timestamp: u64,
     field: DateField,
+    title: &str,
 ) -> Result<Option<(u64, [String; 2])>, &'static str> {
     let mtm = MainThreadMarker::new().expect("Date controls belong to the main thread");
     unsafe {
@@ -147,10 +252,7 @@ pub fn edit_date(
         let _: () = msg_send![&picker, setAccessibilityLabel: &*label];
         picker.sizeToFit();
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str(match field {
-            DateField::Date => "Change Page Date",
-            DateField::Time => "Change Page Time",
-        }));
+        alert.setMessageText(&NSString::from_str(title));
         alert.setAccessoryView(Some(&picker));
         alert.addButtonWithTitle(&NSString::from_str("Apply"));
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
@@ -197,9 +299,9 @@ fn merge_date(
         }
         let date = calendar
             .dateFromComponents(&components)
-            .ok_or("Choose another date or time.")?;
+            .ok_or(crate::DATE_UNCHOSEN)?;
         let seconds = date.timeIntervalSince1970() + 11_644_473_600.0;
-        let outside_range = "This date is outside the notebook's supported range.";
+        let outside_range = crate::DATE_OUT_OF_RANGE;
         if !seconds.is_finite() || seconds < 0.0 || seconds > (u64::MAX / 10_000_000) as f64 {
             return Err(outside_range);
         }
@@ -208,17 +310,49 @@ fn merge_date(
             .checked_mul(10_000_000)
             .and_then(|value| value.checked_add(timestamp % 10_000_000))
             .ok_or(outside_range)?;
+        Ok((updated, labels(&date, calendar)))
+    }
+}
+
+/// `date` as a page's title shows it: the long date and the short time.
+fn labels(date: &NSDate, calendar: &NSCalendar) -> [String; 2] {
+    unsafe {
         let formatter = NSDateFormatter::new();
         formatter.setCalendar(Some(calendar));
         formatter.setTimeZone(Some(&calendar.timeZone()));
         formatter.setDateStyle(NSDateFormatterStyle::NSDateFormatterFullStyle);
-        let date_text = formatter.stringFromDate(&date).to_string();
+        let date_text = formatter.stringFromDate(date).to_string();
         formatter.setDateStyle(NSDateFormatterStyle::NSDateFormatterNoStyle);
         formatter.setTimeStyle(NSDateFormatterStyle::NSDateFormatterShortStyle);
-        Ok((
-            updated,
-            [date_text, formatter.stringFromDate(&date).to_string()],
-        ))
+        [date_text, formatter.stringFromDate(date).to_string()]
+    }
+}
+
+/// FILETIME as a new page's title shows it: the long date and the short time.
+pub fn date_text(filetime: u64) -> [String; 2] {
+    unsafe {
+        let date = NSDate::dateWithTimeIntervalSince1970(
+            (filetime / 10_000_000) as f64 - 11_644_473_600.0,
+        );
+        labels(&date, &NSCalendar::currentCalendar())
+    }
+}
+
+/// The account's full name, which OneNote's author fields take from Office's user name.
+pub fn user_name() -> String {
+    unsafe { objc2_foundation::NSFullUserName().as_ref() }.to_string()
+}
+
+/// FILETIME as the system's short date, as OneNote labels a conflict page.
+pub fn short_date(filetime: u64) -> String {
+    unsafe {
+        let date = NSDate::dateWithTimeIntervalSince1970(
+            (filetime / 10_000_000) as f64 - 11_644_473_600.0,
+        );
+        let formatter = NSDateFormatter::new();
+        formatter.setDateStyle(NSDateFormatterStyle::NSDateFormatterShortStyle);
+        formatter.setTimeStyle(NSDateFormatterStyle::NSDateFormatterNoStyle);
+        formatter.stringFromDate(&date).to_string()
     }
 }
 
@@ -354,8 +488,7 @@ pub fn app_icon(pixels: u32) -> Option<draw::RasterImage> {
 pub fn text_colors(window: &Window) -> [[f32; 4]; 3] {
     let class = AnyClass::get("NSAppearance").expect("AppKit is linked");
     unsafe {
-        let appearance: Retained<AnyObject> =
-            msg_send_id![&ns_window(window), effectiveAppearance];
+        let appearance: Retained<AnyObject> = msg_send_id![&ns_window(window), effectiveAppearance];
         // System colours resolve in the thread's appearance, which outside drawing does
         // not follow the window's.
         let previous: Option<Retained<AnyObject>> = msg_send_id![class, currentAppearance];
@@ -432,43 +565,36 @@ declare_class!(
     }
 );
 
-pub fn event_loop() -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
+/// A `headless` application takes no Dock icon and never activates.
+pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
     MainThreadMarker::new().expect("AppKit must start on the main thread");
     // Create the application's own subclass before Winit obtains the singleton.
     let _: Retained<CanvasApplication> =
         unsafe { msg_send_id![CanvasApplication::class(), sharedApplication] };
-    let event_loop = EventLoop::with_user_event().build()?;
+    let mut builder = EventLoop::with_user_event();
+    if headless {
+        builder
+            .with_activation_policy(ActivationPolicy::Prohibited)
+            .with_activate_ignoring_other_apps(false);
+    }
+    let event_loop = builder.build()?;
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     Ok(event_loop)
 }
 
-pub fn discard_changes() -> bool {
+/// Asks whether to go ahead with `action`, offering `cancel` first.
+pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
     let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
     // The alert and its strings stay on AppKit's main thread for the modal call.
     unsafe {
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str("Discard this page?"));
-        alert.setInformativeText(&NSString::from_str(
-            "This temporary page has no saved copy. Closing it will discard your edits.",
-        ));
-        alert.addButtonWithTitle(&NSString::from_str("Keep Editing"));
-        alert.addButtonWithTitle(&NSString::from_str("Discard Changes"));
+        alert.setMessageText(&NSString::from_str(message));
+        alert.setInformativeText(&NSString::from_str(detail));
+        alert.addButtonWithTitle(&NSString::from_str(cancel));
+        alert.addButtonWithTitle(&NSString::from_str(action));
         alert.runModal() == NSAlertSecondButtonReturn
-    }
-}
-
-/// Tells the user an edit could not be stored and where their text went.
-pub fn change_not_saved() {
-    let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
-    // The alert and its strings stay on AppKit's main thread for the modal call.
-    unsafe {
-        let alert = NSAlert::new(mtm);
-        alert.setMessageText(&NSString::from_str("Change not saved"));
-        alert.setInformativeText(&NSString::from_str(
-            "The page now shows what was last saved. Your text is on the clipboard to paste back.",
-        ));
-        alert.runModal();
     }
 }
 

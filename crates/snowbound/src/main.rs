@@ -1,8 +1,19 @@
 mod art;
-mod macos;
+#[cfg(test)]
+mod conflict_render;
+mod library;
+mod manage;
+mod menus;
+#[cfg_attr(target_os = "linux", path = "linux.rs")]
+#[cfg_attr(target_os = "macos", path = "macos.rs")]
+mod platform;
+mod screenshot;
+mod settings;
+mod sidebar;
+mod templates;
 
 use canvas::gpu::page::PageScene;
-use canvas::interaction::{Cursor, PageView, Request, Response, TextColors, accessibility};
+use canvas::interaction::{Cursor, PageView, Place, Request, Response, TextColors, accessibility};
 use canvas::{
     date::DateField,
     document::TextDocument,
@@ -18,7 +29,9 @@ use onestore::ExGuid;
 use onestore::document::Format;
 use onestore::page::Page;
 use onestore::page::text::Paragraph;
+use library::Library;
 use std::{
+    collections::{HashMap, HashSet},
     error::Error,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
@@ -31,20 +44,22 @@ use winit::{
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
-    platform::macos::WindowAttributesExtMacOS,
     window::{CursorIcon, Window, WindowId},
 };
 
-/// Height of the macOS title bar, which holds the traffic lights.
+/// Height of the title bar, which holds the window's controls.
 const TITLE: f32 = 28.0;
-/// Room the traffic lights take at the title bar's leading edge.
-const LIGHTS: f32 = 78.0;
 const TAB_ROW: f32 = 28.0;
 /// Width of the section colour around the page.
 const FRAME: f32 = 6.0;
-/// macOS rounds windows' corners by 10 pt; the page's corners share their centres.
-const ROUNDING: f32 = 10.0 - FRAME;
+/// The page's corners share their centres with the window's.
+const ROUNDING: f32 = (platform::CORNER_RADIUS - FRAME).max(0.0);
 const PAGE_LIST: f32 = 240.0;
+/// Font sizes the size box offers, OneNote's list in points.
+/// Fonts the font box offers first, OneNote's default leading.
+const FONTS: [&str; 4] = ["Calibri", "Arial", "Times New Roman", "Courier New"];
+/// Fonts picked this session that the font box offers after `FONTS`, at most.
+const RECENT_FONTS: usize = 5;
 /// Font sizes the size box offers, OneNote's list in points.
 const SIZES: [f32; 17] = [
     8.0, 9.0, 10.0, 10.5, 11.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 36.0, 48.0,
@@ -65,14 +80,21 @@ const FONT_COLORS: [u32; 20] = [
 /// while the gaps still take the pointer.
 const ROW: f32 = 29.0;
 const ROW_GAP: f32 = 3.0;
+/// OneNote's highlight for conflicting changes on a conflict page, COLORREF.
+const CONFLICTING: u32 = 0xd6d6ff;
 /// Space between the page and a page tab that isn't open.
 const PILL_MARGIN: f32 = 3.0;
 /// Rounding where the open page tab meets the page, concentric with its neighbours'.
 const JOIN: f32 = PILL_MARGIN + ROUNDING;
+/// Why the platform's date dialog could not change the page's date.
+const DATE_UNCHOSEN: &str = "Choose another date or time.";
+const DATE_OUT_OF_RANGE: &str = "This date is outside the notebook's supported range.";
 
 #[derive(Debug)]
 enum UserEvent {
     Quit,
+    /// Text AppKit inserts outside key events, such as the character palette's.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     InsertText(String),
     Accessibility(accesskit_winit::Event),
     /// The section's synchronization thread reported an event.
@@ -141,6 +163,11 @@ struct App {
     substitutes: Vec<PathBuf>,
     /// Font files for the interface in place of the system's.
     interface_font: Vec<Vec<u8>>,
+    /// Where `--screenshot` writes its PNGs, drawn from a window never shown.
+    screenshot: Option<PathBuf>,
+    /// Where settings are saved, and what they held at launch, until the window opens.
+    settings: Option<(Option<PathBuf>, settings::Settings)>,
+    cache: PathBuf,
     state: Option<State>,
     startup_error: Option<Box<dyn Error>>,
 }
@@ -155,75 +182,113 @@ enum Input {
     Section {
         file: PathBuf,
         title: String,
-        cache: PathBuf,
     },
-    Notebook {
-        root: PathBuf,
-        cache: PathBuf,
+    /// The open notebooks by location, showing `current`; none shows the first run's
+    /// welcome.
+    Notebooks {
+        locations: Vec<String>,
+        current: Option<String>,
     },
 }
 
-/// A section tab: where the section opens from and how it is labelled.
-struct Tab {
-    /// The notebook catalog path, or the file of a section opened on its own.
-    path: String,
-    name: String,
-    /// COLORREF.
-    color: Option<u32>,
-}
-
-/// The sections the tabs offer.
-struct Library {
-    /// The notebook's folder name, or the section file's.
-    name: String,
-    notebook: Option<notebook::session::Notebook>,
-    tabs: Vec<Tab>,
-    cache: PathBuf,
-}
-
-impl Library {
-    fn open(
-        &self,
-        tab: usize,
-        proxy: EventLoopProxy<UserEvent>,
-    ) -> Result<notebook::session::Section, Box<dyn Error>> {
-        let notify = move || {
-            let _ = proxy.send_event(UserEvent::Sync);
-        };
-        let path = &self.tabs[tab].path;
-        Ok(match &self.notebook {
-            Some(notebook) => notebook.section(path, notify)?,
-            None => notebook::session::Section::open(path, &self.cache, notify)?,
-        })
+/// Asks the event loop to poll sections when their synchronization reports.
+fn notify(proxy: EventLoopProxy<UserEvent>) -> impl Fn() + Send + 'static {
+    move || {
+        let _ = proxy.send_event(UserEvent::Sync);
     }
 }
 
 /// The open section and the page the editor shows.
 struct Session {
     section: notebook::session::Section,
+    /// The notebook the section belongs to.
+    library: Arc<Library>,
+    /// The sections of the section's folder, and which is this one.
+    tabs: Vec<library::Tab>,
     tab: usize,
     /// Spaces, titles and outline levels in section order.
     pages: Vec<(ExGuid, String, u32)>,
     space: ExGuid,
     status: &'static str,
-    /// The editor's page has an unreviewed conflict with another machine's change.
-    conflict: bool,
+    /// Each page's conflict pages, the versions a merge could not take.
+    conflicts: Vec<(ExGuid, Vec<onestore::ConflictPage>)>,
+    /// The page whose conflict pages the list shows beneath it.
+    shown: Option<ExGuid>,
+    /// Which of the open conflict page's conflicting changes is selected, in page order.
+    change: Option<usize>,
+}
+
+/// The information bar above a page with conflict pages, or above one of them.
+#[derive(Clone, Copy)]
+enum Bar {
+    Page { page: ExGuid, shown: bool },
+    Version { page: ExGuid, version: ExGuid },
 }
 
 impl Session {
     fn title(&self) -> &str {
-        self.pages
-            .iter()
-            .find(|(space, ..)| *space == self.space)
-            .map_or("", |(_, title, _)| title)
+        match self.conflict(self.space) {
+            Some((_, version)) => &version.title,
+            None => self
+                .pages
+                .iter()
+                .find(|(space, ..)| *space == self.space)
+                .map_or("", |(_, title, _)| title),
+        }
     }
 
-    fn refresh_conflict(&mut self) -> Result<(), Box<dyn Error>> {
-        self.conflict = self
-            .section
-            .conflict()?
-            .is_some_and(|conflict| conflict.space == self.space);
+    fn versions(&self, page: ExGuid) -> &[onestore::ConflictPage] {
+        self.conflicts
+            .iter()
+            .find(|(listed, _)| *listed == page)
+            .map_or(&[], |(_, versions)| versions)
+    }
+
+    /// The page conflict page `space` belongs to, with it.
+    fn conflict(&self, space: ExGuid) -> Option<(ExGuid, &onestore::ConflictPage)> {
+        self.conflicts.iter().find_map(|(page, versions)| {
+            Some((*page, versions.iter().find(|version| version.space == space)?))
+        })
+    }
+
+    fn bar(&self) -> Option<Bar> {
+        match self.conflict(self.space) {
+            Some((page, _)) => Some(Bar::Version {
+                page,
+                version: self.space,
+            }),
+            None => (!self.versions(self.space).is_empty()).then_some(Bar::Page {
+                page: self.space,
+                shown: self.shown == Some(self.space),
+            }),
+        }
+    }
+
+    fn refresh_conflicts(&mut self) -> Result<(), Box<dyn Error>> {
+        self.conflicts = self.section.conflicts()?;
+        if self
+            .shown
+            .is_some_and(|page| self.versions(page).is_empty())
+        {
+            self.shown = None;
+        }
         Ok(())
+    }
+
+    /// The page in `space` as the editor shows it: a conflict page read-only, its
+    /// conflicting changes highlighted.
+    fn reader(&self, space: ExGuid) -> impl FnOnce() -> Result<Page, Box<dyn Error>> + Send + 'static {
+        let replica = Arc::clone(self.section.replica());
+        let objects = self
+            .conflict(space)
+            .map(|(_, version)| version.objects.clone());
+        move || {
+            let page = replica.page(space)?;
+            Ok(match objects {
+                Some(objects) => highlighted(page, &objects),
+                None => page,
+            })
+        }
     }
 }
 
@@ -250,20 +315,52 @@ const HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Work the interface asked for, done after the frame is built.
 enum Command {
-    OpenSection(usize),
+    /// Opens a notebook's section by catalog path, at the page it showed last.
+    OpenSection(Arc<Library>, String),
+    /// Asks for a notebook folder and opens it.
+    OpenNotebook,
+    /// Asks where to keep a new notebook and creates it.
+    NewNotebook,
+    /// Closes a notebook, keeping its files.
+    CloseNotebook(Arc<Library>),
+    /// Changes a notebook's sections and groups.
+    Structure(Arc<Library>, manage::Structure),
+    /// Adds a page at the end of the open section, or a subpage after the open page, and
+    /// edits its title.
+    NewPage { subpage: bool },
+    /// Deletes pages of the open section to the notebook's recycle bin.
+    DeletePages(Vec<ExGuid>),
+    /// Moves or indents pages of the open section.
+    Pages(Vec<onestore::PageEdit>),
+    /// Gives the open page a template's background or colour.
+    Template(templates::Choice),
     OpenPage(ExGuid),
-    Resolve { keep_mine: bool },
+    /// Shows a page's conflict pages in the list and opens the newest, or hides them.
+    Versions { page: ExGuid, show: bool },
+    DeleteVersion { page: ExGuid, version: ExGuid },
+    /// Copies a conflict page, as a page of its own, to the end of section tab `tab`.
+    CopyVersion { version: ExGuid, tab: usize },
+    /// Selects the next, or previous, conflicting change on the open conflict page.
+    SelectChange { forward: bool },
     Page(Request),
 }
 
 struct State {
     window: Arc<Window>,
+    /// Who this machine's edits name, as OneNote names the Office user: the account's
+    /// full name.
+    author: String,
     proxy: EventLoopProxy<UserEvent>,
     /// Results of reads done off the frame thread, by request number.
     loads: (mpsc::Sender<Read>, mpsc::Receiver<Read>),
     /// The newest read requested; older ones are dropped when they finish.
     loading: u64,
     opening: Option<Opening>,
+    /// Where each page was left this run, by `Library::key` and page space, as OneNote
+    /// returns to it until the notebook closes.
+    places: HashMap<(String, ExGuid), Place>,
+    /// The page each section showed last this run, by `Library::key`.
+    last_pages: HashMap<String, ExGuid>,
     /// Asks for a frame when a worker thread finishes something the page shows.
     redraw: std::task::Waker,
     instance: wgpu::Instance,
@@ -272,14 +369,42 @@ struct State {
     renderer: Renderer,
     ui: Ui,
     view: PageView,
-    library: Option<Arc<Library>>,
+    /// The open notebooks in the sidebar's order.
+    notebooks: Vec<Arc<Library>>,
     session: Option<Session>,
+    /// A page not kept in any notebook, from a text file or `--page`.
+    temporary: bool,
+    /// Where the settings are saved; `None` leaves them as they were read.
+    settings: Option<PathBuf>,
+    /// The directory holding the sections' replicas.
+    cache: PathBuf,
+    /// Whether the notebook sidebar is expanded.
+    sidebar: bool,
+    /// Notebooks and section groups whose rows the sidebar folds, by `sidebar::fold_key`.
+    folded: HashSet<String>,
+    /// The open context menu: what it was opened on, and where.
+    menu: Option<(menus::Target, [f32; 2])>,
+    /// A section or group being renamed in the sidebar.
+    renaming: Option<sidebar::Renaming>,
+    /// The page whose tab is being dragged.
+    dragging: Option<ExGuid>,
+    /// The section or group whose sidebar row is being dragged.
+    dragging_entry: Option<sidebar::Entry>,
+    /// Pages whose template strip was dismissed this run.
+    dismissed: HashSet<ExGuid>,
+    /// A page just created, whose title takes the caret once it opens.
+    title_focus: Option<ExGuid>,
+    /// What the template strip shows over a blank page.
+    templates: templates::View,
+    thumbnails: templates::Thumbnails,
     /// Text filtering the page list.
     filter: String,
     /// Whether the page list is shown beside the page.
     pages_open: bool,
     /// Installed font families, for the font box; listing them is slow.
     fonts: Vec<String>,
+    /// Fonts picked from the font box this session, latest first.
+    recent_fonts: Vec<String>,
     /// The application's icon at the display's scale, for the title bar.
     app_icon: Option<draw::RasterImage>,
     commands: Vec<Command>,
@@ -296,6 +421,8 @@ struct State {
     pointer: [f32; 2],
     /// When the strip was last pressed, to zoom on a double click.
     strip_press: Option<Instant>,
+    /// The strip is held and the window moves once the pointer does.
+    strip_held: bool,
     /// Where a replay asked the next frame to be written.
     snapshot: Option<PathBuf>,
     initial: Vec<(onestore::ExGuid, TextDocument)>,
@@ -303,7 +430,7 @@ struct State {
     initial_date: Option<u64>,
     occluded: bool,
     ime_allowed: bool,
-    clipboard: arboard::Clipboard,
+    clipboard: platform::Clipboard,
     access_adapter: accesskit_winit::Adapter,
     accessibility: accessibility::Accessibility,
 }
@@ -333,14 +460,14 @@ impl State {
         input: Input,
         substitutes: &[PathBuf],
         interface_font: Vec<Vec<u8>>,
+        visible: bool,
+        (settings, stored): (Option<PathBuf>, settings::Settings),
+        cache: PathBuf,
     ) -> Result<Self, Box<dyn Error>> {
         let window = Arc::new(
             event_loop.create_window(
-                Window::default_attributes()
+                platform::window_attributes()
                     .with_visible(false)
-                    .with_titlebar_transparent(true)
-                    .with_title_hidden(true)
-                    .with_fullsize_content_view(true)
                     .with_title(match &input {
                         Input::Notes {
                             reference: Some(page),
@@ -351,20 +478,20 @@ impl State {
                             reference: None, ..
                         } => "Untitled · Temporary page".into(),
                         Input::Section { title, .. } => title.clone(),
-                        Input::Notebook { root, .. } => root.display().to_string(),
+                        Input::Notebooks { .. } => "Snowbound".into(),
                     })
                     .with_inner_size(LogicalSize::new(1180.0, 760.0)),
             )?,
         );
-        macos::install_text_input(&window);
+        platform::install_text_input(&window);
         let access_adapter =
             accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
-        window.set_visible(true);
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(
-            Box::new(window.clone()),
-        ));
+        window.set_visible(visible);
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
+        );
         let surface = instance.create_surface(window.clone())?;
-        macos::configure_presentation(&surface);
+        platform::configure_presentation(&surface);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
@@ -384,7 +511,8 @@ impl State {
                 .register_substitute(parley::fontique::Blob::new(Arc::new(std::fs::read(path)?)))?;
             eprintln!("Using {} for {target}", path.display());
         }
-        let mut library = None;
+        let temporary = matches!(input, Input::Notes { .. } | Input::Page(_));
+        let mut notebooks = Vec::new();
         let mut session = None;
         let (editor, scene) = match input {
             Input::Notes {
@@ -404,51 +532,54 @@ impl State {
                 let (scene, editor) = PageScene::from_page(page, &mut engine)?;
                 (editor, Some((scene, [0.0; 2])))
             }
-            Input::Section { file, title, cache } => {
-                let opened = Library {
-                    name: file_name(file.parent().unwrap_or(&file)),
-                    notebook: None,
-                    tabs: vec![Tab {
-                        name: file
-                            .file_stem()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default(),
-                        path: file.to_string_lossy().into_owned(),
-                        color: None,
-                    }],
-                    cache,
-                };
-                let section = opened.open(0, proxy.clone())?;
+            Input::Section { file, title } => {
+                let library = Arc::new(Library::section(&file, &cache));
+                let section = library.open(&library.location, notify(proxy.clone()))?;
                 let space = section
                     .pages()?
                     .into_iter()
                     .find(|(_, candidate, _)| *candidate == title)
                     .ok_or_else(|| format!("No page titled {title:?} in {}", file.display()))?
                     .0;
-                library = Some(Arc::new(opened));
-                let (opened, page) = read_session(section, 0, Some(space))?;
+                notebooks.push(Arc::clone(&library));
+                let path = library.location.clone();
+                let (opened, page) = read_session(section, library, path, Some(space))?;
                 let (scene, editor) = PageScene::from_page(page, &mut engine)?;
                 session = Some(opened);
                 (editor, Some((scene, [0.0; 2])))
             }
-            Input::Notebook { root, cache } => {
-                let notebook = notebook::session::Notebook::open(&root, &cache)?;
-                let tabs = tabs(&notebook);
-                if tabs.is_empty() {
-                    return Err(format!("No readable sections in {}", root.display()).into());
+            Input::Notebooks { locations, current } => {
+                notebooks = locations
+                    .iter()
+                    .map(|location| Arc::new(Library::notebook(location, &cache)))
+                    .collect();
+                for library in &notebooks {
+                    if let Err(error) = &library.notebook {
+                        eprintln!("Cannot open the notebook at {}: {error}", library.location);
+                    }
                 }
-                let opened = Library {
-                    name: file_name(&root),
-                    notebook: Some(notebook),
-                    tabs,
-                    cache,
-                };
-                let section = opened.open(0, proxy.clone())?;
-                library = Some(Arc::new(opened));
-                let (opened, page) = read_session(section, 0, None)?;
-                let (scene, editor) = PageScene::from_page(page, &mut engine)?;
-                session = Some(opened);
-                (editor, Some((scene, [0.0; 2])))
+                let shown = notebooks
+                    .iter()
+                    .filter(|library| Some(&library.location) == current.as_ref())
+                    .chain(&notebooks)
+                    .find_map(|library| Some((library, library.first_section()?)));
+                match shown {
+                    Some((library, path)) => {
+                        let section = library.open(&path, notify(proxy.clone()))?;
+                        let (opened, page) =
+                            read_session(section, Arc::clone(library), path, None)?;
+                        let (scene, editor) = PageScene::from_page(page, &mut engine)?;
+                        session = Some(opened);
+                        (editor, Some((scene, [0.0; 2])))
+                    }
+                    None => {
+                        let blank = TextDocument::new(vec![Paragraph::new(
+                            String::new(),
+                            Format::default(),
+                        )])?;
+                        (CanvasEditor::new(&mut engine, blank, 480.0)?, None)
+                    }
+                }
             }
         };
         let initial_date = editor.date().map(|date| date.timestamp());
@@ -466,8 +597,8 @@ impl State {
         window.request_redraw();
         eprintln!("Canvas GPU: {:?}; scale factor {dpr}", adapter.get_info());
         let mut ui = Ui::new(
-            theme(window.theme().unwrap_or(winit::window::Theme::Dark)),
-            macos::double_click_interval(),
+            theme(platform::appearance(&window)),
+            platform::double_click_interval(),
         );
         if !interface_font.is_empty() {
             let family = ui
@@ -476,6 +607,11 @@ impl State {
             eprintln!("Using {family} for the interface");
         }
         ui.set_focus(Some(page()));
+        for family in FONTS {
+            for (face, _) in engine.substitute(family).map_or(&[][..], |s| &s.faces) {
+                ui.preview_font(face.clone(), family);
+            }
+        }
         let mut fonts: Vec<String> = engine
             .fonts
             .collection
@@ -486,7 +622,9 @@ impl State {
             .collect();
         fonts.sort_unstable_by_key(|name| name.to_lowercase());
         fonts.dedup();
+        let clipboard = platform::Clipboard::new(&window)?;
         let state = Self {
+            author: platform::user_name(),
             window,
             redraw: Arc::new(Redraw(proxy.clone())).into(),
             proxy,
@@ -501,14 +639,28 @@ impl State {
                 scene,
                 [size.width, size.height],
                 dpr,
-                macos::double_click_interval(),
+                platform::double_click_interval(),
             ),
-            library,
+            notebooks,
             session,
+            temporary,
+            settings,
+            cache,
+            sidebar: stored.sidebar,
+            folded: HashSet::new(),
+            dismissed: HashSet::new(),
+            title_focus: None,
+            menu: None,
+            renaming: None,
+            dragging: None,
+            dragging_entry: None,
+            templates: templates::View::Strip,
+            thumbnails: templates::Thumbnails::default(),
             filter: String::new(),
             pages_open: true,
             fonts,
-            app_icon: macos::app_icon((16.0 * dpr).round() as u32),
+            recent_fonts: stored.recent_fonts,
+            app_icon: platform::app_icon((16.0 * dpr).round() as u32),
             commands: Vec::new(),
             changed: false,
             moved: false,
@@ -516,16 +668,19 @@ impl State {
             page_focused: true,
             pointer: [0.0; 2],
             strip_press: None,
+            strip_held: false,
             snapshot: None,
             initial,
             initial_date,
             initial_layouts,
             occluded: false,
             ime_allowed: true,
-            clipboard: arboard::Clipboard::new()?,
+            clipboard,
             loads: mpsc::channel(),
             loading: 0,
             opening: None,
+            places: HashMap::new(),
+            last_pages: HashMap::new(),
             access_adapter,
             accessibility: accessibility::Accessibility::default(),
         };
@@ -543,28 +698,15 @@ impl State {
         lap("open", start);
         let size = self.window.inner_size();
         let scale = self.window.scale_factor() as f32;
-        self.ui.begin(
+        self.layout(
             [size.width as f32 / scale, size.height as f32 / scale],
             scale,
-            Instant::now(),
-        );
-        let (section, open_tab, open_page) = self.build()?;
-        self.ui.end();
-        self.edges(section, open_tab, open_page);
+        )?;
         lap("build", start);
-        if let Some(rect) = self.ui.rect(page()) {
-            let size = [
-                ((rect[2] - rect[0]) * scale).round() as u32,
-                ((rect[3] - rect[1]) * scale).round() as u32,
-            ];
-            if size != self.view.viewport.size {
-                let response = self.view.resized(size)?;
-                self.respond(response);
-            }
-        }
         self.window.set_cursor(
-            self.ui
-                .cursor()
+            platform::resize_direction(&self.window, self.pointer)
+                .map(CursorIcon::from)
+                .or_else(|| self.ui.cursor())
                 .unwrap_or_else(|| cursor_icon(self.view.cursor())),
         );
         let ime = if self.ui.focused() == Some(page()) {
@@ -600,13 +742,34 @@ impl State {
         Ok(())
     }
 
+    /// Lays out the interface in a window `size` logical pixels big and fits the page to
+    /// its box.
+    fn layout(&mut self, size: [f32; 2], scale: f32) -> Result<(), Box<dyn Error>> {
+        self.ui.begin(size, scale, Instant::now());
+        let (section, open_tab, open_page) = self.build()?;
+        self.ui.end();
+        self.edges(section, open_tab, open_page);
+        if let Some(rect) = self.ui.rect(page()) {
+            let size = [
+                ((rect[2] - rect[0]) * scale).round() as u32,
+                ((rect[3] - rect[1]) * scale).round() as u32,
+            ];
+            if size != self.view.viewport.size {
+                let response = self.view.resized(size)?;
+                self.respond(response);
+            }
+        }
+        Ok(())
+    }
+
     /// Builds the frame's boxes and returns the section's colours as they ease, the open
     /// section tab and the open page's tab, for the edges drawn once they are laid out.
     fn build(&mut self) -> Result<(ui::Section, Id, Option<Id>), Box<dyn Error>> {
-        let target = self.ui.theme.section(match (&self.library, &self.session) {
-            (Some(library), Some(session)) => section_color(library.tabs[session.tab].color),
-            _ => section_color(None),
-        });
+        let target = self.ui.theme.section(section_color(
+            self.session
+                .as_ref()
+                .and_then(|session| session.tabs[session.tab].color),
+        ));
         let mut ease = |part: &str, color: [f32; 4]| -> [f32; 4] {
             std::array::from_fn(|channel| {
                 self.ui
@@ -623,14 +786,40 @@ impl State {
             accent: ease("accent", target.accent),
         };
         self.ui.theme.accent = section.accent;
-        [
-            self.ui.theme.caret,
-            self.ui.theme.selection,
-            self.ui.theme.inactive_selection,
-        ] = macos::text_colors(&self.window);
+        // Elsewhere the theme holds the platform's colours.
+        #[cfg(target_os = "macos")]
+        {
+            [
+                self.ui.theme.caret,
+                self.ui.theme.selection,
+                self.ui.theme.inactive_selection,
+            ] = platform::text_colors(&self.window);
+        }
         let theme = self.ui.theme.clone();
-        self.title_bar(&theme);
+        if !platform::system_titlebar(&self.window) {
+            self.title_bar(&theme);
+        }
+        if self.session.is_none() && !self.temporary {
+            self.welcome(&theme);
+            return Ok((section, Id::ROOT, None));
+        }
         self.toolbar(&theme)?;
+        self.ui.open(
+            "body",
+            Spec {
+                size: [fill(), fill()],
+                ..Spec::default()
+            },
+        );
+        self.sidebar(&theme);
+        self.ui.open(
+            "main",
+            Spec {
+                axis: Axis::Y,
+                size: [fill(), fill()],
+                ..Spec::default()
+            },
+        );
         self.ui.open(
             "tabs",
             Spec {
@@ -647,34 +836,45 @@ impl State {
                 ..Spec::default()
             },
         );
-        let (clicked, open_tab) = match (&self.library, &self.session) {
-            (Some(library), Some(session)) => {
-                let tabs: Vec<_> = library
+        let (clicked, open_tab) = match &self.session {
+            Some(session) => {
+                let tabs: Vec<_> = session
                     .tabs
                     .iter()
                     .map(|tab| (tab.name.as_str(), section_color(tab.color)))
                     .collect();
-                ui::shell::section_tabs(
+                let (clicked, context, open_tab) = ui::shell::section_tabs(
                     &mut self.ui,
                     "sections",
                     &tabs,
                     session.tab,
                     &section,
                     TAB_ROW,
-                )
+                );
+                let open = |tab: usize| {
+                    Command::OpenSection(Arc::clone(&session.library), session.tabs[tab].path.clone())
+                };
+                if let Some((tab, point)) = context {
+                    self.menu = Some((
+                        menus::Target::Section {
+                            library: Arc::clone(&session.library),
+                            path: session.tabs[tab].path.clone(),
+                        },
+                        point,
+                    ));
+                    self.ui.open_popup(menus::id());
+                }
+                (clicked.map(open), open_tab)
             }
-            _ => ui::shell::section_tabs(
-                &mut self.ui,
-                "sections",
-                &[("Temporary page", section_color(None))],
-                0,
-                &section,
-                TAB_ROW,
-            ),
+            None => {
+                let tabs = [("Temporary page", section_color(None))];
+                let shown = if self.temporary { &tabs[..] } else { &[] };
+                let (_, _, open_tab) =
+                    ui::shell::section_tabs(&mut self.ui, "sections", shown, 0, &section, TAB_ROW);
+                (None, open_tab)
+            }
         };
-        if let Some(index) = clicked {
-            self.commands.push(Command::OpenSection(index));
-        }
+        self.commands.extend(clicked);
         if self.session.is_some() {
             self.page_tools(&theme);
         }
@@ -698,12 +898,21 @@ impl State {
                 ..Spec::default()
             },
         );
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.conflict)
+        if let Some(session) = &self.session
+            && let Some(bar) = session.bar()
         {
-            self.conflict_bar(&theme);
+            let changes = self.changes().len();
+            let sections: Vec<&str> = session
+                .tabs
+                .iter()
+                .map(|tab| tab.name.as_str())
+                .collect();
+            let steps = [
+                session.change.is_some_and(|at| at > 0),
+                session.change.map_or(changes > 0, |at| at + 1 < changes),
+            ];
+            self.commands
+                .extend(conflict_bar(&mut self.ui, bar, &sections, steps));
         }
         self.ui.open_as(
             page(),
@@ -714,6 +923,7 @@ impl State {
                 ..Spec::default()
             },
         );
+        self.template_strip(&theme);
         let scroll = self.view.scroll();
         for (index, axis) in [Axis::X, Axis::Y].into_iter().enumerate() {
             if let Some(offset) = ui::scrollbar(
@@ -741,6 +951,12 @@ impl State {
         self.ui.close();
         let open_page = self.page_list(&theme, &section);
         self.ui.close();
+        self.ui.close();
+        self.ui.close();
+        self.context_menu();
+        if self.renaming.is_some() && self.ui.focused() != Some(sidebar::rename_field()) {
+            self.ui.set_focus(Some(sidebar::rename_field()));
+        }
         Ok((section, open_tab, open_page))
     }
 
@@ -800,7 +1016,7 @@ impl State {
         // The frame's top corners share the page's centres; its top edge breaks where the
         // open tab stands on it.
         let [start, end] = [frame[0], frame[2]];
-        let outer = FRAME + ROUNDING;
+        let outer = platform::CORNER_RADIUS;
         let strip = self.ui.theme.strip;
         self.ui.round_corners(
             &[
@@ -847,7 +1063,7 @@ impl State {
         self.ui.leaf(
             "lights",
             Spec {
-                size: [px(LIGHTS), px(1.0)],
+                size: [px(platform::LEADING), px(1.0)],
                 ..Spec::default()
             },
         );
@@ -856,11 +1072,11 @@ impl State {
             Spec {
                 size: [fit(), px(TITLE)],
                 image: self.app_icon.as_ref(),
-                text: Some(
-                    self.library
-                        .as_ref()
-                        .map_or("Temporary page", |library| &library.name),
-                ),
+                text: Some(match &self.session {
+                    Some(session) => &session.library.name,
+                    None if self.temporary => "Temporary page",
+                    None => "Snowbound",
+                }),
                 ..Spec::default()
             },
         );
@@ -883,6 +1099,7 @@ impl State {
                 },
             );
         }
+        platform::window_controls(&mut self.ui, &self.window);
         self.ui.close();
     }
 
@@ -905,6 +1122,12 @@ impl State {
                 tags: Vec::new(),
             });
         let fonts = &self.fonts;
+        let recent_fonts = &self.recent_fonts;
+        let engine = &self.view.engine;
+        // Under the system's title bar the save status joins the toolbar.
+        let status = platform::system_titlebar(&self.window)
+            .then(|| self.session.as_ref().map(|session| session.status))
+            .flatten();
         let ui = &mut self.ui;
         let text = theme.text;
         let on = |toggle| state.toggles.contains(&toggle);
@@ -940,19 +1163,47 @@ impl State {
                 if ui::shell::combo(ui, "font", &font, 120.0).pressed {
                     ui.open_popup(popup("font"));
                 }
-                let items: Vec<_> = fonts
+                // Each family is named with the substitute it shows in, and picked by its
+                // own name; a family of None heads a group. Typing searches the full list.
+                let label = |name: &str| {
+                    engine.substitute(name).map_or_else(
+                        || name.to_owned(),
+                        |substitute| format!("{} ({name})", substitute.name),
+                    )
+                };
+                let mut choices: Vec<(String, Option<&str>, bool)> = Vec::new();
+                if ui::popup::query(ui, popup("font")).is_none_or(str::is_empty) {
+                    choices.extend(FONTS.map(|name| (label(name), Some(name), false)));
+                    if !recent_fonts.is_empty() {
+                        choices.push(("Recent".to_owned(), None, true));
+                        choices.extend(
+                            recent_fonts
+                                .iter()
+                                .map(|name| (label(name), Some(name.as_str()), false)),
+                        );
+                    }
+                }
+                let listed = choices.len();
+                choices.extend(fonts.iter().enumerate().map(|(index, name)| {
+                    (label(name), Some(name.as_str()), index == 0 && listed > 0)
+                }));
+                let items: Vec<_> = choices
                     .iter()
-                    .map(|name| ui::popup::Item {
-                        text: name,
-                        font: Some(name),
-                        checked: *name == font,
+                    .map(|(label, name, separated)| ui::popup::Item {
+                        text: label,
+                        font: *name,
+                        current: *name == Some(font.as_str()),
+                        heading: name.is_none(),
+                        separated: *separated,
                         ..Default::default()
                     })
                     .collect();
                 let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
-                if let Some(index) = ui::popup::menu(ui, popup("font"), anchor, &items, Some("Font"))
+                if let Some(index) =
+                    ui::popup::menu(ui, popup("font"), anchor, &items, Some("Font"))
+                    && let Some(name) = choices[index].1
                 {
-                    command = Some(Formatting::Font(fonts[index].clone()));
+                    command = Some(Formatting::Font(name.to_owned()));
                 }
                 let combo = ui.id("size");
                 if ui::shell::combo(ui, "size", &size, 44.0).pressed {
@@ -1191,6 +1442,18 @@ impl State {
                 ..Spec::default()
             },
         );
+        if let Some(status) = status {
+            ui.leaf(
+                "status",
+                Spec {
+                    size: [fit(), fill()],
+                    text: Some(status),
+                    color: Some(theme.text_dim),
+                    center: true,
+                    ..Spec::default()
+                },
+            );
+        }
         let zoom = self.view.zoom();
         let label = format!("{:.0}%", zoom * 100.0);
         let mut chosen = None;
@@ -1225,6 +1488,12 @@ impl State {
             self.respond(response);
         }
         if let Some(command) = command {
+            if let Formatting::Font(name) = &command {
+                self.recent_fonts.retain(|recent| recent != name);
+                self.recent_fonts.insert(0, name.clone());
+                self.recent_fonts.truncate(RECENT_FONTS);
+                self.save_settings();
+            }
             let response = self.view.format(command)?;
             self.respond(response);
         }
@@ -1309,7 +1578,9 @@ impl State {
                 self.ui.set_focus(Some(page()));
             }
         }
-        ui::shell::tool_button(&mut self.ui, "new", art::NEW_PAGE, theme.text, false);
+        if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, false).clicked {
+            self.commands.push(Command::NewPage { subpage: false });
+        }
         let toggle = if self.pages_open {
             art::SIDEBAR_COLLAPSE
         } else {
@@ -1317,41 +1588,6 @@ impl State {
         };
         if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text, false).clicked {
             self.pages_open = !self.pages_open;
-        }
-        self.ui.close();
-    }
-
-    fn conflict_bar(&mut self, theme: &Theme) {
-        self.ui.open(
-            "conflict",
-            Spec {
-                size: [fill(), px(40.0)],
-                fill: Some(theme.panel),
-                pad: [12.0, 7.0],
-                gap: 8.0,
-                ..Spec::default()
-            },
-        );
-        self.ui.leaf(
-            "message",
-            Spec {
-                size: [fit(), px(26.0)],
-                text: Some("This page also changed on another computer."),
-                ..Spec::default()
-            },
-        );
-        self.ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
-        if ui::button(&mut self.ui, "mine", "Keep mine").clicked {
-            self.commands.push(Command::Resolve { keep_mine: true });
-        }
-        if ui::button(&mut self.ui, "theirs", "Keep theirs").clicked {
-            self.commands.push(Command::Resolve { keep_mine: false });
         }
         self.ui.close();
     }
@@ -1373,55 +1609,24 @@ impl State {
                 ..Spec::default()
             },
         );
-        let mut open = None;
-        for (space, title, level) in matching(&session.pages, &self.filter) {
-            let selected = *space == session.space;
-            let spec = Spec {
-                flags: Flags::CLICKABLE,
-                size: [px(PAGE_LIST), px(ROW)],
-                text: Some(if title.is_empty() {
-                    "Untitled page"
-                } else {
-                    title
-                }),
-                pad: [10.0 + 16.0 * level.saturating_sub(1) as f32, 0.0],
-                ..Spec::default()
-            };
-            let spec = if selected {
-                open = Some(self.ui.id(space));
-                Spec {
-                    color: Some(theme.paper_ink),
-                    fill: Some(theme.paper),
-                    inset: [0.0, 0.0, 0.0, ROW_GAP],
-                    ..spec
-                }
-            } else {
-                // Tabs not open float free of the page as pills; only the open one joins it.
-                Spec {
-                    color: Some(if title.is_empty() {
-                        ui::mix(theme.ink, section.tab, 0.5)
-                    } else {
-                        theme.ink
-                    }),
-                    fill: Some(section.tab),
-                    hover_fill: Some(ui::mix(section.tab, section.accent, 0.3)),
-                    radius: ROUNDING,
-                    inset: [PILL_MARGIN, 0.0, 6.0, ROW_GAP],
-                    // The label keeps its place as the tab opens and closes.
-                    pad: [spec.pad[0] - PILL_MARGIN, 0.0],
-                    ..spec
-                }
-            };
-            if self.ui.leaf(space, spec).clicked && !selected {
-                self.commands.push(Command::OpenPage(*space));
-            }
+        let rows = page_rows(&mut self.ui, theme, section, session, &self.filter);
+        self.commands.extend(rows.clicked.map(Command::OpenPage));
+        if let Some((space, point)) = rows.context {
+            self.menu = Some((menus::Target::Page(space), point));
+            self.ui.open_popup(menus::id());
         }
+        let rect = self.ui.rect(panel).unwrap_or_default();
+        self.drag_pages(rows.held, section, rect);
         self.ui.close();
-        open
+        rows.open
     }
 
     /// Hands the page the events routed to its box, in its device pixels.
     fn page_events(&mut self, events: Vec<ui::Event>) -> Result<(), Box<dyn Error>> {
+        let read_only = self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.conflict(session.space).is_some());
         let scale = self.ui.scale();
         let corner = self.ui.rect(page()).unwrap_or_default();
         let device = |point: [f32; 2]| {
@@ -1446,6 +1651,27 @@ impl State {
                     }
                 }
                 ui::Event::Button { .. } | ui::Event::Ime(Ime::Enabled) => continue,
+                // A conflict page takes no typing; commands and caret moves still apply.
+                ui::Event::Ime(Ime::Preedit(..) | Ime::Commit(_)) if read_only => continue,
+                ui::Event::Key { ref key, .. }
+                    if read_only
+                        && !self.view.modifiers().command
+                        && !matches!(
+                            key,
+                            Key::Named(
+                                NamedKey::ArrowLeft
+                                    | NamedKey::ArrowRight
+                                    | NamedKey::ArrowUp
+                                    | NamedKey::ArrowDown
+                                    | NamedKey::Home
+                                    | NamedKey::End
+                                    | NamedKey::PageUp
+                                    | NamedKey::PageDown
+                            )
+                        ) =>
+                {
+                    continue;
+                }
                 ui::Event::Wheel(delta) => self.view.wheel([delta[0] * scale, delta[1] * scale])?,
                 ui::Event::Key { key, text } => {
                     let modifiers = self.view.modifiers();
@@ -1467,7 +1693,7 @@ impl State {
             self.respond(response);
         }
         if self.view.editor.marked_range().is_none() {
-            macos::clear_marked_text(&self.window);
+            platform::clear_marked_text(&self.window);
         }
         Ok(())
     }
@@ -1483,30 +1709,79 @@ impl State {
 
     fn apply(&mut self, command: Command) -> Result<(), Box<dyn Error>> {
         match command {
-            Command::OpenSection(tab) => {
-                let library = Arc::clone(self.library.as_ref().ok_or("No sections to open")?);
-                let proxy = self.proxy.clone();
+            Command::OpenSection(library, path) => {
+                let notify = notify(self.proxy.clone());
+                let last = self.last_pages.get(&library.key(&path)).copied();
                 self.load(move || {
-                    let section = library.open(tab, proxy)?;
-                    let (session, page) = read_session(section, tab, None)?;
+                    let section = library.open(&path, notify)?;
+                    let (session, page) = read_session(section, library, path, last)?;
                     Ok((Loaded::Section(Box::new(session)), page))
                 });
             }
             Command::OpenPage(space) => {
                 let session = self.session.as_ref().ok_or("No section is open")?;
-                let replica = Arc::clone(session.section.replica());
-                self.load(move || Ok((Loaded::Page(space), replica.page(space)?)));
+                let read = session.reader(space);
+                self.load(move || Ok((Loaded::Page(space), read()?)));
             }
-            Command::Resolve { keep_mine } => self.resolve_conflict(keep_mine)?,
+            Command::Versions { page, show } => {
+                let session = self.session.as_mut().ok_or("No section is open")?;
+                session.shown = show.then_some(page);
+                let open = if show {
+                    session.versions(page).first().map(|version| version.space)
+                } else {
+                    (session.space != page).then_some(page)
+                };
+                self.commands.extend(open.map(Command::OpenPage));
+            }
+            Command::DeleteVersion { page, version } => {
+                let session = self.session.as_mut().ok_or("No section is open")?;
+                session.section.delete_pages(&[version])?;
+                session.status = "Saving";
+                session.refresh_conflicts()?;
+                self.commands.push(Command::OpenPage(page));
+            }
+            Command::CopyVersion { version, tab } => {
+                let session = self.session.as_ref().ok_or("No section is open")?;
+                let page = session.section.page(version)?;
+                if tab == session.tab {
+                    session.section.import_page(&page, &self.author)?;
+                } else {
+                    let library = Arc::clone(&session.library);
+                    let path = session.tabs[tab].path.clone();
+                    let (notify, author) = (notify(self.proxy.clone()), self.author.clone());
+                    std::thread::spawn(move || {
+                        let copied = library.open(&path, notify).and_then(|section| {
+                            section.import_page(&page, &author)?;
+                            Ok(section.close()?)
+                        });
+                        if let Err(error) = copied {
+                            eprintln!("Copying the page failed: {error}");
+                        }
+                    });
+                }
+            }
+            Command::SelectChange { forward } => self.select_change(forward)?,
+            Command::OpenNotebook => {
+                if let Some(path) = platform::pick_notebook("Open Notebook") {
+                    self.open_path(&path);
+                }
+            }
+            Command::NewNotebook => self.new_notebook()?,
+            Command::CloseNotebook(library) => self.close_notebook(&library),
+            Command::Structure(library, change) => self.restructure(library, change),
+            Command::NewPage { subpage } => self.new_page(subpage)?,
+            Command::DeletePages(pages) => self.delete_pages(pages)?,
+            Command::Pages(edits) => self.edit_pages(edits)?,
+            Command::Template(choice) => self.apply_template(choice)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
             Command::Page(Request::Copy(text)) => self.clipboard.set_text(text)?,
             Command::Page(Request::Paste) => {
                 let text = self.clipboard.get_text()?;
-                let language = canvas::language::lcid(&macos::input_language());
+                let language = canvas::language::lcid(&platform::input_language());
                 let response = self.view.paste(&text, language)?;
                 self.respond(response);
             }
-            Command::Page(Request::CharacterPalette) => macos::show_character_palette(),
+            Command::Page(Request::CharacterPalette) => platform::show_character_palette(),
         }
         Ok(())
     }
@@ -1532,7 +1807,13 @@ impl State {
             if id != self.loading {
                 continue;
             }
-            let (loaded, page) = loaded?;
+            let (loaded, page) = match loaded {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    platform::alert("Couldn't open", &error);
+                    continue;
+                }
+            };
             let (scene, editor) = PageScene::from_page(page, &mut self.view.engine)?;
             self.opening = Some(Opening {
                 loaded,
@@ -1558,19 +1839,51 @@ impl State {
         }
         // The page shown so far keeps what was typed while the next one loaded.
         self.persist()?;
+        if let Some(session) = &self.session {
+            let key = session.library.key(&session.tabs[session.tab].path);
+            self.places.insert((key.clone(), session.space), self.view.place());
+            self.last_pages.insert(key, session.space);
+        }
         match opening.loaded {
             Loaded::Section(session) => {
+                // A notebook read again after a change replaces the one it was.
+                match self
+                    .notebooks
+                    .iter_mut()
+                    .find(|library| library.location == session.library.location)
+                {
+                    Some(library) => *library = Arc::clone(&session.library),
+                    None => self.notebooks.push(Arc::clone(&session.library)),
+                }
                 self.session = Some(*session);
                 self.filter.clear();
+                self.save_settings();
             }
             Loaded::Page(space) => {
                 let session = self.session.as_mut().ok_or("No section is open")?;
                 session.space = space;
-                session.refresh_conflict()?;
+                session.change = None;
+                // Pages created, moved or deleted since the list was read.
+                session.pages = session.section.pages()?;
             }
         }
-        self.view.open(opening.editor, Some(opening.scene));
-        self.opened()
+        let place = self.session.as_ref().and_then(|session| {
+            let key = session.library.key(&session.tabs[session.tab].path);
+            self.places.get(&(key, session.space)).copied()
+        });
+        self.view.open(opening.editor, Some(opening.scene), place);
+        self.opened()?;
+        if self.title_focus.take().is_some_and(|space| {
+            self.session
+                .as_ref()
+                .is_some_and(|session| session.space == space)
+        }) && let Some(title) = self.view.editor.outlines().iter().find(|outline| outline.title)
+        {
+            self.view.editor.focus_outline(title.id)?;
+            let response = self.view.focus_text()?;
+            self.respond(response);
+        }
+        Ok(())
     }
 
     /// Follows a page shown in place of another.
@@ -1620,6 +1933,7 @@ impl State {
                     .unwrap_or_default();
                 format!("{} · {file}", session.title())
             }
+            None if !self.temporary => "Snowbound".to_owned(),
             None => {
                 let editor = &self.view.editor;
                 if !editor.active_outline().title {
@@ -1655,12 +1969,68 @@ impl State {
         };
         let timestamp = date.timestamp();
         self.view.editor.finish_composition();
-        macos::clear_marked_text(&self.window);
-        if let Some((timestamp, text)) = macos::edit_date(timestamp, field)? {
+        platform::clear_marked_text(&self.window);
+        let title = match field {
+            DateField::Date => "Change Page Date",
+            DateField::Time => "Change Page Time",
+        };
+        if let Some((timestamp, text)) = platform::edit_date(timestamp, field, title)? {
             let response = self.view.change_date(timestamp, text)?;
             self.respond(response);
             self.window.request_redraw();
         }
+        Ok(())
+    }
+
+    /// The open conflict page's conflicting changes in page order: each text's outline,
+    /// paragraph position and length.
+    fn changes(&self) -> Vec<(ExGuid, usize, u32)> {
+        let Some((_, version)) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.conflict(session.space))
+        else {
+            return Vec::new();
+        };
+        let marked = |id: &ExGuid| version.objects.contains(id);
+        let mut changes = Vec::new();
+        for outline in self.view.editor.outlines() {
+            for (at, node) in outline.document().text_nodes().enumerate() {
+                let Some(text) = node.text() else {
+                    continue;
+                };
+                if marked(&node.id) || marked(&text.id) {
+                    let length = text.text.text().encode_utf16().count() as u32;
+                    changes.push((outline.id, at, length));
+                }
+            }
+        }
+        changes
+    }
+
+    /// Selects the next or previous conflicting change, as OneNote's conflict menu does.
+    fn select_change(&mut self, forward: bool) -> Result<(), Box<dyn Error>> {
+        let changes = self.changes();
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
+        let next = match (session.change, forward) {
+            (None, true) => 0,
+            (Some(at), true) => at + 1,
+            (Some(at), false) if at > 0 => at - 1,
+            _ => return Ok(()),
+        };
+        let Some(&(outline, paragraph, length)) = changes.get(next) else {
+            return Ok(());
+        };
+        session.change = Some(next);
+        let at = |offset| canvas::document::TextPosition { paragraph, offset };
+        self.view.editor.focus_outline(outline)?;
+        self.view.editor.select([at(0), at(length)].into())?;
+        self.ui.set_focus(Some(page()));
+        let response = self.view.focus_text()?;
+        self.respond(response);
+        self.window.request_redraw();
         Ok(())
     }
 
@@ -1677,9 +2047,14 @@ impl State {
         if ops.is_empty() {
             return Ok(());
         }
+        if session.conflict(session.space).is_some() {
+            // A conflict page is read-only: it returns to what is stored.
+            self.stale = true;
+            return Ok(());
+        }
         let space = session.space;
         session.section.apply(
-            "snowbound",
+            &self.author,
             onestore::op::Edit {
                 at: filetime(),
                 ops: ops
@@ -1704,7 +2079,7 @@ impl State {
         let Some(session) = &self.session else {
             return Ok(());
         };
-        let page = session.section.page(session.space)?;
+        let page = session.reader(session.space)()?;
         let response = self.view.refresh(page)?;
         self.respond(response);
         self.title();
@@ -1720,43 +2095,16 @@ impl State {
         // What the editor recorded since builds on the refused edit.
         let _ = self.view.editor.take_ops();
         self.view.editor.cancel_composition(&mut self.view.engine)?;
-        macos::clear_marked_text(&self.window);
+        platform::clear_marked_text(&self.window);
         if let Some(session) = &mut self.session {
             session.status = "Not saving";
         }
         self.refresh()?;
-        macos::change_not_saved();
+        platform::alert(
+            "Change not saved",
+            "The page now shows what was last saved. Your text is on the clipboard to paste back.",
+        );
         Ok(())
-    }
-
-    /// Ends the conflict on this page: `keep_mine` publishes the local page over the remote
-    /// change, otherwise the remote page replaces it.
-    fn resolve_conflict(&mut self, keep_mine: bool) -> Result<(), Box<dyn Error>> {
-        self.persist()?;
-        let Some(session) = &mut self.session else {
-            return Ok(());
-        };
-        let Some(conflict) = session
-            .section
-            .conflict()?
-            .filter(|conflict| conflict.space == session.space)
-        else {
-            return Ok(());
-        };
-        let resolution = if keep_mine {
-            notebook::Resolution::Mine
-        } else {
-            notebook::Resolution::Theirs
-        };
-        session.section.resolve(conflict.id, resolution)?;
-        session.status = "Saving";
-        session.refresh_conflict()?;
-        if keep_mine {
-            self.window.request_redraw();
-            Ok(())
-        } else {
-            self.refresh()
-        }
     }
 
     /// Applies what the section reported since the last poll.
@@ -1764,18 +2112,13 @@ impl State {
         let Some(session) = &mut self.session else {
             return Ok(());
         };
-        let shown = (session.status, session.conflict);
+        let shown = session.status;
         let mut listed = false;
         let mut changed = false;
         let mut rejected = None;
-        let mut conflicted = session.conflict;
         for event in session.section.events() {
             use notebook::session::Event;
             session.status = match event {
-                Event::Refreshed => {
-                    listed = true;
-                    continue;
-                }
                 Event::Changed(spaces) => {
                     listed = true;
                     changed |= spaces.contains(&session.space);
@@ -1793,13 +2136,6 @@ impl State {
                     status: notebook::EditStatus::Published { .. },
                     ..
                 } => "Saved",
-                Event::Attempt {
-                    status: notebook::EditStatus::Conflict(_),
-                    ..
-                } => {
-                    conflicted = true;
-                    "Conflict"
-                }
                 Event::Attempt { .. } => "Saving",
                 Event::Unreachable(_) => "Offline",
                 Event::Failed(error) => {
@@ -1808,23 +2144,22 @@ impl State {
                 }
             };
         }
-        // Reading the queue waits on the section thread, so only a conflict shown or
-        // reported sends the frame thread there.
-        if conflicted {
-            session.refresh_conflict()?;
-        }
-        if listed || changed || shown != (session.status, session.conflict) {
+        if listed || changed || shown != session.status {
             self.window.request_redraw();
         }
         if listed {
+            let back = session.shown;
             session.pages = session.section.pages()?;
-            if !session
-                .pages
-                .iter()
-                .any(|(space, ..)| *space == session.space)
-            {
-                let first = session.pages.first().ok_or("The section has no pages")?.0;
-                self.commands.push(Command::OpenPage(first));
+            session.refresh_conflicts()?;
+            let listed = |space: ExGuid| session.pages.iter().any(|(page, ..)| *page == space);
+            if !listed(session.space) && session.conflict(session.space).is_none() {
+                // A page removed elsewhere, or a conflict page deleted elsewhere, which
+                // returns to its page.
+                let open = back
+                    .filter(|page| listed(*page))
+                    .or(session.pages.first().map(|(page, ..)| *page))
+                    .ok_or("The section has no pages")?;
+                self.commands.push(Command::OpenPage(open));
                 return Ok(());
             }
         }
@@ -1950,7 +2285,7 @@ impl State {
             }
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface = self.instance.create_surface(self.window.clone())?;
-                macos::configure_presentation(&self.surface);
+                platform::configure_presentation(&self.surface);
                 self.surface.configure(&self.renderer.device, &self.config);
                 self.window.request_redraw();
                 return Ok(());
@@ -1972,7 +2307,7 @@ impl State {
         self.window.pre_present_notify();
         let start = Instant::now();
         self.renderer.queue.present(frame);
-        macos::commit_presentation(&self.window);
+        platform::commit_presentation(&self.window);
         lap("present", start);
         trace_input(&"Present submitted");
         if reconfigure {
@@ -2113,11 +2448,28 @@ impl State {
         Ok(())
     }
 
-    /// Queues input for the next frame. A press on the strip moves the window at once,
-    /// while the platform still holds the press; a double press zooms it.
+    /// Queues input for the next frame. A press on the strip moves the window: at once on
+    /// macOS, while AppKit still holds the press, and elsewhere once the pointer moves, as
+    /// the window manager's move would swallow a second click; a double press zooms it.
     fn input(&mut self, event: ui::Event) {
         if let ui::Event::PointerMoved(point) = event {
             self.pointer = point;
+            if std::mem::take(&mut self.strip_held) {
+                let _ = self.window.drag_window();
+            }
+        }
+        if let ui::Event::Button { pressed: false, .. } = event {
+            self.strip_held = false;
+        }
+        if let ui::Event::Button {
+            button: MouseButton::Left,
+            pressed: true,
+            ..
+        } = event
+            && let Some(direction) = platform::resize_direction(&self.window, self.pointer)
+        {
+            let _ = self.window.drag_resize_window(direction);
+            return;
         }
         if let ui::Event::Button {
             button: MouseButton::Left,
@@ -2127,13 +2479,15 @@ impl State {
             && self.ui.box_at(self.pointer) == Some(strip())
         {
             let double = self.strip_press.is_some_and(|last| {
-                at.saturating_duration_since(last) <= macos::double_click_interval()
+                at.saturating_duration_since(last) <= platform::double_click_interval()
             });
             self.strip_press = (!double).then_some(at);
             if double {
-                macos::zoom(&self.window);
-            } else {
+                platform::zoom(&self.window);
+            } else if cfg!(target_os = "macos") {
                 let _ = self.window.drag_window();
+            } else {
+                self.strip_held = true;
             }
             return;
         }
@@ -2149,18 +2503,326 @@ fn theme(appearance: winit::window::Theme) -> Theme {
     }
 }
 
-fn file_name(path: &Path) -> String {
-    path.canonicalize()
-        .ok()
-        .as_deref()
-        .and_then(Path::file_name)
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 /// A section's colour as linear RGBA; sections without one take OneNote's default blue.
 fn section_color(color: Option<u32>) -> [f32; 4] {
     color.map_or(draw::srgb(0x8a, 0xa8, 0xe4), canvas::gpu::colorref)
+}
+
+/// OneNote's information bar for conflicting changes, clicked anywhere: above a page with
+/// conflict pages it shows or hides them; above a conflict page it opens OneNote's menu,
+/// whose previous and next changes `steps` enables and whose Copy Page To lists `sections`.
+fn conflict_bar(ui: &mut Ui, bar: Bar, sections: &[&str], steps: [bool; 2]) -> Option<Command> {
+    let row = ui.open(
+        "conflict",
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [fill(), children()],
+            fill: Some(draw::srgb(0xff, 0xee, 0xc2)),
+            hover_fill: Some(draw::srgb(0xff, 0xe4, 0xa6)),
+            pad: [12.0, 6.0],
+            gap: 8.0,
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "icon",
+        Spec {
+            size: [fit(), px(16.0)],
+            icon: Some(art::CONFLICT),
+            color: Some(draw::srgb(0xc0, 0x48, 0x20)),
+            ..Spec::default()
+        },
+    );
+    // OneNote 2010's words (corpus/conflict-page/native), a sentence to a line.
+    let [said, action] = match bar {
+        Bar::Page { shown, .. } => [
+            "This page has changes that could not be merged during synchronization.",
+            if shown {
+                "Click here to hide versions of the page with unmerged changes."
+            } else {
+                "Click here to show versions of the page with unmerged changes."
+            },
+        ],
+        Bar::Version { .. } => [
+            "Conflicting changes are highlighted in red. This page cannot be edited, but you can copy changes to the primary page.",
+            "Click here for more options.",
+        ],
+    };
+    ui.open(
+        "message",
+        Spec {
+            axis: Axis::Y,
+            size: [fill(), children()],
+            ..Spec::default()
+        },
+    );
+    for (part, text) in [("said", said), ("action", action)] {
+        ui.leaf(
+            part,
+            Spec {
+                size: [fit(), px(18.0)],
+                text: Some(text),
+                color: Some(draw::srgb(0x20, 0x20, 0x20)),
+                ..Spec::default()
+            },
+        );
+    }
+    let action = ui.id("action");
+    ui.close();
+    ui.close();
+    let clicked = ui.signal(row).clicked;
+    let menu = Id::ROOT.child("conflict-menu");
+    let copy = Id::ROOT.child("conflict-copy");
+    // The menu opens under the line the click asks for, as wide as its items.
+    let [left, top, _, bottom] = ui.rect(action).unwrap_or_default();
+    let anchor = ui::Anchor::Below([left, top, left, bottom]);
+    match bar {
+        Bar::Page { page, shown } => clicked.then_some(Command::Versions { page, show: !shown }),
+        Bar::Version { page, version } => {
+            if clicked {
+                ui.open_popup(menu);
+            }
+            let items = [
+                ui::popup::Item {
+                    text: "Delete Conflict Page",
+                    ..Default::default()
+                },
+                ui::popup::Item {
+                    text: "Copy Page To…",
+                    disabled: sections.is_empty(),
+                    ..Default::default()
+                },
+                ui::popup::Item {
+                    text: "Select Previous Conflicting Change",
+                    disabled: !steps[0],
+                    separated: true,
+                    ..Default::default()
+                },
+                ui::popup::Item {
+                    text: "Select Next Conflicting Change",
+                    disabled: !steps[1],
+                    ..Default::default()
+                },
+                ui::popup::Item {
+                    text: "Collapse Conflict Pages",
+                    separated: true,
+                    ..Default::default()
+                },
+            ];
+            let chosen = match ui::popup::menu(ui, menu, anchor, &items, None) {
+                Some(0) => Some(Command::DeleteVersion { page, version }),
+                Some(1) => {
+                    ui.open_popup(copy);
+                    None
+                }
+                Some(2) => Some(Command::SelectChange { forward: false }),
+                Some(3) => Some(Command::SelectChange { forward: true }),
+                Some(_) => Some(Command::Versions { page, show: false }),
+                None => None,
+            };
+            let targets: Vec<_> = sections
+                .iter()
+                .map(|name| ui::popup::Item {
+                    text: name,
+                    ..Default::default()
+                })
+                .collect();
+            let tab = ui::popup::menu(ui, copy, anchor, &targets, None);
+            chosen.or(tab.map(|tab| Command::CopyVersion { version, tab }))
+        }
+    }
+}
+
+/// What the page list's rows were asked this frame.
+#[derive(Default)]
+struct Rows {
+    /// The open page's tab.
+    open: Option<Id>,
+    clicked: Option<ExGuid>,
+    /// The page whose context menu was asked for, and where.
+    context: Option<(ExGuid, [f32; 2])>,
+    /// The page held down, which a drag moves.
+    held: Option<ExGuid>,
+}
+
+/// The page list's rows for the pages matching `filter`, a page's conflict pages beneath it
+/// while shown.
+fn page_rows(
+    ui: &mut Ui,
+    theme: &Theme,
+    section: &ui::Section,
+    session: &Session,
+    filter: &str,
+) -> Rows {
+    let mut rows = Rows::default();
+    for (space, title, level) in matching(&session.pages, filter) {
+        let versions = session.versions(*space);
+        let tab = PageTab {
+            label: if title.is_empty() {
+                "Untitled page"
+            } else {
+                title
+            },
+            dim: title.is_empty(),
+            indent: level.saturating_sub(1),
+            conflicted: !versions.is_empty(),
+        };
+        let selected = *space == session.space;
+        if selected {
+            rows.open = Some(ui.id(space));
+        }
+        let signal = page_tab(ui, theme, section, space, &tab, selected);
+        if signal.clicked && !selected {
+            rows.clicked = Some(*space);
+        }
+        if let Some(point) = signal.context {
+            rows.context = Some((*space, point));
+        }
+        if signal.dragging {
+            rows.held = Some(*space);
+        }
+        if session.shown != Some(*space) {
+            continue;
+        }
+        // OneNote lists a page's conflict pages beneath it, each by its date and whose
+        // version it is.
+        let muted = ui::Section {
+            tab: ui::mix(section.tab, theme.chip, 0.6),
+            ..*section
+        };
+        for version in versions {
+            let label = match version.created {
+                Some(created) => format!("{} {}", platform::short_date(created), version.user),
+                None => version.user.clone(),
+            };
+            let tab = PageTab {
+                label: &label,
+                dim: false,
+                indent: level.saturating_sub(1),
+                conflicted: false,
+            };
+            let selected = version.space == session.space;
+            if selected {
+                rows.open = Some(ui.id(version.space));
+            }
+            if page_tab(ui, theme, &muted, &version.space, &tab, selected).clicked && !selected {
+                rows.clicked = Some(version.space);
+            }
+        }
+    }
+    rows
+}
+
+/// A row of the page list.
+struct PageTab<'a> {
+    label: &'a str,
+    /// An untitled page's placeholder label.
+    dim: bool,
+    indent: u32,
+    /// The page has conflict pages, which OneNote marks at the tab's end.
+    conflicted: bool,
+}
+
+/// A page's tab down the frame's right side: the open one is the page's colour and joins
+/// it, the others float free of it as pills.
+fn page_tab(
+    ui: &mut Ui,
+    theme: &Theme,
+    section: &ui::Section,
+    id: &ExGuid,
+    tab: &PageTab,
+    selected: bool,
+) -> ui::Signal {
+    let pad = 10.0 + 16.0 * tab.indent as f32;
+    let spec = Spec {
+        flags: Flags::CLICKABLE,
+        size: [px(PAGE_LIST), px(ROW)],
+        pad: [pad, 0.0],
+        ..Spec::default()
+    };
+    let (spec, color) = if selected {
+        let spec = Spec {
+            fill: Some(theme.paper),
+            inset: [0.0, 0.0, 0.0, ROW_GAP],
+            ..spec
+        };
+        (spec, theme.paper_ink)
+    } else {
+        let spec = Spec {
+            fill: Some(section.tab),
+            hover_fill: Some(ui::mix(section.tab, section.accent, 0.3)),
+            radius: ROUNDING,
+            inset: [PILL_MARGIN, 0.0, 6.0, ROW_GAP],
+            // The label keeps its place as the tab opens and closes.
+            pad: [pad - PILL_MARGIN, 0.0],
+            ..spec
+        };
+        let color = if tab.dim {
+            ui::mix(theme.ink, section.tab, 0.5)
+        } else {
+            theme.ink
+        };
+        (spec, color)
+    };
+    let row = ui.open(id, spec);
+    ui.leaf(
+        "label",
+        Spec {
+            size: [fill(), px(ROW - ROW_GAP)],
+            text: Some(tab.label),
+            color: Some(color),
+            ..Spec::default()
+        },
+    );
+    if tab.conflicted {
+        ui.leaf(
+            "conflict",
+            Spec {
+                size: [fit(), px(ROW - ROW_GAP)],
+                icon: Some(art::CONFLICT),
+                color: Some(draw::srgb(0xc0, 0x48, 0x20)),
+                pad: [8.0, 0.0],
+                ..Spec::default()
+            },
+        );
+    }
+    ui.close();
+    ui.signal(row)
+}
+
+/// `page` with its conflict objects marked as OneNote shows a conflict page's: a band
+/// across each conflicting paragraph's outline.
+fn highlighted(mut page: Page, objects: &[ExGuid]) -> Page {
+    use onestore::page::{PageObject, PageParagraph, ParagraphContent};
+    fn mark(paragraphs: &mut [PageParagraph], objects: &[ExGuid]) {
+        for paragraph in paragraphs {
+            match &mut paragraph.content {
+                ParagraphContent::Table(table) => {
+                    for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                        mark(&mut cell.paragraphs, objects);
+                    }
+                }
+                ParagraphContent::Text(text)
+                    if objects.contains(&paragraph.id) || objects.contains(&text.id) =>
+                {
+                    paragraph.format.highlight = Some(CONFLICTING);
+                }
+                _ => {}
+            }
+        }
+    }
+    for object in &mut page.objects {
+        match object {
+            PageObject::Outline(outline) => mark(&mut outline.paragraphs, objects),
+            PageObject::Title(title) => {
+                for outline in &mut title.outlines {
+                    mark(&mut outline.paragraphs, objects);
+                }
+            }
+            _ => {}
+        }
+    }
+    page
 }
 
 /// The pages whose titles contain `filter`, ignoring case.
@@ -2212,50 +2874,42 @@ fn divider(ui: &mut Ui, part: &str, theme: &Theme) {
     );
 }
 
-/// Section tabs for a notebook's readable top-level sections, in its order.
-fn tabs(notebook: &notebook::session::Notebook) -> Vec<Tab> {
-    notebook
-        .catalog()
-        .sections
-        .iter()
-        .filter_map(|section| match &section.state {
-            notebook::discover::SectionState::Readable { name, color } => Some(Tab {
-                name: name.clone().unwrap_or_else(|| {
-                    Path::new(&section.path)
-                        .file_stem()
-                        .map(|stem| stem.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                }),
-                path: section.path.clone(),
-                color: *color,
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The session for `section` showing `space`, or its first page, and that page.
+/// The session for `section`, at catalog `path` in `library`, showing `space` or its first
+/// page, and that page.
 fn read_session(
     section: notebook::session::Section,
-    tab: usize,
+    library: Arc<Library>,
+    path: String,
     space: Option<ExGuid>,
 ) -> Result<(Session, Page), Box<dyn Error>> {
+    let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+    let tabs = library.tabs(folder);
+    let tab = tabs
+        .iter()
+        .position(|tab| tab.path == path)
+        .ok_or("The section is not in its notebook")?;
     let pages = section.pages()?;
-    let space = match space {
-        Some(space) => space,
-        None => pages.first().ok_or("The section has no pages")?.0,
-    };
+    let space = space
+        .filter(|space| pages.iter().any(|(candidate, ..)| candidate == space))
+        .or(pages.first().map(|(space, ..)| *space))
+        .ok_or("The section has no pages")?;
     let page = section.page(space)?;
-    let mut session = Session {
-        section,
-        tab,
-        pages,
-        space,
-        status: "",
-        conflict: false,
-    };
-    session.refresh_conflict()?;
-    Ok((session, page))
+    let conflicts = section.conflicts()?;
+    Ok((
+        Session {
+            section,
+            library,
+            tabs,
+            tab,
+            pages,
+            space,
+            status: "",
+            conflicts,
+            shown: None,
+            change: None,
+        },
+        page,
+    ))
 }
 
 /// The text the editor shows, outline by outline, without hidden field codes.
@@ -2315,8 +2969,12 @@ impl App {
                             .outlines()
                             .iter()
                             .map(|outline| (&outline.id, outline.document())))
-        }) || macos::discard_changes()
-        {
+        }) || platform::confirm(
+            "Discard this page?",
+            "This temporary page has no saved copy. Closing it will discard your edits.",
+            "Keep Editing",
+            "Discard Changes",
+        ) {
             event_loop.exit();
         }
     }
@@ -2396,7 +3054,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         };
         if was_marked && state.view.editor.marked_range().is_none() {
-            macos::clear_marked_text(&state.window);
+            platform::clear_marked_text(&state.window);
         }
         if let Err(error) = result {
             eprintln!("{error}");
@@ -2413,8 +3071,17 @@ impl ApplicationHandler<UserEvent> for App {
             self.input.take().unwrap(),
             &self.substitutes,
             std::mem::take(&mut self.interface_font),
+            self.screenshot.is_none(),
+            self.settings.take().unwrap_or_default(),
+            self.cache.clone(),
         )) {
-            Ok(state) => self.state = Some(state),
+            Ok(mut state) => match &self.screenshot {
+                Some(prefix) => {
+                    self.startup_error = state.screenshot(prefix).err();
+                    event_loop.exit();
+                }
+                None => self.state = Some(state),
+            },
             Err(error) => {
                 self.startup_error = Some(error);
                 event_loop.exit();
@@ -2466,7 +3133,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                     state.renderer.clear_glyph_cache();
-                    state.app_icon = macos::app_icon((16.0 * scale_factor).round() as u32);
+                    state.app_icon = platform::app_icon((16.0 * scale_factor).round() as u32);
                     let response = state.view.scale_factor_changed(scale_factor as f32)?;
                     state.respond(response);
                     state.window.request_redraw();
@@ -2593,7 +3260,10 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                 rest.split_whitespace()
                     .map(|name| match name {
                         "shift" => Ok(ModifiersState::SHIFT),
-                        "command" => Ok(ModifiersState::SUPER),
+                        "control" => Ok(ModifiersState::CONTROL),
+                        // The shortcut modifier, as ui::edit_modifiers reads it.
+                        "command" if cfg!(target_os = "macos") => Ok(ModifiersState::SUPER),
+                        "command" => Ok(ModifiersState::CONTROL),
                         _ => Err(format!("Unknown modifier {name}")),
                     })
                     .try_fold(ModifiersState::empty(), |all, one| one.map(|one| all | one))?,
@@ -2640,6 +3310,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut section = None;
     let mut notebook = None;
     let mut cache = None;
+    let mut settings_file = None;
+    let mut screenshot = None;
     while let Some(arg) = args.next() {
         if arg == "--substitute-font" {
             substitutes.push(PathBuf::from(
@@ -2691,6 +3363,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             cache = Some(PathBuf::from(
                 args.next().ok_or("Provide a directory after --cache.")?,
             ));
+        } else if arg == "--settings" {
+            settings_file = Some(PathBuf::from(
+                args.next().ok_or("Provide a settings file after --settings.")?,
+            ));
+        } else if arg == "--screenshot" {
+            screenshot = Some(PathBuf::from(
+                args.next()
+                    .ok_or("Provide a PNG path prefix after --screenshot.")?,
+            ));
         } else if arg == "--reference" || arg == "--page" {
             if reference.is_some() {
                 return Err("Only one page can be opened.".into());
@@ -2725,7 +3406,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if positional.len() > 2 {
         return Err(
-            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--ui-font FONT_FILE_OR_FOLDER] [--substitute-font FONT_FILE]..."
+            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--settings FILE] [--screenshot PNG_PREFIX] [--ui-font FONT_FILE_OR_FOLDER] [--substitute-font FONT_FILE]..."
                 .into(),
         );
     }
@@ -2745,15 +3426,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
     let cache = match cache {
         Some(cache) => cache,
-        None => PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set.")?)
-            .join("Library/Caches/snowbound"),
+        None => platform::cache_dir().ok_or("HOME is not set.")?,
     };
-    let input = if let Some(root) = notebook {
-        Input::Notebook { root, cache }
-    } else if let Some((file, title)) = section {
-        Input::Section { file, title, cache }
+    let settings_file = settings_file.or_else(settings::default_path);
+    let saved = settings_file
+        .as_deref()
+        .map(settings::Settings::load)
+        .unwrap_or_default();
+    let input = if let Some((file, title)) = section {
+        Input::Section { file, title }
     } else if editable {
         Input::Page(reference.unwrap())
+    } else if positional.is_empty() && reference.is_none() {
+        let mut locations = saved.notebooks.clone();
+        let mut current = saved.current.clone();
+        if let Some(root) = notebook {
+            let location = std::path::absolute(root)?.to_string_lossy().into_owned();
+            if !locations.contains(&location) {
+                locations.push(location.clone());
+            }
+            current = Some(location);
+        }
+        Input::Notebooks { locations, current }
     } else {
         Input::Notes {
             document: TextDocument::new(
@@ -2765,15 +3459,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             reference,
         }
     };
-    let event_loop = macos::event_loop()?;
+    let event_loop = platform::event_loop(screenshot.is_some())?;
     if let Some(script) = std::env::var_os("SNOWBOUND_REPLAY") {
         replay(std::fs::read_to_string(script)?, event_loop.create_proxy())?;
     }
     let mut app = App {
         proxy: event_loop.create_proxy(),
         input: Some(input),
+        // A screenshot leaves the settings as it found them.
+        settings: Some((settings_file.filter(|_| screenshot.is_none()), saved)),
+        cache,
         substitutes,
         interface_font,
+        screenshot,
         state: None,
         startup_error: None,
     };

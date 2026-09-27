@@ -1,8 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    CommitState, ExGuid, Insertion, PreparedEdit, RevisionIndex, Store, TextAttribute as A,
+    CommitState, ExGuid, RevisionIndex, Store, TextAttribute as A,
     document::{Document, Kind},
+    op::{Edit, Op, PageOp},
 };
 use std::sync::LazyLock;
 
@@ -10,8 +11,10 @@ use std::sync::LazyLock;
 mod current;
 #[path = "../../crates/onestore/tests/support/disk.rs"]
 mod disk;
+#[path = "../../crates/onestore/tests/support/ops.rs"]
+mod ops;
 
-static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid, ExGuid)> = LazyLock::new(|| {
+static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid)> = LazyLock::new(|| {
     let bytes = include_bytes!(
         "../../corpus/native/20260905-05/snapshots/03-format-unicode/notebook/synthetic.one"
     )
@@ -27,15 +30,15 @@ static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid, ExGuid)> = LazyLock::new(|| {
         .iter()
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
-    (bytes, space, page, outline)
+    (bytes, space, outline)
 });
 
 fuzz_target!(|input: &[u8]| {
-    let (source, space, page, outline) = &*SOURCE;
-    if let Ok(intent) = serde_json::from_slice::<Insertion>(input)
-        && let Ok(prepared) = PreparedEdit::insert(source, *space, &intent)
+    let (source, space, outline) = &*SOURCE;
+    if let Ok(edit) = serde_json::from_slice::<Edit>(input)
+        && let Ok(edited) = ops::apply(source, "Insertion fuzz", edit.ops)
     {
-        current::current(prepared.as_bytes());
+        current::current(edited.as_bytes());
     }
     let mut persisted = source.clone();
     let mut caches = std::array::from_fn::<_, 12, _>(|_| source.clone());
@@ -56,32 +59,46 @@ fuzz_target!(|input: &[u8]| {
         let first = usize::from(step[3]) % offsets.len();
         let second = usize::from(step[4]) % offsets.len();
         let (start, end) = (first.min(second), first.max(second));
-        let plain = if step[1] & 1 == 0 {
-            Insertion::paragraph(*outline, None, text, "Insertion fuzz").unwrap()
+        let (insert, text_object) = if step[1] & 1 == 0 {
+            let paragraph = ops::paragraph(text);
+            let id = paragraph.text().unwrap().id;
+            let insert = PageOp::Insert {
+                container: *outline,
+                before: None,
+                paragraphs: vec![paragraph],
+            };
+            (insert, id)
         } else {
-            Insertion::outline(*page, 72.0, 144.0, text, "Insertion fuzz").unwrap()
+            let (add, _, id) = ops::new_outline(72.0, 144.0, text);
+            (add, id)
         };
         let enabled = step[5] & 1 != 0;
-        let intent = if start != end || text.is_empty() {
-            plain
-                .with_formatting(
-                    offsets[start]..offsets[end],
-                    &[A::Bold(enabled), A::FontSize(18.0)],
-                )
-                .unwrap()
-        } else {
-            plain
+        let mut page_ops = vec![insert];
+        if start != end || text.is_empty() {
+            page_ops.push(PageOp::Format {
+                text: text_object,
+                range: offsets[start]..offsets[end],
+                set: vec![A::Bold(enabled), A::FontSize(18.0)],
+                clear: Vec::new(),
+            });
+        }
+        let edit = Edit {
+            at: ops::now(),
+            ops: page_ops
+                .into_iter()
+                .map(|op| Op::Page { space: *space, op })
+                .collect(),
         };
-        let encoded = serde_json::to_vec(&intent).unwrap();
-        let intent: Insertion = serde_json::from_slice(&encoded).unwrap();
-        let edit = PreparedEdit::insert(source, *space, &intent).unwrap();
+        let encoded = serde_json::to_vec(&edit).unwrap();
+        let edit: Edit = serde_json::from_slice(&encoded).unwrap();
+        let edit = ops::apply(source, "Insertion fuzz", edit.ops).unwrap();
         let store = Store::parse(edit.as_bytes()).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let s = &document.spaces[space];
         let view = &s.revisions[&s.contexts[&ExGuid::default()]];
         let actual: Vec<_> = view
-            .text_runs(intent.text_object())
+            .text_runs(text_object)
             .unwrap()
             .into_iter()
             .flat_map(|run| {

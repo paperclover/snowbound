@@ -736,6 +736,7 @@ pub(super) mod tests {
             title: "Header".into(),
             created: None,
             margin_origin: [36.0, 14.4],
+            color: None,
             definitions: Default::default(),
             objects: vec![
                 PageObject::Title(Title {
@@ -828,6 +829,7 @@ pub(super) mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: Default::default(),
             objects: vec![PageObject::Unsupported(Unsupported {
                 id: Default::default(),

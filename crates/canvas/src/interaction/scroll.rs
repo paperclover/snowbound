@@ -9,19 +9,19 @@ pub struct Scroll {
 }
 
 impl Scroll {
-    /// `pad` is the room, in device pixels, OneNote leaves beyond content it scrolls to.
-    pub fn new(viewport: Viewport, pad: f32, bounds: impl Iterator<Item = [f32; 4]>) -> Self {
-        let mut min = [f32::INFINITY; 2];
+    /// Each content rectangle comes with the room, in device pixels, OneNote leaves beyond
+    /// it left and up.
+    pub fn new(viewport: Viewport, bounds: impl Iterator<Item = ([f32; 4], f32)>) -> Self {
+        let mut min = [0.0_f32; 2];
         let mut max = [0.0_f32; 2];
-        for rect in bounds {
+        for (rect, pad) in bounds {
             for axis in 0..2 {
-                min[axis] = min[axis].min(rect[axis]);
+                min[axis] = min[axis].min(rect[axis] * viewport.scale - pad);
                 max[axis] = max[axis].max(rect[axis + 2]);
             }
         }
-        // OneNote stops at the page origin, or `pad` beyond content that reaches past it.
+        // OneNote stops at the page origin unless content reaches past it.
         for axis in 0..2 {
-            min[axis] = (min[axis] * viewport.scale - pad).min(0.0);
             max[axis] =
                 ((max[axis] + 36.0) * viewport.scale - viewport.size[axis] as f32).max(min[axis]);
         }
@@ -46,11 +46,29 @@ mod tests {
             scale: 2.0,
             origin: [9999.0; 2],
         };
-        let scroll = Scroll::new(viewport, 11.0, [[-80.0, -20.0, 1000.0, 1200.0]].into_iter());
+        let scroll = Scroll::new(
+            viewport,
+            [([-80.0, -20.0, 1000.0, 1200.0], 11.0)].into_iter(),
+        );
         scroll.clamp(&mut viewport);
         assert_eq!(viewport.origin, [171.0, 51.0]);
         viewport.origin = [-9999.0; 2];
         scroll.clamp(&mut viewport);
         assert_eq!(viewport.origin, [-1272.0, -1872.0]);
+    }
+
+    #[test]
+    fn pictures_reach_no_further_than_their_corner() {
+        let viewport = Viewport {
+            size: [800, 600],
+            scale: 2.0,
+            origin: [0.0; 2],
+        };
+        let bounds = [
+            ([-0.5, -22.35, 613.0, 141.3], 0.0),
+            ([36.0, 86.4, 400.0, 180.0], 11.0),
+        ];
+        let scroll = Scroll::new(viewport, bounds.into_iter());
+        assert_eq!(scroll.min, [-1.0, -44.7]);
     }
 }

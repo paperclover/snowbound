@@ -33,6 +33,16 @@ pub struct Theme {
     pub shades: Shades,
 }
 
+/// The platform's caret and selection colours in a light or `dark` appearance.
+fn text_colors(dark: bool) -> [[f32; 4]; 3] {
+    draw::edit::Platform::CURRENT
+        .text_colors(dark)
+        .map(|([red, green, blue], alpha)| {
+            let [red, green, blue, _] = srgb(red, green, blue);
+            [red, green, blue, alpha]
+        })
+}
+
 /// Saturation and lightness pairs, each from 0 to 1.
 #[derive(Clone, Copy, Debug)]
 pub struct Shades {
@@ -58,15 +68,16 @@ pub struct Section {
 impl Theme {
     /// After File Pilot's default dark scheme.
     pub fn dark() -> Self {
+        let [caret, selection, inactive_selection] = text_colors(true);
         Self {
             font_size: 13.0,
             base: srgb(0x19, 0x1b, 0x1c),
             panel: srgb(0x1f, 0x22, 0x23),
             strip: srgb(0x27, 0x2a, 0x2b),
             accent: srgb(0x00, 0x79, 0xa6),
-            caret: srgb(0x00, 0x7a, 0xff),
-            selection: srgb(0x3f, 0x63, 0x8b),
-            inactive_selection: srgb(0x46, 0x46, 0x46),
+            caret,
+            selection,
+            inactive_selection,
             text: srgb(0xdd, 0xde, 0xe0),
             text_dim: srgb(0x6b, 0x70, 0x78),
             ink: srgb(0xe8, 0xe9, 0xeb),
@@ -85,15 +96,16 @@ impl Theme {
     }
 
     pub fn light() -> Self {
+        let [caret, selection, inactive_selection] = text_colors(false);
         Self {
             font_size: 13.0,
             base: srgb(0xfc, 0xfc, 0xfd),
             panel: srgb(0xf4, 0xf5, 0xf7),
             strip: srgb(0xeb, 0xed, 0xf0),
             accent: srgb(0x00, 0x79, 0xa6),
-            caret: srgb(0x00, 0x7a, 0xff),
-            selection: srgb(0xb3, 0xd7, 0xff),
-            inactive_selection: srgb(0xdc, 0xdc, 0xdc),
+            caret,
+            selection,
+            inactive_selection,
             text: srgb(0x1f, 0x23, 0x28),
             text_dim: srgb(0x7b, 0x82, 0x8c),
             ink: srgb(0x1d, 0x1e, 0x20),

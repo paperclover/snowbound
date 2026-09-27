@@ -112,7 +112,7 @@ pub fn text_field(
     };
     let before = [selection.anchor(), selection.focus()];
     let (texts, frame) = ui.texts();
-    let mut label = texts.label(text, size, None, frame);
+    let mut label = texts.label(text, size, false, None, frame);
     if let Some(x) = pointer {
         let layout = &label.layout;
         let unit = if signal.pressed { signal.unit } else { press.1 };
@@ -143,9 +143,11 @@ pub fn text_field(
             Event::Ime(Ime::Commit(committed)) => (selection.text_range(), committed.as_str()),
             Event::Key { key, text: typed } => {
                 let key = edit_key(key);
-                // One line has no break for Control-K to join, nor room for Home and End to scroll.
+                // One line has no break for Control-K to join, nor room for Home, End and the
+                // page keys to scroll.
                 let command = match (Command::from_key(&key, modifiers), &key) {
                     (Some(Command::Kill), _) => Some(Command::DeleteTo(Movement::LineEnd)),
+                    (Some(Command::ScrollPage { .. } | Command::MovePage { .. }), _) => None,
                     (None, edit::Key::Named(edit::NamedKey::Home)) => {
                         Some(Command::Move(Movement::DocumentStart))
                     }
@@ -198,7 +200,7 @@ pub fn text_field(
             _ => continue,
         };
         text.replace_range(range.clone(), inserted);
-        label = texts.label(text, size, None, frame);
+        label = texts.label(text, size, false, None, frame);
         selection = Selection::from_byte_index(
             &label.layout,
             range.start + inserted.len(),
@@ -284,6 +286,8 @@ pub fn edit_key(key: &Key) -> edit::Key {
             NamedKey::ArrowDown => Edit::ArrowDown,
             NamedKey::Home => Edit::Home,
             NamedKey::End => Edit::End,
+            NamedKey::PageUp => Edit::PageUp,
+            NamedKey::PageDown => Edit::PageDown,
             NamedKey::Alt
             | NamedKey::AltGraph
             | NamedKey::Control
@@ -301,6 +305,10 @@ pub fn edit_modifiers(modifiers: ModifiersState) -> edit::Modifiers {
         shift: modifiers.shift_key(),
         control: modifiers.control_key(),
         option: modifiers.alt_key(),
-        command: modifiers.super_key(),
+        command: if edit::Platform::CURRENT == edit::Platform::MacOs {
+            modifiers.super_key()
+        } else {
+            modifiers.control_key()
+        },
     }
 }

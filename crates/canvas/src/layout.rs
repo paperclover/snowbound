@@ -4,10 +4,11 @@ use parley::{
     FontStyle, FontWeight, GenericFamily, Layout, LayoutContext, OverflowWrap,
     PositionedLayoutItem, StyleProperty,
     editing::{Cursor, Selection},
+    fontique::{Blob, FontInfo},
 };
 use skrifa::{FontRef, MetadataProvider, raw::TableProvider, string::StringId};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     ops::Range,
     sync::{
@@ -16,11 +17,20 @@ use std::{
     },
 };
 
-#[derive(Default)]
 pub struct TextEngine {
     pub fonts: FontContext,
     context: LayoutContext<TextBrush>,
     arial_substitutes: BTreeSet<u64>,
+    /// The substitute each family lays out in, by family.
+    substitutes: BTreeMap<&'static str, Substitute>,
+}
+
+/// A font laid out in place of a family.
+pub struct Substitute {
+    pub name: &'static str,
+    /// Its faces as registered for the family.
+    pub faces: Vec<(Blob<u8>, FontInfo)>,
+    bundled: bool,
 }
 
 /// Superscripts and subscripts draw at this fraction of their run's size.
@@ -69,7 +79,9 @@ pub enum LayoutError {
 impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedSubstituteFont => write!(f, "Choose an Arimo or Carlito font file."),
+            Self::UnsupportedSubstituteFont => {
+                write!(f, "Choose an Arimo, Carlito, Tinos or Cousine font file.")
+            }
             _ => write!(f, "Text layout failed: {self:?}"),
         }
     }
@@ -77,12 +89,75 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
+/// Metric-compatible faces for the fonts OneNote pages use most, under the SIL Open Font
+/// Licence files beside them, by the family each stands in for.
+const BUNDLED: [(&str, &[&[u8]]); 4] = [
+    (
+        "Calibri",
+        &[
+            include_bytes!("../assets/fonts/Carlito-Regular.ttf"),
+            include_bytes!("../assets/fonts/Carlito-Bold.ttf"),
+            include_bytes!("../assets/fonts/Carlito-Italic.ttf"),
+            include_bytes!("../assets/fonts/Carlito-BoldItalic.ttf"),
+        ],
+    ),
+    (
+        "Arial",
+        &[
+            include_bytes!("../assets/fonts/Arimo.ttf"),
+            include_bytes!("../assets/fonts/Arimo-Italic.ttf"),
+        ],
+    ),
+    (
+        "Times New Roman",
+        &[
+            include_bytes!("../assets/fonts/Tinos-Regular.ttf"),
+            include_bytes!("../assets/fonts/Tinos-Bold.ttf"),
+            include_bytes!("../assets/fonts/Tinos-Italic.ttf"),
+            include_bytes!("../assets/fonts/Tinos-BoldItalic.ttf"),
+        ],
+    ),
+    (
+        "Courier New",
+        &[
+            include_bytes!("../assets/fonts/Cousine-Regular.ttf"),
+            include_bytes!("../assets/fonts/Cousine-Bold.ttf"),
+            include_bytes!("../assets/fonts/Cousine-Italic.ttf"),
+            include_bytes!("../assets/fonts/Cousine-BoldItalic.ttf"),
+        ],
+    ),
+];
+
+impl Default for TextEngine {
+    /// An engine that lays out each bundled family in its substitute where it is missing.
+    fn default() -> Self {
+        let mut engine = Self {
+            fonts: FontContext::default(),
+            context: LayoutContext::default(),
+            arial_substitutes: BTreeSet::new(),
+            substitutes: BTreeMap::new(),
+        };
+        for (family, faces) in BUNDLED {
+            if engine.fonts.collection.family_id(family).is_none() {
+                for face in faces {
+                    engine
+                        .register(Blob::new(Arc::new(*face)), true)
+                        .expect("bundled substitutes register");
+                }
+            }
+        }
+        engine
+    }
+}
+
 impl TextEngine {
-    /// Register Arimo as Arial or Carlito as Calibri before creating layouts.
-    pub fn register_substitute(
-        &mut self,
-        data: parley::fontique::Blob<u8>,
-    ) -> Result<&'static str, LayoutError> {
+    /// Register Arimo as Arial, Carlito as Calibri, Tinos as Times New Roman or Cousine as
+    /// Courier New before creating layouts, in place of the bundled substitute.
+    pub fn register_substitute(&mut self, data: Blob<u8>) -> Result<&'static str, LayoutError> {
+        self.register(data, false)
+    }
+
+    fn register(&mut self, data: Blob<u8>, bundled: bool) -> Result<&'static str, LayoutError> {
         let font =
             FontRef::new(data.as_ref()).map_err(|_| LayoutError::UnsupportedSubstituteFont)?;
         let family = font
@@ -94,9 +169,11 @@ impl TextEngine {
             })
             .map(|name| name.to_string())
             .ok_or(LayoutError::UnsupportedSubstituteFont)?;
-        let target = match family.as_str() {
-            "Arimo" => "Arial",
-            "Carlito" => "Calibri",
+        let (substitute, target) = match family.as_str() {
+            "Arimo" => ("Arimo", "Arial"),
+            "Carlito" => ("Carlito", "Calibri"),
+            "Tinos" => ("Tinos", "Times New Roman"),
+            "Cousine" => ("Cousine", "Courier New"),
             _ => return Err(LayoutError::UnsupportedSubstituteFont),
         };
         let id = data.id();
@@ -110,8 +187,23 @@ impl TextEngine {
                 return Err(LayoutError::InvalidFontMetrics);
             }
         }
-        let registered = self.fonts.collection.register_fonts(
-            data,
+        let collection = &mut self.fonts.collection;
+        // A substitute of the caller's replaces the bundled one outright.
+        if !bundled
+            && self
+                .substitutes
+                .get(target)
+                .is_some_and(|known| known.bundled)
+            && let Some(replaced) = self.substitutes.remove(target)
+            && let Some(family) = collection.family_id(target)
+        {
+            for (face, info) in replaced.faces {
+                collection.unregister_font(family, info.width(), info.style(), info.weight());
+                self.arial_substitutes.remove(&face.id());
+            }
+        }
+        let registered = collection.register_fonts(
+            data.clone(),
             Some(parley::fontique::FontInfoOverride {
                 family_name: Some(target),
                 ..Default::default()
@@ -123,7 +215,23 @@ impl TextEngine {
         if target == "Arial" {
             self.arial_substitutes.insert(id);
         }
+        let entry = self.substitutes.entry(target).or_insert(Substitute {
+            name: substitute,
+            faces: Vec::new(),
+            bundled,
+        });
+        entry.faces.extend(
+            registered
+                .into_iter()
+                .flat_map(|(_, infos)| infos)
+                .map(|info| (data.clone(), info)),
+        );
         Ok(target)
+    }
+
+    /// The font `family` lays out in when a substitute stands in for it.
+    pub fn substitute(&self, family: &str) -> Option<&Substitute> {
+        self.substitutes.get(family)
     }
 
     fn shape(
@@ -466,14 +574,9 @@ mod tests {
     use onestore::document::Format;
 
     #[test]
-    #[ignore = "requires Arial and CANVAS_TEST_SUBSTITUTE pointing to Carlito"]
+    #[ignore = "requires Arial"]
     fn native_unkerned_advances() {
         let mut engine = TextEngine::default();
-        engine
-            .register_substitute(parley::fontique::Blob::new(Arc::new(
-                std::fs::read(std::env::var_os("CANVAS_TEST_SUBSTITUTE").unwrap()).unwrap(),
-            )))
-            .unwrap();
         for (font, expected) in [("Calibri", 149.63843), ("Arial", 184.58305)] {
             let paragraph = Paragraph::new(
                 "AVATAR AVATAR SECOND OFFICE".into(),
@@ -486,6 +589,34 @@ mod tests {
             let layout = engine.layout(&paragraph, 400.0).unwrap();
             assert_eq!(layout.lines().count(), 1);
             assert!((layout.lines().next().unwrap().0.metrics().advance - expected).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn a_registered_substitute_replaces_the_bundled_one() {
+        let mut engine = TextEngine::default();
+        if engine.substitute("Calibri").is_none() {
+            return;
+        }
+        let explicit = Blob::new(Arc::new(BUNDLED[0].1[0].to_vec()));
+        assert_eq!(engine.register_substitute(explicit.clone()), Ok("Calibri"));
+        let substitute = engine.substitute("Calibri").unwrap();
+        assert_eq!(substitute.faces.len(), 1);
+        let paragraph = Paragraph::new(
+            "Calibri".into(),
+            Format {
+                font: Some("Calibri".into()),
+                bold: Some(true),
+                ..Format::default()
+            },
+        );
+        let layout = engine.layout(&paragraph, 400.0).unwrap();
+        let (line, _) = layout.lines().next().unwrap();
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(run) = item else {
+                continue;
+            };
+            assert_eq!(run.run().font().font.data.id(), explicit.id());
         }
     }
 

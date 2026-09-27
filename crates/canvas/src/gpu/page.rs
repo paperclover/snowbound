@@ -10,6 +10,7 @@ use crate::{
     layout::{LayoutError, TextEngine},
 };
 use background::Background;
+pub use background::{template_art, template_picture};
 use draw::Primitive;
 use onestore::page::Page;
 use picture::Picture;
@@ -492,11 +493,12 @@ impl PageScene {
             })
     }
 
-    /// Bounds of noneditable content in page coordinates.
+    /// Bounds of noneditable content in page coordinates, each with whether OneNote's view
+    /// leaves room beyond it: a picture's corner is as far as the view reaches.
     pub fn content_bounds<'a>(
         &'a self,
         editor: &'a CanvasEditor,
-    ) -> impl Iterator<Item = [f32; 4]> + 'a {
+    ) -> impl Iterator<Item = ([f32; 4], bool)> + 'a {
         self.objects(Some(editor))
             .into_iter()
             .flatten()
@@ -515,12 +517,15 @@ impl PageScene {
                         Some(editor),
                     )
                     .ok()?;
-                    Some([
-                        origin[0],
-                        origin[1],
-                        origin[0] + layout.size[0],
-                        origin[1] + layout.size[1],
-                    ])
+                    Some((
+                        [
+                            origin[0],
+                            origin[1],
+                            origin[0] + layout.size[0],
+                            origin[1] + layout.size[1],
+                        ],
+                        true,
+                    ))
                 }
                 Content::Date { below_title } => {
                     let date = editor.date()?;
@@ -534,21 +539,27 @@ impl PageScene {
                     )
                     .ok()?;
                     let size = date.layout().size;
-                    Some([
-                        origin[0],
-                        origin[1],
-                        origin[0] + size[0],
-                        origin[1] + size[1],
-                    ])
+                    Some((
+                        [
+                            origin[0],
+                            origin[1],
+                            origin[0] + size[0],
+                            origin[1] + size[1],
+                        ],
+                        true,
+                    ))
                 }
-                Content::Image(source) => Some([
-                    source.layout.x.unwrap_or(0.0),
-                    source.layout.y.unwrap_or(0.0),
-                    source.layout.x.unwrap_or(0.0) + source.layout.max_width?,
-                    source.layout.y.unwrap_or(0.0) + source.layout.max_height?,
-                ]),
-                Content::Ink(ink) => crate::editor::page::ink_bounds(ink),
-                Content::ReadOnly(object) => Some(object.rect()),
+                Content::Image(source) => Some((
+                    [
+                        source.layout.x.unwrap_or(0.0),
+                        source.layout.y.unwrap_or(0.0),
+                        source.layout.x.unwrap_or(0.0) + source.layout.max_width?,
+                        source.layout.y.unwrap_or(0.0) + source.layout.max_height?,
+                    ],
+                    false,
+                )),
+                Content::Ink(ink) => Some((crate::editor::page::ink_bounds(ink)?, true)),
+                Content::ReadOnly(object) => Some((object.rect(), true)),
                 Content::Editable(_) => None,
             })
     }
@@ -787,7 +798,12 @@ impl PageScene {
                     };
                     outline.append_table_primitives(primitives, object_origin, paper);
                     let everything = [f32::NEG_INFINITY, f32::INFINITY];
-                    outline.append_background_primitives(primitives, object_origin, everything, paper);
+                    outline.append_background_primitives(
+                        primitives,
+                        object_origin,
+                        everything,
+                        paper,
+                    );
                     self.append_outline_objects(outline, object_origin, None, paper, primitives);
                     for (index, paragraph) in outline.visible(everything) {
                         outline.append_paragraph_primitives(
@@ -828,6 +844,7 @@ impl crate::outline::OutlineLayout {
 
     /// Highlights behind the paragraphs `visible` finds between outline-local `rows`. A black
     /// highlight paints in the paper's ink, censoring the automatic text on it in any theme.
+    /// A paragraph's band spans its outline, or its cell, tinted for the paper.
     pub fn append_background_primitives(
         &self,
         primitives: &mut Vec<Primitive<'_>>,
@@ -836,6 +853,27 @@ impl crate::outline::OutlineLayout {
         paper: Paper,
     ) {
         for (index, paragraph) in self.visible(rows) {
+            if let Some(band) = paragraph.band {
+                let mut rect = parley::BoundingBox::new(
+                    0.0,
+                    f64::from(paragraph.origin[1]),
+                    f64::from(self.size[0]),
+                    f64::from(paragraph.origin[1] + paragraph.text.height()),
+                );
+                let cell = self.paragraph_cell(index);
+                if let Some(clipped) = cell.map_or(Some(rect), |cell| cell.clip(rect)) {
+                    rect = clipped;
+                    primitives.push(Primitive::Rect {
+                        rect: [
+                            rect.x0 as f32 + origin[0],
+                            rect.y0 as f32 + origin[1],
+                            rect.x1 as f32 + origin[0],
+                            rect.y1 as f32 + origin[1],
+                        ],
+                        color: paper.tint(colorref(band)),
+                    });
+                }
+            }
             for (mut rect, color) in paragraph.text.backgrounds() {
                 rect.x0 += f64::from(paragraph.origin[0]);
                 rect.x1 += f64::from(paragraph.origin[0]);
@@ -1046,6 +1084,7 @@ mod tests {
             created: Some(1),
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Title(Title {
                 date: Some(fields[1].id),
@@ -1062,14 +1101,20 @@ mod tests {
         assert!(editor.active_outline().title);
         assert_eq!(editor.active_outline().origin(), [46.0, 34.4]);
         assert_eq!(editor.active_outline().layout().max_width, None);
-        let before = scene.content_bounds(&editor).collect::<Vec<_>>();
+        let bounds = |editor: &CanvasEditor| {
+            scene
+                .content_bounds(editor)
+                .map(|(rect, _)| rect)
+                .collect::<Vec<_>>()
+        };
+        let before = bounds(&editor);
         assert_eq!(before[0][0], 48.0);
         assert!((before[0][1] - 62.6).abs() < 0.00001);
         let text = "A long title with multiple wrapped lines ".repeat(10);
         editor.select_all().unwrap();
         let end = text.encode_utf16().count() as u32;
         editor.compose(&mut engine, text.clone(), end..end).unwrap();
-        let wrapped = scene.content_bounds(&editor).collect::<Vec<_>>();
+        let wrapped = bounds(&editor);
         assert!(wrapped[0][1] > before[0][1] + 20.0);
         assert_eq!(
             wrapped[0][1],
@@ -1077,9 +1122,9 @@ mod tests {
         );
         editor.cancel_composition(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document().nodes(), source);
-        assert_eq!(scene.content_bounds(&editor).collect::<Vec<_>>(), before);
+        assert_eq!(bounds(&editor), before);
         editor.commit_text(&mut engine, text).unwrap();
-        assert_eq!(scene.content_bounds(&editor).collect::<Vec<_>>(), wrapped);
+        assert_eq!(bounds(&editor), wrapped);
         assert_eq!(editor.active_outline().id, id);
         assert_eq!(
             editor.active_outline().document().nodes()[0].id,
@@ -1087,14 +1132,14 @@ mod tests {
         );
         editor.undo(&mut engine).unwrap();
         assert_eq!(editor.active_outline().document().nodes(), source);
-        assert_eq!(scene.content_bounds(&editor).collect::<Vec<_>>(), before);
+        assert_eq!(bounds(&editor), before);
         editor.redo(&mut engine).unwrap();
         editor.select_all().unwrap();
         editor.insert(&mut engine, "").unwrap();
         assert_eq!(editor.outlines().len(), 1);
         assert!(editor.caret_outline().is_none());
         assert_eq!(editor.active_outline().id, id);
-        assert_eq!(scene.content_bounds(&editor).collect::<Vec<_>>(), before);
+        assert_eq!(bounds(&editor), before);
         assert!(editor.move_outline(id, [0.0; 2]).is_err());
         assert!(editor.resize(&mut engine, 90.0).is_err());
         editor.undo(&mut engine).unwrap();
@@ -1111,7 +1156,7 @@ mod tests {
                 ["A date label that wraps ".repeat(30), String::new()],
             )
             .unwrap();
-        let changed = scene.content_bounds(&editor).collect::<Vec<_>>();
+        let changed = bounds(&editor);
         assert_eq!(changed[0][1], wrapped[0][1]);
         assert!(changed[0][3] > wrapped[0][3]);
         let (field, rect) = scene.date_fields(&editor).next().unwrap();
@@ -1120,12 +1165,12 @@ mod tests {
         assert_eq!(rect[3], changed[0][3]);
         editor.undo(&mut engine).unwrap();
         assert_eq!(editor.date().unwrap().timestamp(), 1);
-        assert_eq!(scene.content_bounds(&editor).collect::<Vec<_>>(), wrapped);
+        assert_eq!(bounds(&editor), wrapped);
         assert_eq!(editor.active_outline().document(), &title);
     }
 
     #[test]
-    #[ignore = "requires the native baseline section and Carlito via CANVAS_TEST_SECTION/CANVAS_TEST_SUBSTITUTE"]
+    #[ignore = "requires the native baseline section via CANVAS_TEST_SECTION"]
     fn native_title_metrics_and_exit() {
         let bytes = std::fs::read(std::env::var_os("CANVAS_TEST_SECTION").unwrap()).unwrap();
         let store = onestore::Store::parse(&bytes).unwrap();
@@ -1133,11 +1178,6 @@ mod tests {
         let document = onestore::document::Document::parse(&index).unwrap();
         let page = Page::from_document(&document, "Baseline anchors").unwrap();
         let mut engine = TextEngine::default();
-        engine
-            .register_substitute(parley::fontique::Blob::new(Arc::new(
-                std::fs::read(std::env::var_os("CANVAS_TEST_SUBSTITUTE").unwrap()).unwrap(),
-            )))
-            .unwrap();
         let mut editor = CanvasEditor::from_page(page, &mut engine).unwrap();
         let title_id = editor
             .outlines()
@@ -1288,7 +1328,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the native baseline section and Carlito via CANVAS_TEST_SECTION/CANVAS_TEST_SUBSTITUTE"]
+    #[ignore = "requires the native baseline section via CANVAS_TEST_SECTION"]
     fn native_title_flow() {
         use crate::document::TextDocument;
         use onestore::page::Image;
@@ -1297,11 +1337,6 @@ mod tests {
         let index = onestore::RevisionIndex::parse(&store).unwrap();
         let document = onestore::document::Document::parse(&index).unwrap();
         let mut engine = TextEngine::default();
-        engine
-            .register_substitute(parley::fontique::Blob::new(Arc::new(
-                std::fs::read(std::env::var_os("CANVAS_TEST_SUBSTITUTE").unwrap()).unwrap(),
-            )))
-            .unwrap();
         let long = "A page title that is intentionally long enough to wrap across several lines at this window size while retaining its own date and time below the text";
         for (font_size, text, x, y, expected) in [
             (17.0, long, 120.0, 90.0, 116.18992),
@@ -1448,7 +1483,11 @@ mod tests {
                 assert_eq!([old[0], old[2]], [new[0], new[2]]);
                 assert!((old[1] + delta - new[1]).abs() < 0.002);
                 assert!((old[3] + delta - new[3]).abs() < 0.002);
-                assert!(scene.content_bounds(&editor).any(|bounds| bounds == *new));
+                assert!(
+                    scene
+                        .content_bounds(&editor)
+                        .any(|(bounds, _)| bounds == *new)
+                );
             }
             editor.undo(&mut engine).unwrap();
             assert_eq!(images(&editor), before);
@@ -1487,6 +1526,7 @@ mod tests {
             created: None,
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Title(Title {
                 date: None,
@@ -1561,6 +1601,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects,
         };
@@ -1640,6 +1681,7 @@ mod tests {
                 created: None,
                 title: String::new(),
                 margin_origin: [36.0, 14.0],
+                color: None,
                 objects: vec![unsupported, PageObject::Outline(make_outline("Editable"))],
                 definitions: BTreeMap::from([(
                     definition,
@@ -1711,6 +1753,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![
                 PageObject::Outline(Outline {
@@ -1890,6 +1933,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![
                 outline(2.0, "first"),
@@ -2063,6 +2107,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Ink(ink.clone())],
         };
@@ -2071,7 +2116,7 @@ mod tests {
         assert!(
             scene
                 .content_bounds(&editor)
-                .any(|bounds| bounds == [9.0, 19.0, 41.0, 61.0])
+                .any(|(bounds, _)| bounds == [9.0, 19.0, 41.0, 61.0])
         );
         let mut primitives = Vec::new();
         scene
@@ -2122,6 +2167,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Image(Image {
                 size: None,
@@ -2207,6 +2253,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Image(background), PageObject::Image(picture)],
         };
@@ -2274,6 +2321,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            color: None,
             definitions: BTreeMap::new(),
             objects: pictures.iter().cloned().map(PageObject::Image).collect(),
         };

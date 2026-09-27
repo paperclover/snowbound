@@ -213,6 +213,10 @@ pub struct Spec<'a> {
     pub axis: Axis,
     pub text: Option<&'a str>,
     /// The family the label is shaped in, where it has the glyphs; the interface's otherwise.
+    /// The label's size in logical pixels; the theme's otherwise.
+    pub font_size: Option<f32>,
+    /// Shapes the label semibold.
+    pub bold: bool,
     pub font: Option<&'a str>,
     /// The label's colour; the theme's text colour otherwise.
     pub color: Option<[f32; 4]>,
@@ -232,7 +236,8 @@ pub struct Spec<'a> {
     pub shape: Shape,
     /// 16 px artwork before the label, tinted with the label's colour.
     pub icon: Option<&'static [&'static str]>,
-    /// A 16 px picture in the icon's place.
+    /// A 16 px picture in the icon's place beside a label; without one, the picture fills
+    /// the box inside its padding.
     pub image: Option<&'a RasterImage>,
     /// Inset of the label and children on each axis.
     pub pad: [f32; 2],
@@ -245,11 +250,6 @@ pub struct Spec<'a> {
     /// Floats the box over all others beside a rectangle in the window, as a popup
     /// `Ui::open_popup` opened; boxes beneath take no input while one is open.
     pub anchor: Option<Anchor>,
-    /// How transparent the box and its contents are, from 0 to 1.
-    pub fade: f32,
-    /// The colour `fade` blends the box and its contents into instead, so boxes fading
-    /// over one another never add up.
-    pub fade_into: Option<[f32; 4]>,
 }
 
 /// Input the host forwards; positions and wheel distances are logical pixels.
@@ -283,6 +283,8 @@ pub struct Signal {
     pub clicked: bool,
     /// The primary button is held after pressing the box.
     pub dragging: bool,
+    /// The secondary button went down on the box, here: where its context menu opens.
+    pub context: Option<[f32; 2]>,
     pub focused: bool,
     /// For custom boxes: every event routed to the box, in order. For focused boxes:
     /// keys, text and composition. For scrolling boxes: the wheel.
@@ -329,9 +331,6 @@ struct Built {
     position: [f32; 2],
     cursor: Option<CursorIcon>,
     anchor: Option<Anchor>,
-    /// The opacity of the box and its contents; a popup's rises as it opens.
-    alpha: f32,
-    fade_into: Option<[f32; 4]>,
     /// Rectangles relative to the box, painted over its fill.
     marks: Vec<([f32; 4], [f32; 4], f32)>,
     computed: [f32; 2],
@@ -368,6 +367,8 @@ struct Popup {
     /// Its filter field's text, and the key of the row the keyboard or pointer last chose.
     query: String,
     highlight: Option<u64>,
+    /// The height its results ease from and to, and the seconds since they set out.
+    height: Option<[f32; 3]>,
 }
 
 struct Hit {
@@ -422,34 +423,6 @@ enum Display {
     },
 }
 
-impl Display {
-    /// Multiplies the item's opacity by `alpha`, or blends it that far into `into`.
-    fn fade(&mut self, alpha: f32, into: Option<[f32; 4]>) {
-        let fade = |color: &mut [f32; 4]| match into {
-            Some(into) => {
-                let [red, green, blue, _] = mix(into, *color, alpha);
-                *color = [red, green, blue, color[3]];
-            }
-            None => color[3] *= alpha,
-        };
-        match self {
-            Display::Rect {
-                fill,
-                shade,
-                border,
-                ..
-            } => [Some(fill), shade.as_mut(), border.as_mut()]
-                .into_iter()
-                .flatten()
-                .for_each(fade),
-            Display::Segment { color, .. } | Display::Text { color, .. } => fade(color),
-            Display::Path { colors, .. } => colors.iter_mut().for_each(fade),
-            Display::Icon { tint, .. } => fade(tint),
-            Display::Clip(_) | Display::Image { .. } | Display::Custom { .. } => {}
-        }
-    }
-}
-
 pub struct Ui {
     pub theme: Theme,
     /// Whether the window has keyboard focus; without it a field hides its caret and dims
@@ -484,6 +457,9 @@ pub struct Ui {
     /// Where the popups' painting starts in `display`, for edges drawn beneath them.
     popups_painted: usize,
     animating: bool,
+    /// This frame routed input, whose effects the builder may only have seen after boxes
+    /// built before it read their state; one more frame shows them.
+    routed: bool,
     /// The field showing a caret, when its blink started and the frame it last showed.
     caret: Option<(Id, Instant, u64)>,
     /// When the next timed change is due, such as a caret's blink.
@@ -520,6 +496,7 @@ impl Ui {
             display: Vec::new(),
             popups_painted: 0,
             animating: false,
+            routed: false,
             caret: None,
             wake: None,
         }
@@ -532,7 +509,7 @@ impl Ui {
 
     /// Whether queued input or animation needs another frame.
     pub fn wants_frame(&self) -> bool {
-        self.animating || !self.queue.is_empty()
+        self.animating || self.routed || !self.queue.is_empty()
     }
 
     /// When a timed change, such as a caret's blink, next needs a frame.
@@ -548,7 +525,8 @@ impl Ui {
         self.modifiers
     }
 
-    pub(crate) fn pointer(&self) -> Option<[f32; 2]> {
+    /// Where the pointer is, in logical pixels, while it is over the window.
+    pub fn pointer(&self) -> Option<[f32; 2]> {
         self.pointer
     }
 
@@ -609,6 +587,7 @@ impl Ui {
         self.signals.clear();
         self.moved = false;
         self.wake = None;
+        self.routed = !self.queue.is_empty();
         for event in std::mem::take(&mut self.queue) {
             self.route(event);
         }
@@ -657,6 +636,11 @@ impl Ui {
                     self.close_from(under + 1);
                 }
                 let target = self.hit(point, Flags::CLICKABLE | Flags::CUSTOM);
+                if let Some(id) = target
+                    && button == MouseButton::Right
+                {
+                    self.signals.entry(id).or_default().context = Some(point);
+                }
                 if let Some(id) = target
                     && button == MouseButton::Left
                 {
@@ -782,6 +766,7 @@ impl Ui {
             focus: self.focus,
             query: String::new(),
             highlight: None,
+            height: None,
         });
         self.focus = Some(id);
         self.states.entry(id).or_default().touched = self.frame;
@@ -855,7 +840,10 @@ impl Ui {
     pub fn open_as(&mut self, id: Id, spec: Spec<'_>) -> Id {
         let label = spec
             .text
-            .map(|text| self.texts.label(text, self.theme.font_size, spec.font, self.frame));
+            .map(|text| {
+            let size = spec.font_size.unwrap_or(self.theme.font_size);
+            self.texts.label(text, size, spec.bold, spec.font, self.frame)
+        });
         // Popups hang from the root, outside the clips and flow of where they are built.
         let parent = if spec.anchor.is_some() {
             0
@@ -899,10 +887,16 @@ impl Ui {
         self.texts.use_fonts(files)
     }
 
+    /// Previews `family` in the font `data` holds, as a font menu shows the substitute a
+    /// missing family lays out in.
+    pub fn preview_font(&mut self, data: parley::fontique::Blob<u8>, family: &str) {
+        self.texts.preview_font(data, family);
+    }
+
     /// The size of `text` as a label, in logical pixels.
     pub fn measure(&mut self, text: &str) -> [f32; 2] {
         self.texts
-            .label(text, self.theme.font_size, None, self.frame)
+            .label(text, self.theme.font_size, false, None, self.frame)
             .size
     }
 
@@ -924,8 +918,10 @@ impl Ui {
         };
         self.caret = Some((id, start, self.frame));
         let (opacity, hold) = draw::edit::caret_blink(self.now.saturating_duration_since(start));
-        let due = self.now + hold;
-        self.wake = Some(self.wake.map_or(due, |wake| wake.min(due)));
+        if let Some(hold) = hold {
+            let due = self.now + hold;
+            self.wake = Some(self.wake.map_or(due, |wake| wake.min(due)));
+        }
         opacity
     }
 
@@ -983,7 +979,6 @@ impl Ui {
     }
 
     fn paint(&mut self, index: usize, clip: Option<[f32; 4]>) {
-        let start = self.display.len();
         let node = &self.nodes[index];
         let state = &self.states[&node.id];
         let rect = node.rect;
@@ -1087,9 +1082,14 @@ impl Ui {
             });
             x += ICON + ICON_GAP;
         } else if let Some(image) = &node.image {
+            let rect = if node.label.is_some() {
+                [x, top, x + ICON, top + ICON]
+            } else {
+                [inner[0], painted[1] + node.pad[1], inner[2], painted[3] - node.pad[1]]
+            };
             self.display.push(Display::Image {
                 image: image.clone(),
-                rect: [x, top, x + ICON, top + ICON],
+                rect,
             });
             x += ICON + ICON_GAP;
         }
@@ -1135,14 +1135,6 @@ impl Ui {
         }
         if inner_clip != clip {
             self.display.push(Display::Clip(clip));
-        }
-        let Built {
-            alpha, fade_into, ..
-        } = self.nodes[index];
-        if alpha < 1.0 {
-            for item in &mut self.display[start..] {
-                item.fade(alpha, fade_into);
-            }
         }
     }
 
@@ -1319,8 +1311,6 @@ impl Built {
             position: spec.position,
             cursor: spec.cursor,
             anchor: spec.anchor,
-            alpha: 1.0 - spec.fade,
-            fade_into: spec.fade_into,
             marks: Vec::new(),
             computed: [0.0; 2],
             relative: [0.0; 2],

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 177 123" preserveAspectRatio="none">
 <defs>
-<radialGradient id="reach" cx="40" cy="20" r="1" gradientTransform="translate(40 20) scale(180 120) translate(-40 -20)" gradientUnits="userSpaceOnUse"><stop offset="0.2" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></radialGradient><mask id="glow"><rect width="177" height="123" fill="url(#reach)"/></mask>
+<radialGradient id="reach" cx="40" cy="20" r="1" gradientTransform="translate(40 20) scale(125 90) translate(-40 -20)" gradientUnits="userSpaceOnUse"><stop offset="0.2" stop-color="white"/><stop offset="1" stop-color="white" stop-opacity="0"/></radialGradient><mask id="glow"><rect width="177" height="123" fill="url(#reach)"/></mask>
 <linearGradient id="navy" x2="1"><stop offset="0" stop-color="#1f2d4a"/><stop offset=".45" stop-color="#6d7f9f"/><stop offset="1" stop-color="#1f2d4a"/></linearGradient>
 <g id="pin">
 <path d="M-11-30C-11-36 11-36 11-30L8-12C16-8 18 0 15 4H-15C-18 0-16-8-8-12Z"/>

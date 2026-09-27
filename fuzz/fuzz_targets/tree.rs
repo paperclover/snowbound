@@ -5,6 +5,8 @@ use libfuzzer_sys::fuzz_target;
 mod current;
 #[path = "../../crates/onestore/tests/support/disk.rs"]
 mod disk;
+#[path = "../../crates/onestore/tests/support/ops.rs"]
+mod ops;
 #[path = "../../crates/onestore/tests/support/tree_model.rs"]
 mod tree_model;
 

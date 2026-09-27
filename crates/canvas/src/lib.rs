@@ -4,6 +4,7 @@ pub mod language;
 pub mod layout;
 pub mod math;
 pub mod outline;
+pub mod template;
 
 pub mod date;
 #[cfg(feature = "gpu")]

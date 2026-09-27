@@ -1,6 +1,6 @@
-//! The ops the editor records for each edit, applied to the section, store what the edited
-//! page lowered whole (`Section::apply_page(editor.page())`) stores: every editor operation
-//! alone and in random sequences with undo and redo, on every page of the corpus sections
+//! The ops the editor records for each edit, applied to the section, store what the model
+//! oracle (`op::predict`) predicts from them, read back so once sealed, and hold the editor's
+//! page or what it lowered whole stores: every editor operation alone and in random sequences with undo and redo, on every page of the corpus sections
 //! below and of any named in `OPS_SWEEP_SECTIONS` (`:`-separated paths; the structural
 //! probe section, which `structural_roundtrip` sweeps, takes minutes).
 
@@ -11,8 +11,9 @@ use canvas::{
 };
 use draw::edit::Movement;
 use onestore::{
-    Arena, ExGuid, Section,
-    op::{Edit, Op},
+    Arena, ExGuid, RevisionIndex, Section, Store,
+    document::{Document, Kind as Node},
+    op::{Edit, Op, PageOp},
     page::Page,
 };
 use std::{collections::BTreeMap, path::Path};
@@ -372,7 +373,7 @@ fn perform(
     }
 }
 
-/// How a step's ops compared with its page lowered whole.
+/// How a step's ops compared with the editor's page.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Outcome {
     /// The ops store the editor's page, or what that page lowered whole stores.
@@ -383,7 +384,8 @@ enum Outcome {
     /// stored.
     OpsOnly,
     /// The paths part where the section already stored the page differently from the
-    /// editor's model, as the writers normalize some values.
+    /// editor's model, as the writers normalize some values, or where text keeps an insertion
+    /// style the page model cannot show.
     Normalized,
     Differs(String),
 }
@@ -395,114 +397,188 @@ struct Stored<'a> {
     at: u64,
 }
 
+/// The text objects of the page in `space` whose empty final run keeps an insertion style,
+/// which inserting at their end takes and the page model cannot show.
+fn hidden_styles(image: &[u8], space: ExGuid) -> Vec<ExGuid> {
+    let store = Store::parse(image).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let space = &document.spaces[&space];
+    space.revisions[&space.contexts[&ExGuid::default()]]
+        .nodes
+        .iter()
+        .filter(|(_, node)| {
+            matches!(&node.kind, Node::RichText { text, runs, .. }
+                if !text.is_empty() && runs.len() > 1 && runs.last().is_some_and(|r| r.start == r.end))
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// A page as JSON without tags' property-set indices, which the writer assigns.
+fn comparable(page: &Page) -> serde_json::Value {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                map.remove("extra_set");
+                map.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let mut value = serde_json::to_value(page).unwrap();
+    strip(&mut value);
+    value
+}
+
 impl Stored<'_> {
-    /// Stores the editor's step as its ops and, unless they store the editor's page,
-    /// compares with that page lowered whole onto the section as it was before the step.
+    /// Stores the editor's step as its ops, checks the stored page against what the model
+    /// oracle predicts from them and against the sealed image reread, and, unless it is the
+    /// editor's page, compares with that page lowered whole onto the section as it was
+    /// before the step.
     fn step(&mut self, editor: &mut CanvasEditor, model: &Page) -> Outcome {
         self.at += 10_000_000;
         let image = self.section.image();
-        let reads_as = |stored: Page, model: &Page| {
-            Page {
-                title: model.title.clone(),
-                ..stored
-            } == *model
-        };
-        let normalized = !reads_as(self.section.page(self.space).unwrap(), model);
+        let before = self.section.page(self.space).unwrap();
+        let normalized = !reads_as(&before, model);
         let ops = editor.take_ops().map_err(|error| error.to_string());
-        let edit = ops.clone().map(|ops| Edit {
-            at: self.at,
-            ops: ops
-                .into_iter()
-                .map(|op| Op::Page {
-                    space: self.space,
-                    op,
-                })
-                .collect(),
-        });
-        let applied = edit.and_then(|edit| {
-            if edit.ops.is_empty() {
+        let applied = ops.clone().and_then(|ops| {
+            if ops.is_empty() {
                 return Ok(());
             }
+            let edit = Edit {
+                at: self.at,
+                ops: ops
+                    .into_iter()
+                    .map(|op| Op::Page {
+                        space: self.space,
+                        op,
+                    })
+                    .collect(),
+            };
             self.section
                 .apply("Sweep", &edit)
                 .map_err(|error| error.to_string())
         });
+        let stored = self.section.page(self.space).unwrap();
         let edited = editor.page().unwrap();
-        if applied.is_ok() && reads_as(self.section.page(self.space).unwrap(), &edited) {
-            self.section.seal().unwrap();
-            return Outcome::Same;
+        let outcome = self.classify(image, &before, &stored, &edited, &ops, applied, normalized);
+        if !matches!(outcome, Outcome::Same | Outcome::Refused)
+            && std::env::var_os("OPS_SWEEP_DEBUG").is_some()
+        {
+            eprintln!("DIFFERS {outcome:?}\n  ops:");
+            for op in ops.iter().flatten() {
+                let op = format!("{op:?}");
+                eprintln!("    {}", &op[..op.len().min(600)]);
+            }
+        }
+        self.section.seal().unwrap();
+        let arena = Arena::default();
+        let reread = Section::open(&arena, self.section.image())
+            .unwrap()
+            .page(self.space)
+            .unwrap();
+        if reread != stored {
+            return Outcome::Differs(format!(
+                "reads back otherwise: {}",
+                difference(&stored, &reread)
+            ));
+        }
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn classify(
+        &self,
+        image: Vec<u8>,
+        before: &Page,
+        stored: &Page,
+        edited: &Page,
+        ops: &Result<Vec<PageOp>, String>,
+        applied: Result<(), String>,
+        normalized: bool,
+    ) -> Outcome {
+        if let Err(error) = &applied
+            && stored != before
+        {
+            return Outcome::Differs(format!("a refused edit changed the page: {error}"));
+        }
+        if let (Ok(()), Ok(ops)) = (&applied, ops) {
+            let mut predicted = before.clone();
+            if let Err(error) = ops
+                .iter()
+                .try_for_each(|op| onestore::op::predict(&mut predicted, op))
+            {
+                return Outcome::Differs(format!(
+                    "the model refuses what the section stores: {error}"
+                ));
+            }
+            if comparable(&predicted) != comparable(stored) {
+                let hidden = hidden_styles(&image, self.space);
+                if ops.iter().any(|op| {
+                    matches!(op, PageOp::Text { text, .. } | PageOp::Link { text, .. } | PageOp::Split { text, .. }
+                        if hidden.contains(text))
+                }) {
+                    return Outcome::Normalized;
+                }
+                return Outcome::Differs(format!(
+                    "the model predicts otherwise: {}",
+                    difference(stored, &predicted)
+                ));
+            }
+            if reads_as(stored, edited) {
+                return Outcome::Same;
+            }
         }
         let arena = Arena::default();
         let mut whole = Section::open(&arena, image).unwrap();
-        let lowered = onestore::op::lower_page(&whole.page(self.space).unwrap(), &edited)
+        let lowered = onestore::op::lower_page(before, edited)
             .map_err(|error| error.to_string())
             .and_then(|ops| {
                 let edit = Edit {
                     at: self.at,
                     ops: ops
-                        .iter()
+                        .into_iter()
                         .map(|op| Op::Page {
                             space: self.space,
-                            op: op.clone(),
+                            op,
                         })
                         .collect(),
                 };
                 whole
                     .apply("Sweep", &edit)
-                    .map_err(|error| error.to_string())?;
-                Ok(ops)
+                    .map_err(|error| error.to_string())
             });
-        let outcome = match (applied, &lowered) {
+        match (applied, lowered) {
             (Err(error), Err(whole)) => {
                 if std::env::var_os("OPS_SWEEP_DEBUG").is_some() {
                     eprintln!("BOTH {error} | {whole}");
                 }
                 Outcome::Refused
             }
-            (Ok(()), Ok(_)) => {
-                let (a, b) = (
-                    self.section.page(self.space).unwrap(),
-                    whole.page(self.space).unwrap(),
-                );
-                if a == b {
+            (Ok(()), Ok(())) => {
+                let whole = whole.page(self.space).unwrap();
+                if *stored == whole {
                     Outcome::Same
                 } else if normalized {
                     Outcome::Normalized
                 } else {
-                    Outcome::Differs(difference(&a, &b))
+                    Outcome::Differs(difference(stored, &whole))
                 }
             }
-            (Err(_), Ok(_)) if normalized => Outcome::Normalized,
-            (Err(error), Ok(_)) => Outcome::Differs(format!("ops refused: {error}")),
-            (Ok(()), Err(_)) => {
-                if std::env::var_os("OPS_SWEEP_DEBUG").is_some() {
-                    let stored = self.section.page(self.space).unwrap();
-                    eprintln!("OPSONLY-MODEL {}", difference(&stored, &edited));
-                }
-                Outcome::OpsOnly
-            }
-        };
-        if !matches!(outcome, Outcome::Same | Outcome::Refused)
-            && std::env::var_os("OPS_SWEEP_DEBUG").is_some()
-        {
-            let show = |ops: &[onestore::op::PageOp]| {
-                for op in ops {
-                    let op = format!("{op:?}");
-                    eprintln!("    {}", &op[..op.len().min(600)]);
-                }
-            };
-            eprintln!("DIFFERS {outcome:?}\n  ops:");
-            if let Ok(ops) = &ops {
-                show(ops);
-            }
-            eprintln!("  whole:");
-            if let Ok(ops) = &lowered {
-                show(ops);
-            }
+            (Err(_), Ok(())) if normalized => Outcome::Normalized,
+            (Err(error), Ok(())) => Outcome::Differs(format!("ops refused: {error}")),
+            (Ok(()), Err(_)) => Outcome::OpsOnly,
         }
-        self.section.seal().unwrap();
-        outcome
     }
+}
+
+fn reads_as(stored: &Page, model: &Page) -> bool {
+    Page {
+        title: model.title.clone(),
+        ..stored.clone()
+    } == *model
 }
 
 /// The first place two pages part: an object missing from one, then objects by identity,
@@ -613,7 +689,7 @@ fn sweep(
 }
 
 #[test]
-fn editor_ops_store_what_the_page_lowered_whole_stores() {
+fn editor_ops_store_the_editor_s_page() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut paths: Vec<_> = SECTIONS.iter().map(|path| root.join(path)).collect();
     if let Some(extra) = std::env::var_os("OPS_SWEEP_SECTIONS") {
@@ -645,17 +721,16 @@ fn editor_ops_store_what_the_page_lowered_whole_stores() {
     }
     let mut totals = [0; 5];
     for (kind, counts) in &per_kind {
-        let [same, refused, only, normalized, differs] = counts;
+        let [same, refused, ops_only, normalized, differs] = counts;
         report += &format!(
-            "{kind:?}: {same} same, {refused} both refused, {only} only as ops, {normalized} after normalization, {differs} differ\n"
+            "{kind:?}: {same} same, {refused} refused, {ops_only} by ops only, {normalized} after normalization, {differs} differ\n"
         );
         for (total, count) in totals.iter_mut().zip(counts) {
             *total += count;
         }
     }
-    report += &format!(
-        "all: {totals:?} (same, both refused, only as ops, after normalization, differ)\n"
-    );
+    report +=
+        &format!("all: {totals:?} (same, refused, by ops only, after normalization, differ)\n");
     for ((kind, outcome), count) in &tally.outcomes {
         if let Outcome::Differs(reason) = outcome {
             report += &format!(

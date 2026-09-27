@@ -10,7 +10,10 @@ use std::sync::LazyLock;
 mod checkpoint;
 #[path = "../../crates/onestore/tests/support/disk.rs"]
 mod disk;
+#[path = "../../crates/onestore/tests/support/ops.rs"]
+mod ops;
 use disk::Disk;
+use onestore::op::{Op, PageOp};
 
 const SOURCE: &[u8] = include_bytes!(
     "../../corpus/native/20260905-05/snapshots/03-format-unicode/notebook/synthetic.one"
@@ -58,7 +61,7 @@ static CASES: LazyLock<[(Vec<u8>, ExGuid, ExGuid); 7]> = LazyLock::new(|| {
         panic!("Missing text fixture")
     });
     let checkpoint = (
-        checkpoint::pending(&ordinary.0, ordinary.1, ordinary.2, 0x14001d7a),
+        checkpoint::pending(&ordinary.0, ordinary.1, ordinary.2),
         ordinary.1,
         ordinary.2,
     );
@@ -166,29 +169,30 @@ fuzz_target!(|input: &[u8]| {
             visible: persisted_source.clone(),
             durable: persisted_source.clone(),
             operation: 0,
-            fail_at: (step[3] & 1 != 0)
-                .then_some(source.len().div_ceil(193) + usize::from(step[4]) + 1),
+            fail_at: (step[3] & 1 != 0).then_some(usize::from(step[4]) + 1),
             write_limit: usize::from(step[5]) + 1,
             random: u64::from_le_bytes(step.try_into().unwrap()),
         };
-        let result = onestore::commit_text(
-            &mut storage,
-            source,
-            sid,
-            oid,
-            offset..offset + removed,
-            replacement,
-        );
-        let persisted = characters(&storage.durable, sid, oid);
+        let op = PageOp::Text {
+            text: oid,
+            range: offset..offset + removed,
+            with: replacement.to_owned(),
+        };
+        let transaction = ops::transaction(source, "Fuzz", vec![Op::Page { space: sid, op }]);
         if !replacement.contains(['\n', '\0']) {
             assert!(
-                result
-                    .as_ref()
-                    .err()
-                    .is_none_or(|error| error.error.kind() != std::io::ErrorKind::InvalidData),
-                "Valid ordinary text edit was rejected: {result:?}"
+                transaction.is_ok(),
+                "Valid ordinary text edit was rejected: {transaction:?}"
             );
         }
+        let result = match transaction {
+            Ok(Some(transaction)) => transaction.commit(&mut storage),
+            Ok(None) | Err(_) => {
+                assert_eq!(characters(&storage.durable, sid, oid), current);
+                continue;
+            }
+        };
+        let persisted = characters(&storage.durable, sid, oid);
         match result {
             Ok(()) => assert_eq!(persisted, expected),
             Err(error) => match error.state {

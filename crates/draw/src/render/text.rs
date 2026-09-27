@@ -23,6 +23,9 @@ pub struct GlyphRun<'a> {
     pub skew: Option<f32>,
     /// `None` paints in the primitive's ink.
     pub color: Option<[f32; 4]>,
+    /// The colour painted behind the glyphs, such as a highlight; `None` for the layer's
+    /// backdrop.
+    pub backdrop: Option<[f32; 4]>,
     /// Top and height of the run's line: lines outside the target are skipped, and
     /// colour glyphs shrink to fit.
     pub line: [f32; 2],
@@ -50,14 +53,15 @@ pub struct Decoration {
     pub color: Option<[f32; 4]>,
 }
 
-/// Paints one parley glyph run with its line's baseline moved to `baseline` and its
-/// glyphs raised by `rise`.
+/// Paints one parley glyph run with its line's baseline moved to `baseline`, its glyphs
+/// raised by `rise` and `backdrop` behind them.
 pub fn paint_parley_run<B: parley::Brush>(
     run: &parley::GlyphRun<'_, B>,
     baseline: f32,
     rise: f32,
     line: [f32; 2],
     color: impl Fn(&B) -> Option<[f32; 4]>,
+    backdrop: Option<[f32; 4]>,
     paint: &mut dyn FnMut(GlyphRun<'_>) -> Result<(), RenderError>,
 ) -> Result<(), RenderError> {
     let shaped = run.run();
@@ -108,6 +112,7 @@ pub fn paint_parley_run<B: parley::Brush>(
         embolden: synthesis.embolden(),
         skew: synthesis.skew(),
         color: color(&style.brush),
+        backdrop,
         line,
         glyphs: &mut glyphs,
         decorations: &decorations,

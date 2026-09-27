@@ -250,7 +250,12 @@ fn divides_link(text: &Paragraph, offset: u32) -> Result<bool, EditError> {
 /// Whether a split or join keeping `first` up to UTF-16 `start` and `last` from `end` on meets
 /// an equation or embedded object at the seam or carries one to another paragraph: their run
 /// data belongs to the whole paragraph, and OneNote has not been seen dividing them.
-fn moves_object(first: &Paragraph, start: u32, last: &Paragraph, end: u32) -> Result<bool, EditError> {
+fn moves_object(
+    first: &Paragraph,
+    start: u32,
+    last: &Paragraph,
+    end: u32,
+) -> Result<bool, EditError> {
     let object = |text: &Paragraph, span: usize| {
         let format = &text.spans()[span].format;
         [format.math, format.embedded_object].contains(&Some(true))
@@ -759,19 +764,20 @@ impl TextDocument {
             // The joined text lies in the upper paragraph, whose spacing and alignment it takes.
             let paragraph = &above.spans()[0].format;
             let mut start = 0;
-            text.text.append(Paragraph::from_runs(below.spans().iter().map(|span| {
-                let run = below.text()[start..span.end].to_owned();
-                start = span.end;
-                let format = Format {
-                    alignment: paragraph.alignment,
-                    space_before: paragraph.space_before,
-                    space_after: paragraph.space_after,
-                    line_spacing: paragraph.line_spacing,
-                    list_spacing: paragraph.list_spacing,
-                    ..span.format.inherit(&reset)
-                };
-                (run, format)
-            })))?;
+            text.text
+                .append(Paragraph::from_runs(below.spans().iter().map(|span| {
+                    let run = below.text()[start..span.end].to_owned();
+                    start = span.end;
+                    let format = Format {
+                        alignment: paragraph.alignment,
+                        space_before: paragraph.space_before,
+                        space_after: paragraph.space_after,
+                        line_spacing: paragraph.line_spacing,
+                        list_spacing: paragraph.list_spacing,
+                        ..span.format.inherit(&reset)
+                    };
+                    (run, format)
+                })))?;
         }
         let moves = BTreeMap::from([(bottom.id, &head)]);
         let adopted = adopt(nodes, last + 1, &moves, BTreeMap::new())?;

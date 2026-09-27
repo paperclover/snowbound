@@ -52,6 +52,22 @@ impl Paper {
         ink: [0.0, 0.0, 0.0, 1.0],
     };
 
+    /// A fill OneNote draws on white paper, moved onto this paper: as far from it in
+    /// OKLab lightness as from white, in the same hue and chroma, so text keeps its
+    /// contrast on it.
+    pub(crate) fn tint(&self, light: [f32; 4]) -> [f32; 4] {
+        let [lightness, a, b] = draw::oklab(light);
+        let [paper, ..] = draw::oklab(self.color);
+        let distance = 1.0 - lightness;
+        let lightness = if paper < 0.5 {
+            paper + distance
+        } else {
+            paper - distance
+        };
+        let [red, green, blue] = draw::from_oklab([lightness, a, b]);
+        [red, green, blue, light[3]]
+    }
+
     /// A near-neutral colour OneNote draws on white paper, moved onto this paper: its
     /// darkness becomes ink and its tint tints the paper.
     pub(crate) fn shade(&self, light: [f32; 4]) -> [f32; 4] {
@@ -87,6 +103,11 @@ impl Glyphs for TextLayout {
                             .or(brush.highlight.filter(|&color| color != 0).map(|_| 0))
                             .map(colorref)
                     },
+                    run.style()
+                        .brush
+                        .highlight
+                        .filter(|&color| color != 0)
+                        .map(colorref),
                     paint,
                 )?;
             }
@@ -149,6 +170,48 @@ mod tests {
     use onestore::document::Format;
     use onestore::page::text::Paragraph;
     use std::time::Duration;
+
+    #[test]
+    fn runs_carry_their_highlight_as_what_lies_behind_them() {
+        let run = |highlight, color| {
+            (
+                "text".into(),
+                Format {
+                    highlight,
+                    color,
+                    ..Format::default()
+                },
+            )
+        };
+        let text = TextEngine::default()
+            .layout(
+                &Paragraph::from_runs([
+                    run(None, None),
+                    run(Some(0x0000ffff), None),
+                    run(Some(0x0000ffff), Some(0x000000ff)),
+                    run(Some(0), None),
+                ]),
+                400.0,
+            )
+            .unwrap();
+        let mut painted = Vec::new();
+        text.runs(&mut |run| {
+            painted.push((run.color, run.backdrop));
+            Ok(())
+        })
+        .unwrap();
+        let [black, red, yellow] = [0, 0x000000ff, 0x0000ffff].map(colorref);
+        assert_eq!(
+            painted,
+            [
+                (None, None),
+                (Some(black), Some(yellow)),
+                (Some(red), Some(yellow)),
+                // A black highlight paints in the ink, as its automatic text does.
+                (None, None),
+            ]
+        );
+    }
 
     #[test]
     #[ignore = "requires a native GPU adapter"]

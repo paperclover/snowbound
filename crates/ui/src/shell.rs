@@ -18,7 +18,8 @@ pub const TOOL: f32 = 22.0;
 /// Section tabs in a row `height` tall, as OneNote draws them: each leans over the next
 /// at 45°, and the open one lies on top in `section`'s colours, rising to meet the frame
 /// below as its outline and shadow fade in. `tabs` are names and section colours. Returns
-/// the tab clicked and the open tab's id, for `tab_base`.
+/// the tab clicked, the tab whose context menu was asked for and where, and the open tab's
+/// id, for `tab_base`.
 pub fn section_tabs(
     ui: &mut Ui,
     part: impl Hash,
@@ -26,7 +27,7 @@ pub fn section_tabs(
     active: usize,
     section: &Section,
     height: f32,
-) -> (Option<usize>, Id) {
+) -> (Option<usize>, Option<(usize, [f32; 2])>, Id) {
     let theme = ui.theme.clone();
     ui.open(
         part,
@@ -46,7 +47,7 @@ pub fn section_tabs(
             (left - width, width)
         })
         .collect();
-    let mut clicked = None;
+    let (mut clicked, mut context) = (None, None);
     // Earlier tabs lie over later ones; the open tab over all.
     let order = (0..tabs.len())
         .rev()
@@ -83,10 +84,13 @@ pub fn section_tabs(
         if signal.clicked && index != active {
             clicked = Some(index);
         }
+        if let Some(point) = signal.context {
+            context = Some((index, point));
+        }
     }
     let open_tab = ui.id(("tab", active));
     ui.close();
-    (clicked, open_tab)
+    (clicked, context, open_tab)
 }
 
 /// Where the tab laid out at `tab` in a row `height` tall meets the edge below it: from its

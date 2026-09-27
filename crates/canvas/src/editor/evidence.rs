@@ -784,9 +784,8 @@ fn structural_edits_on_native_pages_survive_the_page_writer() {
             press(&mut editor, &mut engine, *key);
         }
         let edited = settled(editor.page().unwrap());
-        let written = onestore::PreparedEdit::page(&section, space, &edited, "Author")
-            .unwrap_or_else(|error| panic!("{title}: {error}"));
-        let (_, reread) = page(written.as_bytes(), title);
+        let written = super::ops::saved(&section, space, &mut editor);
+        let (_, reread) = page(&written, title);
         assert_eq!(settled(reread).objects, edited.objects, "{title}");
     }
 }

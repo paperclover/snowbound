@@ -211,7 +211,7 @@ pub struct Layer<'a> {
     /// Device bounds `[left, top, right, bottom]` the layer paints within.
     pub clip: Option<[f32; 4]>,
     /// The colour behind the layer: on a dark one, text in dark colours of its own is
-    /// lifted to stay legible, as OneNote's dark page does.
+    /// lifted to stay legible against what lies behind it, as OneNote's dark page does.
     pub backdrop: Option<[f32; 4]>,
     pub primitives: &'a [Primitive<'a>],
 }
@@ -985,7 +985,8 @@ impl Renderer {
                     if glyph.color {
                         [1.0; 4]
                     } else {
-                        run.color.map_or(ink, |color| legible(color, space.backdrop))
+                        run.color
+                            .map_or(ink, |color| legible(color, space.backdrop, run.backdrop))
                     },
                 )?;
             }
@@ -1004,7 +1005,7 @@ impl Renderer {
                 [0.5 / ATLAS_SIZE as f32; 4],
                 decoration
                     .color
-                    .map_or(ink, |color| legible(color, space.backdrop)),
+                    .map_or(ink, |color| legible(color, space.backdrop, run.backdrop)),
             )?;
         }
         Ok(())
@@ -1467,13 +1468,16 @@ fn srgb_byte(value: f32) -> u8 {
     (srgb * 255.0).round() as u8
 }
 
-/// Linear RGBA of an opaque sRGB colour.
 /// Least OKLab lightness difference between text and the backdrop it stays legible on.
 const LEGIBLE: f32 = 0.4;
 
-/// `color` lifted clear of a dark `backdrop`'s lightness, keeping hue and chroma.
-fn legible(color: [f32; 4], backdrop: Option<[f32; 4]>) -> [f32; 4] {
-    let [under, ..] = backdrop.map_or([1.0; 3], oklab);
+/// On a dark layer `backdrop`, `color` lifted clear of the lightness of what lies `behind`
+/// it, or of the backdrop, keeping hue and chroma.
+fn legible(color: [f32; 4], backdrop: Option<[f32; 4]>, behind: Option<[f32; 4]>) -> [f32; 4] {
+    let Some(backdrop) = backdrop.filter(|backdrop| oklab(*backdrop)[0] < 0.5) else {
+        return color;
+    };
+    let [under, ..] = oklab(behind.unwrap_or(backdrop));
     let [lightness, a, b] = oklab(color);
     if under >= 0.5 || lightness >= under + LEGIBLE {
         return color;
@@ -1513,6 +1517,7 @@ pub fn from_oklab([lightness, a, b]: [f32; 3]) -> [f32; 3] {
     .map(|[x, y, z]| (x * l + y * m + z * s).clamp(0.0, 1.0))
 }
 
+/// Linear RGBA of an opaque sRGB colour.
 pub fn srgb(red: u8, green: u8, blue: u8) -> [f32; 4] {
     let linear = |byte: u8| {
         let value = f32::from(byte) / 255.0;
@@ -1555,6 +1560,7 @@ mod tests {
                             0.0,
                             [metrics.block_min_coord, metrics.line_height],
                             |_| None,
+                            None,
                             paint,
                         )?;
                     }
@@ -1580,6 +1586,28 @@ mod tests {
         let mut layout = builder.build(text);
         layout.break_all_lines(Some(width));
         Text(layout)
+    }
+
+    #[test]
+    fn text_is_lifted_against_what_lies_behind_it_on_a_dark_layer() {
+        let [black, dark_red] = [[0.0, 0.0, 0.0, 1.0], [0.2, 0.0, 0.0, 1.0]];
+        let [dark, yellow, navy] = [srgb(0x1f, 0x20, 0x22), srgb(255, 255, 0), srgb(0, 0, 128)];
+        let lightness = |color| oklab(color)[0];
+        assert_eq!(legible(black, None, Some(navy)), black, "an unset layer");
+        assert_eq!(
+            legible(black, Some([1.0; 4]), Some(navy)),
+            black,
+            "a light layer keeps its colours, as OneNote's light page does"
+        );
+        assert!(lightness(legible(black, Some(dark), None)) >= lightness(dark) + LEGIBLE - 1e-3);
+        assert_eq!(
+            legible(black, Some(dark), Some(yellow)),
+            black,
+            "a light highlight on a dark layer"
+        );
+        assert_eq!(legible(dark_red, Some(dark), Some(yellow)), dark_red);
+        let lifted = legible(black, Some(dark), Some(navy));
+        assert!(lightness(lifted) >= lightness(navy) + LEGIBLE - 1e-3);
     }
 
     #[test]

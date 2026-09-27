@@ -1,6 +1,6 @@
 //! Renders each popup control open, in both themes, to `/tmp/ui-popups-{dark,light}.png`,
 //! and frames of lists changing to `/tmp/ui-list-{keystroke,delete}-{dark,light}.png`: a
-//! combo's list after `c` is typed into its filter, and a page list losing rows. Then times
+//! combo's list after `cou` is typed into its filter, and a page list losing rows. Then times
 //! a list of 200 000 rows.
 
 use std::{
@@ -72,7 +72,7 @@ fn main() {
 /// Frames a change shows at: before it, then each of the 150 ms it takes.
 const FRAMES: [u32; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 10];
 
-/// A font combo's list before `c` is typed into its filter and at frames after.
+/// A font combo's list before `cou` is typed into its filter and at frames after.
 fn keystroke(
     theme: &Theme,
     device: &wgpu::Device,
@@ -92,7 +92,7 @@ fn keystroke(
     };
     scene.open(id, Vec::new(), build);
     let mut panels = vec![paint(device, queue, renderer, &scene.ui)];
-    for event in typed("c") {
+    for event in typed("cou") {
         scene.ui.event(event);
     }
     for frame in 1..=10 {
@@ -276,7 +276,7 @@ fn measure() {
         .map(|_| frame(&mut ui, &rows, &mut selected))
         .collect();
     println!(
-        "a keystroke filtering 200 000 to {}: {filtering:?} to filter, then {first:?} and {:?} a frame as rows ease",
+        "a keystroke filtering 200 000 to {}: {filtering:?} to filter, then {first:?} and {:?} a frame after",
         rows.count(),
         average(times)
     );

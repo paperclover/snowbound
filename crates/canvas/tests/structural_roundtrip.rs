@@ -1,5 +1,5 @@
-//! Every structural edit the editor makes saves, through the page writer and as the ops the
-//! editor recorded, and rereads as the model it saved: random Enter, Backspace, Delete, Tab,
+//! Every structural edit the editor makes saves as the ops the editor recorded and rereads
+//! as the model it saved: random Enter, Backspace, Delete, Tab,
 //! Shift+Tab, list and paste edits, alone and several to a save, on every outline of the probe
 //! section and of any sections named in `CANVAS_SWEEP_SECTIONS` (`:`-separated paths).
 
@@ -9,7 +9,7 @@ use canvas::{
     layout::TextEngine,
 };
 use onestore::{
-    Arena, ExGuid, PreparedEdit, RevisionIndex, Section, Store,
+    Arena, ExGuid, RevisionIndex, Section, Store,
     document::Document,
     page::{Outline, Page, PageObject, PageParagraph, ParagraphContent},
 };
@@ -352,25 +352,14 @@ fn sweep(path: &Path, random: &mut Random, engine: &mut TextEngine, tally: &mut 
                         .map(|op| onestore::op::Op::Page { space, op })
                         .collect(),
                 };
-                let ops = match stored.apply("Sweep", &edit) {
+                let failure = match stored.apply("Sweep", &edit) {
                     Err(error) => Some(format!("ops: {error}")),
                     Ok(()) => {
                         let reread = stored.page(space).unwrap();
                         (!rereads(&reread)).then(|| format!("ops: {}", difference(&after, &reread)))
                     }
                 };
-                let failure = match PreparedEdit::page(&section, space, &after, "Sweep") {
-                    Err(error) => Some(error.message.to_owned()),
-                    Ok(saved) => match pages(saved.as_bytes())
-                        .into_iter()
-                        .find(|(id, _)| *id == space)
-                    {
-                        Some((_, reread)) if rereads(&reread) => None,
-                        Some((_, reread)) => Some(difference(&after, &reread)),
-                        None => Some("the page does not reread".into()),
-                    },
-                };
-                for failure in failure.into_iter().chain(ops) {
+                if let Some(failure) = failure {
                     tally.failures.entry(failure).or_default().push(format!(
                         "{plan:?} on {:?} in {}",
                         page.title,
@@ -483,10 +472,20 @@ fn edit(section: &mut Vec<u8>, title: &str, keys: &[(Caret, Press)], engine: &mu
         }
     }
     let after = editor.page().unwrap();
-    let saved = PreparedEdit::page(section, space, &after, "Snowbound")
-        .unwrap()
-        .as_bytes()
-        .to_vec();
+    let arena = Arena::default();
+    let mut stored = Section::open(&arena, section.to_vec()).unwrap();
+    let edit = onestore::op::Edit {
+        at: 133_000_000_000_000_000,
+        ops: editor
+            .take_ops()
+            .unwrap()
+            .into_iter()
+            .map(|op| onestore::op::Op::Page { space, op })
+            .collect(),
+    };
+    stored.apply("Snowbound", &edit).unwrap();
+    stored.seal().unwrap();
+    let saved = stored.image();
     let (_, reread) = pages(&saved)
         .into_iter()
         .find(|(id, _)| *id == space)

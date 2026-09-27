@@ -11,6 +11,8 @@ ui = { path = "../ui" }
 png = "0.18"
 onestore = { path = "../onestore" }
 notebook = { path = "../notebook" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 pollster = "0.4"
 wgpu.workspace = true
 parley.workspace = true
@@ -18,7 +20,16 @@ winit = "0.30.13"
 arboard = { version = "3.6.1", default-features = false }
 accesskit = "0.25.0"
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["rwh_06"] }
-objc2 = "0.5.2"
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell"] }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSTimeZone"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell", "NSOpenPanel", "NSPanel", "NSSavePanel"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+accesskit_winit = { version = "0.34.0", default-features = false, features = ["accesskit_unix", "async-io"] }
+smithay-clipboard = "0.7.3"
+# Loads fontconfig at run time, so builds need no fontconfig headers or library.
+fontique = { workspace = true, features = ["fontconfig-dlopen"] }
+libc = "0.2"
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }

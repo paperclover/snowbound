@@ -1,9 +1,10 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    CommitState, ExGuid, Insertion, OutlineEdit, ParagraphJoin, ParagraphSplit, PreparedEdit,
-    RevisionIndex, Store, TextAttribute as A,
+    CommitState, ExGuid, OutlineEdit, RevisionIndex, Store, TextAttribute as A,
     document::{Document, Kind},
+    op::{Edit, PageOp},
+    page::text::new_id,
 };
 use std::sync::LazyLock;
 
@@ -11,6 +12,8 @@ use std::sync::LazyLock;
 mod current;
 #[path = "../../crates/onestore/tests/support/disk.rs"]
 mod disk;
+#[path = "../../crates/onestore/tests/support/ops.rs"]
+mod ops;
 
 static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid)> = LazyLock::new(|| {
     let source = onestore::create_section("paragraph.one", "Original", "Author").unwrap();
@@ -26,34 +29,33 @@ static SOURCE: LazyLock<(Vec<u8>, ExGuid, ExGuid)> = LazyLock::new(|| {
         .find(|id| matches!(view.nodes[id].kind, Kind::Outline { .. }))
         .unwrap();
     let parent = view.nodes[&outline].children[0];
-    let intent = Insertion::paragraph(parent, None, "a🦀 e\u{301} 東京\rEnd", "Author")
-        .unwrap()
-        .with_formatting(0..4, &[A::Bold(true)])
-        .unwrap()
-        .with_formatting(4..7, &[A::Italic(true), A::Color(Some([12, 34, 56]))])
-        .unwrap();
-    let edited = PreparedEdit::insert(&source, sid, &intent).unwrap();
-    let second = Insertion::outline(page, 144.0, 36.0, "Fixed second", "Author").unwrap();
-    let edited = PreparedEdit::insert(edited.as_bytes(), sid, &second).unwrap();
-    (edited.as_bytes().to_vec(), sid, outline)
+    let mut paragraph = ops::paragraph("a🦀 e\u{301} 東京\rEnd");
+    paragraph.level = 2;
+    let text = paragraph.text().unwrap().id;
+    let format = |range, set| PageOp::Format {
+        text,
+        range,
+        set,
+        clear: Vec::new(),
+    };
+    let insert = PageOp::Insert {
+        container: parent,
+        before: None,
+        paragraphs: vec![paragraph],
+    };
+    let bold = format(0..4, vec![A::Bold(true)]);
+    let italic = format(4..7, vec![A::Italic(true), A::Color(Some([12, 34, 56]))]);
+    let (second, ..) = ops::new_outline(144.0, 36.0, "Fixed second");
+    let edited = ops::page_edited(&source, sid, vec![insert, bold, italic, second]).unwrap();
+    (edited, sid, outline)
 });
 
 fuzz_target!(|input: &[u8]| {
     let (source, sid, outline) = &*SOURCE;
-    if let Ok(operation) = serde_json::from_slice::<OutlineEdit>(input)
-        && let Ok(edit) = PreparedEdit::outline(source, *sid, *outline, operation)
+    if let Ok(edit) = serde_json::from_slice::<Edit>(input)
+        && let Ok(edited) = ops::apply(source, "Paragraph fuzz", edit.ops)
     {
-        current::current(edit.as_bytes());
-    }
-    if let Ok(intent) = serde_json::from_slice::<ParagraphSplit>(input)
-        && let Ok(edit) = PreparedEdit::split(source, *sid, &intent)
-    {
-        current::current(edit.as_bytes());
-    }
-    if let Ok(intent) = serde_json::from_slice::<ParagraphJoin>(input)
-        && let Ok(edit) = PreparedEdit::join(source, *sid, &intent)
-    {
-        current::current(edit.as_bytes());
+        current::current(edited.as_bytes());
     }
     let mut persisted = source.clone();
     let mut caches = std::array::from_fn::<_, 12, _>(|_| source.clone());
@@ -134,7 +136,15 @@ fuzz_target!(|input: &[u8]| {
                     expected_text.push((*id, characters(view, *id)));
                 }
             }
-            PreparedEdit::outline(source, *sid, object, operation).unwrap()
+            ops::page_op(
+                source,
+                *sid,
+                PageOp::Outline {
+                    object,
+                    edit: operation,
+                },
+            )
+            .unwrap()
         } else if step[1] & 8 != 0 && !pairs.is_empty() {
             let (parent, left, right) = pairs[usize::from(step[2]) % pairs.len()];
             let a = view.nodes[&left].content[0];
@@ -151,10 +161,7 @@ fuzz_target!(|input: &[u8]| {
                 .collect();
             expected_graph.push((parent, children, view.nodes[&parent].content.clone()));
             expected_graph.push((left, view.nodes[&right].children.clone(), vec![survivor]));
-            let intent = ParagraphJoin::new(a, b, "Paragraph fuzz").unwrap();
-            let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
-            assert_eq!(intent, restored);
-            PreparedEdit::join(source, *sid, &restored).unwrap()
+            ops::page_op(source, *sid, PageOp::Join { left: a, right: b }).unwrap()
         } else {
             let paragraph = paragraphs[usize::from(step[2]) % paragraphs.len()];
             let text = view.nodes[&paragraph].content[0];
@@ -166,22 +173,23 @@ fuzz_target!(|input: &[u8]| {
                 }))
                 .collect();
             let offset = u32::from(step[3]) % (offsets.last().unwrap() + 2);
-            let intent = ParagraphSplit::new(text, offset, "Paragraph fuzz").unwrap();
-            let restored = serde_json::from_value(serde_json::to_value(&intent).unwrap()).unwrap();
-            assert_eq!(intent, restored);
-            let edit = PreparedEdit::split(source, *sid, &restored);
+            let (object, right) = (new_id().unwrap(), new_id().unwrap());
+            let split = PageOp::Split {
+                text,
+                at: offset,
+                paragraph: object,
+                right,
+                lists: Vec::new(),
+            };
+            let edit = ops::page_op(source, *sid, split);
             let Some(position) = offsets.iter().position(|n| *n == offset) else {
                 assert!(edit.is_err());
                 continue;
             };
             expected_text.push((text, before[..position].to_vec()));
-            expected_text.push((intent.text_object(), before[position..].to_vec()));
+            expected_text.push((right, before[position..].to_vec()));
             expected_graph.push((paragraph, vec![], vec![text]));
-            expected_graph.push((
-                intent.object(),
-                view.nodes[&paragraph].children.clone(),
-                vec![intent.text_object()],
-            ));
+            expected_graph.push((object, view.nodes[&paragraph].children.clone(), vec![right]));
             edit.unwrap()
         };
         let after_store = Store::parse(edit.as_bytes()).unwrap();
@@ -226,7 +234,10 @@ fuzz_target!(|input: &[u8]| {
             write_limit: if step[6] & 1 == 0 { 17 } else { 4096 },
             random: u64::from(step[7]) + 1,
         };
-        let result = edit.commit(&mut disk);
+        let Some(transaction) = &edit.transaction else {
+            continue;
+        };
+        let result = transaction.commit(&mut disk);
         let observed = current::current(&disk.durable);
         match result {
             Ok(()) => assert_eq!(observed, after),

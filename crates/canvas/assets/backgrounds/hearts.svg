@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 171 552" preserveAspectRatio="none">
 <defs><path id="heart" d="M0 10C-5 6-10.5 1.5-10.5-3.5C-10.5-8-7-10.5-4-10.5C-2-10.5-.5-9.2 0-7.5C.5-9.2 2-10.5 4-10.5C7-10.5 10.5-8 10.5-3.5C10.5 1.5 5 6 0 10Z"/></defs>
-<g transform="translate(70 58) rotate(-35) scale(5.6)"><use href="#heart" fill="#dcbccf"/><use href="#heart" fill="#ddd1d9" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(130 108) rotate(90) scale(4.3)"><use href="#heart" fill="#99d3a8"/><use href="#heart" fill="#bee2ac" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(62 166) rotate(-70) scale(4.3)"><use href="#heart" fill="#da91ba"/><use href="#heart" fill="#dcbccf" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(118 230) rotate(35) scale(4.8)"><use href="#heart" fill="#b0dede"/><use href="#heart" fill="#d2ebe5" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(52 322) rotate(-135) scale(4.6)"><use href="#heart" fill="#b0dede"/><use href="#heart" fill="#d2ebe5" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(110 382) rotate(110) scale(4.3)"><use href="#heart" fill="#da91ba"/><use href="#heart" fill="#dcbccf" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(40 443) rotate(-120) scale(4.3)"><use href="#heart" fill="#99d3a8"/><use href="#heart" fill="#bee2ac" transform="translate(-1.2 -1.4) scale(.8)"/></g>
-<g transform="translate(100 497) rotate(172) scale(5.6)"><use href="#heart" fill="#dcbccf"/><use href="#heart" fill="#ddd1d9" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(64 64) rotate(-27) scale(5.2 6.1)"><use href="#heart" fill="#dcbccf"/><use href="#heart" fill="#ddd1d9" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(123 123) rotate(44) scale(3.6 4.1)"><use href="#heart" fill="#99d3a8"/><use href="#heart" fill="#bee2ac" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(72 178) rotate(-43) scale(3.8 4.1)"><use href="#heart" fill="#da91ba"/><use href="#heart" fill="#dcbccf" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(116 242) rotate(38) scale(4.0 4.6)"><use href="#heart" fill="#b0dede"/><use href="#heart" fill="#d2ebe5" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(57 306) rotate(-137) scale(4.0 4.6)"><use href="#heart" fill="#b0dede"/><use href="#heart" fill="#d2ebe5" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(112 376) rotate(145) scale(3.8 4.1)"><use href="#heart" fill="#da91ba"/><use href="#heart" fill="#dcbccf" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(45 428) rotate(-138) scale(3.8 4.1)"><use href="#heart" fill="#99d3a8"/><use href="#heart" fill="#bee2ac" transform="translate(-1.2 -1.4) scale(.8)"/></g>
+<g transform="translate(100 496) rotate(156) scale(5.2 6.1)"><use href="#heart" fill="#dcbccf"/><use href="#heart" fill="#ddd1d9" transform="translate(-1.2 -1.4) scale(.8)"/></g>
 </svg>

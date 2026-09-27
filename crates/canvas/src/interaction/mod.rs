@@ -112,6 +112,8 @@ struct Paint {
     /// The document's top and bottom the view shows; paragraphs wholly outside it are
     /// not painted.
     visible: [f32; 2],
+    /// Whether the active outline shows its frame and grips.
+    chrome: bool,
 }
 
 enum Drag {
@@ -169,6 +171,14 @@ fn read_only_shortcut(key: &Key, modifiers: Modifiers) -> bool {
             && matches!(key, Key::Character(value) if matches!(value.as_str(), "+" | "=" | "-" | "0") || (modifiers.shift && value.eq_ignore_ascii_case("n"))))
 }
 
+/// Where a page was left: its scroll and the focused outline's selection.
+#[derive(Clone, Copy, Debug)]
+pub struct Place {
+    origin: [f32; 2],
+    outline: onestore::ExGuid,
+    selection: Selection,
+}
+
 /// A page on screen: the editor, the drawn scene, the view onto them and the pointer and
 /// keyboard state between events.
 pub struct PageView {
@@ -186,6 +196,9 @@ pub struct PageView {
     object_focus: Option<ObjectFocus>,
     modifiers: Modifiers,
     focused: bool,
+    /// Input is by finger: the focused outline's grips reach further, and outline chrome
+    /// shows only while the view is focused, as there is no hover to reveal it.
+    pub touch: bool,
     /// The caret's opacity in its blink.
     caret: f32,
     /// When the caret last moved, which restarts its blink.
@@ -242,6 +255,7 @@ impl PageView {
             object_focus: None,
             modifiers: Modifiers::default(),
             focused: true,
+            touch: false,
             caret: 1.0,
             blink_from: Instant::now(),
         };
@@ -272,28 +286,39 @@ impl PageView {
         self.moved()
     }
 
-    /// Shows another page as OneNote opens one, keeping the zoom.
-    pub fn open(&mut self, editor: CanvasEditor, scene: Option<(PageScene, [f32; 2])>) {
+    /// Shows another page as OneNote opens one, keeping the zoom: at `place` if the page was
+    /// left there earlier. OneNote keeps the scroll in device pixels across zoom changes and
+    /// does not reveal the restored selection.
+    pub fn open(
+        &mut self,
+        editor: CanvasEditor,
+        scene: Option<(PageScene, [f32; 2])>,
+        place: Option<Place>,
+    ) {
         self.replace(editor, scene);
-        self.place_opened();
+        let Some(place) = place else {
+            return self.place_opened();
+        };
+        self.viewport.origin = place.origin;
+        self.scroll().clamp(&mut self.viewport);
+        if self.editor.focus_outline(place.outline).is_ok() {
+            let _ = self.editor.select(place.selection);
+        }
     }
 
-    /// OneNote 2010 opens a page scrolled fully left and up, then down just far enough to
-    /// show the caret's outline 9 pt and 9 px above the view's bottom.
+    /// Where the page is left, for `open` to return to.
+    pub fn place(&self) -> Place {
+        Place {
+            origin: self.viewport.origin,
+            outline: self.editor.active_outline().id,
+            selection: self.editor.selection(),
+        }
+    }
+
+    /// OneNote 2010 opens a page scrolled fully left and up, however far down its content
+    /// lies.
     fn place_opened(&mut self) {
-        let scroll = self.scroll();
-        self.viewport.origin = scroll.min.map(|offset| -offset);
-        let outline = self.editor.active_outline();
-        let offset = self
-            .scene
-            .as_ref()
-            .filter(|_| self.editor.has_page_outline(outline.id))
-            .map_or(0.0, |(_, offset)| offset[1]);
-        let bottom = (outline.bounds().y1 as f32 + offset + 9.0) * self.viewport.scale
-            + 9.0 * self.display_scale
-            + self.viewport.origin[1];
-        self.viewport.origin[1] -= (bottom - self.viewport.size[1] as f32).max(0.0);
-        scroll.clamp(&mut self.viewport);
+        self.viewport.origin = self.scroll().min.map(|offset| -offset);
     }
 
     pub fn modifiers(&self) -> Modifiers {
@@ -382,7 +407,21 @@ impl PageView {
         {
             return Some(Hit::Image { id, handle });
         }
-        page_hit_test(&self.editor, self.scene.as_ref(), point, self.pixel())
+        let touched = (self.touch && self.focused && self.object_focus.is_none())
+            .then(|| self.editor.active_outline().id);
+        page_hit(
+            &self.editor,
+            self.scene.as_ref(),
+            point,
+            self.pixel(),
+            touched,
+        )
+    }
+
+    /// What the view point `position`, in device pixels, lands on, for the host to route a
+    /// gesture before it starts.
+    pub fn hit(&self, position: [f32; 2]) -> Option<Hit> {
+        self.hit_test(self.viewport.document_point(position))
     }
 
     fn set_object_focus(&mut self, focus: Option<ObjectFocus>) {
@@ -503,6 +542,25 @@ impl PageView {
         Ok(())
     }
 
+    /// Moves the caret by lines until it has gone a view's height, then scrolls as far so
+    /// it keeps its place on screen.
+    fn move_page(&mut self, up: bool, extend: bool) -> Result<()> {
+        let movement = if up { Movement::Up } else { Movement::Down };
+        let start = self.caret_area()?[1];
+        let mut caret = self.caret_area()?;
+        while (caret[1] - start).abs() < self.viewport.size[1] as f32 {
+            self.editor
+                .move_selection(&mut self.engine, movement, extend)?;
+            let moved = self.caret_area()?;
+            if moved == caret {
+                break;
+            }
+            caret = moved;
+        }
+        self.viewport.origin[1] -= caret[1] - start;
+        Ok(())
+    }
+
     /// Reveals the caret or focused object after an edit, then reports the change.
     fn edited(&mut self) -> Result<Response> {
         self.reveal_focus()?;
@@ -554,21 +612,23 @@ impl PageView {
                     rect.y1 as f32 + offset[1],
                 ]
             });
+        let pad = PAD * self.display_scale;
         let fixed = self.scene.iter().flat_map(|(scene, offset)| {
-            scene.content_bounds(&self.editor).map(|rect| {
-                [
-                    rect[0] + offset[0],
-                    rect[1] + offset[1],
-                    rect[2] + offset[0],
-                    rect[3] + offset[1],
-                ]
-            })
+            scene
+                .content_bounds(&self.editor)
+                .map(move |(rect, padded)| {
+                    (
+                        [
+                            rect[0] + offset[0],
+                            rect[1] + offset[1],
+                            rect[2] + offset[0],
+                            rect[3] + offset[1],
+                        ],
+                        if padded { pad } else { 0.0 },
+                    )
+                })
         });
-        scroll::Scroll::new(
-            self.viewport,
-            PAD * self.display_scale,
-            editable.chain(fixed),
-        )
+        scroll::Scroll::new(self.viewport, editable.map(|rect| (rect, pad)).chain(fixed))
     }
 
     /// Scrolls the view's corner `offset` device pixels from the page origin along `axis`,
@@ -654,6 +714,7 @@ impl PageView {
                 colors,
                 visible: [0.0, self.viewport.size[1] as f32]
                     .map(|y| (y - self.viewport.origin[1]) / self.viewport.scale),
+                chrome: !self.touch || self.focused,
             },
         )
     }
@@ -681,7 +742,7 @@ impl PageView {
         let (caret, hold) = edit::caret_blink(now.saturating_duration_since(self.blink_from));
         let repaint = caret != self.caret;
         self.caret = caret;
-        (repaint, Some(now + hold))
+        (repaint, hold.map(|hold| now + hold))
     }
 
     /// `size` in device pixels.
@@ -863,8 +924,12 @@ impl PageView {
     }
 
     pub fn pointer_released(&mut self) -> Result<Response> {
-        let preview = self.outline_preview();
-        if let Some((id, origin, size)) = self.image_preview() {
+        // As in OneNote, an outline or picture dropped outside the view stays where it was.
+        let inside =
+            (0..2).all(|axis| (0.0..self.viewport.size[axis] as f32).contains(&self.pointer[axis]));
+        let moving_image = matches!(self.drag, Some(Drag::Image { handle: [0, 0], .. }));
+        let preview = self.outline_preview().filter(|_| inside);
+        if let Some((id, origin, size)) = self.image_preview().filter(|_| inside || !moving_image) {
             self.editor
                 .place_image(&mut self.engine, id, origin, size)?;
         }
@@ -922,7 +987,8 @@ impl PageView {
 
     /// An input method's marked text; `cursor` is its UTF-8 selection within `text`.
     pub fn compose(&mut self, text: String, cursor: Option<(usize, usize)>) -> Result<Response> {
-        if !self.accepts_text() {
+        // Wayland input methods clear an absent composition after each cursor update.
+        if !self.accepts_text() || text.is_empty() && self.editor.marked_range().is_none() {
             return Ok(Response::default());
         }
         if text.is_empty() {
@@ -959,6 +1025,21 @@ impl PageView {
             return Ok(Response::default());
         }
         self.editor.format(&mut self.engine, command)?;
+        self.edited()
+    }
+
+    /// Undoes the last edit, or redoes the last undone one.
+    pub fn undo(&mut self, redo: bool) -> Result<Response> {
+        if redo {
+            self.editor.redo(&mut self.engine)?;
+        } else {
+            self.editor.undo(&mut self.engine)?;
+        }
+        if let Some(ObjectFocus::Image(id)) = self.object_focus
+            && self.editor.image_placement(id).is_none()
+        {
+            self.set_object_focus(None);
+        }
         self.edited()
     }
 
@@ -1111,17 +1192,9 @@ impl PageView {
                     self.set_object_focus(None);
                 }
                 "a" => self.editor.select_all()?,
-                "z" => {
-                    if shift {
-                        self.editor.redo(&mut self.engine)?;
-                    } else {
-                        self.editor.undo(&mut self.engine)?;
-                    }
-                    if let Some(ObjectFocus::Image(id)) = self.object_focus
-                        && self.editor.image_placement(id).is_none()
-                    {
-                        self.set_object_focus(None);
-                    }
+                "z" => return self.undo(shift),
+                "y" if edit::Platform::CURRENT == edit::Platform::Windows => {
+                    return self.undo(true);
                 }
                 "c" | "x" => {
                     let [anchor, focus] = self.editor.selection().positions;
@@ -1166,6 +1239,13 @@ impl PageView {
             if let Some(Command::Move(movement)) = chord {
                 self.editor
                     .move_selection(&mut self.engine, movement, shift)?;
+            } else if let Some(Command::ScrollPage { up }) = chord {
+                // AppKit keeps ten points of the last page in view.
+                let page = self.viewport.size[1] as f32 - 10.0 * self.display_scale;
+                self.viewport.origin[1] += if up { page } else { -page };
+                return self.moved();
+            } else if let Some(Command::MovePage { up }) = chord {
+                self.move_page(up, shift)?;
             } else if self.editor.marked_range().is_none() {
                 match (chord, key) {
                     (Some(Command::DeleteTo(movement)), _) => {
@@ -1250,6 +1330,21 @@ pub fn page_hit_test(
     point: [f32; 2],
     pixel: f32,
 ) -> Option<Hit> {
+    page_hit(editor, scene, point, pixel, None)
+}
+
+/// Logical pixels a finger's grip targets extend beyond the drawn grips.
+const TOUCH_REACH: f32 = 16.0;
+
+/// `page_hit_test` where the `touched` outline's grips reach `TOUCH_REACH` further: outward,
+/// and inward along its header.
+fn page_hit(
+    editor: &CanvasEditor,
+    scene: Option<&(PageScene, [f32; 2])>,
+    point: [f32; 2],
+    pixel: f32,
+    touched: Option<onestore::ExGuid>,
+) -> Option<Hit> {
     /// Grips and text resolve front to back before any outline's padding, as a native
     /// width handle stays reachable under the next outline's left padding; the typing room
     /// below an outline comes last.
@@ -1278,19 +1373,31 @@ pub fn page_hit_test(
         let local = [point[0] - offset[0], point[1] - offset[1]];
         let [x, y] = local;
         if layer == Layer::Grips {
+            let extra = if touched == Some(outline.id) && !outline.title {
+                TOUCH_REACH * pixel
+            } else {
+                0.0
+            };
             // Width handles: 15 px inside to 6 px outside the header's right end, and 6 px
             // either side of the right border below it.
-            let inside = if y < body_top { 15.0 } else { 6.0 };
+            let inside = if y < body_top {
+                15.0 * pixel + extra
+            } else {
+                6.0 * pixel
+            };
             if !outline.title
-                && (bounds[2] - inside * pixel..=bounds[2] + 6.0 * pixel).contains(&x)
-                && (bounds[1]..=bounds[3]).contains(&y)
+                && (bounds[2] - inside..=bounds[2] + 6.0 * pixel + extra).contains(&x)
+                && (bounds[1] - extra..=bounds[3] + extra).contains(&y)
             {
                 return Some(Hit::Resize {
                     id: outline.id,
                     grab: point[0] - outline.bounds().x1 as f32,
                 });
             }
-            if x >= bounds[0] && x <= bounds[2] && y >= bounds[1] && y < body_top {
+            if (bounds[0] - extra..=bounds[2] + extra).contains(&x)
+                && y >= bounds[1] - extra
+                && y < body_top
+            {
                 return Some(Hit::Handle {
                     id: outline.id,
                     grab: [
@@ -1397,7 +1504,7 @@ fn page_primitives<'a>(
             Some(PointerFeedback::Move(id, origin)) if id == outline.id => origin,
             _ => outline.origin(),
         };
-        if (object_focus.is_none() && outline.id == editor.active_outline().id)
+        if (paint.chrome && object_focus.is_none() && outline.id == editor.active_outline().id)
             || matches!(preview, Some(PointerFeedback::Hover(id) | PointerFeedback::Move(id, _)) if id == outline.id)
             || matches!(preview, Some(PointerFeedback::Resize(resized)) if resized.id == outline.id)
         {
@@ -1794,6 +1901,7 @@ fn append_outline<'a>(
         pixel,
         colors,
         visible,
+        ..
     } = paint;
     let rows = [visible[0] - y, visible[1] - y];
     outline

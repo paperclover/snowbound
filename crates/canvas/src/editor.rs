@@ -109,6 +109,7 @@ struct PageHeader {
     identity: Option<[u8; 16]>,
     created: Option<u64>,
     margin_origin: [f32; 2],
+    color: Option<u32>,
     areas: Vec<page::TitleArea>,
 }
 
@@ -396,6 +397,59 @@ impl TextOutline {
 
     pub fn paragraph_layout(&self, source: usize) -> Result<&ParagraphLayout, EditError> {
         Ok(&self.shaped.paragraphs[self.visible_index(source)?])
+    }
+
+    /// The shown paragraphs with their source text: those a collapsed parent hides have no
+    /// layout and are left out.
+    fn shown(&self) -> impl Iterator<Item = (usize, &Paragraph)> {
+        self.layouts()
+            .filter_map(|(index, _)| Some((index, self.document.paragraph(index)?)))
+    }
+
+    /// The outline's text as platform text input sees it: the shown paragraphs joined by
+    /// `\n`, addressed in UTF-16 units by `utf16_offset` and `utf16_position`.
+    pub fn shown_text(&self) -> String {
+        self.shown()
+            .map(|(_, paragraph)| paragraph.text())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Where `position` falls in `shown_text`; a hidden paragraph falls at the start of the
+    /// next shown one.
+    pub fn utf16_offset(&self, position: TextPosition) -> Result<u32, EditError> {
+        let mut offset = 0;
+        for (index, paragraph) in self.shown() {
+            if index == position.paragraph {
+                return Ok(offset + position.offset);
+            }
+            if index > position.paragraph {
+                return Ok(offset);
+            }
+            offset += paragraph.utf16_offset(paragraph.text().len())? + 1;
+        }
+        Ok(offset.saturating_sub(1))
+    }
+
+    /// The source position at `offset` in `shown_text`, clamped to its end.
+    pub fn utf16_position(&self, offset: u32) -> Result<TextPosition, EditError> {
+        let mut rest = offset;
+        let mut end = None;
+        for (index, paragraph) in self.shown() {
+            let length = paragraph.utf16_offset(paragraph.text().len())?;
+            if rest <= length {
+                return Ok(TextPosition {
+                    paragraph: index,
+                    offset: rest,
+                });
+            }
+            rest -= length + 1;
+            end = Some(TextPosition {
+                paragraph: index,
+                offset: length,
+            });
+        }
+        end.ok_or(EditError::InvalidRange)
     }
 
     fn column(&self, x: f32, current: ExGuid) -> Result<Vec<usize>, EditError> {
@@ -711,6 +765,7 @@ impl CanvasEditor {
             identity: page.identity,
             created: page.created,
             margin_origin: page.margin_origin,
+            color: page.color,
             areas,
         };
         let mut ids = BTreeSet::new();
@@ -972,6 +1027,7 @@ impl CanvasEditor {
                 .map(PageDate::timestamp)
                 .or(self.header.created),
             margin_origin: self.header.margin_origin,
+            color: self.header.color,
             objects,
             definitions,
         })
@@ -1029,16 +1085,31 @@ impl CanvasEditor {
             .fold(text_bottom, f32::max)
     }
 
+    /// Where the caret goes on leaving `title`: the first body line under its header, on
+    /// OneNote's 18-point grid.
+    fn body_start_of(&self, title: &TextOutline) -> [f32; 2] {
+        let bottom = self.header_bottom(title.id, title.bounds().y1 as f32);
+        [
+            title.origin()[0],
+            ((((f64::from(bottom) - 14.4) / 18.0).ceil() + 1.0) * 18.0 + 14.4) as f32,
+        ]
+    }
+
+    /// Where the page's first body line starts, in points, under its title.
+    pub fn body_start(&self) -> Option<[f32; 2]> {
+        let title = self
+            .visible_outlines()
+            .chain(self.caret_outline())
+            .find(|outline| outline.title)?;
+        Some(self.body_start_of(title))
+    }
+
     pub fn leave_title(&mut self, engine: &mut TextEngine) -> Result<(), EditorError> {
         let title = self.active_outline();
         if !title.title {
             return Ok(());
         }
-        let bottom = self.header_bottom(title.id, title.bounds().y1 as f32);
-        let position = [
-            title.origin()[0],
-            ((((f64::from(bottom) - 14.4) / 18.0).ceil() + 1.0) * 18.0 + 14.4) as f32,
-        ];
+        let position = self.body_start_of(title);
         if let Some((id, origin)) = self
             .outlines()
             .iter()
@@ -1896,10 +1967,19 @@ impl CanvasEditor {
     }
 
     pub fn caret(&self, width: f32) -> Result<BoundingBox, EditError> {
-        let focus = self.active_outline().selection.positions[1];
+        let selection = self.active_outline().selection;
+        self.caret_at(selection.positions[1], selection.affinities[1], width)
+    }
+
+    /// The caret at `focus` in the active outline, in its coordinates.
+    pub fn caret_at(
+        &self,
+        focus: TextPosition,
+        affinity: Affinity,
+        width: f32,
+    ) -> Result<BoundingBox, EditError> {
         let paragraph = self.active_outline().paragraph_layout(focus.paragraph)?;
-        let cursor =
-            paragraph.cursor(focus.offset, self.active_outline().selection.affinities[1])?;
+        let cursor = paragraph.cursor(focus.offset, affinity)?;
         let mut rect = paragraph.text.caret(cursor, width);
         rect.x0 += f64::from(paragraph.origin[0]);
         rect.x1 += f64::from(paragraph.origin[0]);
@@ -2325,12 +2405,12 @@ impl CanvasEditor {
     }
 
     pub fn selection_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
-        self.rectangles(self.active_outline().selection)
+        self.range_rects(self.active_outline().selection)
     }
 
     pub fn marked_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
         match &self.composition {
-            Some(composition) => self.rectangles(Selection {
+            Some(composition) => self.range_rects(Selection {
                 positions: [composition.range.start, composition.range.end],
                 affinities: [Affinity::Downstream, Affinity::Upstream],
             }),
@@ -2338,7 +2418,8 @@ impl CanvasEditor {
         }
     }
 
-    fn rectangles(&self, selection: Selection) -> Result<Vec<BoundingBox>, EditError> {
+    /// Highlight rectangles of `selection` in the active outline, in its coordinates.
+    pub fn range_rects(&self, selection: Selection) -> Result<Vec<BoundingBox>, EditError> {
         let [anchor, focus] = selection.positions;
         if anchor == focus {
             return Ok(Vec::new());
@@ -2515,8 +2596,10 @@ impl CanvasEditor {
         let (start, end) = (anchor.min(focus), anchor.max(focus));
         let format = self.typing_format(start)?;
         let document = &self.active_outline().document;
-        let mut edit =
-            document.replace(start..end, vec![Paragraph::new(String::new(), format.clone()); 2])?;
+        let mut edit = document.replace(
+            start..end,
+            vec![Paragraph::new(String::new(), format.clone()); 2],
+        )?;
         let nodes = document.container(edit.container)?;
         let next = nodes
             .get(crate::document::subtree_end(nodes, edit.range.start))
@@ -2554,10 +2637,8 @@ impl CanvasEditor {
                 .find(|id| style(Some(*id)) == Some("p"));
             // The heading's run formatting carries over under the body style (`c9-h1-*`).
             let run = format.over(&self.style_format(head.style)?);
-            tail.text_mut().unwrap().text = Paragraph::new(
-                String::new(),
-                run.inherit(&self.style_format(tail.style)?),
-            );
+            tail.text_mut().unwrap().text =
+                Paragraph::new(String::new(), run.inherit(&self.style_format(tail.style)?));
         }
         let caret = TextPosition {
             paragraph: start.paragraph + 1,
@@ -2763,6 +2844,14 @@ impl CanvasEditor {
             },
         )?;
         Ok(true)
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo.is_empty()
     }
 
     pub fn undo(&mut self, engine: &mut TextEngine) -> Result<bool, EditorError> {
@@ -4984,6 +5073,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                color: None,
                 definitions: BTreeMap::new(),
                 objects: vec![PageObject::Image(background), PageObject::Image(picture)],
             },
@@ -5107,6 +5197,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                color: None,
                 definitions: BTreeMap::new(),
                 objects,
             },
@@ -5164,6 +5255,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                color: None,
                 definitions: BTreeMap::new(),
                 objects: vec![PageObject::Outline(source)],
             },
@@ -5303,6 +5395,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                color: None,
                 definitions: BTreeMap::new(),
                 objects: vec![
                     PageObject::Outline(mixed),
@@ -5393,6 +5486,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                color: None,
                 definitions: BTreeMap::new(),
                 objects,
             },
@@ -6898,6 +6992,50 @@ mod tests {
                 .as_ptr(),
             cached
         );
+    }
+
+    #[test]
+    fn platform_text_offsets_skip_collapsed_children() {
+        let document = TextDocument::new(
+            ["Collapsed", "Hidden", "Last"]
+                .into_iter()
+                .map(|s| Paragraph::new(s.into(), Format::default()))
+                .collect(),
+        )
+        .unwrap();
+        let mut nodes = document.nodes().to_vec();
+        nodes[0].collapsed = true;
+        nodes[1].parent = Some(nodes[0].id);
+        nodes[1].level = 2;
+        let outline = Outline {
+            title: false,
+            min_width: None,
+            id: onestore::page::text::new_id().unwrap(),
+            layout: onestore::document::Layout {
+                max_width: Some(150.0),
+                ..Default::default()
+            },
+            indents: Vec::new(),
+            paragraphs: nodes,
+            unsupported: Vec::new(),
+        };
+        let mut engine = TextEngine::default();
+        let editor =
+            CanvasEditor::from_outlines(&mut engine, vec![outline], BTreeMap::new()).unwrap();
+        let outline = editor.active_outline();
+        assert_eq!(outline.shown_text(), "Collapsed\nLast");
+        let at = |paragraph, offset| TextPosition { paragraph, offset };
+        for (position, offset) in [
+            (at(0, 3), 3),
+            (at(1, 2), 10),
+            (at(2, 0), 10),
+            (at(2, 4), 14),
+        ] {
+            assert_eq!(outline.utf16_offset(position).unwrap(), offset);
+        }
+        for (offset, position) in [(9, at(0, 9)), (10, at(2, 0)), (99, at(2, 4))] {
+            assert_eq!(outline.utf16_position(offset).unwrap(), position);
+        }
     }
 
     #[test]
@@ -8610,7 +8748,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edited_page_writes_back_through_the_page_writer() {
+    fn an_edited_page_writes_back_as_its_ops() {
         let mut engine = TextEngine::default();
         let (space, source) = corpus_page(CORPUS[2], "Split middle");
         let mut editor = CanvasEditor::from_page(source.clone(), &mut engine).unwrap();
@@ -8623,8 +8761,8 @@ mod tests {
         editor.focus_outline(body).unwrap();
         editor.insert(&mut engine, "Edited ").unwrap();
         let page = editor.page().unwrap();
-        let written = onestore::PreparedEdit::page(CORPUS[2], space, &page, "Author").unwrap();
-        let reread = corpus_pages(written.as_bytes())
+        let written = ops::saved(CORPUS[2], space, &mut editor);
+        let reread = corpus_pages(&written)
             .into_iter()
             .find_map(|(candidate, page)| (candidate == space).then_some(page))
             .unwrap();

@@ -233,6 +233,7 @@ fuzz_target!(|input: &[u8]| {
                     identity: None,
                     created: date.map(|date| date.timestamp()),
                     margin_origin: [0.0; 2],
+                    color: None,
                     definitions: BTreeMap::new(),
                     objects,
                 },

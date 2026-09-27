@@ -3,6 +3,12 @@ use std::time::Duration;
 use winit::keyboard::NamedKey;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+/// The key that carries shortcuts: Command on macOS, Control elsewhere.
+const SHORTCUT: ModifiersState = if cfg!(target_vendor = "apple") {
+    ModifiersState::SUPER
+} else {
+    ModifiersState::CONTROL
+};
 
 thread_local! {
     static START: Instant = Instant::now();
@@ -147,6 +153,42 @@ fn clicks_use_the_previous_layout_and_hover_animates() {
         button_frame(&mut ui);
     }
     assert!(!ui.wants_frame());
+}
+
+/// A click whose press and release arrive together starts an animation that a box built
+/// earlier in the frame reads: the frame that handled the click asks for the next one.
+#[test]
+fn a_click_within_one_frame_starts_an_animation_read_before_it() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut open = false;
+    let mut width = 0.0;
+    let mut build = |ui: &mut Ui, open: &mut bool, width: &mut f32| {
+        *width = ui.animate(Id::ROOT.child("panel"), if *open { 100.0 } else { 0.0 });
+        if button(ui, "toggle", "Toggle").clicked {
+            *open = true;
+        }
+    };
+    frame(&mut ui, |ui| build(ui, &mut open, &mut width));
+    // The pointer rests on the button until its hover has faded in.
+    ui.event(Event::PointerMoved([5.0, 5.0]));
+    for _ in 0..40 {
+        frame(&mut ui, |ui| build(ui, &mut open, &mut width));
+    }
+    assert!(!ui.wants_frame());
+    let at = Instant::now();
+    for pressed in [true, false] {
+        ui.event(Event::Button {
+            button: MouseButton::Left,
+            pressed,
+            at,
+        });
+    }
+    frame(&mut ui, |ui| build(ui, &mut open, &mut width));
+    assert!(open && width == 0.0);
+    assert!(ui.wants_frame(), "the click's frame asks for another");
+    frame(&mut ui, |ui| build(ui, &mut open, &mut width));
+    frame(&mut ui, |ui| build(ui, &mut open, &mut width));
+    assert!(width > 0.0 && ui.wants_frame(), "the panel eases open");
 }
 
 #[test]
@@ -341,7 +383,7 @@ fn focused_field(text: &str) -> (Ui, String) {
 fn point_to(ui: &mut Ui, text: &str, index: usize) {
     let size = ui.theme.font_size;
     let (texts, frame) = ui.texts();
-    let layout = &texts.label(text, size, None, frame).layout;
+    let layout = &texts.label(text, size, false, None, frame).layout;
     let x = parley::editing::Cursor::from_byte_index(layout, index, parley::Affinity::Downstream)
         .geometry(layout, 1.0)
         .x0 as f32;
@@ -372,7 +414,7 @@ fn text_fields_edit_with_keys_and_selection() {
     ui.event(Event::Ime(Ime::Commit("é".into())));
     field_frame(&mut ui, &mut text);
     assert_eq!(text, "caé");
-    ui.event(Event::Modifiers(ModifiersState::SUPER));
+    ui.event(Event::Modifiers(SHORTCUT));
     ui.event(typed("a"));
     field_frame(&mut ui, &mut text);
     ui.event(Event::Modifiers(ModifiersState::empty()));
@@ -383,6 +425,7 @@ fn text_fields_edit_with_keys_and_selection() {
 }
 
 #[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "macOS editing conventions")]
 fn text_field_carets_fade_on_appkit_s_blink_and_restart_when_moved() {
     let (mut ui, mut text) = focused_field("one");
     let start = Instant::now();
@@ -430,6 +473,7 @@ fn text_field_carets_fade_on_appkit_s_blink_and_restart_when_moved() {
 }
 
 #[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "macOS editing conventions")]
 fn text_fields_move_and_select_by_word() {
     let (mut ui, mut text) = focused_field("one two three");
     ui.event(key(NamedKey::End));
@@ -449,6 +493,48 @@ fn text_fields_move_and_select_by_word() {
 }
 
 #[test]
+#[cfg_attr(
+    target_vendor = "apple",
+    ignore = "GTK and Windows editing conventions"
+)]
+fn text_fields_follow_gtk_and_windows_chords() {
+    let (mut ui, mut text) = focused_field("one two three");
+    ui.event(key(NamedKey::End));
+    ui.event(Event::Modifiers(ModifiersState::CONTROL));
+    ui.event(key(NamedKey::ArrowLeft));
+    ui.event(key(NamedKey::ArrowLeft));
+    field_frame(&mut ui, &mut text);
+    ui.event(Event::Modifiers(
+        ModifiersState::CONTROL | ModifiersState::SHIFT,
+    ));
+    ui.event(key(NamedKey::ArrowRight));
+    field_frame(&mut ui, &mut text);
+    ui.event(Event::Modifiers(ModifiersState::empty()));
+    ui.event(typed("2"));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "one 2 three");
+    ui.event(Event::Modifiers(ModifiersState::CONTROL));
+    ui.event(key(NamedKey::Backspace));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "one  three");
+    ui.event(Event::Modifiers(ModifiersState::empty()));
+    ui.event(key(NamedKey::Home));
+    ui.event(typed("<"));
+    ui.event(key(NamedKey::End));
+    ui.event(typed(">"));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "<one  three>");
+    ui.event(Event::Modifiers(ModifiersState::CONTROL));
+    ui.event(typed("a"));
+    field_frame(&mut ui, &mut text);
+    ui.event(Event::Modifiers(ModifiersState::empty()));
+    ui.event(key(NamedKey::Delete));
+    field_frame(&mut ui, &mut text);
+    assert_eq!(text, "");
+}
+
+#[test]
+#[cfg_attr(not(target_vendor = "apple"), ignore = "macOS editing conventions")]
 fn text_fields_delete_by_word_and_line_chords() {
     let (mut ui, mut text) = focused_field("one two three");
     ui.event(key(NamedKey::End));
@@ -674,14 +760,6 @@ fn popups_show_at_once_by_their_anchor() {
     ui.open_popup(menu_id());
     menu_frame(&mut ui, BELOW, None);
     menu_frame(&mut ui, BELOW, None);
-    let alpha = |ui: &Ui| {
-        ui.nodes
-            .iter()
-            .find(|node| node.id == menu_id())
-            .unwrap()
-            .alpha
-    };
-    assert_eq!(alpha(&ui), 1.0);
     assert_eq!(
         ui.rect(menu_id()).unwrap()[1],
         44.0,
@@ -692,7 +770,6 @@ fn popups_show_at_once_by_their_anchor() {
     ui.open_popup(menu_id());
     menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
     menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
-    assert_eq!(alpha(&ui), 1.0);
     assert_eq!(ui.rect(menu_id()).unwrap()[..2], [50.0, 50.0]);
 }
 
@@ -785,6 +862,47 @@ fn the_pointer_moves_the_highlight_only_when_it_moves() {
 }
 
 #[test]
+fn headings_are_never_chosen_and_hide_while_filtered() {
+    let mut ui = open_menu(Some("Filter"));
+    let mut items = items();
+    items.insert(
+        3,
+        popup::Item {
+            text: "Selection",
+            heading: true,
+            separated: true,
+            ..popup::Item::default()
+        },
+    );
+    items[4].separated = false;
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            chosen = popup::menu(ui, menu_id(), BELOW, &items, Some("Filter"));
+        });
+        chosen
+    };
+    build(&mut ui);
+    ui.event(key(NamedKey::End));
+    build(&mut ui);
+    ui.event(key(NamedKey::ArrowUp));
+    build(&mut ui);
+    assert_eq!(
+        ui.popups[0].highlight,
+        Some(1),
+        "keys skip the heading and Paste"
+    );
+    ui.event(typed("sel"));
+    build(&mut ui);
+    ui.event(key(NamedKey::Enter));
+    assert_eq!(
+        build(&mut ui),
+        Some(4),
+        "the query matches the item, not its heading"
+    );
+}
+
+#[test]
 fn typing_filters_to_the_best_matches_first() {
     let mut ui = open_menu(Some("Filter"));
     assert_eq!(ui.focused(), Some(menu_id().child("filter")));
@@ -808,10 +926,14 @@ fn typing_filters_to_the_best_matches_first() {
         shown.sort();
         shown.into_iter().map(|(_, item)| item).collect::<Vec<_>>()
     };
-    assert_eq!(shown(&ui), [3, 0], "letters together before letters apart");
+    assert_eq!(
+        shown(&ui),
+        [0, 3],
+        "a word's start before the middle of one"
+    );
     ui.event(key(NamedKey::Backspace));
     settle(&mut ui);
-    assert_eq!(shown(&ui), [0, 1, 3], "a prefix before a word's start");
+    assert_eq!(shown(&ui), [0, 1, 3], "equal matches keep their order");
     ui.event(key(NamedKey::ArrowDown));
     ui.event(key(NamedKey::Enter));
     assert_eq!(menu_frame(&mut ui, BELOW, Some("Filter")).1, Some(1));
@@ -1062,117 +1184,6 @@ fn lists_hold_the_selection_still_as_items_arrive_and_leave_above() {
     assert_eq!(row_top(&ui, 500), Some(at - 60.0));
 }
 
-fn alpha(ui: &Ui, key: u64) -> Option<f32> {
-    let id = list_id().child(key);
-    ui.nodes
-        .iter()
-        .find(|node| node.id == id)
-        .map(|node| node.alpha)
-}
-
-fn folding(ui: &Ui, key: u64) -> Option<f32> {
-    let id = list_id().child(("folding", key));
-    ui.nodes
-        .iter()
-        .find(|node| node.id == id)
-        .map(|node| node.alpha)
-}
-
-#[test]
-fn rows_slide_while_the_rest_fold_away_and_unfold_at_once() {
-    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
-    let mut selected = None;
-    let rows = Keyed::new(0..20);
-    settle_list(&mut ui, &rows, &mut selected);
-    let rows = Keyed::new([5, 0, 1, 2, 3, 100, 6, 7, 8, 9, 10, 11]);
-    list_frame(&mut ui, &rows, &mut selected, &[]);
-    let sliding = row_top(&ui, 0).unwrap();
-    assert!(
-        sliding > 0.0 && sliding < LIST_ROW,
-        "sliding at once: {sliding}"
-    );
-    for key in [4, 5] {
-        let alpha = folding(&ui, key).unwrap();
-        assert!(alpha > 0.0 && alpha < 1.0, "{key} folds where it was");
-    }
-    assert!(row_top(&ui, 5).unwrap() < 0.0, "out of the seam at the top");
-    for _ in 0..4 {
-        list_frame(&mut ui, &rows, &mut selected, &[]);
-    }
-    for key in [5, 100] {
-        let alpha = alpha(&ui, key).unwrap();
-        assert!(alpha > 0.0 && alpha < 1.0, "{key} unfolds where it goes");
-    }
-    for _ in 0..11 {
-        list_frame(&mut ui, &rows, &mut selected, &[]);
-    }
-    assert_eq!(row_top(&ui, 5), Some(0.0), "there in about 250 ms");
-    assert_eq!(row_top(&ui, 0), Some(LIST_ROW));
-    assert_eq!(row_top(&ui, 100), Some(5.0 * LIST_ROW));
-    assert_eq!(alpha(&ui, 100), Some(1.0));
-    assert_eq!((folding(&ui, 4), folding(&ui, 5)), (None, None));
-    assert!(!ui.wants_frame());
-}
-
-/// Two rows whose text is drawn over each other: their labels, centred in each row, meet
-/// within the view while both can be seen and one is fully drawn. Rows folding together,
-/// both blended into the background, may meet.
-fn text_overlaps(ui: &mut Ui) -> Option<String> {
-    let text = ui.measure("Ag")[1];
-    let list = ui.nodes.iter().position(|node| node.id == list_id())?;
-    let rows: Vec<_> = ui
-        .nodes
-        .iter()
-        // Below half an 8-bit step, a row changes no pixel.
-        .filter(|node| {
-            node.parent == list && node.size[1] == px(LIST_ROW) && node.alpha * 255.0 >= 0.5
-        })
-        .map(|node| {
-            let middle = (node.rect[1] + node.rect[3]) / 2.0;
-            let [top, bottom] =
-                [middle - text / 2.0, middle + text / 2.0].map(|y| y.clamp(0.0, VIEW));
-            (top, bottom, node.alpha)
-        })
-        .collect();
-    rows.iter().enumerate().find_map(|(at, a)| {
-        rows[at + 1..]
-            .iter()
-            .find(|b| a.0 < b.1 && b.0 < a.1 && a.2.max(b.2) >= 1.0)
-            .map(|b| format!("{a:?} over {b:?}"))
-    })
-}
-
-#[test]
-fn rows_never_draw_text_over_each_other() {
-    let orders: [Vec<u64>; 7] = [
-        (0..30).collect(),
-        (4..12).chain([2, 3, 16]).chain(12..16).collect(),
-        (0..30).rev().collect(),
-        [7, 3, 12, 0, 1, 25, 26, 2, 4, 5].into(),
-        (0..30)
-            .filter(|key| !(3..6).contains(key) && *key != 8)
-            .collect(),
-        (0..3).chain(40..44).chain(3..30).collect(),
-        [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 50].into(),
-    ];
-    for (at, order) in orders.iter().enumerate() {
-        let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
-        let mut selected = None;
-        settle_list(&mut ui, &Keyed::new(0..30), &mut selected);
-        // Each change, and another landing half-way through it.
-        let next = &orders[(at + 1) % orders.len()];
-        for (frame, rows) in (0..30).map(|frame| {
-            let order = if frame < 5 { order } else { next };
-            (frame, Keyed::new(order.iter().copied()))
-        }) {
-            list_frame(&mut ui, &rows, &mut selected, &[]);
-            if let Some(overlap) = text_overlaps(&mut ui) {
-                panic!("order {at}, frame {frame}: {overlap}");
-            }
-        }
-    }
-}
-
 #[test]
 fn keys_move_the_selection_and_the_view_eases_after_it() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
@@ -1245,4 +1256,176 @@ fn a_long_menu_scrolls_by_dragging_its_thumb() {
             .map(|rect| rect[1]),
         top
     );
+}
+
+const FONTS: [&str; 46] = [
+    "American Typewriter",
+    "Andale Mono",
+    "Apple Braille",
+    "Apple Chancery",
+    "Arial",
+    "Arial Black",
+    "Arial Hebrew",
+    "Arial Narrow",
+    "Arial Rounded MT Bold",
+    "Arial Unicode MS",
+    "Avenir",
+    "Baskerville",
+    "Big Caslon",
+    "Brush Script MT",
+    "Chalkboard",
+    "Charter",
+    "Cochin",
+    "Comic Sans MS",
+    "Courier",
+    "Courier New",
+    "Didot",
+    "Futura",
+    "Geneva",
+    "Georgia",
+    "Gill Sans",
+    "Helvetica",
+    "Helvetica Neue",
+    "Herculanum",
+    "Hoefler Text",
+    "Impact",
+    "Lucida Grande",
+    "Marker Felt",
+    "Menlo",
+    "Monaco",
+    "Optima",
+    "Palatino",
+    "Papyrus",
+    "Rockwell",
+    "Savoye LET",
+    "Skia",
+    "Tahoma",
+    "Times",
+    "Times New Roman",
+    "Trebuchet MS",
+    "Verdana",
+    "Zapfino",
+];
+
+fn fonts() -> Vec<popup::Item<'static>> {
+    FONTS
+        .iter()
+        .map(|text| popup::Item {
+            text,
+            ..popup::Item::default()
+        })
+        .collect()
+}
+
+fn ranked(items: &[popup::Item], query: &str) -> Vec<&'static str> {
+    let order = popup::Matches::new(items, query).order;
+    order.into_iter().map(|index| FONTS[index]).collect()
+}
+
+#[test]
+fn fuzzy_matches_rank_whole_words_first_and_ties_keep_their_order() {
+    let fonts = fonts();
+    let family = [
+        "Arial",
+        "Arial Black",
+        "Arial Hebrew",
+        "Arial Narrow",
+        "Arial Rounded MT Bold",
+        "Arial Unicode MS",
+    ];
+    assert_eq!(ranked(&fonts, "Arial"), family);
+    assert_eq!(ranked(&fonts, "rial"), family, "case aside, mid-word");
+    let ari = ranked(&fonts, "ari");
+    assert_eq!(ari[..6], family, "letters together before letters apart");
+    assert_eq!(
+        ari[6..],
+        ["American Typewriter", "Apple Braille", "Baskerville"]
+    );
+    assert_eq!(
+        ranked(&fonts, "tnr"),
+        ["Times New Roman"],
+        "words' initials"
+    );
+    assert_eq!(
+        ranked(&fonts, "ar bl")[0],
+        "Arial Black",
+        "words in any order"
+    );
+    assert_eq!(
+        ranked(&fonts, "ms"),
+        [
+            "Arial Unicode MS",
+            "Comic Sans MS",
+            "Trebuchet MS",
+            "Times",
+            "Times New Roman"
+        ]
+    );
+    assert!(ranked(&fonts, "Cafe").is_empty());
+}
+
+#[test]
+fn typing_more_never_reveals_what_a_shorter_query_filtered_out() {
+    let fonts = fonts();
+    for query in [
+        "arial black",
+        "times new roman",
+        "helvetica neue",
+        "comic sans ms",
+        "tnr",
+    ] {
+        let mut shown = ranked(&fonts, "");
+        for end in 1..=query.len() {
+            let narrower = ranked(&fonts, &query[..end]);
+            for font in &narrower {
+                assert!(shown.contains(font), "{:?} revealed {font}", &query[..end]);
+            }
+            shown = narrower;
+        }
+        assert!(!shown.is_empty(), "{query}");
+    }
+}
+
+#[test]
+fn a_filtered_menu_eases_to_its_new_height_while_its_rows_appear_in_place() {
+    let fonts = fonts();
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            popup::menu(ui, menu_id(), BELOW, &fonts, Some("Font"));
+        })
+    };
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui);
+    ui.open_popup(menu_id());
+    build(&mut ui);
+    build(&mut ui);
+    let results = menu_id().child("results");
+    let height = |ui: &Ui| {
+        let rect = ui.rect(results).unwrap();
+        rect[3] - rect[1]
+    };
+    let tall = height(&ui);
+    assert!(
+        !ui.wants_frame() && tall > 5.0 * 26.0,
+        "open at its full height"
+    );
+    ui.event(typed("tnr"));
+    build(&mut ui);
+    build(&mut ui);
+    let row = ui.rect(menu_id().child("rows").child(42_u64)).unwrap();
+    assert_eq!(
+        row[1],
+        ui.rect(results).unwrap()[1],
+        "Times New Roman at the top"
+    );
+    let easing = height(&ui);
+    assert!(easing > 26.0 && easing < tall, "{easing}");
+    let mut frames = 0;
+    while ui.wants_frame() {
+        build(&mut ui);
+        frames += 1;
+        assert_eq!(ui.rect(menu_id().child("rows").child(42_u64)), Some(row));
+    }
+    assert_eq!(height(&ui), 26.0);
+    assert!(frames <= 10, "settles in {frames} frames");
 }

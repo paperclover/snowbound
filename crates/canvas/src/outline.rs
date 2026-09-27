@@ -203,6 +203,9 @@ pub struct ParagraphLayout {
     pub(crate) parent: Option<ExGuid>,
     /// An equation draws in two dimensions in place of its linear text.
     pub math: Option<crate::math::MathLayout>,
+    /// A highlight of the whole paragraph (its own `highlight`), COLORREF: a band across its
+    /// outline behind its lines, as OneNote marks a conflict page's conflicting changes.
+    pub band: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -626,6 +629,7 @@ impl ParagraphLayout {
             tags,
             math,
             parent: paragraph.parent,
+            band: paragraph.format.highlight,
         };
         result.place_tags(result.marker_left());
         Ok(result)
@@ -1688,7 +1692,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CANVAS_TEST_SECTION native Tab capture and CANVAS_TEST_SUBSTITUTE Carlito font"]
+    #[ignore = "requires CANVAS_TEST_SECTION native Tab capture"]
     fn native_table_layout() {
         use onestore::page::{Page, PageObject};
         use onestore::{RevisionIndex, Store, document::Document};
@@ -1697,11 +1701,6 @@ mod tests {
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
         let mut engine = TextEngine::default();
-        engine
-            .register_substitute(parley::fontique::Blob::new(std::sync::Arc::new(
-                std::fs::read(std::env::var_os("CANVAS_TEST_SUBSTITUTE").unwrap()).unwrap(),
-            )))
-            .unwrap();
         let page = Page::from_document(&document, "rows").unwrap();
         let outline = page
             .objects

@@ -359,6 +359,7 @@ impl CanvasEditor {
                     identity: None,
                     created: None,
                     margin_origin: [0.0; 2],
+                    color: None,
                     objects,
                     definitions: named(&self.definitions, &[&outline.paragraphs]),
                 };
@@ -454,6 +455,26 @@ impl CanvasEditor {
         let at = children.iter().position(|child| *child == id)?;
         children.get(at + 1).copied()
     }
+}
+
+/// `image` with the ops `editor` recorded since they were last taken applied to the page in
+/// `space` and sealed, as the application saves an edit.
+#[cfg(test)]
+pub(crate) fn saved(image: &[u8], space: ExGuid, editor: &mut CanvasEditor) -> Vec<u8> {
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, image.to_vec()).unwrap();
+    let ops = editor.take_ops().unwrap();
+    let ops = ops
+        .into_iter()
+        .map(|op| op::Op::Page { space, op })
+        .collect();
+    let edit = op::Edit {
+        at: 134_000_000_000_000_000,
+        ops,
+    };
+    section.apply("Author", &edit).unwrap();
+    section.seal().unwrap();
+    section.image()
 }
 
 #[cfg(test)]

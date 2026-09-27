@@ -5,8 +5,9 @@ use canvas::{
     layout::TextEngine,
 };
 use onestore::{
-    ExGuid, PageCreation, PreparedEdit, RevisionIndex, Store,
+    Arena, ExGuid, PageCreation, RevisionIndex, Section, Store,
     document::Document,
+    op::{Edit, Op, SectionOp},
     page::{Page, PageObject, ParagraphContent},
 };
 use std::{fs, path::Path};
@@ -32,8 +33,8 @@ fn spaces(document: &Document<'_>) -> Vec<ExGuid> {
     spaces
 }
 
-/// What `notebook::session::Section::import_page` writes: a new titled page, then the
-/// editor's body objects saved onto it.
+/// What `notebook::session::Section::import_page` applies: a new titled page holding a copy of
+/// the editor's body objects.
 #[test]
 fn an_imported_editor_page_reopens_with_its_title_editable() {
     let section = onestore::create_section("reopen.one", "Body 🦀 é", "Author").unwrap();
@@ -41,20 +42,20 @@ fn an_imported_editor_page_reopens_with_its_title_editable() {
     let (_, editor) = PageScene::from_page(pages(&section).remove(0), &mut engine).unwrap();
     let copy = editor.page().unwrap().copy().unwrap();
     let creation = PageCreation::new(None, Some("Imported 🦋"), "Author").unwrap();
-    let created = PreparedEdit::create_page(&section, &creation).unwrap();
-    let mut after = pages(created.as_bytes()).pop().unwrap();
-    after
-        .objects
-        .retain(|object| matches!(object, PageObject::Title(_)));
-    after.objects.extend(
-        copy.objects
-            .into_iter()
-            .filter(|object| !matches!(object, PageObject::Title(_))),
-    );
-    after.definitions = copy.definitions;
-    let saved = PreparedEdit::page(created.as_bytes(), creation.space(), &after, "Author").unwrap();
+    let arena = Arena::default();
+    let mut imported = Section::open(&arena, section).unwrap();
+    let import = SectionOp::Import {
+        creation,
+        page: copy,
+    };
+    let edit = Edit {
+        at: 134_000_000_000_000_000,
+        ops: vec![Op::Section(import)],
+    };
+    imported.apply("Author", &edit).unwrap();
+    imported.seal().unwrap();
 
-    let reopened = pages(saved.as_bytes()).pop().unwrap();
+    let reopened = pages(&imported.image()).pop().unwrap();
     let (_, editor) = PageScene::from_page(reopened.clone(), &mut engine).unwrap();
     assert_eq!(editor.page().unwrap(), reopened);
     let texts = |title: bool| -> Vec<String> {
