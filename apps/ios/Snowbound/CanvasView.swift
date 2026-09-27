@@ -38,6 +38,11 @@ private extension UITextRange {
     var upper: Int { (self as! Range).hi }
 }
 
+/// The page date's fields, from `sb_view_date_request`.
+enum DateField: Int8 {
+    case date, time
+}
+
 /// What a touch lands on; see `sb_view_target`.
 private enum Target: UInt8 {
     case page, activeText, text, grip
@@ -64,7 +69,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     private static let zoomKey = "zoom"
 
     private let section: Section
-    private let page: Int
+    private let page: String
     private let metal = MetalView()
     /// Sized to the page content at 100%, so the scroll view's zoom scale is the page zoom.
     private let content = UIView()
@@ -106,8 +111,21 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     lazy var tokenizer: UITextInputTokenizer = LineTokenizer(canvas: self)
     /// Called when editing starts or stops and after each change, for the bar buttons.
     var onChange: (() -> Void)?
+    /// Called once the page is first on screen.
+    var onOpened: (() -> Void)?
+    /// Called when a tap on the page date asks to change it, with the date it shows.
+    var onDate: ((DateField, Date) -> Void)?
+    /// Formatting above the keyboard.
+    let formatBar = FormatBar()
+    /// Room above the page for a bar over it.
+    var topInset: CGFloat = 0 {
+        didSet {
+            contentInset.top = topInset
+            home()
+        }
+    }
 
-    init(section: Section, page: Int) {
+    init(section: Section, page: String) {
         self.section = section
         self.page = page
         super.init(frame: .zero)
@@ -143,6 +161,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             self, selector: #selector(keyboardChanged), name: UIResponder.keyboardWillChangeFrameNotification,
             object: nil)
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: CanvasView, _) in view.paper() }
+        formatBar.onApply = { [weak self] command in self?.apply(command) }
+        formatBar.onDismiss = { [weak self] in _ = self?.resignFirstResponder() }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -168,9 +188,9 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             guard (metal.layer as! CAMetalLayer).drawableSize != pixels else { return }
             sb_view_resize(handle, Float(bounds.width), Float(bounds.height), Float(scale))
             transform()
-        } else if let sectionHandle = section.handle {
+        } else {
             handle = sb_view_new(
-                Unmanaged.passUnretained(metal.layer).toOpaque(), sectionHandle, page,
+                Unmanaged.passUnretained(metal.layer).toOpaque(), section.handle, page,
                 Float(bounds.width), Float(bounds.height), Float(scale))
             guard let handle else { return }
             sb_view_focus(handle, false)
@@ -181,6 +201,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             zoomScale = resting
             left = skip * resting
             home()
+            onOpened?()
             #if DEBUG
             runScript()
             #endif
@@ -203,7 +224,11 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         if sb_view_frame_pending(handle) { dirty = true }
         guard dirty else { return }
         dirty = false
+        // A frame presented with a transaction shows only once one commits, which an edit
+        // that moves no UIKit view would not otherwise cause.
+        CATransaction.begin()
         sb_view_render(handle)
+        CATransaction.commit()
     }
 
     /// The page follows the system's appearance, on the desktop's dark paper in dark mode.
@@ -243,23 +268,21 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         dirty = true
     }
 
-    /// The zoom the reader last pinched to, within reason; before that, OneNote's 100%, where its 11 pt
-    /// body text shows at 15 points, or up to 140% where the whole page fits across.
+    /// The zoom the reader last pinched to, within reason; before that, 100%, where OneNote's
+    /// 11 pt body text shows at 17 points.
     private func openingZoom() -> CGFloat {
-        if let zoom = UserDefaults.standard.object(forKey: Self.zoomKey) as? Double {
-            // A page opens readable however far the last one was pinched.
-            return min(2, max(0.75, zoom))
-        }
-        let width = bounds.inset(by: safeAreaInsets).width
-        return min(1.4, max(1, width / (content.bounds.width - margin)))
+        guard let zoom = UserDefaults.standard.object(forKey: Self.zoomKey) as? Double else { return 1 }
+        // A page opens readable however far the last one was pinched.
+        return min(2, max(0.75, zoom))
     }
 
-    /// The empty page left of its first outline, which a phone skips on opening.
+    /// The empty page left of its first outline, which a phone skips on opening, keeping
+    /// room for the tags OneNote hangs left of the text.
     private var margin: CGFloat {
         guard let handle else { return 0 }
         var block: [Float] = [0, 0, 0, 0]
         guard sb_view_block(handle, 0, 0, &block) else { return 0 }
-        return max(0, CGFloat(block[0]) - origin.x - 12)
+        return max(0, CGFloat(block[0]) - origin.x - 34)
     }
 
     /// Until the reader scrolls, the page's corner stays below the navigation bar as its
@@ -346,9 +369,10 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
         switch recognizer {
         case tap:
-            [.page, .grip].contains(target(recognizer.location(in: self))) && !onHandle(recognizer.location(in: self))
+            !readOnly && [.page, .grip].contains(target(recognizer.location(in: self)))
+                && !onHandle(recognizer.location(in: self))
         case doubleTap: target(recognizer.location(in: self)) == .page
-        case grip: target(touchStart) == .grip
+        case grip: !readOnly && target(touchStart) == .grip
         case handleDrag: onHandle(touchStart)
         default: super.gestureRecognizerShouldBegin(recognizer)
         }
@@ -357,6 +381,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// The system's text interaction works in the outline taking input; a touch on another
     /// outline's text focuses it first, as a tap there would.
     func interactionShouldBegin(_ interaction: UITextInteraction, at point: CGPoint) -> Bool {
+        if readOnly { return false }
         if onHandle(point) { return true }
         switch target(point) {
         case .activeText: break
@@ -383,7 +408,19 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// starts a new one.
     func tap(at point: CGPoint) {
         press(at: point)
-        if !isFirstResponder { _ = becomeFirstResponder() }
+        var seconds: Int64 = 0
+        if let handle, let field = DateField(rawValue: sb_view_date_request(handle, &seconds)) {
+            onDate?(field, Date(timeIntervalSince1970: TimeInterval(seconds)))
+        } else if !isFirstResponder {
+            _ = becomeFirstResponder()
+        }
+    }
+
+    /// Gives the page `date`, which the date and time under its title show.
+    func changeDate(_ date: Date) {
+        guard let handle else { return }
+        let (day, time) = titleDate(date)
+        edit(external: true) { sb_view_change_date(handle, Int64(date.timeIntervalSince1970.rounded()), day, time) }
     }
 
     private func press(at point: CGPoint) {
@@ -460,7 +497,6 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             inputDelegate?.textWillChange(self)
         }
         let changed = change()
-        dropEdits()
         if external {
             inputDelegate?.textDidChange(self)
             inputDelegate?.selectionDidChange(self)
@@ -471,32 +507,36 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             revealCaret()
         }
         display.setNeedsSelectionUpdate()
-        onChange?()
+        changedSelection()
     }
 
-    /// Takes the edit the page recorded, so its ops do not pile up; the host drops it
-    /// until it holds a notebook session that stores edits.
-    private func dropEdits() {
-        guard let handle, let edit = sb_view_edit(handle) else { return }
-        sb_string_free(edit)
+    /// Tells the bar buttons and the format bar what the selection now has.
+    private func changedSelection() {
+        if let handle { formatBar.show(sb_view_format(handle)) }
+        onChange?()
     }
 
     private func revealCaret() {
         guard handle != nil, isFirstResponder, let range = selectedTextRange else { return }
-        let caret = caretRect(for: range.end)
-        scrollRectToVisible(caret.insetBy(dx: -8, dy: -16), animated: false)
+        reveal(caretRect(for: range.end))
+    }
+
+    private func reveal(_ rect: CGRect) {
+        scrollRectToVisible(rect.insetBy(dx: -8, dy: -16), animated: false)
     }
 
     // MARK: Responder
 
-    override var canBecomeFirstResponder: Bool { handle != nil }
+    override var canBecomeFirstResponder: Bool { handle != nil && !readOnly }
+
+    override var inputAccessoryView: UIView? { formatBar }
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
         if let handle { sb_view_focus(handle, true) }
         display.isActivated = true
         dirty = true
-        onChange?()
+        changedSelection()
         return true
     }
 
@@ -569,14 +609,99 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         edit(external: true) { choose(Range(0, endOfDocument.offset)) }
     }
 
-    override func toggleBoldface(_ sender: Any?) { toggle(0) }
-    override func toggleItalics(_ sender: Any?) { toggle(1) }
-    override func toggleUnderline(_ sender: Any?) { toggle(2) }
+    override func toggleBoldface(_ sender: Any?) { apply(0) }
+    override func toggleItalics(_ sender: Any?) { apply(1) }
+    override func toggleUnderline(_ sender: Any?) { apply(2) }
 
-    private func toggle(_ style: UInt8) {
+    // MARK: Page
+
+    /// A conflict page, which shows what is stored and takes no edits.
+    var readOnly: Bool { handle.map(sb_view_read_only) ?? false }
+
+    /// The title as typed; nil on a page without an editable title.
+    var pageTitle: String? { handle.flatMap { take(sb_view_title($0)) } }
+
+    var pageText: String { handle.flatMap { take(sb_view_page_text($0)) } ?? "" }
+
+    /// Applies `sb_view_apply` formatting to the selection.
+    func apply(_ command: UInt8) {
         guard let handle else { return }
-        edit(external: true) { sb_view_toggle(handle, style) }
+        edit(external: true) { sb_view_apply(handle, command) }
     }
+
+    /// Shows the page as stored; with `discard`, after an edit was refused.
+    func reload(discard: Bool) {
+        guard let handle else { return }
+        edit(external: true) { sb_view_reload(handle, discard) }
+    }
+
+    /// Selects the first place `query` occurs and brings it into view.
+    func find(_ query: String) -> Bool {
+        guard let handle else { return false }
+        var found = false
+        edit(external: true) {
+            found = sb_view_find(handle, query)
+            return found
+        }
+        if found { reveal(selectedTextRange.map { firstRect(for: $0) } ?? .zero) }
+        return found
+    }
+
+    /// Puts the caret at the end of the page title.
+    func focusTitle() -> Bool {
+        guard let handle else { return false }
+        var focused = false
+        edit(external: true) {
+            focused = sb_view_focus_title(handle)
+            return focused
+        }
+        return focused
+    }
+
+    /// Puts a JPEG or PNG after the caret's paragraph at `size` points.
+    func insertPicture(_ data: Data, size: CGSize) {
+        guard let handle else { return }
+        edit(external: true) {
+            data.withUnsafeBytes { bytes in
+                sb_view_insert_picture(
+                    handle, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, Float(size.width),
+                    Float(size.height))
+            }
+        }
+    }
+
+    /// Commits marked text, so it is stored before the app leaves the screen.
+    func commitComposition() {
+        guard markedTextRange != nil else { return }
+        inputDelegate?.textWillChange(self)
+        unmarkText()
+        inputDelegate?.textDidChange(self)
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        guard isFirstResponder else { return nil }
+        // Ctrl+1 to Ctrl+9 in OneNote, where the Mac's Command stands for Control.
+        let tags = FormatBar.tags.enumerated().map { index, name in
+            let command = UIKeyCommand(
+                title: name, action: #selector(tagged), input: "\(index + 1)", modifierFlags: .command,
+                propertyList: index)
+            command.wantsPriorityOverSystemBehavior = true
+            return command
+        }
+        let outdent = UIKeyCommand(
+            title: "Decrease Indent", action: #selector(outdented), input: "\t", modifierFlags: .shift)
+        outdent.wantsPriorityOverSystemBehavior = true
+        let done = UIKeyCommand(title: "Done", action: #selector(finished), input: UIKeyCommand.inputEscape)
+        return tags + [outdent, done]
+    }
+
+    @objc private func tagged(_ command: UIKeyCommand) {
+        guard let index = command.propertyList as? Int else { return }
+        apply(16 + UInt8(index))
+    }
+
+    @objc private func outdented() { apply(7) }
+    @objc private func finished() { _ = resignFirstResponder() }
 
     // MARK: Coordinates
 
@@ -639,7 +764,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             _ = choose(newValue)
             display.setNeedsSelectionUpdate()
             dirty = true
-            onChange?()
+            changedSelection()
         }
     }
 
@@ -663,7 +788,6 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     func unmarkText() {
         guard let handle else { return }
         sb_unmark(handle)
-        dropEdits()
         dirty = true
     }
 

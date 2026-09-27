@@ -1,16 +1,22 @@
 #if DEBUG
 import UIKit
 
+private var scriptedPage = false
+
 extension CanvasView {
     /// Replays `SNOWBOUND_SCRIPT` through the calls touch and the keyboard make, to check
     /// input without a finger: steps joined by `|`, such as
     /// `tap:120,300|type:hi|mark:かな|unmark|return|delete|select:2,9|scroll:0,600|zoom:1.5|shot:a`.
     /// `tap` and `doubletap` take points from the view's corner, `select` text offsets,
-    /// `scroll` a content offset; `done` ends editing, `tree` saves the view hierarchy to
+    /// `scroll` a content offset; `format:N` applies `sb_view_apply` formatting, `find:word`
+    /// selects a match, `title` edits the title, `picture` inserts a drawn picture; `done`
+    /// ends editing, `tree` saves the view hierarchy to
     /// Documents/tree.txt, and `shot:a` the window to Documents/a.png, as a device has no
     /// screenshot command.
     func runScript() {
-        guard let script = ProcessInfo.processInfo.environment["SNOWBOUND_SCRIPT"] else { return }
+        // Only the first page shown runs it, not every page opened afterwards.
+        guard !scriptedPage, let script = ProcessInfo.processInfo.environment["SNOWBOUND_SCRIPT"] else { return }
+        scriptedPage = true
         for (index, step) in script.split(separator: "|").enumerated() {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1 + Double(index) * 0.4) { [weak self] in
                 self?.perform(String(step))
@@ -48,6 +54,17 @@ extension CanvasView {
             let values = argument.split(separator: ",").compactMap { Double($0) }
             zoom(at: CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y))
         case "done": _ = resignFirstResponder()
+        case "format": apply(UInt8(argument) ?? 0)
+        case "find": _ = find(argument)
+        case "title": _ = focusTitle()
+        case "picture":
+            let image = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 200)).image { context in
+                UIColor.systemTeal.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: 320, height: 200))
+                UIColor.systemYellow.setFill()
+                context.cgContext.fillEllipse(in: CGRect(x: 110, y: 50, width: 100, height: 100))
+            }
+            if let data = image.jpegData(compressionQuality: 0.9) { insertPicture(data, size: CGSize(width: 240, height: 150)) }
         case "tree":
             let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             try? "\(value(forKey: "recursiveDescription") ?? "")".write(
@@ -65,5 +82,24 @@ extension CanvasView {
             NSLog("script selection \(offset(from: beginningOfDocument, to: range.start))..\(offset(from: beginningOfDocument, to: range.end)) text \(text(in: all) ?? "nil")")
         }
     }
+}
+
+/// Logs `presenter changed` whenever a coordinated write reaches `SNOWBOUND_PRESENTER`, a
+/// file, to check that saving tells file providers about it.
+final class Presenter: NSObject, NSFilePresenter {
+    private static var watching: Presenter?
+    let presentedItemURL: URL?
+    let presentedItemOperationQueue = OperationQueue()
+
+    private init(_ url: URL) { presentedItemURL = url }
+
+    static func watch() {
+        guard let path = ProcessInfo.processInfo.environment["SNOWBOUND_PRESENTER"] else { return }
+        let presenter = Presenter(URL(fileURLWithPath: path))
+        NSFileCoordinator.addFilePresenter(presenter)
+        watching = presenter
+    }
+
+    func presentedItemDidChange() { NSLog("presenter changed") }
 }
 #endif

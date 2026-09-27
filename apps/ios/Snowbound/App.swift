@@ -1,8 +1,30 @@
 import UIKit
-import UniformTypeIdentifiers
+
+/// Runs the library's file access under `NSFileCoordinator`, so file providers such as
+/// iCloud Drive download before it reads and learn of what it writes.
+private let coordinate: sb_coordinator = { path, write, body, context in
+    guard let path, let body else { return }
+    let url = URL(fileURLWithPath: String(cString: path))
+    var error: NSError?
+    if write {
+        NSFileCoordinator().coordinate(writingItemAt: url, options: .forMerging, error: &error) { _ in body(context) }
+    } else {
+        NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &error) { _ in body(context) }
+    }
+}
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        sb_set_coordinator(coordinate)
+        #if DEBUG
+        Presenter.watch()
+        #endif
+        return true
+    }
+
     func application(
         _ application: UIApplication,
         configurationForConnecting session: UISceneSession,
@@ -12,331 +34,182 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         configuration.delegateClass = SceneDelegate.self
         return configuration
     }
+
+    /// Edits are in the cache once stored; this gives publishing a moment before the app goes.
+    func applicationWillTerminate(_ application: UIApplication) {
+        NotificationCenter.default.post(name: PageViewController.leaving, object: nil)
+        for section in Section.all { _ = section.flush(2) }
+    }
 }
 
-/// Notebook, section and page columns as Notes lays out folders, notes and a note: side by
-/// side on a wide screen, a navigation stack on a phone.
+/// Where the reader was, reopened on the next launch as Notes reopens its last note.
+private struct Place: Codable {
+    let notebook: UUID
+    let section: String
+    let page: String?
+
+    static let key = "place"
+
+    static var saved: Place? {
+        get { UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(Place.self, from: $0) } }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: key) }
+    }
+}
+
+/// Notebooks and sections, pages and a page, as Notes lays out folders, notes and a note:
+/// side by side on a wide screen, a navigation stack on a phone.
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewControllerDelegate {
     var window: UIWindow?
-    private let split = UISplitViewController(style: .tripleColumn)
-    private let sections = SectionsViewController()
+    private let split = RootViewController(style: .tripleColumn)
+    private let notebooks = NotebooksViewController()
     private let pages = PagesViewController()
     private var showingPage = false
+    private var background = UIBackgroundTaskIdentifier.invalid
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
         split.delegate = self
+        split.scene = self
         split.preferredDisplayMode = .oneBesideSecondary
         split.preferredSplitBehavior = .tile
-        split.setViewController(sections, for: .primary)
+        split.setViewController(notebooks, for: .primary)
         split.setViewController(pages, for: .supplementary)
         split.setViewController(UIViewController(), for: .secondary)
-        sections.onOpen = { [weak self] section in self?.show(section: section) }
-        pages.onOpen = { [weak self] section, page in self?.show(section: section, page: page) }
+        notebooks.onOpen = { [weak self] tab, notebook in self?.open(tab, of: notebook) }
+        pages.onOpen = { [weak self] section, id, find in self?.show(section: section, page: id, find: find) }
+        pages.onOpenSection = { [weak self] notebook, path, id, find in
+            guard let tab = notebook.tabs.first(where: { $0.path == path }) else { return }
+            self?.open(tab, of: notebook, page: id, find: find)
+        }
         window.rootViewController = split
         window.makeKeyAndVisible()
         self.window = window
-        sections.load(Library.opening())
-        let environment = ProcessInfo.processInfo.environment
-        // The split view collapses into a stack once the window is on screen.
-        DispatchQueue.main.async { [self] in
-            if let index = environment["SNOWBOUND_SECTION"].flatMap(Int.init), let notebook = sections.notebook,
-                index < notebook.sections.count
-            {
-                show(section: notebook.sections[index])
-                if let page = environment["SNOWBOUND_PAGE"].flatMap(Int.init), let section = pages.section,
-                    page < section.headings.count
-                {
-                    show(section: section, page: page)
-                }
+        Notebooks.load()
+        notebooks.reload()
+        for notebook in Notebooks.all {
+            notebook.open { [weak self] in
+                self?.notebooks.reload()
+                self?.restore(notebook)
             }
         }
     }
 
-    private func show(section tab: Tab) {
-        pages.load(tab)
-        split.show(.supplementary)
+    /// Reopens the section and page shown last, or the scripted one.
+    private func restore(_ notebook: Notebook) {
+        let environment = ProcessInfo.processInfo.environment
+        if let index = environment["SNOWBOUND_SECTION"].flatMap(Int.init) {
+            let readable = notebook.tabs.filter(\.readable)
+            guard index < readable.count else { return }
+            open(readable[index], of: notebook) { [weak self] section in
+                guard let page = environment["SNOWBOUND_PAGE"].flatMap(Int.init), page < section.rows.count else {
+                    return
+                }
+                self?.show(section: section, page: section.rows[page].id)
+            }
+            return
+        }
+        guard let place = Place.saved, place.notebook == notebook.id,
+            let tab = notebook.tabs.first(where: { $0.path == place.section })
+        else { return }
+        open(tab, of: notebook, page: place.page)
     }
 
-    private func show(section: Section, page: Int) {
+    func open(
+        _ tab: Tab, of notebook: Notebook, page: String? = nil, find: String? = nil,
+        then: ((Section) -> Void)? = nil
+    ) {
+        guard Author.name != nil else {
+            return Author.ask(from: split) { [weak self] in self?.open(tab, of: notebook, page: page, find: find, then: then) }
+        }
+        pages.loading(tab)
+        split.show(.supplementary)
+        Section.open(tab, of: notebook) { [weak self] section, problem in
+            guard let self else { return }
+            guard let section else {
+                pages.failed(tab, problem)
+                return
+            }
+            pages.load(section)
+            notebooks.select(tab, of: notebook)
+            Place.saved = Place(notebook: notebook.id, section: tab.path, page: page)
+            if let page, section.row(of: page) != nil {
+                show(section: section, page: page, find: find)
+            }
+            then?(section)
+        }
+    }
+
+    func show(section: Section, page: String, find: String? = nil, titleFocus: Bool = false) {
         showingPage = true
-        let controller = PageViewController(section: section, page: page)
+        let controller = PageViewController(section: section, page: page, find: find, titleFocus: titleFocus)
+        controller.onOpen = { [weak self] id in self?.show(section: section, page: id) }
         split.setViewController(UINavigationController(rootViewController: controller), for: .secondary)
         split.show(.secondary)
+        pages.select(page)
+        Place.saved = Place(notebook: section.notebook.id, section: section.tab.path, page: page)
     }
 
-    /// A phone opens on the notebook's sections, as Notes opens on its folders.
+    /// Adds a page to the open section and opens it, its title ready for typing.
+    func newPage(subpage: Bool = false) {
+        guard let section = pages.section else { return }
+        let parent = subpage ? (Place.saved?.page).flatMap { section.row(of: $0)?.row.id } : nil
+        guard let id = section.newPage(under: parent) else { return }
+        show(section: section, page: id, titleFocus: true)
+    }
+
+    func search() {
+        split.show(.supplementary)
+        pages.startSearching()
+    }
+
+    /// A phone opens on the notebooks, as Notes opens on its folders.
     func splitViewController(
         _ svc: UISplitViewController, topColumnForCollapsingToProposedTopColumn proposedTopColumn: UISplitViewController.Column
     ) -> UISplitViewController.Column {
         showingPage ? proposedTopColumn : .primary
     }
-}
 
-/// A notebook's listing from `sb_notebook`.
-struct Notebook: Decodable {
-    let name: String
-    let sections: [Tab]
-}
-
-struct Tab: Decodable {
-    let name: String
-    let path: String
-    /// The section group holding it, `/`-separated; empty at the notebook's top.
-    let group: String
-    let color: [UInt8]
-    let readable: Bool
-
-    var uiColor: UIColor {
-        UIColor(red: CGFloat(color[0]) / 255, green: CGFloat(color[1]) / 255, blue: CGFloat(color[2]) / 255, alpha: 1)
-    }
-}
-
-/// Where the notebook shown comes from: the one last opened from Files, kept as a bookmark,
-/// or the bundled sample.
-enum Library {
-    private static let bookmarkKey = "notebook"
-    /// The Files location being read, held open while it is shown.
-    private static var accessed: URL?
-
-    static func opening() -> Notebook? {
-        if let path = ProcessInfo.processInfo.environment["SNOWBOUND_NOTEBOOK"] { return read(path) }
-        var stale = false
-        if let data = UserDefaults.standard.data(forKey: bookmarkKey),
-            let url = try? URL(resolvingBookmarkData: data, bookmarkDataIsStale: &stale),
-            let notebook = open(url)
-        {
-            return notebook
+    /// Composition ends and every edit is stored and published while the system allows.
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        NotificationCenter.default.post(name: PageViewController.leaving, object: nil)
+        let sections = Section.all
+        guard !sections.isEmpty, background == .invalid else { return }
+        background = UIApplication.shared.beginBackgroundTask(withName: "Saving") { [weak self] in
+            self?.finishBackground()
         }
-        // The bundled folder keeps its corpus name.
-        return Bundle.main.path(forResource: "notebook", ofType: nil).flatMap(read).map {
-            Notebook(name: "Sample", sections: $0.sections)
+        DispatchQueue.global(qos: .userInitiated).async {
+            for section in sections { _ = section.flush(20) }
+            DispatchQueue.main.async { [weak self] in self?.finishBackground() }
         }
     }
 
-    /// A notebook folder or section file chosen in Files, remembered for the next launch.
-    static func open(_ url: URL) -> Notebook? {
-        accessed?.stopAccessingSecurityScopedResource()
-        accessed = url.startAccessingSecurityScopedResource() ? url : nil
-        guard let notebook = read(url.path) else { return nil }
-        if let data = try? url.bookmarkData() { UserDefaults.standard.set(data, forKey: bookmarkKey) }
-        return notebook
+    private func finishBackground() {
+        guard background != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(background)
+        background = .invalid
     }
 
-    private static func read(_ path: String) -> Notebook? {
-        guard let json = sb_notebook(path) else { return nil }
-        defer { sb_string_free(json) }
-        return try? JSONDecoder().decode(Notebook.self, from: Data(String(cString: json).utf8))
+    /// Changes made elsewhere while away show at once.
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        for section in Section.all { section.wake() }
     }
 }
 
-/// A parsed .one section; pages are read-only copies until saving lands.
-final class Section {
-    let handle: OpaquePointer?
-    let name: String
-    let color: UIColor
-    /// Each page's title and level in the page list, 1 at the top.
-    let headings: [(title: String, level: Int)]
+/// Takes the app's keyboard shortcuts wherever focus is.
+final class RootViewController: UISplitViewController {
+    weak var scene: SceneDelegate?
 
-    init(_ tab: Tab) {
-        handle = sb_section_open(tab.path)
-        name = tab.name
-        color = tab.uiColor
-        headings = handle.map { handle in
-            (0..<sb_section_count(handle)).map {
-                (String(cString: sb_section_title(handle, $0)), Int(sb_section_level(handle, $0)))
-            }
-        } ?? []
+    override var keyCommands: [UIKeyCommand]? {
+        [
+            UIKeyCommand(title: "New Page", action: #selector(newPage), input: "n", modifierFlags: .command),
+            UIKeyCommand(
+                title: "New Subpage", action: #selector(newSubpage), input: "n", modifierFlags: [.command, .shift]),
+            UIKeyCommand(title: "Search", action: #selector(search), input: "f", modifierFlags: [.command, .alternate]),
+        ]
     }
 
-    deinit { if let handle { sb_section_free(handle) } }
-}
-
-final class SectionsViewController: UITableViewController, UIDocumentPickerDelegate {
-    private(set) var notebook: Notebook?
-    /// Sections by group, in the notebook's order.
-    private var groups: [(name: String, sections: [Tab])] = []
-    var onOpen: ((Tab) -> Void)?
-
-    init() {
-        super.init(style: .insetGrouped)
-        navigationItem.largeTitleDisplayMode = .always
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "section")
-        let open = UIBarButtonItem(
-            title: "Open Notebook", image: UIImage(systemName: "folder"), target: self, action: #selector(open))
-        navigationItem.rightBarButtonItem = open
-    }
-
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-        navigationController?.navigationBar.prefersLargeTitles = true
-    }
-
-    func load(_ notebook: Notebook?) {
-        self.notebook = notebook
-        title = notebook?.name
-        var groups: [(name: String, sections: [Tab])] = []
-        for tab in notebook?.sections ?? [] {
-            if groups.last?.name == tab.group {
-                groups[groups.count - 1].sections.append(tab)
-            } else {
-                groups.append((tab.group, [tab]))
-            }
-        }
-        self.groups = groups
-        tableView.reloadData()
-        var empty = UIContentUnavailableConfiguration.empty()
-        empty.text = notebook == nil ? "No Notebook Open" : "No Sections"
-        empty.secondaryText = notebook == nil ? "Open a notebook folder or section from Files." : nil
-        contentUnavailableConfiguration = groups.isEmpty ? empty : nil
-    }
-
-    @objc private func open() {
-        let picker = UIDocumentPickerViewController(
-            forOpeningContentTypes: [.folder, UTType(filenameExtension: "one") ?? .data])
-        picker.delegate = self
-        present(picker, animated: true)
-    }
-
-    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let url = urls.first else { return }
-        guard let notebook = Library.open(url) else {
-            let alert = UIAlertController(
-                title: "Can’t Open Notebook", message: "Choose a OneNote notebook folder or a section file.",
-                preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
-            return
-        }
-        load(notebook)
-    }
-
-    override func numberOfSections(in tableView: UITableView) -> Int { groups.count }
-
-    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        groups[section].name.isEmpty ? nil : groups[section].name.replacingOccurrences(of: "/", with: " › ")
-    }
-
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        groups[section].sections.count
-    }
-
-    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let tab = groups[indexPath.section].sections[indexPath.row]
-        let cell = tableView.dequeueReusableCell(withIdentifier: "section", for: indexPath)
-        var content = cell.defaultContentConfiguration()
-        content.text = tab.name
-        content.image = UIImage(systemName: tab.readable ? "rectangle.portrait.fill" : "lock.fill")
-        content.imageProperties.tintColor = tab.uiColor
-        if !tab.readable {
-            content.secondaryText = "Can’t be opened here"
-            content.textProperties.color = .secondaryLabel
-        }
-        cell.contentConfiguration = content
-        cell.accessoryType = tab.readable ? .disclosureIndicator : .none
-        cell.selectionStyle = tab.readable ? .default : .none
-        return cell
-    }
-
-    override func tableView(_ tableView: UITableView, willSelectRowAt indexPath: IndexPath) -> IndexPath? {
-        groups[indexPath.section].sections[indexPath.row].readable ? indexPath : nil
-    }
-
-    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        onOpen?(groups[indexPath.section].sections[indexPath.row])
-    }
-}
-
-final class PagesViewController: UITableViewController {
-    private(set) var section: Section?
-    var onOpen: ((Section, Int) -> Void)?
-
-    init() {
-        super.init(style: .plain)
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "page")
-    }
-
-    func load(_ tab: Tab) {
-        let section = Section(tab)
-        self.section = section
-        title = section.name
-        tableView.reloadData()
-        var empty = UIContentUnavailableConfiguration.empty()
-        empty.text = section.handle == nil ? "Can’t Open Section" : "No Pages"
-        contentUnavailableConfiguration = section.headings.isEmpty ? empty : nil
-    }
-
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        self.section?.headings.count ?? 0
-    }
-
-    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let heading = section!.headings[indexPath.row]
-        let cell = tableView.dequeueReusableCell(withIdentifier: "page", for: indexPath)
-        var content = cell.defaultContentConfiguration()
-        content.text = heading.title.isEmpty ? "Untitled Page" : heading.title
-        if heading.level > 1 { content.textProperties.color = .secondaryLabel }
-        // Subpages sit under their page, indented as in OneNote's page list.
-        content.directionalLayoutMargins.leading += CGFloat(heading.level - 1) * 20
-        cell.contentConfiguration = content
-        return cell
-    }
-
-    override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        guard let section else { return }
-        onOpen?(section, indexPath.row)
-    }
-}
-
-final class PageViewController: UIViewController {
-    private let section: Section
-    private let page: Int
-    private lazy var canvas = CanvasView(section: section, page: page)
-    private lazy var done = UIBarButtonItem(
-        systemItem: .done, primaryAction: UIAction { [weak self] _ in _ = self?.canvas.resignFirstResponder() })
-    private lazy var undo = UIBarButtonItem(
-        systemItem: .undo, primaryAction: UIAction { [weak self] _ in self?.canvas.undo(redo: false) })
-    private lazy var redo = UIBarButtonItem(
-        systemItem: .redo, primaryAction: UIAction { [weak self] _ in self?.canvas.undo(redo: true) })
-
-    init(section: Section, page: Int) {
-        self.section = section
-        self.page = page
-        super.init(nibName: nil, bundle: nil)
-        title = section.headings[page].title
-        navigationItem.largeTitleDisplayMode = .never
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func loadView() {
-        view = canvas
-        canvas.onChange = { [weak self] in self?.editingChanged() }
-    }
-
-    /// Notes' checkmark ends editing and puts the keyboard away; undo and redo sit beside it.
-    private func editingChanged() {
-        guard canvas.isFirstResponder else {
-            navigationItem.rightBarButtonItems = nil
-            return
-        }
-        undo.isEnabled = canvas.canUndo(redo: false)
-        redo.isEnabled = canvas.canUndo(redo: true)
-        if navigationItem.rightBarButtonItems?.first !== done {
-            navigationItem.rightBarButtonItems = [done, redo, undo]
-        }
-    }
+    @objc private func newPage() { scene?.newPage() }
+    @objc private func newSubpage() { scene?.newPage(subpage: true) }
+    @objc private func search() { scene?.search() }
 }
