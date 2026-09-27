@@ -1,0 +1,9 @@
+  L1 [To Do] [] qs0 Tag 1 To Do
+  L1 [Important[x]] [] qs0 Tag 2 Important
+  L1 [Question[x]] [] qs0 Tag 3 Question
+  L1 [Remember for later[x]] [] qs0 Tag 4 Remember for later
+  L1 [Definition[x]] [] qs0 Tag 5 Definition
+  L1 [Highlight[x]] [] qs0 Tag 6 Highlight
+  L1 [Contact[x]] [] qs0 Tag 7 Contact
+  L1 [Address[x]] [] qs0 Tag 8 Address
+  L1 [Phone number[x]] [] qs0 Tag 9 Phone number

@@ -114,6 +114,15 @@ impl<'a> Node<'a> {
         }
     }
 
+    /// Whether the reference is fcrZero or fcrNil, as OneNote leaves one whose target its
+    /// garbage collection freed.
+    pub(crate) fn freed(&self) -> bool {
+        matches!(
+            self.reference,
+            Some(Reference::Data(chunk) | Reference::NodeList(chunk)) if chunk.absent()
+        )
+    }
+
     pub(crate) fn referenced_list<'s>(&self, store: &'s Store<'a>) -> Result<&'s [Node<'a>]> {
         let Some(Reference::NodeList(chunk)) = self.reference else {
             return Err(Error {
@@ -166,6 +175,7 @@ impl<'a> RevisionIndex<'a> {
                         });
                     }
                 }
+                8 if node.freed() => {}
                 8 => {
                     let id = node.fields(store).exguid()?;
                     let manifest = node.referenced_list(store)?;

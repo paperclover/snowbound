@@ -636,9 +636,25 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             }
         }
         PageOp::Equation { text, math } => {
-            let object = text_mut(page, *text)?;
+            let (path, index) =
+                text_holder(page, *text).ok_or_else(|| invalid("Text is not on the page"))?;
+            let style = list_at(page, &path)[index]
+                .style
+                .and_then(|style| page.definitions.get(&style))
+                .map(|definition| definition.format.clone())
+                .unwrap_or_default();
+            let paragraph = &mut list_at(page, &path)[index];
+            // Runs read back through the paragraph style and format, which fill what they
+            // leave unset.
+            let inherited = style.inherit(&paragraph.format);
+            let object = paragraph.text_mut().unwrap();
             let previous = object.text.spans()[0].format.clone();
-            object.text = paragraph_formatted(math, &previous);
+            let math = Paragraph::from_runs(math.spans().iter().scan(0, |start, span| {
+                let run = (math.text()[*start..span.end].to_owned(), span.format.inherit(&inherited));
+                *start = span.end;
+                Some(run)
+            }));
+            object.text = paragraph_formatted(&math, &previous);
         }
         PageOp::Insert {
             container,

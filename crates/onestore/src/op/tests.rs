@@ -29,7 +29,7 @@ const SOURCES: &[(&str, &[u8])] = &[
     ("math", include_bytes!("../../../../corpus/math-edit/native-editor/notebook/links.one")),
     ("links", include_bytes!("../../../../corpus/link-edit/native-links/notebook/links.one")),
     ("paragraph-format", include_bytes!("../../../../corpus/paragraph-format/cold/notebook/synthetic.one")),
-    ("enter-probe", include_bytes!("../../../../evidence/structural-edits/probe-section/probe.one")),
+    ("enter-probe", include_bytes!("../../../../corpus/structural-probe/probe.one")),
 ];
 
 /// FILETIME both writers take as the edit's time.

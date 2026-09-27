@@ -108,7 +108,7 @@ impl<'a> Store<'a> {
             .lists
             .values()
             .flat_map(|list| &list.nodes)
-            .filter(|node| node.id == 0x94)
+            .filter(|node| node.id == 0x94 && !node.freed())
         {
             let mut c = node.fields(self);
             if c.read::<16>()? != guid {

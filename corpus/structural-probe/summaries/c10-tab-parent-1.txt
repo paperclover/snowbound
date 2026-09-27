@@ -1,0 +1,4 @@
+  L1 [] [] qs0 Alpha
+  L1 [] []  TABLE[Parent || ]
+    L2 [] [] qs0 Child
+  L1 [] [] qs0 Omega

@@ -1514,7 +1514,7 @@ pub(crate) fn declared_payloads(store: &Store<'_>) -> Vec<[u8; 16]> {
         .lists
         .values()
         .flat_map(|list| &list.nodes)
-        .filter(|node| node.id == 0x94)
+        .filter(|node| node.id == 0x94 && !node.freed())
         .filter_map(|node| node.payload.get(..16).and_then(|g| g.try_into().ok()))
         .collect()
 }

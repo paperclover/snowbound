@@ -566,6 +566,7 @@ impl<'a> Store<'a> {
             let last_revision_list = nodes.iter().rposition(|node| node.id == 0x10);
             for (index, node) in nodes.iter().enumerate() {
                 if let Some(Reference::NodeList(reference)) = node.reference
+                    && !reference.absent()
                     && (node.id != 0x10 || Some(index) == last_revision_list)
                 {
                     pending.push(reference);
@@ -614,7 +615,11 @@ impl<'a> Store<'a> {
             None => None,
         };
         let mut spaces = BTreeMap::new();
-        for node in root.nodes.iter().filter(|node| node.id == 8) {
+        for node in root
+            .nodes
+            .iter()
+            .filter(|node| node.id == 8 && !node.freed())
+        {
             let revisions = node
                 .referenced_list(self)?
                 .iter()
