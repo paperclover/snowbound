@@ -10,3 +10,8 @@ __pycache__/
 /tools/w7/payload/vendor/
 /resources/
 /.env
+
+# The global ignore excludes AGENTS.md; this repo keeps its own.
+!AGENTS.md
+# Build output of nested crates outside the workspace.
+**/target/
