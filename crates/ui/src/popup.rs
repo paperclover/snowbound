@@ -13,7 +13,7 @@ use nucleo_matcher::{
 use std::cell::RefCell;
 use winit::keyboard::{Key, NamedKey};
 
-const CHECK: &[&str] = &[include_str!("../assets/check.svg")];
+pub(crate) const CHECK: &[&str] = &[include_str!("../assets/check.svg")];
 /// Inset of a popup's contents, and its distance from what it drops down from.
 const PAD: f32 = 4.0;
 const ROW: f32 = 26.0;
@@ -498,7 +498,7 @@ fn state(ui: &mut Ui, id: Id) -> &mut Popup {
 }
 
 /// Takes the presses of `keys` routed this frame to the focus when it is one of `owners`.
-fn navigation(ui: &mut Ui, owners: &[Id], keys: &[NamedKey]) -> Vec<NamedKey> {
+pub fn navigation(ui: &mut Ui, owners: &[Id], keys: &[NamedKey]) -> Vec<NamedKey> {
     let Some(signal) = ui
         .focus
         .filter(|focus| owners.contains(focus))

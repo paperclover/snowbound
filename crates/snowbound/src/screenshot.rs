@@ -37,7 +37,7 @@ impl State {
         }
         for (name, appearance) in [("light", Appearance::Light), ("dark", Appearance::Dark)] {
             self.window.set_theme(Some(appearance));
-            self.ui.theme = theme(appearance);
+            self.ui.theme = theme(appearance, self.light_pages);
             // The page's box sizes the view whose pictures settle.
             self.layout(SIZE, SCALE)?;
             let paper = self.paper();

@@ -13,7 +13,7 @@ const COLORS: TextColors = TextColors {
 };
 
 /// Paint for a view at `scale` device pixels per point on a display of `display_scale`.
-pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint {
+pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint<'static> {
     Paint {
         caret: f32::from(u8::from(show_caret)),
         scale,
@@ -21,6 +21,7 @@ pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint {
         colors: COLORS,
         visible: [f32::NEG_INFINITY, f32::INFINITY],
         chrome: true,
+        found: &[],
     }
 }
 
@@ -833,6 +834,7 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
             colors: COLORS,
             visible: [f32::NEG_INFINITY, f32::INFINITY],
             chrome: true,
+            found: &[],
         },
         &mut primitives,
     )
@@ -905,6 +907,7 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
             colors: COLORS,
             visible: [f32::NEG_INFINITY, f32::INFINITY],
             chrome: true,
+            found: &[],
         },
         &mut primitives,
     )

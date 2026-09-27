@@ -11,6 +11,8 @@ mod current;
 mod disk;
 #[path = "support/ops.rs"]
 mod ops;
+#[path = "support/sweep.rs"]
+mod sweep;
 #[path = "support/tree_model.rs"]
 mod tree_model;
 
@@ -27,8 +29,9 @@ const FIXTURES: [(&[u8], &[u8]); 2] = [
 
 #[test]
 fn twelve_client_tree_schedules_preserve_content_and_indentation() {
-    let mut random = 1932_u64;
-    for _ in 0..80 {
+    let runs = sweep::seeds(0..80, 4);
+    let mut random = 1932 + runs.start;
+    for _ in runs {
         let input: Vec<_> = (0..241)
             .map(|_| {
                 random ^= random << 13;

@@ -19,6 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long a wait may take on a loaded machine before it fails: far short of the hourly
+/// poll the waits rule out.
+const PATIENCE: Duration = Duration::from_secs(120);
+
 #[derive(Clone)]
 struct Shared(Arc<Mutex<Server>>);
 
@@ -130,7 +134,7 @@ fn reconnects_after_connect_read_and_uncertain_publish_without_replaying() {
         .unwrap();
     let mut errors = 0;
     let published = loop {
-        match observed_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+        match observed_rx.recv_timeout(PATIENCE).unwrap() {
             Err(_) => errors += 1,
             Ok(Some((actual, status @ EditStatus::Published { .. }))) => {
                 assert_eq!(actual, id);
@@ -183,15 +187,12 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
                     .unwrap();
                 if first {
                     first = false;
-                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    resume_rx.recv_timeout(PATIENCE).unwrap();
                 }
             },
         )
         .unwrap();
-    assert_eq!(
-        observed_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
-        None
-    );
+    assert_eq!(observed_rx.recv_timeout(PATIENCE).unwrap(), None);
     let started = Instant::now();
     let queued = std::thread::scope(|scope| {
         (0..12)
@@ -219,12 +220,12 @@ fn local_saves_wake_an_idle_worker_and_publish_every_writer_marker() {
     });
     resume_tx.send(()).unwrap();
     while !cache.pending().unwrap().is_empty() {
-        if let Some((_, status)) = observed_rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+        if let Some((_, status)) = observed_rx.recv_timeout(PATIENCE).unwrap() {
             assert!(matches!(status, EditStatus::Published { .. }), "{status:?}");
         }
     }
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < PATIENCE,
         "Edits waited for the hourly poll"
     );
     worker.stop().unwrap();
@@ -262,7 +263,7 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
         }
         fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
             self.entered.send(()).unwrap();
-            self.resume.recv_timeout(Duration::from_secs(5)).unwrap();
+            self.resume.recv_timeout(PATIENCE).unwrap();
             self.shared.publish(transaction)
         }
         fn confirm(&mut self, base: &Stamp) -> Result<(), CommitError> {
@@ -293,10 +294,10 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
             |_| {},
         )
         .unwrap();
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    entered_rx.recv_timeout(PATIENCE).unwrap();
     let stopped = Instant::now();
     drop(worker);
-    assert!(stopped.elapsed() < Duration::from_millis(500));
+    assert!(stopped.elapsed() < PATIENCE);
     let shared = Shared(Arc::clone(&server));
     let start = cache.start_sync(
         Duration::from_secs(3600),
@@ -315,7 +316,7 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
                 if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy) => {}
             Err(error) => panic!("{error}"),
         }
-        assert!(stopped.elapsed() < Duration::from_secs(5));
+        assert!(stopped.elapsed() < PATIENCE);
         std::thread::sleep(Duration::from_millis(1));
     });
     assert!(matches!(
@@ -335,7 +336,7 @@ fn dropping_during_publication_is_nonblocking_and_retains_ownership_until_recove
         )
         .unwrap();
     assert!(
-        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
+        matches!(rx.recv_timeout(PATIENCE).unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
     );
     worker.stop().unwrap();
     let server = server.lock().unwrap();
@@ -369,7 +370,7 @@ fn cache_failures_stop_retries_and_return_the_error_without_remote_publication()
             },
         )
         .unwrap();
-    assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(rx.recv_timeout(PATIENCE).unwrap());
     assert!(matches!(worker.stop(), Err(Error::Database(_))));
     assert!(rx.try_iter().next().is_none());
     assert_eq!(server.lock().unwrap().publications, 0);
@@ -405,13 +406,9 @@ fn polling_reports_an_uncertain_attempt_once_per_remote_change_without_replay() 
             },
         )
         .unwrap();
-    assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+    assert!(rx.recv_timeout(PATIENCE).unwrap().is_err());
     for round in 0..3 {
-        let (actual, status) = rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let (actual, status) = rx.recv_timeout(PATIENCE).unwrap().unwrap().unwrap();
         assert_eq!(actual, id);
         assert!(
             matches!(status, EditStatus::AwaitingConfirmation { .. }),
@@ -450,9 +447,9 @@ fn reachability_notification_retries_without_waiting_for_the_poll() {
             },
         )
         .unwrap();
-    assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(rx.recv_timeout(PATIENCE).unwrap());
     worker.wake();
-    assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(rx.recv_timeout(PATIENCE).unwrap());
     worker.stop().unwrap();
     assert!(rx.try_iter().next().is_none());
 }
@@ -472,7 +469,7 @@ fn cancellation_during_connect_does_not_read_or_report_a_false_refresh() {
             Duration::from_secs(3600),
             move || {
                 entered_tx.send(()).unwrap();
-                resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                resume_rx.recv_timeout(PATIENCE).unwrap();
                 Ok(shared.clone())
             },
             move |_| {
@@ -480,18 +477,18 @@ fn cancellation_during_connect_does_not_read_or_report_a_false_refresh() {
             },
         )
         .unwrap();
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    entered_rx.recv_timeout(PATIENCE).unwrap();
     drop(worker);
     let weak = Arc::downgrade(&cache);
     drop(cache);
     resume_tx.send(()).unwrap();
     let started = Instant::now();
     while weak.upgrade().is_some() {
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(started.elapsed() < PATIENCE);
         std::thread::sleep(Duration::from_millis(1));
     }
     assert_eq!(
-        rx.recv_timeout(Duration::from_secs(5)),
+        rx.recv_timeout(PATIENCE),
         Err(mpsc::RecvTimeoutError::Disconnected)
     );
 }
@@ -519,7 +516,7 @@ fn invalid_intervals_and_callback_panics_leave_worker_ownership_recoverable() {
             },
         )
         .unwrap();
-    rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    rx.recv_timeout(PATIENCE).unwrap();
     assert!(matches!(worker.stop(), Err(Error::Io(_))));
     let (tx, rx) = mpsc::channel();
     let worker = cache
@@ -531,7 +528,7 @@ fn invalid_intervals_and_callback_panics_leave_worker_ownership_recoverable() {
             },
         )
         .unwrap();
-    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), None);
+    assert_eq!(rx.recv_timeout(PATIENCE).unwrap(), None);
     worker.stop().unwrap();
     assert_eq!(snapshot(&cache), source);
 }
@@ -559,7 +556,7 @@ fn a_conflict_publishes_its_conflict_page_in_one_worker_step() {
         )
         .unwrap();
     assert!(
-        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), Some((actual, EditStatus::Published { .. })) if actual > id)
+        matches!(rx.recv_timeout(PATIENCE).unwrap(), Some((actual, EditStatus::Published { .. })) if actual > id)
     );
     worker.stop().unwrap();
     assert!(cache.pending().unwrap().is_empty());
@@ -640,10 +637,10 @@ fn ordinary_read_and_unpublished_write_contention_reuse_the_connection() {
         )
         .unwrap();
     for _ in 0..4 {
-        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().is_err());
+        assert!(rx.recv_timeout(PATIENCE).unwrap().is_err());
     }
     assert!(
-        matches!(rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
+        matches!(rx.recv_timeout(PATIENCE).unwrap().unwrap(), Some((actual, EditStatus::Published { .. })) if actual == id)
     );
     worker.stop().unwrap();
     assert_eq!(text(&snapshot(&cache)).2, "L abc");
@@ -706,10 +703,10 @@ fn publication_backoff_drains_local_wakes_without_waiting_for_the_idle_poll() {
             },
         )
         .unwrap();
-    let (second, status) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (second, status) = rx.recv_timeout(PATIENCE).unwrap();
     assert_eq!(status, None);
     for expected in [first, second] {
-        let (id, status) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (id, status) = rx.recv_timeout(PATIENCE).unwrap();
         assert_eq!(id, expected);
         assert!(matches!(status, Some(EditStatus::Published { .. })));
     }

@@ -24,7 +24,7 @@ accesskit_winit = { version = "0.34.0", default-features = false, features = ["r
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc2 = "0.5.2"
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell", "NSOpenPanel", "NSPanel", "NSSavePanel"] }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell", "NSOpenPanel", "NSPanel", "NSSavePanel"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -58,7 +58,7 @@ fn layout(ui: &mut Ui, session: &Session, menu: bool) -> Vec<Command> {
             ..Spec::default()
         },
     );
-    let rows = page_rows(ui, &theme, &section, session, "");
+    let rows = page_rows(ui, &theme, &section, session, &HashSet::new());
     commands.extend(rows.clicked.map(Command::OpenPage));
     ui.close();
     ui.close();

@@ -3,6 +3,7 @@
 //! cache, which stores each edit at once and publishes it in the background.
 
 use crate::{Result, owned, report, string};
+use canvas::search::{Entry, Index, Query};
 use notebook::{
     Remote, Replica,
     discover::{Folder, SectionState},
@@ -10,11 +11,9 @@ use notebook::{
     smb::{Client, Credentials},
 };
 use onestore::{
-    CommitError, CommitState, ExGuid, PageCreation, PageEdit, RevisionIndex, Stamp, Store,
-    Transaction,
-    document::Document,
+    CommitError, CommitState, ExGuid, PageCreation, PageEdit, Stamp, Transaction,
     op::{Edit, Op, SectionOp},
-    page::{Page, PageObject, PageParagraph, ParagraphContent},
+    page::Page,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -172,11 +171,10 @@ fn files(folder: &Folder, files: &mut BTreeMap<String, String>) {
     }
 }
 
-/// Page texts of a section as last read, and when its file was last checked.
-struct Indexed {
-    checked: Instant,
+/// When a section's file was last checked for changes, and how it was then.
+struct Checked {
+    at: Instant,
     stamp: Vec<u8>,
-    pages: Vec<(ExGuid, String, String)>,
 }
 
 pub struct Library {
@@ -184,7 +182,7 @@ pub struct Library {
     notebook: Mutex<Option<Notebook>>,
     place: Place,
     cache: PathBuf,
-    index: Mutex<HashMap<String, Indexed>>,
+    index: Mutex<(HashMap<String, Checked>, Index)>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -665,65 +663,6 @@ const CHANGED: u32 = 2;
 /// The section refused an edit; the page shown returns to what is stored.
 const REJECTED: u32 = 4;
 
-/// The text a paragraph shows, without hidden field codes.
-pub(crate) fn shown(paragraph: &onestore::page::text::Paragraph) -> String {
-    let mut start = 0;
-    paragraph
-        .spans()
-        .iter()
-        .filter_map(|span| {
-            let run = &paragraph.text()[start..span.end];
-            start = span.end;
-            (span.format.hidden != Some(true)).then_some(run)
-        })
-        .collect()
-}
-
-/// A page's text, paragraph by paragraph, the title first.
-pub(crate) fn page_text(page: &Page) -> String {
-    fn walk(paragraphs: &[PageParagraph], out: &mut Vec<String>) {
-        for paragraph in paragraphs {
-            match &paragraph.content {
-                ParagraphContent::Text(text) => out.push(shown(&text.text)),
-                ParagraphContent::Table(table) => {
-                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
-                        walk(&cell.paragraphs, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for object in &page.objects {
-        match object {
-            PageObject::Title(title) => {
-                for outline in &title.outlines {
-                    walk(&outline.paragraphs, &mut out);
-                }
-            }
-            PageObject::Outline(outline) => walk(&outline.paragraphs, &mut out),
-            _ => {}
-        }
-    }
-    out.join("\n")
-}
-
-/// Each page of a section file with its title and text.
-fn section_texts(bytes: &[u8]) -> Result<Vec<(ExGuid, String, String)>> {
-    let store = Store::parse(bytes)?;
-    let index = RevisionIndex::parse(&store)?;
-    let document = Document::parse(&index)?;
-    let mut pages = Vec::new();
-    for (space, id) in document.pages()? {
-        let revision = document.active(space)?;
-        let (title, _) = Page::heading(revision, id);
-        let page = Page::from_revision(revision, id)?;
-        pages.push((space, title, page_text(&page)));
-    }
-    Ok(pages)
-}
-
 #[derive(serde::Serialize)]
 pub(crate) struct Found {
     /// The section's catalog path.
@@ -734,81 +673,63 @@ pub(crate) struct Found {
     pub(crate) snippet: String,
 }
 
-/// Up to 60 characters either side of the first place `lower` occurs in `text`, on its line.
-fn snippet(text: &str, lower: &str) -> Option<String> {
-    let line = text
-        .lines()
-        .find(|line| line.to_lowercase().contains(lower))?;
-    let chars: Vec<char> = line.chars().collect();
-    let folded: Vec<char> = line.to_lowercase().chars().collect();
-    let needle: Vec<char> = lower.chars().collect();
-    // Lowercasing can change a line's length; then the match is shown from the line start.
-    let at = (folded.len() == chars.len())
-        .then(|| {
-            folded
-                .windows(needle.len())
-                .position(|window| window == needle)
-        })
-        .flatten()
-        .unwrap_or(0);
-    let start = at.saturating_sub(60);
-    let end = (at + needle.len() + 60).min(chars.len());
-    let mut text: String = chars[start..end].iter().collect();
-    if start > 0 {
-        text.insert(0, '…');
-    }
-    if end < chars.len() {
-        text.push('…');
-    }
-    Some(text)
-}
-
 impl Library {
-    /// Pages of the notebook whose title or text holds `query`, ignoring case: the open
-    /// section as its edits leave it, others as stored, reread when their file changed.
+    /// Pages of the notebook holding every word of `query` in their title or text, as the
+    /// desktop searches: the open section as its edits leave it, others as stored, read
+    /// again when their file changed.
     pub(crate) fn search(&self, open: Option<(&str, &Section)>, query: &str) -> Result<Vec<Found>> {
-        let lower = query.to_lowercase();
-        let mut found = Vec::new();
-        for tab in self.tabs()?.into_iter().filter(|tab| tab.readable) {
-            let pages = match open.filter(|(path, _)| *path == tab.path) {
+        let tabs: Vec<String> = self
+            .tabs()?
+            .into_iter()
+            .filter(|tab| tab.readable)
+            .map(|tab| tab.path)
+            .collect();
+        let mut indexed = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        let (checked, index) = &mut *indexed;
+        for path in &tabs {
+            match open.filter(|(open, _)| open == path) {
                 Some((_, section)) => {
                     let section = &section.shared.section;
-                    section
-                        .pages()?
-                        .into_iter()
-                        .map(|(space, title, _)| {
-                            Ok((space, title, page_text(&section.page(space)?)))
-                        })
-                        .collect::<Result<Vec<_>>>()?
+                    let mut entries = Vec::new();
+                    for (space, ..) in section.pages()? {
+                        let modified = index.get(path, space).map_or(0, |entry| entry.modified);
+                        entries.push(Entry::new(path, space, &section.page(space)?, modified));
+                    }
+                    index.retain(|entry| entry.section != *path);
+                    entries.into_iter().for_each(|entry| index.set(entry));
+                    checked.remove(path);
                 }
-                None => match report(self.indexed(&tab.path)) {
-                    Some(pages) => pages,
-                    None => continue,
-                },
-            };
-            for (space, title, text) in pages {
-                let snippet = snippet(&text, &lower);
-                if title.to_lowercase().contains(&lower) || snippet.is_some() {
-                    found.push(Found {
-                        section: tab.path.clone(),
-                        page: space.to_string(),
-                        title: title.replace(|char: char| char.is_control(), " "),
-                        snippet: snippet.unwrap_or_default(),
-                    });
+                None => {
+                    report(self.reindex(path, checked, index));
                 }
             }
         }
-        Ok(found)
+        index.retain(|entry| tabs.contains(&entry.section));
+        Ok(index
+            .search(&Query::new(query), |_| true)
+            .into_iter()
+            .map(|found| Found {
+                section: found.section,
+                page: found.space.to_string(),
+                title: found.title.replace(|char: char| char.is_control(), " "),
+                snippet: found.snippet,
+            })
+            .collect())
     }
 
-    /// The pages of the section at catalog `path` with their texts, read again only when
-    /// the file changed, and checked at most every 30 seconds.
-    fn indexed(&self, path: &str) -> Result<Vec<(ExGuid, String, String)>> {
-        let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(indexed) = index.get(path)
-            && indexed.checked.elapsed() < Duration::from_secs(30)
+    /// Reads the section at catalog `path` into `index` again when its file changed, and
+    /// checks at most every 30 seconds.
+    fn reindex(
+        &self,
+        path: &str,
+        checked: &mut HashMap<String, Checked>,
+        index: &mut Index,
+    ) -> Result<()> {
+        if checked
+            .get(path)
+            .is_some_and(|known| known.at.elapsed() < Duration::from_secs(30))
         {
-            return Ok(indexed.pages.clone());
+            return Ok(());
         }
         let (stamp, read): (Vec<u8>, Reader) = match &self.place {
             Place::Share { root, .. } => {
@@ -829,19 +750,22 @@ impl Library {
             Place::Folder(root) => local(root.join(path))?,
             Place::File(file) => local(file.clone())?,
         };
-        let pages = match index.remove(path) {
-            Some(indexed) if indexed.stamp == stamp => indexed.pages,
-            _ => section_texts(&read()?)?,
-        };
-        index.insert(
+        if checked.get(path).is_none_or(|known| known.stamp != stamp) {
+            let pages = session::stored_pages(&read()?)?;
+            index.retain(|entry| entry.section != path);
+            for stored in pages {
+                let modified = stored.modified.map_or(0, u64::from);
+                index.set(Entry::new(path, stored.space, &stored.page, modified));
+            }
+        }
+        checked.insert(
             path.to_owned(),
-            Indexed {
-                checked: Instant::now(),
+            Checked {
+                at: Instant::now(),
                 stamp,
-                pages: pages.clone(),
             },
         );
-        Ok(pages)
+        Ok(())
     }
 }
 

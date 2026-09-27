@@ -30,6 +30,8 @@ pub enum Action {
     Fold(String),
     NewNotebook,
     OpenNotebook,
+    /// Opens the Options dialog, which macOS reaches from the application menu instead.
+    Options,
     /// A row's context menu, opened here.
     Menu(Target, [f32; 2]),
     /// Ends renaming, with the name typed or without.
@@ -179,10 +181,14 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
             ..Spec::default()
         },
     );
+    let options = ("options", art::OPTIONS, "Options", Action::Options);
     for (part, icon, label, chosen) in [
         ("new", art::PLUS, "New Notebook", Action::NewNotebook),
         ("open", art::NOTEBOOK, "Open Existing", Action::OpenNotebook),
-    ] {
+    ]
+    .into_iter()
+    .chain((!cfg!(target_os = "macos")).then_some(options))
+    {
         let (row, _) = tree_row(
             ui,
             tree,
@@ -555,6 +561,7 @@ impl crate::State {
             }
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
             Some(Action::OpenNotebook) => self.commands.push(crate::Command::OpenNotebook),
+            Some(Action::Options) => self.open_options(),
             None => {}
         }
     }

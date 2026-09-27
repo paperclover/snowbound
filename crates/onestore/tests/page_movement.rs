@@ -11,6 +11,8 @@ use onestore::{
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/sweep.rs"]
+mod sweep;
 
 const SOURCE: &[u8] =
     include_bytes!("../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one");
@@ -426,7 +428,13 @@ fn grouped_page_levels_and_membership_survive_each_storage_interruption() {
         let old = current::current(source);
         let new = current::current(prepared.as_bytes());
         assert_eq!(new.len(), old.len());
-        for write_limit in [1, 17, 4096] {
+        // Byte-at-a-time writes tear the commit at every byte, a full sweep's matrix.
+        let limits: &[usize] = if sweep::full().is_some() {
+            &[1, 17, 4096]
+        } else {
+            &[17, 4096]
+        };
+        for &write_limit in limits {
             let mut complete = disk::Disk {
                 visible: source.to_vec(),
                 durable: source.to_vec(),

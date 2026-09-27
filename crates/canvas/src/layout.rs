@@ -4,7 +4,7 @@ use parley::{
     FontStyle, FontWeight, GenericFamily, Layout, LayoutContext, OverflowWrap,
     PositionedLayoutItem, StyleProperty,
     editing::{Cursor, Selection},
-    fontique::{Blob, FontInfo},
+    fontique::{Blob, FontInfo, SourceCache},
 };
 use skrifa::{FontRef, MetadataProvider, raw::TableProvider, string::StringId};
 use std::{
@@ -26,6 +26,7 @@ pub struct TextEngine {
 }
 
 /// A font laid out in place of a family.
+#[derive(Clone)]
 pub struct Substitute {
     pub name: &'static str,
     /// Its faces as registered for the family.
@@ -132,7 +133,11 @@ impl Default for TextEngine {
     /// An engine that lays out each bundled family in its substitute where it is missing.
     fn default() -> Self {
         let mut engine = Self {
-            fonts: FontContext::default(),
+            // Clones share loaded font files, so glyphs one lays out draw from the same cache.
+            fonts: FontContext {
+                source_cache: SourceCache::new_shared(),
+                ..FontContext::default()
+            },
             context: LayoutContext::default(),
             arial_substitutes: BTreeSet::new(),
             substitutes: BTreeMap::new(),
@@ -147,6 +152,18 @@ impl Default for TextEngine {
             }
         }
         engine
+    }
+}
+
+/// Another engine with the same fonts and substitutes, to lay out on another thread.
+impl Clone for TextEngine {
+    fn clone(&self) -> Self {
+        Self {
+            fonts: self.fonts.clone(),
+            context: LayoutContext::default(),
+            arial_substitutes: self.arial_substitutes.clone(),
+            substitutes: self.substitutes.clone(),
+        }
     }
 }
 

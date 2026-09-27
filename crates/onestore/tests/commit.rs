@@ -209,3 +209,101 @@ fn bounded_file_reads_reject_partial_images_and_release_the_owner() {
     assert_eq!(fs::read(&path).unwrap(), bytes);
     fs::remove_file(path).unwrap();
 }
+
+/// Zeroes the chunk reference of the file node at `offset`, as OneNote's garbage
+/// collection leaves a node whose target it freed.
+fn free_reference(bytes: &mut [u8], offset: usize) {
+    let header = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let stp = [8, 4, 2, 4][(header >> 23 & 3) as usize];
+    let cb = [4, 8, 1, 2][(header >> 25 & 3) as usize];
+    bytes[offset + 4..offset + 4 + stp + cb].fill(0);
+}
+
+#[test]
+fn garbage_collected_references_read_as_absent_and_accept_appends() {
+    let source = fs::read("../../corpus/page-lifecycle/removal/features/native/after/notebook/Lifecycle.one")
+        .unwrap();
+    let store = Store::parse(&source).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let pages = document.pages().unwrap();
+    let live = |space: &ExGuid| *space == index.root || pages.iter().any(|(page, _)| page == space);
+    let payloads = |spaces: &mut dyn Iterator<Item = &ExGuid>| {
+        let mut guids = std::collections::BTreeSet::new();
+        for space in spaces {
+            for rid in index.spaces[space].revisions.keys() {
+                for object in index.resolve(*space, *rid).unwrap().objects.values() {
+                    if let Some(onestore::FileDataReference::Internal(guid)) =
+                        object.file_reference().unwrap()
+                    {
+                        guids.insert(guid);
+                    }
+                }
+            }
+        }
+        guids
+    };
+    let deleted: Vec<_> = index.spaces.keys().filter(|space| !live(space)).copied().collect();
+    let referenced = payloads(&mut index.spaces.keys().filter(|space| live(space)));
+    let orphans: Vec<[u8; 16]> = store
+        .lists
+        .values()
+        .flat_map(|list| &list.nodes)
+        .filter(|node| node.id == 0x94)
+        .map(|node| node.payload[..16].try_into().unwrap())
+        .filter(|guid| !referenced.contains(guid))
+        .collect();
+    assert!(!deleted.is_empty() && !orphans.is_empty());
+    let mut collected = source.clone();
+    for node in store.lists.values().flat_map(|list| &list.nodes) {
+        let tail = |width: usize| &node.payload[node.payload.len() - width..];
+        let freed = match node.id {
+            8 => deleted.iter().any(|space| {
+                tail(20) == [space.guid.as_slice(), &space.n.to_le_bytes()].concat()
+            }),
+            0x94 => orphans.iter().any(|guid| node.payload[..16] == *guid),
+            _ => false,
+        };
+        if freed {
+            free_reference(&mut collected, node.offset);
+        }
+    }
+    let store = Store::parse(&collected).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    index.validate_current().unwrap();
+    assert!(deleted.iter().all(|space| !index.spaces.contains_key(space)));
+    assert_eq!(Document::parse(&index).unwrap().pages().unwrap(), pages);
+    for guid in &orphans {
+        assert_eq!(
+            store.file_data(*guid).unwrap_err().message,
+            "File-data object is not declared"
+        );
+    }
+
+    let arena = Arena::default();
+    let (space, object, transaction) = document
+        .spaces
+        .iter()
+        .flat_map(|(space, view)| {
+            let nodes = view.active().map(|revision| &revision.nodes);
+            nodes.into_iter().flatten().filter_map(|(id, node)| match &node.kind {
+                Kind::RichText { text, .. } => Some((*space, *id, text.encode_utf16().count())),
+                _ => None,
+            })
+        })
+        .find_map(|(space, object, length)| {
+            let mut section = Section::open(&arena, collected.clone()).unwrap();
+            let op = PageOp::Text {
+                text: object,
+                range: 0..length as u32,
+                with: "After collection".into(),
+            };
+            let edit = Edit { at: 133_700_000_000_000_000, ops: vec![Op::Page { space, op }] };
+            section.apply("Author", &edit).ok()?;
+            Some((space, object, section.seal().unwrap().unwrap()))
+        })
+        .unwrap();
+    let mut written = collected.clone();
+    transaction.apply(&mut written).unwrap();
+    assert_eq!(text_of(&written, space, object), "After collection");
+}

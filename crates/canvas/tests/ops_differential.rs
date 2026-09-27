@@ -2,7 +2,8 @@
 //! oracle (`op::predict`) predicts from them, read back so once sealed, and hold the editor's
 //! page or what it lowered whole stores: every editor operation alone and in random sequences with undo and redo, on every page of the corpus sections
 //! below and of any named in `OPS_SWEEP_SECTIONS` (`:`-separated paths; the structural
-//! probe section, which `structural_roundtrip` sweeps, takes minutes).
+//! probe section, which `structural_roundtrip` sweeps, takes minutes). The smoke slice takes
+//! the first pages of each section.
 
 use canvas::{
     document::TextPosition,
@@ -17,6 +18,9 @@ use onestore::{
     page::Page,
 };
 use std::{collections::BTreeMap, path::Path};
+
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 
 const SECTIONS: [&str; 15] = [
     "corpus/outline-edit/before/notebook/synthetic.one",
@@ -634,12 +638,12 @@ fn sweep(
     random: &mut Random,
     engine: &mut TextEngine,
     tally: &mut Tally,
-    sequences: usize,
+    pages: usize,
 ) {
     let image = std::fs::read(path).unwrap();
     let arena = Arena::default();
     let mut section = Section::open(&arena, image.clone()).unwrap();
-    for (space, title, _) in section.pages().unwrap() {
+    for (space, title, _) in section.pages().unwrap().into_iter().take(pages) {
         let Ok(page) = section.page(space) else {
             continue;
         };
@@ -650,7 +654,7 @@ fn sweep(
             .iter()
             .map(|kind| vec![*kind])
             .chain(KINDS.iter().map(|kind| vec![*kind, Kind::Undo, Kind::Redo]))
-            .chain((0..sequences).map(|_| {
+            .chain((0..4).map(|_| {
                 (0..3 + random.below(8))
                     .map(|_| KINDS[random.below(KINDS.len())])
                     .collect()
@@ -695,14 +699,14 @@ fn editor_ops_store_the_editor_s_page() {
     if let Some(extra) = std::env::var_os("OPS_SWEEP_SECTIONS") {
         paths.extend(std::env::split_paths(&extra));
     }
-    let seed = std::env::var("OPS_SWEEP_SEED").map_or(1, |seed| seed.parse().unwrap());
-    let sequences = std::env::var("OPS_SWEEP_SEQUENCES").map_or(4, |n| n.parse().unwrap());
-    let mut random = Random(seed);
+    let full = sweep::full();
+    let pages = if full.is_some() { usize::MAX } else { 2 };
+    let mut random = Random(1 + full.unwrap_or(0));
     let mut engine = TextEngine::default();
     let mut tally = Tally::default();
     for path in &paths {
         let start = std::time::Instant::now();
-        sweep(path, &mut random, &mut engine, &mut tally, sequences);
+        sweep(path, &mut random, &mut engine, &mut tally, pages);
         if std::env::var_os("OPS_SWEEP_DEBUG").is_some() {
             eprintln!("TIME {:?} {}", start.elapsed(), path.display());
         }

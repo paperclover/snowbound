@@ -630,13 +630,13 @@ fn dropping_during_connection_keeps_cache_owned_until_the_worker_finishes() {
         1024 * 1024,
         move || {
             entered.send(()).unwrap();
-            stalled.recv_timeout(Duration::from_secs(10)).unwrap();
+            stalled.recv_timeout(Duration::from_secs(120)).unwrap();
             Err(std::io::ErrorKind::TimedOut.into())
         },
         || {},
     )
     .unwrap();
-    connecting.recv_timeout(Duration::from_secs(5)).unwrap();
+    connecting.recv_timeout(Duration::from_secs(120)).unwrap();
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let after = edited(&before, "Saved during connection ");
@@ -646,7 +646,7 @@ fn dropping_during_connection_keeps_cache_owned_until_the_worker_finishes() {
         drop(section);
         dropped.send(()).unwrap();
     });
-    finished.recv_timeout(Duration::from_secs(2)).unwrap();
+    finished.recv_timeout(Duration::from_secs(60)).unwrap();
     assert!(matches!(
         notebook::Replica::open(&cache),
         Err(notebook::Error::Database(error))

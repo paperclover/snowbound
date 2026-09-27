@@ -24,7 +24,7 @@ func titleDate(_ date: Date = Date()) -> (date: String, time: String) {
     return (day, formatter.string(from: date))
 }
 
-/// Who edits name, as OneNote names the Office user; asked once.
+/// The user name edits are stored under, OneNote's Personalize setting; asked once.
 enum Author {
     private static let key = "author"
 
@@ -33,18 +33,19 @@ enum Author {
         set { UserDefaults.standard.set(newValue, forKey: key) }
     }
 
-    /// Asks for the name OneNote shows beside changes, then runs `then`.
+    /// Asks for the user name OneNote shows beside changes, then runs `then`.
     static func ask(from controller: UIViewController, then: @escaping () -> Void) {
         let alert = UIAlertController(
-            title: "What’s Your Name?",
-            message: "OneNote shows it beside the pages and changes you make.", preferredStyle: .alert)
+            title: "Personalize",
+            message: "OneNote shows your user name beside the pages and changes you make.",
+            preferredStyle: .alert)
         let save = UIAlertAction(title: "Continue", style: .default) { [weak alert] _ in
             name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespaces)
             then()
         }
         alert.addTextField { field in
             field.text = name
-            field.placeholder = "Name"
+            field.placeholder = "User name"
             field.textContentType = .name
             field.autocapitalizationType = .words
             save.isEnabled = !(field.text ?? "").isEmpty

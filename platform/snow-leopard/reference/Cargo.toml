@@ -1,0 +1,12 @@
+[package]
+name = "reference"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Paints the render-probe scene through draw over wgpu, on the dev Mac."
+
+[dependencies]
+draw = { path = "../../../crates/draw" }
+wgpu = "30.0.1"
+pollster = "0.4"
+png = "0.18"

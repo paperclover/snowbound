@@ -11,6 +11,8 @@ mod current;
 mod disk;
 #[path = "support/ops.rs"]
 mod ops;
+#[path = "support/sweep.rs"]
+mod sweep;
 
 const SOURCE: &[u8] = include_bytes!("../../../corpus/outline-edit/before/notebook/synthetic.one");
 
@@ -464,7 +466,7 @@ fn repeated_geometry_changes_and_expansion_match_an_independent_model() {
     let text = view.nodes[&paragraph].content[0];
     let (add, _, _) = ops::new_outline(144.0, 36.0, "Second");
     let original = ops::page_op(&original, sid, add).unwrap().image;
-    for seed in 1..=16_u64 {
+    for seed in sweep::seeds(1..17, 16) {
         let mut rng = seed;
         let mut source = original.clone();
         let mut layout = serde_json::to_value(&view.nodes[&outline].layout).unwrap();

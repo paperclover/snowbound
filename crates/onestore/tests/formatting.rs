@@ -4,6 +4,8 @@ mod ops;
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/sweep.rs"]
+mod sweep;
 use onestore::{
     ExGuid, RevisionIndex, Store, TextAttribute as A,
     document::{Document, Kind},
@@ -49,7 +51,7 @@ fn overlapping_unicode_format_edits_match_an_independent_character_model() {
     let text = "abcdefgh 東京 🦀 café\rSecond\tline";
     let original = onestore::create_section("format.one", text, "Author").unwrap();
     let (sid, id) = target(&original);
-    for seed in 1..=16_u64 {
+    for seed in sweep::seeds(1..17, 16) {
         let mut rng = seed;
         let mut source = original.clone();
         let mut expected = characters(&source, sid, id);

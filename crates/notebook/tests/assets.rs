@@ -207,7 +207,9 @@ fn download_network_wait_does_not_block_local_edits() {
         }
         fn read(&mut self, _: &str, _: usize) -> io::Result<Vec<u8>> {
             self.entered.send(()).unwrap();
-            self.released.recv_timeout(Duration::from_secs(5)).unwrap();
+            self.released
+                .recv_timeout(Duration::from_secs(120))
+                .unwrap();
             Ok(self.bytes.clone())
         }
     }
@@ -227,7 +229,7 @@ fn download_network_wait_does_not_block_local_edits() {
                 .fetch_asset(&mut source, "synthetic.one", &name, 1024)
                 .unwrap()
         });
-        waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiting.recv_timeout(Duration::from_secs(120)).unwrap();
         let text = first_text(&snapshot(&cache));
         let id = model_ops::save(&cache, text, |page| {
             model_ops::replace_text(page, text, 0..0, "during download ")

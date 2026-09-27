@@ -413,26 +413,15 @@ impl Canvas {
         Ok(true)
     }
 
-    /// Selects the first place `query` occurs on the page, ignoring case.
+    /// Selects the first match of `query` on the page, as the search that found it matches.
     fn find(&mut self, query: &str) -> Result<bool> {
-        let lower: Vec<u16> = query.to_lowercase().encode_utf16().collect();
-        if lower.is_empty() {
-            return Ok(false);
-        }
-        let found = self.page.editor.outlines().iter().find_map(|outline| {
-            let text: Vec<u16> = outline.shown_text().to_lowercase().encode_utf16().collect();
-            let at = text
-                .windows(lower.len())
-                .position(|window| window == lower)?;
-            // Lowercasing can change the length; the match is then only found in place.
-            (text.len() == outline.shown_text().encode_utf16().count())
-                .then_some((outline.id, at as u32))
-        });
-        let Some((id, at)) = found else {
+        let query = canvas::search::Query::new(query);
+        let Some(&(id, selection)) = canvas::search::page_matches(&self.page.editor, &query).first()
+        else {
             return Ok(false);
         };
         self.page.editor.focus_outline(id)?;
-        self.select([at, at + lower.len() as u32])?;
+        self.page.editor.select(selection)?;
         Ok(true)
     }
 
@@ -447,7 +436,7 @@ impl Canvas {
                 outline
                     .document()
                     .paragraphs()
-                    .map(library::shown)
+                    .map(canvas::search::shown)
                     .collect::<Vec<_>>()
                     .join("\n")
             })
@@ -511,7 +500,7 @@ impl Canvas {
 
     /// The selection rectangles of a range, one or more per line.
     fn range_rects(&self, range: [u32; 2]) -> Result<Vec<[f32; 4]>> {
-        let rects = self.page.editor.range_rects(Selection {
+        let rects = self.active().range_rects(Selection {
             positions: self.positions(range)?,
             affinities: [Affinity::Downstream, Affinity::Upstream],
         })?;

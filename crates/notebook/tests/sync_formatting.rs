@@ -16,6 +16,8 @@ mod server;
 use server::{Fault, Server, conflicted, pages, snapshot};
 #[path = "support/model_ops.rs"]
 mod model_ops;
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 use model_ops::{
     AUTHOR, insert_after, insert_outline, page_of, paragraph_with, replace_text, restyle, save,
 };
@@ -263,7 +265,8 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
         .map(|id| u32::try_from(text_of(&page, *id).encode_utf16().count()).unwrap())
         .collect();
     let (mut published, mut conflicts) = (0, 0);
-    for seed in 1_u64..=64 {
+    let seeds = sweep::seeds(1..65, 16);
+    for seed in seeds.clone() {
         let mut state = seed;
         let mut next = || {
             state = state
@@ -341,7 +344,7 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
         assert_eq!(snapshot(&cache), server.durable, "seed {seed}");
     }
     assert!(
-        published >= 16,
+        published * 4 >= seeds.end - seeds.start,
         "{published} published, {conflicts} conflicts"
     );
 }

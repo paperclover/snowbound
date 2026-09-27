@@ -12,8 +12,9 @@ fn save_page(cache: &Replica, space: ExGuid, edit: impl FnOnce(&mut Page)) -> Op
 
 #[test]
 fn twelve_offline_clients_reconcile_tree_text_and_interrupted_publication() {
-    let mut random = 1940_u64;
-    for _ in 0..24 {
+    let runs = sweep::seeds(0..24, 1);
+    let mut random = 1940 + runs.start;
+    for _ in runs {
         let input: Vec<_> = (0..256)
             .map(|_| {
                 random ^= random << 13;

@@ -1225,11 +1225,10 @@ pub(super) fn first_difference(expected: &Page, actual: &Page) -> String {
 fn lowered_edits_store_the_edited_page() {
     let mut tally: BTreeMap<(Family, String), usize> = BTreeMap::new();
     let mut mismatches = Vec::new();
-    let seeds = std::env::var("OP_SEEDS").map_or(3, |s| s.parse().unwrap());
     for (name, source) in SOURCES {
         for (p, space) in pages(source).into_iter().enumerate().take(4) {
             for family in FAMILIES {
-                for seed in 0..seeds {
+                for seed in crate::sweep::seeds(0..3, 1) {
                     let mut rng = Rng(seed * 7919 + p as u64 * 131 + family as u64);
                     let mut after = read(source, space);
                     GUIDS.set(Some(1 << 60 | seed << 32 | (family as u64) << 20));
@@ -1621,12 +1620,12 @@ fn random_object_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
 /// the same pages.
 #[test]
 fn random_ops_read_back_as_the_model_predicts() {
-    let steps = std::env::var("OP_STEPS").map_or(60, |s| s.parse().unwrap());
+    let steps = 60;
     let (mut applied, mut refused, mut unseen) = (0, 0, 0);
     let mut mismatches: Vec<String> = Vec::new();
     for (name, source) in SOURCES {
         let spaces = pages(source);
-        for seed in 0..2u64 {
+        for seed in crate::sweep::seeds(0..2, 2) {
             let arena = Arena::default();
             let mut section = Section::open(&arena, source.to_vec()).unwrap();
             let mut rng = Rng(seed * 104_729 + name.len() as u64);
@@ -1952,11 +1951,10 @@ fn a_range_lowers_as_its_page_does() {
         Family::ParagraphPicture, Family::Attachment, Family::Equation,
     ];
     let (mut same, mut total, mut smaller) = (0, 0, 0);
-    let seeds = std::env::var("OP_SEEDS").map_or(3, |s| s.parse().unwrap());
     for (name, source) in SOURCES {
         for (p, space) in pages(source).into_iter().enumerate().take(4) {
             for family in families {
-                for seed in 0..seeds {
+                for seed in crate::sweep::seeds(0..3, 1) {
                     let mut rng = Rng(seed * 7919 + p as u64 * 131 + family as u64);
                     let before = read(source, space);
                     let mut after = before.clone();

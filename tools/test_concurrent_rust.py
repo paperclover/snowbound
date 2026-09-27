@@ -14,14 +14,14 @@ class OracleTests(unittest.TestCase):
             executable = output / 'client'
             executable.write_text(f'#!{sys.executable}\nimport json, os, sys, time\nprint(json.dumps(dict(os.environ)), flush=True)\nwhile not os.path.exists(sys.argv[5]): time.sleep(.001)\n')
             executable.chmod(0o700)
-            with running_clients(output, 'unused.one', 2, 1, 1, 7, timeout=1.25,
+            with running_clients(output, 'unused.one', 2, 1, 1, 7, timeout=600.25,
                                  executable=executable, environment={'KEPT': 'value'}):
                 (output / 'start').touch()
             for actor in ['w0', 'w1', 'r0']:
                 environment = json.loads((output / f'{actor}.jsonl').read_text())
-                self.assertEqual(environment['ONESTORE_CLIENT_TIMEOUT_MS'], '1250')
+                self.assertEqual(environment['ONESTORE_CLIENT_TIMEOUT_MS'], '600250')
                 self.assertEqual(environment['KEPT'], 'value')
-            self.assertEqual(json.loads((output / 'clients.json').read_text())['timeout_ms'], 1250)
+            self.assertEqual(json.loads((output / 'clients.json').read_text())['timeout_ms'], 600250)
 
     def test_distinct_reader_binary_is_launched_and_recorded(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -104,7 +104,7 @@ pub struct TextColors {
 /// How to paint an outline: the caret's opacity, the view scale, document points per
 /// logical pixel, and the text colours.
 #[derive(Clone, Copy)]
-struct Paint {
+struct Paint<'a> {
     caret: f32,
     scale: f32,
     pixel: f32,
@@ -114,6 +114,8 @@ struct Paint {
     visible: [f32; 2],
     /// Whether the active outline shows its frame and grips.
     chrome: bool,
+    /// Search matches, marked as OneNote marks them.
+    found: &'a [crate::search::PageMatch],
 }
 
 enum Drag {
@@ -202,6 +204,8 @@ pub struct PageView {
     /// A platform scroll view owns the viewport: changes neither clamp it nor reveal the
     /// caret, which the host does knowing its bars and keyboard.
     pub host_viewport: bool,
+    /// Matches of the search shown on the page, marked under their text.
+    pub found: Vec<crate::search::PageMatch>,
     /// The caret's opacity in its blink.
     caret: f32,
     /// When the caret last moved, which restarts its blink.
@@ -260,6 +264,7 @@ impl PageView {
             focused: true,
             touch: false,
             host_viewport: false,
+            found: Vec::new(),
             caret: 1.0,
             blink_from: Instant::now(),
         };
@@ -273,6 +278,7 @@ impl PageView {
         self.scene = scene;
         self.drag = None;
         self.object_focus = None;
+        self.found.clear();
     }
 
     /// Shows the stored page after a change made elsewhere in place of the one shown,
@@ -730,6 +736,7 @@ impl PageView {
                 visible: [0.0, self.viewport.size[1] as f32]
                     .map(|y| (y - self.viewport.origin[1]) / self.viewport.scale),
                 chrome: !self.touch || self.focused,
+                found: &self.found,
             },
         )
     }
@@ -1920,6 +1927,7 @@ fn append_outline<'a>(
         pixel,
         colors,
         visible,
+        found,
         ..
     } = paint;
     let rows = [visible[0] - y, visible[1] - y];
@@ -1929,6 +1937,26 @@ fn append_outline<'a>(
     outline
         .shaped()
         .append_background_primitives(primitives, origin, rows, colors.paper);
+    // OneNote's search highlight: yellow, deepened to gold under light text on dark paper.
+    let [red, green, blue, _] = colors.paper.color;
+    let marker = if red + green + blue < 1.5 {
+        draw::srgb(0x7a, 0x62, 0x00)
+    } else {
+        draw::srgb(0xff, 0xe6, 0x00)
+    };
+    for (_, selection) in found.iter().filter(|(id, _)| *id == outline.id) {
+        for rect in outline.range_rects(*selection)? {
+            primitives.push(Primitive::Rect {
+                rect: [
+                    rect.x0 as f32 + x,
+                    rect.y0 as f32 + y,
+                    rect.x1 as f32 + x,
+                    rect.y1 as f32 + y,
+                ],
+                color: marker,
+            });
+        }
+    }
     if let Some(editor) = editor {
         for rect in editor.selection_rects()? {
             primitives.push(Primitive::Rect {

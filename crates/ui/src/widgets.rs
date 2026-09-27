@@ -29,6 +29,51 @@ pub fn button(ui: &mut Ui, part: impl Hash, text: &str) -> Signal {
     ui.leaf(part, spec)
 }
 
+/// A check box before `label`, `checked` or not; a click on either reports for the caller
+/// to toggle.
+pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Signal {
+    let theme = ui.theme.clone();
+    let [height, side] = [theme.font_size * 2.0, 16.0];
+    let margin = (height - side) / 2.0;
+    let id = ui.open(
+        part,
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [crate::children(), px(height)],
+            gap: 8.0,
+            ..Spec::default()
+        },
+    );
+    let hovered = ui.signal(id).hovered;
+    ui.leaf(
+        "box",
+        Spec {
+            size: [px(side), px(height)],
+            inset: [0.0, margin, 0.0, margin],
+            fill: Some(if checked { theme.accent } else { theme.base }),
+            border: Some(if checked || hovered {
+                theme.accent
+            } else {
+                theme.chip
+            }),
+            radius: 3.0,
+            icon: checked.then_some(crate::popup::CHECK),
+            color: Some([1.0; 4]),
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "label",
+        Spec {
+            size: [fit(), px(height)],
+            text: Some(label),
+            ..Spec::default()
+        },
+    );
+    ui.close();
+    ui.signal(id)
+}
+
 /// An overlay scrollbar along the far edge of the current box, for content whose scroll
 /// offset ranges over `range` while `view` of it shows, all in one unit. Returns the offset
 /// a drag of its thumb chose.

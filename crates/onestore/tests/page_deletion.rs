@@ -276,7 +276,13 @@ fn tombstones_and_first_page_promotion_survive_each_storage_interruption() {
             old.keys().collect::<Vec<_>>(),
             new.keys().collect::<Vec<_>>()
         );
-        for write_limit in [1, 17, 4096] {
+        // Byte-at-a-time writes tear the commit at every byte, a full sweep's matrix.
+        let limits: &[usize] = if sweep::full().is_some() {
+            &[1, 17, 4096]
+        } else {
+            &[17, 4096]
+        };
+        for &write_limit in limits {
             let mut complete = disk::Disk {
                 visible: source.to_vec(),
                 durable: source.to_vec(),
@@ -360,6 +366,8 @@ fn stale_removal_cannot_delete_a_newer_page_edit() {
 
 #[path = "support/page_schedule.rs"]
 mod page_schedule;
+#[path = "support/sweep.rs"]
+mod sweep;
 
 #[test]
 fn twelve_client_page_schedules_include_removal_empty_sections_and_stale_edits() {
@@ -367,7 +375,7 @@ fn twelve_client_page_schedules_include_removal_empty_sections_and_stale_edits()
         0, 192, 0, 128, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 18, 0, 0, 0, 0, 0, 0, 3, 192, 0,
         128, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0,
     ]);
-    for seed in 1_u64..=32 {
+    for seed in sweep::seeds(1..33, 2) {
         let mut random = seed * 2003;
         let mut input = [0; 192];
         for byte in &mut input {

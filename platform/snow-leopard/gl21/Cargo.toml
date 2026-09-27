@@ -1,0 +1,6 @@
+[package]
+name = "gl21"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "OpenGL 2.1 plus EXT_framebuffer_object, as Mac OS X 10.6 exports them."

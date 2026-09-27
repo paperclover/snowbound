@@ -1,0 +1,6 @@
+[package]
+name = "hello-snow-leopard"
+version = "0.0.0"
+edition = "2024"
+publish = false
+

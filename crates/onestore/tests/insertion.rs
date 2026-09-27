@@ -6,6 +6,8 @@ mod current;
 mod disk;
 #[path = "support/ops.rs"]
 mod ops;
+#[path = "support/sweep.rs"]
+mod sweep;
 
 use onestore::{
     ExGuid, RevisionIndex, Store, TextAttribute as A,
@@ -105,7 +107,7 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
         .collect();
     let old_store = Store::parse(&source).unwrap();
     let old_index = RevisionIndex::parse(&old_store).unwrap();
-    for seed in 1..=48_u64 {
+    for seed in sweep::seeds(1..49, 48) {
         let mut random = seed;
         let mut expected: Vec<_> = text.chars().map(|c| (c, default.clone())).collect();
         let mut formats = Vec::new();

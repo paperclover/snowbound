@@ -110,7 +110,7 @@ fn fold_char(character: char, out: &mut String) {
     if character.is_ascii() {
         out.push(match character {
             '\n' => '\n',
-            space if space.is_ascii_whitespace() => ' ',
+            space if space.is_whitespace() => ' ',
             other => other.to_ascii_lowercase(),
         });
         return;
@@ -215,6 +215,22 @@ pub struct Entry {
     folded_text: String,
 }
 
+impl Entry {
+    /// Page `space` of `section` as `page` shows it.
+    pub fn new(section: &str, space: ExGuid, page: &Page, modified: u64) -> Self {
+        let text = page_text(page);
+        Self {
+            section: section.to_owned(),
+            space,
+            folded_title: fold(&page.title),
+            folded_text: fold(&text),
+            title: page.title.clone(),
+            modified,
+            text,
+        }
+    }
+}
+
 /// A page matching a query.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Found {
@@ -245,22 +261,12 @@ impl Index {
         self.entries.is_empty()
     }
 
-    /// Adds or replaces page `space` of `section` as `page` shows it.
-    pub fn set(&mut self, section: &str, space: ExGuid, page: &Page, modified: u64) {
-        let text = page_text(page);
-        let entry = Entry {
-            section: section.to_owned(),
-            space,
-            folded_title: fold(&page.title),
-            folded_text: fold(&text),
-            title: page.title.clone(),
-            modified,
-            text,
-        };
+    /// Adds `entry`, replacing the page it names.
+    pub fn set(&mut self, entry: Entry) {
         match self
             .entries
             .iter_mut()
-            .find(|entry| entry.space == space && entry.section == section)
+            .find(|old| old.space == entry.space && old.section == entry.section)
         {
             Some(old) => *old = entry,
             None => self.entries.push(entry),
@@ -323,7 +329,10 @@ impl Index {
 fn snippet(entry: &Entry, query: &Query) -> (String, Vec<Range<usize>>) {
     let first = query.hits(&entry.folded_text).first().map(|hit| hit.start);
     let line = first.map_or(0, |at| {
-        entry.folded_text[..at].bytes().filter(|byte| *byte == b'\n').count()
+        entry.folded_text[..at]
+            .bytes()
+            .filter(|byte| *byte == b'\n')
+            .count()
     });
     let text = entry.text.split('\n').nth(line).unwrap_or_default();
     let hits = query.find(text);
@@ -335,12 +344,16 @@ fn snippet(entry: &Entry, query: &Query) -> (String, Vec<Range<usize>>) {
     let mut end = (start + SNIPPET).min(chars.len());
     // Cut ends fall back to the nearest space, so no word shows in part.
     if start > 0
-        && let Some(space) = chars[start..at].iter().position(|(_, char)| char.is_whitespace())
+        && let Some(space) = chars[start..at]
+            .iter()
+            .position(|(_, char)| char.is_whitespace())
     {
         start += space + 1;
     }
     if end < chars.len()
-        && let Some(space) = chars[at..end].iter().rposition(|(_, char)| char.is_whitespace())
+        && let Some(space) = chars[at..end]
+            .iter()
+            .rposition(|(_, char)| char.is_whitespace())
     {
         end = at + space;
     }

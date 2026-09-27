@@ -415,6 +415,64 @@ impl TextOutline {
             .join("\n")
     }
 
+    /// Highlight rectangles of `selection` in the outline, in its coordinates.
+    pub fn range_rects(&self, selection: Selection) -> Result<Vec<BoundingBox>, EditError> {
+        let [anchor, focus] = selection.positions;
+        if anchor == focus {
+            return Ok(Vec::new());
+        }
+        let (start, end, affinities) = if anchor < focus {
+            (anchor, focus, selection.affinities)
+        } else {
+            (
+                focus,
+                anchor,
+                [selection.affinities[1], selection.affinities[0]],
+            )
+        };
+        let mut rectangles = Vec::new();
+        for (visible, (index, paragraph)) in self
+            .layouts()
+            .enumerate()
+            .filter(|(_, (index, _))| *index >= start.paragraph && *index <= end.paragraph)
+        {
+            let source = self.document.paragraph(index).unwrap();
+            let first = if index == start.paragraph {
+                paragraph.cursor(start.offset, affinities[0])?
+            } else {
+                paragraph.cursor(0, Affinity::Downstream)?
+            };
+            let last = if index == end.paragraph {
+                paragraph.cursor(end.offset, affinities[1])?
+            } else {
+                paragraph.cursor(
+                    source.utf16_offset(source.text().len())?,
+                    Affinity::Upstream,
+                )?
+            };
+            let mut local = paragraph
+                .text
+                .selection(ParagraphSelection::new(first, last));
+            if index < end.paragraph {
+                local.push(paragraph.text.caret(last, 4.0));
+            }
+            for mut rect in local {
+                rect.x0 += f64::from(paragraph.origin[0]);
+                rect.x1 += f64::from(paragraph.origin[0]);
+                rect.y0 += f64::from(paragraph.origin[1]);
+                rect.y1 += f64::from(paragraph.origin[1]);
+                if let Some(cell) = self.shaped.paragraph_cell(visible) {
+                    let Some(clipped) = cell.clip(rect) else {
+                        continue;
+                    };
+                    rect = clipped;
+                }
+                rectangles.push(rect);
+            }
+        }
+        Ok(rectangles)
+    }
+
     /// Where `position` falls in `shown_text`; a hidden paragraph falls at the start of the
     /// next shown one.
     pub fn utf16_offset(&self, position: TextPosition) -> Result<u32, EditError> {
@@ -2445,76 +2503,18 @@ impl CanvasEditor {
     }
 
     pub fn selection_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
-        self.range_rects(self.active_outline().selection)
+        self.active_outline()
+            .range_rects(self.active_outline().selection)
     }
 
     pub fn marked_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
         match &self.composition {
-            Some(composition) => self.range_rects(Selection {
+            Some(composition) => self.active_outline().range_rects(Selection {
                 positions: [composition.range.start, composition.range.end],
                 affinities: [Affinity::Downstream, Affinity::Upstream],
             }),
             None => Ok(Vec::new()),
         }
-    }
-
-    /// Highlight rectangles of `selection` in the active outline, in its coordinates.
-    pub fn range_rects(&self, selection: Selection) -> Result<Vec<BoundingBox>, EditError> {
-        let [anchor, focus] = selection.positions;
-        if anchor == focus {
-            return Ok(Vec::new());
-        }
-        let (start, end, affinities) = if anchor < focus {
-            (anchor, focus, selection.affinities)
-        } else {
-            (
-                focus,
-                anchor,
-                [selection.affinities[1], selection.affinities[0]],
-            )
-        };
-        let mut rectangles = Vec::new();
-        for (visible, (index, paragraph)) in self
-            .active_outline()
-            .layouts()
-            .enumerate()
-            .filter(|(_, (index, _))| *index >= start.paragraph && *index <= end.paragraph)
-        {
-            let source = self.active_outline().document.paragraph(index).unwrap();
-            let first = if index == start.paragraph {
-                paragraph.cursor(start.offset, affinities[0])?
-            } else {
-                paragraph.cursor(0, Affinity::Downstream)?
-            };
-            let last = if index == end.paragraph {
-                paragraph.cursor(end.offset, affinities[1])?
-            } else {
-                paragraph.cursor(
-                    source.utf16_offset(source.text().len())?,
-                    Affinity::Upstream,
-                )?
-            };
-            let mut local = paragraph
-                .text
-                .selection(ParagraphSelection::new(first, last));
-            if index < end.paragraph {
-                local.push(paragraph.text.caret(last, 4.0));
-            }
-            for mut rect in local {
-                rect.x0 += f64::from(paragraph.origin[0]);
-                rect.x1 += f64::from(paragraph.origin[0]);
-                rect.y0 += f64::from(paragraph.origin[1]);
-                rect.y1 += f64::from(paragraph.origin[1]);
-                if let Some(cell) = self.active_outline().shaped.paragraph_cell(visible) {
-                    let Some(clipped) = cell.clip(rect) else {
-                        continue;
-                    };
-                    rect = clipped;
-                }
-                rectangles.push(rect);
-            }
-        }
-        Ok(rectangles)
     }
 
     pub fn replace(

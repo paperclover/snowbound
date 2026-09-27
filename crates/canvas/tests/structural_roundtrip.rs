@@ -1,7 +1,8 @@
 //! Every structural edit the editor makes saves as the ops the editor recorded and rereads
 //! as the model it saved: random Enter, Backspace, Delete, Tab,
 //! Shift+Tab, list and paste edits, alone and several to a save, on every outline of the probe
-//! section and of any sections named in `CANVAS_SWEEP_SECTIONS` (`:`-separated paths).
+//! section and of any sections named in `CANVAS_SWEEP_SECTIONS` (`:`-separated paths). The
+//! smoke slice takes the first pages of each section.
 
 use canvas::{
     document::TextPosition,
@@ -14,6 +15,9 @@ use onestore::{
     page::{Outline, Page, PageObject, PageParagraph, ParagraphContent},
 };
 use std::{collections::BTreeMap, path::Path};
+
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Kind {
@@ -289,9 +293,15 @@ struct Tally {
     failures: BTreeMap<String, Vec<String>>,
 }
 
-fn sweep(path: &Path, random: &mut Random, engine: &mut TextEngine, tally: &mut Tally) {
+fn sweep(
+    path: &Path,
+    random: &mut Random,
+    engine: &mut TextEngine,
+    tally: &mut Tally,
+    count: usize,
+) {
     let section = std::fs::read(path).unwrap();
-    for (space, page) in pages(&section) {
+    for (space, page) in pages(&section).into_iter().take(count) {
         let Ok(editor) = CanvasEditor::from_page(page.clone(), engine) else {
             continue;
         };
@@ -378,12 +388,13 @@ fn structural_edits_reread_as_saved() {
     if let Some(extra) = std::env::var_os("CANVAS_SWEEP_SECTIONS") {
         paths.extend(std::env::split_paths(&extra));
     }
-    let seed = std::env::var("CANVAS_SWEEP_SEED").map_or(1, |seed| seed.parse().unwrap());
-    let mut random = Random(seed);
+    let full = sweep::full();
+    let count = if full.is_some() { usize::MAX } else { 24 };
+    let mut random = Random(1 + full.unwrap_or(0));
     let mut engine = TextEngine::default();
     let mut tally = Tally::default();
     for path in &paths {
-        sweep(path, &mut random, &mut engine, &mut tally);
+        sweep(path, &mut random, &mut engine, &mut tally, count);
     }
     let failed: usize = tally.failures.values().map(Vec::len).sum();
     let mut report = String::new();

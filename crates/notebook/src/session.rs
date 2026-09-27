@@ -746,6 +746,12 @@ impl Notebook {
         Ok(None)
     }
 
+    /// The section at catalog `path` as its file stores it, without the edits a replica
+    /// may hold (`stored_pages` reads it).
+    pub fn read_section(&self, path: &str) -> Result<Vec<u8>> {
+        self.storage.read(&self.section_path(path)?.path)
+    }
+
     /// The pages of a password-protected section: nothing is cached, and the decoded
     /// buffers go when the pages have been built.
     #[cfg(feature = "protected")]
@@ -826,6 +832,34 @@ impl Notebook {
         }
         Section::open_with(file, &self.cache, connect, notify)
     }
+}
+
+/// A page as a section file stores it.
+pub struct StoredPage {
+    pub space: ExGuid,
+    pub page: Page,
+    /// The page's `LastModifiedTime`, Time32 seconds since 1980.
+    pub modified: Option<u32>,
+}
+
+/// The pages of the section file `image` holds, in section order; pages the model cannot
+/// build are left out.
+pub fn stored_pages(image: &[u8]) -> Result<Vec<StoredPage>> {
+    let store = Store::parse(image)?;
+    let index = RevisionIndex::parse(&store)?;
+    let document = Document::parse(&index)?;
+    Ok(document
+        .pages()?
+        .into_iter()
+        .filter_map(|(space, id)| {
+            let revision = document.active(space).ok()?;
+            Some(StoredPage {
+                space,
+                page: Page::from_revision(revision, id).ok()?,
+                modified: revision.nodes.get(&id).and_then(|node| node.modified),
+            })
+        })
+        .collect())
 }
 
 /// The colours OneNote 2010 gives a folder's first sixteen new sections, COLORREF, in the

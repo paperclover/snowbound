@@ -194,9 +194,6 @@ impl State {
         let Some(session) = &self.session else {
             return;
         };
-        if held.is_some() && !self.filter.is_empty() {
-            return;
-        }
         let dropped = match (&self.drag, held) {
             (_, Some(space)) => Some(space),
             (Some(Drag::Page(space)), None) => Some(*space),

@@ -23,6 +23,8 @@ use model_ops::{
 };
 #[path = "support/model_schedule.rs"]
 mod model_schedule;
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 #[path = "sync/tree.rs"]
 mod tree;
 

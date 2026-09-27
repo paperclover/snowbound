@@ -499,6 +499,8 @@ pub(crate) mod tests {
 
     #[test]
     fn writes_leave_the_page_that_appending_and_reading_their_revisions_does() {
+        // Seeded identities: the writes pick nodes in identity order.
+        crate::write::GUIDS.set(Some(1 << 61));
         // Past 512 revisions, so the chain checkpoints once.
         check_writes(
             include_bytes!(

@@ -24,6 +24,9 @@ mod revisions;
 mod section;
 mod snapshot;
 mod store;
+#[cfg(test)]
+#[path = "../tests/support/sweep.rs"]
+mod sweep;
 mod toc;
 mod tree;
 mod write;

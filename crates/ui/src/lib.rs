@@ -13,7 +13,7 @@ mod widgets;
 
 pub use list::{List, Row, Rows, list};
 pub use theme::{Section, Shades, Theme};
-pub use widgets::{button, edit_key, edit_modifiers, scrollbar, text_field};
+pub use widgets::{button, check_box, edit_key, edit_modifiers, scrollbar, text_field};
 
 use draw::{
     PathStyle, Primitive, RasterImage, Stroke,
@@ -521,7 +521,7 @@ impl Ui {
         self.scale
     }
 
-    pub(crate) fn modifiers(&self) -> ModifiersState {
+    pub fn modifiers(&self) -> ModifiersState {
         self.modifiers
     }
 

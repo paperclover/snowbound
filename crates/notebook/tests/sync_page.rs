@@ -22,10 +22,12 @@ mod model_ops;
 #[path = "support/page_schedule.rs"]
 mod page_schedule;
 use page_schedule::body_outline;
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 
 #[test]
 fn twelve_replica_page_schedules_retain_acknowledged_pages_through_interruptions() {
-    for seed in 0..24_u64 {
+    for seed in sweep::seeds(0..24, 1) {
         let mut random = seed + 1956;
         let mut input = Vec::new();
         for step in 0..48 {

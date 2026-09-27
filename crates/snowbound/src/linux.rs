@@ -163,6 +163,9 @@ pub fn zoom(window: &Window) {
 /// Winit delivers typed text with its key events on Linux.
 pub fn install_text_input(_: &Window) {}
 
+/// Options opens from the sidebar's footer and Ctrl+Comma, as Linux apps have no shared menu.
+pub fn install_menu() {}
+
 pub fn clear_marked_text(_: &Window) {}
 
 pub fn configure_presentation(_: &wgpu::Surface<'_>) {}
@@ -538,6 +541,13 @@ fn dialog<const Z: usize, const K: usize>(
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
+}
+
+/// Opens `folder` in the file manager.
+pub fn reveal(folder: &std::path::Path) {
+    if let Err(error) = Command::new("xdg-open").arg(folder).spawn() {
+        eprintln!("Cannot open {}: {error}", folder.display());
+    }
 }
 
 /// Asks whether to go ahead with `action`; false when no tool can ask.

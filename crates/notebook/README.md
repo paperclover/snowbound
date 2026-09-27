@@ -267,6 +267,10 @@ section, so a link follows its page when the section is renamed or moved and
 when the page itself was moved to another section. Other URLs and unknown
 targets are `None`.
 
+`Notebook::read_section(path)` reads a section file as stored, without opening a
+replica, and `session::stored_pages(image)` builds its pages with each page's
+`LastModifiedTime`: the app's search indexes the sections it has not opened this way.
+
 With the optional `protected` feature, `Notebook::unlock(path, password)`
 reads a `Locked` section as `Unlocked { pages, .. }`, and
 `Notebook::apply_unlocked(path, password, &mut unlocked, author, edit)`

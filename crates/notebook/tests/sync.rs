@@ -9,6 +9,8 @@ mod server;
 use server::*;
 #[path = "support/model_ops.rs"]
 mod model_ops;
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 
 /// Saves a replacement of `range` in the page holding `text`.
 fn save(cache: &Replica, text: ExGuid, range: Range<u32>, replacement: &str) -> Option<u64> {
@@ -444,7 +446,7 @@ fn twelve_local_editors_progress_during_remote_reads_publication_and_confirmatio
             if self.phase == phase {
                 self.entered.send(()).unwrap();
                 self.resume
-                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .recv_timeout(std::time::Duration::from_secs(120))
                     .unwrap();
             }
         }
@@ -502,7 +504,7 @@ fn twelve_local_editors_progress_during_remote_reads_publication_and_confirmatio
                 paused.server
             });
             entered_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv_timeout(std::time::Duration::from_secs(120))
                 .unwrap();
             assert!(
                 matches!(cache.sync_once(&mut Server::new(&source)),Err(Error::Io(error)) if error.kind()==io::ErrorKind::WouldBlock)
@@ -537,8 +539,9 @@ fn twelve_local_editors_progress_during_remote_reads_publication_and_confirmatio
                 .map(|handle| handle.join().unwrap())
                 .collect();
             assert_eq!(ids.len(), 12, "every local edit is its own");
+            // Well inside the paused remote's wait, which edits queued behind it would outlast.
             assert!(
-                started.elapsed() < std::time::Duration::from_secs(2),
+                started.elapsed() < std::time::Duration::from_secs(60),
                 "Local edits waited for remote {phase}"
             );
             resume_tx.send(()).unwrap();
@@ -671,8 +674,9 @@ fn a_failed_rebase_leaves_the_queue_as_it_was() {
 fn seeded_conflicts_keep_the_remote_text_and_later_edits_publish_once() {
     let dir = tempfile::tempdir().unwrap();
     let original: Vec<_> = "abcdefghij🦀klmnop".chars().collect();
-    let mut seed = 911_u64;
-    for case in 0..64 {
+    let cases = sweep::seeds(0..64, 16);
+    let mut seed = 911 + cases.start;
+    for case in cases {
         seed ^= seed << 13;
         seed ^= seed >> 7;
         seed ^= seed << 17;

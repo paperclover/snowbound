@@ -18,7 +18,7 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith('ONESTORE_')}
+                   if not key.startswith(('ONESTORE_', 'SNOWBOUND_'))}
     environment['PYTHONPATH'] = str(root / 'tools')
     environment['CARGO_TARGET_DIR'] = str(root / 'target')
     commands = [

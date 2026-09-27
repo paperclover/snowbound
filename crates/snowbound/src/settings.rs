@@ -1,5 +1,5 @@
-//! What the app keeps between launches: the open notebooks, the sidebar and recent fonts,
-//! as JSON in the platform's settings directory.
+//! What the app keeps between launches: the open notebooks, the sidebar, recent fonts and
+//! the Options dialog's choices, as JSON in the platform's settings directory.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -15,6 +15,35 @@ pub struct Settings {
     pub sidebar: bool,
     /// Fonts picked from the font box, latest first.
     pub recent_fonts: Vec<String>,
+    /// The name edits are stored under, OneNote's User name; the account's full name until
+    /// first saved.
+    pub user_name: Option<String>,
+    pub color_scheme: ColorScheme,
+    /// Keeps pages white in the Dark color scheme.
+    pub light_pages: bool,
+    /// Where searches look first, as "Set This Scope as Default" chose.
+    pub search_scope: crate::search::Scope,
+}
+
+/// The interface's colours: the system's appearance, or one chosen in Options.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorScheme {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ColorScheme {
+    /// The appearance the window is held to; none follows the system.
+    pub fn theme(self) -> Option<winit::window::Theme> {
+        match self {
+            Self::System => None,
+            Self::Light => Some(winit::window::Theme::Light),
+            Self::Dark => Some(winit::window::Theme::Dark),
+        }
+    }
 }
 
 impl Settings {
@@ -45,8 +74,8 @@ impl Settings {
 }
 
 impl crate::State {
-    /// Keeps what the next launch restores: the open notebooks, the one shown, the sidebar
-    /// and recent fonts. A section opened on its own is not kept.
+    /// Keeps what the next launch restores: the open notebooks, the one shown, the sidebar,
+    /// recent fonts and the Options dialog's choices. A section opened on its own is not kept.
     pub(crate) fn save_settings(&self) {
         let Some(path) = &self.settings else {
             return;
@@ -68,6 +97,10 @@ impl crate::State {
                 .map(|library| library.location.clone()),
             sidebar: self.sidebar,
             recent_fonts: self.recent_fonts.clone(),
+            user_name: Some(self.author.clone()),
+            color_scheme: self.color_scheme,
+            light_pages: self.light_pages,
+            search_scope: self.search.default,
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -107,6 +140,10 @@ mod tests {
             current: Some("/notebooks/Personal".into()),
             sidebar: true,
             recent_fonts: vec!["Georgia".into()],
+            user_name: Some("Snowbound Test".into()),
+            color_scheme: ColorScheme::Dark,
+            light_pages: true,
+            search_scope: crate::search::Scope::Notebook,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

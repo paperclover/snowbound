@@ -661,3 +661,16 @@ fn create(file_name: &str, file_type: FileType, spaces: Vec<NewSpace>) -> Result
     RevisionIndex::parse(&store)?.validate_current()?;
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn initials_take_each_word_first_letter() {
+        // OneNote 2010 stores "snow" with "S" in the native corpus.
+        assert_eq!(super::initials("snow"), "S");
+        assert_eq!(super::initials("Clover"), "C");
+        assert_eq!(super::initials("  Snowbound   Test "), "ST");
+        assert_eq!(super::initials("émile zola"), "ÉZ");
+        assert_eq!(super::initials(""), "");
+    }
+}

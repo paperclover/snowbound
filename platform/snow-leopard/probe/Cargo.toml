@@ -1,0 +1,24 @@
+[package]
+name = "probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gl21 = { path = "../gl21" }
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["std", "NSString", "NSAutoreleasePool", "NSObject", "NSZone", "NSGeometry", "NSDate", "NSRunLoop"] }
+objc2-app-kit = { workspace = true, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSView", "NSOpenGL", "NSOpenGLView", "NSEvent", "NSRunningApplication", "NSGraphics"] }
+png = "0.18"
+
+[[bin]]
+name = "probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "window-probe"
+path = "src/window.rs"
+
+[[bin]]
+name = "render-probe"
+path = "src/render.rs"

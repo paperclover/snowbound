@@ -32,7 +32,7 @@ final class NotebooksViewController: UITableViewController, UIDocumentPickerDele
             UIAction(title: "Connect to Server…", image: UIImage(systemName: "server.rack")) { [weak self] _ in
                 self?.connect()
             },
-            UIAction(title: "Change Your Name…", image: UIImage(systemName: "person.crop.circle")) { [weak self] _ in
+            UIAction(title: "Personalize…", image: UIImage(systemName: "person.crop.circle")) { [weak self] _ in
                 guard let self else { return }
                 Author.ask(from: self) {}
             },

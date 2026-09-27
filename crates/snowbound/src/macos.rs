@@ -10,6 +10,7 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSColor,
     NSColorSpace, NSDatePicker, NSDatePickerElementFlags, NSDatePickerStyle, NSEvent, NSEventType,
+    NSMenuItem,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
@@ -634,6 +635,11 @@ declare_class!(
             if let Some(proxy) = QUIT.get() { let _ = proxy.send_event(crate::UserEvent::Quit); }
         }
 
+        #[method(showOptions:)]
+        fn show_options(&self, _sender: Option<&AnyObject>) {
+            if let Some(proxy) = QUIT.get() { let _ = proxy.send_event(crate::UserEvent::Options); }
+        }
+
         // NSAlert consumes Escape before it reaches cancelOperation:.
         #[method(sendEvent:)]
         fn send_event(&self, event: &NSEvent) {
@@ -668,6 +674,37 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLo
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     Ok(event_loop)
+}
+
+/// Adds Settings… to the application menu Winit made, below About as macOS places it.
+pub fn install_menu() {
+    let mtm = MainThreadMarker::new().expect("Menus belong to the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    // Winit's menu is plain AppKit objects on the main thread.
+    unsafe {
+        let Some(menu) = app
+            .mainMenu()
+            .and_then(|bar| bar.itemAtIndex(0))
+            .and_then(|item| item.submenu())
+        else {
+            return;
+        };
+        let settings = NSMenuItem::initWithTitle_action_keyEquivalent(
+            mtm.alloc(),
+            &NSString::from_str("Settings…"),
+            Some(sel!(showOptions:)),
+            &NSString::from_str(","),
+        );
+        menu.insertItem_atIndex(&settings, 2);
+        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), 3);
+    }
+}
+
+/// Opens `folder` in Finder.
+pub fn reveal(folder: &std::path::Path) {
+    if let Err(error) = std::process::Command::new("open").arg(folder).spawn() {
+        eprintln!("Cannot open {}: {error}", folder.display());
+    }
 }
 
 /// Asks whether to go ahead with `action`, offering `cancel` first.

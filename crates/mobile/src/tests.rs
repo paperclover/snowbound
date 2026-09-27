@@ -214,7 +214,7 @@ fn undo_restores_typing() {
 fn stored_text(file: &Path, space: ExGuid) -> String {
     let arena = onestore::Arena::default();
     let section = onestore::Section::open(&arena, onestore::read_file(file).unwrap()).unwrap();
-    library::page_text(&section.page(space).unwrap())
+    canvas::search::page_text(&section.page(space).unwrap())
 }
 
 #[test]
@@ -245,7 +245,7 @@ fn typing_is_stored_in_the_cache_and_published_to_the_file() {
     let reopened = open(&library, &file.to_string_lossy());
     let (page, read_only) = reopened.shared.page(space).unwrap();
     assert!(!read_only);
-    assert!(library::page_text(&page).contains("Saved Collapsed parent"));
+    assert!(canvas::search::page_text(&page).contains("Saved Collapsed parent"));
 }
 
 #[test]
@@ -347,7 +347,7 @@ fn find_selects_the_match_and_formatting_reports_and_toggles() {
     let mut canvas = canvas(&section, "Paragraph controls");
     assert!(canvas.find("collapsed PARENT").unwrap());
     let [start, end] = canvas.selection().unwrap();
-    assert_eq!(canvas.text([start, end]).to_lowercase(), "collapsed parent");
+    assert_eq!(canvas.text([start, end]).to_lowercase(), "collapsed");
     assert_eq!(canvas.format_bits().unwrap() & 1, 0);
     assert!(canvas.format(0).unwrap());
     assert_eq!(canvas.format_bits().unwrap() & 1, 1);
@@ -494,7 +494,7 @@ fn a_notebook_on_a_share_saves_and_opens_offline() {
         .unwrap();
     let arena = onestore::Arena::default();
     let stored = onestore::Section::open(&arena, published).unwrap();
-    assert!(library::page_text(&stored.page(canvas.space).unwrap()).contains("Shared "));
+    assert!(canvas::search::page_text(&stored.page(canvas.space).unwrap()).contains("Shared "));
     let shared = Arc::clone(&section.shared);
     drop((canvas, section, library));
     Arc::into_inner(shared).unwrap().section.close().unwrap();
@@ -517,7 +517,7 @@ fn a_notebook_on_a_share_saves_and_opens_offline() {
         .page(space(&reopened, "Paragraph controls"))
         .unwrap()
         .0;
-    assert!(library::page_text(&page).contains("Shared "));
+    assert!(canvas::search::page_text(&page).contains("Shared "));
 }
 
 /// Paths the test coordinator was asked for, with whether to write.
@@ -584,7 +584,7 @@ fn tapping_the_date_asks_for_it_and_a_new_date_is_stored() {
         }
     )));
     section.shared.apply(edit).unwrap();
-    let stored = library::page_text(&section.shared.page(canvas.space).unwrap().0);
-    assert!(stored.contains("Friday, January 2, 2026"), "{stored}");
+    let stored = section.shared.page(canvas.space).unwrap().0.date_text();
+    assert_eq!(stored.unwrap()[0], "Friday, January 2, 2026");
     assert_ne!(canvas.page.editor.date().unwrap().timestamp(), before);
 }

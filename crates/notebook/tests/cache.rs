@@ -19,6 +19,8 @@ use std::{
 mod model_ops;
 #[path = "support/server.rs"]
 mod server;
+#[path = "../../onestore/tests/support/sweep.rs"]
+mod sweep;
 use server::snapshot;
 
 fn target(source: &[u8]) -> (ExGuid, ExGuid, String) {
@@ -377,7 +379,8 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
     let source = onestore::create_section("model.one", &text, "Fixture").unwrap();
     let mut replica = Replica::create(&path, &source).unwrap();
     let (_, object, _) = target(&source);
-    let mut random = 911_u64;
+    let steps = sweep::seeds(0..512, 64);
+    let mut random = 911 + steps.start;
     let mut next = || {
         random ^= random << 13;
         random ^= random >> 7;
@@ -385,7 +388,7 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
         random
     };
     let mut acknowledged = Vec::new();
-    for step in 0..512 {
+    for step in steps.clone() {
         let boundaries: Vec<_> = text
             .char_indices()
             .map(|(at, _)| at)
@@ -412,11 +415,7 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
             None => assert_eq!(text, expected),
         }
         text = expected;
-        assert_eq!(
-            target(&snapshot(&replica)).2,
-            text,
-            "seed 911, step {step}"
-        );
+        assert_eq!(target(&snapshot(&replica)).2, text, "step {step}");
         if step % 37 == 0 {
             let pending = replica.pending().unwrap();
             drop(replica);
@@ -426,7 +425,7 @@ fn seeded_unicode_edits_and_restarts_match_an_independent_text_model() {
         }
     }
     assert!(
-        acknowledged.len() > 256,
+        acknowledged.len() as u64 * 2 > steps.end - steps.start,
         "Most random edits change the text"
     );
     assert_eq!(

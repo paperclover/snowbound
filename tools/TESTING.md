@@ -12,9 +12,9 @@ The command runs formatting, all workspace features/targets, doctests, Clippy,
 diagnostic/example builds, and Python regression tests. Each stage has its own
 log; `results.json` records executed commands, elapsed times and exit statuses.
 Only a completed run receives `status: passed`. Existing result directories are
-refused. This lane clears inherited `ONESTORE_*` overrides and uses this
-checkout's binaries so personal captures or external exporters cannot silently
-replace public inputs.
+refused. This lane clears inherited `ONESTORE_*` and `SNOWBOUND_*` overrides and
+uses this checkout's binaries so personal captures or external exporters cannot
+silently replace public inputs.
 
 Repeat the same command in a fresh checkout containing only versioned files to
 verify clean-checkout compatibility. Fixture symlinks must remain symlinks; their
@@ -26,6 +26,22 @@ Rust explicitly reports ignored lab tests and fixture generators. Those cases
 are **not** part of a successful public run. The Python suite tests native/lab
 harness logic using retained synthetic captures and mocks; it does not claim a
 new execution of OneNote or a real server interruption.
+
+## Sweeps and soak
+
+Seeded sweeps (random edit walks, multi-client schedules, differentials across
+corpus sections) run a smoke slice by default. `SNOWBOUND_SWEEP=0` runs them in
+full with the seeds as written; any other number shifts every sweep's seeds, and
+a failure replays under the same value.
+
+`tools/soak.sh [seconds per fuzz target]` soaks a dedicated machine until
+stopped: each round runs the full sweeps under a random shift, in release with
+debug assertions, then every `fuzz/` target for the time limit. A failing round
+leaves `soak/*.log` ending in the command that replays it; crash inputs stay in
+`fuzz/artifacts/<target>/`. On a Linux VM, install rustup's stable and nightly
+toolchains, `cargo install cargo-fuzz`, and `build-essential pkg-config
+libfontconfig-dev`; copy the checkout together with the untracked `evidence/`,
+which tests read, and run the script under `tmux`.
 
 ## Private and native verification
 

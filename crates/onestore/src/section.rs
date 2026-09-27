@@ -928,7 +928,10 @@ mod tests {
             differential(source, seed as u64, 60, 1, 2);
             differential(source, seed as u64 + 100, 60, 5, 2);
         }
-        let created = crate::create_section("model.one", "First", "Author").unwrap();
+        // Seeded identities: the writes pick nodes in identity order.
+        let created = seeded(7, || {
+            crate::create_section("model.one", "First", "Author").unwrap()
+        });
         differential(&created, 7, 60, 3, 1);
     }
 
@@ -942,7 +945,7 @@ mod tests {
             include_bytes!("../../../corpus/outline-edit/tree/before/notebook/synthetic.one"),
             include_bytes!("../../../corpus/paragraph-edit/before/notebook/synthetic.one"),
         ];
-        for seed in 4..=8 {
+        for seed in crate::sweep::seeds(4..9, 5) {
             for source in corpus {
                 differential(source, seed, 30, 12, 3);
             }
