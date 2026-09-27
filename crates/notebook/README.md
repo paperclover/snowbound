@@ -242,12 +242,17 @@ directly from the core document model.
 
 ## Notebook structure
 
-`Notebook::create_section`, `create_group`, `rename`, `set_section_color`,
-`reorder` and `delete` change a notebook the way OneNote does: the table of
-contents (`Open Notebook.onetoc2`, created when a folder has none) gains,
-renames, reorders or loses entries; a section's colour lives in its own
-metadata; a deleted section moves into `OneNote_RecycleBin`, a group with its
-own TOC. Every created, renamed or moved file is placed with
+`Notebook::create`, `create_section`, `create_group`, `rename`, `move_entry`,
+`set_section_color`, `reorder` and `delete` change a notebook the way OneNote does: the
+table of contents (`Open Notebook.onetoc2`, created when a folder has none) gains,
+renames, reorders or loses entries; a new notebook holds "New Section 1", and a new
+section an empty section's file plus the page its `PageCreation` makes, in OneNote's
+new-section colour order; a section's colour lives in its own metadata; a deleted
+section moves into `OneNote_RecycleBin`, a group with its own TOC, and a deleted group's
+sections move there too before its folders go. `recycle_pages` keeps copies of pages a
+section is about to delete in `OneNote_RecycleBin/OneNote_DeletedPages.one`, with their
+identities, titles, dates and creation times, as OneNote does
+(`corpus/notebook-management`). Every created, renamed or moved file is placed with
 `onestore::place_file`, which sets the header's ancestor to the parent TOC's
 identity and the name CRC OneNote checks on open; a file without them is
 re-identified and listed anew. They run over `Storage`: a mounted directory

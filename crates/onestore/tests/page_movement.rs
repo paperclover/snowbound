@@ -520,3 +520,43 @@ fn repeated_nesting_retains_series_history_across_revision_checkpoints() {
         std::fs::write(std::path::Path::new(&output).join("movement.one"), &source).unwrap();
     }
 }
+
+/// A move on a section OneNote merged, which holds empty page series, rewrites the series
+/// without them and gives the moved page one of its own.
+#[test]
+fn a_move_after_a_native_merge_drops_its_empty_series() {
+    let merged = include_bytes!(
+        "../../../corpus/conflict-page/native-pages/merged/notebook/synthetic.one"
+    );
+    let series = |bytes: &[u8]| {
+        let store = Store::parse(bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let space = &document.spaces[&document.root];
+        let view = &space.revisions[&space.contexts[&ExGuid::default()]];
+        view.nodes[&view.roots[&1]]
+            .children
+            .iter()
+            .map(|id| (*id, view.nodes[id].spaces.clone()))
+            .collect::<Vec<_>>()
+    };
+    let before = series(merged);
+    assert!(before.iter().any(|(_, spaces)| spaces.is_empty()));
+    let ids = pages(merged);
+    let moved = ops::section_op(
+        merged,
+        SectionOp::Pages(vec![PageEdit::move_to(ids[1], None, 1).unwrap()]),
+    )
+    .unwrap();
+    let after = series(moved.as_bytes());
+    assert!(after.iter().all(|(_, spaces)| !spaces.is_empty()));
+    let (id, spaces) = after.last().unwrap();
+    assert_eq!(spaces, &vec![ids[1]]);
+    assert!(before.iter().all(|(old, _)| old != id));
+    assert_eq!(pages(moved.as_bytes()), [&ids[..1], &ids[2..], &ids[1..2]].concat());
+    if let Some(output) = std::env::var_os("ONESTORE_EMPTY_SERIES_EXPORT") {
+        let output = std::path::Path::new(&output);
+        std::fs::create_dir(output).unwrap();
+        std::fs::write(output.join("synthetic.one"), moved.as_bytes()).unwrap();
+    }
+}

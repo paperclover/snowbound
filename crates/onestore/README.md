@@ -85,7 +85,12 @@ under the section's key (fresh IV per object, payloads under the file IV); `Sect
 rejects protected sections.
 `PageCreation::new` appends, or inserts before the first page space of an existing
 series. `Some("")` creates an empty title field; `None` omits the title node.
-The page has no body outlines, generated date/time text or applied template.
+`dated(date, time)` gives the title OneNote 2010's date and time fields showing that
+text, as OneNote titles a new page; `keeping(identity, created)` keeps another page's
+identity and creation time, as a page moved to the recycle bin keeps them. The page has
+no body outlines or applied template; `create_empty_section` makes a section for such
+pages, and `PageOp::Color` sets or clears a page's colour (`0x14001d2a` on the page node,
+absent for "No color").
 Retain the intent to preserve its page, title and space identities; existing
 identities require reconciliation before retry. Body insertion and title edits
 use those identities through page ops. [Native page-creation fixtures](../../corpus/page-lifecycle/creation/README.md)

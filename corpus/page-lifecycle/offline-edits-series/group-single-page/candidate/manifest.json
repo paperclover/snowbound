@@ -1,0 +1,87 @@
+{
+  "confirmations": 0,
+  "conflict": true,
+  "mode": "group",
+  "original": [
+    {
+      "guid": [
+        106,
+        239,
+        107,
+        240,
+        178,
+        128,
+        132,
+        68,
+        153,
+        189,
+        143,
+        39,
+        201,
+        121,
+        23,
+        95
+      ],
+      "level": 1,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A3D5318-2F37-02D8-0DC9-CC0BC689209F},1"
+    },
+    {
+      "guid": [
+        153,
+        239,
+        1,
+        102,
+        46,
+        96,
+        32,
+        70,
+        136,
+        164,
+        197,
+        78,
+        35,
+        85,
+        187,
+        83
+      ],
+      "level": 2,
+      "position": {
+        "Before": null
+      },
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    },
+    {
+      "guid": [
+        235,
+        105,
+        29,
+        79,
+        205,
+        140,
+        16,
+        65,
+        169,
+        123,
+        14,
+        62,
+        80,
+        183,
+        253,
+        48
+      ],
+      "level": 3,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A6DBA48-33BB-0681-2F02-2C73A811E8B8},1"
+    }
+  ],
+  "page_receipt": "Some(Published { revision: ExGuid { guid: [110, 9, 150, 21, 87, 116, 176, 73, 135, 91, 48, 29, 75, 28, 84, 177], n: 1 } })",
+  "phase": "single-page",
+  "publications": 1,
+  "reviewed": [],
+  "text_receipt": "Some(Published { revision: ExGuid { guid: [110, 9, 150, 21, 87, 116, 176, 73, 135, 91, 48, 29, 75, 28, 84, 177], n: 1 } })"
+}

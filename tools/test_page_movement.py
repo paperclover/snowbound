@@ -90,6 +90,47 @@ class PageMovementTest(unittest.TestCase):
                                  (fixture / 'cold/notebook/Lifecycle.one').read_bytes()[1024:])
                 self.assertEqual(compare(fixture / 'candidate', fixture / 'cold'), 0)
 
+    def test_series_rows_survive_native_reopen(self):
+        """Rust moves heading series of their own, and offline batches merged as page series."""
+        def series(one):
+            with TemporaryDirectory() as temporary:
+                subprocess.run([EXPORTER, one, Path(temporary) / 'm'], check=True, capture_output=True)
+                document = json.loads((Path(temporary) / 'm/document.json').read_text())
+            _, root = view(document, document['root'])
+            section = root['nodes'][root['roots']['1']]
+            return {space: oid for oid in section['children'] for space in root['nodes'][oid]['spaces']}
+        edits = FIXTURE / 'page-edits-series'
+        before = series(FIXTURE / '04-nested/notebook/Lifecycle.one')
+        base, previous = list(before), before
+        # The page each phase moves; `05` moves a subpage into its parent's series.
+        moved = {'03-selected-group-move': 3, '04-subpage-move': 4, '08-collapsed-group-move': 4, 'single-page': 3}
+        for phase in sorted(p.name for p in edits.iterdir() if p.is_dir()):
+            with self.subTest(phase=phase):
+                fixture = edits / phase
+                self.assertEqual((fixture / 'candidate/Lifecycle.one').read_bytes()[1024:],
+                                 (fixture / 'cold/notebook/Lifecycle.one').read_bytes()[1024:])
+                self.assertEqual(compare(fixture / 'candidate', fixture / 'cold'), 0)
+                after = series(fixture / 'candidate/Lifecycle.one')
+                if phase in moved:
+                    start = before if phase == 'single-page' else previous
+                    self.assertNotIn(after[base[moved[phase]]], start.values())
+                if phase != 'single-page':
+                    previous = after
+        offline = FIXTURE / 'offline-edits-series'
+        for case in sorted(p.name for p in offline.iterdir() if p.is_dir() and p.name != 'twelve-clients'):
+            with self.subTest(case=case):
+                source, cold = offline / case / 'candidate', offline / case / 'cold'
+                manifest = json.loads((source / 'manifest.json').read_text())
+                self.assertEqual((manifest['conflict'], manifest['reviewed']), (True, []))
+                repaired = case == 'indent-02-promoted-parent'
+                self.assertEqual(compare(source, cold, refresh_metadata=repaired), int(repaired))
+                if not repaired:
+                    self.assertEqual((source / 'Lifecycle.one').read_bytes()[1024:],
+                                     (cold / 'notebook/Lifecycle.one').read_bytes()[1024:])
+        twelve = offline / 'twelve-clients'
+        self.assertEqual(compare(twelve / 'candidate', twelve / 'cold'), 0)
+        self.assertEqual(json.loads((twelve / 'candidate/manifest.json').read_text())['publications'], 12)
+
     def test_repeated_page_nesting_survives_native_reopen_after_checkpoints(self):
         fixture = FIXTURE / 'page-edits/stress'
         self.assertEqual((fixture / 'candidate/movement.one').read_bytes()[1024:],

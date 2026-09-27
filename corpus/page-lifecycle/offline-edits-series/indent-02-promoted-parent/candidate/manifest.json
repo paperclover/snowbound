@@ -1,0 +1,35 @@
+{
+  "confirmations": 0,
+  "conflict": true,
+  "mode": "indent",
+  "original": [
+    {
+      "guid": [
+        70,
+        179,
+        162,
+        143,
+        72,
+        227,
+        248,
+        64,
+        159,
+        7,
+        0,
+        166,
+        131,
+        166,
+        211,
+        72
+      ],
+      "level": 3,
+      "position": "Keep",
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    }
+  ],
+  "page_receipt": "Some(Published { revision: ExGuid { guid: [144, 208, 130, 2, 184, 145, 30, 67, 154, 106, 180, 175, 85, 128, 40, 126], n: 1 } })",
+  "phase": "02-promoted-parent",
+  "publications": 1,
+  "reviewed": [],
+  "text_receipt": "Some(Published { revision: ExGuid { guid: [144, 208, 130, 2, 184, 145, 30, 67, 154, 106, 180, 175, 85, 128, 40, 126], n: 1 } })"
+}

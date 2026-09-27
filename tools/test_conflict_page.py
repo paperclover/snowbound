@@ -11,6 +11,7 @@ import hashlib
 
 from native_xml import pages, texts
 from document_model import EXPORTER, ordered_pages, view
+from verify_page_creation import compare as compare_graphs
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = ROOT / 'corpus/conflict-page'
@@ -148,6 +149,13 @@ class ConflictPageTest(unittest.TestCase):
                 self.assertEqual(owner(merged, title), owner(initial, title), title)
             for title in client:
                 self.assertNotIn(owner(merged, title), {**initial, **published}, title)
+
+    def test_onenote_reads_a_rust_move_that_drops_empty_series(self):
+        root = FIXTURE / 'series-move'
+        self.assertEqual((root / 'candidate/synthetic.one').read_bytes()[1024:],
+                         (root / 'cold/notebook/synthetic.one').read_bytes()[1024:])
+        self.assertEqual(compare_graphs(root / 'candidate', root / 'cold'), 0)
+        self.assertTrue(all(series(model(root / 'candidate')).values()))
 
     def test_a_page_edited_offline_and_deleted_online_comes_back_as_a_new_page(self):
         for capture in ('native-pages', 'native-restore'):

@@ -1,0 +1,87 @@
+{
+  "confirmations": 0,
+  "conflict": true,
+  "mode": "group",
+  "original": [
+    {
+      "guid": [
+        55,
+        220,
+        38,
+        71,
+        47,
+        170,
+        53,
+        66,
+        139,
+        104,
+        24,
+        238,
+        194,
+        96,
+        177,
+        2
+      ],
+      "level": 1,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A3D5318-2F37-02D8-0DC9-CC0BC689209F},1"
+    },
+    {
+      "guid": [
+        140,
+        13,
+        145,
+        79,
+        63,
+        166,
+        77,
+        73,
+        158,
+        26,
+        254,
+        232,
+        198,
+        149,
+        101,
+        89
+      ],
+      "level": 2,
+      "position": {
+        "Before": null
+      },
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    },
+    {
+      "guid": [
+        18,
+        181,
+        156,
+        40,
+        205,
+        204,
+        124,
+        69,
+        153,
+        67,
+        16,
+        116,
+        216,
+        205,
+        169,
+        116
+      ],
+      "level": 3,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A6DBA48-33BB-0681-2F02-2C73A811E8B8},1"
+    }
+  ],
+  "page_receipt": "Some(Published { revision: ExGuid { guid: [28, 191, 204, 103, 192, 238, 143, 72, 160, 21, 202, 184, 111, 209, 202, 133], n: 1 } })",
+  "phase": "07-promoted-root",
+  "publications": 1,
+  "reviewed": [],
+  "text_receipt": "Some(Published { revision: ExGuid { guid: [28, 191, 204, 103, 192, 238, 143, 72, 160, 21, 202, 184, 111, 209, 202, 133], n: 1 } })"
+}

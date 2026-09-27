@@ -1,0 +1,87 @@
+{
+  "confirmations": 0,
+  "conflict": true,
+  "mode": "group",
+  "original": [
+    {
+      "guid": [
+        94,
+        111,
+        203,
+        102,
+        137,
+        5,
+        1,
+        65,
+        179,
+        170,
+        125,
+        232,
+        204,
+        23,
+        163,
+        106
+      ],
+      "level": 1,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A3D5318-2F37-02D8-0DC9-CC0BC689209F},1"
+    },
+    {
+      "guid": [
+        229,
+        103,
+        227,
+        76,
+        55,
+        67,
+        28,
+        66,
+        188,
+        213,
+        158,
+        204,
+        32,
+        66,
+        155,
+        181
+      ],
+      "level": 2,
+      "position": {
+        "Before": null
+      },
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    },
+    {
+      "guid": [
+        71,
+        45,
+        134,
+        175,
+        49,
+        202,
+        56,
+        76,
+        130,
+        139,
+        137,
+        23,
+        7,
+        208,
+        7,
+        1
+      ],
+      "level": 3,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A6DBA48-33BB-0681-2F02-2C73A811E8B8},1"
+    }
+  ],
+  "page_receipt": "Some(Published { revision: ExGuid { guid: [49, 49, 147, 226, 188, 223, 28, 78, 185, 7, 77, 190, 226, 242, 41, 152], n: 1 } })",
+  "phase": "08-collapsed-group-move",
+  "publications": 1,
+  "reviewed": [],
+  "text_receipt": "Some(Published { revision: ExGuid { guid: [49, 49, 147, 226, 188, 223, 28, 78, 185, 7, 77, 190, 226, 242, 41, 152], n: 1 } })"
+}

@@ -1,0 +1,253 @@
+{
+ "generator": [
+  "crates/onestore/tests/page_movement.rs::explicit_page_edits_match_native_selection_and_indentation"
+ ],
+ "evidence": "evidence/series",
+ "cold": {
+  "03-selected-group-move": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpn80ah_uu",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-161c24f1",
+    "hostname": "ONE-M6-161C24F1"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 58424,
+     "sha256": "e7065e4e043857c74bb8fa2ce6291c87378e3dc2224fad2fefe25e0396f645c4",
+     "mtime_ns": 1790522182627846620
+    }
+   ]
+  },
+  "04-subpage-move": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp6we9ek5d",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-24b26e2e",
+    "hostname": "ONE-M6-24B26E2E"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 60208,
+     "sha256": "1b91cd7a7b6d225d52155246d1913a5c94b96b3f834a9f75529af349cc598983",
+     "mtime_ns": 1790522182669188978
+    }
+   ]
+  },
+  "05-insert-before-subpage": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpbkgvgbin",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-88fba3a0",
+    "hostname": "ONE-M6-88FBA3A0"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 61944,
+     "sha256": "28d85faa977ed919a90b237e93ee7aec55a4d988fafa1994dd5fbfa2e5d038a3",
+     "mtime_ns": 1790522182622519129
+    }
+   ]
+  },
+  "06-promoted-level-two": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpsvr31me6",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-4ccc9dae",
+    "hostname": "ONE-M6-4CCC9DAE"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 62696,
+     "sha256": "90732ec43728d3485a4ff5da2bb2960201961361ef084e8d97b93965875baa0d",
+     "mtime_ns": 1790522182647666599
+    }
+   ]
+  },
+  "07-promoted-root": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpm0pgu6fk",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-af60a95d",
+    "hostname": "ONE-M6-AF60A95D"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 64480,
+     "sha256": "eb79d7824c9c1135ef3b8aaaa111cdb1277ccf8175729a2d0637a4031742d74f",
+     "mtime_ns": 1790522182638013566
+    }
+   ]
+  },
+  "08-collapsed-group-move": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmp3lrvn0ah",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-5db5d160",
+    "hostname": "ONE-M6-5DB5D160"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 65584,
+     "sha256": "7ba31fe2131d88523503fe1ca412b74fe301d6668a8fcdc691209bf9243db10c",
+     "mtime_ns": 1790522182626875088
+    }
+   ]
+  },
+  "single-page": {
+   "run": {
+    "notebook": "/private/var/folders/90/4f4rngds01j55ggdj_vglk_c0000gn/T/tmpbiygu3ji",
+    "expected_pages": 9,
+    "author": null,
+    "author_timeout_seconds": 600,
+    "inspect": false,
+    "collect_notebook": true,
+    "base": {
+     "file": "win7-office-base.qcow2",
+     "format": "qcow2",
+     "sha256": "a1a4f8fab782ee14885ff801ca2f6347c208fdcfc3513637096f314315c89346",
+     "virtual_size": 68719476736
+    },
+    "scripts": {
+     "cold.ps1": "c177fc72ae6c2634d186f5671a880de20b09f9716532c37c69cb13aa15c7e331",
+     "read.ps1": "04013bfcccee40a17e2a225f9b9e96f40a3a8daad9e350609654f8eda3ccbb41"
+    }
+   },
+   "machine": {
+    "name": "m6-231ec95d",
+    "hostname": "ONE-M6-231EC95D"
+   },
+   "teardown": {
+    "absent": true
+   },
+   "source": [
+    {
+     "path": "Lifecycle.one",
+     "bytes": 55032,
+     "sha256": "eed7365c2054ffe32321b599ac4456d583130d3cb2e3aed41bf0baac4e27d8d2",
+     "mtime_ns": 1790522182633015571
+    }
+   ]
+  }
+ }
+}

@@ -264,10 +264,12 @@ fn page_changes<'a>(
     let mut series_by_head = BTreeMap::new();
     let mut copies = BTreeMap::new();
     let mut copy_ids = BTreeSet::new();
+    let mut stale = BTreeSet::new();
     for oid in &section_node.children {
         let series = &view.nodes[oid];
+        // OneNote leaves the losing side's series empty after a merge; the rewrite drops it.
         let Some(head) = series.spaces.first() else {
-            return Err(invalid("A page series must contain at least one page"));
+            continue;
         };
         if levels.get(head) != Some(&1)
             || series.spaces[1..]
@@ -285,8 +287,11 @@ fn page_changes<'a>(
             let FieldValue::Objects(ids) = &field.value else {
                 return Err(invalid("Page metadata copies must be object references"));
             };
-            if ids.len() != series.spaces.len() {
-                return Err(invalid("Page metadata copies must match their series"));
+            // OneNote can leave a page's former copy beside its new one (MS-ONE 2.2.81, note
+            // 9): the last copy of each page stays and the series is rewritten to match.
+            let mismatched = ids.len() != series.spaces.len();
+            if mismatched {
+                stale.insert(*oid);
             }
             for id in ids {
                 if !copy_ids.insert(*id)
@@ -303,7 +308,7 @@ fn page_changes<'a>(
                     .ok_or_else(|| {
                         invalid("Metadata copy must identify a page in its series")
                     })?;
-                if copies.insert(*sid, *id).is_some() {
+                if copies.insert(*sid, *id).is_some() && !mismatched {
                     return Err(invalid("Each page needs its own ordinary metadata copy"));
                 }
             }
@@ -372,7 +377,11 @@ fn page_changes<'a>(
     let mut children = Vec::new();
     for spaces in groups {
         let head = spaces[0];
-        let old_id = series_by_head.get(&head).copied();
+        // A moved page heads a series of its own, as OneNote's drag gives one.
+        let moved = selected
+            .get(&head)
+            .is_some_and(|edit| matches!(edit.position, PagePosition::Before(_)));
+        let old_id = series_by_head.get(&head).copied().filter(|_| !moved);
         let (id, mut series) = if let Some(id) = old_id {
             (id, PropertyObject::from_object(&raw.objects[&id])?)
         } else {
@@ -396,7 +405,8 @@ fn page_changes<'a>(
             )
         };
         children.push(id);
-        let membership_changed = old_id.is_none_or(|old| view.nodes[&old].spaces != spaces);
+        let membership_changed = old_id
+            .is_none_or(|old| view.nodes[&old].spaces != spaces || stale.contains(&old));
         if !membership_changed
             && !spaces.iter().any(|sid| {
                 levels[sid] != original_levels[sid]
@@ -654,7 +664,7 @@ impl PageCreation {
     /// The title's second outline as OneNote 2010 writes it for a new page (object numbers,
     /// jcids and properties): a read-only outline of two paragraphs, the date then the
     /// time, in the `PageDateTime` style.
-    fn date_fields(&self, date: &str, time: &str) -> Vec<(u32, u32, Vec<(u32, Vec<u8>)>)> {
+    fn date_fields(&self, date: &str, time: &str) -> Vec<(u32, u32, crate::op::Values)> {
         let reference = |n: u32| n.to_le_bytes().to_vec();
         let modified = || (0x14001d7a, self.created.to_le_bytes().to_vec());
         let yes = |id: u32| (id | 1 << 31, Vec::new());

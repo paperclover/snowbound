@@ -1,0 +1,87 @@
+{
+  "confirmations": 0,
+  "conflict": true,
+  "mode": "group",
+  "original": [
+    {
+      "guid": [
+        191,
+        13,
+        164,
+        227,
+        82,
+        236,
+        26,
+        68,
+        190,
+        184,
+        125,
+        92,
+        176,
+        151,
+        92,
+        109
+      ],
+      "level": 1,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A3D5318-2F37-02D8-0DC9-CC0BC689209F},1"
+    },
+    {
+      "guid": [
+        56,
+        89,
+        41,
+        215,
+        48,
+        19,
+        73,
+        75,
+        153,
+        165,
+        39,
+        124,
+        235,
+        93,
+        47,
+        90
+      ],
+      "level": 2,
+      "position": {
+        "Before": null
+      },
+      "space": "{D7B1788B-A971-08DE-3324-F4DF82A3B46E},1"
+    },
+    {
+      "guid": [
+        175,
+        208,
+        247,
+        122,
+        131,
+        58,
+        148,
+        64,
+        189,
+        66,
+        158,
+        33,
+        255,
+        61,
+        102,
+        224
+      ],
+      "level": 3,
+      "position": {
+        "Before": null
+      },
+      "space": "{8A6DBA48-33BB-0681-2F02-2C73A811E8B8},1"
+    }
+  ],
+  "page_receipt": "Some(Published { revision: ExGuid { guid: [13, 174, 2, 173, 50, 101, 29, 74, 170, 248, 125, 169, 18, 82, 231, 129], n: 1 } })",
+  "phase": "06-promoted-level-two",
+  "publications": 1,
+  "reviewed": [],
+  "text_receipt": "Some(Published { revision: ExGuid { guid: [13, 174, 2, 173, 50, 101, 29, 74, 170, 248, 125, 169, 18, 82, 231, 129], n: 1 } })"
+}

@@ -140,11 +140,12 @@ impl Storage for Directory {
 
     fn delete(&self, path: &str) -> Result<()> {
         let path = self.path(path);
-        Ok(if path.is_dir() {
-            std::fs::remove_dir(path)?
+        if path.is_dir() {
+            std::fs::remove_dir(path)?;
         } else {
-            std::fs::remove_file(path)?
-        })
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()> {
@@ -259,6 +260,7 @@ impl Notebook {
         std::fs::create_dir(root.as_ref())?;
         let mut notebook = Self::open(root, cache)?;
         notebook.edit_toc("", &[onestore::TocEdit::Color(color)])?;
+        notebook.refresh()?;
         notebook.create_section("", "New Section 1", page)?;
         Ok(notebook)
     }
@@ -368,8 +370,14 @@ impl Notebook {
             Some(toc) => Ok((catalog_path(folder, &toc.filename), toc.file_id)),
             None => {
                 let path = catalog_path(folder, TOC);
-                let bytes = onestore::create_table_of_contents(TOC, &[])?;
-                self.storage.create(&path, &bytes)?;
+                // One this change already created, before the catalog was read again.
+                let bytes = if self.storage.exists(&path) {
+                    self.storage.read(&path)?
+                } else {
+                    let bytes = onestore::create_table_of_contents(TOC, &[])?;
+                    self.storage.create(&path, &bytes)?;
+                    bytes
+                };
                 Ok((path, onestore::Store::parse(&bytes)?.header.file_id))
             }
         }
@@ -632,17 +640,7 @@ impl Notebook {
         let mut section = onestore::Section::open(&arena, self.storage.read(&path)?)?;
         let mut ops = Vec::new();
         for page in pages {
-            let mut creation = PageCreation::new(None, Some(&page.title), author)?;
-            if let (Some(identity), Some(created)) = (page.identity, page.created) {
-                creation = creation.keeping(identity, created)?;
-            }
-            if let Some([date, time]) = page.date_text() {
-                creation = creation.dated(&date, &time)?;
-            }
-            ops.push(Op::Section(SectionOp::Import {
-                creation,
-                page: page.copy()?,
-            }));
+            ops.push(moved(page, author)?);
         }
         section.apply(author, &Edit { at: crate::now(), ops })?;
         if let Some(transaction) = section.seal()? {
@@ -802,6 +800,17 @@ impl Notebook {
 
     /// Opens a section of a mounted notebook by its catalog path.
     pub fn section(&self, path: &str, notify: impl Fn() + Send + 'static) -> Result<Section> {
+        self.section_with(path, |file| Ok(FileRemote(file.to_owned())), notify)
+    }
+
+    /// `section`, reading and publishing through the remote `connect` makes for its file
+    /// (`Section::open_with`).
+    pub fn section_with<R: Remote + 'static>(
+        &self,
+        path: &str,
+        connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Section> {
         let path = self.section_path(path)?.path.clone();
         let Some(root) = &self.root else {
             return Err(io::Error::new(
@@ -815,29 +824,39 @@ impl Notebook {
         if !file.starts_with(root) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
         }
-        Section::open(file, &self.cache, notify)
+        Section::open_with(file, &self.cache, connect, notify)
     }
 }
 
-/// The section colours OneNote 2010 gives new sections, COLORREF, in the order it gives
-/// them (`evidence/notebook-management/new-notebook`).
-const SECTION_COLORS: [u32; 3] = [0x00e4a88a, 0x0078b0f6, 0x00bba4d5];
+/// The colours OneNote 2010 gives a folder's first sixteen new sections, COLORREF, in the
+/// order it gives them (`corpus/notebook-management/native/section-colors`: sixteen sections
+/// made with New Section in a new notebook).
+const SECTION_COLORS: [u32; 16] = [
+    0x00e4a88a, 0x0078b0f6, 0x00bba4d5, 0x00d2bb9b, 0x00b79cab, 0x0099d1e8, 0x006ff9f5,
+    0x0092e7ad, 0x00cabc4d, 0x007575ba, 0x00aa9595, 0x00e4a88a, 0x0069d8ff, 0x0097c9b7,
+    0x009795ee, 0x00de9eb4,
+];
 
-/// The colour OneNote gives a new section in `folder`: the first of its colours none of
-/// the folder's sections has, or the next in turn when all are taken.
+/// The colour OneNote gives a new section in `folder`, by how many sections it holds.
 fn next_color(folder: &discover::Folder) -> u32 {
-    let taken: Vec<u32> = folder
-        .sections
-        .iter()
-        .filter_map(|section| match section.state {
-            discover::SectionState::Readable { color, .. } => color,
-            _ => None,
-        })
-        .collect();
-    SECTION_COLORS
-        .into_iter()
-        .find(|color| !taken.contains(color))
-        .unwrap_or(SECTION_COLORS[folder.sections.len() % SECTION_COLORS.len()])
+    SECTION_COLORS[folder.sections.len() % SECTION_COLORS.len()]
+}
+
+/// The op putting `page` into another section as OneNote moves a page there, into the
+/// recycle bin or another section: last, under fresh object identities, keeping its page
+/// identity, title, date and creation time.
+pub fn moved(page: &Page, author: &str) -> Result<Op> {
+    let mut creation = PageCreation::new(None, Some(&page.title), author)?;
+    if let (Some(identity), Some(created)) = (page.identity, page.created) {
+        creation = creation.keeping(identity, created)?;
+    }
+    if let Some([date, time]) = page.date_text() {
+        creation = creation.dated(&date, &time)?;
+    }
+    Ok(Op::Section(SectionOp::Import {
+        creation,
+        page: page.copy()?,
+    }))
 }
 
 fn component(name: &str) -> bool {
@@ -897,8 +916,20 @@ impl Section {
         cache: impl AsRef<Path>,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Self> {
+        Self::open_with(file, cache, |file| Ok(FileRemote(file.to_owned())), notify)
+    }
+
+    /// `open`, reading and publishing the file through the remote `connect` makes for it,
+    /// as a host that coordinates file access with other processes (iOS's file providers)
+    /// needs.
+    pub fn open_with<R: Remote + 'static>(
+        file: impl AsRef<Path>,
+        cache: impl AsRef<Path>,
+        mut connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
         let file = file.as_ref().canonicalize()?;
-        let source = onestore::read_file(&file)?;
+        let source = connect(&file)?.read()?;
         let store = Store::parse(&source)?;
         let identity = RevisionIndex::parse(&store)?.root;
         let name: String = identity
@@ -913,7 +944,8 @@ impl Section {
         } else {
             Replica::create(&cache, &source)?
         };
-        Self::resume(file, replica, notify)
+        let remote = file.clone();
+        Self::start(file, replica, move || connect(&remote), notify)
     }
 
     /// Resumes an owned local replica without reading the publication target.

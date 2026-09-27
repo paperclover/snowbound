@@ -52,7 +52,7 @@ mod payload {
 pub use text::Paragraph;
 
 /// The page node's colour (View, Page Color) as COLORREF, absent for "No color"; not in
-/// MS-ONE, observed in OneNote 2010's pages (`evidence/notebook-management`).
+/// MS-ONE, observed in OneNote 2010's pages (`corpus/notebook-management/native/page-color`).
 pub(crate) const PAGE_COLOR: u32 = 0x14001d2a;
 
 /// The role of a title-outline paragraph that displays the page's creation date or time.

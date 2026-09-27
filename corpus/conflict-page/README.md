@@ -58,6 +58,11 @@ holding A's edit, in a new series where A had it; B's version stays in the recyc
 - `native-restore`: from One, Two, Target, Three, Four, A moved Four before One
   (re-seriesing One, Two, Target, Three) and B deleted Target: Four, One, Two, Target, Three.
 
+`series-move` is `a_move_after_a_native_merge_drops_its_empty_series`
+(`crates/onestore/tests/page_movement.rs`, `ONESTORE_EMPTY_SERIES_EXPORT`): Rust moves a
+page of `native-pages/merged`, giving it a series of its own and dropping the empty
+series; OneNote's cold read (`cold`) keeps every byte after the header.
+
 `page_moves_and_a_removed_page_merge_as_onenote_merges_them` in
 `crates/notebook/tests/sync_pages.rs` replays both with Snowbound's queue, A's moves as
 moves of the pages A re-seriesed, and reaches OneNote's order.

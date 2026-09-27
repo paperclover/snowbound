@@ -642,8 +642,8 @@ fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<
             };
             let edit = merge::conflict_page(
                 &mut new,
-                &mut old,
                 local,
+                &merged.moved,
                 *space,
                 page,
                 author,

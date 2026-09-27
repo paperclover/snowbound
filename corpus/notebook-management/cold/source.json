@@ -1,0 +1,56 @@
+[
+  {
+    "path": "Archive/Inner.one",
+    "bytes": 6816,
+    "sha256": "4947149bfe3af5bdf0224e01a0ce95a9849ffad5cbe7d5af4771c6c644850cde",
+    "mtime_ns": 1790521518477003662
+  },
+  {
+    "path": "Archive/Kitchen.one",
+    "bytes": 9992,
+    "sha256": "ea8fea880e9f42ff4999c6d7fd1a90c0977ab2efd0501aa1e4bcee85c6279f55",
+    "mtime_ns": 1790521519374324319
+  },
+  {
+    "path": "Archive/Open Notebook.onetoc2",
+    "bytes": 4200,
+    "sha256": "5a0c4e1078e51e3fdea8660b1ecb73f76048e556d5ae21691428fd798801e5d8",
+    "mtime_ns": 1790521519426971739
+  },
+  {
+    "path": "New Section 1.one",
+    "bytes": 85232,
+    "sha256": "9e903193b2ae555d1aaeeef01b21e749204a0f6a5f9560b18e835f8bc1655097",
+    "mtime_ns": 1790521519332264376
+  },
+  {
+    "path": "OneNote_RecycleBin/Binned.one",
+    "bytes": 6816,
+    "sha256": "d2cb20d7cb2238b5525ce6c5b378323eacc265688b6d78cb32a6bdc7f8db9570",
+    "mtime_ns": 1790521519520939028
+  },
+  {
+    "path": "OneNote_RecycleBin/Gone.one",
+    "bytes": 6816,
+    "sha256": "976f0b7e524ac877d3ced0f803f50a812b5747a9edf8bccc387276f9ccbc16c0",
+    "mtime_ns": 1790521519461432928
+  },
+  {
+    "path": "OneNote_RecycleBin/OneNote_DeletedPages.one",
+    "bytes": 6888,
+    "sha256": "b005c3a26c475d717d87ec66d72eccdfa1d35c72000966fd132728bd086bb860",
+    "mtime_ns": 1790521519201361387
+  },
+  {
+    "path": "OneNote_RecycleBin/Open Notebook.onetoc2",
+    "bytes": 4592,
+    "sha256": "a4784bb35ecae53b6f6ad576c3c0687078e72ace4fba47d004d6498aadfae8b2",
+    "mtime_ns": 1790521519539400089
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 9392,
+    "sha256": "cbeebc6c391f65d834f819f9ed90077f36ddbcf7f7e41ff72614200a659b2fef",
+    "mtime_ns": 1790521519587646429
+  }
+]
