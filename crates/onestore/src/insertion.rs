@@ -47,7 +47,13 @@ impl Insertion {
     }
 
     /// Adds an outline to an editable page at coordinates measured in points.
-    pub(crate) fn outline(page: ExGuid, x: f32, y: f32, text: &str, author: &str) -> Result<Self, Error> {
+    pub(crate) fn outline(
+        page: ExGuid,
+        x: f32,
+        y: f32,
+        text: &str,
+        author: &str,
+    ) -> Result<Self, Error> {
         Self::new(page, Placement::Outline { x, y }, text, author)
     }
 
@@ -186,7 +192,11 @@ impl Insertion {
                     (0x10001cfe, 0x409_u16.to_le_bytes().to_vec()),
                 ],
             ),
-            (author, 0x120001, crate::create::author_properties(&self.author)),
+            (
+                author,
+                0x120001,
+                crate::create::author_properties(&self.author),
+            ),
             (default, 0x12004d, default_text_style()),
         ] {
             new.insert(

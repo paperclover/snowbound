@@ -1,7 +1,6 @@
 use crate::{
-    ExGuid, RevisionIndex, Store,
+    ExGuid, RevisionIndex, Store, Transaction,
     document::{Document, Kind},
-    Transaction,
     write::{PropertyObject, RevisionEdit, applied, revisions, write_revisions},
 };
 use std::collections::BTreeMap;

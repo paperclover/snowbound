@@ -3,6 +3,7 @@
 //! pages the merges leave.
 
 use crate::model_ops::{self, AUTHOR};
+use crate::ops;
 use crate::server::{Fault, Server, remote_snapshot, snapshot};
 use notebook::{EditStatus, Remote, Replica};
 use onestore::{
@@ -11,9 +12,6 @@ use onestore::{
     page::{Outline, Page, PageObject},
 };
 use std::{io, sync::LazyLock};
-
-#[path = "../../../onestore/tests/support/ops.rs"]
-mod ops;
 
 static SOURCE: LazyLock<(Vec<u8>, ExGuid)> = LazyLock::new(|| {
     let source =
@@ -282,13 +280,16 @@ pub fn run(input: &[u8]) {
                 let next = cache.pending().unwrap();
                 // Edits leave the queue oldest first, each with a durable receipt; a rebase
                 // queues the conflict pages it makes after them.
-                let queued = |edit: &notebook::PendingEdit| pending.iter().any(|kept| kept.id == edit.id);
+                let queued =
+                    |edit: &notebook::PendingEdit| pending.iter().any(|kept| kept.id == edit.id);
                 let left = pending.len() - next.iter().filter(|edit| queued(edit)).count();
                 assert!(next.iter().all(|edit| {
                     pending[left..].iter().any(|kept| kept.id == edit.id)
                         || matches!(
                             &edit.edit.ops[..],
-                            [onestore::op::Op::Section(onestore::op::SectionOp::Conflict { .. })]
+                            [onestore::op::Op::Section(
+                                onestore::op::SectionOp::Conflict { .. }
+                            )]
                         )
                 }));
                 for edit in &pending[..left] {
@@ -301,24 +302,18 @@ pub fn run(input: &[u8]) {
                 if next.is_empty() && result.is_ok() {
                     assert_eq!(
                         local(cache),
-                        shape(&model_ops::page_of(
-                            &remote_snapshot(cache),
-                            *space
-                        ))
+                        shape(&model_ops::page_of(&remote_snapshot(cache), *space))
                     );
                 }
             }
             5 => {
                 let remote = rows(&server.visible);
                 let row = remote[usize::from(step[2]) % remote.len()].clone();
-                if !row.2.is_empty() {
+                let letter = char::from(b'a' + step[3] % 26);
+                // Retyping the letter already there changes nothing, so stores no revision.
+                if row.2.chars().next().is_some_and(|first| first != letter) {
                     let mut page = model_ops::page_of(&server.visible, *space);
-                    model_ops::replace_text(
-                        &mut page,
-                        row.1,
-                        0..1,
-                        &char::from(b'a' + step[3] % 26).to_string(),
-                    );
+                    model_ops::replace_text(&mut page, row.1, 0..1, &letter.to_string());
                     let visible = server.visible.clone();
                     ops::save(&visible, *space, &page)
                         .unwrap()
@@ -334,9 +329,8 @@ pub fn run(input: &[u8]) {
                     .find(|(page, _)| page == space)
                     .map(|(_, pages)| pages[usize::from(step[2]) % pages.len()].space)
                 {
-                    let delete = onestore::op::Op::Section(onestore::op::SectionOp::Delete(vec![
-                        conflict,
-                    ]));
+                    let delete =
+                        onestore::op::Op::Section(onestore::op::SectionOp::Delete(vec![conflict]));
                     cache
                         .apply(
                             AUTHOR,

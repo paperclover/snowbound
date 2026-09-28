@@ -143,10 +143,7 @@ fn atomic_page_batches_survive_reopen_with_dependent_text() {
     drop(cache);
     let cache = Replica::open(&path).unwrap();
     assert_eq!(cache.pending().unwrap(), queue);
-    assert_eq!(
-        server::pages(&snapshot(&cache)),
-        server::pages(&local)
-    );
+    assert_eq!(server::pages(&snapshot(&cache)), server::pages(&local));
     let mut server = Server::new(SOURCE);
     assert!(matches!(
         cache.sync_once(&mut server).unwrap().edit,
@@ -178,7 +175,10 @@ fn indenting_a_page_the_remote_moved_keeps_the_remote_placement() {
         SectionOp::Pages([PageEdit::set_level(sid, 3).unwrap()].to_vec()),
     );
     let mut server = Server::new(SOURCE);
-    ops::section_op(SOURCE, SectionOp::Pages([PageEdit::move_to(sid, Some(before[7].0), 2).unwrap()].to_vec()))
+    ops::section_op(
+        SOURCE,
+        SectionOp::Pages([PageEdit::move_to(sid, Some(before[7].0), 2).unwrap()].to_vec()),
+    )
     .unwrap()
     .commit(&mut server)
     .unwrap();
@@ -196,9 +196,15 @@ fn competing_page_moves_keep_the_remote_placement() {
     let cache = Replica::create(directory.path().join("pages.sqlite"), SOURCE).unwrap();
     let pages = order(SOURCE);
     let sid = pages[6].0;
-    let id = section_op(&cache, SectionOp::Pages(vec![PageEdit::move_to(sid, None, 1).unwrap()]));
+    let id = section_op(
+        &cache,
+        SectionOp::Pages(vec![PageEdit::move_to(sid, None, 1).unwrap()]),
+    );
     let mut server = Server::new(SOURCE);
-    ops::section_op(SOURCE, SectionOp::Pages([PageEdit::move_to(sid, Some(pages[0].0), 1).unwrap()].to_vec()))
+    ops::section_op(
+        SOURCE,
+        SectionOp::Pages([PageEdit::move_to(sid, Some(pages[0].0), 1).unwrap()].to_vec()),
+    )
     .unwrap()
     .commit(&mut server)
     .unwrap();
@@ -219,12 +225,18 @@ fn a_competing_level_keeps_the_remote_level_and_the_rest_of_the_batch() {
     ];
     let id = section_op(&cache, SectionOp::Pages(edits.clone()));
     let mut server = Server::new(SOURCE);
-    ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(pages[5].0, 1).unwrap()].to_vec()))
-        .unwrap()
-        .commit(&mut server)
-        .unwrap();
-    let expected =
-        ops::section_op(&server.durable.clone(), SectionOp::Pages(edits[..1].to_vec())).unwrap();
+    ops::section_op(
+        SOURCE,
+        SectionOp::Pages([PageEdit::set_level(pages[5].0, 1).unwrap()].to_vec()),
+    )
+    .unwrap()
+    .commit(&mut server)
+    .unwrap();
+    let expected = ops::section_op(
+        &server.durable.clone(),
+        SectionOp::Pages(edits[..1].to_vec()),
+    )
+    .unwrap();
     assert!(matches!(cache.sync_once(&mut server).unwrap().edit,
         Some((published, EditStatus::Published { .. })) if published == id));
     assert_eq!(order(&server.durable), order(expected.as_bytes()));
@@ -367,7 +379,10 @@ fn an_explicit_anchor_yields_to_a_remote_move() {
         ]),
     );
     let mut server = Server::new(SOURCE);
-    ops::section_op(SOURCE, SectionOp::Pages([PageEdit::move_to(pages[6].0, Some(pages[0].0), 1).unwrap()].to_vec()))
+    ops::section_op(
+        SOURCE,
+        SectionOp::Pages([PageEdit::move_to(pages[6].0, Some(pages[0].0), 1).unwrap()].to_vec()),
+    )
     .unwrap()
     .commit(&mut server)
     .unwrap();
@@ -391,10 +406,13 @@ fn convergent_page_indentation_requires_confirmation_without_republishing() {
         SectionOp::Pages([PageEdit::set_level(sid, 1).unwrap()].to_vec()),
     );
     let mut server = Server::new(SOURCE);
-    ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(sid, 1).unwrap()].to_vec()))
-        .unwrap()
-        .commit(&mut server)
-        .unwrap();
+    ops::section_op(
+        SOURCE,
+        SectionOp::Pages([PageEdit::set_level(sid, 1).unwrap()].to_vec()),
+    )
+    .unwrap()
+    .commit(&mut server)
+    .unwrap();
     server.fault = Fault::Confirm;
     assert!(cache.sync_once(&mut server).is_err());
     assert_eq!(cache.status(id).unwrap(), Some(EditStatus::Pending));
@@ -451,12 +469,21 @@ fn native_page_changes_reconcile_with_atomic_offline_batches() {
                 .collect();
             let placement = |image: &[u8]| -> BTreeMap<ExGuid, (ExGuid, Option<ExGuid>, u32)> {
                 let arena = onestore::Arena::default();
-                let series = onestore::Section::open(&arena, image.to_vec()).unwrap().series().unwrap();
-                let shared: Vec<_> = order(image).into_iter().filter(|(sid, _)| both.contains(sid)).collect();
+                let series = onestore::Section::open(&arena, image.to_vec())
+                    .unwrap()
+                    .series()
+                    .unwrap();
+                let shared: Vec<_> = order(image)
+                    .into_iter()
+                    .filter(|(sid, _)| both.contains(sid))
+                    .collect();
                 (0..shared.len())
                     .map(|at| {
                         let (sid, level) = shared[at];
-                        (sid, (series[&sid], at.checked_sub(1).map(|b| shared[b].0), level))
+                        (
+                            sid,
+                            (series[&sid], at.checked_sub(1).map(|b| shared[b].0), level),
+                        )
                     })
                     .collect()
             };
@@ -607,14 +634,21 @@ fn twelve_disjoint_page_batches_merge_with_dependent_bodies_without_review() {
 /// A, offline, `moves` pages (each last, or before another) and edits `Target`'s body while
 /// client B publishes `b-published`. The pages the merge lists after the first, and
 /// `Target`'s space and texts.
-fn native_page_merge(capture: &str, moves: &[(&str, Option<&str>)]) -> (Vec<String>, ExGuid, Vec<String>) {
+fn native_page_merge(
+    capture: &str,
+    moves: &[(&str, Option<&str>)],
+) -> (Vec<String>, ExGuid, Vec<String>) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/conflict-page")
         .join(capture);
-    let read = |phase: &str| std::fs::read(root.join(phase).join("notebook/synthetic.one")).unwrap();
+    let read =
+        |phase: &str| std::fs::read(root.join(phase).join("notebook/synthetic.one")).unwrap();
     let pages = |image: &[u8]| {
         let arena = onestore::Arena::default();
-        onestore::Section::open(&arena, image.to_vec()).unwrap().pages().unwrap()
+        onestore::Section::open(&arena, image.to_vec())
+            .unwrap()
+            .pages()
+            .unwrap()
     };
     let initial = read("initial");
     let listed = pages(&initial);
@@ -624,7 +658,9 @@ fn native_page_merge(capture: &str, moves: &[(&str, Option<&str>)]) -> (Vec<Stri
     for (page, before) in moves {
         section_op(
             &cache,
-            SectionOp::Pages(vec![PageEdit::move_to(space(page), before.map(space), 1).unwrap()]),
+            SectionOp::Pages(vec![
+                PageEdit::move_to(space(page), before.map(space), 1).unwrap(),
+            ]),
         );
     }
     let body = texts(&initial)
@@ -650,7 +686,11 @@ fn native_page_merge(capture: &str, moves: &[(&str, Option<&str>)]) -> (Vec<Stri
         .filter(|((page, _), _)| *page == target)
         .map(|(_, text)| text)
         .collect();
-    (merged[1..].iter().map(|page| page.1.clone()).collect(), target, texts)
+    (
+        merged[1..].iter().map(|page| page.1.clone()).collect(),
+        target,
+        texts,
+    )
 }
 
 /// Each side keeps the pages it gave a series of their own, the remote's where both did;
@@ -659,20 +699,47 @@ fn native_page_merge(capture: &str, moves: &[(&str, Option<&str>)]) -> (Vec<Stri
 #[test]
 fn page_moves_and_a_removed_page_merge_as_onenote_merges_them() {
     for (capture, moves) in [
-        ("native-pages", &[("One", Some("Target")), ("Three", Some("Target")), ("Two", None)][..]),
-        ("native-restore", &[("One", None), ("Two", None), ("Target", None), ("Three", None)][..]),
+        (
+            "native-pages",
+            &[
+                ("One", Some("Target")),
+                ("Three", Some("Target")),
+                ("Two", None),
+            ][..],
+        ),
+        (
+            "native-restore",
+            &[
+                ("One", None),
+                ("Two", None),
+                ("Target", None),
+                ("Three", None),
+            ][..],
+        ),
         ("native-restore", &[("Four", Some("One"))][..]),
     ] {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/conflict-page");
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/conflict-page");
         let native: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join(capture).join("merged.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(root.join(capture).join("merged.json")).unwrap())
+                .unwrap();
         let (order, target, texts) = native_page_merge(capture, moves);
         let native: Vec<String> = serde_json::from_value(native["order"].clone()).unwrap();
         assert_eq!(order, native[1..], "{capture}");
-        assert!(texts.contains(&"Body Target edited offline.".to_owned()), "{capture}");
+        assert!(
+            texts.contains(&"Body Target edited offline.".to_owned()),
+            "{capture}"
+        );
         let arena = onestore::Arena::default();
-        let initial = std::fs::read(root.join(capture).join("initial/notebook/synthetic.one")).unwrap();
-        let listed = onestore::Section::open(&arena, initial).unwrap().pages().unwrap();
-        assert!(listed.iter().all(|page| page.0 != target), "{capture}: a new page");
+        let initial =
+            std::fs::read(root.join(capture).join("initial/notebook/synthetic.one")).unwrap();
+        let listed = onestore::Section::open(&arena, initial)
+            .unwrap()
+            .pages()
+            .unwrap();
+        assert!(
+            listed.iter().all(|page| page.0 != target),
+            "{capture}: a new page"
+        );
     }
 }

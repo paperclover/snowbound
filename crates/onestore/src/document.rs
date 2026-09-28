@@ -897,11 +897,16 @@ impl<'a> Document<'a> {
             if space.contexts.contains_key(&context) {
                 continue;
             }
-            let rid = *index
+            let rid = index
                 .spaces
                 .get(&id)
-                .and_then(|s| s.labels.get(&(context, 1)))
-                .ok_or_else(|| invalid("Document context has no revision"))?;
+                .and_then(|s| s.labels.get(&(context, 1)));
+            let rid = match rid {
+                Some(rid) => *rid,
+                // OneNote's copy of a page version names a history it never wrote.
+                None if context == crate::section::HISTORY => continue,
+                None => return Err(invalid("Document context has no revision")),
+            };
             space.contexts.insert(context, rid);
             if space.revisions.contains_key(&rid) {
                 continue;
@@ -924,8 +929,10 @@ impl<'a> Document<'a> {
                     Kind::VersionProxy { context, .. } => (*context, false),
                     _ => continue,
                 };
-                let rid = space.contexts[&context];
-                let revision = &space.revisions[&rid];
+                let Some(rid) = space.contexts.get(&context) else {
+                    continue;
+                };
+                let revision = &space.revisions[rid];
                 let root = revision.roots.get(&1).and_then(|id| revision.nodes.get(id));
                 if history {
                     if !matches!(root.map(|n| &n.kind), Some(Kind::VersionHistory)) {
@@ -934,7 +941,7 @@ impl<'a> Document<'a> {
                         ));
                     }
                 } else if !matches!(root.map(|n| &n.kind), Some(Kind::Manifest { .. }))
-                    || space.contexts.get(&ExGuid::default()) == Some(&rid)
+                    || space.contexts.get(&ExGuid::default()) == Some(rid)
                 {
                     return Err(invalid(
                         "Version context does not resolve to a historical page",

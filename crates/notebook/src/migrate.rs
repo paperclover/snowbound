@@ -116,9 +116,12 @@ fn conflict(space: ExGuid, remote: &Page, local: &Page, author: &str) -> Result<
         for object in &page.objects {
             match object {
                 onestore::page::PageObject::Outline(outline) => pending.extend(&outline.paragraphs),
-                onestore::page::PageObject::Title(title) => {
-                    pending.extend(title.outlines.iter().flat_map(|outline| &outline.paragraphs))
-                }
+                onestore::page::PageObject::Title(title) => pending.extend(
+                    title
+                        .outlines
+                        .iter()
+                        .flat_map(|outline| &outline.paragraphs),
+                ),
                 _ => {}
             }
         }
@@ -128,7 +131,11 @@ fn conflict(space: ExGuid, remote: &Page, local: &Page, author: &str) -> Result<
                     texts.insert(text.id, format!("{:?}", text.text));
                 }
                 onestore::page::ParagraphContent::Table(table) => pending.extend(
-                    table.rows.iter().flat_map(|row| &row.cells).flat_map(|cell| &cell.paragraphs),
+                    table
+                        .rows
+                        .iter()
+                        .flat_map(|row| &row.cells)
+                        .flat_map(|cell| &cell.paragraphs),
                 ),
                 _ => {}
             }

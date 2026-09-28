@@ -187,7 +187,10 @@ fn native_subtree_controls_match_with_preserved_fields_and_history() {
             let Some((name, object, edit)) = operation(before, page) else {
                 continue;
             };
-            let edit: Vec<Op> = edit.into_iter().map(|op| Op::Page { space: sid, op }).collect();
+            let edit: Vec<Op> = edit
+                .into_iter()
+                .map(|op| Op::Page { space: sid, op })
+                .collect();
             let prepared = ops::apply(source, "Tree author", edit.clone())
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             let after_store = Store::parse(prepared.as_bytes()).unwrap();
@@ -425,7 +428,10 @@ fn publication_interruptions_expose_complete_old_or_new_trees() {
         ) {
             continue;
         }
-        let intent = intent.into_iter().map(|op| Op::Page { space: sid, op }).collect();
+        let intent = intent
+            .into_iter()
+            .map(|op| Op::Page { space: sid, op })
+            .collect();
         let edit = ops::apply(source, "Tree author", intent).unwrap();
         let after = current::current(edit.as_bytes());
         for write_limit in [17, 4096] {

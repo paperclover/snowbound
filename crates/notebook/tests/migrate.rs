@@ -191,9 +191,7 @@ fn a_schema_14_queue_converts_to_ops_that_reach_its_working_pages_and_publish() 
             Queued::Page(
                 a,
                 appended(
-                    ops::saved(SOURCE, a, &first)
-                        .unwrap()
-                        .as_slice(),
+                    ops::saved(SOURCE, a, &first).unwrap().as_slice(),
                     a,
                     a_text,
                     " two",
@@ -306,10 +304,7 @@ fn an_uncertain_attempt_keeps_its_state_and_a_conflict_becomes_a_conflict_page()
         .as_slice()
         .to_vec();
     let local = appended(SOURCE, a, a_text, " local");
-    let working = ops::saved(SOURCE, a, &local)
-        .unwrap()
-        .as_slice()
-        .to_vec();
+    let working = ops::saved(SOURCE, a, &local).unwrap().as_slice().to_vec();
     {
         // Schema 14 stored the remote as the base and kept the local working image.
         v14(&path, &remote, &[], Some(&working));
@@ -346,7 +341,10 @@ fn an_uncertain_attempt_keeps_its_state_and_a_conflict_becomes_a_conflict_page()
         conflicts(&server.durable),
         [(
             a,
-            vec![("Author".to_owned(), page_texts(&model_ops::page_of(&working, a)))]
+            vec![(
+                "Author".to_owned(),
+                page_texts(&model_ops::page_of(&working, a))
+            )]
         )]
     );
 }
@@ -447,7 +445,13 @@ fn a_schema_15_cache_upgrades_in_place_and_its_conflict_becomes_a_conflict_page(
     assert_eq!(version, 16);
     assert_eq!(columns, ["id", "sealed", "revisions", "attempted"]);
     drop(connection);
-    assert_eq!(notebook::Recovery::open(&archive).unwrap().pending().unwrap(), pending);
+    assert_eq!(
+        notebook::Recovery::open(&archive)
+            .unwrap()
+            .pending()
+            .unwrap(),
+        pending
+    );
     let cache = Replica::open(&path).unwrap();
     let remote = typed(SOURCE, space, text, 0..0, "Remote ");
     let mut server = Server::new(&remote);

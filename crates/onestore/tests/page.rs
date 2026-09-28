@@ -117,7 +117,15 @@ fn created_pages_support_title_edits_and_body_insertion() {
             Some(title.filter(|s| !s.is_empty()).unwrap_or("Body 🦀 é"))
         );
         if let Some(text) = intent.title_object() {
-            source = ops::page_op(&source, intent.space(), PageOp::Text { text, range: 0..title.unwrap().encode_utf16().count() as u32, with: "Renamed".into() })
+            source = ops::page_op(
+                &source,
+                intent.space(),
+                PageOp::Text {
+                    text,
+                    range: 0..title.unwrap().encode_utf16().count() as u32,
+                    with: "Renamed".into(),
+                },
+            )
             .unwrap()
             .as_bytes()
             .to_vec();
@@ -359,10 +367,18 @@ fn native_changes_on_created_pages_accept_rust_followups() {
     let mut source = initial.to_vec();
     for (sid, title, body) in targets {
         for (object, prefix) in [(body, "Rust + "), (title, "Reviewed ")] {
-            source = ops::page_op(&source, sid, PageOp::Text { text: object, range: 0..0, with: prefix.into() })
-                .unwrap()
-                .as_bytes()
-                .to_vec();
+            source = ops::page_op(
+                &source,
+                sid,
+                PageOp::Text {
+                    text: object,
+                    range: 0..0,
+                    with: prefix.into(),
+                },
+            )
+            .unwrap()
+            .as_bytes()
+            .to_vec();
         }
         let store = Store::parse(&source).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();

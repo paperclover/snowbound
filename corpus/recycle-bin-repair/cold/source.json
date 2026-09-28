@@ -1,0 +1,26 @@
+[
+  {
+    "path": "New Section 1.one",
+    "bytes": 6024,
+    "sha256": "b1444e361cef2e5f0d716ae021ad42b051129ec9ac32c36b54f4d4c7ddfc3f84",
+    "mtime_ns": 1790582690747351251
+  },
+  {
+    "path": "OneNote_RecycleBin/OneNote Table Of Contents.onetoc2",
+    "bytes": 3848,
+    "sha256": "b0e0f0928773e1fe41fac3e0377162201083a86e789a193ba0977a03cf043808",
+    "mtime_ns": 1790582691261467141
+  },
+  {
+    "path": "OneNote_RecycleBin/OneNote_DeletedPages.one",
+    "bytes": 8352,
+    "sha256": "05b75f0780567db72cc70dc8277fe8a947d6edc5f6bb51bea76f488669d6cdd0",
+    "mtime_ns": 1790582691300920689
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 5456,
+    "sha256": "f282959ea3de40d2460fe941ade4b7ab14f22e569530056bf7690f041b0118c6",
+    "mtime_ns": 1790582691234269352
+  }
+]

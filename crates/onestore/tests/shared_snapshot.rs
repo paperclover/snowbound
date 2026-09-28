@@ -198,8 +198,7 @@ fn published_snapshots_survive_interleaved_commit_io() {
             bytes: source.clone(),
             events: Vec::new(),
         };
-        commit_text(&mut trace, &source, sid, oid, end..end, " [reader café 🦀]")
-            .unwrap();
+        commit_text(&mut trace, &source, sid, oid, end..end, " [reader café 🦀]").unwrap();
         let after = current(&trace.bytes);
         assert_ne!(before, after);
         let mut writes = Vec::new();

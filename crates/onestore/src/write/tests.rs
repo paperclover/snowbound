@@ -130,7 +130,10 @@ fn document_insertions_and_formatting_respect_readonly_ancestors() {
         })
         .unwrap();
         let refused = |op| edited(&protected, sid, vec![op]).is_err();
-        assert!(refused(insert(paragraph, text_paragraph("Nested", Format::default()))));
+        assert!(refused(insert(
+            paragraph,
+            text_paragraph("Nested", Format::default())
+        )));
         assert!(refused(PageOp::Split {
             text,
             at: 1,

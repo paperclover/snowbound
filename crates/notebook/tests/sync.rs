@@ -57,8 +57,7 @@ fn an_unchanged_stamp_publishes_and_settles_without_reading_the_remote() {
     assert_eq!(cache.sync_once(&mut remote).unwrap().edit, None);
     assert_eq!(remote.reads, 0);
     // Another writer's commit moves the header, so the next step reads the file.
-    let native =
-        typed(&remote.server.visible, sid, object, 0..0, "Native ");
+    let native = typed(&remote.server.visible, sid, object, 0..0, "Native ");
     remote.server.visible.clone_from(&native);
     assert_eq!(cache.sync_once(&mut remote).unwrap().edit, None);
     assert_eq!(remote.reads, 1);
@@ -252,7 +251,10 @@ fn overlapping_changes_keep_both_versions_and_survive_restart() {
     assert_eq!(content(&server.durable, oid), "aRc");
     assert_eq!(
         conflicts(&server.durable),
-        [(sid, vec![(model_ops::AUTHOR.to_owned(), vec!["aLc".to_owned()])])]
+        [(
+            sid,
+            vec![(model_ops::AUTHOR.to_owned(), vec!["aLc".to_owned()])]
+        )]
     );
     assert_eq!(snapshot(&cache), server.durable);
     assert!(cache.pending().unwrap().is_empty());
@@ -635,7 +637,10 @@ fn edits_after_a_conflict_apply_to_the_remote_version_and_survive_reopen() {
     assert_eq!(content(&server.durable, oid), expected);
     assert_eq!(
         conflicts(&server.durable),
-        [(sid, vec![(model_ops::AUTHOR.to_owned(), vec!["aLc".to_owned()])])]
+        [(
+            sid,
+            vec![(model_ops::AUTHOR.to_owned(), vec!["aLc".to_owned()])]
+        )]
     );
     assert!(cache.pending().unwrap().is_empty());
 }
@@ -714,7 +719,11 @@ fn seeded_conflicts_keep_the_remote_text_and_later_edits_publish_once() {
             ),
             "case {case}, seed {seed}"
         );
-        assert_eq!(content(&server.durable, oid), remote_text, "case {case}, seed {seed}");
+        assert_eq!(
+            content(&server.durable, oid),
+            remote_text,
+            "case {case}, seed {seed}"
+        );
         assert_eq!(
             conflicts(&server.durable),
             [(sid, vec![(model_ops::AUTHOR.to_owned(), vec![local])])],
@@ -729,7 +738,11 @@ fn seeded_conflicts_keep_the_remote_text_and_later_edits_publish_once() {
         let mut expected = original.clone();
         expected.splice(at..at + 1, "λ🐕μ".chars());
         let expected = prefix + &expected.iter().collect::<String>() + &suffix;
-        assert_eq!(content(&server.durable, oid), expected, "case {case}, seed {seed}");
+        assert_eq!(
+            content(&server.durable, oid),
+            expected,
+            "case {case}, seed {seed}"
+        );
         assert_eq!(server.publications, 2);
         assert!(cache.pending().unwrap().is_empty());
     }
@@ -919,7 +932,10 @@ fn a_remote_restore_keeps_local_work_on_a_conflict_page() {
         conflicts(&server.durable),
         [(
             space,
-            vec![(model_ops::AUTHOR.to_owned(), vec!["Revised Original".to_owned()])]
+            vec![(
+                model_ops::AUTHOR.to_owned(),
+                vec!["Revised Original".to_owned()]
+            )]
         )]
     );
     drop(cache);

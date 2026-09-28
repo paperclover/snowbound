@@ -206,7 +206,8 @@ impl Client {
                 0xc0000043 | 0xc0000054 | 0xc0000055 => io::ErrorKind::WouldBlock,
                 0xc0000011 => io::ErrorKind::UnexpectedEof,
                 0xc0000034 | 0xc000003a => io::ErrorKind::NotFound,
-                0xc0000022 => io::ErrorKind::PermissionDenied,
+                // Windows reports a delete-pending file as access denied too.
+                0xc0000022 | 0xc0000056 => io::ErrorKind::PermissionDenied,
                 0xc0000103 => io::ErrorKind::NotADirectory,
                 _ => io::ErrorKind::Other,
             };

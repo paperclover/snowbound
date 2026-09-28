@@ -270,7 +270,7 @@ fn native_paragraph_breaks_preserve_every_stored_character() {
 }
 
 #[test]
-fn referenced_history_contexts_require_history_roots() {
+fn referenced_history_contexts_require_history_roots_where_stored() {
     let bytes = fs::read("../../corpus/m6/native-features-01/notebook/Features.one").unwrap();
     let store = Store::parse(&bytes).unwrap();
     let mut index = RevisionIndex::parse(&store).unwrap();
@@ -306,16 +306,16 @@ fn referenced_history_contexts_require_history_roots() {
         Document::parse(&index).unwrap_err().message,
         "History context does not resolve to version history"
     );
+    // OneNote's Copy Page To of a page version names a history it never writes
+    // (corpus/page-versions/native/step-03).
     index
         .spaces
         .get_mut(&sid)
         .unwrap()
         .labels
         .remove(&(context, 1));
-    assert_eq!(
-        Document::parse(&index).unwrap_err().message,
-        "Document context has no revision"
-    );
+    let document = Document::parse(&index).unwrap();
+    assert!(!document.spaces[&sid].contexts.contains_key(&context));
 }
 
 #[test]

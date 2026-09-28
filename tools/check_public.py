@@ -22,7 +22,7 @@ def main():
     environment['PYTHONPATH'] = str(root / 'tools')
     environment['CARGO_TARGET_DIR'] = str(root / 'target')
     commands = [
-        ('python-dependencies', [sys.executable, '-c', 'import PIL']),
+        ('python-dependencies', [sys.executable, '-c', 'import PIL, pdfplumber']),
         ('format', ['cargo', 'fmt', '--all', '--check']),
         ('rust', ['cargo', 'test', '--locked', '--workspace', '--all-features', '--all-targets']),
         ('doctests', ['cargo', 'test', '--locked', '--workspace', '--all-features', '--doc']),

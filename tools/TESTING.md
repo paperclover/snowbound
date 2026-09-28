@@ -2,10 +2,12 @@
 
 ## Public fixtures
 
-From a checkout with Rust and Python 3 plus Pillow installed:
+From a checkout with Rust and [uv](https://docs.astral.sh/uv/), which provides
+Python 3.12 with Pillow and pdfplumber without installing anything system-wide:
 
 ```sh
-python3 tools/check_public.py /absolute/path/to/new-results
+uv run --no-project --python 3.12 --with pillow --with pdfplumber \
+  python tools/check_public.py /absolute/path/to/new-results
 ```
 
 The command runs formatting, all workspace features/targets, doctests, Clippy,
@@ -21,6 +23,11 @@ verify clean-checkout compatibility. Fixture symlinks must remain symlinks; thei
 targets are versioned in this repository. Neither `corpus/private`, ignored
 `evidence`, existing `target` outputs, credentials nor running virtual machines
 are required. Cargo's normal dependency cache may be reused.
+
+For the Python tests alone, end the same `uv run` with
+`python -m unittest discover -s tools -p 'test_*.py'`. Without pdfplumber they
+skip the PDF oracles (`test_pdf_format`, part of `test_document_oracle`) and
+say so; `check_public.py` refuses to start without it.
 
 Rust explicitly reports ignored lab tests and fixture generators. Those cases
 are **not** part of a successful public run. The Python suite tests native/lab
@@ -40,8 +47,7 @@ debug assertions, then every `fuzz/` target for the time limit. A failing round
 leaves `soak/*.log` ending in the command that replays it; crash inputs stay in
 `fuzz/artifacts/<target>/`. On a Linux VM, install rustup's stable and nightly
 toolchains, `cargo install cargo-fuzz`, and `build-essential pkg-config
-libfontconfig-dev`; copy the checkout together with the untracked `evidence/`,
-which tests read, and run the script under `tmux`.
+libfontconfig-dev`; copy the checkout and run the script under `tmux`.
 
 ## Private and native verification
 

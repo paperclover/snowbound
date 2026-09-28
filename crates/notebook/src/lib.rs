@@ -243,6 +243,20 @@ impl Replica {
         self.ask(|reply| working::Request::Conflicts { reply })
     }
 
+    /// The versions of each page that has them (`onestore::Section::versions`).
+    pub fn versions(&self) -> Result<Vec<(ExGuid, Vec<onestore::PageVersion>)>> {
+        self.ask(|reply| working::Request::Versions { reply })
+    }
+
+    /// A page as one of its versions holds it; O(section).
+    pub fn version(&self, space: ExGuid, version: ExGuid) -> Result<Page> {
+        self.ask(|reply| working::Request::Version {
+            space,
+            version,
+            reply,
+        })
+    }
+
     /// The section image the queued edits leave, the unsealed ones sealed as one more
     /// revision whose identities differ per call: O(section).
     pub(crate) fn snapshot(&self) -> Result<Vec<u8>> {

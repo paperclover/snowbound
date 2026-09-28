@@ -4,10 +4,7 @@ use onestore::{
     op::{Op, PageOp},
     page::Page,
 };
-use std::{
-    collections::BTreeMap,
-    sync::LazyLock,
-};
+use std::{collections::BTreeMap, sync::LazyLock};
 
 use crate::{current, disk, ops};
 
@@ -136,7 +133,12 @@ pub fn run(input: &[u8]) {
             let destination = destinations[usize::from(step[4]) % destinations.len()];
             // Outline groups are the writers' business: anchors are the paragraphs in them.
             let mut children = Vec::new();
-            let mut pending: Vec<ExGuid> = view.nodes[&destination].children.iter().rev().copied().collect();
+            let mut pending: Vec<ExGuid> = view.nodes[&destination]
+                .children
+                .iter()
+                .rev()
+                .copied()
+                .collect();
             while let Some(id) = pending.pop() {
                 match view.nodes[&id].kind {
                     Kind::OutlineGroup => pending.extend(view.nodes[&id].children.iter().rev()),
@@ -155,7 +157,10 @@ pub fn run(input: &[u8]) {
             (op, subtree.contains_key(&destination))
         };
         let model = Page::from_space(&document, sid).unwrap();
-        let ops = vec![Op::Page { space: sid, op: op.clone() }];
+        let ops = vec![Op::Page {
+            space: sid,
+            op: op.clone(),
+        }];
         let Ok(edit) = ops::apply(source, "Tree schedule", ops) else {
             continue;
         };
@@ -170,7 +175,13 @@ pub fn run(input: &[u8]) {
         if stored != predicted {
             let (a, b) = (format!("{stored:?}"), format!("{predicted:?}"));
             let at = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
-            panic!("{op:?}\n stored    …{}\n predicted …{}", &a[a.floor_char_boundary(at.saturating_sub(300))..a.floor_char_boundary((at + 200).min(a.len()))], &b[b.floor_char_boundary(at.saturating_sub(300))..b.floor_char_boundary((at + 200).min(b.len()))]);
+            panic!(
+                "{op:?}\n stored    …{}\n predicted …{}",
+                &a[a.floor_char_boundary(at.saturating_sub(300))
+                    ..a.floor_char_boundary((at + 200).min(a.len()))],
+                &b[b.floor_char_boundary(at.saturating_sub(300))
+                    ..b.floor_char_boundary((at + 200).min(b.len()))]
+            );
         }
         let space = &after_document.spaces[&sid];
         let after = &space.revisions[&space.contexts[&ExGuid::default()]];

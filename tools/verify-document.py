@@ -82,7 +82,10 @@ def visible_text(node, space):
     text = ''.join(data[run['start'] * 2:run['end'] * 2].decode('utf-16-le') for run in kind['runs']
                    if not run['format'] or not (space['nodes'][run['format']]['format']['hidden']
                                                 or space['nodes'][run['format']]['format']['math']))
-    return "" if text == "\u00a0" else project_text(text.removesuffix('\r'))
+    # A trailing CR ends the stored text; one inside it, between equations, is a line break.
+    if kind['text'].endswith('\r'):
+        text = text.removesuffix('\r')
+    return "" if text == "\u00a0" else project_text(text)
 
 
 ISF_X = bytes.fromhex('8f6a8a59c052a04b93afaf357411a561')
@@ -247,6 +250,33 @@ def compare_objects(space, roots, page, native_roots, assets, native_payloads, a
     return count
 
 
+def exported_links(runs):
+    """Characters and links as OneNote 2010 exports them: an address without a scheme opens
+    over http, and URL text it finds in a page's text is a link, a removed link's included
+    (`corpus/link-edit/native-typed`)."""
+    def href(link):
+        if link is None or ':' in link.split('/')[0] or link.startswith('\\\\'):
+            return link
+        return 'http://' + link
+    out = [(char, href(link)) for char, link in runs]
+    start = 0
+    while start < len(out):
+        end = start
+        while end < len(out) and not out[end][0].isspace():
+            end += 1
+        word = ''.join(char for char, _ in out[start:end])
+        # The scheme stays with the text it links; trailing punctuation does not.
+        for scheme in ('http://', 'https://', 'ftp://', 'mailto:', 'news:'):
+            at = word.lower().find(scheme)
+            if at >= 0 and all(link is None for _, link in out[start:end]):
+                url = word[at:].rstrip('.,;:!?\'")]}')
+                for index in range(start + at, start + at + len(url)):
+                    out[index] = (out[index][0], url)
+                break
+        start = end + 1
+    return out
+
+
 def compare(notebook, native, versions=None, password_file=None):
     notebook = notebook.resolve(strict=True)
     native = native.resolve(strict=True)
@@ -396,12 +426,14 @@ def compare(notebook, native, versions=None, password_file=None):
                     # Native XML exports equation runs as MathML, not text (tools/test_math_edit.py compares that).
                     observed_runs = [(char, run['link']) for run in resolved_text[sid][rid][text_id]
                                      if not run['format']['hidden'] and not run['format']['math'] for char in run['text']]
-                    if observed_runs and observed_runs[-1][0] == '\r':
+                    stored = ''.join(run['text'] for run in resolved_text[sid][rid][text_id])
+                    if observed_runs and observed_runs[-1][0] == '\r' and stored.endswith('\r'):
                         observed_runs.pop()
                     observed_runs = [(projected, link) for char, link in observed_runs for projected in project_text(char)]
                     expected_links = [(char, style.get('link')) for char, style in expected_runs]
                     if observed_runs == [('\u00a0', None)] and not expected_links:
                         observed_runs = []
+                    observed_runs = exported_links(observed_runs)
                     assert observed_runs == expected_links, 'Resolved text or associated hyperlink differs'
                 count, differences = compare_formats(space, text_nodes, native_runs)
                 formatting += count

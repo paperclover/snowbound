@@ -50,7 +50,13 @@ fn insertion(
         Place::Outline(x, y) => {
             let object = ops::outline(x, y, vec![paragraph]);
             let id = object.id();
-            (PageOp::Add { object, before: None }, id)
+            (
+                PageOp::Add {
+                    object,
+                    before: None,
+                },
+                id,
+            )
         }
     };
     let mut result = vec![Op::Page { space, op }];
@@ -161,7 +167,10 @@ fn atomic_formatted_insertions_match_a_character_model_and_preserve_history() {
             Place::In(outline, None)
         };
         let (ops, _, inserted) = insertion(sid, place, text, &formats);
-        let edit = Edit { at: ops::now(), ops };
+        let edit = Edit {
+            at: ops::now(),
+            ops,
+        };
         let restored: Edit = serde_json::from_slice(&serde_json::to_vec(&edit).unwrap()).unwrap();
         assert_eq!(restored, edit);
         let edited = ops::edited(&source, restored.ops).unwrap();
@@ -308,7 +317,10 @@ fn export_native_formatted_insertions() {
             .into_iter()
             .map(|(label, attributes)| {
                 let start = text[..text.find(label).unwrap()].encode_utf16().count() as u32;
-                (start..start + label.encode_utf16().count() as u32, attributes)
+                (
+                    start..start + label.encode_utf16().count() as u32,
+                    attributes,
+                )
             })
             .collect()
         };
@@ -322,7 +334,10 @@ fn export_native_formatted_insertions() {
             };
             ops.push(Op::Page { space: sid, op });
         }
-        let edit = Edit { at: ops::now(), ops };
+        let edit = Edit {
+            at: ops::now(),
+            ops,
+        };
         let bytes = ops::edited(source, edit.ops.clone()).unwrap();
         current::current(&bytes);
         let notebook = output.join(name);
@@ -348,7 +363,9 @@ fn paragraph_and_outline_insertions_publish_metadata_and_references_together() {
         (Place::Outline(144.0, 18.0), page, Some(144.0), Some(18.0)),
     ] {
         let (ops, object, text) = insertion(sid, place, "First 🦀\rSecond", &[]);
-        let transaction = ops::transaction(&source, "New author", ops).unwrap().unwrap();
+        let transaction = ops::transaction(&source, "New author", ops)
+            .unwrap()
+            .unwrap();
         let mut written = source.clone();
         transaction.apply(&mut written).unwrap();
         let store = Store::parse(&written).unwrap();
@@ -405,7 +422,9 @@ fn repeated_insertions_and_formatting_share_immutable_objects() {
     let mut texts = Vec::new();
     for _ in 0..12 {
         let (ops, _, text) = insertion(sid, Place::In(outline, None), "Repeated paragraph", &[]);
-        let transaction = ops::transaction(&source, "Same author", ops).unwrap().unwrap();
+        let transaction = ops::transaction(&source, "Same author", ops)
+            .unwrap()
+            .unwrap();
         transaction.apply(&mut source).unwrap();
         let bold = PageOp::Format {
             text,
@@ -413,9 +432,16 @@ fn repeated_insertions_and_formatting_share_immutable_objects() {
             set: vec![A::Bold(true), A::FontSize(20.0)],
             clear: Vec::new(),
         };
-        let transaction = ops::transaction(&source, "Same author", vec![Op::Page { space: sid, op: bold }])
-            .unwrap()
-            .unwrap();
+        let transaction = ops::transaction(
+            &source,
+            "Same author",
+            vec![Op::Page {
+                space: sid,
+                op: bold,
+            }],
+        )
+        .unwrap()
+        .unwrap();
         transaction.apply(&mut source).unwrap();
         texts.push(text);
     }
@@ -459,8 +485,12 @@ fn serialized_insertions_rebase_with_the_same_objects_and_preserve_remote_edits(
     let source = onestore::create_section("rebase.one", "Original", "Author").unwrap();
     let (sid, _, outline, paragraph, text) = targets(&source);
     let formats = [(0..3, vec![A::Bold(true), A::Color(Some([12, 34, 56]))])];
-    let (ops, object, inserted) =
-        insertion(sid, Place::In(outline, Some(paragraph)), "Inserted", &formats);
+    let (ops, object, inserted) = insertion(
+        sid,
+        Place::In(outline, Some(paragraph)),
+        "Inserted",
+        &formats,
+    );
     let encoded = serde_json::to_vec(&ops).unwrap();
     let restored: Vec<Op> = serde_json::from_slice(&encoded).unwrap();
     assert_eq!(ops, restored);
@@ -540,8 +570,12 @@ fn anchors_targets_identities_and_text_are_validated_before_publication() {
         assert!(refused(&source, Place::In(outline, None), content));
     }
     assert!(
-        ops::transaction(&source, "a\0b", insertion(sid, Place::In(outline, None), "Text", &[]).0)
-            .is_err()
+        ops::transaction(
+            &source,
+            "a\0b",
+            insertion(sid, Place::In(outline, None), "Text", &[]).0
+        )
+        .is_err()
     );
     for place in [
         Place::In(outline, Some(text)),
@@ -610,13 +644,21 @@ fn insertion_publication_faults_expose_only_complete_graphs_and_title_caches() {
         &checkpoint,
     ] {
         let (sid, _, outline, paragraph, _) = targets(source);
-        for place in [Place::In(outline, Some(paragraph)), Place::Outline(0.0, 0.0)] {
+        for place in [
+            Place::In(outline, Some(paragraph)),
+            Place::Outline(0.0, 0.0),
+        ] {
             let formats = [
                 (0..3, vec![A::Bold(true), A::FontSize(18.0)]),
-                (6..8, vec![A::Italic(true), A::Highlight(Some([255, 255, 0]))]),
+                (
+                    6..8,
+                    vec![A::Italic(true), A::Highlight(Some([255, 255, 0]))],
+                ),
             ];
             let (ops, _, _) = insertion(sid, place, "First 🦀", &formats);
-            let edit = ops::transaction(source, "New author", ops).unwrap().unwrap();
+            let edit = ops::transaction(source, "New author", ops)
+                .unwrap()
+                .unwrap();
             let mut written = source.to_vec();
             edit.apply(&mut written).unwrap();
             let before = current::current(source);

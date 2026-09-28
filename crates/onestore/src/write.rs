@@ -76,6 +76,16 @@ pub(crate) fn node(id: u16, reference: Option<Reference>, payload: &[u8]) -> Res
     Ok(bytes)
 }
 
+/// A `RevisionRoleAndContextDeclarationFND` payload: `rid` current under `context` in the
+/// default role.
+pub(crate) fn label_payload(rid: ExGuid, context: ExGuid) -> Vec<u8> {
+    let mut payload = Vec::new();
+    rid.encode(&mut payload);
+    payload.extend_from_slice(&1_u32.to_le_bytes());
+    context.encode(&mut payload);
+    payload
+}
+
 pub(crate) fn append(data: &mut Vec<u8>, bytes: &[u8]) -> Result<Chunk> {
     let length = u64::from(u32::try_from(bytes.len()).map_err(|_| Error {
         offset: 0,
@@ -1213,6 +1223,7 @@ pub(crate) fn differing<'s, T: PartialEq>(before: &'s [T], after: &'s [T]) -> (&
 }
 
 /// A revision `LiveRevision::commit` stored.
+#[derive(Clone)]
 pub(crate) struct Commit {
     /// Whether the revision declares every object, depending on none.
     pub checkpoint: bool,
@@ -1329,7 +1340,10 @@ fn build(
     if validate {
         index.validate_current()?;
     }
-    applied(source, build_on(&index, payloads, protection, edit)?.as_ref())
+    applied(
+        source,
+        build_on(&index, payloads, protection, edit)?.as_ref(),
+    )
 }
 
 /// `write_revision` on a source the caller has parsed and validated.
@@ -1484,6 +1498,7 @@ pub(crate) fn build_on(
                 previous: rid,
                 new_space,
                 label,
+                rid: None,
                 live: &live,
                 commit: &commit,
                 replaced: &replaced,
@@ -1578,6 +1593,8 @@ pub(crate) struct Sealing<'r, 'a> {
     pub new_space: bool,
     /// The context and role it is current under.
     pub label: (ExGuid, u32),
+    /// Its identity, where the caller chose one; a fresh one otherwise.
+    pub rid: Option<ExGuid>,
     pub live: &'r LiveRevision<'a>,
     pub commit: &'r Commit,
     /// Objects whose bytes the revision stores rather than referencing stored bytes.
@@ -1723,6 +1740,23 @@ impl Appending {
         protection: Option<&dyn Protection>,
         key: Option<&crate::Node<'_>>,
     ) -> Result<(ExGuid, Vec<(ExGuid, Chunk)>)> {
+        let mut manifest = Vec::new();
+        let written = self.manifest(sealing, segments, protection, key, &mut manifest)?;
+        self.close(sealing.space, sealing.new_space, &manifest)?;
+        Ok(written)
+    }
+
+    /// Appends a revision's object groups and new data, and its manifest's nodes to
+    /// `manifest` for `close`; returns its identity and where it stored each replaced
+    /// object's bytes.
+    pub(crate) fn manifest(
+        &mut self,
+        sealing: &Sealing<'_, '_>,
+        segments: &[(u64, &[u8])],
+        protection: Option<&dyn Protection>,
+        key: Option<&crate::Node<'_>>,
+        manifest: &mut Vec<Vec<u8>>,
+    ) -> Result<(ExGuid, Vec<(ExGuid, Chunk)>)> {
         let is_section = self.state.file_type == FileType::Section;
         let Sealing {
             space,
@@ -1782,9 +1816,12 @@ impl Appending {
                 .or_default()
                 .push((*id, object));
         }
-        let new_rid = ExGuid {
-            guid: fresh_guid()?,
-            n: 1,
+        let new_rid = match sealing.rid {
+            Some(rid) => rid,
+            None => ExGuid {
+                guid: fresh_guid()?,
+                n: 1,
+            },
         };
         let mut start = Vec::new();
         new_rid.encode(&mut start);
@@ -1806,7 +1843,6 @@ impl Appending {
         if contextual {
             label.0.encode(&mut start);
         }
-        let mut manifest = Vec::new();
         if sealing.new_space {
             let mut payload = Vec::new();
             space.encode(&mut payload);
@@ -1997,8 +2033,13 @@ impl Appending {
             }
         }
         manifest.push(node(0x1c, None, &[])?);
-        if sealing.new_space {
-            let (chunk, tail) = self.list(&manifest)?;
+        Ok((new_rid, stored))
+    }
+
+    /// Adds a space's manifest nodes to its revision list, creating the space when `new`.
+    pub(crate) fn close(&mut self, space: ExGuid, new: bool, manifest: &[Vec<u8>]) -> Result<()> {
+        if new {
+            let (chunk, tail) = self.list(manifest)?;
             let mut payload = Vec::new();
             space.encode(&mut payload);
             let (chunk, _) = self.list(&[
@@ -2013,10 +2054,10 @@ impl Appending {
                 offset: 0,
                 message: "Object space is absent from the root list",
             })?;
-            self.extend(&mut tail, &manifest)?;
+            self.extend(&mut tail, manifest)?;
             self.state.spaces.insert(space, tail);
         }
-        Ok((new_rid, stored))
+        Ok(())
     }
 
     /// Embeds payloads as file-data store objects referenced from the root file node list
@@ -2221,12 +2262,14 @@ pub(crate) struct Written<'r, 'a> {
     pub space: ExGuid,
     pub rid: ExGuid,
     pub previous: Option<ExGuid>,
+    pub label: (ExGuid, u32),
     pub live: &'r LiveRevision<'a>,
     pub commit: &'r Commit,
 }
 
 /// Reads back what `transaction` appends to the section `before` describes, whose bytes
-/// `segments` hold, and checks it stores `revisions` and `payloads` as `after` expects:
+/// `segments` hold, and checks it stores `revisions`, then each space's `labels` (space,
+/// revision, context), and `payloads` as `after` expects:
 /// fragments link and decode to the logged counts under the logged checksum; each declared
 /// object parses, names identities its group's table holds and objects reachable after its
 /// revision, carries its incremental reference count and, if read-only, its MD5; roots stay
@@ -2237,6 +2280,7 @@ pub(crate) fn check_transaction(
     transaction: &crate::Transaction,
     segments: &[(u64, &[u8])],
     revisions: &[Written<'_, '_>],
+    labels: &[(ExGuid, ExGuid, ExGuid)],
     payloads: &[([u8; 16], &[u8])],
 ) -> Result<()> {
     let wrong = |message| Error { offset: 0, message };
@@ -2332,14 +2376,18 @@ pub(crate) fn check_transaction(
         }
         read(after.last)
     };
-    for written in revisions {
-        let Written {
-            space,
-            rid,
-            live,
-            commit,
-            ..
-        } = *written;
+    // Each space's list gains one fragment: its revisions in order, then its labels.
+    let mut spaces: Vec<ExGuid> = Vec::new();
+    for space in revisions
+        .iter()
+        .map(|written| written.space)
+        .chain(labels.iter().map(|(space, ..)| *space))
+    {
+        if !spaces.contains(&space) {
+            spaces.push(space);
+        }
+    }
+    for space in spaces {
         let old = before.spaces.get(&space);
         let new = after
             .spaces
@@ -2359,166 +2407,190 @@ pub(crate) fn check_transaction(
                 .next()
                 .ok_or(wrong("A revision manifest is truncated"))
         };
-        let mut node = next()?;
-        if old.is_none() {
+        let mut fresh = old.is_none();
+        for written in revisions.iter().filter(|written| written.space == space) {
+            let Written {
+                rid,
+                live,
+                commit,
+                label,
+                ..
+            } = *written;
+            let mut node = next()?;
+            if fresh {
+                let mut c = Cursor {
+                    bytes: node.payload,
+                    offset: node.offset,
+                };
+                if node.id != 0x14 || c.exguid()? != space {
+                    return Err(wrong("A new space's revision list names another space"));
+                }
+                node = next()?;
+                fresh = false;
+            }
             let mut c = Cursor {
                 bytes: node.payload,
                 offset: node.offset,
             };
-            if node.id != 0x14 || c.exguid()? != space {
-                return Err(wrong("A new space's revision list names another space"));
+            let dependency = if commit.checkpoint {
+                ExGuid::default()
+            } else {
+                written
+                    .previous
+                    .ok_or(wrong("A dependent revision follows none"))?
+            };
+            let contextual = label.0 != ExGuid::default();
+            if node.id != if contextual { 0x1f } else { 0x1e }
+                || c.exguid()? != rid
+                || c.exguid()? != dependency
+                || c.read::<4>()? != label.1.to_le_bytes()
+                || c.read::<2>()? != [0, 0]
+                || (contextual && c.exguid()? != label.0)
+            {
+                return Err(wrong(
+                    "A revision starts with the wrong identity, dependency or label",
+                ));
             }
-            node = next()?;
-        }
-        let mut c = Cursor {
-            bytes: node.payload,
-            offset: node.offset,
-        };
-        let dependency = if commit.checkpoint {
-            ExGuid::default()
-        } else {
-            written
-                .previous
-                .ok_or(wrong("A dependent revision follows none"))?
-        };
-        if node.id != 0x1e
-            || c.exguid()? != rid
-            || c.exguid()? != dependency
-            || c.read::<4>()? != 1_u32.to_le_bytes()
-            || c.read::<2>()? != [0, 0]
-        {
-            return Err(wrong(
-                "A revision starts with the wrong identity or dependency",
-            ));
-        }
-        let mut declared = BTreeSet::new();
-        let mut roots = BTreeMap::new();
-        loop {
-            let node = next()?;
-            match node.id {
-                0xb0 => {
-                    let Some(Reference::NodeList(at)) = node.reference else {
-                        return Err(wrong("An object group lacks its list"));
-                    };
-                    let bytes = read(at)?;
-                    let id = Fragment::parse(&bytes, at.offset as usize)?.id;
-                    let required = *counts
-                        .get(&id)
-                        .ok_or(wrong("An object group is not logged"))?;
-                    let group = nodes(&bytes, at, id, 0, required)?;
-                    let mut table = BTreeMap::new();
-                    let mut override_crc = u32::MAX;
-                    for item in &group {
-                        let mut c = Cursor {
-                            bytes: item.payload,
-                            offset: item.offset,
+            let mut declared = BTreeSet::new();
+            let mut roots = BTreeMap::new();
+            loop {
+                let node = next()?;
+                match node.id {
+                    0xb0 => {
+                        let Some(Reference::NodeList(at)) = node.reference else {
+                            return Err(wrong("An object group lacks its list"));
                         };
-                        match item.id {
-                            0xb4 | 0x22 | 0x28 | 0xb8 => {}
-                            0x24 => {
-                                table.insert(u32::from_le_bytes(c.read()?), c.read::<16>()?);
+                        let bytes = read(at)?;
+                        let id = Fragment::parse(&bytes, at.offset as usize)?.id;
+                        let required = *counts
+                            .get(&id)
+                            .ok_or(wrong("An object group is not logged"))?;
+                        let group = nodes(&bytes, at, id, 0, required)?;
+                        let mut table = BTreeMap::new();
+                        let mut override_crc = u32::MAX;
+                        for item in &group {
+                            let mut c = Cursor {
+                                bytes: item.payload,
+                                offset: item.offset,
+                            };
+                            match item.id {
+                                0xb4 | 0x22 | 0x28 | 0xb8 => {}
+                                0x24 => {
+                                    table.insert(u32::from_le_bytes(c.read()?), c.read::<16>()?);
+                                }
+                                0xa5 | 0xc5 | 0x73 => {
+                                    let id = c.compact(&table)?;
+                                    let object =
+                                        live.revision.objects.get(&id).ok_or(wrong(
+                                            "A revision declares an unknown object",
+                                        ))?;
+                                    let jcid = u32::from_le_bytes(c.read()?);
+                                    let flags = if item.id == 0x73 {
+                                        None
+                                    } else {
+                                        Some(c.read::<1>()?[0])
+                                    };
+                                    let count = u32::from_le_bytes(c.read()?);
+                                    if !declared.insert(id)
+                                        || jcid != object.jcid
+                                        || count != object.reference_count
+                                    {
+                                        return Err(wrong(
+                                            "A declaration disagrees with its object or its count",
+                                        ));
+                                    }
+                                    override_crc =
+                                        crc(override_crc, &count.to_le_bytes(), FileType::Section);
+                                    if item.id == 0x73 {
+                                        continue;
+                                    }
+                                    let Some(Reference::Data(at)) = item.reference else {
+                                        return Err(wrong("An object declaration lacks its data"));
+                                    };
+                                    let data = read(at)?;
+                                    let stored = crate::Object {
+                                        jcid,
+                                        reference_count: count,
+                                        data: ObjectData::Properties(&data),
+                                        global_ids: Arc::new(table.clone()),
+                                    };
+                                    let references = stored.references()?;
+                                    let expected = u8::from(!references.objects.is_empty())
+                                        | (u8::from(
+                                            !references.object_spaces.is_empty()
+                                                || !references.contexts.is_empty(),
+                                        ) << 1);
+                                    if object.data != ObjectData::Properties(&data)
+                                        || flags != Some(expected)
+                                        || (item.id == 0xc5) != (jcid & 0x100000 != 0)
+                                        || (item.id == 0xc5
+                                            && c.read::<16>()? != md5::compute(&data).0)
+                                    {
+                                        return Err(wrong(
+                                            "An object's stored bytes differ from its revision",
+                                        ));
+                                    }
+                                    if live.is_reachable(id)
+                                        && !references
+                                            .objects
+                                            .iter()
+                                            .all(|target| live.is_reachable(*target))
+                                    {
+                                        return Err(wrong(
+                                            "An object references one its revision cannot reach",
+                                        ));
+                                    }
+                                }
+                                _ => return Err(wrong("Unexpected node in an object group")),
                             }
-                            0xa5 | 0xc5 | 0x73 => {
-                                let id = c.compact(&table)?;
-                                let object = live
-                                    .revision
-                                    .objects
-                                    .get(&id)
-                                    .ok_or(wrong("A revision declares an unknown object"))?;
-                                let jcid = u32::from_le_bytes(c.read()?);
-                                let flags = if item.id == 0x73 {
-                                    None
-                                } else {
-                                    Some(c.read::<1>()?[0])
-                                };
-                                let count = u32::from_le_bytes(c.read()?);
-                                if !declared.insert(id)
-                                    || jcid != object.jcid
-                                    || count != object.reference_count
-                                {
-                                    return Err(wrong(
-                                        "A declaration disagrees with its object or its count",
-                                    ));
-                                }
-                                override_crc =
-                                    crc(override_crc, &count.to_le_bytes(), FileType::Section);
-                                if item.id == 0x73 {
-                                    continue;
-                                }
-                                let Some(Reference::Data(at)) = item.reference else {
-                                    return Err(wrong("An object declaration lacks its data"));
-                                };
-                                let data = read(at)?;
-                                let stored = crate::Object {
-                                    jcid,
-                                    reference_count: count,
-                                    data: ObjectData::Properties(&data),
-                                    global_ids: Arc::new(table.clone()),
-                                };
-                                let references = stored.references()?;
-                                let expected = u8::from(!references.objects.is_empty())
-                                    | (u8::from(
-                                        !references.object_spaces.is_empty()
-                                            || !references.contexts.is_empty(),
-                                    ) << 1);
-                                if object.data != ObjectData::Properties(&data)
-                                    || flags != Some(expected)
-                                    || (item.id == 0xc5) != (jcid & 0x100000 != 0)
-                                    || (item.id == 0xc5 && c.read::<16>()? != md5::compute(&data).0)
-                                {
-                                    return Err(wrong(
-                                        "An object's stored bytes differ from its revision",
-                                    ));
-                                }
-                                if live.is_reachable(id)
-                                    && !references
-                                        .objects
-                                        .iter()
-                                        .all(|target| live.is_reachable(*target))
-                                {
-                                    return Err(wrong(
-                                        "An object references one its revision cannot reach",
-                                    ));
-                                }
-                            }
-                            _ => return Err(wrong("Unexpected node in an object group")),
+                        }
+                        let node = next()?;
+                        let mut c = Cursor {
+                            bytes: node.payload,
+                            offset: node.offset,
+                        };
+                        if node.id != 0x84
+                            || c.read::<8>()? != [0; 8]
+                            || u32::from_le_bytes(c.read()?) != !override_crc
+                        {
+                            return Err(wrong("An object group's count overrides do not match"));
                         }
                     }
-                    let node = next()?;
-                    let mut c = Cursor {
-                        bytes: node.payload,
-                        offset: node.offset,
-                    };
-                    if node.id != 0x84
-                        || c.read::<8>()? != [0; 8]
-                        || u32::from_le_bytes(c.read()?) != !override_crc
-                    {
-                        return Err(wrong("An object group's count overrides do not match"));
+                    0x5a => {
+                        let mut c = Cursor {
+                            bytes: node.payload,
+                            offset: node.offset,
+                        };
+                        let id = c.exguid()?;
+                        roots.insert(u32::from_le_bytes(c.read()?), id);
                     }
+                    0x1c => break,
+                    _ => return Err(wrong("Unexpected node in a revision manifest")),
                 }
-                0x5a => {
-                    let mut c = Cursor {
-                        bytes: node.payload,
-                        offset: node.offset,
-                    };
-                    let id = c.exguid()?;
-                    roots.insert(u32::from_le_bytes(c.read()?), id);
-                }
-                0x1c => break,
-                _ => return Err(wrong("Unexpected node in a revision manifest")),
+            }
+            let expected: BTreeSet<ExGuid> = if commit.checkpoint {
+                live.revision.objects.keys().copied().collect()
+            } else {
+                commit.changed.clone()
+            };
+            if declared != expected
+                || (commit.checkpoint && roots != live.revision.roots)
+                || (!commit.checkpoint && !roots.is_empty())
+            {
+                return Err(wrong(
+                    "A revision declares other objects or roots than it changed",
+                ));
             }
         }
-        let expected: BTreeSet<ExGuid> = if commit.checkpoint {
-            live.revision.objects.keys().copied().collect()
-        } else {
-            commit.changed.clone()
-        };
-        if declared != expected
-            || (commit.checkpoint && roots != live.revision.roots)
-            || (!commit.checkpoint && !roots.is_empty())
-        {
+        for (_, rid, context) in labels.iter().filter(|(labelled, ..)| *labelled == space) {
+            let node = next()?;
+            if node.id != 0x5d || node.payload != label_payload(*rid, *context) {
+                return Err(wrong("A revision label names another revision or context"));
+            }
+        }
+        if next().is_ok() {
             return Err(wrong(
-                "A revision declares other objects or roots than it changed",
+                "A revision list gains nodes no revision or label declares",
             ));
         }
     }
@@ -2534,8 +2606,10 @@ pub(crate) fn check_transaction(
         )?;
         let created = revisions
             .iter()
-            .filter(|written| !before.spaces.contains_key(&written.space))
-            .count();
+            .map(|written| written.space)
+            .filter(|space| !before.spaces.contains_key(space))
+            .collect::<BTreeSet<_>>()
+            .len();
         let spaces = added.iter().filter(|node| node.id == 8).count();
         if spaces != created || added.iter().any(|node| !matches!(node.id, 8 | 0x90)) {
             return Err(wrong(

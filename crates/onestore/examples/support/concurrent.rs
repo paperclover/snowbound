@@ -322,7 +322,10 @@ mod tests {
         TextAttribute,
         document::{Format, Layout},
         op::{Edit, Op, PageOp},
-        page::{Outline, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject, text::new_id},
+        page::{
+            Outline, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
+            text::new_id,
+        },
     };
 
     fn paragraph(text: &str, level: u32) -> PageParagraph {
@@ -335,12 +338,15 @@ mod tests {
             content: ParagraphContent::Text(TextObject {
                 id: new_id().unwrap(),
                 date_field: None,
-                text: Paragraph::new(text.into(), Format {
-                    font: Some("Calibri".into()),
-                    font_size: Some(11.0),
-                    language: Some(0x409),
-                    ..Format::default()
-                }),
+                text: Paragraph::new(
+                    text.into(),
+                    Format {
+                        font: Some("Calibri".into()),
+                        font_size: Some(11.0),
+                        language: Some(0x409),
+                        ..Format::default()
+                    },
+                ),
                 tags: Vec::new(),
             }),
             lists: Vec::new(),
@@ -354,7 +360,15 @@ mod tests {
         let arena = onestore::Arena::default();
         let mut section = onestore::Section::open(&arena, image.to_vec()).unwrap();
         let ops = ops.into_iter().map(|op| Op::Page { space, op }).collect();
-        section.apply("Author", &Edit { at: 134_000_000_000_000_000, ops }).unwrap();
+        section
+            .apply(
+                "Author",
+                &Edit {
+                    at: 134_000_000_000_000_000,
+                    ops,
+                },
+            )
+            .unwrap();
         section.seal().unwrap();
         section.image()
     }

@@ -1,3 +1,4 @@
+import html
 import json
 import re
 from pathlib import Path
@@ -48,6 +49,37 @@ class LinkEditTest(unittest.TestCase):
         page = next(page for name, page in pages.items() if name.startswith('Linking page'))
         text = ' '.join(' '.join(oe.find('one:T', ns).text.split()) for oe in page.iter('{%s}OE' % ns['one']) if oe.find('one:T', ns) is not None)
         self.assertRegex(text, r'^Linking page <a href="onenote:#Link%20target&amp;section-id=\{[0-9A-F-]{36}\}&amp;page-id=\{[0-9A-F-]{36}\}&amp;end&amp;base-path=C:\\one-tests\\runs\\capture\\notebook\\links.one">Link target</a>$')
+
+    def test_onenote_links_typed_urls_and_dialog_addresses(self):
+        """OneNote 2010's read of `native-typed`: a typed `www.` address opens over http,
+        and a Link dialog address typed without a scheme does too."""
+        text = (FIXTURE / 'native-typed/read/page-000.xml').read_text(encoding='utf-8-sig')
+        hrefs = [html.unescape(href) for href in re.findall(r'href="([^"]*)"', text)]
+        self.assertEqual(hrefs[1], 'http://www.example.com')
+        self.assertEqual(hrefs[11], 'http://www.d.example')
+        self.assertEqual(hrefs[15], 'http://example.net/x')
+        self.assertNotIn('me@example.com', hrefs)
+
+    def test_editor_links_and_equations_render_natively(self):
+        """What the canvas editor saved for typed URLs, the Link dialog, Remove Link and
+        equations typed after Alt+= reads back in a cold OneNote 2010 with the links and
+        MathML it meant (`crates/canvas/tests/links_equations.rs`)."""
+        row = FIXTURE / 'editor'
+        with TemporaryDirectory() as temporary:
+            read = Path(temporary) / 'read'
+            shutil.copytree(row / 'cold/read', read)
+            compare(row / 'candidate', read)
+        expected = json.loads((row / 'expected.json').read_text())
+        path = next(path for path in sorted((row / 'cold/read').glob('page-*.xml'))
+                    if ET.parse(path).getroot().get('name').startswith('Linking page'))
+        page = ET.parse(path).getroot()
+        text = ''.join(oe.find('one:T', ns).text for oe in page.iter('{%s}OE' % ns['one']) if oe.find('one:T', ns) is not None)
+        hrefs = [html.unescape(href) for href in re.findall(r'href="([^"]*)"', text)]
+        self.assertEqual(hrefs, expected['hrefs'])
+        raw = path.read_text(encoding='utf-8-sig')
+        mathml = [re.sub(r'&#(\d+);', lambda m: chr(int(m.group(1))), body)
+                  for body in re.findall(r'<mml:math[^>]*>(.*?)</mml:math>', raw, re.S)]
+        self.assertEqual(mathml, expected['mathml'])
 
 
 if __name__ == '__main__':

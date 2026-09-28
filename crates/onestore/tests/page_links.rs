@@ -162,6 +162,8 @@ fn a_link_is_added_to_a_fresh_page_and_reads_back() {
     );
     let written = ops::saved(&source, space, &after).unwrap();
     let stored = assert_same(written.as_slice(), space, &after);
+    // As OneNote titles `NATIVE_LINKS`'s page holding this paragraph: without the field code.
+    assert_eq!(stored.title, "Read about Rust the Rust site");
     let mut stored = stored;
     let text = &body_paragraphs(&mut stored)[0].text().unwrap().text;
     let flags: Vec<(Option<bool>, Option<bool>, Option<bool>)> = text
@@ -285,6 +287,24 @@ fn internal_links_match_what_onenote_stores() {
     );
     assert_eq!(parse_internal_link(&stored[0]), None);
     assert_eq!(parse_internal_link("onenote:#x&page-id={0}"), None);
+    // The Link dialog's page and Copy Link to Page name the section file before the `#`.
+    let ids = "section-id={0F1EFC25-DF7C-45CB-87A4-BDD03F42057E}&page-id={A9CCA318-A43E-4912-A1C7-F19F1EAF30CA}";
+    for url in [
+        format!("onenote:links.one#Page&{ids}&base-path=//C:/notebook"),
+        format!("onenote:///C:\\notebook\\links.one#Page&{ids}&end"),
+    ] {
+        let link = parse_internal_link(&url).unwrap();
+        assert_eq!(
+            (
+                link.section[..4].to_vec(),
+                link.page.map(|page| page[..4].to_vec())
+            ),
+            (
+                vec![0x25, 0xfc, 0x1e, 0x0f],
+                Some(vec![0x18, 0xa3, 0xcc, 0xa9])
+            )
+        );
+    }
 }
 
 /// `ONESTORE_INTERNAL_LINK_EXPORT` names a new directory receiving the candidate for a cold
@@ -295,7 +315,9 @@ fn a_page_links_to_another_page_and_its_paragraph() {
     let creation = onestore::PageCreation::new(None, Some("Link target"), "Author").unwrap();
     let with_target = ops::edited(
         &source,
-        vec![onestore::op::Op::Section(onestore::op::SectionOp::Create(creation))],
+        vec![onestore::op::Op::Section(onestore::op::SectionOp::Create(
+            creation,
+        ))],
     )
     .unwrap();
     let section = Store::parse(&with_target).unwrap().header.file_id;
@@ -354,7 +376,13 @@ fn a_page_links_to_another_page_and_its_paragraph() {
     })
     .unwrap();
     let written = ops::saved(&with_target, space, &after).unwrap();
-    assert_same(written.as_slice(), space, &after);
+    let stored = assert_same(written.as_slice(), space, &after);
+    // Titles show the link's label, not its field code, as OneNote stores them.
+    assert!(
+        stored.title.starts_with("Linking page Link target"),
+        "{}",
+        stored.title
+    );
     if let Some(directory) = std::env::var_os("ONESTORE_INTERNAL_LINK_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
@@ -366,4 +394,21 @@ fn a_page_links_to_another_page_and_its_paragraph() {
         )
         .unwrap();
     }
+}
+
+/// A title stored with a link's field code, as an earlier writer left it
+/// (`corpus/link-edit/internal/candidate`), reads as the label the page shows.
+#[test]
+fn titles_read_without_link_field_codes() {
+    let bytes = include_bytes!("../../../corpus/link-edit/internal/candidate/links.one").to_vec();
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, bytes.clone()).unwrap();
+    let titles: Vec<String> = section
+        .pages()
+        .unwrap()
+        .into_iter()
+        .map(|(_, title, _)| title)
+        .collect();
+    assert_eq!(titles, ["Linking page Link target", "Link target"]);
+    page_by_title(&bytes, "Linking page Link target");
 }

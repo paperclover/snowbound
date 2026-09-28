@@ -609,13 +609,23 @@ fn live_structure() {
     let mut notebook =
         Notebook::open_smb(std::sync::Arc::clone(&client), &root, cache.path()).unwrap();
     assert_eq!(
-        notebook.create_section("", "Second", &onestore::PageCreation::new(None, Some(""), "Author").unwrap()).unwrap(),
+        notebook
+            .create_section(
+                "",
+                "Second",
+                &onestore::PageCreation::new(None, Some(""), "Author").unwrap()
+            )
+            .unwrap(),
         "Second.one"
     );
     assert_eq!(notebook.create_group("", "Archive").unwrap(), "Archive");
     assert_eq!(
         notebook
-            .create_section("Archive", "Inner", &onestore::PageCreation::new(None, Some(""), "Author").unwrap())
+            .create_section(
+                "Archive",
+                "Inner",
+                &onestore::PageCreation::new(None, Some(""), "Author").unwrap()
+            )
             .unwrap(),
         "Archive/Inner.one"
     );

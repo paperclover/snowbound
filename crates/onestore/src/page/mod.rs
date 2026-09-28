@@ -11,6 +11,7 @@ use std::{
 };
 
 pub mod ink;
+mod linear;
 pub mod link;
 pub mod math;
 pub mod text;
@@ -378,7 +379,11 @@ impl Page {
         let mut selected = None;
         for (space, id) in document.pages()? {
             let revision = document.active(space)?;
-            if page_title(revision, id) == Some(title) {
+            if page_title(revision, id)
+                .map(crate::edit::without_fields)
+                .as_deref()
+                == Some(title)
+            {
                 if selected.is_some() {
                     return Err(Error {
                         offset: 0,
@@ -406,8 +411,8 @@ impl Page {
     /// `copy`, renaming `ids`, identities on this page, to theirs on the copy.
     pub fn copy_with(&self, ids: &mut [ExGuid]) -> Result<Self, Error> {
         let invalid = |message| Error { offset: 0, message };
-        let mut value = serde_json::to_value((self, &*ids))
-            .map_err(|_| invalid("Page is not serializable"))?;
+        let mut value =
+            serde_json::to_value((self, &*ids)).map_err(|_| invalid("Page is not serializable"))?;
         let mut fresh: BTreeMap<String, String> = BTreeMap::new();
         fn walk(
             value: &mut serde_json::Value,
@@ -495,7 +500,10 @@ impl Page {
             PageObject::Title(title) => Some(title),
             _ => None,
         })?;
-        let outline = title.outlines.iter().find(|outline| Some(outline.id) == title.date)?;
+        let outline = title
+            .outlines
+            .iter()
+            .find(|outline| Some(outline.id) == title.date)?;
         let [first, second] = &outline.paragraphs[..] else {
             return None;
         };
@@ -503,7 +511,9 @@ impl Page {
         let text = |object: &TextObject| object.text.text().to_owned();
         // OneNote writes the date first; a field marked as the other role says otherwise.
         Some(
-            if first.date_field == Some(DateField::Time) || second.date_field == Some(DateField::Date) {
+            if first.date_field == Some(DateField::Time)
+                || second.date_field == Some(DateField::Date)
+            {
                 [text(second), text(first)]
             } else {
                 [text(first), text(second)]
@@ -539,7 +549,7 @@ impl Page {
                 _ => None,
             });
         (
-            page_title(revision, id).unwrap_or_default().to_owned(),
+            crate::edit::without_fields(page_title(revision, id).unwrap_or_default()),
             level.unwrap_or(1),
         )
     }
@@ -577,7 +587,7 @@ impl Page {
             .filter(|node| matches!(node.kind, Kind::Metadata { .. }))
             .and_then(|node| node.extra.first());
         let mut page = Self {
-            title: page_title(revision, id).unwrap_or_default().to_owned(),
+            title: crate::edit::without_fields(page_title(revision, id).unwrap_or_default()),
             identity: Self::identity_of(revision),
             created: metadata
                 .and_then(|fields| fields.iter().find(|field| field.id == 0x18001c65))
@@ -604,7 +614,7 @@ impl Page {
                     FieldValue::Bytes(&[red, green, blue, alpha]) => {
                         Ok(u32::from_le_bytes([red, green, blue, alpha]))
                     }
-                    _ => Err(invalid("The page colour is damaged")),
+                    _ => Err(invalid("The page color is damaged")),
                 })
                 .transpose()?,
             objects: Vec::new(),
@@ -755,7 +765,11 @@ fn inherited_by(
             paragraph_style, ..
         } => {
             let style = match paragraph_style {
-                Some(id) => revision.nodes.get(id).map(|n| n.format.clone()).unwrap_or_default(),
+                Some(id) => revision
+                    .nodes
+                    .get(id)
+                    .map(|n| n.format.clone())
+                    .unwrap_or_default(),
                 None => Format::default(),
             };
             node.format
@@ -805,7 +819,11 @@ pub(crate) fn text_of(
     let runs = revision.text_runs(text)?;
     Ok(if runs.is_empty() {
         let style = match paragraph_style {
-            Some(id) => revision.nodes.get(id).map(|n| n.format.clone()).unwrap_or_default(),
+            Some(id) => revision
+                .nodes
+                .get(id)
+                .map(|n| n.format.clone())
+                .unwrap_or_default(),
             None => Format::default(),
         };
         Paragraph::new(String::new(), node.format.inherit(&style).inherit(&format))

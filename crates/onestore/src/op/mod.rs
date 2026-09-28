@@ -5,13 +5,16 @@
 use crate::{
     ExGuid, OutlineEdit, PageCreation, PageEdit, TextAttribute,
     document::{Layout, Tag},
-    page::{Definition, InkStroke, Page, PageObject, PageParagraph, Paragraph, TableCell,
-        TableColumn, TableRow},
+    page::{
+        Definition, InkStroke, Page, PageObject, PageParagraph, Paragraph, TableCell, TableColumn,
+        TableRow,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 mod apply;
+pub(crate) use apply::Failure;
 pub(crate) mod content;
 pub(crate) mod levels;
 pub(crate) mod lower;
@@ -73,7 +76,10 @@ pub enum PageOp {
         target: Option<String>,
     },
     /// Rewrites an equation's linear text and spans whole.
-    Equation { text: ExGuid, math: Paragraph },
+    Equation {
+        text: ExGuid,
+        math: Paragraph,
+    },
     /// The page's date: its creation time, FILETIME, and the text each of the title's date
     /// and time fields shows for it, as OneNote 2010 writes both when the date changes.
     Date {
@@ -101,7 +107,10 @@ pub enum PageOp {
     },
     /// Appends the right text to the left one and removes the right paragraph; an empty
     /// left text is replaced by the right text object.
-    Join { left: ExGuid, right: ExGuid },
+    Join {
+        left: ExGuid,
+        right: ExGuid,
+    },
     /// Moves a subtree before a direct child of `parent`, or last; `None` names the page,
     /// whose children are outlines, pictures and ink. A paragraph keeps its level where it
     /// lies deeper than its new parent.
@@ -111,11 +120,19 @@ pub enum PageOp {
         before: Option<ExGuid>,
     },
     /// Removes a subtree.
-    Delete { object: ExGuid },
+    Delete {
+        object: ExGuid,
+    },
     /// Sets a paragraph's absolute outline level, regrouping its container.
-    Level { paragraph: ExGuid, level: u32 },
+    Level {
+        paragraph: ExGuid,
+        level: u32,
+    },
     /// Outline position and width, or a paragraph's saved expansion state.
-    Outline { object: ExGuid, edit: OutlineEdit },
+    Outline {
+        object: ExGuid,
+        edit: OutlineEdit,
+    },
     /// Paragraph formatting stored on a paragraph's text; `None` leaves a value as it is.
     Paragraph {
         paragraph: ExGuid,
@@ -169,7 +186,10 @@ pub enum PageOp {
         add: Vec<InkStroke>,
         remove: Vec<ExGuid>,
     },
-    Table { table: ExGuid, edit: TableEdit },
+    Table {
+        table: ExGuid,
+        edit: TableEdit,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -205,7 +225,10 @@ pub enum SectionOp {
     Create(PageCreation),
     /// A page created with `creation` holding `page`'s content under the identities it
     /// carries (`Page::copy` gives fresh ones); the created title stays.
-    Import { creation: PageCreation, page: Page },
+    Import {
+        creation: PageCreation,
+        page: Page,
+    },
     /// A read-only conflict page of the listed page `of`, as OneNote 2010 keeps the version of
     /// a page a merge could not take: created with `creation` (not placed, its author the user
     /// whose version it is, a title only where `page` has one) and holding `page` as `Import`
@@ -223,6 +246,31 @@ pub enum SectionOp {
     /// The section's colour as COLORREF, kept in its own metadata; `None` is OneNote's
     /// "no colour".
     Color(Option<u32>),
+    /// Makes a version of a page (`Section::versions`) its current state, as OneNote 2010's
+    /// Restore Version does; the page as it stood becomes the newest version. New objects take
+    /// identities from `guid`.
+    RestoreVersion {
+        page: ExGuid,
+        version: ExGuid,
+        guid: [u8; 16],
+    },
+    /// Deletes versions of a page, as OneNote 2010's Delete Version does; their revisions stay
+    /// stored.
+    DeleteVersions {
+        page: ExGuid,
+        versions: Vec<ExGuid>,
+    },
+}
+
+impl SectionOp {
+    /// `RestoreVersion` of `page`'s `version`, its new objects under a fresh identity.
+    pub fn restore(page: ExGuid, version: ExGuid) -> Result<Self, crate::Error> {
+        Ok(Self::RestoreVersion {
+            page,
+            version,
+            guid: crate::write::fresh_guid()?,
+        })
+    }
 }
 
 /// A character property that `PageOp::Format` can clear so the text inherits it.

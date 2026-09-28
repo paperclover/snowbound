@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (0x20001, 0x14001cbe) => {
             if index.resolve_active(space)?.roots.get(&1) != Some(&object) {
-                return Err("Only the notebook's colour, on the TOC root, changes".into());
+                return Err("Only the notebook's color, on the TOC root, changes".into());
             }
             let color = u32::from_le_bytes(value.as_slice().try_into()?);
             onestore::edit_table_of_contents(&bytes, &[TocEdit::Color(color)])?
@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             write(&args[1], &patched)?;
             return Ok(());
         }
-        _ => return Err("Only text and TOC colours change as edits; other values are patched into a copy of equal length".into()),
+        _ => return Err("Only text and TOC colors change as edits; other values are patched into a copy of equal length".into()),
     };
     let transaction = transaction.ok_or("The value is already stored")?;
     if args[1] == "--in-place" {

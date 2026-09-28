@@ -71,7 +71,8 @@ pub struct InternalLink {
     pub object: Option<ExGuid>,
 }
 
-/// The identities in an `onenote:#…` link, or `None` for any other URL.
+/// The identities in an `onenote:` link, whatever path it names before the `#` (none as
+/// stored, the section file's as Copy Link to Page gives it), or `None` for any other URL.
 pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
     let guid = |value: &str| {
         format!("{value},0")
@@ -79,7 +80,8 @@ pub fn parse_internal_link(url: &str) -> Option<InternalLink> {
             .ok()
             .map(|id| id.guid)
     };
-    let parts: Vec<&str> = url.strip_prefix("onenote:#")?.split('&').collect();
+    let (_, fragment) = url.strip_prefix("onenote:")?.split_once('#')?;
+    let parts: Vec<&str> = fragment.split('&').collect();
     let value = |name: &str| {
         parts.iter().find_map(|part| {
             part.strip_prefix(name)

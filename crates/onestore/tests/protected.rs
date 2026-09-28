@@ -188,7 +188,10 @@ fn a_protected_page_edit_is_stored_under_the_section_key() {
             let ops = onestore::op::lower_page(&before, page).unwrap();
             let edit = Edit {
                 at: 134_000_000_000_000_000,
-                ops: ops.into_iter().map(|op| Op::Page { space: *space, op }).collect(),
+                ops: ops
+                    .into_iter()
+                    .map(|op| Op::Page { space: *space, op })
+                    .collect(),
             };
             let store = Store::parse(&bytes).unwrap();
             let index = RevisionIndex::parse(&store).unwrap();

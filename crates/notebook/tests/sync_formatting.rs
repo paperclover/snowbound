@@ -83,11 +83,7 @@ fn formats(page: &Page, text: ExGuid) -> Vec<Format> {
 fn remote_with(space: ExGuid, change: impl FnOnce(&mut Page)) -> Server {
     let mut page = page_of(OUTLINES, space);
     change(&mut page);
-    Server::new(
-        ops::saved(OUTLINES, space, &page)
-            .unwrap()
-            .as_slice(),
-    )
+    Server::new(ops::saved(OUTLINES, space, &page).unwrap().as_slice())
 }
 
 fn cache(directory: &tempfile::TempDir) -> Replica {
@@ -157,7 +153,11 @@ fn offline_formatting_conflicts_only_with_remote_changes_it_overlaps() {
             assert!(matches!(outcome, Some((_, EditStatus::Published { .. }))));
             assert!(conflicted(&server.durable, space));
             let remote = page_of(&server.durable, space);
-            assert!(formats(&remote, ids[0]).iter().all(|format| format.bold != Some(true)));
+            assert!(
+                formats(&remote, ids[0])
+                    .iter()
+                    .all(|format| format.bold != Some(true))
+            );
             assert_eq!(pages(&snapshot(&cache)), pages(&server.durable));
             assert_ne!(pages(&local), pages(&server.durable));
         }
@@ -302,7 +302,6 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
         });
         let remote_page = page_of(&server.durable, space);
         let outcome = cache.sync_once(&mut server).unwrap().edit.unwrap();
-        assert_eq!(outcome.0, id, "seed {seed}");
         // Bullets the remote typed before the target's text, and whether it underlined a
         // character the target already had.
         let mut bullets = vec![0_u32; ids.len()];
@@ -316,13 +315,20 @@ fn seeded_formatting_reconciles_exactly_when_the_remote_left_the_paragraph_alone
         }
         if underlined[target] && start == 0 {
             conflicts += 1;
-            assert!(matches!(outcome.1, EditStatus::Published { .. }), "seed {seed}");
+            // The step names its batch by the newest edit: the conflict page the rebase queued.
+            assert!(outcome.0 > id, "seed {seed}");
+            assert!(
+                matches!(outcome.1, EditStatus::Published { .. }),
+                "seed {seed}"
+            );
+            assert_eq!(cache.status(id).unwrap(), Some(outcome.1), "seed {seed}");
             assert!(conflicted(&server.durable, space), "seed {seed}");
             assert_eq!(page_of(&server.durable, space), remote_page, "seed {seed}");
             assert_ne!(pages(&snapshot(&cache)), pages(&local), "seed {seed}");
             continue;
         }
         published += 1;
+        assert_eq!(outcome.0, id, "seed {seed}");
         assert!(
             matches!(outcome.1, EditStatus::Published { .. }),
             "seed {seed}: {outcome:?}"

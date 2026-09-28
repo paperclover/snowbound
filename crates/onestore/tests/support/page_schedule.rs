@@ -94,7 +94,8 @@ pub fn run(input: &[u8]) {
                 let removed: Vec<_> = (0..count)
                     .map(|i| pages[(usize::from(step[2]) + i) % pages.len()].0)
                     .collect();
-                let prepared = ops::section_op(source, SectionOp::Delete(removed.to_vec())).unwrap();
+                let prepared =
+                    ops::section_op(source, SectionOp::Delete(removed.to_vec())).unwrap();
                 pages.retain(|page| !removed.contains(&page.0));
                 for sid in removed {
                     levels.remove(&sid);
@@ -143,7 +144,15 @@ pub fn run(input: &[u8]) {
                     unreachable!()
                 };
                 Some((
-                    ops::page_op(source, sid, PageOp::Text { text: object, range: 0..u32::try_from(original.encode_utf16().count()).unwrap(), with: text.into() })
+                    ops::page_op(
+                        source,
+                        sid,
+                        PageOp::Text {
+                            text: object,
+                            range: 0..u32::try_from(original.encode_utf16().count()).unwrap(),
+                            with: text.into(),
+                        },
+                    )
                     .unwrap(),
                     Some((sid, object, text)),
                 ))

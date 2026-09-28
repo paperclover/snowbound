@@ -3,9 +3,7 @@
 //! here and are written in one SQLite transaction per burst; the sync thread asks it to seal
 //! and, when the remote changed, to rebase the queue.
 
-use crate::{
-    Result, base, lock, merge, queue, worker::Signal,
-};
+use crate::{Result, base, lock, merge, queue, worker::Signal};
 use onestore::{
     Arena, ExGuid, Section, Transaction,
     op::{Edit, OpError},
@@ -36,6 +34,14 @@ pub(crate) enum Request {
     },
     Conflicts {
         reply: Reply<Vec<(ExGuid, Vec<onestore::ConflictPage>)>>,
+    },
+    Versions {
+        reply: Reply<Vec<(ExGuid, Vec<onestore::PageVersion>)>>,
+    },
+    Version {
+        space: ExGuid,
+        version: ExGuid,
+        reply: Reply<Page>,
     },
     /// Answers once the edits before it are written.
     Flush {
@@ -79,6 +85,8 @@ impl Request {
             Self::Page { reply, .. } => reply(Err(error())),
             Self::Pages { reply } => reply(Err(error())),
             Self::Conflicts { reply } => reply(Err(error())),
+            Self::Versions { reply } => reply(Err(error())),
+            Self::Version { reply, .. } => reply(Err(error())),
             Self::Flush { reply } => reply(Err(error())),
             Self::Seal { reply } => reply(Err(error())),
             Self::Rebase { reply, .. } => reply(Err(error())),
@@ -321,6 +329,14 @@ impl<'a> Working<'a> {
                         Request::Conflicts { reply } => {
                             reply(self.section.conflicts().map_err(Into::into))
                         }
+                        Request::Versions { reply } => {
+                            reply(self.section.versions().map_err(Into::into))
+                        }
+                        Request::Version {
+                            space,
+                            version,
+                            reply,
+                        } => reply(self.section.version(space, version).map_err(Into::into)),
                         Request::Handover(to) => {
                             let mut waiting = held.take().unwrap_or_default();
                             waiting.extend(burst.drain(..).chain(later.drain(..)));
@@ -353,6 +369,18 @@ impl<'a> Working<'a> {
                     }
                     Request::Conflicts { reply } => {
                         reply(self.section.conflicts().map_err(Into::into));
+                        false
+                    }
+                    Request::Versions { reply } => {
+                        reply(self.section.versions().map_err(Into::into));
+                        false
+                    }
+                    Request::Version {
+                        space,
+                        version,
+                        reply,
+                    } => {
+                        reply(self.section.version(space, version).map_err(Into::into));
                         false
                     }
                     request @ (Request::Flush { .. } | Request::Seal { .. })
@@ -390,7 +418,9 @@ impl<'a> Working<'a> {
                                 .then(VecDeque::new);
                             false
                         } else {
-                            reply(Err(io::Error::other("The queue could not be written").into()));
+                            reply(Err(
+                                io::Error::other("The queue could not be written").into()
+                            ));
                             true
                         }
                     }
@@ -546,7 +576,7 @@ impl<'a> Working<'a> {
         let root = self.section.root();
         let revisions: BTreeMap<ExGuid, ExGuid> = self
             .section
-            .revisions()
+            .newest()
             .filter(|(space, _)| {
                 self.touched.contains(space) || (self.touched.is_empty() && *space == root)
             })
@@ -677,7 +707,12 @@ fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<
         .iter()
         .filter(|(space, rid)| after.get(space) != Some(rid))
         .map(|(space, _)| *space)
-        .chain(after.keys().filter(|space| !before.contains_key(space)).copied())
+        .chain(
+            after
+                .keys()
+                .filter(|space| !before.contains_key(space))
+                .copied(),
+        )
         .collect();
     changed.extend(converged);
     Ok(changed.into_iter().collect())

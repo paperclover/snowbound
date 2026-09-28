@@ -11,16 +11,39 @@ fn title_line(text: &str) -> &str {
     text.trim_start().split('\r').next().unwrap()
 }
 
-pub(crate) fn automatic_title(text: &str) -> &str {
-    let line = title_line(text).trim_end();
+/// `text` as it shows: hyperlink field instructions, which the text holds hidden, left out.
+pub(crate) fn without_fields(text: &str) -> String {
+    let mut line = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('\u{fddf}') {
+        line.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let Some(label) = rest
+            .strip_prefix("\u{fddf}HYPERLINK \"")
+            .and_then(|target| target.split_once('"'))
+            .map(|(_, label)| label)
+        else {
+            break;
+        };
+        rest = label;
+    }
+    line.push_str(rest);
+    line
+}
+
+/// The first line of `text` as OneNote titles a page after it: without hyperlink field
+/// instructions, which the text holds hidden, and at most 255 UTF-16 units long.
+pub(crate) fn automatic_title(text: &str) -> String {
+    let line = without_fields(title_line(text));
+    let line = line.trim();
     let mut units = 0;
     for (byte, character) in line.char_indices() {
         if units >= 255 {
-            return line[..byte].trim_end();
+            return line[..byte].trim_end().to_owned();
         }
         units += character.len_utf16();
     }
-    line
+    line.to_owned()
 }
 
 /// Replaces UTF-16 character positions across ordinary text runs.
@@ -446,7 +469,7 @@ pub(crate) fn title_of<'n>(
     let Kind::Page { rtl, .. } = &node(*page).unwrap().kind else {
         unreachable!()
     };
-    let mut title_text = title_line(title_text);
+    let mut title_text = without_fields(title_line(title_text));
     if automatic {
         let mut roots = node(*page).unwrap().children.clone();
         roots.sort_by(|a, b| {
@@ -495,7 +518,7 @@ pub(crate) fn title_of<'n>(
             pending.extend(element.structure.iter().rev().copied());
         }
     }
-    Ok(Some((*page, automatic, title_text.to_owned())))
+    Ok(Some((*page, automatic, title_text)))
 }
 
 /// Updates the page title for `changed` objects made on `view`, a copy of the page's view.

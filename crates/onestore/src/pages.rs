@@ -38,7 +38,11 @@ pub(crate) fn metadata_guid(metadata: &crate::document::Element<'_>) -> Result<[
         .ok_or_else(|| invalid("Page metadata needs its page identifier"))
 }
 
-pub(crate) fn set_references(object: &mut PropertyObject, property: u32, ids: &[ExGuid]) -> Result<(), Error> {
+pub(crate) fn set_references(
+    object: &mut PropertyObject,
+    property: u32,
+    ids: &[ExGuid],
+) -> Result<(), Error> {
     let mut references = Vec::new();
     for id in ids {
         references.extend_from_slice(&object.reference(*id)?);
@@ -184,19 +188,29 @@ pub(crate) fn section_changes(
             )
         };
         if element(&manifest)?.content.len() != 1 {
-            return Err(invalid("Each page space must contain one page with a valid level"));
+            return Err(invalid(
+                "Each page space must contain one page with a valid level",
+            ));
         }
         Ok(PageParts {
             metadata: element(&stored)?,
-            manifest: (manifest, PropertyObject::from_object(&revision.objects[&manifest])?),
-            stored_metadata: (stored, PropertyObject::from_object(&revision.objects[&stored])?),
+            manifest: (
+                manifest,
+                PropertyObject::from_object(&revision.objects[&manifest])?,
+            ),
+            stored_metadata: (
+                stored,
+                PropertyObject::from_object(&revision.objects[&stored])?,
+            ),
         })
     };
-    Ok(page_changes(root, &view, &raw, &pages, parts, edits, removals)?
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(_, changes)| !changes.is_empty())
-        .collect())
+    Ok(
+        page_changes(root, &view, &raw, &pages, parts, edits, removals)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, changes)| !changes.is_empty())
+            .collect(),
+    )
 }
 
 /// The objects page moves, indentation and removals change in each space; none when the
@@ -253,7 +267,10 @@ fn page_changes<'a>(
                 "Each page space must contain one page with a valid level",
             ));
         }
-        if page_guids.insert(metadata_guid(&page.metadata)?, *sid).is_some() {
+        if page_guids
+            .insert(metadata_guid(&page.metadata)?, *sid)
+            .is_some()
+        {
             return Err(invalid("Pages must have distinct metadata identifiers"));
         }
         order.push(*sid);
@@ -305,9 +322,7 @@ fn page_changes<'a>(
                 let sid = page_guids
                     .get(&metadata_guid(&view.nodes[id])?)
                     .filter(|sid| series.spaces.contains(sid))
-                    .ok_or_else(|| {
-                        invalid("Metadata copy must identify a page in its series")
-                    })?;
+                    .ok_or_else(|| invalid("Metadata copy must identify a page in its series"))?;
                 if copies.insert(*sid, *id).is_some() && !mismatched {
                     return Err(invalid("Each page needs its own ordinary metadata copy"));
                 }
@@ -334,11 +349,10 @@ fn page_changes<'a>(
             order.remove(at);
             let position = match before {
                 None => order.len(),
-                Some(before) => {
-                    order.iter().position(|sid| *sid == before).ok_or_else(|| {
-                        invalid("The movement anchor is no longer in the section")
-                    })?
-                }
+                Some(before) => order
+                    .iter()
+                    .position(|sid| *sid == before)
+                    .ok_or_else(|| invalid("The movement anchor is no longer in the section"))?,
             };
             order.insert(position, edit.space);
         }
@@ -351,7 +365,7 @@ fn page_changes<'a>(
     if order == original_order && levels == original_levels {
         return Ok(None);
     }
-        let mut groups: Vec<Vec<ExGuid>> = Vec::new();
+    let mut groups: Vec<Vec<ExGuid>> = Vec::new();
     for sid in order {
         if levels[&sid] == 1 {
             groups.push(Vec::new());
@@ -405,8 +419,8 @@ fn page_changes<'a>(
             )
         };
         children.push(id);
-        let membership_changed = old_id
-            .is_none_or(|old| view.nodes[&old].spaces != spaces || stale.contains(&old));
+        let membership_changed =
+            old_id.is_none_or(|old| view.nodes[&old].spaces != spaces || stale.contains(&old));
         if !membership_changed
             && !spaces.iter().any(|sid| {
                 levels[sid] != original_levels[sid]
@@ -611,10 +625,7 @@ impl PageCreation {
     }
 
     /// The root space's changes creating this page, and the new space's roots and objects.
-    pub(crate) fn changes(
-        &self,
-        section: &mut crate::Section<'_>,
-    ) -> Result<Creation, Error> {
+    pub(crate) fn changes(&self, section: &mut crate::Section<'_>) -> Result<Creation, Error> {
         self.validate()?;
         if section.revision(self.space()).is_ok() {
             return Err(invalid(
@@ -636,7 +647,14 @@ impl PageCreation {
         section: &mut crate::Section<'_>,
         title: &str,
         level: u32,
-    ) -> Result<(BTreeMap<u32, ExGuid>, crate::active::Changes, PropertyObject), Error> {
+    ) -> Result<
+        (
+            BTreeMap<u32, ExGuid>,
+            crate::active::Changes,
+            PropertyObject,
+        ),
+        Error,
+    > {
         if self.before.is_some() {
             return Err(invalid("A conflict page is not placed in the page list"));
         }
@@ -683,7 +701,11 @@ impl PageCreation {
         };
         let text = |value: &str, role: u32| {
             // OneNote keeps Latin-1 text as TextExtendedAscii, other text as Unicode.
-            let content = match value.chars().map(|c| u8::try_from(c).ok()).collect::<Option<Vec<u8>>>() {
+            let content = match value
+                .chars()
+                .map(|c| u8::try_from(c).ok())
+                .collect::<Option<Vec<u8>>>()
+            {
                 Some(latin) => (0x1c003498, latin),
                 None => (0x1c001c22, string(value)),
             };
@@ -829,8 +851,11 @@ impl PageCreation {
                             modified(),
                             (
                                 0x24001c20,
-                                [reference(14), self.date.iter().flat_map(|_| reference(20)).collect()]
-                                    .concat(),
+                                [
+                                    reference(14),
+                                    self.date.iter().flat_map(|_| reference(20)).collect(),
+                                ]
+                                .concat(),
                             ),
                             (0x14001c14, 0_f32.to_le_bytes().to_vec()),
                             (0x14001c15, 0_f32.to_le_bytes().to_vec()),
@@ -949,14 +974,24 @@ mod tests {
     };
 
     /// Page moves and removals through a section, sealed: the image they leave.
-    fn edit_pages(source: &[u8], edits: &[PageEdit], removals: &[ExGuid]) -> Result<Vec<u8>, OpError> {
+    fn edit_pages(
+        source: &[u8],
+        edits: &[PageEdit],
+        removals: &[ExGuid],
+    ) -> Result<Vec<u8>, OpError> {
         let arena = crate::Arena::default();
         let mut section = crate::Section::open(&arena, source.to_vec()).map_err(OpError::Failed)?;
         let mut ops = vec![Op::Section(SectionOp::Pages(edits.to_vec()))];
         if !removals.is_empty() {
             ops.push(Op::Section(SectionOp::Delete(removals.to_vec())));
         }
-        section.apply("Author", &Edit { at: 133_700_000_000_000_000, ops })?;
+        section.apply(
+            "Author",
+            &Edit {
+                at: 133_700_000_000_000_000,
+                ops,
+            },
+        )?;
         section.seal().map_err(OpError::Failed)?;
         Ok(section.image())
     }

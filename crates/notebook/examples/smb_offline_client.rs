@@ -404,10 +404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let at = u32::try_from(text.encode_utf16().count())?;
                 let token = format!(" [{}:{}]", args[2], generated);
                 let started = now();
-                match cache.apply(
-                    "Offline document writer",
-                    append(space, object, at, &token),
-                ) {
+                match cache.apply("Offline document writer", append(space, object, at, &token)) {
                     Ok(id) => {
                         println!(
                             "{}",
@@ -432,7 +429,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
                 let mut at = u32::try_from(text.encode_utf16().count())?;
                 for token in &missing {
-                    ids.push(cache.apply("Offline document writer", append(space, object, at, token))?);
+                    ids.push(
+                        cache.apply("Offline document writer", append(space, object, at, token))?,
+                    );
                     at += u32::try_from(token.encode_utf16().count())?;
                 }
                 if !missing.is_empty() {

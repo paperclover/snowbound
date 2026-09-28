@@ -258,8 +258,8 @@ pub(crate) fn style_changes(
     let raw = &active.live.revision;
     let mut changed = BTreeMap::new();
     if !raw.objects.contains_key(&style) {
-        let definition =
-            definition.ok_or_else(|| invalid("A paragraph references a missing style definition"))?;
+        let definition = definition
+            .ok_or_else(|| invalid("A paragraph references a missing style definition"))?;
         let Kind::Style { name } = &definition.kind else {
             return Err(invalid("A paragraph style must be a style definition"));
         };

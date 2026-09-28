@@ -416,7 +416,9 @@ impl UnlockedSection<'_> {
             ));
         }
         if edit.ops.iter().any(|op| matches!(op, Op::Section(_))) {
-            return Err(OpError::Unsupported("A protected section's page list is not edited"));
+            return Err(OpError::Unsupported(
+                "A protected section's page list is not edited",
+            ));
         }
         let twin = self.twin().map_err(failed)?;
         let arena = crate::Arena::default();
@@ -435,7 +437,10 @@ impl UnlockedSection<'_> {
             .map(|space| Ok((*space, applied_index.resolve_active(*space)?)))
             .collect::<std::result::Result<Vec<_>, crate::Error>>()
             .map_err(failed)?;
-        let edited: Vec<_> = edited.iter().map(|(space, after)| (*space, after)).collect();
+        let edited: Vec<_> = edited
+            .iter()
+            .map(|(space, after)| (*space, after))
+            .collect();
         let payloads = crate::write::declared_payloads(&applied_store)
             .into_iter()
             .map(|guid| Ok((guid, applied_store.file_data(guid)?)))
@@ -444,12 +449,15 @@ impl UnlockedSection<'_> {
         let transaction = crate::write::squash(self.index, &edited, &payloads, Some(self))
             .map_err(failed)?
             .ok_or(OpError::Unsupported("The edit changes nothing"))?;
-        let written = crate::write::applied(self.index.store.data, Some(&transaction))
-            .map_err(failed)?;
+        let written =
+            crate::write::applied(self.index.store.data, Some(&transaction)).map_err(failed)?;
         let store = crate::Store::parse(&written).map_err(failed)?;
         let index = RevisionIndex::parse(&store).map_err(failed)?;
         UnlockedSection::unlock(&index, Limits::default(), |metadata, _| {
-            self.keys.get(metadata).cloned().ok_or(Error::PasswordMismatch)
+            self.keys
+                .get(metadata)
+                .cloned()
+                .ok_or(Error::PasswordMismatch)
         })
         .map_err(|error| match error {
             Error::Invalid(error) => failed(error),

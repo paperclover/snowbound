@@ -29,7 +29,10 @@ pub(crate) fn initials(author: &str) -> String {
 
 /// An author object's properties as OneNote 2010 writes them: initials, then the name.
 pub(crate) fn author_properties(name: &str) -> Vec<(u32, Vec<u8>)> {
-    vec![(0x1c001df8, string(&initials(name))), (0x1c001d75, string(name))]
+    vec![
+        (0x1c001df8, string(&initials(name))),
+        (0x1c001d75, string(name)),
+    ]
 }
 
 pub(crate) fn default_text_style() -> Vec<(u32, Vec<u8>)> {
@@ -160,10 +163,12 @@ pub(crate) fn at<T>(filetime: u64, f: impl FnOnce() -> T) -> T {
 /// Seconds since 1980 as OneNote's Time32, and FILETIME, of the writers' clock.
 pub(crate) fn current_timestamps() -> Result<(u32, u64)> {
     let now = match CLOCK.get() {
-        Some(filetime) => (filetime / 10_000_000).checked_sub(11644473600).ok_or(Error {
-            offset: 0,
-            message: "An edit time precedes the Unix epoch",
-        })?,
+        Some(filetime) => (filetime / 10_000_000)
+            .checked_sub(11644473600)
+            .ok_or(Error {
+                offset: 0,
+                message: "An edit time precedes the Unix epoch",
+            })?,
         None => SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| Error {
@@ -200,7 +205,7 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
     let page_guid = fresh_guid()?;
     let metadata = vec![
         (0x1c001c30, page_guid.to_vec()),
-        (0x1c001cf3, string(crate::edit::automatic_title(text))),
+        (0x1c001cf3, string(&crate::edit::automatic_title(text))),
         (0x14001d82, 40_u32.to_le_bytes().to_vec()),
         (0x1400348b, 40_u32.to_le_bytes().to_vec()),
         (0x14001dff, 1_u32.to_le_bytes().to_vec()),
@@ -265,7 +270,7 @@ pub fn create_section(file_name: &str, text: &str, author: &str) -> Result<Vec<u
                             (0x24001c20, id(23)),
                             (0x1c001d75, string(author)),
                             (0x1c001df8, string(&initials(author))),
-                            (0x1c001d3c, string(crate::edit::automatic_title(text))),
+                            (0x1c001d3c, string(&crate::edit::automatic_title(text))),
                         ],
                         page_margins(),
                     ]

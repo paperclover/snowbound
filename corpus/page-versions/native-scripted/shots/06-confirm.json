@@ -1,0 +1,13 @@
+{
+  "exit": 0,
+  "stdout": "dialog: Microsoft OneNote | &Yes\r\n&No\r\nDo you want to delete all page versions in the section \"History\"?\r\n\n",
+  "stderr": "",
+  "w": 800,
+  "h": 600,
+  "error": null,
+  "win": {
+    "title": "Microsoft OneNote",
+    "class": "#32770",
+    "dialog": true
+  }
+}

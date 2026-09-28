@@ -95,8 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // The remote the queue was made on, as a recovery archive records it.
                     let archive = copy.with_extension("probe-recovery");
                     replica.export_recovery(&archive)?;
-                    let mut remote =
-                        Memory(notebook::Recovery::open(&archive)?.remote_snapshot()?);
+                    let mut remote = Memory(notebook::Recovery::open(&archive)?.remote_snapshot()?);
                     std::fs::remove_file(&archive)?;
                     let synced = replica.sync_once(&mut remote)?;
                     let published = {

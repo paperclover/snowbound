@@ -5,8 +5,8 @@
 
 use onestore::{
     Arena, ExGuid, RevisionIndex, Section, Store,
-    op::{self, Op},
     document::{Document, Format, Layout},
+    op::{self, Op},
     page::{
         Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent,
         text::{Edit, new_id},
@@ -576,10 +576,20 @@ pub fn run(input: &[u8]) {
     let mut section = Section::open(&arena, source.clone()).unwrap();
     let edit = op::Edit {
         at: 134_000_000_000_000_000,
-        ops: ops.iter().map(|op| Op::Page { space, op: op.clone() }).collect(),
+        ops: ops
+            .iter()
+            .map(|op| Op::Page {
+                space,
+                op: op.clone(),
+            })
+            .collect(),
     };
     if section.apply("Fuzz author", &edit).is_err() {
-        assert_eq!(section.page(space).unwrap(), before, "a refused edit changes nothing");
+        assert_eq!(
+            section.page(space).unwrap(),
+            before,
+            "a refused edit changes nothing"
+        );
         return;
     }
     let mut predicted = before.clone();

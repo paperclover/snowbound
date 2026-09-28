@@ -15,14 +15,18 @@ use crate::{
     active::{ActivePage, Changes},
     document::Kind,
     page::{
-        Attachment, Image, Ink, PageObject, PageParagraph, Paragraph, ParagraphContent,
-        TableCell, TableColumn,
+        Attachment, Image, Ink, PageObject, PageParagraph, Paragraph, ParagraphContent, TableCell,
+        TableColumn,
     },
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
 };
+
+/// `HasConflictPages` and `HasVersionPages` (MS-ONE 2.3.71, 2.3.84), true when present.
+const HAS_CONFLICT_PAGES: u32 = 0x88001d97;
+const HAS_VERSION_PAGES: u32 = 0x88003462;
 
 fn invalid(message: &'static str) -> Error {
     Error { offset: 0, message }
@@ -87,7 +91,9 @@ impl<'a> Section<'a> {
         space: ExGuid,
         after: &crate::page::Page,
     ) -> Result<Vec<PageOp>, OpError> {
-        let before = self.page(space).map_err(|error| self.classify(Failure::Rejected(error)))?;
+        let before = self
+            .page(space)
+            .map_err(|error| self.classify(Failure::Rejected(error)))?;
         let ops = super::lower_page(&before, after)
             .map_err(|error| OpError::Unsupported(error.message))?;
         let edit = Edit {
@@ -152,7 +158,10 @@ impl<'a> Section<'a> {
                 let conflicts = self.conflicts()?;
                 for space in pages {
                     let of = conflicts.iter().find_map(|(of, conflicts)| {
-                        conflicts.iter().any(|page| page.space == *space).then_some(*of)
+                        conflicts
+                            .iter()
+                            .any(|page| page.space == *space)
+                            .then_some(*of)
                     });
                     match of {
                         Some(of) => self.unlink_conflict(of, *space)?,
@@ -165,6 +174,19 @@ impl<'a> Section<'a> {
                     }
                 }
             }
+            SectionOp::RestoreVersion {
+                page,
+                version,
+                guid,
+            } => {
+                self.restore(author, *page, *version, *guid)?;
+                self.flag_metadata(*page, HAS_VERSION_PAGES, true)?;
+            }
+            SectionOp::DeleteVersions { page, versions } => {
+                if self.unlist(*page, versions)? {
+                    self.flag_metadata(*page, HAS_VERSION_PAGES, false)?;
+                }
+            }
             SectionOp::Color(color) => {
                 let root = self.root();
                 let page = self.active(root)?;
@@ -173,7 +195,7 @@ impl<'a> Section<'a> {
                     .roots
                     .get(&2)
                     .filter(|id| page.live.revision.objects.contains_key(id))
-                    .ok_or_else(|| invalid("The section has no metadata to colour"))?;
+                    .ok_or_else(|| invalid("The section has no metadata to color"))?;
                 let mut object = crate::write::PropertyObject::from_object(
                     &page.live.revision.objects[&metadata],
                 )?;
@@ -185,10 +207,17 @@ impl<'a> Section<'a> {
     }
 
     /// Writes `page`'s content onto the page just created in `space`, whose title stays.
-    fn fill(&mut self, author: &str, space: ExGuid, page: &crate::page::Page) -> Result<(), Failure> {
+    fn fill(
+        &mut self,
+        author: &str,
+        space: ExGuid,
+        page: &crate::page::Page,
+    ) -> Result<(), Failure> {
         let before = self.page(space)?;
         let mut after = page.clone();
-        after.objects.retain(|object| !matches!(object, PageObject::Title(_)));
+        after
+            .objects
+            .retain(|object| !matches!(object, PageObject::Title(_)));
         for object in &mut after.objects {
             // Stroke points are page coordinates; new ink takes its position from them.
             if let PageObject::Ink(ink) = object {
@@ -298,7 +327,7 @@ impl<'a> Section<'a> {
             &[],
             BTreeMap::from([(manifest_id, manifest), (copy, metadata)]),
         )?;
-        self.has_conflicts(of, true)
+        self.flag_metadata(of, HAS_CONFLICT_PAGES, true)
     }
 
     /// Deletes conflict page `space` of page `of` as OneNote 2010 does: the manifest stops
@@ -322,21 +351,21 @@ impl<'a> Section<'a> {
         }
         self.apply_changes(of, &[], BTreeMap::from([(manifest_id, manifest)]))?;
         if spaces.is_empty() {
-            self.has_conflicts(of, false)?;
+            self.flag_metadata(of, HAS_CONFLICT_PAGES, false)?;
         }
         Ok(())
     }
 
-    /// Sets or clears `HasConflictPages` on page `of`'s metadata and on the section's copy
+    /// Sets or clears a Boolean `property` on page `of`'s metadata and on the section's copy
     /// of it, where its series keeps one.
-    fn has_conflicts(&mut self, of: ExGuid, value: bool) -> Result<(), Failure> {
+    fn flag_metadata(&mut self, of: ExGuid, property: u32, value: bool) -> Result<(), Failure> {
         use crate::write::PropertyObject;
         let flag = |object: &crate::Object<'_>| -> Result<PropertyObject, Error> {
             let mut object = PropertyObject::from_object(object)?;
             if value {
-                object.set(&[(0x88001d97, &[])])?;
+                object.set(&[(property, &[])])?;
             } else {
-                object.remove(&[0x88001d97])?;
+                object.remove(&[property])?;
             }
             Ok(object)
         };
@@ -399,7 +428,7 @@ fn stores_more_than_once(op: &Op) -> bool {
 }
 
 /// Why an op was not applied: a precondition it names, or what a writer refused.
-enum Failure {
+pub(crate) enum Failure {
     Refused(OpError),
     Rejected(Error),
 }
@@ -524,7 +553,11 @@ impl<'a> Writer<'_, 'a> {
                 (*child, target)
             })
             .unzip();
-        if current.iter().map(|(_, depth)| *depth).eq(depths.iter().copied()) {
+        if current
+            .iter()
+            .map(|(_, depth)| *depth)
+            .eq(depths.iter().copied())
+        {
             return Ok(());
         }
         let (level, runs) = levels::runs(&children, &depths, is_cell)?;
@@ -592,13 +625,15 @@ impl<'a> Writer<'_, 'a> {
             }
             PageOp::Color(color) => self.write(|page| {
                 let [node] = crate::active::manifest_pages(&page.view)[..] else {
-                    return Err(invalid("The page has no page node to colour"));
+                    return Err(invalid("The page has no page node to color"));
                 };
                 let mut object =
                     crate::write::PropertyObject::from_object(&page.live.revision.objects[&node])?;
                 // OneNote's "No color" removes the property.
                 match color {
-                    Some(color) => object.set(&[(crate::page::PAGE_COLOR, &color.to_le_bytes())])?,
+                    Some(color) => {
+                        object.set(&[(crate::page::PAGE_COLOR, &color.to_le_bytes())])?
+                    }
                     None => object.remove(&[crate::page::PAGE_COLOR])?,
                 }
                 Ok(BTreeMap::from([(node, object)]))
@@ -648,12 +683,9 @@ impl<'a> Writer<'_, 'a> {
                 self.target(*paragraph)?;
                 let container = self.container(*paragraph)?;
                 let base = self.level(container)?;
-                let depth = level
-                    .checked_sub(base)
-                    .filter(|depth| *depth > 0)
-                    .ok_or(OpError::Unsupported(
-                        "A paragraph lies deeper than its parent",
-                    ))?;
+                let depth = level.checked_sub(base).filter(|depth| *depth > 0).ok_or(
+                    OpError::Unsupported("A paragraph lies deeper than its parent"),
+                )?;
                 self.regroup(container, &[(*paragraph, depth)])
             }
             PageOp::Outline { object, edit } => {
@@ -703,7 +735,9 @@ impl<'a> Writer<'_, 'a> {
                         .get(id)
                         .is_some_and(|owners| owners.iter().any(|owner| owner != paragraph))
                     {
-                        return Err(OpError::Unsupported("A list node belongs to one paragraph").into());
+                        return Err(
+                            OpError::Unsupported("A list node belongs to one paragraph").into()
+                        );
                     }
                 }
                 let nodes = lists
@@ -833,7 +867,9 @@ impl<'a> Writer<'_, 'a> {
         let mut at = parent;
         loop {
             if at == object {
-                return Err(OpError::StructureChanged("A subtree cannot move inside itself").into());
+                return Err(
+                    OpError::StructureChanged("A subtree cannot move inside itself").into(),
+                );
             }
             match self.page()?.parents.get(&at).map(Vec::as_slice) {
                 Some([up]) => at = *up,
@@ -844,9 +880,10 @@ impl<'a> Writer<'_, 'a> {
             Some(before) => {
                 self.target(before)?;
                 if self.container(before)? != parent {
-                    return Err(
-                        OpError::StructureChanged("The anchor is no child of the container").into(),
-                    );
+                    return Err(OpError::StructureChanged(
+                        "The anchor is no child of the container",
+                    )
+                    .into());
                 }
                 self.parent(before)?
             }
@@ -877,9 +914,10 @@ impl<'a> Writer<'_, 'a> {
             Some(before) => {
                 self.target(before)?;
                 if self.container(before)? != container {
-                    return Err(
-                        OpError::StructureChanged("The anchor is no child of the container").into(),
-                    );
+                    return Err(OpError::StructureChanged(
+                        "The anchor is no child of the container",
+                    )
+                    .into());
                 }
                 self.parent(before)?
             }
@@ -920,8 +958,13 @@ impl<'a> Writer<'_, 'a> {
                 .level
                 .checked_sub(parent_level)
                 .filter(|depth| *depth > 0)
-                .ok_or(OpError::Unsupported("A paragraph lies deeper than its parent"))?;
-            targets.entry(parent).or_default().push((paragraph.id, depth));
+                .ok_or(OpError::Unsupported(
+                    "A paragraph lies deeper than its parent",
+                ))?;
+            targets
+                .entry(parent)
+                .or_default()
+                .push((paragraph.id, depth));
             self.paragraph(holder, anchor, paragraph, None)?;
         }
         for (parent, targets) in targets {
@@ -966,13 +1009,16 @@ impl<'a> Writer<'_, 'a> {
         match &paragraph.content {
             ParagraphContent::Text(target) => {
                 if equation {
-                    return self.write(|page| content::equation_changes(page, text_id, &target.text));
+                    return self
+                        .write(|page| content::equation_changes(page, text_id, &target.text));
                 }
                 let page = self.page()?;
                 let stored = crate::page::text_of(&page.view, &page.parents, text_id)?;
                 let values = paragraph_fields(&stored, &target.text)?.values()?;
                 if !values.is_empty() {
-                    self.write(|page| properties::paragraph_format_changes(page, text_id, &values))?;
+                    self.write(|page| {
+                        properties::paragraph_format_changes(page, text_id, &values)
+                    })?;
                 }
                 let page = self.page()?;
                 let stored = crate::page::text_of(&page.view, &page.parents, text_id)?;
@@ -996,12 +1042,19 @@ impl<'a> Writer<'_, 'a> {
                         .rows
                         .iter()
                         .flat_map(|row| &row.cells)
-                        .map(|cell| (cell.id, (table::cell_indents(&cell.indents, None), cell.shading)))
+                        .map(|cell| {
+                            (
+                                cell.id,
+                                (table::cell_indents(&cell.indents, None), cell.shading),
+                            )
+                        })
                         .collect(),
                     columns: &table.columns,
                     borders: table.borders,
                 };
-                self.write(|page| table::table_changes(page, table.id, Some(paragraph.id), &structure))?;
+                self.write(|page| {
+                    table::table_changes(page, table.id, Some(paragraph.id), &structure)
+                })?;
                 for cell in table.rows.iter().flat_map(|row| &row.cells) {
                     self.cell(cell)?;
                 }
@@ -1009,7 +1062,10 @@ impl<'a> Writer<'_, 'a> {
             }
             ParagraphContent::Image(image) => {
                 if image.layout.x.is_some() || image.layout.y.is_some() {
-                    return Err(OpError::Unsupported("A paragraph picture has no position of its own").into());
+                    return Err(OpError::Unsupported(
+                        "A paragraph picture has no position of its own",
+                    )
+                    .into());
                 }
                 self.picture(image, Some(paragraph.id))
             }
@@ -1065,7 +1121,11 @@ impl<'a> Writer<'_, 'a> {
             self.free(stroke.id)?;
         }
         let data = fresh()?;
-        let strokes: Vec<_> = ink.strokes.iter().map(|stroke| (stroke.id, stroke)).collect();
+        let strokes: Vec<_> = ink
+            .strokes
+            .iter()
+            .map(|stroke| (stroke.id, stroke))
+            .collect();
         self.write(|page| content::ink_changes(page, ink, ink.id, data, &strokes, holder))
     }
 
@@ -1104,7 +1164,9 @@ impl<'a> Writer<'_, 'a> {
                             .level
                             .checked_sub(parent_level)
                             .filter(|depth| *depth > 0)
-                            .ok_or(OpError::Unsupported("A paragraph lies deeper than its parent"))?;
+                            .ok_or(OpError::Unsupported(
+                                "A paragraph lies deeper than its parent",
+                            ))?;
                         self.paragraph(parent, None, paragraph, None)?;
                         if parent == outline.id {
                             targets.push((paragraph.id, depth));
@@ -1128,8 +1190,9 @@ impl<'a> Writer<'_, 'a> {
                     let indents = content::measurement_bytes(&outline.indents, 4)?;
                     let id = outline.id;
                     self.write(|page| {
-                        let mut node =
-                            crate::write::PropertyObject::from_object(&page.live.revision.objects[&id])?;
+                        let mut node = crate::write::PropertyObject::from_object(
+                            &page.live.revision.objects[&id],
+                        )?;
                         node.set(&[(0x1c001c12, &indents)])?;
                         Ok(BTreeMap::from([(id, node)]))
                     })?;
@@ -1137,13 +1200,17 @@ impl<'a> Writer<'_, 'a> {
             }
             PageObject::Image(image) => {
                 if image.layout.x.is_none() || image.layout.y.is_none() {
-                    return Err(OpError::Unsupported("A new page-level picture needs a position").into());
+                    return Err(
+                        OpError::Unsupported("A new page-level picture needs a position").into(),
+                    );
                 }
                 self.picture(image, None)?;
             }
             PageObject::Ink(ink) => self.ink(ink, None)?,
             PageObject::Title(_) | PageObject::Unsupported(_) => {
-                return Err(OpError::Unsupported("Titles and unsupported objects cannot be added").into());
+                return Err(
+                    OpError::Unsupported("Titles and unsupported objects cannot be added").into(),
+                );
             }
         }
         if before.is_some() {
@@ -1178,13 +1245,13 @@ impl<'a> Writer<'_, 'a> {
             .map(|row| (*row, page.view.nodes[row].children.clone()))
             .collect();
         let mut borders = *borders;
-        let template = rows
-            .first()
-            .and_then(|(_, cells)| cells.first())
-            .and_then(|cell| match &page.view.nodes[cell].kind {
-                Kind::Cell { indents, .. } => Some(indents.clone()),
-                _ => None,
-            });
+        let template =
+            rows.first()
+                .and_then(|(_, cells)| cells.first())
+                .and_then(|cell| match &page.view.nodes[cell].kind {
+                    Kind::Cell { indents, .. } => Some(indents.clone()),
+                    _ => None,
+                });
         let mut new_rows = BTreeSet::new();
         let mut new_cells: BTreeMap<ExGuid, (Vec<f32>, Option<u32>)> = BTreeMap::new();
         let mut filled: Vec<&TableCell> = Vec::new();
@@ -1195,17 +1262,22 @@ impl<'a> Writer<'_, 'a> {
             )
         };
         match edit {
-            TableEdit::Rows { before, rows: added } => {
+            TableEdit::Rows {
+                before,
+                rows: added,
+            } => {
                 let at = match before {
-                    Some(before) => rows
-                        .iter()
-                        .position(|(row, _)| row == before)
-                        .ok_or(OpError::StructureChanged("The anchor row is not in the table"))?,
+                    Some(before) => rows.iter().position(|(row, _)| row == before).ok_or(
+                        OpError::StructureChanged("The anchor row is not in the table"),
+                    )?,
                     None => rows.len(),
                 };
                 for row in added {
                     if row.cells.len() != columns.len() {
-                        return Err(OpError::Unsupported("Every table row has one cell per column").into());
+                        return Err(OpError::Unsupported(
+                            "Every table row has one cell per column",
+                        )
+                        .into());
                     }
                     new_rows.insert(row.id);
                     for cell in &row.cells {
@@ -1245,13 +1317,18 @@ impl<'a> Writer<'_, 'a> {
                     return Err(OpError::TargetUnavailable(*row).into());
                 }
                 if rows.is_empty() {
-                    return Err(OpError::Unsupported("A table keeps a row; delete the table instead").into());
+                    return Err(OpError::Unsupported(
+                        "A table keeps a row; delete the table instead",
+                    )
+                    .into());
                 }
             }
             TableEdit::DeleteColumn(at) => {
                 let at = *at as usize;
                 if at >= columns.len() || columns.len() == 1 {
-                    return Err(OpError::Unsupported("Choose a column of a table with several").into());
+                    return Err(
+                        OpError::Unsupported("Choose a column of a table with several").into(),
+                    );
                 }
                 columns.remove(at);
                 for (_, cells) in &mut rows {
@@ -1294,7 +1371,10 @@ impl<'a> Writer<'_, 'a> {
         for row in &new_rows {
             self.free(*row)?;
         }
-        if columns.iter().any(|c| !c.width.is_finite() || c.width < 36.0) {
+        if columns
+            .iter()
+            .any(|c| !c.width.is_finite() || c.width < 36.0)
+        {
             return Err(OpError::Unsupported("Table columns are at least 36 points wide").into());
         }
         let structure = Structure {
@@ -1348,7 +1428,11 @@ fn bare(paragraph: &PageParagraph) -> Result<(), OpError> {
             if !table.tags.is_empty() {
                 return Err(OpError::Unsupported("Set a table's tags with their own op"));
             }
-            for paragraph in table.rows.iter().flat_map(|row| &row.cells).flat_map(|cell| &cell.paragraphs)
+            for paragraph in table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .flat_map(|cell| &cell.paragraphs)
             {
                 bare(paragraph)?;
             }
@@ -1364,7 +1448,9 @@ fn bare(paragraph: &PageParagraph) -> Result<(), OpError> {
 /// The field code OneNote stores before a hyperlink's label.
 fn field_code(target: &str) -> Result<String, Error> {
     if target.is_empty() || target.contains(['"', '\0', '\r', '\n', '\u{fddf}']) {
-        return Err(invalid("Choose a link target without quotes or line breaks"));
+        return Err(invalid(
+            "Choose a link target without quotes or line breaks",
+        ));
     }
     Ok(format!("\u{fddf}HYPERLINK \"{target}\""))
 }
@@ -1449,6 +1535,8 @@ pub(crate) fn link_ops(
             clear: vec![TextProperty::Hyperlink, TextProperty::HyperlinkLabel],
         }),
     }
-    ops.retain(|op| !matches!(op, PageOp::Format { set, clear, .. } if set.is_empty() && clear.is_empty()));
+    ops.retain(
+        |op| !matches!(op, PageOp::Format { set, clear, .. } if set.is_empty() && clear.is_empty()),
+    );
     Ok(ops)
 }

@@ -226,7 +226,10 @@ Reserved `_onefiles` directories are excluded from section-group traversal;
 OneNote's `OneNote_RecycleBin` is listed as the section group OneNote shows.
 Encrypted sections and valid storage with an unreadable document graph retain
 their identity as `Locked` or `Unreadable`, without being presented as empty pages.
-Malformed storage, failed reads and ambiguous identities reject the discovery.
+A child folder or section file that is denied or gone while listing (a folder
+another client holds delete-pending reads as denied) is kept as `unavailable` and
+tried again on the next discovery; the root itself, malformed storage, other failed
+reads and ambiguous identities reject the discovery.
 
 Each file read must be a consistent, bounded snapshot. The result is an
 observation across multiple files, not an atomic notebook transaction or
@@ -252,7 +255,12 @@ section moves into `OneNote_RecycleBin`, a group with its own TOC, and a deleted
 sections move there too before its folders go. `recycle_pages` keeps copies of pages a
 section is about to delete in `OneNote_RecycleBin/OneNote_DeletedPages.one`, with their
 identities, titles, dates and creation times, as OneNote does
-(`corpus/notebook-management`). Every created, renamed or moved file is placed with
+(`corpus/notebook-management`). A bin or deleted-pages file its TOC does not list is
+placed and listed again, a bin whose TOC OneNote named otherwise keeps it, and an
+unavailable bin refuses the delete (`corpus/recycle-bin-repair`). An entry a TOC still
+lists for a file gone from its folder gives way to the file an edit gives its name.
+Edits keep entries in the order their ordering numbers give; a rename or colour keeps
+the numbers. Every created, renamed or moved file is placed with
 `onestore::place_file`, which sets the header's ancestor to the parent TOC's
 identity and the name CRC OneNote checks on open; a file without them is
 re-identified and listed anew. They run over `Storage`: a mounted directory

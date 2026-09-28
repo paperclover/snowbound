@@ -1,5 +1,5 @@
 use crate::{
-    disk, model_ops,
+    disk, model_ops, ops,
     server::{remote_snapshot, snapshot},
 };
 use notebook::{Remote, Replica};
@@ -13,9 +13,6 @@ use onestore::{
     },
 };
 use std::{io, sync::LazyLock};
-
-#[path = "../../../onestore/tests/support/ops.rs"]
-mod ops;
 
 const BODY: &str = "Body 🦋 é";
 
@@ -242,10 +239,9 @@ pub fn run(input: &[u8]) {
                     .collect();
                 let expected = ops::section_op(&image, SectionOp::Pages(edits.to_vec()));
                 match section_op(cache, onestore::op::SectionOp::Pages(edits)) {
-                    Ok(_) => assert_eq!(
-                        pages(&snapshot(cache)),
-                        pages(expected.unwrap().as_bytes())
-                    ),
+                    Ok(_) => {
+                        assert_eq!(pages(&snapshot(cache)), pages(expected.unwrap().as_bytes()))
+                    }
                     Err(_) => {
                         assert!(expected.is_err());
                         assert_eq!(pages(&snapshot(cache)), listed);

@@ -44,7 +44,7 @@ pub use pages::{ConflictPage, PageCreation, PageEdit, PagePosition};
 pub(crate) use paragraph::{ParagraphJoin, ParagraphSplit};
 pub use properties::{IdStream, Property, PropertySets, Value};
 pub use revisions::{ExGuid, ObjectSpace, Revision, RevisionIndex};
-pub use section::{Arena, Section};
+pub use section::{Arena, PageVersion, Section};
 pub use snapshot::{read_snapshot, read_storage_snapshot};
 pub use store::{Chunk, Error, FileType, Header, Node, NodeList, Reference, Store};
 pub use toc::{TocEdit, edit_table_of_contents};

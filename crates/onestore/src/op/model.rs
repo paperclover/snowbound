@@ -53,7 +53,12 @@ pub(crate) fn lists(page: &Page) -> Vec<(Path, ExGuid, &Vec<PageParagraph>)> {
     for (object, value) in page.objects.iter().enumerate() {
         let outlines: Vec<(Option<usize>, &Outline)> = match value {
             PageObject::Outline(outline) => vec![(None, outline)],
-            PageObject::Title(title) => title.outlines.iter().enumerate().map(|(i, o)| (Some(i), o)).collect(),
+            PageObject::Title(title) => title
+                .outlines
+                .iter()
+                .enumerate()
+                .map(|(i, o)| (Some(i), o))
+                .collect(),
             _ => Vec::new(),
         };
         for (title_outline, outline) in outlines {
@@ -88,24 +93,24 @@ pub(crate) fn list_at<'p>(page: &'p mut Page, path: &Path) -> &'p mut Vec<PagePa
 /// The list holding paragraph `id`, and its index there.
 fn find(page: &Page, id: ExGuid) -> Option<(Path, usize)> {
     lists(page).into_iter().find_map(|(path, _, list)| {
-        list.iter().position(|p| p.id == id).map(|index| (path, index))
+        list.iter()
+            .position(|p| p.id == id)
+            .map(|index| (path, index))
     })
 }
 
 /// The list a container's children lie in: its own for an outline or cell, the one
 /// holding it for a paragraph.
 fn container(page: &Page, id: ExGuid) -> Option<(Path, Option<usize>)> {
-    lists(page)
-        .into_iter()
-        .find_map(|(path, owner, list)| {
-            if owner == id {
-                Some((path, None))
-            } else {
-                list.iter()
-                    .position(|p| p.id == id)
-                    .map(|index| (path, Some(index)))
-            }
-        })
+    lists(page).into_iter().find_map(|(path, owner, list)| {
+        if owner == id {
+            Some((path, None))
+        } else {
+            list.iter()
+                .position(|p| p.id == id)
+                .map(|index| (path, Some(index)))
+        }
+    })
 }
 
 /// The entries of `list` in the subtree of the paragraph at `index`.
@@ -227,7 +232,8 @@ pub(crate) fn paragraph_text(page: &Page, text: ExGuid) -> Option<&TextObject> {
 }
 
 fn text_mut(page: &mut Page, text: ExGuid) -> Result<&mut TextObject, Error> {
-    let (path, index) = text_holder(page, text).ok_or_else(|| invalid("Text is not on the page"))?;
+    let (path, index) =
+        text_holder(page, text).ok_or_else(|| invalid("Text is not on the page"))?;
     Ok(list_at(page, &path)[index].text_mut().unwrap())
 }
 
@@ -269,7 +275,10 @@ pub(crate) fn replace_text(
     let format = format_in(text, range.start)?.clone();
     let removed = range.end - range.start;
     if length - removed == 0 && with.is_empty() {
-        return Ok(Paragraph::new(String::new(), text.spans().last().unwrap().format.clone()));
+        return Ok(Paragraph::new(
+            String::new(),
+            text.spans().last().unwrap().format.clone(),
+        ));
     }
     let mut result = text.clone();
     result.apply(crate::page::text::Edit {
@@ -373,7 +382,10 @@ pub(crate) fn format_text(
         format
     };
     if text.text().is_empty() {
-        return Ok(Paragraph::new(String::new(), apply(&text.spans()[0].format)));
+        return Ok(Paragraph::new(
+            String::new(),
+            apply(&text.spans()[0].format),
+        ));
     }
     let (start, end) = (text.byte_offset(range.start)?, text.byte_offset(range.end)?);
     let mut runs = Vec::new();
@@ -381,11 +393,19 @@ pub(crate) fn format_text(
     for span in text.spans() {
         for (from, to, selected) in [
             (previous, start.clamp(previous, span.end), false),
-            (start.clamp(previous, span.end), end.clamp(previous, span.end), true),
+            (
+                start.clamp(previous, span.end),
+                end.clamp(previous, span.end),
+                true,
+            ),
             (end.clamp(previous, span.end), span.end, false),
         ] {
             if from < to {
-                let format = if selected { apply(&span.format) } else { span.format.clone() };
+                let format = if selected {
+                    apply(&span.format)
+                } else {
+                    span.format.clone()
+                };
                 runs.push((text.text()[from..to].to_owned(), format));
             }
         }
@@ -401,7 +421,9 @@ fn inserted(text: &Paragraph) -> Paragraph {
     macro_rules! shared {
         ($field:ident, $type:ty, $store:expr) => {{
             let first = spans[0].format.$field.unwrap_or_default();
-            (spans.iter().all(|s| s.format.$field.unwrap_or_default() == first)
+            (spans
+                .iter()
+                .all(|s| s.format.$field.unwrap_or_default() == first)
                 && first != <$type>::default())
             .then(|| $store(first))
         }};
@@ -485,8 +507,8 @@ fn insert(
     before: Option<ExGuid>,
     paragraphs: Vec<PageParagraph>,
 ) -> Result<(), Error> {
-    let (path, owner) =
-        self::container(page, container).ok_or_else(|| invalid("The container is not on the page"))?;
+    let (path, owner) = self::container(page, container)
+        .ok_or_else(|| invalid("The container is not on the page"))?;
     let list = list_at(page, &path);
     let at = match before {
         Some(before) => list
@@ -519,7 +541,9 @@ fn relevel(list: &mut [PageParagraph], index: usize, level: u32) {
 /// The title a page's writers store after changing it: the title text's first line when
 /// it has one, which only an edit of that text changes, else the first line of body text.
 fn retitle(page: &mut Page, edited: Option<ExGuid>) {
-    let line = |text: &str| text.trim_start().split('\r').next().unwrap_or_default().to_owned();
+    let line = |text: &str| {
+        crate::edit::without_fields(text.trim_start().split('\r').next().unwrap_or_default())
+    };
     match find_title_text(page) {
         Some(title) => {
             let text = text_of(page, title);
@@ -545,7 +569,7 @@ fn automatic(page: &mut Page) {
             .total_cmp(&b.y.unwrap_or(0.0))
             .then_with(|| a.x.unwrap_or(0.0).total_cmp(&b.x.unwrap_or(0.0)))
     });
-    fn first(list: &[PageParagraph]) -> Option<&str> {
+    fn first(list: &[PageParagraph]) -> Option<String> {
         list.iter().find_map(|paragraph| match &paragraph.content {
             ParagraphContent::Text(text) => {
                 Some(crate::edit::automatic_title(text.text.text())).filter(|t| !t.is_empty())
@@ -564,8 +588,7 @@ fn automatic(page: &mut Page) {
             PageObject::Outline(outline) => first(&outline.paragraphs),
             _ => None,
         })
-        .unwrap_or_default()
-        .to_owned();
+        .unwrap_or_default();
     page.title = title;
 }
 
@@ -650,7 +673,10 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             let object = paragraph.text_mut().unwrap();
             let previous = object.text.spans()[0].format.clone();
             let math = Paragraph::from_runs(math.spans().iter().scan(0, |start, span| {
-                let run = (math.text()[*start..span.end].to_owned(), span.format.inherit(&inherited));
+                let run = (
+                    math.text()[*start..span.end].to_owned(),
+                    span.format.inherit(&inherited),
+                );
                 *start = span.end;
                 Some(run)
             }));
@@ -671,7 +697,8 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             right,
             lists,
         } => {
-            let (path, index) = text_holder(page, *text).ok_or_else(|| invalid("Text is not on the page"))?;
+            let (path, index) =
+                text_holder(page, *text).ok_or_else(|| invalid("Text is not on the page"))?;
             let definitions: Vec<_> = {
                 let list = list_at(page, &path);
                 list[index].lists.clone()
@@ -722,7 +749,8 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             retitle(page, None);
         }
         PageOp::Join { left, right } => {
-            let (path, index) = text_holder(page, *right).ok_or_else(|| invalid("Text is not on the page"))?;
+            let (path, index) =
+                text_holder(page, *right).ok_or_else(|| invalid("Text is not on the page"))?;
             let (left_path, left_index) =
                 text_holder(page, *left).ok_or_else(|| invalid("Text is not on the page"))?;
             let list = list_at(page, &path);
@@ -778,7 +806,10 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                             }
                         }
                     }
-                    let run = (right_text.text.text()[previous..span.end].to_owned(), format);
+                    let run = (
+                        right_text.text.text()[previous..span.end].to_owned(),
+                        format,
+                    );
                     previous = span.end;
                     run
                 }));
@@ -849,7 +880,8 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                 retitle(page, None);
                 return Ok(());
             };
-            let (path, index) = find(page, *object).ok_or_else(|| invalid("The paragraph is not on the page"))?;
+            let (path, index) =
+                find(page, *object).ok_or_else(|| invalid("The paragraph is not on the page"))?;
             let list = list_at(page, &path);
             let mut moved: Vec<PageParagraph> = list.drain(subtree(list, index)).collect();
             let into_cell = table_cells(page).contains(parent);
@@ -884,7 +916,8 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             retitle(page, None);
         }
         PageOp::Level { paragraph, level } => {
-            let (path, index) = find(page, *paragraph).ok_or_else(|| invalid("The paragraph is not on the page"))?;
+            let (path, index) = find(page, *paragraph)
+                .ok_or_else(|| invalid("The paragraph is not on the page"))?;
             relevel(list_at(page, &path), index, *level);
         }
         PageOp::Outline { object, edit } => match edit {
@@ -967,10 +1000,31 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                                 }
                             )*};
                         }
-                        restyle!(bold, italic, underline, strike, superscript, subscript, hidden,
-                            hyperlink, hyperlink_label, math, embedded_object, font, font_size,
-                            color, highlight, language, alignment, rtl, space_before, space_after,
-                            line_spacing, list_spacing, math_object);
+                        restyle!(
+                            bold,
+                            italic,
+                            underline,
+                            strike,
+                            superscript,
+                            subscript,
+                            hidden,
+                            hyperlink,
+                            hyperlink_label,
+                            math,
+                            embedded_object,
+                            font,
+                            font_size,
+                            color,
+                            highlight,
+                            language,
+                            alignment,
+                            rtl,
+                            space_before,
+                            space_after,
+                            line_spacing,
+                            list_spacing,
+                            math_object
+                        );
                         let run = (text.text.text()[previous..span.end].to_owned(), format);
                         previous = span.end;
                         run
@@ -1052,7 +1106,9 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                 y: layout.y.map(stored),
                 max_width: layout.max_width.map(stored),
                 max_height: layout.max_height.map(stored),
-                width_set_by_user: layout.max_width.map(|_| layout.width_set_by_user == Some(true)),
+                width_set_by_user: layout
+                    .max_width
+                    .map(|_| layout.width_set_by_user == Some(true)),
                 reserved_width: image.layout.reserved_width,
             };
             image.alt = alt.clone();
@@ -1071,7 +1127,8 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                         .map(|index| (path, index))
                 })
                 .ok_or_else(|| invalid("The attachment is not on the page"))?;
-            let ParagraphContent::Attachment(stored_attachment) = &mut list_at(page, &path)[index].content
+            let ParagraphContent::Attachment(stored_attachment) =
+                &mut list_at(page, &path)[index].content
             else {
                 unreachable!()
             };
@@ -1170,8 +1227,9 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
 
 /// Removes outlines a tree edit left without paragraphs, as the tree writer does.
 fn drop_emptied(page: &mut Page) {
-    page.objects
-        .retain(|object| !matches!(object, PageObject::Outline(outline) if outline.paragraphs.is_empty()));
+    page.objects.retain(
+        |object| !matches!(object, PageObject::Outline(outline) if outline.paragraphs.is_empty()),
+    );
 }
 
 /// The identity a read-only definition is stored under: an equal one the page holds, as
@@ -1283,8 +1341,11 @@ fn text_of(page: &Page, text: ExGuid) -> String {
     lists(page)
         .into_iter()
         .find_map(|(_, _, list)| {
-            list.iter()
-                .find_map(|p| p.text().filter(|t| t.id == text).map(|t| t.text.text().to_owned()))
+            list.iter().find_map(|p| {
+                p.text()
+                    .filter(|t| t.id == text)
+                    .map(|t| t.text.text().to_owned())
+            })
         })
         .unwrap_or_default()
 }

@@ -75,9 +75,7 @@ fn a_text_edit_stores_the_table_entries_it_names() {
             sparse |= (entries as u32) < span;
         }
         assert_eq!(
-            ops::saved(&written, space, &page)
-                .unwrap()
-                .as_slice(),
+            ops::saved(&written, space, &page).unwrap().as_slice(),
             written
         );
         bytes = written;

@@ -209,7 +209,10 @@ impl<'a> RevisionIndex<'a> {
                         targets.insert((target, rid));
                     }
                     for context in references.contexts {
-                        if !space.labels.contains_key(&(context, 1)) {
+                        // OneNote's copy of a page version names a history it never wrote.
+                        if !space.labels.contains_key(&(context, 1))
+                            && context != crate::section::HISTORY
+                        {
                             return Err(Error {
                                 offset: 0,
                                 message: "Context reference has no current revision",

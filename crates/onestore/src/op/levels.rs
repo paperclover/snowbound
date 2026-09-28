@@ -37,7 +37,11 @@ pub(crate) type Runs = Vec<(u32, Vec<ExGuid>)>;
 
 /// The child level of a container whose children lie `depths` deeper than it, and its
 /// children in runs.
-pub(crate) fn runs(children: &[ExGuid], depths: &[u32], is_cell: bool) -> Result<(u32, Runs), Error> {
+pub(crate) fn runs(
+    children: &[ExGuid],
+    depths: &[u32],
+    is_cell: bool,
+) -> Result<(u32, Runs), Error> {
     let level = *depths
         .iter()
         .min()

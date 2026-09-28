@@ -184,7 +184,11 @@ fn layout_values(stored: &Layout, layout: &Layout) -> Result<(Values, Vec<u32>),
     Ok((values, removed))
 }
 
-fn icon_size(values: &mut Values, size: Option<[f32; 2]>, message: &'static str) -> Result<(), Error> {
+fn icon_size(
+    values: &mut Values,
+    size: Option<[f32; 2]>,
+    message: &'static str,
+) -> Result<(), Error> {
     if let Some([width, height]) = size {
         if !(width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0) {
             return Err(invalid(message));
@@ -332,7 +336,11 @@ pub(crate) fn attachment_changes(
         .unwrap_or("");
     let modified = crate::create::current_timestamps()?.0.to_le_bytes();
     let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
-    icon_size(&mut values, attachment.size, "Attachment icon size must be positive")?;
+    icon_size(
+        &mut values,
+        attachment.size,
+        "Attachment icon size must be positive",
+    )?;
     values.push((0x14001c3b, 0x409_u32.to_le_bytes().to_vec()));
     values.push((0x10001cfe, 0x409_u16.to_le_bytes().to_vec()));
     values.push((0x1c001dcf, vec![0; 32]));
@@ -412,7 +420,11 @@ pub(crate) fn attachment_edit_changes(
     }
     if attachment.size != stored.size {
         match attachment.size {
-            Some(_) => icon_size(&mut values, attachment.size, "Attachment icon size must be positive")?,
+            Some(_) => icon_size(
+                &mut values,
+                attachment.size,
+                "Attachment icon size must be positive",
+            )?,
             None => removed.extend([0x140034cd, 0x140034ce]),
         }
     }
@@ -612,12 +624,7 @@ pub(crate) fn strokes_changes(
     kept: &[ExGuid],
     added: &[(ExGuid, &InkStroke)],
 ) -> Result<Changes, Error> {
-    let data = match active
-        .view
-        .nodes
-        .get(&container)
-        .map(|node| &node.kind)
-    {
+    let data = match active.view.nodes.get(&container).map(|node| &node.kind) {
         Some(crate::document::Kind::Ink {
             data: Some(data), ..
         }) => *data,

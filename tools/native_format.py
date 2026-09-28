@@ -100,7 +100,8 @@ def compare_formats(space, nodes, native):
             # Hidden runs and equation runs (exported as MathML) have no visible native text.
             if not style.get('hidden') and not style.get('math'):
                 actual.extend((char, style) for char in text)
-        if actual and actual[-1][0] == '\r':
+        # A trailing CR ends the stored text; one between equations is a line break.
+        if actual and actual[-1][0] == '\r' and kind['text'].endswith('\r'):
             actual.pop()
         actual = [(projected, style) for char, style in actual for projected in project_text(char)]
         if kind['text'] == '\u00a0' and not expected:

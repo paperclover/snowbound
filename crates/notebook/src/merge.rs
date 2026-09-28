@@ -156,7 +156,9 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
         PageOp::Color(_) => Vec::new(),
         PageOp::Join { left, right } => vec![*left, *right],
         PageOp::Insert { container, .. } => vec![*container],
-        PageOp::Move { object, .. } | PageOp::Delete { object } | PageOp::Outline { object, .. } => {
+        PageOp::Move { object, .. }
+        | PageOp::Delete { object }
+        | PageOp::Outline { object, .. } => {
             vec![*object]
         }
         PageOp::Level { paragraph, .. }
@@ -165,7 +167,9 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
         | PageOp::List { paragraph, .. } => vec![*paragraph],
         PageOp::Tags { target, .. } => vec![*target],
         PageOp::Add { object, .. } => vec![object.id()],
-        PageOp::Picture { picture: object, .. }
+        PageOp::Picture {
+            picture: object, ..
+        }
         | PageOp::Attachment {
             attachment: object, ..
         }
@@ -196,7 +200,8 @@ pub(crate) fn conflict_page(
     at: u64,
 ) -> Result<Edit> {
     let mut page = page.clone();
-    page.objects.retain(|object| !matches!(object, PageObject::Unsupported(_)));
+    page.objects
+        .retain(|object| !matches!(object, PageObject::Unsupported(_)));
     let listed = order(new)?;
     let ops = if listed.iter().any(|(listed, _)| *listed == space) {
         let index = Index::of(&page);
@@ -224,9 +229,7 @@ pub(crate) fn conflict_page(
             .map_or(&[][..], |at| &queued[at + 1..])
             .iter()
             .map(|(next, _)| *next)
-            .find(|next| {
-                !moved.contains(next) && listed.iter().any(|(listed, _)| listed == next)
-            });
+            .find(|next| !moved.contains(next) && listed.iter().any(|(listed, _)| listed == next));
         let creation = PageCreation::new(before, Some(&page.title), author)?;
         let mut ops = vec![Op::Section(SectionOp::Import {
             creation: creation.clone(),
@@ -260,7 +263,8 @@ fn moved(old: &mut Section<'_>, new: &mut Section<'_>) -> Result<BTreeSet<ExGuid
         .iter()
         .filter_map(|&(space, level)| {
             let (at, before) = base.get(&space)?;
-            (*before == level && series.0.get(&space) == series.1.get(&space)).then_some((space, *at))
+            (*before == level && series.0.get(&space) == series.1.get(&space))
+                .then_some((space, *at))
         })
         .collect();
     // A longest subsequence of `kept` in base order (patience sorting).
@@ -313,7 +317,10 @@ fn advance(local: &mut Order, op: &SectionOp) {
             }
         }
         SectionOp::Delete(spaces) => local.retain(|(space, _)| !spaces.contains(space)),
-        SectionOp::Conflict { .. } | SectionOp::Color(_) => {}
+        SectionOp::Conflict { .. }
+        | SectionOp::Color(_)
+        | SectionOp::RestoreVersion { .. }
+        | SectionOp::DeleteVersions { .. } => {}
     }
 }
 
@@ -411,10 +418,18 @@ impl Replay {
     /// from `before` on, in the queue's order, that the remote lists where the base had it,
     /// or last, as OneNote 2010 places a page series only one side changed.
     fn anchor(&self, listed: &Order, page: ExGuid, before: Option<ExGuid>) -> Option<ExGuid> {
-        let from = self.local.iter().position(|(space, _)| Some(*space) == before)?;
-        self.local[from..].iter().map(|(space, _)| *space).find(|space| {
-            *space != page && !self.moved.contains(space) && listed.iter().any(|(listed, _)| listed == space)
-        })
+        let from = self
+            .local
+            .iter()
+            .position(|(space, _)| Some(*space) == before)?;
+        self.local[from..]
+            .iter()
+            .map(|(space, _)| *space)
+            .find(|space| {
+                *space != page
+                    && !self.moved.contains(space)
+                    && listed.iter().any(|(listed, _)| listed == space)
+            })
     }
 
     /// A section op as it replays on the remote section, or `None`: a page placed by
@@ -467,6 +482,23 @@ impl Replay {
                 }
                 (!kept.is_empty()).then_some(SectionOp::Pages(kept))
             }
+            // A version the remote deleted is gone; restoring one keeps the remote's page as
+            // the newest version.
+            SectionOp::RestoreVersion { page, version, .. } => (self.listed(*page)
+                && listed_versions(new, *page)?.contains(version))
+            .then(|| op.clone()),
+            SectionOp::DeleteVersions { page, versions } => {
+                let listed = listed_versions(new, *page)?;
+                let versions: Vec<ExGuid> = versions
+                    .iter()
+                    .filter(|version| listed.contains(version))
+                    .copied()
+                    .collect();
+                (!versions.is_empty()).then_some(SectionOp::DeleteVersions {
+                    page: *page,
+                    versions,
+                })
+            }
             SectionOp::Delete(deleted) => {
                 let deleted: Vec<ExGuid> = deleted
                     .iter()
@@ -480,6 +512,16 @@ impl Replay {
             }
         })
     }
+}
+
+/// The versions `section` lists for `page`.
+fn listed_versions(section: &mut Section<'_>, page: ExGuid) -> Result<Vec<ExGuid>> {
+    Ok(section
+        .versions()?
+        .into_iter()
+        .filter(|(listed, _)| *listed == page)
+        .flat_map(|(_, versions)| versions.into_iter().map(|version| version.context))
+        .collect())
 }
 
 /// One page as the base stored it and as the remote does, with the remote's text changes

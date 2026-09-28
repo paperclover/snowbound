@@ -44,7 +44,13 @@ fn split(source: &[u8], space: ExGuid, text: ExGuid, at: u32) -> (Op, ExGuid, Ex
 
 /// `source` after joining the paragraph of text `right` to the one of text `left`.
 fn join(source: &[u8], space: ExGuid, left: ExGuid, right: ExGuid) -> Result<Vec<u8>, OpError> {
-    ops::edited(source, vec![Op::Page { space, op: PageOp::Join { left, right } }])
+    ops::edited(
+        source,
+        vec![Op::Page {
+            space,
+            op: PageOp::Join { left, right },
+        }],
+    )
 }
 
 const SOURCE: &[u8] =
@@ -445,10 +451,7 @@ fn splits_partition_native_paragraphs_at_every_scalar_boundary() {
             assert_eq!(after.nodes[parent].children, children);
             assert_eq!(after.nodes[&paragraph].content, [text]);
             assert!(after.nodes[&paragraph].children.is_empty());
-            assert_eq!(
-                after.nodes[&new_paragraph].content,
-                [new_text]
-            );
+            assert_eq!(after.nodes[&new_paragraph].content, [new_text]);
             assert_eq!(
                 after.nodes[&new_paragraph].children,
                 before.nodes[&paragraph].children
@@ -516,7 +519,17 @@ fn invalid_split_identities_and_title_targets_are_rejected() {
         .0;
     let (op, ..) = split(SOURCE, sid, text, 1);
     assert!(ops::transaction(SOURCE, "a\0b", vec![op.clone()]).is_err());
-    let Op::Page { op: PageOp::Split { paragraph, right, lists, .. }, .. } = op else {
+    let Op::Page {
+        op:
+            PageOp::Split {
+                paragraph,
+                right,
+                lists,
+                ..
+            },
+        ..
+    } = op
+    else {
         unreachable!()
     };
     for (text, at, paragraph) in [
@@ -525,7 +538,13 @@ fn invalid_split_identities_and_title_targets_are_rejected() {
         (text, 1, ExGuid::default()),
         (text, 1, text),
     ] {
-        let op = PageOp::Split { text, at, paragraph, right, lists: lists.clone() };
+        let op = PageOp::Split {
+            text,
+            at,
+            paragraph,
+            right,
+            lists: lists.clone(),
+        };
         assert!(ops::page_edited(SOURCE, sid, vec![op]).is_err());
     }
     let mut titles = 0;
@@ -638,7 +657,9 @@ fn interrupted_splits_publish_a_complete_graph_or_retain_the_original() {
     let checkpoint = checkpoint::pending(source, sid, text);
     for source in [source, &checkpoint] {
         let (op, ..) = split(source, sid, text, 1);
-        let edit = ops::transaction(source, "Author", vec![op]).unwrap().unwrap();
+        let edit = ops::transaction(source, "Author", vec![op])
+            .unwrap()
+            .unwrap();
         let mut written = source.to_vec();
         edit.apply(&mut written).unwrap();
         let before = current::current(source);
@@ -698,7 +719,10 @@ fn export_native_paragraph_joins() {
                 })
                 .unwrap()
                 .0;
-            let op = Op::Page { space: sid, op: PageOp::Join { left, right } };
+            let op = Op::Page {
+                space: sid,
+                op: PageOp::Join { left, right },
+            };
             let transaction = ops::transaction(&source, "Rust join author", vec![op.clone()])
                 .unwrap()
                 .unwrap();
@@ -767,8 +791,16 @@ fn interrupted_joins_preserve_complete_graphs_and_empty_text_adoption() {
     .unwrap();
     let checkpoint = checkpoint::pending(original, sid, left);
     for source in [original, &empty, &checkpoint] {
-        let op = Op::Page { space: sid, op: PageOp::Join { left, right: right_text } };
-        let edit = ops::transaction(source, "Join author", vec![op]).unwrap().unwrap();
+        let op = Op::Page {
+            space: sid,
+            op: PageOp::Join {
+                left,
+                right: right_text,
+            },
+        };
+        let edit = ops::transaction(source, "Join author", vec![op])
+            .unwrap()
+            .unwrap();
         let mut written = source.to_vec();
         edit.apply(&mut written).unwrap();
         let before = current::current(source);
@@ -828,7 +860,13 @@ fn joins_reject_invalid_identities_wrong_order_and_unrelated_pages() {
     ] {
         assert!(join(source, *sid, a, b).is_err());
     }
-    let op = Op::Page { space: *sid, op: PageOp::Join { left: *left, right: *right } };
+    let op = Op::Page {
+        space: *sid,
+        op: PageOp::Join {
+            left: *left,
+            right: *right,
+        },
+    };
     assert!(ops::transaction(source, "a\0b", vec![op]).is_err());
     let view = &space.revisions[&space.contexts[&ExGuid::default()]];
     let paragraph = *view

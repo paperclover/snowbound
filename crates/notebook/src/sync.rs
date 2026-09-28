@@ -341,10 +341,19 @@ impl Replica {
         if let Some(sealed) = sealed {
             local.replay(sealed)?;
         }
-        let remote = onestore::Section::open(&remote, image.to_vec())?;
+        let mut remote = onestore::Section::open(&remote, image.to_vec())?;
+        // A page's versions change without its page changing.
+        let versions = |section: &mut onestore::Section<'_>| {
+            section.versions().map(|versions| {
+                versions
+                    .into_iter()
+                    .filter(|(page, _)| revisions.contains_key(page))
+                    .collect::<Vec<_>>()
+            })
+        };
         Ok(revisions.keys().all(
             |space| matches!((local.page(*space), remote.page(*space)), (Ok(a), Ok(b)) if a == b),
-        ))
+        ) && versions(&mut local)? == versions(&mut remote)?)
     }
 
     /// Asks the section thread to replay the queue on `image`, returning the pages the

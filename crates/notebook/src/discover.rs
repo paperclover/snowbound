@@ -41,6 +41,16 @@ pub struct Folder {
     pub toc: Option<Toc>,
     pub sections: Vec<Section>,
     pub groups: Vec<Folder>,
+    /// Child section files and groups that could not be read.
+    pub unavailable: Vec<Unavailable>,
+}
+
+/// A section file or group folder denied or gone while listing; each discovery tries it again.
+#[derive(Debug, Serialize)]
+pub struct Unavailable {
+    pub path: String,
+    pub group: bool,
+    pub error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,6 +206,7 @@ fn scan(
         toc: None,
         sections: Vec::new(),
         groups: Vec::new(),
+        unavailable: Vec::new(),
     };
     for entry in &listing {
         let child = join(path, &entry.name);
@@ -203,14 +214,18 @@ fn scan(
             if entry.name.to_ascii_lowercase().ends_with("_onefiles") {
                 continue;
             }
-            result.groups.push(scan(
-                source,
-                &child,
-                limits,
-                depth + 1,
-                remaining,
-                identities,
-            )?);
+            // A group whose own listing or TOC cannot be read is unavailable, not fatal.
+            match scan(source, &child, limits, depth + 1, remaining, identities) {
+                Ok(group) => result.groups.push(group),
+                Err(error @ Error::Io { .. }) if unavailable(&error) => {
+                    result.unavailable.push(Unavailable {
+                        path: child,
+                        group: true,
+                        error: error.to_string(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
             continue;
         }
         let lower = entry.name.to_ascii_lowercase();
@@ -226,12 +241,24 @@ fn scan(
         {
             return Err(Error::Entry { path: child });
         }
-        let bytes = source
-            .read(&child, limits.bytes_per_file)
-            .map_err(|error| Error::Io {
-                path: child.clone(),
-                error,
-            })?;
+        let bytes = match source.read(&child, limits.bytes_per_file) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let error = Error::Io {
+                    path: child.clone(),
+                    error,
+                };
+                if expected == FileType::Section && unavailable(&error) {
+                    result.unavailable.push(Unavailable {
+                        path: child,
+                        group: false,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         if bytes.len() > limits.bytes_per_file {
             return Err(Error::Limit { path: child });
         }
@@ -402,6 +429,14 @@ fn scan(
         return Err(Error::Changed { path: path.into() });
     }
     Ok(result)
+}
+
+/// Access denied or a file gone mid-listing; a lost connection stays fatal.
+fn unavailable(error: &Error) -> bool {
+    matches!(error, Error::Io { error, .. } if matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
+    ))
 }
 
 fn component(name: &str) -> bool {

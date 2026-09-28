@@ -360,7 +360,11 @@ impl Transaction {
     /// last, covers bytes 0..1024.
     pub fn writes(&self) -> impl Iterator<Item = (u64, &[u8])> {
         std::iter::once((self.base.length, self.append.as_slice()))
-            .chain(self.patches.iter().map(|(offset, bytes)| (*offset, bytes.as_slice())))
+            .chain(
+                self.patches
+                    .iter()
+                    .map(|(offset, bytes)| (*offset, bytes.as_slice())),
+            )
             .chain(std::iter::once((0, self.header.as_slice())))
     }
 

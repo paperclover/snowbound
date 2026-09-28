@@ -6,7 +6,6 @@ use onestore::{
     page::{Ink, InkStroke, Page, PageObject, text::new_id},
 };
 
-
 /// Two drawings made with the mouse in OneNote 2010 (`tools/native/ink.ahk`): a diamond and a
 /// diagonal line, whose native read reports their positions and sizes.
 const NATIVE: &[u8] =

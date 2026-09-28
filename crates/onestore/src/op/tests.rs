@@ -15,21 +15,66 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 const SOURCES: &[(&str, &[u8])] = &[
-    ("outline-edit", include_bytes!("../../../../corpus/outline-edit/before/notebook/synthetic.one")),
-    ("paragraph-edit", include_bytes!("../../../../corpus/paragraph-edit/before/notebook/synthetic.one")),
-    ("outline-tree", include_bytes!("../../../../corpus/outline-edit/tree/before/notebook/synthetic.one")),
-    ("features", include_bytes!("../../../../corpus/m6/native-features-01/notebook/Features.one")),
-    ("tables", include_bytes!("../../../../corpus/table-edit/nested/cold/notebook/synthetic.one")),
-    ("table-controls", include_bytes!("../../../../corpus/m6/native-table-controls-01/notebook/synthetic.one")),
-    ("lists", include_bytes!("../../../../corpus/list-edit/cold/notebook/lists.one")),
-    ("tags", include_bytes!("../../../../corpus/tag-edit/cold/notebook/tags.one")),
-    ("pictures", include_bytes!("../../../../corpus/picture-edit/native-page-level/notebook/pictures.one")),
-    ("attachments", include_bytes!("../../../../corpus/attachment-edit/plain/cold/notebook/files.one")),
-    ("ink", include_bytes!("../../../../corpus/ink-edit/drawing/cold/notebook/ink.one")),
-    ("math", include_bytes!("../../../../corpus/math-edit/native-editor/notebook/links.one")),
-    ("links", include_bytes!("../../../../corpus/link-edit/native-links/notebook/links.one")),
-    ("paragraph-format", include_bytes!("../../../../corpus/paragraph-format/cold/notebook/synthetic.one")),
-    ("enter-probe", include_bytes!("../../../../corpus/structural-probe/probe.one")),
+    (
+        "outline-edit",
+        include_bytes!("../../../../corpus/outline-edit/before/notebook/synthetic.one"),
+    ),
+    (
+        "paragraph-edit",
+        include_bytes!("../../../../corpus/paragraph-edit/before/notebook/synthetic.one"),
+    ),
+    (
+        "outline-tree",
+        include_bytes!("../../../../corpus/outline-edit/tree/before/notebook/synthetic.one"),
+    ),
+    (
+        "features",
+        include_bytes!("../../../../corpus/m6/native-features-01/notebook/Features.one"),
+    ),
+    (
+        "tables",
+        include_bytes!("../../../../corpus/table-edit/nested/cold/notebook/synthetic.one"),
+    ),
+    (
+        "table-controls",
+        include_bytes!("../../../../corpus/m6/native-table-controls-01/notebook/synthetic.one"),
+    ),
+    (
+        "lists",
+        include_bytes!("../../../../corpus/list-edit/cold/notebook/lists.one"),
+    ),
+    (
+        "tags",
+        include_bytes!("../../../../corpus/tag-edit/cold/notebook/tags.one"),
+    ),
+    (
+        "pictures",
+        include_bytes!("../../../../corpus/picture-edit/native-page-level/notebook/pictures.one"),
+    ),
+    (
+        "attachments",
+        include_bytes!("../../../../corpus/attachment-edit/plain/cold/notebook/files.one"),
+    ),
+    (
+        "ink",
+        include_bytes!("../../../../corpus/ink-edit/drawing/cold/notebook/ink.one"),
+    ),
+    (
+        "math",
+        include_bytes!("../../../../corpus/math-edit/native-editor/notebook/links.one"),
+    ),
+    (
+        "links",
+        include_bytes!("../../../../corpus/link-edit/native-links/notebook/links.one"),
+    ),
+    (
+        "paragraph-format",
+        include_bytes!("../../../../corpus/paragraph-format/cold/notebook/synthetic.one"),
+    ),
+    (
+        "enter-probe",
+        include_bytes!("../../../../corpus/structural-probe/probe.one"),
+    ),
 ];
 
 /// FILETIME both writers take as the edit's time.
@@ -55,7 +100,15 @@ impl Rng {
     }
 
     fn text(&mut self) -> String {
-        let words = ["", "a", "Two words", "東京 🦀", "é\u{301}", "longer text here", " "];
+        let words = [
+            "",
+            "a",
+            "Two words",
+            "東京 🦀",
+            "é\u{301}",
+            "longer text here",
+            " ",
+        ];
         words[self.next() as usize % words.len()].to_owned()
     }
 }
@@ -92,7 +145,10 @@ pub(super) fn normalize(page: &Page) -> Page {
     let mut page = page.clone();
     let mut lists = BTreeMap::new();
     let mut canonical = BTreeMap::new();
-    let mut paths: Vec<_> = model::lists(&page).into_iter().map(|(path, _, _)| path).collect();
+    let mut paths: Vec<_> = model::lists(&page)
+        .into_iter()
+        .map(|(path, _, _)| path)
+        .collect();
     paths.sort_by_key(|path| format!("{path:?}"));
     let definitions = page.definitions.clone();
     for path in &paths {
@@ -102,7 +158,9 @@ pub(super) fn normalize(page: &Page) -> Page {
                     guid: [0xee; 16],
                     n: 1 + canonical.len() as u32,
                 };
-                let content = definitions.get(list).map_or(format!("{list:?}"), |d| format!("{d:?}"));
+                let content = definitions
+                    .get(list)
+                    .map_or(format!("{list:?}"), |d| format!("{d:?}"));
                 let id = *canonical.entry(content).or_insert(next);
                 *list = *lists.entry(*list).or_insert(id);
             }
@@ -185,26 +243,33 @@ fn as_written(after: &Page, before: &Page, stored: &Page) -> Page {
     fn adopt(after: &mut Value, stored: &Value, old: &BTreeSet<String>, new: bool) {
         match (after, stored) {
             (Value::Object(after), Value::Object(stored)) => {
-                let new = new
-                    || matches!(after.get("id"), Some(Value::String(id)) if !old.contains(id));
+                let new =
+                    new || matches!(after.get("id"), Some(Value::String(id)) if !old.contains(id));
                 for (key, value) in after.iter_mut() {
                     let Some(written) = stored.get(key) else {
                         continue;
                     };
                     // Ink coordinates are stored at a coarser resolution.
                     let near = |a: &Value, b: &Value| {
-                        a.as_f64().zip(b.as_f64()).is_some_and(|(a, b)| (a - b).abs() < 0.05)
+                        a.as_f64()
+                            .zip(b.as_f64())
+                            .is_some_and(|(a, b)| (a - b).abs() < 0.05)
                     };
                     let close_points = key == "points"
-                        && value.as_array().zip(written.as_array()).is_some_and(|(a, b)| {
-                            a.len() == b.len()
-                                && a.iter().zip(b).all(|(a, b)| {
-                                    a.as_array().zip(b.as_array()).is_some_and(|(a, b)| {
-                                        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| near(a, b))
+                        && value
+                            .as_array()
+                            .zip(written.as_array())
+                            .is_some_and(|(a, b)| {
+                                a.len() == b.len()
+                                    && a.iter().zip(b).all(|(a, b)| {
+                                        a.as_array().zip(b.as_array()).is_some_and(|(a, b)| {
+                                            a.len() == b.len()
+                                                && a.iter().zip(b).all(|(a, b)| near(a, b))
+                                        })
                                     })
-                                })
-                        });
-                    let unset = new && (value.is_null() || value.as_array().is_some_and(Vec::is_empty));
+                            });
+                    let unset =
+                        new && (value.is_null() || value.as_array().is_some_and(Vec::is_empty));
                     if close_points || unset {
                         *value = written.clone();
                     } else {
@@ -223,7 +288,12 @@ fn as_written(after: &Page, before: &Page, stored: &Page) -> Page {
     let mut old = BTreeSet::new();
     ids(&serde_json::to_value(before).unwrap(), &mut old);
     let mut value = serde_json::to_value(after).unwrap();
-    adopt(&mut value, &serde_json::to_value(stored).unwrap(), &old, false);
+    adopt(
+        &mut value,
+        &serde_json::to_value(stored).unwrap(),
+        &old,
+        false,
+    );
     let mut page: Page = serde_json::from_value(value).unwrap();
     page.title = stored.title.clone();
     unused_dropped(&mut page);
@@ -323,11 +393,11 @@ pub(super) const FAMILIES: [Family; 33] = [
 ];
 
 const PNG: &[u8] = &[
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-    0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-    0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8,
-    0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00,
-    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
+    0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
 fn id() -> ExGuid {
@@ -370,7 +440,9 @@ fn editable(page: &Page) -> Vec<model::Path> {
         .objects
         .iter()
         .filter_map(|o| match o {
-            PageObject::Title(title) => Some(title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()),
+            PageObject::Title(title) => {
+                Some(title.outlines.iter().map(|o| o.id).collect::<Vec<_>>())
+            }
             _ => None,
         })
         .flatten()
@@ -493,7 +565,13 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                                 0 => format.bold = Some(!format.bold.unwrap_or(false)),
                                 1 => format.italic = Some(!format.italic.unwrap_or(false)),
                                 2 => format.underline = Some(!format.underline.unwrap_or(false)),
-                                3 => format.font_size = Some(if format.font_size == Some(14.0) { 11.0 } else { 14.0 }),
+                                3 => {
+                                    format.font_size = Some(if format.font_size == Some(14.0) {
+                                        11.0
+                                    } else {
+                                        14.0
+                                    })
+                                }
                                 4 => format.color = Some(0x00ff),
                                 _ => format.font = Some("Consolas".into()),
                             }
@@ -510,7 +588,10 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 }
                 _ => {
                     if range.is_empty()
-                        || text.spans().iter().any(|s| s.format.hyperlink == Some(true))
+                        || text
+                            .spans()
+                            .iter()
+                            .any(|s| s.format.hyperlink == Some(true))
                     {
                         return false;
                     }
@@ -579,7 +660,11 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 .filter(|i| list.get(*i).is_none_or(|p| p.parent.is_none()))
                 .collect();
             let at = boundaries[rng.pick(boundaries.len()).unwrap()];
-            let count = if family == Family::Paste { 2 + rng.next() as usize % 3 } else { 1 };
+            let count = if family == Family::Paste {
+                2 + rng.next() as usize % 3
+            } else {
+                1
+            };
             let mut inserted = Vec::new();
             for i in 0..count {
                 let mut paragraph = text_paragraph(&rng.text(), template.clone());
@@ -612,7 +697,9 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 return false;
             };
             let list = model::list_at(page, &path);
-            let top: Vec<usize> = (0..list.len()).filter(|i| list[*i].parent.is_none()).collect();
+            let top: Vec<usize> = (0..list.len())
+                .filter(|i| list[*i].parent.is_none())
+                .collect();
             match family {
                 Family::Delete => {
                     if top.len() < 2 {
@@ -645,7 +732,8 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
             }
         }
         Family::Position | Family::Width => {
-            let mut outlines: Vec<&mut Outline> = outlines(page).into_iter().filter(|o| !o.title).collect();
+            let mut outlines: Vec<&mut Outline> =
+                outlines(page).into_iter().filter(|o| !o.title).collect();
             let Some(at) = rng.pick(outlines.len()) else {
                 return false;
             };
@@ -784,7 +872,11 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 let paragraph = &list[index];
                 let text = &paragraph.text().unwrap().text;
                 let end = text.utf16_offset(text.text().len()).unwrap();
-                if text.spans().iter().any(|s| s.format.hyperlink == Some(true)) {
+                if text
+                    .spans()
+                    .iter()
+                    .any(|s| s.format.hyperlink == Some(true))
+                {
                     return false;
                 }
                 let offsets: Vec<u32> = text
@@ -822,14 +914,18 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 let upper = &list[index];
                 if lower.parent != upper.parent
                     || lower.level != upper.level
-                    || list.iter().any(|p| p.parent == Some(upper.id) || p.parent == Some(lower.id))
+                    || list
+                        .iter()
+                        .any(|p| p.parent == Some(upper.id) || p.parent == Some(lower.id))
                 {
                     return false;
                 }
                 let Some(lower_text) = lower.text().cloned() else {
                     return false;
                 };
-                if lower_text.text.text().is_empty() || crate::page::Math::is_equation(&lower_text.text) {
+                if lower_text.text.text().is_empty()
+                    || crate::page::Math::is_equation(&lower_text.text)
+                {
                     return false;
                 }
                 let upper = list[index].text_mut().unwrap();
@@ -859,7 +955,12 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
             if family == Family::Indent {
                 // Tab: the paragraph becomes the last child of its previous sibling.
                 let parent = list[index].parent;
-                let Some(sibling) = list[..index].iter().rev().find(|p| p.parent == parent).map(|p| (p.id, p.level)) else {
+                let Some(sibling) = list[..index]
+                    .iter()
+                    .rev()
+                    .find(|p| p.parent == parent)
+                    .map(|p| (p.id, p.level))
+                else {
                     return false;
                 };
                 list[index].parent = Some(sibling.0);
@@ -912,7 +1013,13 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 }
                 Family::TableColumn => {
                     let at = rng.pick(table.columns.len() + 1).unwrap();
-                    table.columns.insert(at, TableColumn { width: 72.0, locked: false });
+                    table.columns.insert(
+                        at,
+                        TableColumn {
+                            width: 72.0,
+                            locked: false,
+                        },
+                    );
                     for row in &mut table.rows {
                         row.cells.insert(at, new_cell(&indents));
                     }
@@ -940,7 +1047,11 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     let cells: Vec<_> = table.rows.iter_mut().flat_map(|r| &mut r.cells).collect();
                     let len = cells.len();
                     let cell = cells.into_iter().nth(rng.pick(len).unwrap()).unwrap();
-                    cell.shading = if cell.shading.is_some() { None } else { Some(0x00ccff) };
+                    cell.shading = if cell.shading.is_some() {
+                        None
+                    } else {
+                        Some(0x00ccff)
+                    };
                 }
             }
             true
@@ -948,7 +1059,9 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
         Family::NewTable | Family::ParagraphPicture | Family::Attachment | Family::Equation => {
             let equation = page.objects.iter().find_map(|o| match o {
                 PageObject::Outline(outline) => outline.paragraphs.iter().find_map(|p| {
-                    p.text().filter(|t| crate::page::Math::is_equation(&t.text)).map(|t| t.text.clone())
+                    p.text()
+                        .filter(|t| crate::page::Math::is_equation(&t.text))
+                        .map(|t| t.text.clone())
                 }),
                 _ => None,
             });
@@ -959,7 +1072,13 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
             paragraph.content = match family {
                 Family::NewTable => ParagraphContent::Table(Table {
                     id: id(),
-                    columns: vec![TableColumn { width: 72.0, locked: false }; 2],
+                    columns: vec![
+                        TableColumn {
+                            width: 72.0,
+                            locked: false
+                        };
+                        2
+                    ],
                     rows: (0..2)
                         .map(|_| TableRow {
                             id: id(),
@@ -1000,7 +1119,12 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 }
             };
             let boundaries: Vec<usize> = (0..=outline.paragraphs.len())
-                .filter(|i| outline.paragraphs.get(*i).is_none_or(|p| p.parent.is_none()))
+                .filter(|i| {
+                    outline
+                        .paragraphs
+                        .get(*i)
+                        .is_none_or(|p| p.parent.is_none())
+                })
                 .collect();
             let at = boundaries[rng.pick(boundaries.len()).unwrap()];
             outline.paragraphs.insert(at, paragraph);
@@ -1139,7 +1263,13 @@ pub(super) fn stored(source: &[u8], space: ExGuid, after: &Page, seed: u64) -> O
     };
     let edit = Edit {
         at: AT,
-        ops: ops.iter().map(|op| Op::Page { space, op: op.clone() }).collect(),
+        ops: ops
+            .iter()
+            .map(|op| Op::Page {
+                space,
+                op: op.clone(),
+            })
+            .collect(),
     };
     if seeded(seed, || section.apply("Author", &edit)).is_err() {
         if section.page(space).unwrap() != before {
@@ -1159,7 +1289,9 @@ pub(super) fn stored(source: &[u8], space: ExGuid, after: &Page, seed: u64) -> O
         ));
     }
     let Some(_) = seeded(seed, || section.seal().unwrap()) else {
-        return if live == before { Outcome::Unchanged } else {
+        return if live == before {
+            Outcome::Unchanged
+        } else {
             Outcome::Mismatch("the page changed and the seal stored nothing".into())
         };
     };
@@ -1171,12 +1303,18 @@ pub(super) fn stored(source: &[u8], space: ExGuid, after: &Page, seed: u64) -> O
     }
     let reread = read(&image, space);
     if reread != live {
-        return Outcome::Mismatch(format!("reads back otherwise: {}", first_difference(&live, &reread)));
+        return Outcome::Mismatch(format!(
+            "reads back otherwise: {}",
+            first_difference(&live, &reread)
+        ));
     }
     let written = as_written(after, &before, &reread);
     let (stored, wanted) = (normalize(&reread), normalize(&written));
     if stored != wanted {
-        return Outcome::Mismatch(format!("stores another page: {}", first_difference(&wanted, &stored)));
+        return Outcome::Mismatch(format!(
+            "stores another page: {}",
+            first_difference(&wanted, &stored)
+        ));
     }
     Outcome::Stored
 }
@@ -1187,7 +1325,16 @@ fn spans(text: &Paragraph) -> String {
         let f = &span.format;
         out.push_str(&format!(
             " [{} b{:?} h{:?} l{:?}/{:?} c{:?} a{:?} s{:?} lang{:?} f{:?}]",
-            span.end, f.bold, f.hidden, f.hyperlink, f.hyperlink_label, f.color, f.alignment, f.space_before, f.language, f.font
+            span.end,
+            f.bold,
+            f.hidden,
+            f.hyperlink,
+            f.hyperlink_label,
+            f.color,
+            f.alignment,
+            f.space_before,
+            f.language,
+            f.font
         ));
     }
     out
@@ -1243,7 +1390,8 @@ fn lowered_edits_store_the_edited_page() {
                     };
                     *tally.entry((family, key)).or_default() += 1;
                     if let Outcome::Mismatch(detail) = outcome {
-                        mismatches.push(format!("{name} page {p} {family:?} seed {seed}: {detail}"));
+                        mismatches
+                            .push(format!("{name} page {p} {family:?} seed {seed}: {detail}"));
                     }
                 }
             }
@@ -1279,7 +1427,25 @@ fn debug_case() {
         model::apply(&mut page, op).unwrap();
     }
     for object in &page.objects {
-        println!("{:?} {:?} {:?}", object.id(), object.layout(), match object { PageObject::Outline(o) => o.paragraphs.iter().filter_map(|p| p.text().map(|t| t.text.text().to_owned())).collect::<Vec<_>>(), PageObject::Title(t) => t.outlines.iter().flat_map(|o| &o.paragraphs).filter_map(|p| p.text().map(|t| format!("title {:?}", t.text.text()))).collect(), _ => vec![] });
+        println!(
+            "{:?} {:?} {:?}",
+            object.id(),
+            object.layout(),
+            match object {
+                PageObject::Outline(o) => o
+                    .paragraphs
+                    .iter()
+                    .filter_map(|p| p.text().map(|t| t.text.text().to_owned()))
+                    .collect::<Vec<_>>(),
+                PageObject::Title(t) => t
+                    .outlines
+                    .iter()
+                    .flat_map(|o| &o.paragraphs)
+                    .filter_map(|p| p.text().map(|t| format!("title {:?}", t.text.text())))
+                    .collect(),
+                _ => vec![],
+            }
+        );
     }
     println!("{:?} -> {:?}", before.title, page.title);
 }
@@ -1334,7 +1500,11 @@ fn random_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
             text,
             range,
             set: vec![TextAttribute::Bold(rng.coin())],
-            clear: if rng.next().is_multiple_of(3) { vec![TextProperty::Italic] } else { Vec::new() },
+            clear: if rng.next().is_multiple_of(3) {
+                vec![TextProperty::Italic]
+            } else {
+                Vec::new()
+            },
         },
         3 => PageOp::Split {
             text,
@@ -1357,7 +1527,9 @@ fn random_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
         6 => PageOp::Move {
             object: paragraph,
             parent: Some(container),
-            before: siblings.get(rng.pick(siblings.len().max(1)).unwrap_or(0)).copied(),
+            before: siblings
+                .get(rng.pick(siblings.len().max(1)).unwrap_or(0))
+                .copied(),
         },
         7 => PageOp::Level {
             paragraph,
@@ -1377,7 +1549,10 @@ fn random_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
             language: None,
         },
         10 => {
-            let right = texts.iter().skip_while(|(p, _, _)| *p != paragraph).nth(1)?;
+            let right = texts
+                .iter()
+                .skip_while(|(p, _, _)| *p != paragraph)
+                .nth(1)?;
             PageOp::Join {
                 left: text,
                 right: right.1,
@@ -1505,7 +1680,10 @@ fn random_object_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
             };
             let edit = match rng.next() % 7 {
                 0 => TableEdit::Rows {
-                    before: table.rows.get(rng.pick(table.rows.len() + 1)?).map(|r| r.id),
+                    before: table
+                        .rows
+                        .get(rng.pick(table.rows.len() + 1)?)
+                        .map(|r| r.id),
                     rows: vec![TableRow {
                         id: id(),
                         cells: table.columns.iter().map(|_| cell()).collect(),
@@ -1639,7 +1817,10 @@ fn random_ops_read_back_as_the_model_predicts() {
                 if ops.is_empty() {
                     continue;
                 }
-                let edit = Edit { at: AT + step as u64, ops };
+                let edit = Edit {
+                    at: AT + step as u64,
+                    ops,
+                };
                 // Text whose emptied final run keeps an insertion style the model cannot show.
                 let hidden: Vec<ExGuid> = section
                     .active(space)
@@ -1658,7 +1839,9 @@ fn random_ops_read_back_as_the_model_predicts() {
                         applied += 1;
                         let mut predicted = before.clone();
                         for op in &edit.ops {
-                            let Op::Page { op, .. } = op else { unreachable!() };
+                            let Op::Page { op, .. } = op else {
+                                unreachable!()
+                            };
                             model::apply(&mut predicted, op).unwrap();
                         }
                         let stored = section.page(space).unwrap();
@@ -1671,7 +1854,9 @@ fn random_ops_read_back_as_the_model_predicts() {
                             matches!(op, Op::Page { op: PageOp::Style { paragraph, .. }, .. }
                                 if model::paragraph(&before, *paragraph).is_some_and(|p| p.style.is_some()))
                         });
-                        if (touches_hidden || restyles) && normalize(&predicted) != normalize(&stored) {
+                        if (touches_hidden || restyles)
+                            && normalize(&predicted) != normalize(&stored)
+                        {
                             unseen += 1;
                             continue;
                         }
@@ -1680,7 +1865,11 @@ fn random_ops_read_back_as_the_model_predicts() {
                                 .ops
                                 .iter()
                                 .map(|op| match op {
-                                    Op::Page { op, .. } => format!("{op:?}").split([' ', '{']).next().unwrap().to_owned(),
+                                    Op::Page { op, .. } => format!("{op:?}")
+                                        .split([' ', '{'])
+                                        .next()
+                                        .unwrap()
+                                        .to_owned(),
                                     Op::Section(_) => "Section".into(),
                                 })
                                 .collect();
@@ -1693,7 +1882,12 @@ fn random_ops_read_back_as_the_model_predicts() {
                                                 "{}: {}",
                                                 owner.n,
                                                 list.iter()
-                                                    .map(|p| format!("{}<{:?}>@{}", p.id.n, p.parent.map(|p| p.n), p.level))
+                                                    .map(|p| format!(
+                                                        "{}<{:?}>@{}",
+                                                        p.id.n,
+                                                        p.parent.map(|p| p.n),
+                                                        p.level
+                                                    ))
                                                     .collect::<Vec<_>>()
                                                     .join(" ")
                                             )
@@ -1701,7 +1895,13 @@ fn random_ops_read_back_as_the_model_predicts() {
                                         .collect::<Vec<_>>()
                                         .join("\n")
                                 };
-                                println!("ops {:?}\nbefore\n{}\nstored\n{}\npredicted\n{}", edit.ops, tree(&before), tree(&stored), tree(&predicted));
+                                println!(
+                                    "ops {:?}\nbefore\n{}\nstored\n{}\npredicted\n{}",
+                                    edit.ops,
+                                    tree(&before),
+                                    tree(&stored),
+                                    tree(&predicted)
+                                );
                             }
                             if mismatches.len() < 6 {
                                 println!(
@@ -1715,7 +1915,10 @@ fn random_ops_read_back_as_the_model_predicts() {
                     Err(OpError::Failed(error)) => panic!("{name} step {step}: {error:?}"),
                     Err(_) => {
                         refused += 1;
-                        assert!(section.page(space).unwrap() == before, "{name} step {step}: a refused edit changed the page");
+                        assert!(
+                            section.page(space).unwrap() == before,
+                            "{name} step {step}: a refused edit changed the page"
+                        );
                     }
                 }
                 if step % 7 == 6 || step + 1 == steps {
@@ -1723,13 +1926,18 @@ fn random_ops_read_back_as_the_model_predicts() {
                     let image = section.image();
                     let reopened = Section::open(&arena, image).unwrap();
                     for space in &spaces {
-                        assert!(reopened.page(*space).unwrap() == section.page(*space).unwrap(), "{name} step {step}: reopening changed a page");
+                        assert!(
+                            reopened.page(*space).unwrap() == section.page(*space).unwrap(),
+                            "{name} step {step}: reopening changed a page"
+                        );
                     }
                 }
             }
         }
     }
-    println!("{applied} edits applied, {refused} refused, {unseen} restyled or typed into a hidden insertion style");
+    println!(
+        "{applied} edits applied, {refused} refused, {unseen} restyled or typed into a hidden insertion style"
+    );
     let mut kinds = BTreeMap::new();
     for kind in &mismatches {
         *kinds.entry(kind.clone()).or_insert(0) += 1;
@@ -1745,7 +1953,8 @@ fn random_ops_read_back_as_the_model_predicts() {
 fn section_ops_leave_the_page_list_they_describe() {
     let sources: Vec<Vec<u8>> = vec![
         crate::create_section("pages.one", "First", "Author").unwrap(),
-        include_bytes!("../../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one").to_vec(),
+        include_bytes!("../../../../corpus/page-lifecycle/04-nested/notebook/Lifecycle.one")
+            .to_vec(),
         SOURCES[3].1.to_vec(),
     ];
     let mut applied = 0;
@@ -1756,16 +1965,31 @@ fn section_ops_leave_the_page_list_they_describe() {
         for step in 0..12u64 {
             let listed = section.pages().unwrap();
             let spaces: Vec<ExGuid> = listed.iter().map(|(space, ..)| *space).collect();
-            let anchor = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied().filter(|_| rng.coin());
+            let anchor = spaces
+                .get(rng.pick(spaces.len()).unwrap_or(0))
+                .copied()
+                .filter(|_| rng.coin());
             let op = match step % 4 {
-                0 => SectionOp::Create(crate::PageCreation::new(anchor, Some("Created"), "Author").unwrap()),
+                0 => SectionOp::Create(
+                    crate::PageCreation::new(anchor, Some("Created"), "Author").unwrap(),
+                ),
                 1 => {
-                    let Some(space) = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied() else { continue };
-                    let level = if spaces[0] == space { 1 } else { 1 + (rng.next() % 2) as u32 };
+                    let Some(space) = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied()
+                    else {
+                        continue;
+                    };
+                    let level = if spaces[0] == space {
+                        1
+                    } else {
+                        1 + (rng.next() % 2) as u32
+                    };
                     SectionOp::Pages(vec![crate::PageEdit::set_level(space, level).unwrap()])
                 }
                 2 => {
-                    let Some(space) = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied() else { continue };
+                    let Some(space) = spaces.get(rng.pick(spaces.len()).unwrap_or(0)).copied()
+                    else {
+                        continue;
+                    };
                     SectionOp::Pages(vec![crate::PageEdit::move_to(space, None, 1).unwrap()])
                 }
                 _ => {
@@ -1775,7 +1999,10 @@ fn section_ops_leave_the_page_list_they_describe() {
                     SectionOp::Delete(vec![spaces[rng.pick(spaces.len()).unwrap()]])
                 }
             };
-            let edit = Edit { at: AT, ops: vec![Op::Section(op.clone())] };
+            let edit = Edit {
+                at: AT,
+                ops: vec![Op::Section(op.clone())],
+            };
             if section.apply("Author", &edit).is_err() {
                 assert_eq!(section.pages().unwrap(), listed, "{n} step {step} {op:?}");
                 continue;
@@ -1784,11 +2011,17 @@ fn section_ops_leave_the_page_list_they_describe() {
             applied += 1;
             let after = section.pages().unwrap();
             let order = |list: &[(ExGuid, String, u32)], without: ExGuid| -> Vec<ExGuid> {
-                list.iter().map(|(space, ..)| *space).filter(|space| *space != without).collect()
+                list.iter()
+                    .map(|(space, ..)| *space)
+                    .filter(|space| *space != without)
+                    .collect()
             };
             match &op {
                 SectionOp::Create(creation) => {
-                    let at = after.iter().position(|(space, ..)| *space == creation.space()).unwrap();
+                    let at = after
+                        .iter()
+                        .position(|(space, ..)| *space == creation.space())
+                        .unwrap();
                     assert_eq!(after[at].1, "Created");
                     assert_eq!(order(&after, creation.space()), spaces, "{n} step {step}");
                     match anchor {
@@ -1798,7 +2031,10 @@ fn section_ops_leave_the_page_list_they_describe() {
                 }
                 SectionOp::Pages(edits) => {
                     let space = edits[0].space();
-                    let at = after.iter().position(|(listed, ..)| *listed == space).unwrap();
+                    let at = after
+                        .iter()
+                        .position(|(listed, ..)| *listed == space)
+                        .unwrap();
                     assert_eq!(after[at].2, edits[0].level(), "{n} step {step} {op:?}");
                     if edits[0].position() == crate::PagePosition::Keep {
                         assert_eq!(order(&after, space), order(&listed, space));
@@ -1808,11 +2044,16 @@ fn section_ops_leave_the_page_list_they_describe() {
                     }
                 }
                 SectionOp::Delete(deleted) => {
-                    assert_eq!(after.iter().map(|(s, ..)| *s).collect::<Vec<_>>(), order(&listed, deleted[0]));
+                    assert_eq!(
+                        after.iter().map(|(s, ..)| *s).collect::<Vec<_>>(),
+                        order(&listed, deleted[0])
+                    );
                 }
-                SectionOp::Import { .. } | SectionOp::Conflict { .. } | SectionOp::Color(_) => {
-                    unreachable!()
-                }
+                SectionOp::Import { .. }
+                | SectionOp::Conflict { .. }
+                | SectionOp::Color(_)
+                | SectionOp::RestoreVersion { .. }
+                | SectionOp::DeleteVersions { .. } => unreachable!(),
             }
             let image = section.image();
             let store = Store::parse(&image).unwrap();
@@ -1830,7 +2071,11 @@ fn section_ops_leave_the_page_list_they_describe() {
                 .collect();
             assert_eq!(reread, after, "{n} step {step}");
             for (space, ..) in &after {
-                assert_eq!(read(&image, *space), section.page(*space).unwrap(), "{n} step {step}");
+                assert_eq!(
+                    read(&image, *space),
+                    section.page(*space).unwrap(),
+                    "{n} step {step}"
+                );
             }
         }
     }
@@ -1851,21 +2096,40 @@ fn an_imported_page_reads_back_as_its_copy() {
             let arena = Arena::default();
             let mut section = Section::open(&arena, target.clone()).unwrap();
             let import = |section: &mut Section<'_>, op: SectionOp| {
-                section.apply("Author", &Edit { at: AT, ops: vec![Op::Section(op)] })
+                section.apply(
+                    "Author",
+                    &Edit {
+                        at: AT,
+                        ops: vec![Op::Section(op)],
+                    },
+                )
             };
             import(&mut section, SectionOp::Create(creation.clone())).unwrap();
             let created = section.page(creation.space()).unwrap();
             let mut expected = created.clone();
             let arena = Arena::default();
             let mut section = Section::open(&arena, target.clone()).unwrap();
-            if import(&mut section, SectionOp::Import { creation: creation.clone(), page: copy.clone() }).is_err() {
+            if import(
+                &mut section,
+                SectionOp::Import {
+                    creation: creation.clone(),
+                    page: copy.clone(),
+                },
+            )
+            .is_err()
+            {
                 continue;
             }
             section.seal().unwrap();
             let image = section.image();
             let store = Store::parse(&image).unwrap();
-            RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
-            expected.objects.retain(|object| matches!(object, PageObject::Title(_)));
+            RevisionIndex::parse(&store)
+                .unwrap()
+                .validate_current()
+                .unwrap();
+            expected
+                .objects
+                .retain(|object| matches!(object, PageObject::Title(_)));
             expected.objects.extend(
                 copy.objects
                     .iter()
@@ -1876,16 +2140,24 @@ fn an_imported_page_reads_back_as_its_copy() {
             let stored = read(&image, creation.space());
             // New page children stack as the writers add them.
             let order: Vec<ExGuid> = stored.objects.iter().map(PageObject::id).collect();
-            expected.objects.sort_by_key(|object| order.iter().position(|id| *id == object.id()));
+            expected
+                .objects
+                .sort_by_key(|object| order.iter().position(|id| *id == object.id()));
             let mut expected = as_written(&expected, &created, &stored);
             // An outline's height follows its content; no op carries it.
             for (object, stored) in expected.objects.iter_mut().zip(&stored.objects) {
-                if let (PageObject::Outline(outline), PageObject::Outline(stored)) = (object, stored) {
+                if let (PageObject::Outline(outline), PageObject::Outline(stored)) =
+                    (object, stored)
+                {
                     outline.layout.max_height = stored.layout.max_height;
                 }
             }
             let (ours, theirs) = (normalize(&stored), normalize(&expected));
-            assert!(ours == theirs, "{name}: {}", first_difference(&theirs, &ours));
+            assert!(
+                ours == theirs,
+                "{name}: {}",
+                first_difference(&theirs, &ours)
+            );
             imported += 1;
         }
     }
@@ -1902,7 +2174,15 @@ fn lower_range(before: &Page, after: &Page) -> Option<Result<Vec<PageOp>, crate:
         match (a, b) {
             (PageObject::Outline(a), PageObject::Outline(b)) if a.id == b.id => {
                 if a.paragraphs != b.paragraphs {
-                    if changed.is_some() || (Outline { paragraphs: Vec::new(), ..a.clone() }) != (Outline { paragraphs: Vec::new(), ..b.clone() }) {
+                    if changed.is_some()
+                        || (Outline {
+                            paragraphs: Vec::new(),
+                            ..a.clone()
+                        }) != (Outline {
+                            paragraphs: Vec::new(),
+                            ..b.clone()
+                        })
+                    {
                         return None;
                     }
                     changed = Some((a, b));
@@ -1924,7 +2204,11 @@ fn lower_range(before: &Page, after: &Page) -> Option<Result<Vec<PageOp>, crate:
     let (mut end_a, mut end_b) = (a.len() - suffix, b.len() - suffix);
     // A range holds the children of what it changes.
     while end_a < a.len() {
-        let ids: Vec<ExGuid> = a[prefix..end_a].iter().chain(&b[prefix..end_b]).map(|p| p.id).collect();
+        let ids: Vec<ExGuid> = a[prefix..end_a]
+            .iter()
+            .chain(&b[prefix..end_b])
+            .map(|p| p.id)
+            .collect();
         if a[end_a].parent.is_some_and(|parent| ids.contains(&parent)) {
             end_a += 1;
             end_b += 1;
@@ -1932,23 +2216,49 @@ fn lower_range(before: &Page, after: &Page) -> Option<Result<Vec<PageOp>, crate:
             break;
         }
     }
-    let outline = match before.objects.iter().find(|o| matches!(o, PageObject::Outline(o) if o.paragraphs == *a)) {
+    let outline = match before
+        .objects
+        .iter()
+        .find(|o| matches!(o, PageObject::Outline(o) if o.paragraphs == *a))
+    {
         Some(PageObject::Outline(outline)) => outline.id,
         _ => return None,
     };
     let mut definitions = before.definitions.clone();
     definitions.extend(after.definitions.clone());
-    Some(lower(outline, &a[prefix..end_a], &b[prefix..end_b], b.get(end_b), &definitions))
+    Some(lower(
+        outline,
+        &a[prefix..end_a],
+        &b[prefix..end_b],
+        b.get(end_b),
+        &definitions,
+    ))
 }
 
 /// Lowering the changed range of an outline stores what lowering the whole page does.
 #[test]
 fn a_range_lowers_as_its_page_does() {
     let families = [
-        Family::Text, Family::Format, Family::Insert, Family::Paste, Family::Delete, Family::Move,
-        Family::Collapse, Family::List, Family::Tag, Family::Split, Family::Join, Family::Indent,
-        Family::Outdent, Family::Alignment, Family::Style, Family::Link, Family::NewTable,
-        Family::ParagraphPicture, Family::Attachment, Family::Equation,
+        Family::Text,
+        Family::Format,
+        Family::Insert,
+        Family::Paste,
+        Family::Delete,
+        Family::Move,
+        Family::Collapse,
+        Family::List,
+        Family::Tag,
+        Family::Split,
+        Family::Join,
+        Family::Indent,
+        Family::Outdent,
+        Family::Alignment,
+        Family::Style,
+        Family::Link,
+        Family::NewTable,
+        Family::ParagraphPicture,
+        Family::Attachment,
+        Family::Equation,
     ];
     let (mut same, mut total, mut smaller) = (0, 0, 0);
     for (name, source) in SOURCES {
@@ -1974,18 +2284,32 @@ fn a_range_lowers_as_its_page_does() {
                         let mut section = Section::open(&arena, source.to_vec()).unwrap();
                         let edit = Edit {
                             at: AT,
-                            ops: ops.iter().map(|op| Op::Page { space, op: op.clone() }).collect(),
+                            ops: ops
+                                .iter()
+                                .map(|op| Op::Page {
+                                    space,
+                                    op: op.clone(),
+                                })
+                                .collect(),
                         };
-                        section.apply("Author", &edit).map(|()| normalize(&section.page(space).unwrap()))
+                        section
+                            .apply("Author", &edit)
+                            .map(|()| normalize(&section.page(space).unwrap()))
                     };
                     let (ours, theirs) = (write(&ranged), write(&whole));
                     match (ours, theirs) {
                         (Ok(ours), Ok(theirs)) => {
-                            assert!(ours == theirs, "{name} page {p} {family:?} seed {seed}: {}", first_difference(&theirs, &ours));
+                            assert!(
+                                ours == theirs,
+                                "{name} page {p} {family:?} seed {seed}: {}",
+                                first_difference(&theirs, &ours)
+                            );
                             same += 1;
                         }
                         (Err(_), Err(_)) => same += 1,
-                        (ours, theirs) => panic!("{name} page {p} {family:?} seed {seed}: {ours:?} vs {theirs:?}"),
+                        (ours, theirs) => {
+                            panic!("{name} page {p} {family:?} seed {seed}: {ours:?} vs {theirs:?}")
+                        }
                     }
                     let length = |ops: &[PageOp]| format!("{ops:?}").len();
                     smaller += usize::from(length(&ranged) <= length(&whole));
@@ -2012,7 +2336,9 @@ fn keystroke_ops() {
     let image = std::fs::read(&path).unwrap();
     let space = pages(&image)
         .into_iter()
-        .max_by_key(|space| read(&image, *space).objects.len() + format!("{:?}", read(&image, *space)).len())
+        .max_by_key(|space| {
+            read(&image, *space).objects.len() + format!("{:?}", read(&image, *space)).len()
+        })
         .unwrap();
     let page = read(&image, space);
     let outline = page
@@ -2027,7 +2353,11 @@ fn keystroke_ops() {
     let middle = outline.paragraphs.len() / 2;
     let paragraph = &outline.paragraphs[middle];
     let text = paragraph.text().unwrap().id;
-    println!("{path}: {} bytes, {} paragraphs in the outline", image.len(), outline.paragraphs.len());
+    println!(
+        "{path}: {} bytes, {} paragraphs in the outline",
+        image.len(),
+        outline.paragraphs.len()
+    );
 
     // Emitting: a keystroke is one op; a generic range replacement lowers its paragraphs.
     let mut edited = paragraph.clone();
@@ -2087,7 +2417,11 @@ fn keystroke_ops() {
         seals.push(start.elapsed());
         sizes.push((
             transaction.append.len(),
-            transaction.patches.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
+            transaction
+                .patches
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>(),
         ));
     }
     sizes.sort();
@@ -2122,20 +2456,42 @@ fn op_gate_candidate() {
         at.get()
     };
     let apply = |section: &mut Section<'_>, op: Op| {
-        let result = section.apply("Gate author", &Edit { at: next(), ops: vec![op] });
+        let result = section.apply(
+            "Gate author",
+            &Edit {
+                at: next(),
+                ops: vec![op],
+            },
+        );
         section.seal().unwrap();
         result
     };
     let mut imported = Vec::new();
     for (name, bytes) in SOURCES.iter().filter(|(name, _)| *name != "enter-probe") {
-        let Some(space) = pages(bytes).first().copied() else { continue };
+        let Some(space) = pages(bytes).first().copied() else {
+            continue;
+        };
         let page = read(bytes, space);
-        if page.objects.iter().any(|o| matches!(o, PageObject::Unsupported(_))) {
+        if page
+            .objects
+            .iter()
+            .any(|o| matches!(o, PageObject::Unsupported(_)))
+        {
             continue;
         }
         let Ok(copy) = page.copy() else { continue };
-        let creation = crate::PageCreation::new(None, Some(&format!("Imported {name}")), "Gate author").unwrap();
-        if apply(&mut section, Op::Section(SectionOp::Import { creation: creation.clone(), page: copy })).is_ok() {
+        let creation =
+            crate::PageCreation::new(None, Some(&format!("Imported {name}")), "Gate author")
+                .unwrap();
+        if apply(
+            &mut section,
+            Op::Section(SectionOp::Import {
+                creation: creation.clone(),
+                page: copy,
+            }),
+        )
+        .is_ok()
+        {
             imported.push(creation.space());
         }
     }
@@ -2163,10 +2519,16 @@ fn op_gate_candidate() {
                     .collect()
             };
             let edited = fields(&before);
-            if fields(&after).iter().any(|(id, text)| edited.iter().any(|(e, old)| e == id && old != text)) {
+            if fields(&after)
+                .iter()
+                .any(|(id, text)| edited.iter().any(|(e, old)| e == id && old != text))
+            {
                 continue;
             }
-            if section.apply_page("Gate author", next(), *space, &after).is_ok() {
+            if section
+                .apply_page("Gate author", next(), *space, &after)
+                .is_ok()
+            {
                 section.seal().unwrap();
                 edits += 1;
             }
@@ -2174,12 +2536,20 @@ fn op_gate_candidate() {
     }
     // A created page: margins, an outline, and its first move adding the margin origin.
     let creation = crate::PageCreation::new(None, Some("Created by ops"), "Gate author").unwrap();
-    apply(&mut section, Op::Section(SectionOp::Create(creation.clone()))).unwrap();
+    apply(
+        &mut section,
+        Op::Section(SectionOp::Create(creation.clone())),
+    )
+    .unwrap();
     let outline = Outline {
         id: id(),
         title: false,
         min_width: None,
-        layout: Layout { x: Some(36.0), y: Some(86.4), ..Default::default() },
+        layout: Layout {
+            x: Some(36.0),
+            y: Some(86.4),
+            ..Default::default()
+        },
         indents: Vec::new(),
         paragraphs: vec![text_paragraph("Typed through ops", Format::default())],
         unsupported: Vec::new(),
@@ -2188,26 +2558,87 @@ fn op_gate_candidate() {
     let text = outline.paragraphs[0].text().unwrap().id;
     let space = creation.space();
     let page = |op| Op::Page { space, op };
-    apply(&mut section, page(PageOp::Add { object: PageObject::Outline(outline), before: None })).unwrap();
-    apply(&mut section, page(PageOp::Outline { object: outline_id, edit: crate::OutlineEdit::Position { x: 72.0, y: 108.0 } })).unwrap();
-    apply(&mut section, page(PageOp::Text { text, range: 5..5, with: " and sealed".into() })).unwrap();
-    apply(&mut section, page(PageOp::Link { text, range: 0..5, target: Some("https://example.invalid/ops".into()) })).unwrap();
-    let spaces: Vec<ExGuid> = section.pages().unwrap().into_iter().map(|(s, _, _)| s).collect();
-    apply(&mut section, Op::Section(SectionOp::Pages(vec![crate::PageEdit::move_to(space, Some(spaces[1]), 1).unwrap()]))).unwrap();
-    apply(&mut section, Op::Section(SectionOp::Pages(vec![crate::PageEdit::set_level(spaces[2], 2).unwrap()]))).unwrap();
-    apply(&mut section, Op::Section(SectionOp::Delete(vec![*spaces.last().unwrap()]))).unwrap();
+    apply(
+        &mut section,
+        page(PageOp::Add {
+            object: PageObject::Outline(outline),
+            before: None,
+        }),
+    )
+    .unwrap();
+    apply(
+        &mut section,
+        page(PageOp::Outline {
+            object: outline_id,
+            edit: crate::OutlineEdit::Position { x: 72.0, y: 108.0 },
+        }),
+    )
+    .unwrap();
+    apply(
+        &mut section,
+        page(PageOp::Text {
+            text,
+            range: 5..5,
+            with: " and sealed".into(),
+        }),
+    )
+    .unwrap();
+    apply(
+        &mut section,
+        page(PageOp::Link {
+            text,
+            range: 0..5,
+            target: Some("https://example.invalid/ops".into()),
+        }),
+    )
+    .unwrap();
+    let spaces: Vec<ExGuid> = section
+        .pages()
+        .unwrap()
+        .into_iter()
+        .map(|(s, _, _)| s)
+        .collect();
+    apply(
+        &mut section,
+        Op::Section(SectionOp::Pages(vec![
+            crate::PageEdit::move_to(space, Some(spaces[1]), 1).unwrap(),
+        ])),
+    )
+    .unwrap();
+    apply(
+        &mut section,
+        Op::Section(SectionOp::Pages(vec![
+            crate::PageEdit::set_level(spaces[2], 2).unwrap(),
+        ])),
+    )
+    .unwrap();
+    apply(
+        &mut section,
+        Op::Section(SectionOp::Delete(vec![*spaces.last().unwrap()])),
+    )
+    .unwrap();
     let image = section.image();
     let store = Store::parse(&image).unwrap();
-    RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
+    RevisionIndex::parse(&store)
+        .unwrap()
+        .validate_current()
+        .unwrap();
     let count = section.pages().unwrap().len();
     std::fs::write(directory.join("ops.one"), &image).unwrap();
     std::fs::write(
         directory.join("Open Notebook.onetoc2"),
-        crate::create_table_of_contents("Open Notebook.onetoc2", &[("ops.one", store.header.file_id)]).unwrap(),
+        crate::create_table_of_contents(
+            "Open Notebook.onetoc2",
+            &[("ops.one", store.header.file_id)],
+        )
+        .unwrap(),
     )
     .unwrap();
     std::fs::write(directory.join("expected-count.txt"), count.to_string()).unwrap();
-    println!("{} imported pages, {edits} lowered edits, {count} pages", imported.len());
+    println!(
+        "{} imported pages, {edits} lowered edits, {count} pages",
+        imported.len()
+    );
 }
 
 /// OneNote 2010's own date change (`corpus/page-date/native`, COM `UpdatePageContent`
@@ -2229,9 +2660,9 @@ fn changed_jcids(image: &[u8], space: ExGuid) -> Vec<u32> {
         .objects
         .iter()
         .filter(|(id, object)| {
-            old.objects.get(id).is_none_or(|old| {
-                format!("{:?}", old.data) != format!("{:?}", object.data)
-            })
+            old.objects
+                .get(id)
+                .is_none_or(|old| format!("{:?}", old.data) != format!("{:?}", object.data))
         })
         .map(|(_, object)| object.jcid)
         .collect();
@@ -2256,10 +2687,19 @@ const DATED_AT: u64 = 133_961_211_000_000_000;
 fn a_page_date_stores_what_onenote_stores() {
     let spaces = pages(DATED);
     let title = |space: &ExGuid| read(DATED, *space).title;
-    let kept = *spaces.iter().find(|space| title(space) == "Kept date").unwrap();
-    let changed = *spaces.iter().find(|space| title(space) == "Changed date").unwrap();
+    let kept = *spaces
+        .iter()
+        .find(|space| title(space) == "Kept date")
+        .unwrap();
+    let changed = *spaces
+        .iter()
+        .find(|space| title(space) == "Changed date")
+        .unwrap();
     let native = changed_jcids(DATED, changed);
-    assert_eq!(native, [0x20030, 0x6000c, 0x6000d, 0x6000d, 0x6000e, 0x6000e]);
+    assert_eq!(
+        native,
+        [0x20030, 0x6000c, 0x6000d, 0x6000d, 0x6000e, 0x6000e]
+    );
 
     let arena = Arena::default();
     let mut section = Section::open(&arena, DATED.to_vec()).unwrap();
@@ -2278,7 +2718,13 @@ fn a_page_date_stores_what_onenote_stores() {
     let mut predicted = before.clone();
     model::apply(&mut predicted, &op).unwrap();
     section
-        .apply("Author", &Edit { at: AT, ops: vec![Op::Page { space: kept, op }] })
+        .apply(
+            "Author",
+            &Edit {
+                at: AT,
+                ops: vec![Op::Page { space: kept, op }],
+            },
+        )
         .unwrap();
     section.seal().unwrap();
     let image = section.image();
@@ -2288,20 +2734,36 @@ fn a_page_date_stores_what_onenote_stores() {
     assert_eq!(stored, predicted);
     assert_eq!(changed_jcids(&image, kept), native);
     let store = Store::parse(&image).unwrap();
-    RevisionIndex::parse(&store).unwrap().validate_current().unwrap();
+    RevisionIndex::parse(&store)
+        .unwrap()
+        .validate_current()
+        .unwrap();
 
     // The whole-page lowering reaches the same page through the same op.
     let mut after = before.clone();
     after.created = Some(DATED_AT);
-    model::apply(&mut after, &PageOp::Date { created: DATED_AT, fields }).unwrap();
-    assert!(matches!(&lower_page(&before, &after).unwrap()[..], [PageOp::Date { .. }]));
+    model::apply(
+        &mut after,
+        &PageOp::Date {
+            created: DATED_AT,
+            fields,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        &lower_page(&before, &after).unwrap()[..],
+        [PageOp::Date { .. }]
+    ));
 
     if let Some(directory) = std::env::var_os("ONESTORE_PAGE_DATE_EXPORT") {
         let directory = std::path::Path::new(&directory);
         std::fs::create_dir_all(directory).unwrap();
         std::fs::write(directory.join("pictures.one"), &image).unwrap();
         std::fs::copy(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus/page-date/native/notebook/Open Notebook.onetoc2"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../corpus/page-date/native/notebook/Open Notebook.onetoc2"
+            ),
             directory.join("Open Notebook.onetoc2"),
         )
         .unwrap();

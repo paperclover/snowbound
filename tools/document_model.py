@@ -49,7 +49,8 @@ def ordered_pages(document):
 def version_pages(document, sid, revision):
     manifest = revision['nodes'][revision['roots']['1']]['kind']
     context = manifest['history']
-    if context is None:
+    # A page OneNote copied from a version names a history it never wrote.
+    if context not in document['spaces'][sid]['contexts']:
         return
     _, history = view(document, sid, context)
     root = history['nodes'][history['roots']['1']]

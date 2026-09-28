@@ -58,7 +58,12 @@ impl<'a> ActivePage<'a> {
         let rid = index.active(space)?;
         let live = LiveRevision::new(index.resolve(space, rid)?, chain_depth(index, space, rid))?;
         let store: &'a Store<'a> = index.store;
-        Self::viewed(std::rc::Rc::new(|guid| store.file_data(guid)), pages, live, view)
+        Self::viewed(
+            std::rc::Rc::new(|guid| store.file_data(guid)),
+            pages,
+            live,
+            view,
+        )
     }
 
     /// The page space `live` holds, whose stored payloads `files` reads.
@@ -404,21 +409,20 @@ pub(crate) mod tests {
                 choice => choice,
             };
             match choice {
-                0..=3 => Insertion::paragraph(container, anchor, word, "Author").and_then(
-                    |insertion| {
+                0..=3 => {
+                    Insertion::paragraph(container, anchor, word, "Author").and_then(|insertion| {
                         let paragraph = new_id()?;
                         insertion.changes_as(active, paragraph, paragraph, new_id()?)
-                    },
-                ),
+                    })
+                }
                 4 => TreeEdit::move_to(paragraph, container, anchor, "Author")
                     .and_then(|edit| edit.changes(active)),
                 5 => TreeEdit::delete(paragraph, "Author").and_then(|edit| edit.changes(active)),
                 6 => {
                     let at = self.pick(3) as u32;
                     let lists = (0..8).map(|_| new_id()).collect::<Result<Vec<_>>>()?;
-                    ParagraphSplit::new(text, at, "Author").and_then(|split| {
-                        split.changes_as(active, new_id()?, new_id()?, &lists)
-                    })
+                    ParagraphSplit::new(text, at, "Author")
+                        .and_then(|split| split.changes_as(active, new_id()?, new_id()?, &lists))
                 }
                 _ => {
                     let end = self.pick(2) as u32;

@@ -242,16 +242,34 @@ fn formatting_matches_format_text() {
     let (space, page) = page_by_title(PARAGRAPHS, "Split style boundary");
     let (_, text, content) = text_ids(body(&page)[0])[0].clone();
     let end = u32::try_from(content.encode_utf16().count()).unwrap();
-    let reference = ops::page_op(PARAGRAPHS, space, PageOp::Format { text, range: 1..end.min(4), set: vec![
-            TextAttribute::Bold(true),
-            TextAttribute::Color(Some([255, 0, 0])),
-            TextAttribute::FontSize(14.0),
-        ], clear: Vec::new() })
+    let reference = ops::page_op(
+        PARAGRAPHS,
+        space,
+        PageOp::Format {
+            text,
+            range: 1..end.min(4),
+            set: vec![
+                TextAttribute::Bold(true),
+                TextAttribute::Color(Some([255, 0, 0])),
+                TextAttribute::FontSize(14.0),
+            ],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
-    let reference = ops::page_op(reference.as_bytes(), space, PageOp::Format { text, range: 0..1, set: vec![
-            TextAttribute::Italic(true),
-            TextAttribute::Font("Consolas".into()),
-        ], clear: Vec::new() })
+    let reference = ops::page_op(
+        reference.as_bytes(),
+        space,
+        PageOp::Format {
+            text,
+            range: 0..1,
+            set: vec![
+                TextAttribute::Italic(true),
+                TextAttribute::Font("Consolas".into()),
+            ],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
     oracle(PARAGRAPHS, space, reference.as_bytes());
 }
@@ -444,7 +462,11 @@ fn composed_edits_publish_one_transaction() {
         }],
     );
     let insertion = insert(outline.id, Some(paragraphs[1].0), "Inserted", 1);
-    let PageOp::Insert { paragraphs: inserted, .. } = &insertion else {
+    let PageOp::Insert {
+        paragraphs: inserted,
+        ..
+    } = &insertion
+    else {
         unreachable!()
     };
     let inserted = inserted[0].text().unwrap().id;

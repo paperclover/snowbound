@@ -458,9 +458,8 @@ mod tests {
             .unwrap();
         let paragraph = view.nodes[&outline].children[0];
         let text = view.nodes[&paragraph].content[0];
-        let deleted = |bytes: &[u8]| {
-            edited(bytes, sid, vec![PageOp::Delete { object: paragraph }]).is_ok()
-        };
+        let deleted =
+            |bytes: &[u8]| edited(bytes, sid, vec![PageOp::Delete { object: paragraph }]).is_ok();
         for target in [page, outline, paragraph, text] {
             for property in [0x08001cde, 0x08001cb4, 0x08001cf9, 0x08001cb2] {
                 for enabled in [false, true] {

@@ -6,7 +6,9 @@ mod typing;
 use onestore::{
     document::{Format, Layout},
     op::{Edit, Op, PageOp},
-    page::{Outline, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject, text::new_id},
+    page::{
+        Outline, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject, text::new_id,
+    },
 };
 use std::{fs, io::Write};
 
@@ -87,7 +89,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             op,
         }],
     };
-    let transaction = typing::sealed(&source, author, &edit)?.ok_or("The insertion stores nothing")?;
+    let transaction =
+        typing::sealed(&source, author, &edit)?.ok_or("The insertion stores nothing")?;
     let mut record = serde_json::json!({"edit": edit, "object": object, "text_object": text});
     if args[2] == "--in-place" {
         if let Err(error) = transaction.commit_file(&args[1]) {

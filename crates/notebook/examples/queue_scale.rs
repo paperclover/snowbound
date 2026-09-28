@@ -36,9 +36,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let arena = Arena::default();
         let mut section = Section::open(&arena, source)?;
         let ops = vec![Op::Section(SectionOp::Create(creation))];
-        section.apply("Fixture", &Edit { at: 133_000_000_000_000_000, ops })?;
+        section.apply(
+            "Fixture",
+            &Edit {
+                at: 133_000_000_000_000_000,
+                ops,
+            },
+        )?;
         section.seal()?;
-        let pages: Vec<ExGuid> = section.pages()?.into_iter().map(|(space, ..)| space).collect();
+        let pages: Vec<ExGuid> = section
+            .pages()?
+            .into_iter()
+            .map(|(space, ..)| space)
+            .collect();
         (section.image(), pages)
     };
     assert_eq!(pages.len(), 2);

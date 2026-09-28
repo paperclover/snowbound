@@ -142,10 +142,7 @@ fn live_keystrokes_publish_reading_only_the_header_and_a_native_change_merges() 
     }
     assert_eq!(remote.reads, 0, "publications read only the header");
     assert_eq!(remote.stamps, 20);
-    assert_eq!(
-        lab.read(&path, 1 << 24).unwrap(),
-        snapshot(&replica)
-    );
+    assert_eq!(lab.read(&path, 1 << 24).unwrap(), snapshot(&replica));
     for _ in 0..5 {
         assert_eq!(replica.sync_once(&mut remote).unwrap().edit, None);
     }
@@ -175,10 +172,7 @@ fn live_keystrokes_publish_reading_only_the_header_and_a_native_change_merges() 
     let merged = text_of(&replica, space, text);
     assert!(merged.starts_with("Native Body"), "{merged}");
     assert!(merged.ends_with(" local"), "{merged}");
-    assert_eq!(
-        lab.read(&path, 1 << 24).unwrap(),
-        snapshot(&replica)
-    );
+    assert_eq!(lab.read(&path, 1 << 24).unwrap(), snapshot(&replica));
     lab.delete(&path).unwrap();
 }
 

@@ -1,3 +1,4 @@
+from importlib.util import find_spec
 from pathlib import Path
 import runpy
 import unittest
@@ -6,7 +7,11 @@ from unittest.mock import patch
 
 verify = runpy.run_path(str(Path(__file__).with_name('verify-document.py')))['verify_pdf_black']
 
+requires_pdfplumber = unittest.skipUnless(
+    find_spec('pdfplumber'), 'pdfplumber is not installed; tools/TESTING.md sets up the Python lane')
 
+
+@requires_pdfplumber
 class PdfFormatOracleTest(unittest.TestCase):
     def test_unmapped_text_cannot_hide_missing_text_or_incorrect_highlighting(self):
         chars = [{'text': c, 'x0': i * 2, 'x1': i * 2 + 1, 'top': 0, 'bottom': 1}

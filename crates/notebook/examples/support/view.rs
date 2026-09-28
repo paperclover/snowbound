@@ -76,7 +76,14 @@ fn in_page(page: &onestore::page::Page) -> Option<(ExGuid, String)> {
             return Some((text.id, text.text.text().to_owned()));
         }
         if let onestore::page::ParagraphContent::Table(table) = &paragraph.content {
-            pending.extend(table.rows.iter().flat_map(|row| &row.cells).flat_map(|cell| &cell.paragraphs).rev());
+            pending.extend(
+                table
+                    .rows
+                    .iter()
+                    .flat_map(|row| &row.cells)
+                    .flat_map(|cell| &cell.paragraphs)
+                    .rev(),
+            );
         }
     }
     None
@@ -84,7 +91,9 @@ fn in_page(page: &onestore::page::Page) -> Option<(ExGuid, String)> {
 
 /// The concurrent-edit paragraph as the queued edits leave it: its page, text object and
 /// text.
-pub fn cached(cache: &notebook::Replica) -> Result<(ExGuid, ExGuid, String), Box<dyn std::error::Error>> {
+pub fn cached(
+    cache: &notebook::Replica,
+) -> Result<(ExGuid, ExGuid, String), Box<dyn std::error::Error>> {
     let mut found = Vec::new();
     for (space, ..) in cache.pages()? {
         if let Some((object, text)) = in_page(&cache.page(space)?) {

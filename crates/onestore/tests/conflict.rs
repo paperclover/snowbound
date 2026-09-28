@@ -91,13 +91,15 @@ fn native_conflict_pages_are_listed_under_their_page_last_first() {
     assert_eq!(conflicts.len(), 1);
     let (page, listed) = &conflicts[0];
     assert_eq!(*page, pages[0].0);
-    let [ConflictPage {
-        space,
-        title,
-        user,
-        created,
-        objects,
-    }] = listed.as_slice()
+    let [
+        ConflictPage {
+            space,
+            title,
+            user,
+            created,
+            objects,
+        },
+    ] = listed.as_slice()
     else {
         panic!("{listed:?}")
     };
@@ -282,7 +284,10 @@ fn a_conflict_page_is_stored_as_onenote_stores_one() {
         std::fs::create_dir_all(output).unwrap();
         std::fs::write(output.join("synthetic.one"), &image).unwrap();
         std::fs::copy(
-            format!("{}/../../{notebook}/Open Notebook.onetoc2", env!("CARGO_MANIFEST_DIR")),
+            format!(
+                "{}/../../{notebook}/Open Notebook.onetoc2",
+                env!("CARGO_MANIFEST_DIR")
+            ),
             output.join("Open Notebook.onetoc2"),
         )
         .unwrap();
@@ -335,9 +340,20 @@ fn deleting_a_conflict_page_stores_what_onenote_stores() {
     };
     let (manifest, metadata, flagged, space) = shapes(&image);
     let (native_manifest, native_metadata, native_flagged, native_space) = shapes(&native);
-    assert_eq!(manifest.1.iter().filter(|id| **id != 0x3400347b).collect::<Vec<_>>(), [&0x24001c1f, &0x24003442]);
     assert_eq!(
-        native_manifest.1.iter().filter(|id| **id != 0x3400347b).collect::<Vec<_>>(),
+        manifest
+            .1
+            .iter()
+            .filter(|id| **id != 0x3400347b)
+            .collect::<Vec<_>>(),
+        [&0x24001c1f, &0x24003442]
+    );
+    assert_eq!(
+        native_manifest
+            .1
+            .iter()
+            .filter(|id| **id != 0x3400347b)
+            .collect::<Vec<_>>(),
         [&0x24001c1f, &0x24003442]
     );
     assert!(!metadata.1.contains(&0x88001d97) && !native_metadata.1.contains(&0x88001d97));
@@ -349,7 +365,10 @@ fn deleting_a_conflict_page_stores_what_onenote_stores() {
         std::fs::create_dir_all(output).unwrap();
         std::fs::write(output.join("synthetic.one"), &image).unwrap();
         std::fs::copy(
-            format!("{}/../../{notebook}/Open Notebook.onetoc2", env!("CARGO_MANIFEST_DIR")),
+            format!(
+                "{}/../../{notebook}/Open Notebook.onetoc2",
+                env!("CARGO_MANIFEST_DIR")
+            ),
             output.join("Open Notebook.onetoc2"),
         )
         .unwrap();

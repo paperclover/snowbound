@@ -110,10 +110,7 @@ fn cache_reopen_preserves_the_base_and_queued_edits() {
         .apply(model_ops::AUTHOR, typed(sid, oid, "Recovered "))
         .unwrap();
     assert!(second > first);
-    assert_eq!(
-        target(&snapshot(&replica)).2,
-        "Recovered café 🐈 日本語"
-    );
+    assert_eq!(target(&snapshot(&replica)).2, "Recovered café 🐈 日本語");
     assert_eq!(replica.pending().unwrap().len(), 2);
 }
 

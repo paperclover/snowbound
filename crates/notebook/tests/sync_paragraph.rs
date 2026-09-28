@@ -392,7 +392,10 @@ fn a_native_text_object_replacement_keeps_a_conflict_page_for_every_offline_spli
             "{name}"
         );
         assert!(
-            matches!(cache.status(id).unwrap(), Some(EditStatus::Published { .. })),
+            matches!(
+                cache.status(id).unwrap(),
+                Some(EditStatus::Published { .. })
+            ),
             "{name}"
         );
         assert_eq!(page_of(&server.visible, space), remote, "{name}");
@@ -483,8 +486,7 @@ fn offline_paragraphs(output: Option<&Path>) {
             };
             let prefixed = offset > 0 && !content(&page, left).text().is_empty();
             if prefixed {
-                server.visible =
-                    typed(&server.visible, space, left, 0..0, "\u{2602}");
+                server.visible = typed(&server.visible, space, left, 0..0, "\u{2602}");
                 server.durable.clone_from(&server.visible);
             }
             let Ok(queued) = save_page(&cache, left, |page| replay(page, intent, split)) else {
@@ -591,11 +593,7 @@ fn control(title: &str) -> (ExGuid, Page) {
 fn remote_with(space: ExGuid, change: impl FnOnce(&mut Page)) -> Server {
     let mut page = page_of(BEFORE, space);
     change(&mut page);
-    Server::new(
-        ops::saved(BEFORE, space, &page)
-            .unwrap()
-            .as_slice(),
-    )
+    Server::new(ops::saved(BEFORE, space, &page).unwrap().as_slice())
 }
 
 #[test]

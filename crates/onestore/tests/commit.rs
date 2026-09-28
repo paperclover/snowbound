@@ -45,7 +45,8 @@ fn text_of(image: &[u8], space: ExGuid, object: ExGuid) -> String {
     let index = RevisionIndex::parse(&store).unwrap();
     index.validate_current().unwrap();
     let document = Document::parse(&index).unwrap();
-    let Kind::RichText { text, .. } = &document.spaces[&space].active().unwrap().nodes[&object].kind
+    let Kind::RichText { text, .. } =
+        &document.spaces[&space].active().unwrap().nodes[&object].kind
     else {
         panic!()
     };
@@ -76,7 +77,13 @@ fn repeated_appends_cross_log_fragments_and_expose_counter_tears() {
         };
         length = value.encode_utf16().count() as u32;
         section
-            .apply("Author", &Edit { at: 133_700_000_000_000_000 + u64::from(count), ops: vec![Op::Page { space, op }] })
+            .apply(
+                "Author",
+                &Edit {
+                    at: 133_700_000_000_000_000 + u64::from(count),
+                    ops: vec![Op::Page { space, op }],
+                },
+            )
             .unwrap();
         let transaction = section.seal().unwrap().unwrap();
         let mut written = source.clone();

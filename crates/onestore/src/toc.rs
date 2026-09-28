@@ -64,19 +64,27 @@ pub fn edit_table_of_contents(
     let Some(Kind::Toc { entries, .. }) = revision.nodes.get(&root).map(|node| &node.kind) else {
         return Err(invalid("Missing notebook TOC root"));
     };
-    // Entries in stored order with their identities and filenames.
-    let mut listed: Vec<(ExGuid, [u8; 16], String)> = Vec::new();
+    // Entries in display order (their ordering numbers, not their place in the root's list)
+    // with their identities and filenames.
+    let mut stored = Vec::new();
     for id in entries {
         let Some(Kind::Toc {
             filename,
             identity: Some(identity),
+            order,
             ..
         }) = revision.nodes.get(id).map(|node| &node.kind)
         else {
             return Err(invalid("Incomplete notebook TOC reference"));
         };
-        listed.push((*id, *identity, filename.clone().unwrap_or_default()));
+        stored.push((
+            order.unwrap_or(u32::MAX),
+            (*id, *identity, filename.clone().unwrap_or_default()),
+        ));
     }
+    stored.sort_by_key(|(order, _)| *order);
+    let mut listed: Vec<(ExGuid, [u8; 16], String)> =
+        stored.into_iter().map(|(_, entry)| entry).collect();
     let mut created: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
     let mut renamed = BTreeSet::new();
     let mut color = None;
@@ -173,6 +181,13 @@ pub fn edit_table_of_contents(
         }
     }
     let listed = listed;
+    // A rename or a colour keeps every number, gaps and ties included, as OneNote left them.
+    let resequence = edits.iter().any(|edit| {
+        matches!(
+            edit,
+            TocEdit::Add { .. } | TocEdit::Order(_) | TocEdit::Remove { .. }
+        )
+    });
     let transaction = build_on(&index, &[], None, |index| {
         let raw = index.resolve_active(space)?;
         let mut changed = BTreeMap::new();
@@ -190,9 +205,10 @@ pub fn edit_table_of_contents(
                     Value::Bytes(b) => b.try_into().ok().map(u32::from_le_bytes),
                     _ => None,
                 });
+            let order = order as u32 + 1;
             let mut updates: Vec<(u32, Vec<u8>)> = Vec::new();
-            if stored_order != Some(order as u32 + 1) {
-                updates.push((0x14001cb9, (order as u32 + 1).to_le_bytes().to_vec()));
+            if resequence && stored_order != Some(order) {
+                updates.push((0x14001cb9, order.to_le_bytes().to_vec()));
             }
             if renamed.contains(id) {
                 updates.push((0x1c001d6b, crate::create::string(filename)));
@@ -218,4 +234,114 @@ pub fn edit_table_of_contents(
     })?;
     check(&applied(source, transaction.as_ref())?, true)?;
     Ok(transaction)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apply(source: &[u8], transaction: Option<Transaction>) -> Vec<u8> {
+        applied(source, transaction.as_ref()).unwrap()
+    }
+
+    /// Each entry's filename and ordering number, as the root lists them.
+    fn entries(image: &[u8]) -> Vec<(ExGuid, String, u32)> {
+        let store = Store::parse(image).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let revision = document.active(document.root).unwrap();
+        let Kind::Toc { entries, .. } = &revision.nodes[&revision.roots[&1]].kind else {
+            panic!()
+        };
+        entries
+            .iter()
+            .map(|id| match &revision.nodes[id].kind {
+                Kind::Toc {
+                    filename, order, ..
+                } => (*id, filename.clone().unwrap(), order.unwrap()),
+                _ => panic!(),
+            })
+            .collect()
+    }
+
+    fn displayed(image: &[u8]) -> Vec<(String, u32)> {
+        let mut entries: Vec<_> = entries(image)
+            .into_iter()
+            .map(|(_, name, order)| (name, order))
+            .collect();
+        entries.sort_by_key(|(_, order)| *order);
+        entries
+    }
+
+    #[test]
+    fn edits_follow_the_ordering_numbers_not_the_list() {
+        let [a, b, c] = [[1; 16], [2; 16], [3; 16]];
+        let toc = crate::create_table_of_contents(
+            "Open Notebook.onetoc2",
+            &[("Video.one", a), ("Song.one", b), ("Album.one", c)],
+        )
+        .unwrap();
+        // Numbers out of the list's order, with a gap and a tie, as native TOCs carry them.
+        let dragged = {
+            let store = Store::parse(&toc).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let space = Document::parse(&index).unwrap().root;
+            let listed = entries(&toc);
+            let transaction = build_on(&index, &[], None, |index| {
+                let raw = index.resolve_active(space)?;
+                let mut changed = BTreeMap::new();
+                for ((id, _, _), order) in listed.iter().zip([7u32, 2, 2]) {
+                    let mut object = PropertyObject::from_object(&raw.objects[id])?;
+                    object.set(&[(0x14001cb9, &order.to_le_bytes())])?;
+                    changed.insert(*id, object);
+                }
+                Ok(BTreeMap::from([(space, RevisionEdit::Update(changed))]))
+            })
+            .unwrap();
+            apply(&toc, transaction)
+        };
+        let renamed = apply(
+            &dragged,
+            edit_table_of_contents(
+                &dragged,
+                &[TocEdit::Rename {
+                    identity: a,
+                    filename: "Kitchen.one".into(),
+                }],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            displayed(&renamed),
+            [
+                ("Song.one".into(), 2),
+                ("Album.one".into(), 2),
+                ("Kitchen.one".into(), 7)
+            ]
+        );
+        let added = apply(
+            &renamed,
+            edit_table_of_contents(
+                &renamed,
+                &[TocEdit::Add {
+                    filename: "Lore.one".into(),
+                    identity: [4; 16],
+                    group: false,
+                }],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            entries(&added)
+                .into_iter()
+                .map(|(_, name, order)| (name, order))
+                .collect::<Vec<_>>(),
+            [
+                ("Song.one".into(), 1),
+                ("Album.one".into(), 2),
+                ("Kitchen.one".into(), 3),
+                ("Lore.one".into(), 4)
+            ]
+        );
+    }
 }

@@ -118,10 +118,7 @@ fn downloaded_media_survives_reopen_and_recovery_with_the_queue_intact() {
         (summary.cached_assets, summary.cached_asset_bytes),
         (2, 1024)
     );
-    assert_eq!(
-        server::pages(&snapshot(&cache)),
-        server::pages(&working)
-    );
+    assert_eq!(server::pages(&snapshot(&cache)), server::pages(&working));
     assert_eq!(remote_snapshot(&cache), remote);
     assert_eq!(cache.pending().unwrap(), pending);
     assert_eq!(cache.status(1).unwrap(), uncertain);

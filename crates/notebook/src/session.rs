@@ -2,8 +2,7 @@
 //! publishes their edits to the section file in the background.
 
 use crate::{
-    EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result,
-    SyncWorker, discover,
+    EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover,
 };
 use onestore::{
     CommitError, ExGuid, PageCreation, RevisionIndex, Stamp, Store, Transaction,
@@ -388,9 +387,37 @@ impl Notebook {
         self.commit_toc(&toc, edits)
     }
 
+    /// Commits `edits` to the TOC at `toc`. A name it still lists for a file gone from its
+    /// folder passes to the file an edit gives that name; the stale entry goes.
     fn commit_toc(&self, toc: &str, edits: &[onestore::TocEdit]) -> Result<()> {
+        let unresolved = self
+            .folder(split(toc).0)
+            .ok()
+            .and_then(|folder| folder.toc.as_ref())
+            .map_or(&[][..], |toc| &toc.unresolved[..]);
+        let mut superseded = Vec::new();
+        for edit in edits {
+            if let onestore::TocEdit::Add { filename, .. }
+            | onestore::TocEdit::Rename { filename, .. } = edit
+            {
+                superseded.extend(
+                    unresolved
+                        .iter()
+                        .filter(|entry| {
+                            entry
+                                .filename
+                                .as_deref()
+                                .is_some_and(|name| name.eq_ignore_ascii_case(filename))
+                        })
+                        .map(|entry| onestore::TocEdit::Remove {
+                            identity: entry.file,
+                        }),
+                );
+            }
+            superseded.push(edit.clone());
+        }
         let source = self.storage.read(toc)?;
-        match onestore::edit_table_of_contents(&source, edits)? {
+        match onestore::edit_table_of_contents(&source, &superseded)? {
             Some(transaction) => self.storage.commit(toc, &transaction),
             None => Ok(()),
         }
@@ -399,7 +426,12 @@ impl Notebook {
     /// Creates `name.one` in `folder` holding the page `page` creates, in the next of
     /// OneNote's section colours, and lists it last in the folder's TOC, as OneNote creates
     /// a section. Returns the new catalog path.
-    pub fn create_section(&mut self, folder: &str, name: &str, page: &PageCreation) -> Result<String> {
+    pub fn create_section(
+        &mut self,
+        folder: &str,
+        name: &str,
+        page: &PageCreation,
+    ) -> Result<String> {
         let filename = format!("{name}.one");
         let color = next_color(self.folder(folder)?);
         let (_, ancestor) = self.toc(folder)?;
@@ -541,13 +573,24 @@ impl Notebook {
             let mut folders = Vec::new();
             let mut pending = vec![self.folder(path)?];
             while let Some(group) = pending.pop() {
+                // Its folder could not be emptied, so nothing moves.
+                if let Some(entry) = group.unavailable.first() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        entry.error.clone(),
+                    )
+                    .into());
+                }
                 sections.extend(
                     group
                         .sections
                         .iter()
                         .map(|section| (section.path.clone(), section.file_id)),
                 );
-                folders.push((group.path.clone(), group.toc.as_ref().map(|toc| toc.filename.clone())));
+                folders.push((
+                    group.path.clone(),
+                    group.toc.as_ref().map(|toc| toc.filename.clone()),
+                ));
                 pending.extend(&group.groups);
             }
             for (section, identity) in sections {
@@ -566,28 +609,50 @@ impl Notebook {
     }
 
     /// The recycle bin's TOC path and file identity, creating the bin as OneNote does: a
-    /// section group the root TOC lists.
+    /// section group the root TOC lists. A bin the root TOC misses is listed again.
     fn bin(&self) -> Result<(String, [u8; 16])> {
-        let bin_toc = catalog_path(RECYCLE_BIN, TOC);
-        if !self.storage.exists(&bin_toc) {
-            if !self.storage.exists(RECYCLE_BIN) {
-                self.storage.create_directory(RECYCLE_BIN)?;
+        if let Some(entry) = self
+            .catalog
+            .unavailable
+            .iter()
+            .find(|entry| entry.path == RECYCLE_BIN)
+        {
+            return Err(
+                io::Error::new(io::ErrorKind::PermissionDenied, entry.error.clone()).into(),
+            );
+        }
+        // A bin OneNote made may name its TOC otherwise; a second TOC would hide the folder.
+        let bin_toc = match self.folder(RECYCLE_BIN) {
+            Ok(discover::Folder { toc: Some(toc), .. }) => catalog_path(RECYCLE_BIN, &toc.filename),
+            _ => {
+                let bin_toc = catalog_path(RECYCLE_BIN, TOC);
+                if !self.storage.exists(&bin_toc) {
+                    if !self.storage.exists(RECYCLE_BIN) {
+                        self.storage.create_directory(RECYCLE_BIN)?;
+                    }
+                    let bytes = onestore::create_table_of_contents(TOC, &[])?;
+                    self.storage.create(&bin_toc, &bytes)?;
+                }
+                bin_toc
             }
-            let bytes = onestore::create_table_of_contents(TOC, &[])?;
-            self.storage.create(&bin_toc, &bytes)?;
-            self.storage.place(&bin_toc, self.toc("")?.1, RECYCLE_BIN)?;
-            let bin_identity = onestore::Store::parse(&bytes)?.header.file_id;
-            self.edit_toc(
-                "",
+        };
+        let identity = onestore::Store::parse(&self.storage.read(&bin_toc)?)?
+            .header
+            .file_id;
+        let (root, root_identity) = self.toc("")?;
+        // OneNote takes a TOC placed under another parent for a new one.
+        if !lists(&self.storage.read(&root)?, identity)? {
+            self.storage.place(&bin_toc, root_identity, RECYCLE_BIN)?;
+            self.commit_toc(
+                &root,
                 &[onestore::TocEdit::Add {
                     filename: RECYCLE_BIN.into(),
-                    identity: bin_identity,
+                    identity,
                     group: true,
                 }],
             )?;
         }
-        let source = self.storage.read(&bin_toc)?;
-        Ok((bin_toc, onestore::Store::parse(&source)?.header.file_id))
+        Ok((bin_toc, identity))
     }
 
     /// Moves the section file at `path` into the recycle bin, under a name no binned
@@ -626,23 +691,35 @@ impl Notebook {
             // OneNote's "Deleted Pages" section is grey.
             let bytes = onestore::create_empty_section(DELETED, Some(0x00e1e1e1))?;
             self.storage.create(&path, &bytes)?;
+        }
+        let mut bytes = self.storage.read(&path)?;
+        // Listed and placed too when an earlier delete made the file but not its entry.
+        let identity = onestore::Store::parse(&bytes)?.header.file_id;
+        if !lists(&self.storage.read(&bin_toc)?, identity)? {
             self.storage.place(&path, bin_identity, DELETED)?;
             self.commit_toc(
                 &bin_toc,
                 &[onestore::TocEdit::Add {
                     filename: DELETED.into(),
-                    identity: onestore::Store::parse(&bytes)?.header.file_id,
+                    identity,
                     group: false,
                 }],
             )?;
+            bytes = self.storage.read(&path)?;
         }
         let arena = onestore::Arena::default();
-        let mut section = onestore::Section::open(&arena, self.storage.read(&path)?)?;
+        let mut section = onestore::Section::open(&arena, bytes)?;
         let mut ops = Vec::new();
         for page in pages {
             ops.push(moved(page, author)?);
         }
-        section.apply(author, &Edit { at: crate::now(), ops })?;
+        section.apply(
+            author,
+            &Edit {
+                at: crate::now(),
+                ops,
+            },
+        )?;
         if let Some(transaction) = section.seal()? {
             self.storage.commit(&path, &transaction)?;
         }
@@ -866,9 +943,8 @@ pub fn stored_pages(image: &[u8]) -> Result<Vec<StoredPage>> {
 /// order it gives them (`corpus/notebook-management/native/section-colors`: sixteen sections
 /// made with New Section in a new notebook).
 const SECTION_COLORS: [u32; 16] = [
-    0x00e4a88a, 0x0078b0f6, 0x00bba4d5, 0x00d2bb9b, 0x00b79cab, 0x0099d1e8, 0x006ff9f5,
-    0x0092e7ad, 0x00cabc4d, 0x007575ba, 0x00aa9595, 0x00e4a88a, 0x0069d8ff, 0x0097c9b7,
-    0x009795ee, 0x00de9eb4,
+    0x00e4a88a, 0x0078b0f6, 0x00bba4d5, 0x00d2bb9b, 0x00b79cab, 0x0099d1e8, 0x006ff9f5, 0x0092e7ad,
+    0x00cabc4d, 0x007575ba, 0x00aa9595, 0x00e4a88a, 0x0069d8ff, 0x0097c9b7, 0x009795ee, 0x00de9eb4,
 ];
 
 /// The colour OneNote gives a new section in `folder`, by how many sections it holds.
@@ -895,6 +971,28 @@ pub fn moved(page: &Page, author: &str) -> Result<Op> {
 
 fn component(name: &str) -> bool {
     !name.is_empty() && !name.contains(['/', '\\', '\0']) && name != "." && name != ".."
+}
+
+/// Whether the TOC `image` holds has an entry for the file identity `file`.
+fn lists(image: &[u8], file: [u8; 16]) -> Result<bool> {
+    let store = Store::parse(image)?;
+    let index = RevisionIndex::parse(&store)?;
+    let document = Document::parse(&index)?;
+    let revision = document.active(document.root)?;
+    let entries = revision
+        .roots
+        .get(&1)
+        .and_then(|id| revision.nodes.get(id))
+        .map_or(&[][..], |node| match &node.kind {
+            onestore::document::Kind::Toc { entries, .. } => &entries[..],
+            _ => &[],
+        });
+    Ok(entries.iter().any(|id| {
+        matches!(
+            revision.nodes.get(id).map(|node| &node.kind),
+            Some(onestore::document::Kind::Toc { identity: Some(identity), .. }) if *identity == file
+        )
+    }))
 }
 
 fn split(path: &str) -> (&str, &str) {
@@ -1165,6 +1263,48 @@ impl Section {
     /// (`onestore::Section::conflicts`); `page` reads one, `delete_pages` removes it.
     pub fn conflicts(&self) -> Result<Vec<(ExGuid, Vec<onestore::ConflictPage>)>> {
         self.replica.conflicts()
+    }
+
+    /// The versions of each page that has them, newest first, as the local edits leave them
+    /// (`onestore::Section::versions`); `version` reads one.
+    pub fn versions(&self) -> Result<Vec<(ExGuid, Vec<onestore::PageVersion>)>> {
+        self.replica.versions()
+    }
+
+    /// Page `space` as its version `version` holds it; O(section).
+    pub fn version(&self, space: ExGuid, version: ExGuid) -> Result<Page> {
+        self.replica.version(space, version)
+    }
+
+    /// Makes a page's version its current state, the page as it stood becoming the newest
+    /// version, queued like the user's own edits.
+    pub fn restore_version(&self, space: ExGuid, version: ExGuid, author: &str) -> Result<u64> {
+        self.replica.apply(
+            author,
+            Edit {
+                at: crate::now(),
+                ops: vec![Op::Section(SectionOp::restore(space, version)?)],
+            },
+        )
+    }
+
+    /// Deletes versions of pages, queued like the user's own edits.
+    pub fn delete_versions(&self, versions: &[(ExGuid, Vec<ExGuid>)]) -> Result<u64> {
+        self.replica.apply(
+            "",
+            Edit {
+                at: crate::now(),
+                ops: versions
+                    .iter()
+                    .map(|(page, versions)| {
+                        Op::Section(SectionOp::DeleteVersions {
+                            page: *page,
+                            versions: versions.clone(),
+                        })
+                    })
+                    .collect(),
+            },
+        )
     }
 
     /// Retires an uncertain attempt after review, exporting the queue to `archive` first:

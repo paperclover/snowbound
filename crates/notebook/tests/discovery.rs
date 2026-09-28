@@ -278,3 +278,82 @@ fn local_access_stays_inside_the_selected_root() {
         );
     }
 }
+
+/// Restores permissions a test took away, so the temporary directory can be removed.
+struct Restore(Vec<(std::path::PathBuf, u32)>);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        for (path, mode) in &self.0 {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(*mode));
+        }
+    }
+}
+
+#[test]
+fn unreadable_children_are_listed_as_unavailable_and_retried() {
+    use std::os::unix::fs::PermissionsExt;
+    // Permission bits do not bind the superuser.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("notebook");
+    fs::create_dir(&root).unwrap();
+    fixture(&root);
+    fs::create_dir(root.join("Art")).unwrap();
+    fs::create_dir(root.join("Group")).unwrap();
+    for name in ["kept.one", "denied.one"] {
+        fs::write(
+            root.join("Group").join(name),
+            onestore::create_section(name, "Text", "Fixture").unwrap(),
+        )
+        .unwrap();
+    }
+    fs::write(
+        root.join("Group/Open Notebook.onetoc2"),
+        onestore::create_table_of_contents("Open Notebook.onetoc2", &[]).unwrap(),
+    )
+    .unwrap();
+    let _restore = Restore(vec![
+        (root.join("Art"), 0o755),
+        (root.join("Group/denied.one"), 0o644),
+    ]);
+    for path in [root.join("Art"), root.join("Group/denied.one")] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+
+    let mut notebook =
+        notebook::session::Notebook::open(&root, directory.path().join("cache")).unwrap();
+    let catalog = notebook.catalog();
+    assert_eq!(catalog.sections.len(), 1);
+    assert_eq!(catalog.groups.len(), 1);
+    assert_eq!(catalog.unavailable.len(), 1);
+    assert_eq!(catalog.unavailable[0].path, "Art");
+    assert!(catalog.unavailable[0].group);
+    assert!(catalog.unavailable[0].error.contains("Permission denied"));
+    let group = &catalog.groups[0];
+    assert_eq!(group.sections.len(), 1);
+    assert_eq!(group.sections[0].path, "Group/kept.one");
+    assert_eq!(group.unavailable[0].path, "Group/denied.one");
+    assert!(!group.unavailable[0].group);
+
+    // An unavailable entry is not the catalog's to change, nor a group holding one.
+    assert!(notebook.delete("Art").is_err());
+    assert!(notebook.delete("Group").is_err());
+    assert!(root.join("Group/kept.one").exists());
+    assert!(notebook.rename("Art", "Other").is_err());
+    assert!(notebook.create_group("", "Art").is_err());
+
+    fs::set_permissions(root.join("Art"), fs::Permissions::from_mode(0o755)).unwrap();
+    notebook.refresh().unwrap();
+    assert!(notebook.catalog().unavailable.is_empty());
+    assert_eq!(notebook.catalog().groups.len(), 2);
+
+    // The notebook's own folder is still the notebook.
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = notebook.refresh();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(denied.is_err());
+}

@@ -1,0 +1,6 @@
+WinActivate("ahk_exe ONENOTE.EXE")
+CoordMode("Mouse", "Screen")
+Click(202, 36)
+Sleep(600)
+Click(443, 80)
+Sleep(1500)

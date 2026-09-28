@@ -280,7 +280,10 @@ fn a_moved_page_anchor_places_the_page_without_regenerating_dependent_identities
         .pages()
         .unwrap();
     // The remote made `child` and `grandchild` subpages; `Renamed` stayed.
-    let at = listed.iter().position(|listed| listed.0 == pages[6].0).unwrap();
+    let at = listed
+        .iter()
+        .position(|listed| listed.0 == pages[6].0)
+        .unwrap();
     assert_eq!(listed[at - 1].0, page.space());
     let store = Store::parse(&server.durable).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();

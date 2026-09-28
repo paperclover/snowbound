@@ -67,7 +67,15 @@ fn geometry_and_expansion_preserve_unrelated_properties_objects_and_history() {
     for (name, sid, object, edit) in cases(&document) {
         let restored = serde_json::from_value(serde_json::to_value(edit).unwrap()).unwrap();
         assert_eq!(edit, restored);
-        let prepared = ops::page_op(SOURCE, sid, PageOp::Outline { object, edit: restored }).unwrap();
+        let prepared = ops::page_op(
+            SOURCE,
+            sid,
+            PageOp::Outline {
+                object,
+                edit: restored,
+            },
+        )
+        .unwrap();
         let after_store = Store::parse(prepared.as_bytes()).unwrap();
         assert!(after_store.checksum_mismatches.is_empty());
         let after_index = RevisionIndex::parse(&after_store).unwrap();
@@ -144,7 +152,8 @@ fn geometry_and_expansion_preserve_unrelated_properties_objects_and_history() {
                 assert_eq!(old_space.labels, after_index.spaces[space_id].labels);
             }
         }
-        let again = ops::page_op(prepared.as_bytes(), sid, PageOp::Outline { object, edit }).unwrap();
+        let again =
+            ops::page_op(prepared.as_bytes(), sid, PageOp::Outline { object, edit }).unwrap();
         assert_eq!(again.as_bytes(), prepared.as_bytes());
     }
 }
@@ -169,10 +178,17 @@ fn invalid_geometry_and_non_outline_targets_are_rejected() {
         }
         for points in [-1.0, 0.0, 35.999] {
             assert!(
-                ops::page_op(SOURCE, sid, PageOp::Outline { object, edit: Edit::Width {
-                        points,
-                        user_set: false
-                    } })
+                ops::page_op(
+                    SOURCE,
+                    sid,
+                    PageOp::Outline {
+                        object,
+                        edit: Edit::Width {
+                            points,
+                            user_set: false
+                        }
+                    }
+                )
                 .is_err()
             );
         }
@@ -181,8 +197,15 @@ fn invalid_geometry_and_non_outline_targets_are_rejected() {
         for (id, node) in &view.nodes {
             if !matches!(node.kind, Kind::Outline { .. }) {
                 assert!(
-                    ops::page_op(SOURCE, sid, PageOp::Outline { object: *id, edit: Edit::Position { x: 72.0, y: 72.0 } })
-                        .is_err()
+                    ops::page_op(
+                        SOURCE,
+                        sid,
+                        PageOp::Outline {
+                            object: *id,
+                            edit: Edit::Position { x: 72.0, y: 72.0 }
+                        }
+                    )
+                    .is_err()
                 );
             }
             if matches!(node.kind, Kind::Title) {
@@ -197,20 +220,55 @@ fn invalid_geometry_and_non_outline_targets_are_rejected() {
                         },
                         Edit::Collapsed(true),
                     ] {
-                        assert!(ops::page_op(SOURCE, sid, PageOp::Outline { object: child, edit }).is_err());
+                        assert!(
+                            ops::page_op(
+                                SOURCE,
+                                sid,
+                                PageOp::Outline {
+                                    object: child,
+                                    edit
+                                }
+                            )
+                            .is_err()
+                        );
                     }
                 }
             }
             if !matches!(node.kind, Kind::Paragraph { .. }) {
-                assert!(ops::page_op(SOURCE, sid, PageOp::Outline { object: *id, edit: Edit::Collapsed(true) }).is_err());
+                assert!(
+                    ops::page_op(
+                        SOURCE,
+                        sid,
+                        PageOp::Outline {
+                            object: *id,
+                            edit: Edit::Collapsed(true)
+                        }
+                    )
+                    .is_err()
+                );
             }
         }
         assert!(
-            ops::page_op(SOURCE, ExGuid::default(), PageOp::Outline { object, edit: Edit::Collapsed(true) })
-                .is_err()
+            ops::page_op(
+                SOURCE,
+                ExGuid::default(),
+                PageOp::Outline {
+                    object,
+                    edit: Edit::Collapsed(true)
+                }
+            )
+            .is_err()
         );
         assert!(
-            ops::page_op(SOURCE, sid, PageOp::Outline { object: ExGuid::default(), edit: Edit::Collapsed(true) }).is_err()
+            ops::page_op(
+                SOURCE,
+                sid,
+                PageOp::Outline {
+                    object: ExGuid::default(),
+                    edit: Edit::Collapsed(true)
+                }
+            )
+            .is_err()
         );
     }
 }
@@ -228,10 +286,17 @@ fn resizing_a_native_reserved_width_preserves_content() {
     let space = &document.spaces[&sid];
     let before = &space.revisions[&space.contexts[&ExGuid::default()]];
     assert!(before.nodes[&object].layout.reserved_width.is_some());
-    let edit = ops::page_op(source, sid, PageOp::Outline { object, edit: Edit::Width {
-            points: 144.0,
-            user_set: true,
-        } })
+    let edit = ops::page_op(
+        source,
+        sid,
+        PageOp::Outline {
+            object,
+            edit: Edit::Width {
+                points: 144.0,
+                user_set: true,
+            },
+        },
+    )
     .unwrap();
     let after_store = Store::parse(edit.as_bytes()).unwrap();
     let after_index = RevisionIndex::parse(&after_store).unwrap();
@@ -279,8 +344,15 @@ fn outline_movement_updates_both_automatic_title_fields_without_changing_content
         (144.0, 36.0, "First"),
         (0.0, 144.0, "First"),
     ] {
-        let edit = ops::page_op(&source, sid, PageOp::Outline { object: insertion, edit: Edit::Position { x, y } })
-            .unwrap();
+        let edit = ops::page_op(
+            &source,
+            sid,
+            PageOp::Outline {
+                object: insertion,
+                edit: Edit::Position { x, y },
+            },
+        )
+        .unwrap();
         let saved = Store::parse(edit.as_bytes()).unwrap();
         let saved_index = RevisionIndex::parse(&saved).unwrap();
         saved_index.validate_current().unwrap();
@@ -311,7 +383,14 @@ fn outline_movement_updates_both_automatic_title_fields_without_changing_content
             format!("{:?}", saved_index.resolve(sid, rid).unwrap())
         );
         assert_eq!(
-            ops::page_op(edit.as_bytes(), sid, PageOp::Outline { object: insertion, edit: Edit::Position { x, y } })
+            ops::page_op(
+                edit.as_bytes(),
+                sid,
+                PageOp::Outline {
+                    object: insertion,
+                    edit: Edit::Position { x, y }
+                }
+            )
             .unwrap()
             .as_bytes(),
             edit.as_bytes()
@@ -352,10 +431,17 @@ fn native_automatic_and_explicit_titles_follow_outline_movement() {
                 72.0
             },
         };
-        candidate = ops::page_op(&candidate, sid, PageOp::Outline { object: outline, edit: change })
-            .unwrap()
-            .as_bytes()
-            .to_vec();
+        candidate = ops::page_op(
+            &candidate,
+            sid,
+            PageOp::Outline {
+                object: outline,
+                edit: change,
+            },
+        )
+        .unwrap()
+        .as_bytes()
+        .to_vec();
         let store = Store::parse(&candidate).unwrap();
         let saved = RevisionIndex::parse(&store).unwrap();
         saved.validate_current().unwrap();
@@ -417,7 +503,15 @@ fn outline_publication_interruptions_reopen_as_complete_old_or_new_layout() {
         ),
         (paragraph, Edit::Collapsed(true)),
     ] {
-        let edit = ops::page_op(&source, sid, PageOp::Outline { object, edit: operation }).unwrap();
+        let edit = ops::page_op(
+            &source,
+            sid,
+            PageOp::Outline {
+                object,
+                edit: operation,
+            },
+        )
+        .unwrap();
         let before = current::current(&source);
         let after = current::current(edit.as_bytes());
         for write_limit in [17, 4096] {

@@ -53,3 +53,41 @@ corpus/link-edit/candidate OUTPUT` and the written one with
 `ONESTORE_MATH_EXPORT` set while running the test, then
 `tools/native_runner.py OUTPUT COLD --expected-pages 1 --collect-notebook
 --screenshots`.
+
+`native-editor-4/` is a fourth `tools/native_math.py` session repeating most
+of the forms above and adding `e^(x+1)`, `\alpha+\beta` (which stays linear
+text: one run between objects, Greek in mathematical italic),
+`(a+b)/(c+d)`, `x^2+y^2=z^2`, `lim_(n\to\infty) a_n` (a function-apply
+object, 17 with U+2061, around a limit; not built by the linear reading
+here) and `{a+b}`; `x_i^2` kept the editor's “Type equation here.”
+placeholder (11 with `⬚`), as the editor was still opening.
+
+`native-linear/` is the linear form OneNote 2010 shows and stores after
+Equation Tools, Design, Linear, applied to each equation of a session like the
+fourth one plus `x^2+1` and `(a+b)/(c+d)`. It was authored interactively in a
+lab clone through its desktop agent (clicking each equation, then Linear), as
+the key tips and the equation's context menu would not switch it from a
+script; `notebook/links.one` is the section OneNote saved on closing. Each
+equation becomes one run of math between objects: letters in mathematical
+italic, arguments of more than one factor in parentheses, an n-ary body after
+`▒` inside `〖〗`, `√(n&x)` for a root's degree and `∛` for a cube root,
+`■(1&2@3&4)` and `█(x&=1@y&=2)` for arrays, `𝑥┴2`, `𝑥┬2`, `□𝑥`, `▭𝑥`, `¯𝑥`,
+and an accent after a no-break space.
+
+`crates/onestore/tests/page_math.rs` builds every typed expression with
+`Math::from_linear` and compares it with what the editor stored, run by run,
+writes each tree back as the linear text OneNote showed, and rebuilds every
+native equation from its linear form; `crates/canvas/src/editor/equation.rs`
+types the same keys into the canvas editor, building up at each space.
+
+`native-enter/` is OneNote 2010 pressing Enter around equations and a link,
+driven by `tools/native_enter.py`: Enter at an equation's start moves the
+equation to a paragraph of its own; inside the equation's own row it stores a
+line break (`\r`, a plain run) in the paragraph, the equation's two sides
+becoming two equations (two MathML blocks in the read); inside a fraction's
+denominator it makes that argument an equation array (15, `█`) of the two
+parts; at a link's start the whole link, field code and label, moves down. An
+interactive session showed that Enter inside a link opens it instead.
+`crates/canvas/tests/links_equations.rs` presses the same keys in the editor and
+compares every paragraph's runs, and `page_math.rs` compares each equation's
+MathML with the read.

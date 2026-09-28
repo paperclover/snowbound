@@ -149,6 +149,10 @@ impl Math {
             Math::Identifier(c) => tag(out, "mi", &c.to_string()),
             Math::Function(name) => tag(out, "mi", name),
             Math::Number(n) => tag(out, "mn", n),
+            // A parenthesis an object does not pair, as in linear text, is no fence.
+            Math::Operator(c @ ('(' | ')')) => {
+                out.push_str(&format!("<mml:mo fence=\"false\">{c}</mml:mo>"));
+            }
             Math::Operator(c) => tag(out, "mo", &c.to_string()),
             Math::Object {
                 kind,
@@ -346,7 +350,7 @@ fn tag(out: &mut String, element: &str, content: &str) {
 
 /// OneNote exports mathematical italic Latin letters as their plain letters and leaves every
 /// other alphabet (Greek, double-struck, …) as stored.
-fn plain(c: char) -> char {
+pub(crate) fn plain(c: char) -> char {
     match u32::from(c) {
         code @ 0x1d434..=0x1d44d => char::from_u32(code - 0x1d434 + u32::from('A')).unwrap(),
         code @ 0x1d44e..=0x1d467 => char::from_u32(code - 0x1d44e + u32::from('a')).unwrap(),
@@ -358,27 +362,32 @@ fn plain(c: char) -> char {
 impl Math {
     /// The paragraph OneNote stores for `nodes`: linear text with object controls, every run
     /// formatted the way the equation editor formats it (Cambria Math, italic, the math flags
-    /// and the math language over `base`), and the run data each object carries.
+    /// and the math language over `base`; function names upright), and the run data each object
+    /// carries.
+    /// How the equation editor formats math typed over `base`, before it builds up: as a
+    /// run between objects.
+    pub fn format(base: &crate::document::Format) -> crate::document::Format {
+        let mut format = style(base);
+        format.math_object = Some(MathObject {
+            kind: PLAIN_RUN,
+            arguments: None,
+            columns: None,
+            symbols: Vec::new(),
+        });
+        format
+    }
+
     pub fn paragraph(nodes: &[Math], base: &crate::document::Format) -> Paragraph {
-        let mut style = base.clone();
-        style.italic = Some(true);
-        style.hidden = Some(false);
-        style.hyperlink = Some(false);
-        style.math = Some(true);
-        style.embedded_object = Some(true);
-        style.font = Some("Cambria Math".into());
-        style.language = Some(0x1007f);
-        let mut runs: Vec<(String, Option<MathObject>)> = Vec::new();
-        write_sequence(nodes, &mut runs);
-        Paragraph::from_runs(runs.into_iter().map(|(text, object)| {
+        let style = style(base);
+        let mut runs = Vec::new();
+        write_sequence(nodes, None, &mut runs);
+        Paragraph::from_runs(runs.into_iter().map(|run| {
             let mut format = style.clone();
-            format.math_object = Some(object.unwrap_or(MathObject {
-                kind: PLAIN_RUN,
-                arguments: None,
-                columns: None,
-                symbols: Vec::new(),
-            }));
-            (text, format)
+            if run.upright {
+                format.italic = Some(false);
+            }
+            format.math_object = Some(run.object);
+            (run.text, format)
         }))
     }
 }
@@ -386,12 +395,56 @@ impl Math {
 /// The object kind OneNote gives runs between objects.
 const PLAIN_RUN: u32 = 0x9000_0000;
 
-fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) {
+/// How the equation editor formats math over `base`.
+fn style(base: &crate::document::Format) -> crate::document::Format {
+    let mut style = base.clone();
+    style.italic = Some(true);
+    style.hidden = Some(false);
+    style.hyperlink = Some(false);
+    style.hyperlink_label = None;
+    style.math = Some(true);
+    style.embedded_object = Some(true);
+    style.font = Some("Cambria Math".into());
+    style.language = Some(0x1007f);
+    style
+}
+
+struct Run {
+    text: String,
+    object: MathObject,
+    upright: bool,
+    /// Text alone, which the control ending its argument may join.
+    leaf: bool,
+}
+
+/// Runs for `nodes`, an argument of an object of kind `within` or the equation itself. Text
+/// in an argument carries its object's kind, as the equation editor stores it.
+fn write_sequence(nodes: &[Math], within: Option<u32>, runs: &mut Vec<Run>) {
+    let object = || MathObject {
+        kind: within.unwrap_or(PLAIN_RUN),
+        arguments: None,
+        columns: None,
+        symbols: Vec::new(),
+    };
     let mut leaf = String::new();
+    let flush = |leaf: &mut String, runs: &mut Vec<Run>, upright: bool| {
+        if !leaf.is_empty() {
+            runs.push(Run {
+                text: std::mem::take(leaf),
+                object: object(),
+                upright,
+                leaf: true,
+            });
+        }
+    };
     for node in nodes {
         match node {
             Math::Identifier(c) => leaf.push(italic(*c)),
-            Math::Function(name) => leaf.push_str(name),
+            Math::Function(name) => {
+                flush(&mut leaf, runs, false);
+                leaf.push_str(name);
+                flush(&mut leaf, runs, true);
+            }
             Math::Number(n) => leaf.push_str(n),
             Math::Operator(c) => leaf.push(*c),
             Math::Object {
@@ -400,21 +453,22 @@ fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) 
                 columns,
                 arguments,
             } => {
-                if !leaf.is_empty() {
-                    runs.push((std::mem::take(&mut leaf), None));
-                }
-                runs.push((
-                    OBJECT_START.to_string(),
-                    Some(MathObject {
+                flush(&mut leaf, runs, false);
+                runs.push(Run {
+                    text: OBJECT_START.to_string(),
+                    object: MathObject {
                         kind: *kind,
                         arguments: Some(arguments.len() as u32),
                         columns: *columns,
                         symbols: symbols.clone(),
-                    }),
-                ));
+                    },
+                    upright: false,
+                    leaf: false,
+                });
                 for (index, argument) in arguments.iter().enumerate() {
                     let before = runs.len();
-                    write_sequence(argument, runs);
+                    write_sequence(argument, Some(*kind), runs);
+                    let extended = runs.len() > before;
                     let control = if index + 1 == arguments.len() {
                         OBJECT_END
                     } else {
@@ -426,29 +480,33 @@ fn write_sequence(nodes: &[Math], runs: &mut Vec<(String, Option<MathObject>)>) 
                         columns: None,
                         symbols: Vec::new(),
                     };
-                    let extended = runs.len() > before;
                     match runs.last_mut() {
-                        Some((text, slot)) if extended && slot.is_none() => {
-                            text.push(control);
-                            *slot = Some(object);
+                        Some(run) if extended && run.leaf && !run.upright => {
+                            run.text.push(control);
+                            run.object = object;
+                            run.leaf = false;
                         }
-                        _ => runs.push((control.to_string(), Some(object))),
+                        _ => runs.push(Run {
+                            text: control.to_string(),
+                            object,
+                            upright: false,
+                            leaf: false,
+                        }),
                     }
                 }
             }
         }
     }
-    if !leaf.is_empty() {
-        runs.push((leaf, None));
-    }
+    flush(&mut leaf, runs, false);
 }
 
-/// The equation editor stores Latin letters as mathematical italics.
-fn italic(c: char) -> char {
+/// The equation editor stores Latin letters and lowercase Greek as mathematical italics.
+pub(crate) fn italic(c: char) -> char {
     match c {
         'h' => '\u{210e}',
         'A'..='Z' => char::from_u32(0x1d434 + u32::from(c) - u32::from('A')).unwrap(),
         'a'..='z' => char::from_u32(0x1d44e + u32::from(c) - u32::from('a')).unwrap(),
+        'α'..='ω' => char::from_u32(0x1d6fc + u32::from(c) - u32::from('α')).unwrap(),
         c => c,
     }
 }

@@ -577,7 +577,9 @@ fn attributes(
     }
     let color =
         |value: u32| (value != 0xff000000).then(|| value.to_le_bytes()[..3].try_into().unwrap());
-    value!(font, Font, |font: &String| TextAttribute::Font(font.clone()));
+    value!(font, Font, |font: &String| TextAttribute::Font(
+        font.clone()
+    ));
     value!(font_size, FontSize, |size: &f32| TextAttribute::FontSize(
         *size
     ));
@@ -690,9 +692,11 @@ pub(crate) fn same_tags(a: &[Tag], b: &[Tag]) -> bool {
 fn ordinary(text: &TextObject) -> bool {
     text.date_field.is_none()
         && !text.text.text().contains('\u{fffc}')
-        && text.text.spans().iter().all(|span| {
-            span.format.math != Some(true) && span.format.embedded_object != Some(true)
-        })
+        && text
+            .text
+            .spans()
+            .iter()
+            .all(|span| span.format.math != Some(true) && span.format.embedded_object != Some(true))
 }
 
 /// Whether a split at `offset` would divide a hyperlink, which the writer refuses.
@@ -936,7 +940,13 @@ impl Lowering {
                     continue;
                 }
                 let adopts_right = previous.text.text().is_empty();
-                if after.id != if adopts_right { removed.id } else { previous.id } {
+                if after.id
+                    != if adopts_right {
+                        removed.id
+                    } else {
+                        previous.id
+                    }
+                {
                     continue;
                 }
                 self.emit(PageOp::Join {
@@ -1025,7 +1035,11 @@ impl Lowering {
                 }
                 let object = match object {
                     PageObject::Outline(outline) => {
-                        if outline.paragraphs.iter().any(|p| old.paragraphs.contains_key(&p.id)) {
+                        if outline
+                            .paragraphs
+                            .iter()
+                            .any(|p| old.paragraphs.contains_key(&p.id))
+                        {
                             return Err(invalid(
                                 "A new outline holds new paragraphs; move stored ones after",
                             ));
@@ -1233,11 +1247,21 @@ impl Lowering {
         let mut deleted: Option<Vec<u32>> = None;
         let mut added: Option<Vec<u32>> = None;
         for row in &kept_rows {
-            let old_cells: Vec<ExGuid> = before.rows.iter().find(|r| r.id == *row).unwrap().cells
+            let old_cells: Vec<ExGuid> = before
+                .rows
+                .iter()
+                .find(|r| r.id == *row)
+                .unwrap()
+                .cells
                 .iter()
                 .map(|cell| cell.id)
                 .collect();
-            let new_cells: Vec<ExGuid> = after.rows.iter().find(|r| r.id == *row).unwrap().cells
+            let new_cells: Vec<ExGuid> = after
+                .rows
+                .iter()
+                .find(|r| r.id == *row)
+                .unwrap()
+                .cells
                 .iter()
                 .map(|cell| cell.id)
                 .collect();
@@ -1382,9 +1406,10 @@ impl Lowering {
                 (ParagraphContent::Ink(stored), ParagraphContent::Ink(ink)) if stored != ink => {
                     self.strokes(stored, ink)?;
                 }
-                (ParagraphContent::Attachment(stored), ParagraphContent::Attachment(attachment))
-                    if stored != attachment =>
-                {
+                (
+                    ParagraphContent::Attachment(stored),
+                    ParagraphContent::Attachment(attachment),
+                ) if stored != attachment => {
                     self.emit(PageOp::Attachment {
                         attachment: attachment.id,
                         filename: attachment.filename.clone(),
@@ -1520,8 +1545,8 @@ impl Lowering {
             {
                 continue;
             }
-            let stored =
-                stored.ok_or_else(|| invalid("An equation paragraph is missing after placement"))?;
+            let stored = stored
+                .ok_or_else(|| invalid("An equation paragraph is missing after placement"))?;
             if stored.text != text.text {
                 self.emit(PageOp::Equation {
                     text: stored.id,
@@ -1611,10 +1636,14 @@ impl Lowering {
             let current = model::paragraph(&self.current, *id)
                 .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
             let same = paragraph.lists.len() == current.lists.len()
-                && paragraph.lists.iter().zip(&current.lists).all(|(model, node)| {
-                    model == node
-                        && after.definitions.get(model) == self.current.definitions.get(node)
-                });
+                && paragraph
+                    .lists
+                    .iter()
+                    .zip(&current.lists)
+                    .all(|(model, node)| {
+                        model == node
+                            && after.definitions.get(model) == self.current.definitions.get(node)
+                    });
             if same {
                 continue;
             }

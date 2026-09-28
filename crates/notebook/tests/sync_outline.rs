@@ -301,7 +301,10 @@ fn competing_layout_keeps_the_local_one_on_a_conflict_page() {
         let mut section = onestore::Section::open(&arena, server.durable.clone()).unwrap();
         let conflict = section.conflicts().unwrap()[0].1[0].space;
         let kept = section.page(conflict).unwrap();
-        assert_eq!(body_outlines(&kept)[0].layout, outline_of(&local, outline).layout);
+        assert_eq!(
+            body_outlines(&kept)[0].layout,
+            outline_of(&local, outline).layout
+        );
         let dependent = save(&cache, text_id, |page| {
             replace_text(page, text_id, 0..0, "Local ")
         })

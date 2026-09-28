@@ -1,9 +1,9 @@
-#[path = "support/ops.rs"]
-mod ops;
 #[path = "support/current.rs"]
 mod current;
 #[path = "support/disk.rs"]
 mod disk;
+#[path = "support/ops.rs"]
+mod ops;
 #[path = "support/sweep.rs"]
 mod sweep;
 use onestore::{
@@ -90,7 +90,16 @@ fn overlapping_unicode_format_edits_match_an_independent_character_model() {
                     json!(0x00ff00_u32),
                 ),
             };
-            let edit = ops::page_op(&source, sid, PageOp::Format { text: id, range: offsets[start]..offsets[end], set: std::slice::from_ref(&attribute).to_vec(), clear: Vec::new() })
+            let edit = ops::page_op(
+                &source,
+                sid,
+                PageOp::Format {
+                    text: id,
+                    range: offsets[start]..offsets[end],
+                    set: std::slice::from_ref(&attribute).to_vec(),
+                    clear: Vec::new(),
+                },
+            )
             .unwrap();
             for (_, style) in &mut expected[start..end] {
                 style[key] = value.clone();
@@ -101,7 +110,16 @@ fn overlapping_unicode_format_edits_match_an_independent_character_model() {
                 "seed {seed}, step {step}"
             );
             assert_eq!(
-                ops::page_op(edit.as_bytes(), sid, PageOp::Format { text: id, range: offsets[start]..offsets[end], set: vec![attribute], clear: Vec::new() })
+                ops::page_op(
+                    edit.as_bytes(),
+                    sid,
+                    PageOp::Format {
+                        text: id,
+                        range: offsets[start]..offsets[end],
+                        set: vec![attribute],
+                        clear: Vec::new()
+                    }
+                )
                 .unwrap()
                 .as_bytes(),
                 edit.as_bytes()
@@ -123,9 +141,27 @@ fn overlapping_unicode_format_edits_match_an_independent_character_model() {
 fn script_positions_are_exclusive_and_explicit_false_overrides_true() {
     let source = onestore::create_section("script.one", "abc", "Author").unwrap();
     let (sid, id) = target(&source);
-    let superscript = ops::page_op(&source, sid, PageOp::Format { text: id, range: 0..3, set: vec![A::Superscript(true), A::Bold(true)], clear: Vec::new() })
+    let superscript = ops::page_op(
+        &source,
+        sid,
+        PageOp::Format {
+            text: id,
+            range: 0..3,
+            set: vec![A::Superscript(true), A::Bold(true)],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
-    let subscript = ops::page_op(superscript.as_bytes(), sid, PageOp::Format { text: id, range: 1..2, set: vec![A::Subscript(true), A::Bold(false)], clear: Vec::new() })
+    let subscript = ops::page_op(
+        superscript.as_bytes(),
+        sid,
+        PageOp::Format {
+            text: id,
+            range: 1..2,
+            set: vec![A::Subscript(true), A::Bold(false)],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
     let chars = characters(subscript.as_bytes(), sid, id);
     assert_eq!(chars[0].1["superscript"], true);
@@ -140,9 +176,27 @@ fn script_positions_are_exclusive_and_explicit_false_overrides_true() {
 fn empty_paragraph_style_is_used_by_later_text_edits() {
     let source = onestore::create_section("empty.one", "", "Author").unwrap();
     let (sid, id) = target(&source);
-    let formatted = ops::page_op(&source, sid, PageOp::Format { text: id, range: 0..0, set: vec![A::Italic(true), A::FontSize(18.0)], clear: Vec::new() })
+    let formatted = ops::page_op(
+        &source,
+        sid,
+        PageOp::Format {
+            text: id,
+            range: 0..0,
+            set: vec![A::Italic(true), A::FontSize(18.0)],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
-    let filled = ops::page_op(formatted.as_bytes(), sid, PageOp::Text { text: id, range: 0..0, with: "Added 🦀".into() }).unwrap();
+    let filled = ops::page_op(
+        formatted.as_bytes(),
+        sid,
+        PageOp::Text {
+            text: id,
+            range: 0..0,
+            with: "Added 🦀".into(),
+        },
+    )
+    .unwrap();
     for (_, format) in characters(filled.as_bytes(), sid, id) {
         assert_eq!(format["italic"], true);
         assert_eq!(format["font_size"], 18.0);
@@ -154,7 +208,19 @@ fn invalid_ranges_attributes_and_fields_are_rejected() {
     let (sid, id) = target(&source);
     for (start, end) in [(2, 3), (1, 2), (0, 8), (2, 2), (3, 1), (1, 1)] {
         let range = start..end;
-        assert!(ops::page_op(&source, sid, PageOp::Format { text: id, range, set: vec![A::Bold(true)], clear: Vec::new() }).is_err());
+        assert!(
+            ops::page_op(
+                &source,
+                sid,
+                PageOp::Format {
+                    text: id,
+                    range,
+                    set: vec![A::Bold(true)],
+                    clear: Vec::new()
+                }
+            )
+            .is_err()
+        );
     }
     for attributes in [
         vec![],
@@ -163,18 +229,63 @@ fn invalid_ranges_attributes_and_fields_are_rejected() {
         vec![A::Font("".into())],
         vec![A::Font("a\0b".into())],
     ] {
-        assert!(ops::page_op(&source, sid, PageOp::Format { text: id, range: 0..4, set: attributes.to_vec(), clear: Vec::new() }).is_err());
+        assert!(
+            ops::page_op(
+                &source,
+                sid,
+                PageOp::Format {
+                    text: id,
+                    range: 0..4,
+                    set: attributes.to_vec(),
+                    clear: Vec::new()
+                }
+            )
+            .is_err()
+        );
     }
     for size in [f32::NAN, f32::INFINITY, 0.0, 5.5, 130.5, 144.0, 144.5, 12.1] {
-        assert!(ops::page_op(&source, sid, PageOp::Format { text: id, range: 0..4, set: vec![A::FontSize(size)], clear: Vec::new() }).is_err());
+        assert!(
+            ops::page_op(
+                &source,
+                sid,
+                PageOp::Format {
+                    text: id,
+                    range: 0..4,
+                    set: vec![A::FontSize(size)],
+                    clear: Vec::new()
+                }
+            )
+            .is_err()
+        );
     }
-    assert!(ops::page_op(&source, sid, PageOp::Format { text: ExGuid::default(), range: 0..4, set: vec![A::Bold(true)], clear: Vec::new() }).is_err());
+    assert!(
+        ops::page_op(
+            &source,
+            sid,
+            PageOp::Format {
+                text: ExGuid::default(),
+                range: 0..4,
+                set: vec![A::Bold(true)],
+                clear: Vec::new()
+            }
+        )
+        .is_err()
+    );
 }
 #[test]
 fn formatting_publication_faults_preserve_complete_old_or_new_styles() {
     let source = onestore::create_section("atomic.one", "Before 🦀 after", "Author").unwrap();
     let (sid, id) = target(&source);
-    let edit = ops::page_op(&source, sid, PageOp::Format { text: id, range: 2..10, set: vec![A::Bold(true), A::Color(Some([8, 64, 128]))], clear: Vec::new() })
+    let edit = ops::page_op(
+        &source,
+        sid,
+        PageOp::Format {
+            text: id,
+            range: 2..10,
+            set: vec![A::Bold(true), A::Color(Some([8, 64, 128]))],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
     let before = current::current(&source);
     let after = current::current(edit.as_bytes());
@@ -219,8 +330,17 @@ fn export_native_formatting_candidates() {
     let mut manifest = Vec::new();
     let mut save =
         |name: &str, source: &[u8], sid, id, range: std::ops::Range<u32>, attributes: &[A]| {
-            let prepared =
-                ops::page_op(source, sid, PageOp::Format { text: id, range: range.clone(), set: attributes.to_vec(), clear: Vec::new() }).unwrap();
+            let prepared = ops::page_op(
+                source,
+                sid,
+                PageOp::Format {
+                    text: id,
+                    range: range.clone(),
+                    set: attributes.to_vec(),
+                    clear: Vec::new(),
+                },
+            )
+            .unwrap();
             fs::write(output.join(format!("{name}.one")), prepared.as_bytes()).unwrap();
             manifest.push(
                 json!({"name":name,"space":sid,"object":id,"range":range,"attributes":attributes}),
@@ -298,9 +418,26 @@ fn export_native_formatting_candidates() {
     );
     let empty = onestore::create_section("empty.one", "", "Author").unwrap();
     let (empty_sid, empty_id) = target(&empty);
-    let formatted = ops::page_op(&empty, empty_sid, PageOp::Format { text: empty_id, range: 0..0, set: vec![A::FontSize(18.0), A::Italic(true)], clear: Vec::new() })
+    let formatted = ops::page_op(
+        &empty,
+        empty_sid,
+        PageOp::Format {
+            text: empty_id,
+            range: 0..0,
+            set: vec![A::FontSize(18.0), A::Italic(true)],
+            clear: Vec::new(),
+        },
+    )
     .unwrap();
-    let typed = ops::page_op(formatted.as_bytes(), empty_sid, PageOp::Text { text: empty_id, range: 0..0, with: "Typed café 🦀".into() })
+    let typed = ops::page_op(
+        formatted.as_bytes(),
+        empty_sid,
+        PageOp::Text {
+            text: empty_id,
+            range: 0..0,
+            with: "Typed café 🦀".into(),
+        },
+    )
     .unwrap();
     fs::write(output.join("empty-then-type.one"), typed.as_bytes()).unwrap();
     let native = include_bytes!("../../../corpus/native-ink/20260905-ui/notebook/synthetic.one");

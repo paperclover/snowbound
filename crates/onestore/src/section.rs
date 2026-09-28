@@ -9,12 +9,16 @@ use crate::{
     page::Page,
     store::StoreState,
     write::{
-        Appending, LiveRevision, Sealing, Written, chain_depth, check_transaction, declared,
-        replacement, unchanged,
+        Appending, Commit, LiveRevision, PropertyObject, Sealing, Written, chain_depth,
+        check_transaction, declared, label_payload, node, replacement, unchanged,
     },
 };
 use bumpalo::Bump;
 use std::collections::{BTreeMap, BTreeSet};
+
+mod versions;
+pub(crate) use versions::HISTORY;
+pub use versions::PageVersion;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -58,6 +62,58 @@ struct Space<'a> {
     /// The active revision the file stores; none before a new space's first seal.
     rid: Option<ExGuid>,
     state: SpaceState<'a>,
+    /// The version a restore took the open revision from: the revision it depends on, which
+    /// the seal writes even unchanged.
+    restored: Option<ExGuid>,
+    /// Page states restores made versions of, which the seal writes before the open revision.
+    frozen: Vec<Frozen<'a>>,
+    history: Option<History<'a>>,
+    /// Revisions the seal labels as versions, with their contexts.
+    labels: Vec<(ExGuid, ExGuid)>,
+    /// The newest revision a seal appended to the space.
+    newest: Option<ExGuid>,
+}
+
+impl<'a> Space<'a> {
+    fn new(rid: Option<ExGuid>, state: SpaceState<'a>, history: Option<History<'a>>) -> Self {
+        Self {
+            rid,
+            state,
+            restored: None,
+            frozen: Vec::new(),
+            history,
+            labels: Vec::new(),
+            newest: None,
+        }
+    }
+}
+
+/// A page state a restore made a version of: a revision under the identity it chose.
+#[derive(Clone)]
+struct Frozen<'a> {
+    rid: ExGuid,
+    previous: Option<ExGuid>,
+    live: LiveRevision<'a>,
+    revised: Revised,
+}
+
+/// A revision `changed` committed: what it declares, and of those the objects whose bytes it
+/// stores and the objects new to the space.
+#[derive(Clone)]
+struct Revised {
+    commit: Commit,
+    replaced: BTreeSet<ExGuid>,
+    created: BTreeSet<ExGuid>,
+}
+
+/// A page's version history (`versions::HISTORY`), with the objects edits since the last
+/// seal replaced in it.
+#[derive(Clone)]
+struct History<'a> {
+    rid: ExGuid,
+    revision: ResolvedRevision<'a>,
+    depth: usize,
+    pending: BTreeMap<ExGuid, PropertyObject>,
 }
 
 #[derive(Clone)]
@@ -105,50 +161,24 @@ impl<'a> Section<'a> {
             let Some(rid) = space.labels.get(&(ExGuid::default(), 1)).copied() else {
                 continue;
             };
-            let resolved = index.resolve(*id, rid)?;
-            let revision = ResolvedRevision {
-                roots: resolved.roots,
-                objects: resolved
-                    .objects
-                    .into_iter()
-                    .map(|(id, object)| {
-                        // The parse borrows `bytes` only as long as `store`; its slices lie
-                        // in `bytes`, which the arena keeps.
-                        let data = match object.data {
-                            ObjectData::Properties(data) => {
-                                ObjectData::Properties(within(bytes, data))
-                            }
-                            ObjectData::Encrypted(data) => {
-                                ObjectData::Encrypted(within(bytes, data))
-                            }
-                            ObjectData::File {
-                                reference,
-                                extension,
-                            } => ObjectData::File {
-                                reference: within(bytes, reference),
-                                extension: within(bytes, extension),
-                            },
-                        };
-                        let object = crate::Object {
-                            jcid: object.jcid,
-                            reference_count: object.reference_count,
-                            data,
-                            global_ids: object.global_ids,
-                        };
-                        (id, object)
+            let revision = bound(bytes, index.resolve(*id, rid)?);
+            let history = space
+                .labels
+                .get(&(versions::HISTORY, 1))
+                .map(|history| -> Result<History<'a>> {
+                    Ok(History {
+                        rid: *history,
+                        revision: bound(bytes, index.resolve(*id, *history)?),
+                        depth: chain_depth(&index, *id, *history),
+                        pending: BTreeMap::new(),
                     })
-                    .collect(),
+                })
+                .transpose()?;
+            let state = SpaceState::Stored {
+                revision,
+                depth: chain_depth(&index, *id, rid),
             };
-            spaces.insert(
-                *id,
-                Space {
-                    rid: Some(rid),
-                    state: SpaceState::Stored {
-                        revision,
-                        depth: chain_depth(&index, *id, rid),
-                    },
-                },
-            );
+            spaces.insert(*id, Space::new(Some(rid), state, history));
         }
         let mut files = Vec::new();
         for node in store.lists.values().flat_map(|list| &list.nodes) {
@@ -207,6 +237,15 @@ impl<'a> Section<'a> {
         self.spaces
             .iter()
             .filter_map(|(space, stored)| Some((*space, stored.rid?)))
+    }
+
+    /// Each object space with the revision this section last sealed in it, where one did, or
+    /// its active revision: a seal that changes only a page's versions leaves the page's
+    /// active revision as it was.
+    pub fn newest(&self) -> impl Iterator<Item = (ExGuid, ExGuid)> + '_ {
+        self.spaces
+            .iter()
+            .filter_map(|(space, stored)| Some((*space, stored.newest.or(stored.rid)?)))
     }
 
     /// The page an object space holds, with the changes applied since the last seal.
@@ -303,10 +342,14 @@ impl<'a> Section<'a> {
     /// own, so a page in another series than before was moved.
     pub fn series(&mut self) -> Result<BTreeMap<ExGuid, ExGuid>> {
         let view = &self.active(self.root)?.view;
-        let section = view.roots.get(&1).and_then(|id| view.nodes.get(id)).ok_or(Error {
-            offset: 0,
-            message: "Section root is unavailable",
-        })?;
+        let section = view
+            .roots
+            .get(&1)
+            .and_then(|id| view.nodes.get(id))
+            .ok_or(Error {
+                offset: 0,
+                message: "Section root is unavailable",
+            })?;
         Ok(section
             .children
             .iter()
@@ -375,7 +418,8 @@ impl<'a> Section<'a> {
                     title = alternate_title;
                 }
             }
-            pages.push((space, title.unwrap_or_default(), level));
+            let title = crate::edit::without_fields(&title.unwrap_or_default());
+            pages.push((space, title, level));
         }
         Ok(pages)
     }
@@ -447,6 +491,15 @@ impl<'a> Section<'a> {
         Ok(open)
     }
 
+    /// Keeps a space as it is for the running edit to return to, the first time it changes it.
+    pub(crate) fn remember(&mut self, space: ExGuid) {
+        if let Some(undo) = &mut self.undo
+            && !undo.spaces.contains_key(&space)
+        {
+            undo.spaces.insert(space, self.spaces.get(&space).cloned());
+        }
+    }
+
     /// Stores a writer's objects and payloads in a space until the next seal; false when
     /// it stores nothing. An error leaves the section to be reopened.
     pub(crate) fn apply_changes(
@@ -456,11 +509,7 @@ impl<'a> Section<'a> {
         changes: Changes,
     ) -> Result<bool> {
         self.usable()?;
-        if let Some(undo) = &mut self.undo
-            && !undo.spaces.contains_key(&space)
-        {
-            undo.spaces.insert(space, self.spaces.get(&space).cloned());
-        }
+        self.remember(space);
         let arena = &self.arena.0;
         self.broken = true;
         let open = self.editable(space)?;
@@ -519,17 +568,12 @@ impl<'a> Section<'a> {
         let all: Vec<ExGuid> = work.revision.objects.keys().copied().collect();
         work.settle(all)?;
         let page = ActivePage::open(space, work, FileType::Section, self.files())?;
-        self.spaces.insert(
-            space,
-            Space {
-                rid: None,
-                state: SpaceState::Open(Box::new(Open {
-                    file,
-                    page,
-                    pending,
-                })),
-            },
-        );
+        let state = SpaceState::Open(Box::new(Open {
+            file,
+            page,
+            pending,
+        }));
+        self.spaces.insert(space, Space::new(None, state, None));
         self.broken = false;
         Ok(())
     }
@@ -595,69 +639,124 @@ impl<'a> Section<'a> {
         let mut appending = Appending::new(self.state.clone());
         let mut sealed = Vec::new();
         for (id, space) in &mut self.spaces {
-            let SpaceState::Open(open) = &mut space.state else {
-                continue;
-            };
-            if open.pending.is_empty() {
-                continue;
+            // A space's revisions and labels go in one fragment: page states restores made
+            // versions of, the open revision, the version history, then the labels.
+            let mut manifest = Vec::new();
+            for frozen in &space.frozen {
+                appending.manifest(
+                    &Sealing {
+                        space: *id,
+                        previous: frozen.previous,
+                        new_space: false,
+                        label: (ExGuid::default(), 1),
+                        rid: Some(frozen.rid),
+                        live: &frozen.live,
+                        commit: &frozen.revised.commit,
+                        replaced: &frozen.revised.replaced,
+                        created: &frozen.revised.created,
+                    },
+                    &self.segments,
+                    None,
+                    None,
+                    &mut manifest,
+                )?;
             }
-            let (work, file) = (&open.page.live, &mut open.file);
-            let mut replacements = BTreeMap::new();
-            for object_id in &open.pending {
-                if !work.is_reachable(*object_id) {
-                    continue;
-                }
-                let object = &work.revision.objects[object_id];
-                if let Some(stored) = file.revision.objects.get(object_id)
-                    && unchanged(stored, object)?
+            let mut page = None;
+            if let SpaceState::Open(open) = &mut space.state
+                && (!open.pending.is_empty() || space.restored.is_some())
+            {
+                let file = &mut open.file;
+                let restored = space.restored.is_some();
+                let written = match changed(arena, &open.page.live, &open.pending, file, restored)?
                 {
-                    continue;
-                }
-                replacements.insert(*object_id, replacement(*object_id, object)?);
-            }
-            let replacements = file.prepare(replacements, true)?;
-            if replacements.is_empty() {
-                sealed.push((*id, None));
-                continue;
-            }
-            let replaced: BTreeSet<ExGuid> = replacements.keys().copied().collect();
-            let created = replaced
-                .iter()
-                .filter(|id| !file.revision.objects.contains_key(id))
-                .copied()
-                .collect();
-            let mut objects = Vec::new();
-            for (object_id, change) in replacements {
-                // The page holds these bytes already unless preparing remapped them.
-                let bytes = match work.revision.objects.get(&object_id).map(|o| o.data) {
-                    Some(ObjectData::Properties(bytes)) if bytes == change.bytes => bytes,
-                    _ => arena.alloc_slice_copy(&change.bytes),
+                    Some(Revised {
+                        commit,
+                        replaced,
+                        created,
+                    }) => {
+                        let (rid, stored) = appending.manifest(
+                            &Sealing {
+                                space: *id,
+                                previous: space.restored.or(space.rid),
+                                new_space: space.rid.is_none(),
+                                label: (ExGuid::default(), 1),
+                                rid: None,
+                                live: file,
+                                commit: &commit,
+                                replaced: &replaced,
+                                created: &created,
+                            },
+                            &self.segments,
+                            None,
+                            None,
+                            &mut manifest,
+                        )?;
+                        if commit.checkpoint {
+                            let all: Vec<ExGuid> = file.revision.objects.keys().copied().collect();
+                            file.settle(all)?;
+                        } else {
+                            file.settle(commit.changed.iter().copied())?;
+                        }
+                        Some((rid, stored, commit))
+                    }
+                    None => None,
                 };
-                objects.push((object_id, declared(change.jcid, bytes, change.global_ids)?));
+                page = Some(written);
             }
-            let commit = file.commit(objects)?;
-            let (rid, stored) = appending.revision(
-                &Sealing {
-                    space: *id,
-                    previous: space.rid,
-                    new_space: space.rid.is_none(),
-                    label: (ExGuid::default(), 1),
-                    live: file,
-                    commit: &commit,
-                    replaced: &replaced,
-                    created: &created,
-                },
-                &self.segments,
-                None,
-                None,
-            )?;
-            if commit.checkpoint {
-                let all: Vec<ExGuid> = file.revision.objects.keys().copied().collect();
-                file.settle(all)?;
-            } else {
-                file.settle(commit.changed.iter().copied())?;
+            let mut history = None;
+            if let Some(stored) = &space.history
+                && !stored.pending.is_empty()
+            {
+                let mut live = LiveRevision::new(stored.revision.clone(), stored.depth)?;
+                let replacements = live.prepare(stored.pending.clone(), true)?;
+                if !replacements.is_empty() {
+                    let replaced: BTreeSet<ExGuid> = replacements.keys().copied().collect();
+                    let created = replaced
+                        .iter()
+                        .filter(|id| !live.revision.objects.contains_key(id))
+                        .copied()
+                        .collect();
+                    let mut objects = Vec::new();
+                    for (object_id, change) in replacements {
+                        let bytes = arena.alloc_slice_copy(&change.bytes);
+                        objects.push((object_id, declared(change.jcid, bytes, change.global_ids)?));
+                    }
+                    let commit = live.commit(objects)?;
+                    let (rid, chunks) = appending.manifest(
+                        &Sealing {
+                            space: *id,
+                            previous: Some(stored.rid),
+                            new_space: false,
+                            label: (versions::HISTORY, 1),
+                            rid: None,
+                            live: &live,
+                            commit: &commit,
+                            replaced: &replaced,
+                            created: &created,
+                        },
+                        &self.segments,
+                        None,
+                        None,
+                        &mut manifest,
+                    )?;
+                    if commit.checkpoint {
+                        let all: Vec<ExGuid> = live.revision.objects.keys().copied().collect();
+                        live.settle(all)?;
+                    } else {
+                        live.settle(commit.changed.iter().copied())?;
+                    }
+                    history = Some((rid, chunks, live, commit));
+                }
             }
-            sealed.push((*id, Some((rid, stored, commit))));
+            for (rid, context) in &space.labels {
+                manifest.push(node(0x5d, None, &label_payload(*rid, *context))?);
+            }
+            if !manifest.is_empty() {
+                appending.close(*id, space.rid.is_none(), &manifest)?;
+            }
+            if page.is_some() || !manifest.is_empty() {
+                sealed.push((*id, page, history));
+            }
         }
         let payloads: Vec<_> = self
             .payloads
@@ -674,20 +773,46 @@ impl<'a> Section<'a> {
         }
         if let Some((transaction, state)) = &transaction {
             let mut written = Vec::new();
-            for (id, revision) in &sealed {
-                let (Some((rid, _, commit)), Some(space)) = (revision, self.spaces.get(id)) else {
-                    continue;
-                };
-                let SpaceState::Open(open) = &space.state else {
-                    unreachable!()
-                };
-                written.push(Written {
-                    space: *id,
-                    rid: *rid,
-                    previous: space.rid,
-                    live: &open.file,
-                    commit,
-                });
+            let mut labels = Vec::new();
+            for (id, page, history) in &sealed {
+                let space = &self.spaces[id];
+                for frozen in &space.frozen {
+                    written.push(Written {
+                        space: *id,
+                        rid: frozen.rid,
+                        previous: frozen.previous,
+                        label: (ExGuid::default(), 1),
+                        live: &frozen.live,
+                        commit: &frozen.revised.commit,
+                    });
+                }
+                if let (Some(Some((rid, _, commit))), SpaceState::Open(open)) = (page, &space.state)
+                {
+                    written.push(Written {
+                        space: *id,
+                        rid: *rid,
+                        previous: space.restored.or(space.rid),
+                        label: (ExGuid::default(), 1),
+                        live: &open.file,
+                        commit,
+                    });
+                }
+                if let (Some((rid, _, live, commit)), Some(stored)) = (history, &space.history) {
+                    written.push(Written {
+                        space: *id,
+                        rid: *rid,
+                        previous: Some(stored.rid),
+                        label: (versions::HISTORY, 1),
+                        live,
+                        commit,
+                    });
+                }
+                labels.extend(
+                    space
+                        .labels
+                        .iter()
+                        .map(|(rid, context)| (*id, *rid, *context)),
+                );
             }
             check_transaction(
                 &self.state,
@@ -695,6 +820,7 @@ impl<'a> Section<'a> {
                 transaction,
                 &self.segments,
                 &written,
+                &labels,
                 &payloads,
             )?;
             let base = transaction.base.length;
@@ -703,23 +829,42 @@ impl<'a> Section<'a> {
             self.patches.extend(transaction.patches.iter().cloned());
             self.state = state.clone();
             self.declared.extend(payloads.iter().map(|(guid, _)| *guid));
-            for (id, revision) in &sealed {
-                let Some((rid, stored, _)) = revision else {
-                    continue;
-                };
-                let space = self.spaces.get_mut(id).unwrap();
-                space.rid = Some(*rid);
-                let SpaceState::Open(open) = &mut space.state else {
-                    unreachable!()
-                };
+            let bind = |revision: &mut ResolvedRevision<'a>, stored: &[(ExGuid, crate::Chunk)]| {
                 for (object_id, chunk) in stored {
                     let start = (chunk.offset - base) as usize;
-                    open.file.revision.objects.get_mut(object_id).unwrap().data =
+                    revision.objects.get_mut(object_id).unwrap().data =
                         ObjectData::Properties(&segment[start..start + chunk.length as usize]);
+                }
+            };
+            for (id, page, history) in &mut sealed {
+                let space = self.spaces.get_mut(id).unwrap();
+                space.frozen.clear();
+                space.labels.clear();
+                if let (Some(Some((rid, stored, _))), SpaceState::Open(open)) =
+                    (&*page, &mut space.state)
+                {
+                    space.rid = Some(*rid);
+                    space.restored = None;
+                    space.newest = Some(*rid);
+                    bind(&mut open.file.revision, stored);
+                }
+                if let Some((rid, stored, live, _)) = history.take() {
+                    let mut revision = live.revision;
+                    bind(&mut revision, &stored);
+                    space.history = Some(History {
+                        rid,
+                        revision,
+                        depth: live.depth,
+                        pending: BTreeMap::new(),
+                    });
+                    space.newest = Some(rid);
                 }
             }
         }
-        for (id, revision) in sealed {
+        for (id, page, _) in sealed {
+            let Some(revision) = page else {
+                continue;
+            };
             let SpaceState::Open(open) = &mut self.spaces.get_mut(&id).unwrap().state else {
                 unreachable!()
             };
@@ -756,6 +901,87 @@ impl<'a> Section<'a> {
         transaction.apply(&mut image)?;
         *self = Self::open(self.arena, image)?;
         Ok(())
+    }
+}
+
+/// Commits to `file` the objects `pending` names that `page` changed, with what the revision
+/// declares, replaces and creates; none when that changes nothing, unless `force`.
+fn changed<'a>(
+    arena: &'a Bump,
+    page: &LiveRevision<'a>,
+    pending: &BTreeSet<ExGuid>,
+    file: &mut LiveRevision<'a>,
+    force: bool,
+) -> Result<Option<Revised>> {
+    let mut replacements = BTreeMap::new();
+    for object_id in pending {
+        if !page.is_reachable(*object_id) {
+            continue;
+        }
+        let object = &page.revision.objects[object_id];
+        if let Some(stored) = file.revision.objects.get(object_id)
+            && unchanged(stored, object)?
+        {
+            continue;
+        }
+        replacements.insert(*object_id, replacement(*object_id, object)?);
+    }
+    let replacements = file.prepare(replacements, true)?;
+    if replacements.is_empty() && !force {
+        return Ok(None);
+    }
+    let replaced: BTreeSet<ExGuid> = replacements.keys().copied().collect();
+    let created = replaced
+        .iter()
+        .filter(|id| !file.revision.objects.contains_key(id))
+        .copied()
+        .collect();
+    let mut objects = Vec::new();
+    for (object_id, change) in replacements {
+        // The page holds these bytes already unless preparing remapped them.
+        let bytes = match page.revision.objects.get(&object_id).map(|o| o.data) {
+            Some(ObjectData::Properties(bytes)) if bytes == change.bytes => bytes,
+            _ => arena.alloc_slice_copy(&change.bytes),
+        };
+        objects.push((object_id, declared(change.jcid, bytes, change.global_ids)?));
+    }
+    Ok(Some(Revised {
+        commit: file.commit(objects)?,
+        replaced,
+        created,
+    }))
+}
+
+/// `resolved`, parsed from `bytes`, borrowing them for their lifetime.
+fn bound<'a>(bytes: &'a [u8], resolved: ResolvedRevision<'_>) -> ResolvedRevision<'a> {
+    ResolvedRevision {
+        roots: resolved.roots,
+        objects: resolved
+            .objects
+            .into_iter()
+            .map(|(id, object)| {
+                // The parse borrows `bytes` only as long as its store; its slices lie in
+                // `bytes`, which the arena keeps.
+                let data = match object.data {
+                    ObjectData::Properties(data) => ObjectData::Properties(within(bytes, data)),
+                    ObjectData::Encrypted(data) => ObjectData::Encrypted(within(bytes, data)),
+                    ObjectData::File {
+                        reference,
+                        extension,
+                    } => ObjectData::File {
+                        reference: within(bytes, reference),
+                        extension: within(bytes, extension),
+                    },
+                };
+                let object = crate::Object {
+                    jcid: object.jcid,
+                    reference_count: object.reference_count,
+                    data,
+                    global_ids: object.global_ids,
+                };
+                (id, object)
+            })
+            .collect(),
     }
 }
 

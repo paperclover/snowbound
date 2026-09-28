@@ -1,3 +1,4 @@
+from importlib.util import find_spec
 from pathlib import Path
 import re
 import runpy
@@ -9,9 +10,12 @@ import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parent.parent
 compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
+requires_pdfplumber = unittest.skipUnless(
+    find_spec('pdfplumber'), 'pdfplumber is not installed; tools/TESTING.md sets up the Python lane')
 
 
 class DocumentOracleTest(unittest.TestCase):
+    @requires_pdfplumber
     def test_locked_table_width_requires_the_native_value(self):
         fixture = ROOT / 'corpus/m6/native-structure-01'
         with TemporaryDirectory() as temporary:
@@ -27,6 +31,7 @@ class DocumentOracleTest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, 'Locked table column width differs'):
                 compare(fixture / 'notebook', native)
 
+    @requires_pdfplumber
     def test_native_2010_does_not_render_the_documented_cell_shading_control(self):
         import pdfplumber
         fixture = ROOT / 'corpus/m6/cell-shading-control-01/read/page-001'
@@ -40,6 +45,7 @@ class DocumentOracleTest(unittest.TestCase):
             self.assertTrue(all(tuple(rect.get('non_stroking_color') or ()) != (1, 1, 0)
                                 for rect in table_page.rects))
 
+    @requires_pdfplumber
     def test_rust_saved_expansion_is_honored_by_a_fresh_native_cache(self):
         import pdfplumber
         fixture = ROOT / 'corpus/m6/rust-collapse-control-01'
@@ -53,6 +59,7 @@ class DocumentOracleTest(unittest.TestCase):
         self.assertIn('Hidden child remains stored', text)
         self.assertIn('Grandchild', text)
 
+    @requires_pdfplumber
     def test_native_expansion_changes_the_view_without_changing_notebook_bytes(self):
         import pdfplumber
         original = ROOT / 'corpus/m6/native-features-01/notebook/Features.one'
@@ -96,6 +103,7 @@ class DocumentOracleTest(unittest.TestCase):
             captures.append([ET.tostring(n) for n in equations])
         self.assertEqual(*captures)
 
+    @requires_pdfplumber
     def test_rtl_xml_order_matches_native_visual_column_order(self):
         import pdfplumber
         fixture = ROOT / 'corpus/m6/native-page-direction-03'

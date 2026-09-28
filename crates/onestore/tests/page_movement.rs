@@ -212,23 +212,52 @@ fn invalid_and_empty_page_edits_do_not_publish() {
     }
     assert!(PageEdit::move_to(ids[0], Some(ids[0]), 1).is_err());
     assert!(PageEdit::set_level(ExGuid::default(), 1).is_err());
-    assert_eq!(ops::section_op(SOURCE, SectionOp::Pages([].to_vec())).unwrap().as_bytes(), SOURCE);
     assert_eq!(
-        ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(ids[0], 1).unwrap()].to_vec()))
+        ops::section_op(SOURCE, SectionOp::Pages([].to_vec()))
             .unwrap()
             .as_bytes(),
         SOURCE
     );
-    assert!(ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(ids[0], 2).unwrap()].to_vec())).is_err());
+    assert_eq!(
+        ops::section_op(
+            SOURCE,
+            SectionOp::Pages([PageEdit::set_level(ids[0], 1).unwrap()].to_vec())
+        )
+        .unwrap()
+        .as_bytes(),
+        SOURCE
+    );
+    assert!(
+        ops::section_op(
+            SOURCE,
+            SectionOp::Pages([PageEdit::set_level(ids[0], 2).unwrap()].to_vec())
+        )
+        .is_err()
+    );
     let duplicate = PageEdit::set_level(ids[3], 2).unwrap();
-    assert!(ops::section_op(SOURCE, SectionOp::Pages([duplicate.clone(), duplicate].to_vec())).is_err());
+    assert!(
+        ops::section_op(
+            SOURCE,
+            SectionOp::Pages([duplicate.clone(), duplicate].to_vec())
+        )
+        .is_err()
+    );
     let missing = ExGuid {
         guid: [0x77; 16],
         n: 1,
     };
-    assert!(ops::section_op(SOURCE, SectionOp::Pages([PageEdit::set_level(missing, 1).unwrap()].to_vec())).is_err());
     assert!(
-        ops::section_op(SOURCE, SectionOp::Pages([PageEdit::move_to(ids[3], Some(missing), 1).unwrap()].to_vec()))
+        ops::section_op(
+            SOURCE,
+            SectionOp::Pages([PageEdit::set_level(missing, 1).unwrap()].to_vec())
+        )
+        .is_err()
+    );
+    assert!(
+        ops::section_op(
+            SOURCE,
+            SectionOp::Pages([PageEdit::move_to(ids[3], Some(missing), 1).unwrap()].to_vec())
+        )
         .is_err()
     );
     let mut value = serde_json::to_value(PageEdit::set_level(ids[3], 2).unwrap()).unwrap();
@@ -253,8 +282,11 @@ fn moving_pages_preserves_ink_file_data_and_native_feature_objects() {
             .unwrap()
             .as_bytes()
             .to_vec();
-        let moved =
-            ops::section_op(&source, SectionOp::Pages([PageEdit::move_to(first, None, 1).unwrap()].to_vec())).unwrap();
+        let moved = ops::section_op(
+            &source,
+            SectionOp::Pages([PageEdit::move_to(first, None, 1).unwrap()].to_vec()),
+        )
+        .unwrap();
         assert_eq!(pages(moved.as_bytes()).last(), Some(&first));
         let stores = [&source, moved.as_bytes()].map(|bytes| Store::parse(bytes).unwrap());
         let indexes = stores
@@ -338,7 +370,11 @@ fn metadata_copy_order_does_not_change_page_identity() {
         "../../../corpus/page-lifecycle/page-edits/optional-cache/source-cold/notebook/Lifecycle.one"
     );
     let sid = pages(source)[3];
-    let edited = ops::section_op(source, SectionOp::Pages([PageEdit::set_level(sid, 2).unwrap()].to_vec())).unwrap();
+    let edited = ops::section_op(
+        source,
+        SectionOp::Pages([PageEdit::set_level(sid, 2).unwrap()].to_vec()),
+    )
+    .unwrap();
     let expected = include_bytes!(
         "../../../corpus/page-lifecycle/page-edits/optional-cache/candidate/Lifecycle.one"
     );
@@ -374,8 +410,21 @@ fn native_edits_on_moved_pages_support_more_rust_changes() {
     let bodies: Vec<_> = view.nodes.iter().filter_map(|(id, node)|
         matches!(&node.kind, Kind::RichText { text, .. } if text == "Native body after a Rust page move.").then_some(*id)).collect();
     let [body] = bodies.as_slice() else { panic!() };
-    let moved = ops::section_op(source, SectionOp::Pages([PageEdit::set_level(sid, 2).unwrap()].to_vec())).unwrap();
-    let edited = ops::page_op(moved.as_bytes(), sid, PageOp::Text { text: *body, range: 0..0, with: "Rust + ".into() }).unwrap();
+    let moved = ops::section_op(
+        source,
+        SectionOp::Pages([PageEdit::set_level(sid, 2).unwrap()].to_vec()),
+    )
+    .unwrap();
+    let edited = ops::page_op(
+        moved.as_bytes(),
+        sid,
+        PageOp::Text {
+            text: *body,
+            range: 0..0,
+            with: "Rust + ".into(),
+        },
+    )
+    .unwrap();
     let after_store = Store::parse(edited.as_bytes()).unwrap();
     let after_index = RevisionIndex::parse(&after_store).unwrap();
     let after = Document::parse(&after_index).unwrap();
@@ -533,9 +582,8 @@ fn repeated_nesting_retains_series_history_across_revision_checkpoints() {
 /// without them and gives the moved page one of its own.
 #[test]
 fn a_move_after_a_native_merge_drops_its_empty_series() {
-    let merged = include_bytes!(
-        "../../../corpus/conflict-page/native-pages/merged/notebook/synthetic.one"
-    );
+    let merged =
+        include_bytes!("../../../corpus/conflict-page/native-pages/merged/notebook/synthetic.one");
     let series = |bytes: &[u8]| {
         let store = Store::parse(bytes).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
@@ -561,7 +609,10 @@ fn a_move_after_a_native_merge_drops_its_empty_series() {
     let (id, spaces) = after.last().unwrap();
     assert_eq!(spaces, &vec![ids[1]]);
     assert!(before.iter().all(|(old, _)| old != id));
-    assert_eq!(pages(moved.as_bytes()), [&ids[..1], &ids[2..], &ids[1..2]].concat());
+    assert_eq!(
+        pages(moved.as_bytes()),
+        [&ids[..1], &ids[2..], &ids[1..2]].concat()
+    );
     if let Some(output) = std::env::var_os("ONESTORE_EMPTY_SERIES_EXPORT") {
         let output = std::path::Path::new(&output);
         std::fs::create_dir(output).unwrap();

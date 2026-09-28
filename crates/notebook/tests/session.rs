@@ -43,7 +43,13 @@ fn edited(page: &Page, text: &str) -> Page {
 
 /// Replaces `range` of the page's first body text as the editor does: the edit's id once
 /// it is durable.
-fn typed(section: &Section, space: ExGuid, page: &Page, range: std::ops::Range<u32>, text: &str) -> u64 {
+fn typed(
+    section: &Section,
+    space: ExGuid,
+    page: &Page,
+    range: std::ops::Range<u32>,
+    text: &str,
+) -> u64 {
     let op = PageOp::Text {
         text: first_text(page),
         range,
@@ -240,7 +246,10 @@ fn an_external_change_reloads_the_page_and_later_edits_apply_to_it() {
         }
     }
     section.wake();
-    wait(&section, |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)));
+    wait(
+        &section,
+        |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)),
+    );
     assert_same(section.page(space).unwrap(), &native);
     // An edit made on the page shown before the change applies to the page as it is now.
     let id = typed(&section, space, &before, 0..0, "Local ");
@@ -312,7 +321,10 @@ fn edits_apply_in_order_without_waiting_and_finish_before_close() {
         }
     }
     section.wake();
-    wait(&section, |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)));
+    wait(
+        &section,
+        |event| matches!(event, Event::Changed(spaces) if spaces.contains(&space)),
+    );
     apply("Local ");
     section.close().unwrap();
     let (section, _) = open(&file, &cache);
@@ -715,9 +727,10 @@ fn a_conflicting_save_keeps_the_native_page_and_a_conflict_page_the_session_dele
         }
     }
     section.wake();
-    wait(&section, |event| {
-        matches!(event, Event::Attempt { id: n, status: EditStatus::Published { .. } } if *n > id)
-    });
+    wait(
+        &section,
+        |event| matches!(event, Event::Attempt { id: n, status: EditStatus::Published { .. } } if *n > id),
+    );
     assert!(matches!(
         section.status(id).unwrap(),
         Some(EditStatus::Published { .. })
@@ -845,4 +858,62 @@ fn space_of(source: &[u8]) -> ExGuid {
         .pages()
         .unwrap()[0]
         .0
+}
+
+/// Restoring and deleting page versions go through the queue and reach the file as OneNote
+/// 2010 stores them (`corpus/page-versions`); a publication that changes only a page's
+/// versions confirms by the history revision it wrote.
+#[test]
+fn page_versions_restore_and_delete_through_the_session() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("History.one");
+    let cache = directory.path().join("cache");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/page-versions/native/step-02/notebook/History.one"),
+        &file,
+    )
+    .unwrap();
+    let (section, _) = open(&file, &cache);
+    let listed = section.versions().unwrap();
+    let (space, versions) = listed[0].clone();
+    assert_eq!(versions.len(), 1);
+    let standing = section.page(space).unwrap();
+    let old = section.version(space, versions[0].context).unwrap();
+    let restored = section
+        .restore_version(space, versions[0].context, "Editor")
+        .unwrap();
+    published(&section, restored);
+    assert_eq!(section.page(space).unwrap().objects, old.objects);
+    let stored = |file: &Path| {
+        let arena = onestore::Arena::default();
+        let mut stored =
+            onestore::Section::open(&arena, onestore::read_file(file).unwrap()).unwrap();
+        let versions = stored.versions().unwrap();
+        (stored.page(space).unwrap(), versions)
+    };
+    let (page, after) = stored(&file);
+    assert_eq!(page.objects, old.objects);
+    assert_eq!(after[0].1.len(), 2);
+    assert_eq!(after[0].1[0].author.as_deref(), Some("Other Person"));
+    assert_eq!(
+        section.version(space, after[0].1[0].context).unwrap(),
+        standing
+    );
+    section.close().unwrap();
+
+    // After a relaunch, deleting every version publishes the history alone.
+    let (section, _) = open(&file, &cache);
+    let all: Vec<ExGuid> = section.versions().unwrap()[0]
+        .1
+        .iter()
+        .map(|version| version.context)
+        .collect();
+    let deleted = section.delete_versions(&[(space, all)]).unwrap();
+    published(&section, deleted);
+    assert!(section.versions().unwrap().is_empty());
+    let (page, after) = stored(&file);
+    assert!(after.is_empty());
+    assert_eq!(page.objects, old.objects);
+    section.close().unwrap();
 }

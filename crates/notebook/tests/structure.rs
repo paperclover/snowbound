@@ -53,13 +53,23 @@ fn sections_and_groups_are_created_renamed_coloured_ordered_and_deleted() {
     onestore::place_file(root.join("First.one"), toc_id, "First.one").unwrap();
     let mut notebook = Notebook::open(&root, temporary.path().join("cache")).unwrap();
     assert_eq!(
-        notebook.create_section("", "Second", &onestore::PageCreation::new(None, Some(""), "Author").unwrap()).unwrap(),
+        notebook
+            .create_section(
+                "",
+                "Second",
+                &onestore::PageCreation::new(None, Some(""), "Author").unwrap()
+            )
+            .unwrap(),
         "Second.one"
     );
     assert_eq!(notebook.create_group("", "Archive").unwrap(), "Archive");
     assert_eq!(
         notebook
-            .create_section("Archive", "Inner", &onestore::PageCreation::new(None, Some(""), "Author").unwrap())
+            .create_section(
+                "Archive",
+                "Inner",
+                &onestore::PageCreation::new(None, Some(""), "Author").unwrap()
+            )
             .unwrap(),
         "Archive/Inner.one"
     );
@@ -170,4 +180,157 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
             std::fs::copy(entry.path(), target).unwrap();
         }
     }
+}
+
+#[test]
+fn a_rename_keeps_its_place_in_the_notebook_and_in_a_group() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("notebook");
+    let page = onestore::PageCreation::new(None, Some(""), "Author").unwrap();
+    let mut notebook =
+        Notebook::create(&root, temporary.path().join("cache"), 0x00d7ff, &page).unwrap();
+    notebook.create_group("", "Group").unwrap();
+    for folder in ["", "Group"] {
+        for name in ["Video", "Song", "Album"] {
+            notebook.create_section(folder, name, &page).unwrap();
+        }
+    }
+    let path = |folder: &str, name: &str| {
+        if folder.is_empty() {
+            format!("{name}.one")
+        } else {
+            format!("{folder}/{name}.one")
+        }
+    };
+    notebook
+        .reorder(
+            "",
+            &["Album.one", "Video.one", "New Section 1.one", "Song.one"],
+        )
+        .unwrap();
+    notebook
+        .reorder("Group", &["Group/Album.one", "Group/Video.one"])
+        .unwrap();
+    notebook.rename("Video.one", "Kitchen").unwrap();
+    notebook.rename("Group/Video.one", "Kitchen").unwrap();
+    notebook.rename("Group", "Renamed").unwrap();
+    assert_eq!(
+        names(notebook.catalog()),
+        (
+            ["Album", "Kitchen", "New Section 1", "Song"]
+                .map(|name| path("", name))
+                .to_vec(),
+            vec!["Renamed".to_owned()]
+        )
+    );
+    assert_eq!(
+        names(&notebook.catalog().groups[0]).0,
+        ["Album", "Kitchen", "Song"].map(|name| path("Renamed", name))
+    );
+}
+
+/// Each entry a TOC file lists: its filename and file identity.
+fn listed(path: &std::path::Path) -> Vec<(String, [u8; 16])> {
+    let image = onestore::read_file(path).unwrap();
+    let store = onestore::Store::parse(&image).unwrap();
+    let index = onestore::RevisionIndex::parse(&store).unwrap();
+    let document = onestore::document::Document::parse(&index).unwrap();
+    let revision = document.active(document.root).unwrap();
+    let onestore::document::Kind::Toc { entries, .. } = &revision.nodes[&revision.roots[&1]].kind
+    else {
+        panic!()
+    };
+    entries
+        .iter()
+        .map(|id| match &revision.nodes[id].kind {
+            onestore::document::Kind::Toc {
+                filename, identity, ..
+            } => (filename.clone().unwrap_or_default(), identity.unwrap()),
+            _ => panic!(),
+        })
+        .collect()
+}
+
+fn file_id(path: &std::path::Path) -> [u8; 16] {
+    onestore::Store::parse(&onestore::read_file(path).unwrap())
+        .unwrap()
+        .header
+        .file_id
+}
+
+#[test]
+fn a_page_delete_lists_the_recycle_bin_it_finds_or_makes_and_leaves_an_unreadable_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("notebook");
+    let bin = root.join("OneNote_RecycleBin");
+    let page = onestore::PageCreation::new(None, Some("Kept"), "Author").unwrap();
+    let mut notebook =
+        Notebook::create(&root, temporary.path().join("cache"), 0x00d7ff, &page).unwrap();
+    let recycle = |notebook: &mut Notebook| {
+        let image = notebook.read_section("New Section 1.one").unwrap();
+        let pages = notebook::session::stored_pages(&image).unwrap();
+        notebook.recycle_pages(&[pages[0].page.clone()], "Author")
+    };
+    let bins = |root: &std::path::Path| -> Vec<[u8; 16]> {
+        listed(&root.join("Open Notebook.onetoc2"))
+            .into_iter()
+            .filter(|(name, _)| name == "OneNote_RecycleBin")
+            .map(|(_, identity)| identity)
+            .collect()
+    };
+    recycle(&mut notebook).unwrap();
+
+    // Gone from the folder, the bin's entry is stale; the next bin takes its name.
+    std::fs::remove_dir_all(&bin).unwrap();
+    notebook.refresh().unwrap();
+    recycle(&mut notebook).unwrap();
+    let toc = bin.join("Open Notebook.onetoc2");
+    assert_eq!(bins(&root), [file_id(&toc)]);
+    let deleted = file_id(&bin.join("OneNote_DeletedPages.one"));
+    assert_eq!(listed(&toc), [("OneNote_DeletedPages.one".into(), deleted)]);
+
+    // A bin whose TOC has another name and misses the deleted pages is kept and completed.
+    std::fs::remove_file(&toc).unwrap();
+    let other = bin.join("OneNote Table Of Contents.onetoc2");
+    std::fs::write(
+        &other,
+        onestore::create_table_of_contents("OneNote Table Of Contents.onetoc2", &[]).unwrap(),
+    )
+    .unwrap();
+    let parent = file_id(&root.join("Open Notebook.onetoc2"));
+    onestore::place_file(&other, parent, "OneNote_RecycleBin").unwrap();
+    notebook.refresh().unwrap();
+    recycle(&mut notebook).unwrap();
+    assert!(!toc.exists());
+    assert_eq!(bins(&root), [file_id(&other)]);
+    assert_eq!(
+        listed(&other),
+        [("OneNote_DeletedPages.one".into(), deleted)]
+    );
+    let ancestor =
+        onestore::Store::parse(&onestore::read_file(bin.join("OneNote_DeletedPages.one")).unwrap())
+            .unwrap()
+            .header
+            .ancestor;
+    assert_eq!(ancestor, file_id(&other));
+    // `NOTEBOOK_RECYCLE_EXPORT` names a new directory receiving it for a cold reopen.
+    if let Some(directory) = std::env::var_os("NOTEBOOK_RECYCLE_EXPORT") {
+        copy_dir(&root, std::path::Path::new(&directory));
+    }
+    // Permission bits do not bind the superuser.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    // A bin that cannot be read is neither replaced nor added to.
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = notebook.refresh().and_then(|_| recycle(&mut notebook));
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(denied.is_err());
+    let names: Vec<_> = std::fs::read_dir(&bin)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
 }

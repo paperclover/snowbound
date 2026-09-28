@@ -240,6 +240,8 @@ pub(crate) fn spaces(edit: &Edit, root: onestore::ExGuid) -> Vec<onestore::ExGui
                     }
                     SectionOp::Pages(edits) => spaces.extend(edits.iter().map(|edit| edit.space())),
                     SectionOp::Delete(pages) => spaces.extend(pages),
+                    SectionOp::RestoreVersion { page, .. }
+                    | SectionOp::DeleteVersions { page, .. } => spaces.push(*page),
                     SectionOp::Color(_) => {}
                 }
             }

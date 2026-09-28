@@ -171,8 +171,11 @@ fn removal_rejects_duplicate_missing_and_non_page_spaces_without_publication() {
     );
     let written = ops::section_op(SOURCE, SectionOp::Delete([pages[0].0].to_vec())).unwrap();
     assert!(
-        ops::section_op(written.as_bytes(), SectionOp::Delete([pages[1].0, pages[0].0].to_vec()))
-            .is_err()
+        ops::section_op(
+            written.as_bytes(),
+            SectionOp::Delete([pages[1].0, pages[0].0].to_vec())
+        )
+        .is_err()
     );
 }
 
@@ -427,7 +430,12 @@ fn external_payloads_and_their_historical_references_survive_file_removal() {
     assert_eq!(payloads.len(), 3);
     let path = root.join("synthetic.one");
     std::fs::write(&path, &original).unwrap();
-    prepared.transaction.as_ref().unwrap().commit_file(&path).unwrap();
+    prepared
+        .transaction
+        .as_ref()
+        .unwrap()
+        .commit_file(&path)
+        .unwrap();
     let written = onestore::read_file(&path).unwrap();
     assert_eq!(written, prepared.as_bytes());
     let current_store = Store::parse(&written).unwrap();
