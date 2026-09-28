@@ -22,8 +22,10 @@ The motion comes from [File Pilot](https://filepilot.tech): things move
 quickly and never feel like they're waiting on an animation. Animated values
 ease exponentially toward their targets with a short half-life. That is
 frame-rate independent, a retargeted animation continues smoothly from where
-it is, and it settles fast. A context menu opens instantly at the pointer. A
-drop-down grows out of its anchor.
+it is, and it settles fast. Popups open and close on short timed curves,
+slow enough to follow: a menu grows out of the pointer or its button as it
+fades in, a combo's field widens into its list, and a dialog swings up into
+place over a dimmed window, as Windows opens a window.
 
 ## Why not native widgets
 

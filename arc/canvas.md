@@ -74,7 +74,12 @@ give placement. The comparators in `tools/canvas` (with the probes
 `layout-probe` and `page-probe`) keep checking them.
 
 Equations draw in two dimensions from the tree `onestore::page::Math` parses.
-The linear text stays the editable source. Ink draws stroke by stroke in page
+They are edited as OneNote's equation editor edits them: Alt+= starts one,
+typing is its linear format (UnicodeMath), and a space builds up what it ends.
+Linear and Professional switch an equation between the forms, and OneNote
+stores both. Links follow OneNote too: a typed URL links itself when a space or
+Enter ends it, the Link dialog stores its address in a hidden field code before
+the label, and a click opens a link. Ink draws stroke by stroke in page
 coordinates. Page templates' background art is recreated as vector art and
 recognised by the stored picture's hash. OneNote's bitmaps aren't shipped.
 

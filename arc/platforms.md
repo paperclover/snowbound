@@ -27,7 +27,10 @@ Accessibility for the page goes through AccessKit's winit adapter on both.
 ### macOS
 
 - The title bar is transparent. The app draws its own around AppKit's traffic
-  lights, as part of the same frame as the rest of the chrome.
+  lights, as part of the same frame as the rest of the chrome. Under the whole
+  window lies AppKit's title bar material, an `NSVisualEffectView`, and the
+  chrome is drawn transparent over it, so the title bar, toolbar, tab row and
+  sidebar take the system's desktop tint, appearance and focus state exactly.
 - AppKit supplies the open and save panels, alerts, the date picker, date
   formatting for new page titles and conflict labels, the account's full name
   (used as the author, as OneNote uses Office's user name), and the caret and
@@ -45,6 +48,10 @@ Accessibility for the page goes through AccessKit's winit adapter on both.
   the compositor where it offers server-side decorations and a client-side
   frame otherwise. The app draws its own window controls only where no frame
   could be made.
+- The toolbar and the rest of the chrome continue the title bar's fill,
+  focused and not: on KDE the colour scheme's header colours from
+  `kdeglobals`, as KWin paints its title bars, and on GNOME winit's Adwaita
+  frame's. A settings portal signal re-reads them when the scheme changes.
 - zenity or kdialog provide the pickers and alerts. The XDG settings portal
   provides the colour scheme. Text conventions come from the C library's
   locale. Fontconfig is loaded at run time, so builds need no headers for it.
@@ -58,6 +65,9 @@ Accessibility for the page goes through AccessKit's winit adapter on both.
 The readme names both as goals. Nothing platform-specific exists for them yet.
 Keeping `ui` and `draw` free of platform toolkits is what keeps them within
 reach.
+The chrome's fill already has its seam: `platform::install_backdrop` lays a
+system material under a transparent surface, as Mica or Aero glass would,
+and `platform::titlebar` names opaque fills where the system has those.
 
 ## iOS: native around the canvas
 

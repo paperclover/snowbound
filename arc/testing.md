@@ -1,4 +1,4 @@
-# Testing, and why the code can be trusted
+# Testing — Why the code can be trusted
 
 Snowbound writes into other people's notebooks, often while their copy of
 OneNote is writing to the same file. A bug doesn't just crash an app. It can

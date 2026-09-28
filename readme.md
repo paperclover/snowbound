@@ -7,8 +7,10 @@ Type and draw notes on any platform, while maintaining ownership of your data.
 Snowbound does not use a typical markdown or structured note format, but rather
 uses rich text on a free canvas. Unlike other infinite canvas apps, our canvas
 feels more like a standard text editor software as textboxes automatically
-create and resize as you would expect. In addition, Snowbound (TODO) supports
-pen and drawing tools, recording audio and video, revision history, multi-machine
+create and resize as you would expect. In addition, Snowbound supports
+pen and drawing tools [(WIP)](https://shale.paperclover.net/snowbound/issues/21), recording audio and video
+[(WIP)](https://shale.paperclover.net/snowbound/issues/36), revision
+history[(WIP)](https://shale.paperclover.net/snowbound/issues/37), multi-machine
 live collaboration, and much more.
 
 <!-- Regenerate from the sample notebook (edit it freely in OneNote or Snowbound):
@@ -20,8 +22,13 @@ python3 tools/canvas/build_macos.py --release && d=$(mktemp -d) && cp -R docs/sa
 </picture>
 
 Snowbound implements the file and sync protocol used in 2010 Microsoft OneNote,
-so notebooks are fully compatible, including collaboration features. It (TODO)
-supports OS X 10.6, all the way to modern macOS, iOS, Linux, and Windows.
+so notebooks are fully compatible, including collaboration features. It supports
+OS X 10.6 Snow Leopard
+[(WIP)](https://shale.paperclover.net/snowbound/issues/13), all the way to
+modern macOS, Linux, Windows
+[(WIP)](https://shale.paperclover.net/snowbound/issues/11), and fully capable
+iOS[(WIP)](https://shale.paperclover.net/snowbound/issues/36) and
+Android[(WIP)](https://shale.paperclover.net/snowbound/issues/24) apps.
 
 For my songwriting for *[paper clover](https://paperclover.net)*, I use this app
 alongside OneNote on my Windows 7 laptop.

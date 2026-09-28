@@ -43,6 +43,10 @@ the file grows):
   changes and depends on the revision before it. OneNote itself typically
   appends a small dependent revision for each edit: the changed objects plus
   the chain of containers above them, whose modification times moved.
+- **Contexts** label revisions besides the current one. A page's *versions* are earlier
+  revisions of its own space kept current under contexts of their own, and its version
+  history is one more revision, under a fixed context, listing them. Restoring a version
+  forks the page's chain from it; deleting one only unlists it.
 - **Objects** have a type (a JCID) and a property set. They reference each
   other by *ExtendedGUID*: a GUID plus a small integer. Inside a revision these
   are compressed to compact IDs through a global ID table.
