@@ -198,6 +198,33 @@ fn the_text_model_skips_collapsed_paragraphs_and_round_trips_selection() {
 }
 
 #[test]
+fn select_more_widens_from_the_caret_paragraph_to_the_outline() {
+    let (_directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    focus(&mut canvas, "Collapsed parent");
+    let shown = canvas.active().shown_text();
+    let units = |text: &str| text.encode_utf16().count() as u32;
+    let start = units(&shown[..shown.find("Collapsed parent").unwrap()]);
+    let line = units(
+        shown
+            .split('\n')
+            .find(|line| line.contains("Collapsed parent"))
+            .unwrap(),
+    );
+    canvas.select([start + 2; 2]).unwrap();
+    canvas.page.editor.widen_selection().unwrap();
+    let [lo, hi] = canvas.selection().unwrap();
+    assert!(
+        lo == start && [start + line, start + line + 1].contains(&hi),
+        "{lo}..{hi}"
+    );
+    for _ in 0..8 {
+        canvas.page.editor.widen_selection().unwrap();
+    }
+    assert_eq!(canvas.selection().unwrap(), [0, canvas.length()]);
+}
+
+#[test]
 fn undo_restores_typing() {
     let (_directory, section) = features();
     let mut canvas = canvas(&section, "Paragraph controls");
@@ -542,13 +569,24 @@ fn a_local_sections_reads_and_publications_go_through_the_hosts_coordination() {
     let mut canvas = canvas(&section, "Paragraph controls");
     focus(&mut canvas, "Collapsed parent");
     canvas.insert("Coordinated ".into()).unwrap();
-    section.shared.apply(canvas.edit().unwrap().unwrap()).unwrap();
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
     assert!(section.flush(Duration::from_secs(20)));
     let file = root.canonicalize().unwrap().join("Features.one");
     let file = file.to_string_lossy();
     let coordinated = COORDINATED.lock().unwrap();
-    assert!(coordinated.iter().any(|(path, write)| path == &*file && !write));
-    assert!(coordinated.iter().any(|(path, write)| path == &*file && *write));
+    assert!(
+        coordinated
+            .iter()
+            .any(|(path, write)| path == &*file && !write)
+    );
+    assert!(
+        coordinated
+            .iter()
+            .any(|(path, write)| path == &*file && *write)
+    );
 }
 
 #[test]
@@ -572,7 +610,10 @@ fn tapping_the_date_asks_for_it_and_a_new_date_is_stored() {
     // 2 January 2026, 10:30 UTC.
     assert!(
         canvas
-            .change_date(1_767_349_800, ["Friday, January 2, 2026".into(), "10:30 AM".into()])
+            .change_date(
+                1_767_349_800,
+                ["Friday, January 2, 2026".into(), "10:30 AM".into()]
+            )
             .unwrap()
     );
     let edit = canvas.edit().unwrap().unwrap();

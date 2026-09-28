@@ -72,6 +72,7 @@ uint32_t sb_text_length(const View *view);
 char *sb_text(const View *view, uint32_t start, uint32_t end);
 void sb_selection(const View *view, uint32_t range[2]);
 bool sb_select(View *view, uint32_t start, uint32_t end);
+bool sb_select_more(View *view);
 bool sb_marked(const View *view, uint32_t range[2]);
 bool sb_set_marked(View *view, const char *text, uint32_t selected_start, uint32_t selected_end);
 void sb_unmark(View *view);

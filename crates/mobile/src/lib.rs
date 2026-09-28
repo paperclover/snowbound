@@ -13,10 +13,10 @@ use library::Shared;
 pub use library::{Library, Section, Share};
 
 use canvas::{
+    date::DateField,
     document::TextPosition,
     editor::{Formatting, NoteTag, Selection, TextOutline, Toggle},
     gpu::{Paper, Viewport, page::PageScene},
-    date::DateField,
     interaction::{Hit, ObjectFocus, PageView, Request, Response, TextColors},
     layout::TextEngine,
 };
@@ -416,7 +416,8 @@ impl Canvas {
     /// Selects the first match of `query` on the page, as the search that found it matches.
     fn find(&mut self, query: &str) -> Result<bool> {
         let query = canvas::search::Query::new(query);
-        let Some(&(id, selection)) = canvas::search::page_matches(&self.page.editor, &query).first()
+        let Some(&(id, selection)) =
+            canvas::search::page_matches(&self.page.editor, &query).first()
         else {
             return Ok(false);
         };
@@ -943,7 +944,9 @@ pub unsafe extern "C" fn sb_view_change_date(
     date: *const c_char,
     time: *const c_char,
 ) -> bool {
-    let result = view.canvas.change_date(seconds, [string(date), string(time)]);
+    let result = view
+        .canvas
+        .change_date(seconds, [string(date), string(time)]);
     view.stored(result)
 }
 
@@ -975,6 +978,19 @@ pub extern "C" fn sb_selection(view: &View, range: &mut [u32; 2]) {
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_select(view: &mut View, start: u32, end: u32) -> bool {
     report(view.canvas.select([start, end])).is_some()
+}
+
+/// Widens the selection as OneNote's Ctrl+A does, one enclosing unit per call.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_select_more(view: &mut View) -> bool {
+    report(
+        view.canvas
+            .page
+            .editor
+            .widen_selection()
+            .map_err(Into::into),
+    )
+    .is_some()
 }
 
 #[unsafe(no_mangle)]

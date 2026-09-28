@@ -226,6 +226,15 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
             readable,
         });
     }
+    for entry in folder.unavailable.iter().filter(|entry| !entry.group) {
+        tabs.push(Tab {
+            name: stem(&entry.path),
+            path: entry.path.clone(),
+            group: folder.path.clone(),
+            color: rgb(SECTION_COLOR),
+            readable: false,
+        });
+    }
     for group in &folder.groups {
         if !group.path.ends_with("OneNote_RecycleBin") {
             self::tabs(group, tabs);
@@ -891,7 +900,9 @@ pub unsafe extern "C" fn sb_library_new_section(
     let (folder, name) = (string(folder), string(name));
     let page = dated(&string(author), &string(date), &string(time));
     report(page.and_then(|page| {
-        library.with_notebook(true, |notebook| Ok(notebook.create_section(&folder, &name, &page)?))
+        library.with_notebook(true, |notebook| {
+            Ok(notebook.create_section(&folder, &name, &page)?)
+        })
     }))
     .map_or(std::ptr::null_mut(), owned)
 }

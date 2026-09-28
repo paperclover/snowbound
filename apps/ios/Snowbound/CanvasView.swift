@@ -606,7 +606,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     }
 
     override func selectAll(_ sender: Any?) {
-        edit(external: true) { choose(Range(0, endOfDocument.offset)) }
+        guard let handle else { return }
+        edit(external: true) { sb_select_more(handle) }
     }
 
     override func toggleBoldface(_ sender: Any?) { apply(0) }
