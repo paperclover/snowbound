@@ -1,3 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <path d="M2.5 3.5H10.5M6.5 3.5V13.5M10 10L13.5 13.5M13.5 10L10 13.5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#ffb8c9"/><stop offset="1" stop-color="#ff5c85"/></linearGradient>
+    <linearGradient id="g1" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#c3cdd9"/></linearGradient>
+  </defs>
+  <path d="M4.152 5.92L6.168 5.92L9.192 13.84L7.248 13.84L6.672 12.112L3.648 12.112L3.072 13.84L1.128 13.84ZM4.152 10.6L6.168 10.6L5.16 7.648Z" fill="currentColor" fill-rule="evenodd"/>
+  <path d="M12.629 2.807L14.927 4.735A0.8 0.8 40 0 1 15.026 5.862L12.84 8.467A0.8 0.8 40 0 1 11.713 8.565L9.415 6.637A0.8 0.8 40 0 1 9.317 5.51L11.502 2.905A0.8 0.8 40 0 1 12.629 2.807Z" fill="#000000" fill-opacity="0.16"/>
+  <path d="M12.629 2.057L14.927 3.985A0.8 0.8 40 0 1 15.026 5.112L12.84 7.717A0.8 0.8 40 0 1 11.713 7.815L9.415 5.887A0.8 0.8 40 0 1 9.317 4.76L11.502 2.155A0.8 0.8 40 0 1 12.629 2.057Z" fill="url(#g0)" stroke="#d93d66" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M9.737 6.254L12.035 8.182A0.8 0.8 40 0 1 12.133 9.309L8.984 13.063A0.8 0.8 40 0 1 7.857 13.161L5.558 11.233A0.8 0.8 40 0 1 5.46 10.106L8.609 6.352A0.8 0.8 40 0 1 9.737 6.254Z" fill="#000000" fill-opacity="0.16"/>
+  <path d="M9.737 5.504L12.035 7.432A0.8 0.8 40 0 1 12.133 8.559L8.984 12.313A0.8 0.8 40 0 1 7.857 12.411L5.558 10.483A0.8 0.8 40 0 1 5.46 9.356L8.609 5.602A0.8 0.8 40 0 1 9.737 5.504Z" fill="url(#g1)" stroke="#8e9aab" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

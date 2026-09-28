@@ -551,7 +551,10 @@ pub fn template_art(
         [view.width() * 0.75, view.height() * 0.75]
     });
     let pixels = size.map(|side| (side * density).round().max(1.0) as u32);
-    Some((rasterize(template.svg, dark(paper).then_some(paper), pixels), size))
+    Some((
+        rasterize(template.svg, dark(paper).then_some(paper), pixels),
+        size,
+    ))
 }
 
 /// Template `name`'s art as Snowbound stores it for a page: in the format and pixel size of

@@ -1,7 +1,11 @@
 mod icon;
+
+pub use icon::Palette;
 mod text;
+mod translucent;
 
 pub use text::{Decoration, Glyph, GlyphRun, Glyphs, paint_parley_run};
+pub use translucent::Translucent;
 
 use bytemuck::{Pod, Zeroable};
 use image::ImageDecoder;
@@ -150,8 +154,18 @@ struct CachedImage {
 
 struct Batch {
     vertices: Range<u32>,
-    image: Option<u64>,
+    blend: Blend,
     scissor: [u32; 4],
+}
+
+/// How a batch meets what lies beneath it.
+#[derive(Clone, Copy, PartialEq)]
+enum Blend {
+    Over,
+    /// A premultiplied picture over it.
+    Image(u64),
+    /// Clearing it by the batch's coverage.
+    Erase,
 }
 
 #[repr(C)]
@@ -181,6 +195,9 @@ enum AtlasKey {
         sources: &'static [&'static str],
         size: u32,
         phase: [u8; 2],
+        /// The bits of the colour `currentColor` paints.
+        ink: [u32; 3],
+        palette: [Option<[u32; 3]>; 3],
     },
     Path {
         data: String,
@@ -213,7 +230,45 @@ pub struct Layer<'a> {
     /// The colour behind the layer: on a dark one, text in dark colours of its own is
     /// lifted to stay legible against what lies behind it, as OneNote's dark page does.
     pub backdrop: Option<[f32; 4]>,
+    pub motion: Option<Motion>,
     pub primitives: &'a [Primitive<'a>],
+}
+
+/// A layer part of the way through appearing: faded, and leaned back in perspective.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Motion {
+    pub opacity: f32,
+    /// Radians the layer turns about the horizontal line through `pivot`, its part below
+    /// the line leaning away from the viewer.
+    pub tilt: f32,
+    /// Device point the layer turns about.
+    pub pivot: [f32; 2],
+}
+
+impl Motion {
+    fn apply(&self, vertex: &mut Vertex, size: [u32; 2], blend: Blend) {
+        match blend {
+            Blend::Image(_) => vertex.color = vertex.color.map(|v| v * self.opacity),
+            Blend::Over | Blend::Erase => vertex.color[3] *= self.opacity,
+        }
+        if self.tilt == 0.0 {
+            return;
+        }
+        let [width, height] = size.map(|v| v as f32);
+        // Seen from twice the target's height away, so a small turn reads as depth.
+        let distance = 2.0 * height;
+        let [x, y] = [
+            (vertex.position[0] + 1.0) * width / 2.0,
+            (1.0 - vertex.position[1]) * height / 2.0,
+        ];
+        let below = y - self.pivot[1];
+        let near = distance / (distance + below * self.tilt.sin());
+        let [x, y] = [
+            self.pivot[0] + (x - self.pivot[0]) * near,
+            self.pivot[1] + below * self.tilt.cos() * near,
+        ];
+        vertex.position = [x * 2.0 / width - 1.0, 1.0 - y * 2.0 / height];
+    }
 }
 
 /// A layer's transform onto the target.
@@ -223,6 +278,7 @@ struct Space {
     scale: f32,
     origin: [f32; 2],
     backdrop: Option<[f32; 4]>,
+    motion: Option<Motion>,
 }
 
 impl Space {
@@ -271,6 +327,9 @@ pub enum PathStyle {
     Stroke(f32),
     /// Filled and blurred this far, as a soft shadow.
     Shadow(f32),
+    /// Filled, clearing what lies beneath towards transparency by the colours' opacity, so
+    /// whatever the system shows behind the window shows through.
+    Erase,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -291,12 +350,14 @@ pub enum Primitive<'a> {
         ink: [f32; 4],
     },
     /// 16×16 SVG artwork painted `size` units square, later sources over earlier ones.
-    /// `tint` multiplies it; `currentColor` paints white, so it takes the tint's colour.
+    /// `currentColor` paints in `tint`'s colour, slots take `palette`'s, other colours keep
+    /// theirs, and `tint`'s opacity fades the whole icon.
     Icon {
         sources: &'static [&'static str],
         origin: [f32; 2],
         size: f32,
         tint: [f32; 4],
+        palette: Palette,
     },
     /// SVG path data in layer units from `origin`, shaded from `colors[0]` at the top of
     /// what it paints to `colors[1]` at the bottom. Each distinct path is rasterized once
@@ -378,6 +439,7 @@ pub struct Renderer {
     pub queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
+    erase_pipeline: wgpu::RenderPipeline,
     atlas: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     image_sampler: wgpu::Sampler,
@@ -451,8 +513,21 @@ impl Renderer {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(wgpu::BlendState::ALPHA_BLENDING);
+        // Coverage accumulates in alpha, leaving premultiplied colour over a transparent clear.
+        let pipeline = make_pipeline(wgpu::BlendState {
+            color: wgpu::BlendState::ALPHA_BLENDING.color,
+            alpha: wgpu::BlendComponent::OVER,
+        });
         let image_pipeline = make_pipeline(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let erase = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let erase_pipeline = make_pipeline(wgpu::BlendState {
+            color: erase,
+            alpha: erase,
+        });
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Glyph atlas"),
             size: wgpu::Extent3d {
@@ -518,6 +593,7 @@ impl Renderer {
             queue,
             pipeline,
             image_pipeline,
+            erase_pipeline,
             atlas,
             bind_group,
             image_sampler,
@@ -601,6 +677,7 @@ impl Renderer {
                 scale: layer.scale,
                 origin: layer.origin,
                 backdrop: layer.backdrop,
+                motion: layer.motion,
             };
             for primitive in layer.primitives {
                 if let Primitive::Image { image, rect } = primitive
@@ -647,15 +724,12 @@ impl Renderer {
             for batch in &self.batches {
                 let [x, y, width, height] = batch.scissor;
                 pass.set_scissor_rect(x, y, width, height);
-                pass.set_pipeline(if batch.image.is_some() {
-                    &self.image_pipeline
-                } else {
-                    &self.pipeline
-                });
-                let binding = batch
-                    .image
-                    .map(|id| &self.images[&id].binding)
-                    .unwrap_or(&self.bind_group);
+                let (pipeline, binding) = match batch.blend {
+                    Blend::Over => (&self.pipeline, &self.bind_group),
+                    Blend::Image(id) => (&self.image_pipeline, &self.images[&id].binding),
+                    Blend::Erase => (&self.erase_pipeline, &self.bind_group),
+                };
+                pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, binding, &[]);
                 pass.draw(batch.vertices.clone(), 0..1);
             }
@@ -676,6 +750,7 @@ impl Renderer {
                 scale: layer.scale,
                 origin: layer.origin,
                 backdrop: layer.backdrop,
+                motion: layer.motion,
             };
             let bounds = match layer.clip {
                 Some(clip) => space.scissor(clip),
@@ -699,7 +774,7 @@ impl Renderer {
         active_images: &HashSet<u64>,
     ) -> Result<(), RenderError> {
         let start = self.vertices.len() as u32;
-        let mut image_id = None;
+        let mut blend = Blend::Over;
         let mut scissor = bounds;
         match primitive {
             Primitive::Icon {
@@ -707,19 +782,25 @@ impl Renderer {
                 origin,
                 size,
                 tint,
+                palette,
             } => {
                 let origin = [
                     space.origin[0] + origin[0] * space.scale,
                     space.origin[1] + origin[1] * space.scale,
                 ];
-                self.icon(Space { origin, ..space }, sources, *size, *tint)?;
+                self.icon(Space { origin, ..space }, sources, *size, *tint, palette)?;
             }
             Primitive::Path {
                 data,
                 origin,
                 style,
                 colors,
-            } => self.path(space, data, *origin, *style, *colors)?,
+            } => {
+                if *style == PathStyle::Erase {
+                    blend = Blend::Erase;
+                }
+                self.path(space, data, *origin, *style, *colors)?;
+            }
             Primitive::Text {
                 text,
                 origin,
@@ -779,22 +860,27 @@ impl Renderer {
             Primitive::Image { image, rect } => {
                 if let Some(rect) = space.visible_rect(*rect)? {
                     self.image(image, active_images)?;
-                    image_id = Some(image.id());
+                    blend = Blend::Image(image.id());
                     self.quad(space, rect, [0.0, 0.0, 1.0, 1.0], [1.0; 4])?;
                 }
             }
         }
         let end = self.vertices.len() as u32;
+        if let Some(motion) = space.motion {
+            for vertex in &mut self.vertices[start as usize..] {
+                motion.apply(vertex, space.size, blend);
+            }
+        }
         if start != end {
             if let Some(last) = self.batches.last_mut()
-                && last.image == image_id
+                && last.blend == blend
                 && last.scissor == scissor
             {
                 last.vertices.end = end;
             } else {
                 self.batches.push(Batch {
                     vertices: start..end,
-                    image: image_id,
+                    blend,
                     scissor,
                 });
             }
@@ -1073,6 +1159,7 @@ impl Renderer {
         sources: &'static [&'static str],
         size: f32,
         tint: [f32; 4],
+        palette: &Palette,
     ) -> Result<(), RenderError> {
         let size = size * space.scale;
         let [x, y] = space.origin.map(|v| (v * 4.0).round() * 0.25);
@@ -1090,10 +1177,13 @@ impl Renderer {
             return Err(RenderError::AtlasFull);
         }
         let phase = [((x - x.floor()) * 4.0) as u8, ((y - y.floor()) * 4.0) as u8];
+        let ink = [tint[0], tint[1], tint[2]];
         let key = AtlasKey::Icon {
             sources,
             size: size.to_bits(),
             phase,
+            ink: ink.map(f32::to_bits),
+            palette: palette.bits(),
         };
         let glyph = if let Some(Some(glyph)) = self.glyphs.get(&key) {
             *glyph
@@ -1101,7 +1191,7 @@ impl Renderer {
             if self.glyphs.len() >= MAX_GLYPHS {
                 return Err(RenderError::AtlasFull);
             }
-            let glyph = self.upload(icon::rasterize(sources, size, phase))?;
+            let glyph = self.upload(icon::rasterize(sources, size, phase, ink, palette))?;
             self.glyphs.insert(key, Some(glyph));
             glyph
         };
@@ -1122,7 +1212,7 @@ impl Renderer {
                 (glyph.x + glyph.width) as f32 / atlas,
                 (glyph.y + glyph.height) as f32 / atlas,
             ],
-            tint,
+            [1.0, 1.0, 1.0, tint[3]],
         )
     }
 
@@ -1197,7 +1287,7 @@ impl Renderer {
         let [x, y] = [0, 1]
             .map(|axis| ((space.origin[axis] + origin[axis] * space.scale) * 4.0).round() * 0.25);
         let (kind, width) = match style {
-            PathStyle::Fill => (0, 0.0),
+            PathStyle::Fill | PathStyle::Erase => (0, 0.0),
             PathStyle::Stroke(width) => (1, width),
             PathStyle::Shadow(width) => (2, width),
         };
@@ -1729,6 +1819,10 @@ mod tests {
 
     impl Target {
         fn new(device: &wgpu::Device) -> Self {
+            Self::with_format(device, wgpu::TextureFormat::Rgba8UnormSrgb)
+        }
+
+        fn with_format(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
             Self {
                 texture: device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Draw readback test"),
@@ -1740,7 +1834,7 @@ mod tests {
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 }),
@@ -1809,6 +1903,7 @@ mod tests {
             origin: [24.0; 2],
             clip: None,
             backdrop: None,
+            motion: None,
             primitives,
         }]
     }
@@ -1895,6 +1990,7 @@ mod tests {
                 origin: [128.125 + 20.0 * index as f32, 80.25],
                 size: 12.0,
                 tint: [1.0; 4],
+                palette: Palette::default(),
             });
         }
         primitives.extend((0..9).map(|step| Primitive::Text {
@@ -1998,6 +2094,7 @@ mod tests {
                     origin: [10000.0; 2],
                     size: 12.0,
                     tint: [1.0; 4],
+                    palette: Palette::default(),
                 }]),
             )
             .unwrap();
@@ -2210,6 +2307,7 @@ mod tests {
                     origin: [0.0; 2],
                     clip: None,
                     backdrop: None,
+                    motion: None,
                     primitives: &primitives,
                 }],
             )
@@ -2248,6 +2346,112 @@ mod tests {
 
     #[test]
     #[ignore = "requires a native GPU adapter"]
+    fn transparent_targets_hold_premultiplied_coverage_and_erase() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let target = Target::new(&device);
+        let mut renderer = Renderer::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let primitives = [
+            Primitive::Rect {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                color: [1.0, 1.0, 1.0, 0.5],
+            },
+            Primitive::Rect {
+                rect: [20.0, 0.0, 40.0, 10.0],
+                color: [0.0, 0.0, 1.0, 1.0],
+            },
+            Primitive::Path {
+                data: "M0 0H10V10H0Z",
+                origin: [30.0, 0.0],
+                style: PathStyle::Erase,
+                colors: [[0.0, 0.0, 0.0, 1.0]; 2],
+            },
+        ];
+        renderer
+            .draw(
+                &target.texture.create_view(&Default::default()),
+                [512, 256],
+                [0.0; 4],
+                &[Layer {
+                    scale: 1.0,
+                    origin: [0.0; 2],
+                    clip: None,
+                    backdrop: None,
+                    motion: None,
+                    primitives: &primitives,
+                }],
+            )
+            .unwrap();
+        let capture = target.capture(&renderer);
+        let pixel = |x: usize, y: usize| &capture[(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];
+        assert_eq!(pixel(5, 5)[3], 128, "half coverage is half opaque");
+        assert_eq!(pixel(5, 5)[0], 188, "over premultiplied colour");
+        assert_eq!(pixel(25, 5), [0, 0, 255, 255]);
+        assert_eq!(pixel(35, 5), [0; 4], "erased back to transparency");
+        assert_eq!(pixel(50, 5), [0; 4]);
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU adapter"]
+    fn translucent_windows_take_colour_premultiplied_in_srgb() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer = Renderer::new(device.clone(), queue.clone(), format);
+        let mut translucent = Translucent::new(&device, format, wgpu::TextureFormat::Rgba8Unorm);
+        let primitives = [
+            Primitive::Rect {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                color: [1.0, 1.0, 1.0, 0.2],
+            },
+            Primitive::Rect {
+                rect: [20.0, 0.0, 30.0, 10.0],
+                color: [0.2, 0.2, 0.2, 1.0],
+            },
+        ];
+        let frame = translucent.target(&device, [512, 256]);
+        renderer
+            .draw(
+                &frame,
+                [512, 256],
+                [0.0; 4],
+                &[Layer {
+                    scale: 1.0,
+                    origin: [0.0; 2],
+                    clip: None,
+                    backdrop: None,
+                    motion: None,
+                    primitives: &primitives,
+                }],
+            )
+            .unwrap();
+        let window = Target::with_format(&device, wgpu::TextureFormat::Rgba8Unorm);
+        translucent.present(
+            &device,
+            &queue,
+            &window.texture.create_view(&Default::default()),
+        );
+        let capture = window.capture(&renderer);
+        let pixel = |x: usize, y: usize| &capture[(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];
+        assert_eq!(
+            pixel(5, 5),
+            [51, 51, 51, 51],
+            "white at a fifth, premultiplied in sRGB"
+        );
+        assert_eq!(
+            pixel(25, 5),
+            [124, 124, 124, 255],
+            "opaque colours encode as ever"
+        );
+        assert_eq!(pixel(50, 5), [0; 4]);
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU adapter"]
     fn layers_transform_and_clip_independently() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
@@ -2272,6 +2476,7 @@ mod tests {
                         origin: [0.0; 2],
                         clip: Some([100.0, 50.0, 200.5, 80.0]),
                         backdrop: None,
+                        motion: None,
                         primitives: &fill,
                     },
                     Layer {
@@ -2279,6 +2484,7 @@ mod tests {
                         origin: [300.0, 10.0],
                         clip: None,
                         backdrop: None,
+                        motion: None,
                         primitives: &chrome,
                     },
                 ],
@@ -2306,6 +2512,7 @@ mod tests {
                     origin: [0.0; 2],
                     clip: None,
                     backdrop: None,
+                    motion: None,
                     primitives: &fill,
                 }]
             ),

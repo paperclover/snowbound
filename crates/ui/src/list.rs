@@ -4,8 +4,6 @@
 use crate::{Axis, Event, Flags, HALF_LIFE, Id, Size, Spec, Ui, fill, mix, px, scrollbar};
 use winit::keyboard::NamedKey;
 
-/// How far rows fade out under a scrolled list's edges.
-const EDGE: f64 = 10.0;
 /// Room beside a scrolling list's rows for its scrollbar.
 pub(crate) const GUTTER: f32 = 12.0;
 
@@ -191,8 +189,6 @@ pub fn list<R: Rows>(
     let scroll = state.scroll;
     ui.animating |= scroll != state.target;
 
-    let theme = ui.theme.clone();
-    let background = spec.fill.unwrap_or(theme.base);
     ui.open_as(
         id,
         Spec {
@@ -235,28 +231,7 @@ pub fn list<R: Rows>(
         ui.close();
         shown.push((key, place));
     }
-    // Rows fade out under the list's edges rather than end at a cut.
-    let clear = [background[0], background[1], background[2], 0.0];
-    let edges = [
-        (scroll > 0.0, 0.0, [background, clear]),
-        (scroll < most, view - EDGE, [clear, background]),
-    ];
-    for (index, (shown, at, [top, bottom])) in edges.into_iter().enumerate() {
-        if shown {
-            ui.leaf(
-                ("edge", index),
-                Spec {
-                    flags: Flags::FLOAT,
-                    size: [width, px(EDGE as f32)],
-                    position: [0.0, at as f32],
-                    fill: Some(top),
-                    gradient: Some(bottom),
-                    ..Spec::default()
-                },
-            );
-        }
-    }
-    let thumb = mix(theme.text_dim, theme.chip, 0.5);
+    let thumb = mix(ui.theme.text_dim, ui.theme.chip, 0.5);
     if let Some(offset) = scrollbar(
         ui,
         "bar",

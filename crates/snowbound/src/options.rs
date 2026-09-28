@@ -77,12 +77,6 @@ impl State {
         }
         let theme = ui.theme.clone();
         let row = theme.font_size * 2.0;
-        let window = ui.rect(Id::ROOT).unwrap_or_default();
-        let height = ui.rect(id()).map_or(HEIGHT, |rect| rect[3] - rect[1]);
-        let [left, top] = [
-            ((window[2] - WIDTH) / 2.0).max(0.0),
-            ((window[3] - height) / 2.0).max(0.0),
-        ];
         let entered = ui::popup::navigation(ui, &[user_name()], &[NamedKey::Enter])
             .contains(&NamedKey::Enter);
         ui.open_as(
@@ -95,7 +89,7 @@ impl State {
                 shadow: Some(theme.shadow),
                 radius: 8.0,
                 pad: [6.0, 6.0],
-                anchor: Some(Anchor::Below([left, top, left, top])),
+                anchor: Some(Anchor::Dialog),
                 ..Spec::default()
             },
         );
@@ -189,8 +183,13 @@ impl State {
             Page::Display => {
                 heading(ui, &theme, "Display");
                 let dark = !options.light_pages;
-                if ui::check_box(ui, "dark-pages", "Pages appear dark in the Dark color scheme", dark)
-                    .clicked
+                if ui::check_box(
+                    ui,
+                    "dark-pages",
+                    "Pages appear dark in the Dark color scheme",
+                    dark,
+                )
+                .clicked
                 {
                     options.light_pages = dark;
                 }
@@ -247,12 +246,7 @@ impl State {
             self.author = name.to_owned();
             self.color_scheme = options.color_scheme;
             self.light_pages = options.light_pages;
-            self.window.set_theme(self.color_scheme.theme());
-            let appearance = self
-                .color_scheme
-                .theme()
-                .unwrap_or_else(|| platform::appearance(&self.window));
-            self.ui.theme = crate::theme(appearance, self.light_pages);
+            self.follow_color_scheme();
             self.save_settings();
         } else if !cancel {
             return;
@@ -270,7 +264,7 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
             size: [fill(), px(theme.font_size * 1.8)],
             text: Some(text),
             bold: true,
-            fill: Some(theme.strip),
+            fill: Some(ui::mix(theme.panel, theme.chip, 0.4)),
             radius: 4.0,
             pad: [8.0, 0.0],
             ..Spec::default()

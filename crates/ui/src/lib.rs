@@ -43,6 +43,9 @@ const POPUP_SHADOW: [f32; 2] = [12.0, 4.0];
 /// Logical size of a box's icon, and its distance from the label.
 const ICON: f32 = 16.0;
 const ICON_GAP: f32 = 6.0;
+/// Seconds a dialog and other popups take to open and to close.
+const DIALOG: [f32; 2] = [0.24, 0.16];
+const POPUP: [f32; 2] = [0.16, 0.12];
 
 /// A box's identity across frames: its parent's id combined with a builder-chosen part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -136,6 +139,9 @@ impl Flags {
     pub const FLOAT: Flags = Flags(16);
     /// The host paints it and receives the events routed to it.
     pub const CUSTOM: Flags = Flags(32);
+    /// Paints in place while the popup around it opens, as a field standing in for the one
+    /// it opened from.
+    pub const STILL: Flags = Flags(64);
 
     pub(crate) fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
@@ -165,6 +171,18 @@ pub enum Shape {
     Tab { lean: f32 },
 }
 
+/// What a label does where it is wider than its box.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overflow {
+    /// Runs on as one line, cut at the box's edge.
+    #[default]
+    Clip,
+    /// Breaks into lines across the box, which grows to their height when sized by its text.
+    Wrap,
+    /// Stays one line, ending in an ellipsis where it is cut.
+    Ellipsis,
+}
+
 /// Where a popup opens, flipping to the far side of its anchor where the window ends first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
@@ -174,8 +192,10 @@ pub enum Anchor {
     Right([f32; 4]),
     /// Over the rectangle from its corner, as a combo box opens into its own list.
     Over([f32; 4]),
-    /// At a point, as a context menu opens: at once, without fading in.
+    /// At a point, as a context menu opens.
     Point([f32; 2]),
+    /// Centred in the window over the interface, which dims, as a dialog opens.
+    Dialog,
 }
 
 impl Anchor {
@@ -187,6 +207,7 @@ impl Anchor {
             Anchor::Right(rect) => (rect, Some(0)),
             Anchor::Over(rect) => (rect, None),
             Anchor::Point([x, y]) => ([x, y, x, y], Some(1)),
+            Anchor::Dialog => return ((room - size) / 2.0).max(0.0),
         };
         let [low, high] = [rect[axis], rect[axis + 2]];
         let (first, second) = if along == Some(axis) {
@@ -202,6 +223,51 @@ impl Anchor {
             first.min(room - size).max(0.0)
         }
     }
+
+    /// How a popup laid out at `rect` beside the anchor shows `open` of the way open: it
+    /// grows out of the anchor as it fades in, and a dialog swings up into place.
+    fn motion(self, rect: [f32; 4], open: f32) -> Motion {
+        let pivot = match self {
+            Anchor::Below(anchor) => [anchor[0], anchor[3]],
+            Anchor::Right(anchor) => [anchor[2], anchor[1]],
+            Anchor::Over(anchor) => [anchor[0], anchor[1]],
+            Anchor::Point(point) => point,
+            Anchor::Dialog => [(rect[0] + rect[2]) / 2.0, rect[1]],
+        };
+        let (from, tilt) = match self {
+            Anchor::Dialog => (0.95, 0.4),
+            Anchor::Over(_) => (0.94, 0.25),
+            _ => (0.94, 0.0),
+        };
+        Motion {
+            zoom: from + (1.0 - from) * open,
+            pivot: [
+                pivot[0].clamp(rect[0], rect[2]),
+                pivot[1].clamp(rect[1], rect[3]),
+            ],
+            tilt: tilt * (1.0 - open),
+            opacity: open,
+        }
+    }
+
+    /// Seconds the popup takes to open and to close.
+    fn durations(self) -> [f32; 2] {
+        if self == Anchor::Dialog {
+            DIALOG
+        } else {
+            POPUP
+        }
+    }
+}
+
+/// A box and what it holds scaled by `zoom` about `pivot`, leaned back `tilt` radians about
+/// the line through it, and faded; logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Motion {
+    zoom: f32,
+    pivot: [f32; 2],
+    tilt: f32,
+    opacity: f32,
 }
 
 /// What a box is this frame. Colours are linear RGBA.
@@ -218,6 +284,7 @@ pub struct Spec<'a> {
     /// Shapes the label semibold.
     pub bold: bool,
     pub font: Option<&'a str>,
+    pub overflow: Overflow,
     /// The label's colour; the theme's text colour otherwise.
     pub color: Option<[f32; 4]>,
     pub fill: Option<[f32; 4]>,
@@ -246,6 +313,9 @@ pub struct Spec<'a> {
     pub center: bool,
     /// For floating boxes, the offset from the parent's corner.
     pub position: [f32; 2],
+    /// How far the box and its children draw and take the pointer from where they are laid
+    /// out, the boxes around them keeping their places, as a row sliding aside does.
+    pub offset: [f32; 2],
     pub cursor: Option<CursorIcon>,
     /// Floats the box over all others beside a rectangle in the window, as a popup
     /// `Ui::open_popup` opened; boxes beneath take no input while one is open.
@@ -291,18 +361,60 @@ pub struct Signal {
     pub events: Vec<Event>,
 }
 
-/// A frame's painting, in order: interface primitives under a clip, or a host-painted box.
+/// A frame's painting, in order: interface primitives, or a host-painted box.
 pub enum Layer<'a> {
-    Primitives {
-        /// Logical pixels.
-        clip: Option<[f32; 4]>,
-        primitives: Vec<Primitive<'a>>,
-    },
+    Primitives(Primitives<'a>),
     Custom {
         id: Id,
         /// The box's visible logical rectangle.
         rect: [f32; 4],
     },
+}
+
+/// Interface primitives under a clip, in logical pixels, perhaps part of the way through
+/// opening or closing.
+pub struct Primitives<'a> {
+    pub clip: Option<[f32; 4]>,
+    motion: Option<Motion>,
+    pub primitives: Vec<Primitive<'a>>,
+}
+
+impl Primitives<'_> {
+    /// The layer the renderer paints at `scale` device pixels per logical pixel.
+    pub fn layer(&self, scale: f32) -> draw::Layer<'_> {
+        let Motion {
+            zoom,
+            pivot,
+            tilt,
+            opacity,
+        } = self.motion.unwrap_or(Motion {
+            zoom: 1.0,
+            pivot: [0.0; 2],
+            tilt: 0.0,
+            opacity: 1.0,
+        });
+        let device = |point: [f32; 2]| point.map(|value| value * scale);
+        let moved = |point: [f32; 2]| {
+            device(std::array::from_fn(|axis| {
+                pivot[axis] + (point[axis] - pivot[axis]) * zoom
+            }))
+        };
+        draw::Layer {
+            scale: scale * zoom,
+            origin: moved([0.0; 2]),
+            clip: self.clip.map(|[left, top, right, bottom]| {
+                let [[left, top], [right, bottom]] = [moved([left, top]), moved([right, bottom])];
+                [left, top, right, bottom]
+            }),
+            backdrop: None,
+            motion: self.motion.map(|_| draw::Motion {
+                opacity,
+                tilt,
+                pivot: device(pivot),
+            }),
+            primitives: &self.primitives,
+        }
+    }
 }
 
 struct Built {
@@ -313,6 +425,7 @@ struct Built {
     size: [Extent; 2],
     axis: Axis,
     label: Option<Rc<Label>>,
+    overflow: Overflow,
     color: [f32; 4],
     fill: Option<[f32; 4]>,
     gradient: Option<[f32; 4]>,
@@ -329,8 +442,10 @@ struct Built {
     gap: f32,
     center: bool,
     position: [f32; 2],
+    offset: [f32; 2],
     cursor: Option<CursorIcon>,
     anchor: Option<Anchor>,
+    motion: Option<Motion>,
     /// Rectangles relative to the box, painted over its fill.
     marks: Vec<([f32; 4], [f32; 4], f32)>,
     computed: [f32; 2],
@@ -353,6 +468,8 @@ struct State {
     /// A text field's selection, and the selection and unit of the press a drag extends.
     selection: Selection,
     press: (Selection, SelectionUnit),
+    /// The field selects all its text when next built.
+    select_all: bool,
     /// Where a dragged scrollbar thumb was taken, from its start.
     grab: f32,
     /// An animated value and its target, for `Ui::animate`.
@@ -369,6 +486,16 @@ struct Popup {
     highlight: Option<u64>,
     /// The height its results ease from and to, and the seconds since they set out.
     height: Option<[f32; 3]>,
+    opened: Instant,
+}
+
+/// A popup's painting as it last showed, fading out since it closed.
+struct Closing {
+    id: Id,
+    display: Vec<Display>,
+    anchor: Anchor,
+    rect: [f32; 4],
+    closed: Instant,
 }
 
 struct Hit {
@@ -378,8 +505,10 @@ struct Hit {
     cursor: Option<CursorIcon>,
 }
 
+#[derive(Clone)]
 enum Display {
     Clip(Option<[f32; 4]>),
+    Motion(Option<Motion>),
     Rect {
         rect: [f32; 4],
         fill: [f32; 4],
@@ -425,6 +554,8 @@ enum Display {
 
 pub struct Ui {
     pub theme: Theme,
+    /// The colours icons' slots take.
+    pub icon_palette: draw::Palette,
     /// Whether the window has keyboard focus; without it a field hides its caret and dims
     /// its selection.
     pub window_focused: bool,
@@ -456,6 +587,10 @@ pub struct Ui {
     display: Vec<Display>,
     /// Where the popups' painting starts in `display`, for edges drawn beneath them.
     popups_painted: usize,
+    /// Each popup painted, its anchor and rectangle, and its painting's place after
+    /// `popups_painted`.
+    painted: Vec<(Id, Anchor, [f32; 4], std::ops::Range<usize>)>,
+    closing: Vec<Closing>,
     animating: bool,
     /// This frame routed input, whose effects the builder may only have seen after boxes
     /// built before it read their state; one more frame shows them.
@@ -471,6 +606,7 @@ impl Ui {
     pub fn new(theme: Theme, double_click: Duration) -> Self {
         Self {
             theme,
+            icon_palette: draw::Palette::default(),
             window_focused: true,
             frame: 0,
             now: Instant::now(),
@@ -495,6 +631,8 @@ impl Ui {
             clicks: Clicks::new(double_click),
             display: Vec::new(),
             popups_painted: 0,
+            painted: Vec::new(),
+            closing: Vec::new(),
             animating: false,
             routed: false,
             caret: None,
@@ -536,6 +674,15 @@ impl Ui {
 
     pub fn set_focus(&mut self, id: Option<Id>) {
         self.focus = id;
+    }
+
+    /// Focuses text field `id` with all its text selected once it is built, as a field
+    /// opening to rename something does.
+    pub fn focus_all(&mut self, id: Id) {
+        let state = self.states.entry(id).or_default();
+        state.touched = self.frame;
+        state.select_all = true;
+        self.focus = Some(id);
     }
 
     /// The clickable or custom box at `point` in the latest layout.
@@ -767,6 +914,7 @@ impl Ui {
             query: String::new(),
             highlight: None,
             height: None,
+            opened: self.now,
         });
         self.focus = Some(id);
         self.states.entry(id).or_default().touched = self.frame;
@@ -838,11 +986,10 @@ impl Ui {
     /// Opens a box under an id chosen outside the hierarchy, so the host can name it
     /// wherever it is built.
     pub fn open_as(&mut self, id: Id, spec: Spec<'_>) -> Id {
-        let label = spec
-            .text
-            .map(|text| {
+        let label = spec.text.map(|text| {
             let size = spec.font_size.unwrap_or(self.theme.font_size);
-            self.texts.label(text, size, spec.bold, spec.font, self.frame)
+            self.texts
+                .label(text, size, spec.bold, spec.font, self.frame)
         });
         // Popups hang from the root, outside the clips and flow of where they are built.
         let parent = if spec.anchor.is_some() {
@@ -872,6 +1019,15 @@ impl Ui {
     }
 
     /// Eases towards `target` over the next frames, starting there the first time `id` asks.
+    /// Holds animated value `id` at `value` without easing, as a dragged box follows the
+    /// pointer; it eases from there once animated again.
+    pub fn hold(&mut self, id: Id, value: f32) -> f32 {
+        let state = self.states.entry(id).or_default();
+        state.touched = self.frame;
+        state.tween = Some([value; 2]);
+        value
+    }
+
     pub fn animate(&mut self, id: Id, target: f32) -> f32 {
         let state = self.states.entry(id).or_default();
         state.touched = self.frame;
@@ -879,12 +1035,6 @@ impl Ui {
         *goal = target;
         self.animating |= value != goal;
         *value
-    }
-
-    /// Shapes labels in the family the font `files` define, in place of the system's
-    /// interface font. Returns the family's name, or None when the files hold no font.
-    pub fn use_fonts(&mut self, files: impl IntoIterator<Item = Vec<u8>>) -> Option<String> {
-        self.texts.use_fonts(files)
     }
 
     /// Previews `family` in the font `data` holds, as a font menu shows the substitute a
@@ -937,7 +1087,13 @@ impl Ui {
     /// Solves this frame's layout and prepares its painting.
     pub fn end(&mut self) {
         debug_assert_eq!(self.stack.len(), 1, "open without close");
-        layout::solve(&mut self.nodes, &self.states, self.scale);
+        layout::solve(
+            &mut self.nodes,
+            &self.states,
+            self.scale,
+            &mut self.texts,
+            self.frame,
+        );
         for node in &self.nodes {
             let state = self.states.entry(node.id).or_default();
             state.rect = node.rect;
@@ -960,16 +1116,74 @@ impl Ui {
         {
             self.close_from(gone);
         }
-        self.display.clear();
+        let last = std::mem::take(&mut self.display);
+        let last_popups = self.popups_painted;
         self.hits.clear();
-        self.paint(0, None);
+        self.paint(0, None, None);
         self.popups_painted = self.display.len();
         let beneath = self.hits.len();
+        let mut painted = Vec::new();
         for index in self.nodes[0].children.clone() {
-            if self.nodes[index].anchor.is_some() {
-                self.paint(index, None);
+            let node = &self.nodes[index];
+            let Some(anchor) = node.anchor else {
+                continue;
+            };
+            let (id, rect) = (node.id, node.rect);
+            if let Some(open) = self.opening(id, anchor) {
+                self.scrim(anchor, open);
+                self.nodes[index].motion = Some(anchor.motion(rect, open));
             }
+            let from = self.display.len() - self.popups_painted;
+            self.paint(index, None, None);
+            painted.push((
+                id,
+                anchor,
+                rect,
+                from..self.display.len() - self.popups_painted,
+            ));
         }
+        for (id, anchor, rect, range) in std::mem::replace(&mut self.painted, painted) {
+            if self.painted.iter().any(|(shown, ..)| *shown == id) {
+                continue;
+            }
+            // What held still while it opened goes at once, uncovering what it stood in for.
+            let mut still = false;
+            let display = last[last_popups + range.start..last_popups + range.end]
+                .iter()
+                .filter(|item| match item {
+                    Display::Motion(motion) => {
+                        still = motion.is_none();
+                        false
+                    }
+                    _ => !still,
+                })
+                .cloned()
+                .collect();
+            self.closing.push(Closing {
+                id,
+                display,
+                anchor,
+                rect,
+                closed: self.now,
+            });
+        }
+        let closing = std::mem::take(&mut self.closing);
+        for closing in &closing {
+            let shut = self.progress(closing.closed, closing.anchor.durations()[1]);
+            let open = (1.0 - shut).powi(3);
+            self.scrim(closing.anchor, open);
+            let motion = closing.anchor.motion(closing.rect, open);
+            self.display.push(Display::Motion(Some(motion)));
+            self.display.extend(closing.display.iter().cloned());
+            self.display.push(Display::Motion(None));
+        }
+        self.closing = closing
+            .into_iter()
+            .filter(|closing| {
+                self.progress(closing.closed, closing.anchor.durations()[1]) < 1.0
+                    && !self.painted.iter().any(|(shown, ..)| *shown == closing.id)
+            })
+            .collect();
         self.modal = if self.popups.is_empty() { 0 } else { beneath };
         for id in [&mut self.hover, &mut self.active, &mut self.focus] {
             if id.is_some_and(|id| !self.states.contains_key(&id)) {
@@ -978,19 +1192,50 @@ impl Ui {
         }
     }
 
-    fn paint(&mut self, index: usize, clip: Option<[f32; 4]>) {
+    /// How far open popup `id` beside `anchor` shows this frame, from 0 to 1, while open.
+    pub fn opening(&mut self, id: Id, anchor: Anchor) -> Option<f32> {
+        let opened = self.popups.iter().find(|popup| popup.id == id)?.opened;
+        Some(1.0 - (1.0 - self.progress(opened, anchor.durations()[0])).powi(3))
+    }
+
+    /// How far through an animation `duration` seconds long that began at `start` this
+    /// frame is, asking for frames until it ends.
+    fn progress(&mut self, start: Instant, duration: f32) -> f32 {
+        let progress =
+            (self.now.saturating_duration_since(start).as_secs_f32() / duration).min(1.0);
+        self.animating |= progress < 1.0;
+        progress
+    }
+
+    /// Dims the window beneath a dialog `open` of the way open.
+    fn scrim(&mut self, anchor: Anchor, open: f32) {
+        if anchor == Anchor::Dialog {
+            self.display.push(Display::Rect {
+                rect: self.nodes[0].rect,
+                fill: [0.0, 0.0, 0.0, self.theme.shadow[3] * 0.5 * open],
+                shade: None,
+                border: None,
+                radius: 0.0,
+            });
+        }
+    }
+
+    fn paint(&mut self, index: usize, clip: Option<[f32; 4]>, motion: Option<Motion>) {
         let node = &self.nodes[index];
+        // The motion the box and its children paint with, where it changes it.
+        let own = if node.flags.contains(Flags::STILL) {
+            Some(None)
+        } else {
+            node.motion.map(Some)
+        };
+        if let Some(own) = own {
+            self.display.push(Display::Motion(own));
+        }
         let state = &self.states[&node.id];
         let rect = node.rect;
         let visible = clip.map_or(Some(rect), |clip| intersect(rect, clip));
-        // Without a colour of its own, a box fades the hover colour in rather than
-        // blending from transparent black.
         let blend = |base: Option<[f32; 4]>, hover: Option<[f32; 4]>| match (base, hover) {
-            (base, Some(hover)) => Some(mix(
-                base.unwrap_or([hover[0], hover[1], hover[2], 0.0]),
-                hover,
-                state.hot,
-            )),
+            (base, Some(hover)) => Some(mix(base.unwrap_or_default(), hover, state.hot)),
             (base, None) => base,
         };
         let fill = blend(node.fill, node.hover_fill);
@@ -1085,7 +1330,12 @@ impl Ui {
             let rect = if node.label.is_some() {
                 [x, top, x + ICON, top + ICON]
             } else {
-                [inner[0], painted[1] + node.pad[1], inner[2], painted[3] - node.pad[1]]
+                [
+                    inner[0],
+                    painted[1] + node.pad[1],
+                    inner[2],
+                    painted[3] - node.pad[1],
+                ]
             };
             self.display.push(Display::Image {
                 image: image.clone(),
@@ -1130,11 +1380,14 @@ impl Ui {
         }
         for child in node.children.clone() {
             if self.nodes[child].anchor.is_none() {
-                self.paint(child, inner_clip);
+                self.paint(child, inner_clip, own.unwrap_or(motion));
             }
         }
         if inner_clip != clip {
             self.display.push(Display::Clip(clip));
+        }
+        if own.is_some() {
+            self.display.push(Display::Motion(motion));
         }
     }
 
@@ -1142,17 +1395,31 @@ impl Ui {
     pub fn layers(&self) -> Vec<Layer<'_>> {
         let mut layers = Vec::new();
         let mut clip = None;
+        let mut motion = None;
         let mut primitives = Vec::new();
+        fn flush<'a>(
+            layers: &mut Vec<Layer<'a>>,
+            clip: Option<[f32; 4]>,
+            motion: Option<Motion>,
+            primitives: &mut Vec<Primitive<'a>>,
+        ) {
+            if !primitives.is_empty() {
+                layers.push(Layer::Primitives(Primitives {
+                    clip,
+                    motion,
+                    primitives: std::mem::take(primitives),
+                }));
+            }
+        }
         for item in &self.display {
             match item {
                 Display::Clip(next) => {
-                    if !primitives.is_empty() {
-                        layers.push(Layer::Primitives {
-                            clip,
-                            primitives: std::mem::take(&mut primitives),
-                        });
-                    }
+                    flush(&mut layers, clip, motion, &mut primitives);
                     clip = *next;
+                }
+                Display::Motion(next) => {
+                    flush(&mut layers, clip, motion, &mut primitives);
+                    motion = *next;
                 }
                 Display::Rect {
                     rect,
@@ -1221,6 +1488,7 @@ impl Ui {
                     origin: *origin,
                     size: ICON,
                     tint: *tint,
+                    palette: self.icon_palette,
                 }),
                 Display::Text {
                     label,
@@ -1234,12 +1502,7 @@ impl Ui {
                     ink: *color,
                 }),
                 Display::Custom { id, rect } => {
-                    if !primitives.is_empty() {
-                        layers.push(Layer::Primitives {
-                            clip,
-                            primitives: std::mem::take(&mut primitives),
-                        });
-                    }
+                    flush(&mut layers, clip, motion, &mut primitives);
                     layers.push(Layer::Custom {
                         id: *id,
                         rect: *rect,
@@ -1247,9 +1510,7 @@ impl Ui {
                 }
             }
         }
-        if !primitives.is_empty() {
-            layers.push(Layer::Primitives { clip, primitives });
-        }
+        flush(&mut layers, clip, motion, &mut primitives);
         layers
     }
 
@@ -1257,9 +1518,16 @@ impl Ui {
         (&mut self.texts, self.frame)
     }
 
-    pub(crate) fn field(&mut self, id: Id) -> (&mut Selection, &mut (Selection, SelectionUnit)) {
+    pub(crate) fn field(
+        &mut self,
+        id: Id,
+    ) -> (&mut Selection, &mut (Selection, SelectionUnit), &mut bool) {
         let state = self.states.entry(id).or_default();
-        (&mut state.selection, &mut state.press)
+        (
+            &mut state.selection,
+            &mut state.press,
+            &mut state.select_all,
+        )
     }
 
     pub(crate) fn grab(&mut self, id: Id) -> &mut f32 {
@@ -1293,6 +1561,7 @@ impl Built {
             size: spec.size,
             axis: spec.axis,
             label,
+            overflow: spec.overflow,
             color: spec.color.unwrap_or(text),
             fill: spec.fill,
             gradient: spec.gradient,
@@ -1309,8 +1578,10 @@ impl Built {
             gap: spec.gap,
             center: spec.center,
             position: spec.position,
+            offset: spec.offset,
             cursor: spec.cursor,
             anchor: spec.anchor,
+            motion: None,
             marks: Vec::new(),
             computed: [0.0; 2],
             relative: [0.0; 2],
@@ -1407,9 +1678,38 @@ impl Corner {
     }
 }
 
-/// `a` moved `t` of the way to `b`.
+/// Where a box dragged from index `from` of a list laid out at `spans`, each a start and a
+/// length along it, lands with its middle at `middle`: after every other box whose middle it
+/// has passed, as browser tabs reorder. The index is in the list's new order.
+pub fn drop_slot(spans: &[[f32; 2]], from: usize, middle: f32) -> usize {
+    spans
+        .iter()
+        .enumerate()
+        .filter(|(index, [start, length])| *index != from && start + length / 2.0 < middle)
+        .count()
+}
+
+/// How far box `index` of a list slides aside while the box at `from`, `length` long, is
+/// dragged to land at `to`.
+pub fn slide(index: usize, from: usize, to: usize, length: f32) -> f32 {
+    if from < index && index <= to {
+        -length
+    } else if to <= index && index < from {
+        length
+    } else {
+        0.0
+    }
+}
+
+/// `a` moved `t` of the way to `b`, mixed as premultiplied colours, so from transparent
+/// `b` fades in with its own hue.
 pub fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
+    let alpha = a[3] + (b[3] - a[3]) * t;
+    if alpha == 0.0 {
+        return [0.0; 4];
+    }
+    let channel = |i: usize| (a[i] * a[3] + (b[i] * b[3] - a[i] * a[3]) * t) / alpha;
+    [channel(0), channel(1), channel(2), alpha]
 }
 
 fn contains(rect: [f32; 4], point: [f32; 2]) -> bool {

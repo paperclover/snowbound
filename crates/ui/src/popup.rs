@@ -1,5 +1,5 @@
-//! Controls built on the popup layer: menus and filterable lists, a colour grid and a
-//! command palette. Each builds while its popup is open and returns what was chosen the
+//! Controls built on the popup layer: menus and filterable lists, a colour grid, a gallery
+//! and a command palette. Each builds while its popup is open and returns what was chosen the
 //! frame it is, closing the popup.
 
 use crate::{
@@ -16,7 +16,13 @@ use winit::keyboard::{Key, NamedKey};
 pub(crate) const CHECK: &[&str] = &[include_str!("../assets/check.svg")];
 /// Inset of a popup's contents, and its distance from what it drops down from.
 const PAD: f32 = 4.0;
+/// A palette's rows and filter field, and a menu's more compact rows.
 const ROW: f32 = 26.0;
+pub(crate) const MENU_ROW: f32 = 22.0;
+/// Inset of a menu row's icon and text.
+const ROW_PAD: f32 = 8.0;
+/// How far a menu's icons sit inside its leading edge.
+pub(crate) const ICON_INSET: f32 = PAD + ROW_PAD;
 /// Rows a list shows before it scrolls.
 const ROWS: f32 = 12.0;
 /// Height of the rule between groups.
@@ -108,6 +114,7 @@ pub fn menu(
         items,
         filter,
         width.max(least).max(NARROWEST),
+        MENU_ROW,
     )
 }
 
@@ -128,6 +135,7 @@ pub fn palette(ui: &mut Ui, id: Id, commands: &[Item]) -> Option<usize> {
         commands,
         Some("Search commands"),
         width,
+        ROW,
     )
 }
 
@@ -138,6 +146,7 @@ fn choose(
     items: &[Item],
     filter: Option<&str>,
     width: f32,
+    row: f32,
 ) -> Option<usize> {
     let field = id.child("filter");
     if filter.is_some() && ui.focus == Some(id) {
@@ -148,21 +157,31 @@ fn choose(
     let mut query = std::mem::take(&mut popup.query);
     let mut highlight = popup.highlight;
     let theme = ui.theme.clone();
+    // Over a combo box, the field takes the box's place at once and widens as the popup
+    // comes in around it.
+    let (flags, size) = match anchor {
+        Anchor::Over(rect) => {
+            let open = ui.opening(id, anchor).unwrap_or(1.0);
+            let from = rect[2] - rect[0];
+            let to = width - 2.0 * PAD;
+            (
+                Flags::STILL,
+                [px(from + (to - from) * open), px(rect[3] - rect[1])],
+            )
+        }
+        _ => (Flags::default(), [fill(), px(ROW)]),
+    };
     surface(ui, id, anchor, width);
     if let Some(placeholder) = filter {
         let before = query.clone();
-        // Over a combo box, the field takes the box's place.
-        let height = match anchor {
-            Anchor::Over(rect) => rect[3] - rect[1],
-            _ => ROW,
-        };
         text_field(
             ui,
             field,
             &mut query,
             placeholder,
             Spec {
-                size: [fill(), px(height)],
+                flags,
+                size,
                 fill: Some(theme.base),
                 border: Some(theme.accent),
                 radius: 4.0,
@@ -178,7 +197,10 @@ fn choose(
     // Unfiltered, the current or checked item starts highlighted; filtered, the best match.
     highlight = highlight.or_else(|| {
         let first = if query.is_empty() {
-            matches.order.iter().position(|index| items[*index].current || items[*index].checked)
+            matches
+                .order
+                .iter()
+                .position(|index| items[*index].current || items[*index].checked)
         } else {
             (0..matches.count()).find(|row| matches.selectable(*row))
         };
@@ -186,10 +208,10 @@ fn choose(
     });
     let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
     let field = if filter.is_some() { ROW + PAD } else { 0.0 };
-    let content = matches.count() as f32 * ROW + matches.space_before(matches.count());
+    let content = matches.count() as f32 * row + matches.space_before(matches.count());
     let view = content
-        .max(ROW)
-        .min((ROWS * ROW).min(window - 4.0 * PAD - field).max(ROW));
+        .max(row)
+        .min((ROWS * row).min(window - 4.0 * PAD - field).max(row));
     // The popup eases to its new height as the results change; the rows do not move.
     let dt = ui.dt;
     let [from, to, elapsed] = state(ui, id).height.get_or_insert([view, view, RESIZE]);
@@ -212,7 +234,7 @@ fn choose(
         ui.leaf(
             "empty",
             Spec {
-                size: [fill(), px(ROW)],
+                size: [fill(), px(row)],
                 text: Some("No matches"),
                 color: Some(theme.text_dim),
                 pad: [8.0, 0.0],
@@ -223,7 +245,7 @@ fn choose(
     } else {
         let list = List {
             rows: &matches,
-            row: ROW,
+            row,
             keys: &keys,
             hover_selects: true,
         };
@@ -285,7 +307,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
             size: [fill(), fill()],
             fill: row.selected.then(|| theme.hover()),
             radius: 4.0,
-            pad: [8.0, 0.0],
+            pad: [ROW_PAD, 0.0],
             gap: ICON_GAP,
             ..Spec::default()
         },
@@ -299,7 +321,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
         ui.leaf(
             "icon",
             Spec {
-                size: [px(ICON), px(ROW)],
+                size: [px(ICON), fill()],
                 icon: if item.checked { Some(CHECK) } else { item.icon },
                 color: Some(if item.disabled {
                     mix(tint, theme.popup, 0.5)
@@ -313,7 +335,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
     ui.leaf(
         "text",
         Spec {
-            size: [fill(), px(ROW)],
+            size: [fill(), fill()],
             text: Some(item.text),
             font: item.font,
             font_size: item.heading.then_some(theme.font_size - 2.0),
@@ -326,7 +348,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
         ui.leaf(
             "shortcut",
             Spec {
-                size: [fit(), px(ROW)],
+                size: [fit(), fill()],
                 text: Some(item.shortcut),
                 color: Some(theme.text_dim),
                 ..Spec::default()
@@ -445,6 +467,115 @@ pub fn colors(
             ui.close();
         }
         ui.close();
+    }
+    ui.close();
+    state(ui, id).highlight = highlight.map(|cell| cell as u64);
+    None
+}
+
+/// Builds popup `id` as a gallery beside `anchor` while it is open: `groups` of cells, each
+/// a heading and a count, in rows of `columns` cells `size` large, with cell `current`
+/// outlined. `cell` builds a cell's contents from its index, counted through the groups.
+/// Returns the index of the cell chosen.
+#[allow(clippy::too_many_arguments)]
+pub fn gallery(
+    ui: &mut Ui,
+    id: Id,
+    anchor: Anchor,
+    groups: &[(&str, usize)],
+    columns: usize,
+    size: [f32; 2],
+    current: Option<usize>,
+    mut cell: impl FnMut(&mut Ui, usize),
+) -> Option<usize> {
+    if !ui.popup_open(id) {
+        return None;
+    }
+    let cell_id = |index: usize| id.child(("cell", index));
+    let count: usize = groups.iter().map(|(_, count)| count).sum();
+    let keys = navigation(
+        ui,
+        &[id],
+        &[
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowRight,
+            NamedKey::ArrowUp,
+            NamedKey::ArrowDown,
+            NamedKey::Enter,
+        ],
+    );
+    let mut highlight = state(ui, id).highlight.map(|cell| cell as usize);
+    let mut chosen = None;
+    for index in 0..count {
+        let signal = ui.signal(cell_id(index));
+        if signal.hovered && ui.moved {
+            highlight = Some(index);
+        }
+        if signal.clicked {
+            chosen = Some(index);
+        }
+    }
+    for key in keys {
+        let at = highlight.or(current).unwrap_or(0);
+        highlight = Some(match key {
+            NamedKey::Enter => {
+                chosen = chosen.or(highlight);
+                continue;
+            }
+            NamedKey::ArrowLeft => at.saturating_sub(1),
+            NamedKey::ArrowRight => (at + 1).min(count - 1),
+            NamedKey::ArrowUp => at.saturating_sub(columns),
+            _ => (at + columns).min(count - 1),
+        });
+    }
+    if let Some(index) = chosen {
+        ui.close_popup(id);
+        return Some(index);
+    }
+    let theme = ui.theme.clone();
+    surface(ui, id, anchor, columns as f32 * size[0] + 2.0 * PAD);
+    let mut index = 0;
+    for (group, (heading, cells)) in groups.iter().enumerate() {
+        ui.leaf(
+            ("heading", group),
+            Spec {
+                size: [fill(), px(MENU_ROW)],
+                text: Some(heading),
+                font_size: Some(theme.font_size - 2.0),
+                bold: true,
+                color: Some(theme.text_dim),
+                pad: [PAD, 0.0],
+                ..Spec::default()
+            },
+        );
+        for row in 0..cells.div_ceil(columns) {
+            ui.open(
+                ("row", group, row),
+                Spec {
+                    size: [fill(), px(size[1])],
+                    ..Spec::default()
+                },
+            );
+            for _ in 0..columns.min(cells - row * columns) {
+                ui.open_as(
+                    cell_id(index),
+                    Spec {
+                        flags: Flags::CLICKABLE,
+                        axis: Axis::Y,
+                        size: [px(size[0]), px(size[1])],
+                        fill: (highlight == Some(index)).then(|| theme.hover()),
+                        border: (current == Some(index)).then_some(theme.accent),
+                        radius: 4.0,
+                        pad: [PAD, PAD],
+                        ..Spec::default()
+                    },
+                );
+                cell(ui, index);
+                ui.close();
+                index += 1;
+            }
+            ui.close();
+        }
     }
     ui.close();
     state(ui, id).highlight = highlight.map(|cell| cell as u64);

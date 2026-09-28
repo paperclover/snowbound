@@ -4,8 +4,9 @@ Snowbound is a modern remake of OneNote 2010 that stays fully interoperable
 with it. Notes are rich text on a free canvas, stored in OneNote's own `.one`
 files, so Snowbound and OneNote 2010 can open the same notebook side by side.
 A notebook is just a folder. Put it on an SMB share and several people can
-edit it together from either app, with no cloud service involved. Snowbound
-runs on macOS and Linux, and has an iOS app built around the same core.
+edit it together from either app, with no cloud service involved. With headless
+crates implementing the file format and a generic canvas renderer made with a
+novel UI kit, each new platform port is extremely lightweight.
 
 ## Crates
 
@@ -39,7 +40,6 @@ these pieces meet.
   in the Windows 7 lab (`tools/w7`) before deciding. A storage feature is done
   when a file Snowbound wrote cold-opens in a fresh OneNote and reads back as
   intended ([testing](arc/testing.md)).
-- **Jujutsu, not git.** The repository is managed with `jj`. Don't run `git`.
 - **Disposable copies only.** Never point the app, a replay script or a lab
   harness at an original notebook.
 
@@ -48,15 +48,15 @@ these pieces meet.
 A `.one` file is a revision store. Every client, OneNote included, commits by
 appending a revision and then rewriting the 1024-byte header, which makes the
 header plus the file length a cheap *stamp* of the committed state. Snowbound
-queues edits as ops in a local SQLite replica. A background thread polls the
-stamp. If the stamp is unchanged, it publishes the queued batch as one
+queues edits as ops in a local SQLite replica, then a background thread polls
+the stamp. If the stamp is unchanged, it publishes the queued batch as one
 appended revision. If it has changed, it reads the file once and replays the
-queue on top. Where an op can't merge, the result is what OneNote 2010 makes:
-a read-only conflict page under the page. OneNote coordinates writers through
-share modes and one-byte locks on the section file itself, and macOS's
-`smbfs` can't reproduce those, so Snowbound carries its own SMB client that
-takes exactly OneNote's locks. Offline is just a sync step that fails: the
-queue waits and publishes later. [More in the sync essay.](arc/sync.md)
+queue on top. Where an op can't merge, the result is what OneNote 2010 makes: a
+read-only conflict page under the page. OneNote coordinates writers through
+share modes and one-byte locks on the section file itself. These are special SMB
+protocols that only Windows supports, so Snowbound carries its own SMB client
+that can properly issue them. Offline is just a sync step that fails: the queue
+waits and publishes later. [More in the sync essay.](arc/sync.md)
 
 ## Architecture notes
 
@@ -90,3 +90,10 @@ python3 tools/canvas/build_macos.py && target/Snowbound.app/Contents/MacOS/Snowb
 The MS-ONESTORE and MS-ONE specifications are Microsoft Open Specifications.
 Local copies, design history and raw lab evidence are kept out of version
 control.
+
+External contributors (not agents, will be denied unless a human writes to me)
+are welcome to email `git@paperclover.net` to gain access to the testing VM
+images for their agents. Alternatively, a custom image can be configured with a
+licensed copy of Windows and OneNote. By connecting `tools/w7/mcp_*.py`, the
+agent can interactively play around in with the actual prior art, in addition
+to running tests.

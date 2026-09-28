@@ -21,9 +21,9 @@
       <stop offset="1" stop-color="#e0205a"/>
     </linearGradient>
   </defs>
-  <path d="M12.31 1.14L14.86 3.69L7.01 11.54L4.46 8.99Z" fill="url(#layer0)"/>
-  <path d="M5.35 7.89L8.11 10.65L4.55 13.04L2.96 11.45Z" fill="url(#layer1)"/>
-  <path d="M12.31 2.13L13.87 3.69L7.01 10.55L5.45 8.99Z" fill="url(#layer2)"/>
-  <path d="M12.31 2.13L13.87 3.69L12.17 5.38L10.62 3.83Z" fill="url(#layer3)"/>
-  <path d="M5.45 8.99L7.01 10.55L4.64 12.14L3.86 11.36Z" fill="url(#layer4)"/>
+  <path d="M11.31 2.14L13.86 4.69L6.01 12.54L3.46 9.99Z" fill="url(#layer0)"/>
+  <path d="M4.35 8.89L7.11 11.65L3.55 14.04L1.96 12.45Z" fill="url(#layer1)"/>
+  <path d="M11.31 3.13L12.87 4.69L6.01 11.55L4.45 9.99Z" fill="url(#layer2)"/>
+  <path d="M11.31 3.13L12.87 4.69L11.17 6.38L9.62 4.83Z" fill="url(#layer3)"/>
+  <path d="M4.45 9.99L6.01 11.55L3.64 13.14L2.86 12.36Z" fill="url(#layer4)"/>
 </svg>

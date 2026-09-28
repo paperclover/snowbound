@@ -44,14 +44,15 @@ pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Si
             ..Spec::default()
         },
     );
-    let hovered = ui.signal(id).hovered;
+    // A box's signal is taken once, so its hover and click are read together.
+    let signal = ui.signal(id);
     ui.leaf(
         "box",
         Spec {
             size: [px(side), px(height)],
             inset: [0.0, margin, 0.0, margin],
             fill: Some(if checked { theme.accent } else { theme.base }),
-            border: Some(if checked || hovered {
+            border: Some(if checked || signal.hovered {
                 theme.accent
             } else {
                 theme.chip
@@ -71,7 +72,7 @@ pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Si
         },
     );
     ui.close();
-    ui.signal(id)
+    signal
 }
 
 /// An overlay scrollbar along the far edge of the current box, for content whose scroll
@@ -151,9 +152,9 @@ pub fn text_field(
         .zip(ui.rect(id))
         .map(|(pointer, rect)| pointer[0] - rect[0] - pad)
         .filter(|_| signal.pressed || signal.dragging);
-    let (mut selection, mut press) = {
-        let (selection, press) = ui.field(id);
-        (*selection, *press)
+    let (mut selection, mut press, select_all) = {
+        let (selection, press, select_all) = ui.field(id);
+        (*selection, *press, std::mem::take(select_all))
     };
     let before = [selection.anchor(), selection.focus()];
     let (texts, frame) = ui.texts();
@@ -181,7 +182,14 @@ pub fn text_field(
             Selection::new(anchor, focus)
         };
     }
-    selection = selection.refresh(&label.layout);
+    selection = if select_all {
+        Selection::new(
+            Cursor::from_byte_index(&label.layout, 0, Affinity::Downstream),
+            Cursor::from_byte_index(&label.layout, usize::MAX, Affinity::Upstream),
+        )
+    } else {
+        selection.refresh(&label.layout)
+    };
     for event in &signal.events {
         let layout = &label.layout;
         let (range, inserted) = match event {
@@ -192,7 +200,14 @@ pub fn text_field(
                 // page keys to scroll.
                 let command = match (Command::from_key(&key, modifiers), &key) {
                     (Some(Command::Kill), _) => Some(Command::DeleteTo(Movement::LineEnd)),
-                    (Some(Command::ScrollPage { .. } | Command::MovePage { .. }), _) => None,
+                    (
+                        Some(
+                            Command::ScrollPage { .. }
+                            | Command::MovePage { .. }
+                            | Command::MoveParagraphs { .. },
+                        ),
+                        _,
+                    ) => None,
                     (None, edit::Key::Named(edit::NamedKey::Home)) => {
                         Some(Command::Move(Movement::DocumentStart))
                     }
@@ -254,7 +269,7 @@ pub fn text_field(
     }
     let moved = signal.pressed || before != [selection.anchor(), selection.focus()];
     {
-        let (stored, stored_press) = ui.field(id);
+        let (stored, stored_press, _) = ui.field(id);
         *stored = selection;
         *stored_press = press;
     }

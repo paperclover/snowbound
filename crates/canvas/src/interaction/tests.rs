@@ -171,7 +171,7 @@ fn title_chrome_selects_text_and_exposes_a_named_editable_field() {
         })
         .collect::<Vec<_>>();
     assert_eq!(borders, [Some(Stroke::Dashed(1.0))]);
-    assert!(primitives.iter().any(|primitive| matches!(primitive, Primitive::RoundedRect { rect, radius, stroke: Some(Stroke::Dashed(_)), .. } if radius[0] == 6.0 && radius[1] * 2.0 == rect[3] - rect[1])));
+    assert!(primitives.iter().any(|primitive| matches!(primitive, Primitive::RoundedRect { rect, radius, stroke: Some(Stroke::Dashed(_)), .. } if radius[0] == 4.5 && radius[1] * 2.0 == rect[3] - rect[1])));
     let mut access = accessibility::Accessibility::default();
     let update = access
         .update(
@@ -190,6 +190,49 @@ fn title_chrome_selects_text_and_exposes_a_named_editable_field() {
     assert!(update.nodes.iter().any(|(_, node)| node.role()
         == accesskit::Role::MultilineTextInput
         && node.label() == Some("Page title")));
+}
+
+#[test]
+fn title_frame_shows_unfocused_and_its_pen_scales_only_when_zoomed_in() {
+    let mut engine = TextEngine::default();
+    let mut outline = |text: &str, origin, title| {
+        let mut source = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new(text.into(), Format::default())]).unwrap(),
+            468.0,
+            origin,
+        )
+        .unwrap()
+        .snapshot();
+        source.title = title;
+        TextOutline::from_outline(&mut engine, &source, &Default::default()).unwrap()
+    };
+    let title = outline("Title", [36.0, 14.4], true);
+    let body = outline("Body", [36.0, 120.0], false);
+    let body_id = body.id;
+    let mut editor =
+        CanvasEditor::from_text_outlines(vec![title, body], Default::default(), None).unwrap();
+    editor.focus_outline(body_id).unwrap();
+    // OneNote 2010: a 4 px dash period at 100% and below, 4 px times the zoom above it.
+    for (zoom, pen) in [(0.5, 1.5), (1.0, 0.75), (2.0, 0.75), (3.0, 0.75)] {
+        let scale = zoom * 96.0 / 72.0;
+        let primitives =
+            page_primitives(&editor, None, None, None, paint(false, scale, 1.0)).unwrap();
+        let dashed = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::RoundedRect {
+                    stroke: Some(Stroke::Dashed(width)),
+                    ..
+                } => Some(*width),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(dashed[..], [width] if (width - pen).abs() < 1e-5),
+            "zoom {zoom}: {dashed:?}"
+        );
+    }
 }
 
 #[test]
@@ -1339,45 +1382,9 @@ fn read_only_focus_accepts_navigation_without_edit_shortcuts() {
                 ..Modifiers::default()
             },
         ),
-        (
-            Key::Character("N".into()),
-            Modifiers {
-                command: true,
-                shift: true,
-                ..Modifiers::default()
-            },
-        ),
-        (
-            Key::Character("+".into()),
-            Modifiers {
-                command: true,
-                ..Modifiers::default()
-            },
-        ),
-        (
-            Key::Character("0".into()),
-            Modifiers {
-                command: true,
-                ..Modifiers::default()
-            },
-        ),
-        (
-            Key::Character("-".into()),
-            Modifiers {
-                command: true,
-                ..Modifiers::default()
-            },
-        ),
     ] {
         assert!(read_only_shortcut(&key, modifiers));
     }
-    assert!(!read_only_shortcut(
-        &Key::Character("n".into()),
-        Modifiers {
-            command: true,
-            ..Modifiers::default()
-        }
-    ));
     assert!(!read_only_shortcut(
         &Key::Named(NamedKey::Tab),
         Modifiers::default()
@@ -1611,7 +1618,8 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
             .starts_with('X')
     );
 
-    // Command-C asks the host to copy; Command-V asks it to paste, then commits its text.
+    // Copy asks the host to copy; the host's paste commits its text. The shortcut
+    // modifier's chords are the host's, so the page takes none of them as typing.
     let _ = view
         .modifiers_changed(Modifiers {
             shift: true,
@@ -1619,6 +1627,10 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
         })
         .unwrap();
     let _ = view.key(&Key::Named(NamedKey::ArrowRight), None).unwrap();
+    assert_eq!(
+        view.copy(false).unwrap().request,
+        Some(Request::Copy("B".into()))
+    );
     let _ = view
         .modifiers_changed(Modifiers {
             command: true,
@@ -1626,18 +1638,38 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
         })
         .unwrap();
     assert_eq!(
-        view.key(&Key::Character("c".into()), None).unwrap().request,
-        Some(Request::Copy("B".into()))
-    );
-    assert_eq!(
-        view.key(&Key::Character("v".into()), None).unwrap().request,
-        Some(Request::Paste)
+        view.key(&Key::Character("v".into()), Some("v")).unwrap(),
+        Response::default()
     );
     assert!(view.commit_text("line\nbreak".into()).unwrap().changed);
     assert_eq!(
         view.editor.active_outline().document().paragraphs().count(),
         3
     );
+
+    // Select All selects the caret's paragraph, then the whole outline.
+    let caret = view.editor.selection().positions[1].paragraph;
+    let select_all = |view: &mut PageView| {
+        let _ = view.widen_selection().unwrap();
+        view.editor
+            .selection()
+            .positions
+            .map(|position| (position.paragraph, position.offset))
+    };
+    let last = view
+        .editor
+        .active_outline()
+        .document()
+        .paragraphs()
+        .last()
+        .unwrap();
+    let whole = [(0, 0), (2, last.utf16_offset(last.text().len()).unwrap())];
+    let paragraph = select_all(&mut view);
+    assert!(
+        paragraph[0] == (caret, 0) && paragraph != whole,
+        "{paragraph:?}"
+    );
+    assert_eq!(select_all(&mut view), whole);
     let _ = view.modifiers_changed(Modifiers::default()).unwrap();
 
     // A click on the picture selects it, stops text input, and Delete removes it.

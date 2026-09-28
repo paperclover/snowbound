@@ -418,7 +418,7 @@ impl crate::State {
             .chain(editor.caret_outline())
             .filter(|outline| !outline.title)
             .all(canvas::editor::TextOutline::is_empty);
-        if !blank || session.conflict(space).is_some() || self.dismissed.contains(&space) {
+        if !blank || session.read_only() || self.dismissed.contains(&space) {
             self.templates = View::Strip;
             return;
         }

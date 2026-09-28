@@ -273,8 +273,17 @@ impl CanvasEditor {
         if self.active_outline().title {
             return self.leave_title(engine);
         }
+        let [anchor, focus] = self.active_outline().selection.positions;
+        if anchor == focus {
+            self.link_typed_url(engine, focus)?;
+            // Enter at a label's start splits before its field code.
+            self.leave_link_code()?;
+            if self.break_equation(engine)? {
+                return Ok(());
+            }
+        }
+        let [anchor, focus] = self.active_outline().selection.positions;
         let outline = self.active_outline();
-        let [anchor, focus] = outline.selection.positions;
         let (cell, local, source) = outline
             .document
             .leaf(focus.paragraph)

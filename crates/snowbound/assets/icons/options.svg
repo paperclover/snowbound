@@ -1,5 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <path d="M8 1.5V3.5M8 12.5V14.5M1.5 8H3.5M12.5 8H14.5M3.4 3.4L4.8 4.8M11.2 11.2L12.6 12.6M3.4 12.6L4.8 11.2M11.2 4.8L12.6 3.4" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>
-  <circle cx="8" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.25"/>
-  <circle cx="8" cy="8" r="1.25" fill="none" stroke="currentColor" stroke-width="1.25"/>
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#d3d9e0"/><stop offset="1" stop-color="#7b8796"/></linearGradient>
+  </defs>
+  <path d="M8.529 3.376L10.09 1.86L11.394 2.4L11.426 4.576L12.174 5.324L14.35 5.356L14.89 6.66L13.374 8.221L13.374 9.279L14.89 10.84L14.35 12.144L12.174 12.176L11.426 12.924L11.394 15.1L10.09 15.64L8.529 14.124L7.471 14.124L5.91 15.64L4.606 15.1L4.574 12.924L3.826 12.176L1.65 12.144L1.11 10.84L2.626 9.279L2.626 8.221L1.11 6.66L1.65 5.356L3.826 5.324L4.574 4.576L4.606 2.4L5.91 1.86L7.471 3.376ZM5.8 8.75A2.2 2.2 0 1 1 10.2 8.75A2.2 2.2 0 1 1 5.8 8.75Z" fill="#000000" fill-rule="evenodd" fill-opacity="0.16"/>
+  <path d="M8.529 2.626L10.09 1.11L11.394 1.65L11.426 3.826L12.174 4.574L14.35 4.606L14.89 5.91L13.374 7.471L13.374 8.529L14.89 10.09L14.35 11.394L12.174 11.426L11.426 12.174L11.394 14.35L10.09 14.89L8.529 13.374L7.471 13.374L5.91 14.89L4.606 14.35L4.574 12.174L3.826 11.426L1.65 11.394L1.11 10.09L2.626 8.529L2.626 7.471L1.11 5.91L1.65 4.606L3.826 4.574L4.574 3.826L4.606 1.65L5.91 1.11L7.471 2.626ZM5.8 8A2.2 2.2 0 1 1 10.2 8A2.2 2.2 0 1 1 5.8 8Z" fill="url(#g0)" fill-rule="evenodd" stroke="#5a6676" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M4.4 8A3.6 3.6 0 1 1 11.6 8A3.6 3.6 0 1 1 4.4 8Z" fill="none" stroke="#8e99a7" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

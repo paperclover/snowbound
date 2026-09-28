@@ -1,26 +1,25 @@
 //! OneNote 2010's navigation bar: the open notebooks with their sections and section
 //! groups, down the window's left, beside the section tabs.
 
-use crate::{art, library::Library, menus::Target, section_color};
+use crate::{
+    art,
+    library::Library,
+    menus::{Dragged, Target},
+    rename, section_color,
+};
 use notebook::discover::{Folder, SectionState};
 use std::{collections::HashSet, sync::Arc};
-use ui::{Axis, Event, Flags, Id, Signal, Spec, Theme, Ui, fill, fit, px};
-use winit::keyboard::{Key, NamedKey};
+use ui::{Axis, Flags, Id, Signal, Spec, Theme, Ui, fill, fit, px};
 
 pub const WIDTH: f32 = 220.0;
-/// The collapsed sidebar: a rail as wide as its button, which stays where it is as the
-/// sidebar opens.
-pub const RAIL: f32 = crate::FRAME + ui::shell::TOOL + 2.0;
+/// The square the sidebar's button stands in at the start of the section tabs.
+const RAIL: f32 = crate::TAB_ROW;
 const ROW: f32 = 24.0;
 /// How far each level of the tree sits inside its parent.
 const INDENT: f32 = 16.0;
 
 /// What the sidebar was asked to do.
 pub enum Action {
-    /// Expands or collapses the sidebar.
-    Toggle,
-    /// Shows a notebook where it was left.
-    Notebook(usize),
     /// Opens a notebook's section by catalog path.
     Open {
         notebook: usize,
@@ -36,18 +35,8 @@ pub enum Action {
     Menu(Target, [f32; 2]),
     /// Ends renaming, with the name typed or without.
     Renamed(bool),
-}
-
-/// A section or group being renamed in place, and the name typed so far.
-pub struct Renaming {
-    pub library: Arc<Library>,
-    pub path: String,
-    pub name: String,
-}
-
-/// The field a row being renamed shows.
-pub fn rename_field() -> Id {
-    Id::ROOT.child("rename")
+    /// Explains why a section or group can't be read: its name and the reason.
+    Unavailable(String, String),
 }
 
 /// Names a notebook's or group's rows for folding them.
@@ -61,12 +50,35 @@ pub struct Tree<'a> {
     /// The open section's notebook index and catalog path.
     open: Option<(usize, &'a str)>,
     folded: &'a HashSet<String>,
-    renaming: Option<&'a mut Renaming>,
+    renaming: Option<&'a mut rename::Renaming>,
     action: Option<Action>,
     /// Each section and group row: where it lies, and what it is.
     rows: Vec<Entry>,
     /// The section or group held down, which a drag moves.
     held: Option<Entry>,
+    /// The row dragged, which the tree leaves out for a gap where it would land.
+    lifted: Option<(&'a Entry, &'a Landing)>,
+    /// The dragged row as it was built, for drawing it over the others.
+    ghost: Option<Ghost>,
+    /// Where the gap the dragged row would land in stands.
+    gap: Option<[f32; 4]>,
+}
+
+/// Where a dragged row would land: before a row of a folder or at its end, or into a group.
+#[derive(Clone, PartialEq)]
+pub struct Landing {
+    pub folder: String,
+    pub before: Option<String>,
+    pub into: bool,
+}
+
+/// The dragged row's look, kept to draw it over the others.
+struct Ghost {
+    label: String,
+    icon: Leading,
+    depth: u32,
+    dim: bool,
+    selected: Option<[f32; 4]>,
 }
 
 impl<'a> Tree<'a> {
@@ -74,7 +86,7 @@ impl<'a> Tree<'a> {
         theme: &'a Theme,
         open: Option<(usize, &'a str)>,
         folded: &'a HashSet<String>,
-        renaming: Option<&'a mut Renaming>,
+        renaming: Option<&'a mut rename::Renaming>,
     ) -> Self {
         Self {
             theme,
@@ -84,6 +96,9 @@ impl<'a> Tree<'a> {
             action: None,
             rows: Vec::new(),
             held: None,
+            lifted: None,
+            ghost: None,
+            gap: None,
         }
     }
 }
@@ -95,18 +110,26 @@ pub struct Entry {
     pub path: String,
     pub group: bool,
     pub rect: [f32; 4],
+    /// The row's box, which a drag draws over the others.
+    pub id: Id,
 }
 
 impl Entry {
     fn folder(&self) -> &str {
         self.path.rsplit_once('/').map_or("", |(folder, _)| folder)
     }
+
+    /// Whether this is the row `lifted`, or one inside it.
+    fn within(&self, lifted: &Entry) -> bool {
+        self.notebook == lifted.notebook
+            && (self.path == lifted.path || self.path.starts_with(&format!("{}/", lifted.path)))
+    }
 }
 
 /// The sidebar's header row, `header` tall, then with `rows` the tree of `notebooks` with
 /// the open section marked.
 fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32, rows: bool) {
-    let (theme, open, folded) = (tree.theme, tree.open, tree.folded);
+    let (theme, folded) = (tree.theme, tree.folded);
     ui.open(
         "header",
         Spec {
@@ -116,9 +139,14 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
             ..Spec::default()
         },
     );
-    if ui::shell::tool_button(ui, "toggle", art::NOTEBOOK, theme.text, false).clicked {
-        tree.action = Some(Action::Toggle);
-    }
+    // The button's square, which floats over this place from the section tabs.
+    ui.leaf(
+        "toggle",
+        Spec {
+            size: [px(RAIL - crate::FRAME), px(ui::shell::TOOL)],
+            ..Spec::default()
+        },
+    );
     ui.leaf(
         "title",
         Spec {
@@ -148,7 +176,7 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
         let (row, fold) = tree_row(
             ui,
             tree,
-            ("notebook", index),
+            ui.id(("notebook", index)),
             Row {
                 label: &library.name,
                 icon: Leading::Icon(art::NOTEBOOK),
@@ -159,16 +187,18 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
                 renamed: false,
             },
         );
-        if fold {
+        if row.clicked || fold {
             tree.action = Some(Action::Fold(key));
-        } else if row.clicked && open.is_none_or(|(notebook, _)| notebook != index) {
-            tree.action = Some(Action::Notebook(index));
         }
         if let Some(point) = row.context {
             tree.action = Some(Action::Menu(Target::Notebook(Arc::clone(library)), point));
         }
-        if unfolded && let Some(catalog) = library.catalog() {
+        if let Some(catalog) = library.catalog()
+            && unfolding(ui, ("notebook rows", index), unfolded)
+        {
             folder(ui, tree, library, index, catalog, 1);
+            ui.close();
+            ui.close();
         }
     }
     ui.close();
@@ -192,7 +222,7 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
         let (row, _) = tree_row(
             ui,
             tree,
-            part,
+            ui.id(part),
             Row {
                 label,
                 icon: Leading::Icon(icon),
@@ -224,9 +254,9 @@ fn folder(
         .filter(|(index, _)| *index == notebook)
         .map(|(_, path)| path);
     let renamed = |tree: &Tree, path: &str| {
-        tree.renaming.as_ref().is_some_and(|renaming| {
-            Arc::ptr_eq(&renaming.library, library) && renaming.path == path
-        })
+        tree.renaming
+            .as_ref()
+            .is_some_and(|renaming| renaming.entry(library, path, false))
     };
     for section in &folder.sections {
         let (name, color, readable) = match &section.state {
@@ -241,28 +271,29 @@ fn folder(
                 false,
             ),
         };
+        gap(ui, tree, &folder.path, Some(&section.path));
         let renaming = renamed(tree, &section.path);
-        let (row, _) = tree_row(
-            ui,
-            tree,
-            ("section", notebook, &section.path),
-            Row {
-                label: &name,
-                icon: Leading::Swatch(section_color(color)),
-                depth,
-                dim: !readable,
-                fold: None,
-                selected: (open == Some(section.path.as_str())).then_some(section_color(color)),
-                renamed: renaming,
-            },
-        );
+        let id = ui.id(("section", notebook, &section.path));
+        let row = Row {
+            label: &name,
+            icon: Leading::Section(section_color(color)),
+            depth,
+            dim: !readable,
+            fold: None,
+            selected: (open == Some(section.path.as_str())).then_some(section_color(color)),
+            renamed: renaming,
+        };
+        if lifts(tree, notebook, &section.path, &row) {
+            continue;
+        }
+        let (row, _) = tree_row(ui, tree, id, row);
         if row.clicked && readable && open != Some(section.path.as_str()) {
             tree.action = Some(Action::Open {
                 notebook,
                 path: section.path.clone(),
             });
         }
-        entry(ui, tree, notebook, &section.path, false, &row);
+        entry(ui, tree, notebook, &section.path, id, false, &row);
         if let Some(point) = row.context {
             let target = Target::Section {
                 library: Arc::clone(library),
@@ -273,50 +304,200 @@ fn folder(
     }
     for group in &folder.groups {
         // OneNote lists deleted sections under its own command, not as a group.
-        if crate::library::recycle_bin(group) {
+        if crate::library::recycle_bin(&group.path) {
             continue;
         }
         let key = fold_key(library, &group.path);
         let unfolded = !tree.folded.contains(&key);
         let name = group.path.rsplit('/').next().unwrap_or_default();
+        gap(ui, tree, &folder.path, Some(&group.path));
         let renaming = renamed(tree, &group.path);
-        let (row, fold) = tree_row(
+        let id = ui.id(("group", notebook, &group.path));
+        let row = Row {
+            label: name,
+            icon: Leading::Icon(art::SECTION_GROUP),
+            depth,
+            dim: false,
+            fold: Some(unfolded),
+            selected: None,
+            renamed: renaming,
+        };
+        // A dragged group's rows fold away beneath it.
+        let lifted = lifts(tree, notebook, &group.path, &row);
+        if !lifted {
+            let (row, fold) = tree_row(ui, tree, id, row);
+            if row.clicked || fold {
+                tree.action = Some(Action::Fold(key));
+            }
+            entry(ui, tree, notebook, &group.path, id, true, &row);
+            if let Some(point) = row.context {
+                let target = Target::Group {
+                    library: Arc::clone(library),
+                    path: group.path.clone(),
+                };
+                tree.action = Some(Action::Menu(target, point));
+            }
+        }
+        if unfolding(
+            ui,
+            ("group rows", notebook, &group.path),
+            unfolded && !lifted,
+        ) {
+            self::folder(ui, tree, library, notebook, group, depth + 1);
+            ui.close();
+            ui.close();
+        }
+    }
+    gap(ui, tree, &folder.path, None);
+    for entry in &folder.unavailable {
+        if crate::library::recycle_bin(&entry.path) {
+            continue;
+        }
+        let name = entry.path.rsplit('/').next().unwrap_or_default();
+        let name = if entry.group {
+            name.to_owned()
+        } else {
+            crate::library::section_name(&entry.path, &None)
+        };
+        let (row, _) = tree_row(
             ui,
             tree,
-            ("group", notebook, &group.path),
+            ui.id(("unavailable", notebook, &entry.path)),
             Row {
-                label: name,
-                icon: Leading::Icon(art::SECTION_GROUP),
+                label: &name,
+                icon: if entry.group {
+                    Leading::Icon(art::SECTION_GROUP)
+                } else {
+                    Leading::Section(section_color(None))
+                },
                 depth,
-                dim: false,
-                fold: Some(unfolded),
+                dim: true,
+                fold: None,
                 selected: None,
-                renamed: renaming,
+                renamed: false,
             },
         );
-        if row.clicked || fold {
-            tree.action = Some(Action::Fold(key));
-        }
-        entry(ui, tree, notebook, &group.path, true, &row);
-        if let Some(point) = row.context {
-            let target = Target::Group {
-                library: Arc::clone(library),
-                path: group.path.clone(),
-            };
-            tree.action = Some(Action::Menu(target, point));
-        }
-        if unfolded {
-            self::folder(ui, tree, library, notebook, group, depth + 1);
+        if row.clicked {
+            tree.action = Some(Action::Unavailable(name, entry.error.clone()));
         }
     }
 }
 
-/// Records a section or group row for dragging.
-fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, group: bool, row: &Signal) {
-    let Some(rect) = ui
-        .rect(ui.id(("section", notebook, path)))
-        .or_else(|| ui.rect(ui.id(("group", notebook, path))))
-    else {
+/// Where the row `lifted` lands with the pointer at height `y` among `rows`: onto a
+/// group's middle, into it; above or below a row's middle, before or after it in its
+/// folder; into another folder, at its end.
+fn landing_at(rows: &[Entry], lifted: &Entry, y: f32) -> Option<Landing> {
+    let candidates: Vec<&Entry> = rows
+        .iter()
+        .filter(|row| row.notebook == lifted.notebook && !row.within(lifted))
+        .collect();
+    let under = candidates
+        .iter()
+        .find(|row| y >= row.rect[1] && y < row.rect[3])
+        .or_else(|| candidates.last().filter(|row| y >= row.rect[3]))?;
+    let [top, bottom] = [under.rect[1], under.rect[3]];
+    let quarter = (bottom - top) / 4.0;
+    if under.group && y > top + quarter && y < bottom - quarter {
+        return Some(Landing {
+            folder: under.path.clone(),
+            before: None,
+            into: true,
+        });
+    }
+    let folder = under.folder();
+    let before = if y < (top + bottom) / 2.0 {
+        Some(under.path.clone())
+    } else {
+        candidates
+            .iter()
+            .skip_while(|row| row.path != under.path)
+            .skip(1)
+            .find(|row| !row.within(under))
+            .filter(|row| row.folder() == folder)
+            .map(|row| row.path.clone())
+    };
+    Some(Landing {
+        folder: folder.to_owned(),
+        before: before.filter(|_| folder == lifted.folder()),
+        into: false,
+    })
+}
+
+/// Whether the row of `path` in `notebook` is the one dragged, which the tree leaves out,
+/// keeping its look to draw it over the others.
+fn lifts(tree: &mut Tree, notebook: usize, path: &str, row: &Row) -> bool {
+    let lifted = tree
+        .lifted
+        .is_some_and(|(lifted, _)| lifted.notebook == notebook && lifted.path == path);
+    if lifted {
+        tree.ghost = Some(Ghost {
+            label: row.label.to_owned(),
+            icon: row.icon,
+            depth: row.depth,
+            dim: row.dim,
+            selected: row.selected,
+        });
+    }
+    lifted
+}
+
+/// The gap before the row of `before` in `folder`, or at its end, which opens where a
+/// dragged row would land and closes where it no longer would.
+fn gap(ui: &mut Ui, tree: &mut Tree, folder: &str, before: Option<&str>) {
+    let Some((_, landing)) = tree.lifted else {
+        return;
+    };
+    let here = !landing.into && landing.folder == folder && landing.before.as_deref() == before;
+    let id = ui.id(("gap", before));
+    let height = ui.animate(id, if here { ROW } else { 0.0 });
+    if here {
+        tree.gap = ui.rect(id);
+    }
+    if height > 0.0 {
+        ui.leaf(
+            ("gap", before),
+            Spec {
+                size: [fill(), px(height)],
+                ..Spec::default()
+            },
+        );
+    }
+}
+
+/// Opens the boxes a notebook's or group's rows ease open and shut in, where they show:
+/// the caller builds the rows and closes both.
+fn unfolding(ui: &mut Ui, part: impl std::hash::Hash, unfolded: bool) -> bool {
+    let outer = ui.id(part);
+    let rows = ui
+        .rect(outer.child("rows"))
+        .map_or(0.0, |rect| rect[3] - rect[1]);
+    let height = ui.animate(outer, if unfolded { rows } else { 0.0 });
+    if !unfolded && height == 0.0 {
+        return false;
+    }
+    ui.open_as(
+        outer,
+        Spec {
+            flags: Flags::CLIP,
+            axis: Axis::Y,
+            size: [fill(), px(height)],
+            ..Spec::default()
+        },
+    );
+    ui.open(
+        "rows",
+        Spec {
+            axis: Axis::Y,
+            size: [fill(), ui::children()],
+            ..Spec::default()
+        },
+    );
+    true
+}
+
+/// Records a section or group row, built as `id`, for dragging.
+fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, id: Id, group: bool, row: &Signal) {
+    let Some(rect) = ui.rect(id) else {
         return;
     };
     let entry = Entry {
@@ -324,6 +505,7 @@ fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, group: bool, row
         path: path.to_owned(),
         group,
         rect,
+        id,
     };
     if row.dragging {
         tree.held = Some(entry.clone());
@@ -331,10 +513,11 @@ fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, group: bool, row
     tree.rows.push(entry);
 }
 
+#[derive(Clone, Copy)]
 enum Leading {
     Icon(&'static [&'static str]),
-    /// A section's colour, as OneNote's section icon shows it.
-    Swatch([f32; 4]),
+    /// A section's tab, drawn in its colour.
+    Section([f32; 4]),
 }
 
 struct Row<'a> {
@@ -351,13 +534,13 @@ struct Row<'a> {
 }
 
 /// One row of the tree: its signal, and whether its fold arrow was clicked.
-fn tree_row(ui: &mut Ui, tree: &mut Tree, part: impl std::hash::Hash, row: Row) -> (Signal, bool) {
+fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
     let theme = tree.theme;
     let lit = row
         .selected
         .map(|color| ui::mix(theme.section(color).tab, theme.base, 0.35));
-    let id = ui.open(
-        part,
+    ui.open_as(
+        id,
         Spec {
             flags: Flags::CLICKABLE,
             size: [fill(), px(ROW)],
@@ -365,69 +548,31 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, part: impl std::hash::Hash, row: Row) 
             hover_fill: Some(ui::mix(lit.unwrap_or(theme.strip), theme.hover(), 0.6)),
             radius: 4.0,
             pad: [6.0 + INDENT * row.depth as f32, 0.0],
-            gap: 6.0,
+            // The field's text stands where the label did.
+            gap: if row.renamed { 6.0 - rename::PAD } else { 6.0 },
             ..Spec::default()
         },
     );
     let color = if row.dim { theme.text_dim } else { theme.text };
-    match row.icon {
-        Leading::Icon(icon) => {
-            ui.leaf(
-                "icon",
-                Spec {
-                    size: [px(16.0), px(ROW)],
-                    icon: Some(icon),
-                    color: Some(color),
-                    ..Spec::default()
-                },
-            );
-        }
-        Leading::Swatch(swatch) => {
-            ui.open(
-                "swatch",
-                Spec {
-                    size: [px(16.0), px(ROW)],
-                    pad: [3.0, 6.0],
-                    ..Spec::default()
-                },
-            );
-            ui.leaf(
-                "color",
-                Spec {
-                    size: [fill(), fill()],
-                    fill: Some(theme.section(swatch).frame[0]),
-                    border: Some(theme.section(swatch).edge),
-                    radius: 2.0,
-                    ..Spec::default()
-                },
-            );
-            ui.close();
-        }
-    }
+    let (icon, [red, green, blue, _]) = match row.icon {
+        Leading::Icon(icon) => (icon, theme.text),
+        Leading::Section(section) => (art::SECTION, theme.section(section).accent),
+    };
+    // Coloured art keeps its colours, so a dim row fades its icon.
+    let alpha = if row.dim { 0.5 } else { 1.0 };
+    ui.leaf(
+        "icon",
+        Spec {
+            size: [px(16.0), px(ROW)],
+            icon: Some(icon),
+            color: Some([red, green, blue, alpha]),
+            ..Spec::default()
+        },
+    );
     match (row.renamed, tree.renaming.as_deref_mut()) {
         (true, Some(renaming)) => {
-            let field = ui::text_field(
-                ui,
-                rename_field(),
-                &mut renaming.name,
-                "",
-                Spec {
-                    size: [fill(), px(ROW - 4.0)],
-                    fill: Some(theme.base),
-                    border: Some(theme.accent),
-                    radius: 3.0,
-                    pad: [4.0, 0.0],
-                    ..Spec::default()
-                },
-            );
-            for event in &field.events {
-                if let Event::Key {
-                    key: Key::Named(key @ (NamedKey::Enter | NamedKey::Escape)),
-                    ..
-                } = event
-                {
-                    tree.action = Some(Action::Renamed(*key == NamedKey::Enter));
-                }
+            if let Some(keep) = rename::edit(ui, theme, &mut renaming.name, ROW - 4.0) {
+                tree.action = Some(Action::Renamed(keep));
             }
         }
         _ => {
@@ -464,14 +609,14 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, part: impl std::hash::Hash, row: Row) 
 }
 
 impl crate::State {
-    /// The sidebar left of the section tabs, easing open and shut.
-    pub(crate) fn sidebar(&mut self, theme: &Theme) {
+    /// The sidebar left of the section tabs, easing open and shut; returns its width.
+    pub(crate) fn sidebar(&mut self, theme: &Theme) -> f32 {
         if self.temporary {
-            return;
+            return 0.0;
         }
         let width = self.ui.animate(
             self.ui.id("sidebar"),
-            if self.sidebar { WIDTH } else { RAIL },
+            if self.sidebar { WIDTH } else { 0.0 },
         );
         self.ui.open(
             "sidebar",
@@ -500,39 +645,43 @@ impl crate::State {
             Some((index, session.tabs[session.tab].path.as_str()))
         });
         let mut tree = Tree::new(theme, open, &self.folded, self.renaming.as_mut());
-        // The collapsed rail shows only its button.
+        tree.lifted = self
+            .drag
+            .as_ref()
+            .filter(|drag| drag.lifted)
+            .and_then(|drag| match &drag.what {
+                Dragged::Entry { entry, landing, .. } => Some((entry, landing)),
+                _ => None,
+            });
         sidebar(
             &mut self.ui,
             &mut tree,
             &self.notebooks,
             crate::TAB_ROW,
-            width > RAIL + 0.5,
+            width > 0.5,
         );
         let Tree {
-            action, rows, held, ..
+            action,
+            rows,
+            mut held,
+            ghost,
+            gap,
+            ..
         } = tree;
         let corner = self.ui.rect(rows_id).unwrap_or_default();
-        self.drag_entries(held, &rows, corner, theme);
+        let found = ghost.is_some();
+        let (ghost_held, settled) = self.lifted_row(theme, ghost, gap, &rows, corner);
+        held = held.or(ghost_held);
+        self.drag_entries(held, &rows, gap, settled || !found, corner, theme);
         self.ui.close();
         self.ui.close();
         match action {
-            Some(Action::Toggle) => {
-                self.sidebar = !self.sidebar;
-                self.save_settings();
-            }
             Some(Action::Fold(key)) => {
                 if !self.folded.remove(&key) {
                     self.folded.insert(key);
                 }
             }
-            Some(Action::Notebook(index)) => {
-                let library = Arc::clone(&self.notebooks[index]);
-                if let Some(path) = library.first_section() {
-                    self.commands
-                        .push(crate::Command::OpenSection(library, path));
-                }
-            }
-            Some(Action::Open { notebook, path }) => {
+            Some(Action::Open { notebook, path }) if !self.dragged() => {
                 let library = Arc::clone(&self.notebooks[notebook]);
                 self.commands
                     .push(crate::Command::OpenSection(library, path));
@@ -541,120 +690,208 @@ impl crate::State {
                 self.menu = Some((target, point));
                 self.ui.open_popup(crate::menus::id());
             }
-            Some(Action::Renamed(keep)) => {
-                if let Some(renaming) = self.renaming.take()
-                    && keep
-                {
-                    let name = renaming.name.trim().to_owned();
-                    let old = renaming.path.rsplit('/').next().unwrap_or_default();
-                    if !name.is_empty() && name != old.strip_suffix(".one").unwrap_or(old) {
-                        self.commands.push(crate::Command::Structure(
-                            renaming.library,
-                            crate::manage::Structure::Rename {
-                                path: renaming.path,
-                                name,
-                            },
-                        ));
-                    }
-                }
-                self.ui.set_focus(Some(crate::page()));
-            }
+            Some(Action::Renamed(keep)) => self.finish_renaming(keep),
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
             Some(Action::OpenNotebook) => self.commands.push(crate::Command::OpenNotebook),
             Some(Action::Options) => self.open_options(),
-            None => {}
+            Some(Action::Unavailable(name, error)) => crate::platform::alert(
+                &format!("Can't read \u{201c}{name}\u{201d}"),
+                &format!("{error}\n\nIt appears here once you have access."),
+            ),
+            Some(Action::Open { .. }) | None => {}
         }
+        width
     }
 
-    /// Moves a section or group by dragging its row: onto a group's middle it moves into the
-    /// group, as OneNote moves one dropped on a group's tab; between rows of its folder it
-    /// takes that place; between rows of another folder it moves there, last. `corner` is
-    /// the rows' box.
+    /// The sidebar's button in its square at the window's edge, and the room the section
+    /// tabs, standing `width` from that edge, leave it; the button stays put as the sidebar
+    /// eases open and shut.
+    pub(crate) fn sidebar_button(&mut self, theme: &Theme, width: f32) {
+        if self.temporary {
+            return;
+        }
+        // Past the tab row's padding and the frame's corner, the tabs start where the square
+        // ends; the room shrinks on the sidebar's own easing, so the tabs ease with it.
+        let room = RAIL - crate::FRAME - self.rounding();
+        self.ui.leaf(
+            "rail",
+            Spec {
+                size: [px(room * (1.0 - width / WIDTH)), px(1.0)],
+                ..Spec::default()
+            },
+        );
+        self.ui.open(
+            "toggle",
+            Spec {
+                flags: Flags::FLOAT,
+                size: [px(RAIL), px(RAIL)],
+                position: [-width, 0.0],
+                pad: [(RAIL - ui::shell::TOOL) / 2.0; 2],
+                ..Spec::default()
+            },
+        );
+        if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, theme.text, false).clicked
+        {
+            self.sidebar = !self.sidebar;
+            self.save_settings();
+        }
+        self.ui.close();
+    }
+
+    /// The dragged row, `ghost`, drawn over the others in the rows' box `corner`: following
+    /// the pointer, or once let go easing into the `gap` it lands in, or onto the group it
+    /// lands in among `rows`. Returns it while held, and whether it stands in its place.
+    fn lifted_row(
+        &mut self,
+        theme: &Theme,
+        ghost: Option<Ghost>,
+        gap: Option<[f32; 4]>,
+        rows: &[Entry],
+        corner: [f32; 4],
+    ) -> (Option<Entry>, bool) {
+        let (
+            Some(ghost),
+            Some(
+                drag @ crate::menus::Drag {
+                    what: Dragged::Entry { entry, landing, .. },
+                    ..
+                },
+            ),
+        ) = (ghost, &self.drag)
+        else {
+            return (None, true);
+        };
+        let key = self.ui.id("lifted");
+        let (top, settled) = if drag.live() {
+            let top = drag.corner(self.pointer)[1] - corner[1];
+            (self.ui.hold(key, top), false)
+        } else {
+            let place = gap
+                .or_else(|| {
+                    rows.iter()
+                        .find(|row| landing.into && row.path == landing.folder)
+                        .map(|row| row.rect)
+                })
+                .unwrap_or(entry.rect);
+            let target = place[1] - corner[1];
+            let top = self.ui.animate(key, target);
+            (top, (top - target).abs() < 0.5)
+        };
+        let entry = entry.clone();
+        self.ui.open(
+            "lifted",
+            Spec {
+                flags: Flags::FLOAT,
+                size: [px(entry.rect[2] - entry.rect[0]), px(ROW)],
+                position: [entry.rect[0] - corner[0], top],
+                fill: Some(theme.base),
+                shadow: Some([0.0, 0.0, 0.0, 0.3]),
+                radius: 4.0,
+                ..Spec::default()
+            },
+        );
+        let mut tree = Tree::new(theme, None, &self.folded, None);
+        let (row, _) = tree_row(
+            &mut self.ui,
+            &mut tree,
+            entry.id,
+            Row {
+                label: &ghost.label,
+                icon: ghost.icon,
+                depth: ghost.depth,
+                dim: ghost.dim,
+                fold: None,
+                selected: ghost.selected,
+                renamed: false,
+            },
+        );
+        self.ui.close();
+        (row.dragging.then_some(entry), settled)
+    }
+
+    /// Moves a section or group by dragging its row, `held`, among `rows` in the rows' box
+    /// `corner`: the others open a `gap` where it would land. Onto a group's middle it moves
+    /// into the group, as OneNote moves one dropped on a group's tab; between rows of its
+    /// folder it takes that place; into another folder it moves there, last. The drag ends
+    /// once the row, let go, is `settled`.
     fn drag_entries(
         &mut self,
         held: Option<Entry>,
         rows: &[Entry],
+        gap: Option<[f32; 4]>,
+        settled: bool,
         corner: [f32; 4],
         theme: &Theme,
     ) {
-        let dragged = match (&self.drag, &held) {
-            (_, Some(entry)) => Some(entry.clone()),
-            (Some(crate::menus::Drag::Entry(entry)), None) => Some(entry.clone()),
-            _ => None,
-        };
-        if let Some(entry) = &held {
-            self.drag = Some(crate::menus::Drag::Entry(entry.clone()));
-        } else if matches!(self.drag, Some(crate::menus::Drag::Entry(_))) {
-            self.drag = None;
-        }
-        let (Some(dragged), Some([_, y])) = (dragged, self.ui.pointer()) else {
-            return;
-        };
-        let inside = |entry: &Entry| {
-            entry.path == dragged.path || entry.path.starts_with(&format!("{}/", dragged.path))
-        };
-        let candidates: Vec<&Entry> = rows
-            .iter()
-            .filter(|entry| entry.notebook == dragged.notebook && !inside(entry))
-            .collect();
-        let Some(under) = candidates
-            .iter()
-            .find(|entry| y >= entry.rect[1] && y < entry.rect[3])
-            .or_else(|| candidates.last().filter(|entry| y >= entry.rect[3]))
+        let mine = |what: &Dragged| matches!(what, Dragged::Entry { .. });
+        self.settle(mine, settled);
+        let held = held.map(|entry| {
+            let rect = entry.rect;
+            let home = Landing {
+                folder: entry.folder().to_owned(),
+                before: rows
+                    .iter()
+                    .skip_while(|row| row.path != entry.path)
+                    .skip(1)
+                    .find(|row| !row.within(&entry) && row.notebook == entry.notebook)
+                    .filter(|row| row.folder() == entry.folder())
+                    .map(|row| row.path.clone()),
+                into: false,
+            };
+            let what = Dragged::Entry {
+                landing: home.clone(),
+                home,
+                entry,
+            };
+            (what, rect)
+        });
+        let dropped = self.follow_drag(held, mine);
+        let pointer = self.pointer;
+        let Some(
+            drag @ crate::menus::Drag {
+                what: Dragged::Entry { .. },
+                ..
+            },
+        ) = &mut self.drag
         else {
             return;
         };
-        let [top, bottom] = [under.rect[1], under.rect[3]];
-        let quarter = (bottom - top) / 4.0;
-        let into = under.group && y > top + quarter && y < bottom - quarter;
-        let (folder, before) = if into {
-            (under.path.as_str(), None)
-        } else if y < (top + bottom) / 2.0 {
-            (under.folder(), Some(under.path.as_str()))
-        } else {
-            let next = candidates
-                .iter()
-                .skip_while(|entry| entry.path != under.path)
-                .nth(1)
-                .filter(|entry| entry.folder() == under.folder());
-            (under.folder(), next.map(|entry| entry.path.as_str()))
+        let live = drag.live();
+        let middle = drag.corner(pointer)[1] + ROW / 2.0;
+        let Dragged::Entry {
+            entry,
+            landing,
+            home,
+        } = &mut drag.what
+        else {
+            return;
         };
-        let change = if folder == dragged.folder() {
-            if into {
-                return;
-            }
-            // The folder's order with the dragged entry where it was dropped.
-            let mut paths: Vec<String> = candidates
+        if drag.cancelled {
+            *landing = home.clone();
+        } else if live {
+            // Where the rows stand with no gap open, so the gap follows the dragged row
+            // rather than the rows it pushed aside.
+            let closed: Vec<Entry> = rows
                 .iter()
-                .filter(|entry| entry.folder() == folder)
-                .map(|entry| entry.path.clone())
+                .map(|row| {
+                    let mut row = row.clone();
+                    if let Some([_, top, _, bottom]) = gap
+                        && row.rect[1] >= bottom - 0.5
+                    {
+                        row.rect[1] -= bottom - top;
+                        row.rect[3] -= bottom - top;
+                    }
+                    row
+                })
                 .collect();
-            let at = before
-                .and_then(|before| paths.iter().position(|path| path == before))
-                .unwrap_or(paths.len());
-            paths.insert(at, dragged.path.clone());
-            let current: Vec<&str> = rows
-                .iter()
-                .filter(|entry| entry.notebook == dragged.notebook && entry.folder() == folder)
-                .map(|entry| entry.path.as_str())
-                .collect();
-            if paths.iter().map(String::as_str).eq(current) {
-                return;
+            if let Some(found) = landing_at(&closed, entry, middle) {
+                *landing = found;
             }
-            crate::manage::Structure::Reorder {
-                folder: folder.to_owned(),
-                paths,
-            }
-        } else {
-            crate::manage::Structure::Move {
-                path: dragged.path.clone(),
-                folder: folder.to_owned(),
-            }
-        };
-        if held.is_some() {
+        }
+        if live && landing.into {
             let accent = theme.accent;
-            if into {
-                let [left, top, right, bottom] = under.rect;
+            if let Some(group) = rows.iter().find(|row| row.path == landing.folder) {
+                let [left, top, right, bottom] = group.rect;
                 self.ui.mark(
                     [
                         left - corner[0],
@@ -665,28 +902,38 @@ impl crate::State {
                     [accent[0], accent[1], accent[2], 0.3],
                     4.0,
                 );
-            } else {
-                let line = if before == Some(under.path.as_str()) {
-                    top
-                } else {
-                    bottom
-                } - corner[1];
-                self.ui.mark(
-                    [
-                        under.rect[0] - corner[0],
-                        line - 1.5,
-                        under.rect[2] - corner[0],
-                        line + 1.5,
-                    ],
-                    accent,
-                    1.5,
-                );
+            }
+        }
+        if !dropped || landing == home {
+            return;
+        }
+        let change = if landing.into || landing.folder != entry.folder() {
+            crate::manage::Structure::Move {
+                path: entry.path.clone(),
+                folder: landing.folder.clone(),
             }
         } else {
-            let library = std::sync::Arc::clone(&self.notebooks[dragged.notebook]);
-            self.commands
-                .push(crate::Command::Structure(library, change));
-        }
+            // The folder's order with the dragged entry where it was dropped.
+            let mut paths: Vec<String> = rows
+                .iter()
+                .filter(|row| row.notebook == entry.notebook && row.folder() == landing.folder)
+                .filter(|row| !row.within(entry))
+                .map(|row| row.path.clone())
+                .collect();
+            let at = landing
+                .before
+                .as_ref()
+                .and_then(|before| paths.iter().position(|path| path == before))
+                .unwrap_or(paths.len());
+            paths.insert(at, entry.path.clone());
+            crate::manage::Structure::Reorder {
+                folder: landing.folder.clone(),
+                paths,
+            }
+        };
+        let library = Arc::clone(&self.notebooks[entry.notebook]);
+        self.commands
+            .push(crate::Command::Structure(library, change));
     }
 
     /// Opens what the open panel chose: a notebook folder, a notebook's table of contents,
@@ -745,13 +992,64 @@ impl crate::State {
     /// The window below the title bar on the first run, or once every notebook is closed:
     /// what is missing, and the two ways to start.
     pub(crate) fn welcome(&mut self, theme: &Theme) {
+        let id = self.ui.id("welcome");
+        self.notice(
+            theme,
+            id,
+            theme.base,
+            "No notebooks open",
+            vec![
+                (
+                    "new",
+                    art::PLUS,
+                    "New Notebook",
+                    crate::Command::NewNotebook,
+                ),
+                (
+                    "open",
+                    art::NOTEBOOK,
+                    "Open Existing",
+                    crate::Command::OpenNotebook,
+                ),
+            ],
+        );
+    }
+
+    /// The page's place while notebook `library` has no sections, as OneNote 2010 shows
+    /// it, with a button to add one.
+    pub(crate) fn no_sections(&mut self, theme: &Theme, library: Arc<Library>) {
+        let new = crate::Command::Structure(
+            library,
+            crate::manage::Structure::NewSection {
+                folder: String::new(),
+            },
+        );
+        self.notice(
+            theme,
+            crate::page(),
+            theme.strip,
+            "No sections in this notebook",
+            vec![("new", art::PLUS, "New Section", new)],
+        );
+    }
+
+    /// A box `id` filled with `background`, showing `title` above `buttons` in its middle: each
+    /// a part, an icon, a label and what it does.
+    fn notice(
+        &mut self,
+        theme: &Theme,
+        id: ui::Id,
+        background: [f32; 4],
+        title: &str,
+        buttons: Vec<(&str, &'static [&'static str], &str, crate::Command)>,
+    ) {
         const BUTTON: [f32; 2] = [200.0, 32.0];
-        let [left, top, right, bottom] = self.ui.rect(self.ui.id("welcome")).unwrap_or_default();
-        self.ui.open(
-            "welcome",
+        let [left, top, right, bottom] = self.ui.rect(id).unwrap_or_default();
+        self.ui.open_as(
+            id,
             Spec {
                 size: [fill(), fill()],
-                fill: Some(theme.base),
+                fill: Some(background),
                 ..Spec::default()
             },
         );
@@ -773,26 +1071,13 @@ impl crate::State {
             "title",
             Spec {
                 size: [fill(), px(28.0)],
-                text: Some("No notebooks open"),
+                text: Some(title),
                 center: true,
                 ..Spec::default()
             },
         );
         let mut chosen = None;
-        for (part, icon, label, command) in [
-            (
-                "new",
-                art::PLUS,
-                "New Notebook",
-                crate::Command::NewNotebook,
-            ),
-            (
-                "open",
-                art::NOTEBOOK,
-                "Open Existing",
-                crate::Command::OpenNotebook,
-            ),
-        ] {
+        for (part, icon, label, command) in buttons {
             let button = self.ui.leaf(
                 part,
                 Spec {
@@ -815,5 +1100,45 @@ impl crate::State {
         self.commands.extend(chosen);
         self.ui.close();
         self.ui.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(path: &str, group: bool, top: f32) -> Entry {
+        Entry {
+            notebook: 0,
+            path: path.to_owned(),
+            group,
+            rect: [0.0, top, 200.0, top + ROW],
+            id: Id::ROOT.child(path),
+        }
+    }
+
+    /// A dragged row lands before or after a row by its middle, into a group by the group's
+    /// middle half, and at the end of another folder.
+    #[test]
+    fn a_dragged_row_lands_between_rows_into_groups_and_last_in_other_folders() {
+        let rows = [
+            row("A.one", false, 0.0),
+            row("B.one", false, 24.0),
+            row("G", true, 48.0),
+            row("G/C.one", false, 72.0),
+        ];
+        let lifted = row("Z.one", false, 200.0);
+        let landing = |y| landing_at(&rows, &lifted, y).unwrap();
+        let at = |folder: &str, before: Option<&str>, into| Landing {
+            folder: folder.to_owned(),
+            before: before.map(str::to_owned),
+            into,
+        };
+        assert!(landing(4.0) == at("", Some("A.one"), false));
+        assert!(landing(20.0) == at("", Some("B.one"), false));
+        assert!(landing(60.0) == at("G", None, true));
+        assert!(landing(50.0) == at("", Some("G"), false));
+        assert!(landing(80.0) == at("G", None, false));
+        assert!(landing(500.0) == at("G", None, false));
     }
 }

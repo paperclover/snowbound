@@ -590,6 +590,24 @@ fn ink(layout: &TextLayout) -> [f32; 2] {
     extent.map(|v| if v.is_finite() { v } else { 0.0 })
 }
 
+/// The byte ranges of `paragraph`'s runs of math holding objects, which draw in two
+/// dimensions; math without objects is text.
+pub(crate) fn built(paragraph: &Paragraph) -> Vec<std::ops::Range<usize>> {
+    let mut zones: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut start = 0;
+    for span in paragraph.spans() {
+        if span.format.math == Some(true) {
+            match zones.last_mut() {
+                Some(zone) if zone.end == start => zone.end = span.end,
+                _ => zones.push(start..span.end),
+            }
+        }
+        start = span.end;
+    }
+    zones.retain(|zone| paragraph.text()[zone.clone()].contains('\u{fdd0}'));
+    zones
+}
+
 /// Lays out an equation paragraph at the font size and colour of its first run.
 pub fn layout(engine: &mut TextEngine, paragraph: &Paragraph) -> Result<MathLayout, LayoutError> {
     let nodes = Math::parse(paragraph).map_err(|_| LayoutError::UnsupportedContent)?;
@@ -612,8 +630,10 @@ pub fn layout(engine: &mut TextEngine, paragraph: &Paragraph) -> Result<MathLayo
         .next()
         .ok_or(LayoutError::InvalidFontMetrics)?;
     let mut body = Context { engine, color }.row(&nodes, size)?;
-    body.ascent = body.ascent.max(line.baseline);
-    body.descent = body.descent.max(line.height - line.baseline);
+    // Boxes follow ink; lines with taller math keep a gap from the lines beside them.
+    let gap = 0.15 * size;
+    body.ascent = (body.ascent + gap).max(line.baseline);
+    body.descent = (body.descent + gap).max(line.height - line.baseline);
     Ok(MathLayout {
         size: [body.width, body.height()],
         color,

@@ -1,3 +1,4 @@
+use crate::commands;
 use canvas::date::DateField;
 use objc2::{
     ClassType, DeclaredClass,
@@ -14,9 +15,12 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
-    NSDateFormatterStyle, NSPoint, NSRange, NSRect, NSSize, NSString,
+    NSDateFormatterStyle, NSPoint, NSRange, NSRect, NSString,
 };
-use std::{cell::Cell, sync::OnceLock};
+use std::{
+    cell::{Cell, RefCell},
+    sync::OnceLock,
+};
 use winit::{
     error::EventLoopError,
     event_loop::{EventLoop, EventLoopProxy},
@@ -27,7 +31,12 @@ use winit::{
 
 static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 static INPUT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
-thread_local! { static IN_KEY_DOWN: Cell<bool> = const { Cell::new(false) }; }
+static BACKDROP_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+static DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+thread_local! {
+    static IN_KEY_DOWN: Cell<bool> = const { Cell::new(false) };
+    static STATUSES: RefCell<Vec<commands::Status>> = const { RefCell::new(Vec::new()) };
+}
 
 unsafe extern "C" fn key_down(view: &AnyObject, _: Sel, event: &NSEvent) {
     let previous = IN_KEY_DOWN.replace(true);
@@ -77,11 +86,14 @@ pub const LEADING: f32 = 78.0;
 /// How far AppKit rounds a window's corners.
 pub const CORNER_RADIUS: f32 = 10.0;
 
+pub fn corner_radius(_: &Window) -> f32 {
+    CORNER_RADIUS
+}
+
 /// A transparent title bar over the content, where the window draws its own.
 pub fn window_attributes() -> WindowAttributes {
     Window::default_attributes()
         .with_titlebar_transparent(true)
-        .with_title_hidden(true)
         .with_fullsize_content_view(true)
 }
 
@@ -107,6 +119,96 @@ pub fn window_controls(_: &mut ui::Ui, _: &Window) {}
 /// The app draws the title bar around the traffic lights.
 pub fn system_titlebar(_: &Window) -> bool {
     false
+}
+
+unsafe extern "C" fn no_document_drag(
+    _: &AnyObject,
+    _: Sel,
+    _: &AnyObject,
+    _: &AnyObject,
+    _: NSPoint,
+    _: &AnyObject,
+) -> objc2::runtime::Bool {
+    objc2::runtime::Bool::NO
+}
+
+/// Names `file` as the window's document: the title shows its icon, and Command-clicking the
+/// title lists the folders it lies in. Dragging the icon, which could move the file out of its
+/// notebook, is off.
+pub fn represent(window: &Window, file: Option<&std::path::Path>) {
+    let window = ns_window(window);
+    unsafe {
+        let delegate: Option<Retained<AnyObject>> = msg_send_id![&window, delegate];
+        if let Some(delegate) = delegate {
+            let class = DELEGATE_CLASS.get_or_init(|| {
+                let mut class = ClassBuilder::new("SnowboundWindowDelegate", delegate.class())
+                    .expect("Unique window delegate class");
+                class.add_method(
+                    sel!(window:shouldDragDocumentWithEvent:from:withPasteboard:),
+                    no_document_drag as unsafe extern "C" fn(_, _, _, _, _, _) -> _,
+                );
+                class.register()
+            });
+            if delegate.class() != *class {
+                assert_eq!(class.superclass(), Some(delegate.class()));
+                assert_eq!(class.instance_size(), delegate.class().instance_size());
+                // The subclass adds no ivars, so the existing allocation remains valid.
+                AnyObject::set_class(&delegate, class);
+            }
+        }
+        let url = file.map(|file| {
+            objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()))
+        });
+        let _: () = msg_send![&window, setRepresentedURL: url.as_deref()];
+    }
+}
+
+/// Nothing the backdrop leaves to colour.
+pub fn titlebar(_: winit::window::Theme) -> Option<[[f32; 4]; 2]> {
+    None
+}
+
+unsafe extern "C" fn hit_nothing(_: &AnyObject, _: Sel, _: NSPoint) -> *mut AnyObject {
+    std::ptr::null_mut()
+}
+
+/// Lays the title bar's material under the window's content, where it shows through the
+/// app's transparent pixels as AppKit's title bars and toolbars show it: tinted by the
+/// desktop, and following the window's appearance and whether it is key. Presses pass
+/// through it to the view it lies in.
+pub fn install_backdrop(window: &Window) -> bool {
+    MainThreadMarker::new().expect("Views belong to the main thread");
+    let RawWindowHandle::AppKit(handle) =
+        window.window_handle().expect("Live AppKit window").as_raw()
+    else {
+        unreachable!()
+    };
+    unsafe {
+        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
+        let class = BACKDROP_CLASS.get_or_init(|| {
+            let effect = AnyClass::get("NSVisualEffectView").expect("AppKit is linked");
+            let mut class =
+                ClassBuilder::new("SnowboundBackdrop", effect).expect("Unique backdrop class");
+            class.add_method(
+                sel!(hitTest:),
+                hit_nothing as unsafe extern "C" fn(_, _, _) -> _,
+            );
+            class.register()
+        });
+        let bounds: NSRect = msg_send![view, bounds];
+        let backdrop: Allocated<AnyObject> = msg_send_id![*class, alloc];
+        let backdrop: Retained<AnyObject> = msg_send_id![backdrop, initWithFrame: bounds];
+        // NSVisualEffectMaterialTitlebar, NSVisualEffectBlendingModeWithinWindow (which
+        // AppKit's own title bar measures as, over the window's desktop-tinted background)
+        // and NSVisualEffectStateFollowsWindowActiveState.
+        let _: () = msg_send![&backdrop, setMaterial: 3isize];
+        let _: () = msg_send![&backdrop, setBlendingMode: 1isize];
+        let _: () = msg_send![&backdrop, setState: 0isize];
+        // NSViewWidthSizable | NSViewHeightSizable
+        let _: () = msg_send![&backdrop, setAutoresizingMask: 18usize];
+        let _: () = msg_send![view, addSubview: &*backdrop];
+    }
+    true
 }
 
 /// AppKit's window frame takes resizing presses.
@@ -157,7 +259,10 @@ unsafe extern "C" {
         password: *mut *mut std::ffi::c_void,
         item: *mut *const std::ffi::c_void,
     ) -> i32;
-    fn SecKeychainItemFreeContent(list: *const std::ffi::c_void, data: *mut std::ffi::c_void) -> i32;
+    fn SecKeychainItemFreeContent(
+        list: *const std::ffi::c_void,
+        data: *mut std::ffi::c_void,
+    ) -> i32;
 }
 
 /// The password the keychain keeps for `mount`'s account on its server, as macOS saved it
@@ -305,11 +410,6 @@ pub fn install_text_input(window: &Window) {
 
 pub fn double_click_interval() -> std::time::Duration {
     std::time::Duration::from_secs_f64(unsafe { NSEvent::doubleClickInterval() })
-}
-
-pub fn show_character_palette() {
-    let mtm = MainThreadMarker::new().expect("Text input belongs to the main thread");
-    NSApplication::sharedApplication(mtm).orderFrontCharacterPalette(None);
 }
 
 pub fn edit_date(
@@ -502,10 +602,10 @@ pub fn configure_presentation(surface: &wgpu::Surface<'_>) {
     MainThreadMarker::new().expect("Layer presentation belongs to the main thread");
     // Retain wgpu's surface ownership while synchronizing presentation with AppKit resize transactions.
     if let Some(surface) = unsafe { surface.as_hal::<wgpu::hal::api::Metal>() } {
-        surface
-            .render_layer()
-            .lock()
-            .setPresentsWithTransaction(true);
+        let layer = surface.render_layer().lock();
+        layer.setPresentsWithTransaction(true);
+        // Over the backdrop's layer, which AppKit orders after it.
+        layer.setZPosition(1.0);
     }
 }
 
@@ -520,54 +620,9 @@ pub fn commit_presentation(window: &Window) {
     }
 }
 
-/// The application's icon as the Dock shows it, `pixels` square.
-pub fn app_icon(pixels: u32) -> Option<draw::RasterImage> {
-    let side = pixels as usize;
-    let mut rgba = unsafe {
-        let mtm = MainThreadMarker::new()?;
-        let icon: Retained<AnyObject> =
-            msg_send_id![&NSApplication::sharedApplication(mtm), applicationIconImage];
-        let bitmap: Allocated<AnyObject> = msg_send_id![AnyClass::get("NSBitmapImageRep")?, alloc];
-        let planes: *mut *mut u8 = std::ptr::null_mut();
-        let bitmap: Option<Retained<AnyObject>> = msg_send_id![
-            bitmap,
-            initWithBitmapDataPlanes: planes,
-            pixelsWide: side as isize,
-            pixelsHigh: side as isize,
-            bitsPerSample: 8isize,
-            samplesPerPixel: 4isize,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: &*NSString::from_str("NSCalibratedRGBColorSpace"),
-            bytesPerRow: 4 * side as isize,
-            bitsPerPixel: 32isize
-        ];
-        let bitmap = bitmap?;
-        let contexts = AnyClass::get("NSGraphicsContext")?;
-        let context: Option<Retained<AnyObject>> =
-            msg_send_id![contexts, graphicsContextWithBitmapImageRep: &*bitmap];
-        let _: () = msg_send![contexts, saveGraphicsState];
-        let _: () = msg_send![contexts, setCurrentContext: &*context?];
-        let bounds = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            NSSize::new(side as f64, side as f64),
-        );
-        // NSCompositingOperationSourceOver
-        let _: () = msg_send![&icon, drawInRect: bounds, fromRect: NSRect::ZERO, operation: 2usize, fraction: 1.0f64];
-        let _: () = msg_send![contexts, restoreGraphicsState];
-        let data: *const u8 = msg_send![&bitmap, bitmapData];
-        std::slice::from_raw_parts(data, 4 * side * side).to_vec()
-    };
-    // AppKit's bitmap is premultiplied.
-    for pixel in rgba.chunks_exact_mut(4) {
-        let alpha = u32::from(pixel[3]);
-        for channel in &mut pixel[..3] {
-            *channel = (u32::from(*channel) * 255)
-                .checked_div(alpha)
-                .map_or(0, |value| value.min(255) as u8);
-        }
-    }
-    draw::RasterImage::new([pixels; 2], rgba).ok()
+/// None: AppKit's title shows the document's icon in its place.
+pub fn app_icon(_: u32) -> Option<draw::RasterImage> {
+    None
 }
 
 /// The insertion point's colour and selected text's fill with and without keyboard focus,
@@ -635,9 +690,28 @@ declare_class!(
             if let Some(proxy) = QUIT.get() { let _ = proxy.send_event(crate::UserEvent::Quit); }
         }
 
-        #[method(showOptions:)]
-        fn show_options(&self, _sender: Option<&AnyObject>) {
-            if let Some(proxy) = QUIT.get() { let _ = proxy.send_event(crate::UserEvent::Options); }
+        #[method(choose:)]
+        fn choose(&self, sender: &NSMenuItem) {
+            let tag = usize::try_from(unsafe { sender.tag() }).ok();
+            if let (Some(proxy), Some(choice)) = (QUIT.get(), tag.and_then(|tag| commands::choices().nth(tag))) {
+                let _ = proxy.send_event(crate::UserEvent::Choose(choice));
+            }
+        }
+
+        #[method(validateMenuItem:)]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> objc2::runtime::Bool {
+            if unsafe { item.action() } != Some(sel!(choose:)) {
+                // AppKit's own items validate as NSApplication does.
+                return objc2::runtime::Bool::new(
+                    !NSApplication::class().responds_to(sel!(validateMenuItem:))
+                        || unsafe { msg_send![super(self), validateMenuItem: item] },
+                );
+            }
+            let status = usize::try_from(unsafe { item.tag() }).ok().and_then(|tag| {
+                STATUSES.with_borrow(|statuses| statuses.get(tag).copied())
+            }).unwrap_or_default();
+            unsafe { item.setState(isize::from(status.checked)) };
+            objc2::runtime::Bool::new(status.enabled)
         }
 
         // NSAlert consumes Escape before it reaches cancelOperation:.
@@ -665,6 +739,7 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLo
     let _: Retained<CanvasApplication> =
         unsafe { msg_send_id![CanvasApplication::class(), sharedApplication] };
     let mut builder = EventLoop::with_user_event();
+    builder.with_default_menu(false);
     if headless {
         builder
             .with_activation_policy(ActivationPolicy::Prohibited)
@@ -676,34 +751,30 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLo
     Ok(event_loop)
 }
 
-/// Adds Settings… to the application menu Winit made, below About as macOS places it.
+/// Replaces Winit's application menu with the menu bar, whose items the table validates.
 pub fn install_menu() {
     let mtm = MainThreadMarker::new().expect("Menus belong to the main thread");
     let app = NSApplication::sharedApplication(mtm);
-    // Winit's menu is plain AppKit objects on the main thread.
+    let menus = crate::menubar::build(mtm, &app);
+    app.setMainMenu(Some(&menus.bar));
+    // The bar holds these for as long as the application runs.
     unsafe {
-        let Some(menu) = app
-            .mainMenu()
-            .and_then(|bar| bar.itemAtIndex(0))
-            .and_then(|item| item.submenu())
-        else {
-            return;
-        };
-        let settings = NSMenuItem::initWithTitle_action_keyEquivalent(
-            mtm.alloc(),
-            &NSString::from_str("Settings…"),
-            Some(sel!(showOptions:)),
-            &NSString::from_str(","),
-        );
-        menu.insertItem_atIndex(&settings, 2);
-        menu.insertItem_atIndex(&NSMenuItem::separatorItem(mtm), 3);
+        app.setServicesMenu(Some(&menus.services));
+        app.setWindowsMenu(Some(&menus.window));
+        app.setHelpMenu(Some(&menus.help));
     }
 }
 
-/// Opens `folder` in Finder.
-pub fn reveal(folder: &std::path::Path) {
-    if let Err(error) = std::process::Command::new("open").arg(folder).spawn() {
-        eprintln!("Cannot open {}: {error}", folder.display());
+/// The table's statuses, in `commands::choices` order, which the menu bar's items show.
+pub fn update_menu(statuses: impl FnOnce() -> Vec<commands::Status>) {
+    STATUSES.set(statuses());
+}
+
+/// Opens `target`, a folder or a link's URL, as Finder would.
+pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
+    let target = target.as_ref();
+    if let Err(error) = std::process::Command::new("open").arg(target).spawn() {
+        eprintln!("Cannot open {}: {error}", target.display());
     }
 }
 

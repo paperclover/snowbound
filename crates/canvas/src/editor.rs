@@ -24,13 +24,18 @@ use std::{
 
 pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
 
+mod equation;
 #[cfg(test)]
 mod evidence;
 mod format;
+mod link;
 mod ops;
 pub(crate) mod page;
 mod table;
-pub use format::{Alignment, FormatState, Formatting, NoteTag, Toggle};
+pub use format::{
+    Alignment, BULLET_LIBRARY, FormatState, Formatting, ListStyle, NUMBER_LIBRARY, NoteTag, Toggle,
+};
+pub use link::{Link, shown_urls};
 pub use page::ReadOnlyObject;
 
 #[derive(Debug)]
@@ -393,6 +398,19 @@ impl TextOutline {
             .text_nodes()
             .position(|paragraph| paragraph.id == id)
             .unwrap()
+    }
+
+    /// The start of the paragraph after visible paragraph `index` when it follows in the same
+    /// container, where a whole-paragraph selection ends so that deleting it takes the break.
+    fn next_sibling_start(&self, index: usize) -> Option<TextPosition> {
+        let next =
+            (index + 1 < self.shaped.paragraphs.len()).then(|| self.source_index(index + 1))?;
+        let (container, local, _) = self.document.leaf(self.source_index(index))?;
+        let (next_container, next_local, _) = self.document.leaf(next)?;
+        (container == next_container && next_local == local + 1).then_some(TextPosition {
+            paragraph: next,
+            offset: 0,
+        })
     }
 
     pub fn paragraph_layout(&self, source: usize) -> Result<&ParagraphLayout, EditError> {
@@ -2006,6 +2024,50 @@ impl CanvasEditor {
         )
     }
 
+    /// Selects the smallest unit strictly holding the selection, as OneNote 2010's Ctrl+A widens
+    /// it: the paragraph, its subtree, each enclosing table cell, row and table, then the outline.
+    pub fn widen_selection(&mut self) -> Result<(), EditError> {
+        let outline = self.active_outline();
+        let [anchor, focus] = outline.selection.positions;
+        let (start, end) = (anchor.min(focus), anchor.max(focus));
+        let last_shown = |range: Range<usize>| {
+            let paragraph = range
+                .rev()
+                .find(|&paragraph| outline.visible_index(paragraph).is_ok())?;
+            let text = outline.document.paragraph(paragraph)?;
+            Some(TextPosition {
+                paragraph,
+                offset: text.utf16_offset(text.text().len()).ok()?,
+            })
+        };
+        let first = |paragraph| TextPosition {
+            paragraph,
+            offset: 0,
+        };
+        let own = outline
+            .next_sibling_start(outline.visible_index(start.paragraph)?)
+            .or_else(|| last_shown(start.paragraph..start.paragraph + 1));
+        let units = std::iter::once((first(start.paragraph), own))
+            .chain(
+                outline
+                    .document
+                    .enclosing(start.paragraph)
+                    .into_iter()
+                    .map(|range| (first(range.start), last_shown(range))),
+            )
+            .chain([(
+                first(0),
+                last_shown(0..outline.document.paragraphs().count()),
+            )]);
+        match units
+            .filter_map(|(unit_start, unit_end)| Some([unit_start, unit_end?]))
+            .find(|&unit| unit[0] <= start && end <= unit[1] && unit != [start, end])
+        {
+            Some(unit) => self.select(unit.into()),
+            None => Ok(()),
+        }
+    }
+
     pub fn select_at(&mut self, x: f32, y: f32, extend: bool) -> Result<(), EditError> {
         let mut selection = self.selection_at(x, y, SelectionUnit::Grapheme)?;
         if extend {
@@ -2046,20 +2108,10 @@ impl CanvasEditor {
             selection.affinities[slot] = cursor.affinity();
         }
         if unit == SelectionUnit::Paragraph
-            && index + 1 < self.active_outline().shaped.paragraphs.len()
+            && let Some(next) = self.active_outline().next_sibling_start(index)
         {
-            let document = &self.active_outline().document;
-            let source = selection.positions[0].paragraph;
-            let next = self.active_outline().source_index(index + 1);
-            let (container, local, _) = document.leaf(source).unwrap();
-            let (next_container, next_local, _) = document.leaf(next).unwrap();
-            if container == next_container && next_local == local + 1 {
-                selection.positions[1] = TextPosition {
-                    paragraph: next,
-                    offset: 0,
-                };
-                selection.affinities[1] = Affinity::Downstream;
-            }
+            selection.positions[1] = next;
+            selection.affinities[1] = Affinity::Downstream;
         }
         Ok(selection)
     }
@@ -2093,6 +2145,9 @@ impl CanvasEditor {
         extend: bool,
     ) -> Result<(), EditorError> {
         self.finish_composition();
+        if !extend && movement == Movement::Right && self.leave_equation()? {
+            return Ok(());
+        }
         let [anchor, focus] = self.active_outline().selection.positions;
         if !extend
             && self.caret_outline().is_some()
@@ -2557,7 +2612,9 @@ impl CanvasEditor {
         )
     }
 
+    /// Types `text` at the selection; a space ends a typed URL, which becomes a link.
     pub fn insert(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
+        self.leave_link_code()?;
         let start = self.active_outline().selection.positions[0]
             .min(self.active_outline().selection.positions[1]);
         let format = self.typing_format(start)?;
@@ -2565,7 +2622,12 @@ impl CanvasEditor {
             .split('\n')
             .map(|line| Paragraph::new(line.to_owned(), format.clone()))
             .collect();
-        self.replace(engine, replacement)
+        self.replace(engine, replacement)?;
+        if matches!(text, " " | "\t") {
+            self.link_typed_url(engine, start)?;
+            self.build_typed_equation(engine, start)?;
+        }
+        Ok(())
     }
 
     /// Pastes plain text as OneNote does: lines become plain Calibri 11 paragraphs without style
@@ -2634,7 +2696,13 @@ impl CanvasEditor {
     fn split(&mut self, engine: &mut TextEngine) -> Result<(), EditorError> {
         let [anchor, focus] = self.active_outline().selection.positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
-        let format = self.typing_format(start)?;
+        let mut format = self.typing_format(start)?;
+        // A link or equation ends with its paragraph.
+        link::unlinked(&mut format);
+        if format.math == Some(true) {
+            let text = self.active_outline().document.paragraph(start.paragraph);
+            format = equation::text_after(text.ok_or(EditError::InvalidRange)?);
+        }
         let document = &self.active_outline().document;
         let mut edit = document.replace(
             start..end,
@@ -2743,6 +2811,75 @@ impl CanvasEditor {
             }
         }
         self.commit(engine, edit, selection)?;
+        Ok(true)
+    }
+
+    /// Alt+Shift+Up or Down: swaps the selected paragraphs, with their children, and the
+    /// sibling above or below with its children. Does nothing past the first or last sibling.
+    pub fn move_paragraphs(
+        &mut self,
+        engine: &mut TextEngine,
+        up: bool,
+    ) -> Result<bool, EditorError> {
+        use crate::document::{previous_sibling, subtree_end};
+        let outline = self.active_outline();
+        if outline.title {
+            return Ok(false);
+        }
+        let selection = outline.selection;
+        let [anchor, focus] = selection.positions;
+        let document = &outline.document;
+        let (container, first, _) = document
+            .leaf(anchor.min(focus).paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let (end_container, last, _) = document
+            .leaf(anchor.max(focus).paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        if container != end_container {
+            return Ok(false);
+        }
+        let nodes = document.container(container)?;
+        let parent = nodes[first].parent;
+        let mut end = first;
+        while end <= last {
+            if nodes[end].parent != parent {
+                return Ok(false);
+            }
+            end = subtree_end(nodes, end);
+        }
+        let (range, [moved, other]) = if up {
+            let Some(sibling) = previous_sibling(nodes, first, &BTreeSet::new()) else {
+                return Ok(false);
+            };
+            (sibling..end, [first..end, sibling..first])
+        } else {
+            if nodes.get(end).is_none_or(|node| node.parent != parent) {
+                return Ok(false);
+            }
+            let next = subtree_end(nodes, end);
+            (first..next, [first..end, end..next])
+        };
+        let passed = leaves(&nodes[other.clone()], None).count();
+        let replacement = if up {
+            [&nodes[moved], &nodes[other]].concat()
+        } else {
+            [&nodes[other], &nodes[moved]].concat()
+        };
+        let mut moved = selection;
+        for position in &mut moved.positions {
+            position.paragraph = if up {
+                position.paragraph - passed
+            } else {
+                position.paragraph + passed
+            };
+        }
+        let edit = DocumentEdit {
+            columns: BTreeMap::new(),
+            container,
+            range,
+            replacement,
+        };
+        self.commit(engine, edit, moved)?;
         Ok(true)
     }
 
@@ -8871,5 +9008,177 @@ mod tests {
         );
         assert!(editor.undo.is_empty());
         assert_eq!(editor.take_ops().unwrap(), []);
+    }
+
+    /// Alpha, Parent > Child > Grand, a table [[A1 A2 | B1], [C1 | D1]], Omega: text leaves 0..=9.
+    fn select_more_editor(engine: &mut TextEngine, collapsed: bool) -> CanvasEditor {
+        use onestore::page::{ParagraphContent, Table, TableCell, TableColumn, TableRow};
+        let text = |text: &str| {
+            crate::document::node(
+                Paragraph::new(text.into(), Format::default()),
+                Format::default(),
+            )
+            .unwrap()
+        };
+        let child = |label: &str, parent: &PageParagraph| PageParagraph {
+            parent: Some(parent.id),
+            level: parent.level + 1,
+            ..text(label)
+        };
+        let parent = PageParagraph {
+            collapsed,
+            ..text("Parent")
+        };
+        let middle = child("Child", &parent);
+        let grand = child("Grand", &middle);
+        let mut table = text("");
+        table.content = ParagraphContent::Table(Table {
+            id: onestore::page::text::new_id().unwrap(),
+            columns: vec![
+                TableColumn {
+                    width: 72.0,
+                    locked: true,
+                };
+                2
+            ],
+            rows: [[&["A1", "A2"][..], &["B1"]], [&["C1"], &["D1"]]]
+                .into_iter()
+                .map(|cells| TableRow {
+                    id: onestore::page::text::new_id().unwrap(),
+                    cells: cells
+                        .into_iter()
+                        .map(|texts| TableCell {
+                            id: onestore::page::text::new_id().unwrap(),
+                            layout: Default::default(),
+                            indents: vec![18.0, 0.0, 27.0],
+                            shading: None,
+                            paragraphs: texts.iter().map(|t| text(t)).collect(),
+                            unsupported: Vec::new(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            borders: Some(true),
+            layout: Default::default(),
+            tags: Vec::new(),
+        });
+        let nodes = vec![text("Alpha"), parent, middle, grand, table, text("Omega")];
+        CanvasEditor::new(engine, TextDocument::from_nodes(nodes).unwrap(), 300.0).unwrap()
+    }
+
+    /// The selections successive `widen_selection` calls give from `start` to `end`.
+    fn widenings(
+        editor: &mut CanvasEditor,
+        start: (usize, u32),
+        end: (usize, u32),
+    ) -> Vec<[(usize, u32); 2]> {
+        let position = |(paragraph, offset)| TextPosition { paragraph, offset };
+        editor
+            .select([position(start), position(end)].into())
+            .unwrap();
+        (0..6)
+            .map(|_| {
+                editor.widen_selection().unwrap();
+                editor
+                    .selection()
+                    .positions
+                    .map(|position| (position.paragraph, position.offset))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn select_all_widens_as_onenote_does() {
+        let mut engine = TextEngine::default();
+        let mut editor = select_more_editor(&mut engine, false);
+        let outline = [(0, 0), (9, 5)];
+        let steps = |steps: &[[(usize, u32); 2]]| {
+            let mut steps = steps.to_vec();
+            steps.resize(6, outline);
+            steps
+        };
+        // A paragraph takes its break when a sibling follows, then the outline.
+        assert_eq!(
+            widenings(&mut editor, (0, 2), (0, 2)),
+            steps(&[[(0, 0), (1, 0)]])
+        );
+        // A parent, then its subtree, then the outline.
+        assert_eq!(
+            widenings(&mut editor, (1, 2), (1, 2)),
+            steps(&[[(1, 0), (2, 0)], [(1, 0), (3, 5)]])
+        );
+        // A child widens to its own subtree, never its parent's.
+        assert_eq!(
+            widenings(&mut editor, (2, 1), (2, 1)),
+            steps(&[[(2, 0), (3, 0)], [(2, 0), (3, 5)]])
+        );
+        assert_eq!(
+            widenings(&mut editor, (3, 1), (3, 1)),
+            steps(&[[(3, 0), (3, 5)]])
+        );
+        // In a table: paragraph, cell, row, table.
+        assert_eq!(
+            widenings(&mut editor, (4, 1), (4, 1)),
+            steps(&[
+                [(4, 0), (5, 0)],
+                [(4, 0), (5, 2)],
+                [(4, 0), (6, 2)],
+                [(4, 0), (8, 2)],
+            ])
+        );
+        // A cell holding one paragraph adds nothing to it.
+        assert_eq!(
+            widenings(&mut editor, (6, 1), (6, 1)),
+            steps(&[[(6, 0), (6, 2)], [(4, 0), (6, 2)], [(4, 0), (8, 2)]])
+        );
+        assert_eq!(
+            widenings(&mut editor, (9, 1), (9, 1)),
+            steps(&[[(9, 0), (9, 5)]])
+        );
+    }
+
+    #[test]
+    fn select_all_starts_from_the_current_selection() {
+        let mut engine = TextEngine::default();
+        let mut editor = select_more_editor(&mut engine, false);
+        let first = |editor: &mut CanvasEditor, start, end| widenings(editor, start, end)[0];
+        // Part or all of a paragraph's text widens to the paragraph.
+        assert_eq!(first(&mut editor, (0, 1), (0, 3)), [(0, 0), (1, 0)]);
+        assert_eq!(first(&mut editor, (0, 0), (0, 5)), [(0, 0), (1, 0)]);
+        assert_eq!(first(&mut editor, (0, 3), (0, 1)), [(0, 0), (1, 0)]);
+        // Across paragraphs, the outline; across cells of a row, the row.
+        assert_eq!(first(&mut editor, (0, 1), (1, 1)), [(0, 0), (9, 5)]);
+        assert_eq!(first(&mut editor, (5, 1), (6, 1)), [(4, 0), (6, 2)]);
+        assert_eq!(first(&mut editor, (6, 1), (7, 1)), [(4, 0), (8, 2)]);
+        // A caret moved after widening starts over at its paragraph.
+        assert_eq!(first(&mut editor, (9, 1), (9, 1)), [(9, 0), (9, 5)]);
+        // Selection only: nothing to undo or store.
+        assert!(editor.undo.is_empty());
+        assert_eq!(editor.take_ops().unwrap(), []);
+    }
+
+    #[test]
+    fn select_all_skips_the_hidden_children_of_a_collapsed_parent() {
+        let mut engine = TextEngine::default();
+        let mut editor = select_more_editor(&mut engine, true);
+        assert_eq!(
+            widenings(&mut editor, (1, 2), (1, 2))[..2],
+            [[(1, 0), (1, 6)], [(0, 0), (9, 5)]]
+        );
+    }
+
+    #[test]
+    fn select_all_in_a_single_paragraph_stops_at_the_paragraph() {
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(vec![Paragraph::new("Title".into(), Format::default())]).unwrap(),
+            180.0,
+        )
+        .unwrap();
+        assert_eq!(
+            widenings(&mut editor, (0, 5), (0, 5)),
+            [[(0, 0), (0, 5)]; 6]
+        );
     }
 }

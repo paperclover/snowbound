@@ -89,7 +89,7 @@ input-method events that land on it, in order. The host hands them to
 frame. The page's scrollbars are ordinary `ui` widgets; the canvas only
 reports its scroll bounds.
 
-`ui::popup` builds menus, filterable lists, a colour grid and a fuzzy command
+`ui::popup` builds menus, filterable lists, a colour grid, galleries and a fuzzy command
 palette on a popup layer that takes input above everything else. `ui::shell`
 has the OneNote-specific controls: section tabs and compact toolbar buttons.
 The kit doesn't know what a notebook is. `snowbound` assembles the window from

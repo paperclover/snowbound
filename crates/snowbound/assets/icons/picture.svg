@@ -1,4 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <path d="M3 2.5H13A1.5 1.5 0 0 1 14.5 4V12A1.5 1.5 0 0 1 13 13.5H3A1.5 1.5 0 0 1 1.5 12V4A1.5 1.5 0 0 1 3 2.5ZM1.75 12L6 7.5L10.5 12M9 10.5L10.75 8.75L14.25 12.25" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M9.5 5.75A1.25 1.25 0 1 0 12 5.75A1.25 1.25 0 1 0 9.5 5.75Z" fill="currentColor"/>
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e3e9f0"/></linearGradient>
+    <linearGradient id="g1" x2="0" y2="1"><stop offset="0" stop-color="#6fb9ff"/><stop offset="1" stop-color="#dff0ff"/></linearGradient>
+    <linearGradient id="g2" x2="0" y2="1"><stop offset="0" stop-color="#ffe36b"/><stop offset="1" stop-color="#ffa51f"/></linearGradient>
+    <linearGradient id="g3" x2="0" y2="1"><stop offset="0" stop-color="#8fa8cc"/><stop offset="1" stop-color="#4b6993"/></linearGradient>
+    <linearGradient id="g4" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#ffffff"/></linearGradient>
+  </defs>
+  <path d="M2 3.25L14 3.25A0.5 0.5 0 0 1 14.5 3.75L14.5 13.75A0.5 0.5 0 0 1 14 14.25L2 14.25A0.5 0.5 0 0 1 1.5 13.75L1.5 3.75A0.5 0.5 0 0 1 2 3.25Z" fill="#000000" fill-opacity="0.16"/>
+  <path d="M2 2.5H14A0.5 0.5 0 0 1 14.5 3V13A0.5 0.5 0 0 1 14 13.5H2A0.5 0.5 0 0 1 1.5 13V3A0.5 0.5 0 0 1 2 2.5Z" fill="url(#g0)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M3 4H13V12H3Z" fill="url(#g1)"/>
+  <path d="M9 6.5A1.5 1.5 0 1 1 12 6.5A1.5 1.5 0 1 1 9 6.5Z" fill="url(#g2)"/>
+  <path d="M3 12L3 10.6L6.5 6.2L9 9.2L10.2 8.2L13 11L13 12Z" fill="url(#g3)"/>
+  <path d="M5.3 7.7L6.5 6.2L7.7 7.6L6.9 7.3L6.3 8L5.9 7.4Z" fill="url(#g4)"/>
 </svg>

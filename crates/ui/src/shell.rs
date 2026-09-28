@@ -1,10 +1,10 @@
 //! Controls a notebook window's chrome is built from: OneNote's section tabs and the
 //! toolbar's compact buttons.
 
-use draw::PathStyle;
+use draw::{PathStyle, edit::SelectionUnit};
 
 use crate::{
-    Corner, Display, Flags, Id, Section, Shape, Signal, Spec, Ui, children, fill, mix, px,
+    Anchor, Corner, Display, Flags, Id, Section, Shape, Signal, Spec, Ui, children, fill, mix, px,
 };
 use std::hash::Hash;
 
@@ -14,17 +14,25 @@ pub const CHEVRON: &[&str] = &[include_str!("../assets/chevron-down.svg")];
 const TAB_ROUNDING: f32 = 4.0;
 /// Side of a toolbar button.
 pub const TOOL: f32 = 22.0;
+/// Width of a menu arrow beside a toolbar button.
+const ARROW: f32 = 10.0;
+/// Where a section tab's label starts inside it.
+pub const TAB_PAD: f32 = 10.0;
 
 /// Section tabs in a row `height` tall, as OneNote draws them: each leans over the next
 /// at 45°, and the open one lies on top in `section`'s colours, rising to meet the frame
 /// below as its outline and shadow fade in. `tabs` are names and section colours; `lit`
-/// shows as hovered, as a tab something is dragged onto.
+/// shows as hovered, as a tab something is dragged onto. A `dragged` tab follows the
+/// pointer, lifted over the others, which slide aside to open the gap it would land in;
+/// each eases to its place once let go.
+#[allow(clippy::too_many_arguments)]
 pub fn section_tabs(
     ui: &mut Ui,
     part: impl Hash,
     tabs: &[(&str, [f32; 4])],
     active: usize,
     lit: Option<usize>,
+    dragged: Option<Dragged>,
     section: &Section,
     height: f32,
 ) -> Tabs {
@@ -38,25 +46,60 @@ pub fn section_tabs(
         },
     );
     let [low, tallest] = [height - 6.0, height - 2.0];
-    let mut left = 0.0;
+    // Room for the first tab's outline and shadow, which the row would clip.
+    let mut left = crate::SHADOW[0];
     let placed: Vec<_> = tabs
         .iter()
         .map(|(name, _)| {
-            let width = 10.0 + ui.measure(name)[0] + 4.0 + lean(height);
+            let width = TAB_PAD + ui.measure(name)[0] + 4.0 + lean(height);
             left += width;
             (left - width, width)
         })
         .collect();
-    let (mut clicked, mut context, mut held) = (None, None, None);
-    // Earlier tabs lie over later ones; the open tab over all.
+    let (mut clicked, mut context, mut held, mut renamed) = (None, None, None, None);
+    let spans: Vec<[f32; 2]> = placed.iter().map(|(x, width)| [*x, *width]).collect();
+    let slot = dragged.and_then(|dragged| {
+        let width = placed[dragged.index].1;
+        Some(crate::drop_slot(
+            &spans,
+            dragged.index,
+            dragged.start? + width / 2.0,
+        ))
+    });
+    let lifted = dragged.map(|dragged| dragged.index);
+    let mut settled = true;
+    // Earlier tabs lie over later ones; the open tab over them, and a dragged one over all.
     let order = (0..tabs.len())
         .rev()
-        .filter(|index| *index != active)
-        .chain((active < tabs.len()).then_some(active));
+        .filter(|index| *index != active && Some(*index) != lifted)
+        .chain((active < tabs.len() && Some(active) != lifted).then_some(active))
+        .chain(lifted);
     for index in order {
         let (name, color) = tabs[index];
         let (x, width) = placed[index];
-        let open = ui.animate(ui.id(("open", index)), f32::from(u8::from(index == active)));
+        // Keyed by name, so a tab eases from where it stood when the tabs are reordered.
+        let key = ui.id(("x", name));
+        let x = match (dragged, slot) {
+            (
+                Some(Dragged {
+                    start: Some(start), ..
+                }),
+                _,
+            ) if lifted == Some(index) => ui.hold(key, start),
+            (Some(dragged), Some(slot)) => ui.animate(
+                key,
+                x + crate::slide(index, dragged.index, slot, placed[dragged.index].1),
+            ),
+            _ => {
+                let eased = ui.animate(key, x);
+                settled &= lifted != Some(index) || (eased - x).abs() < 0.5;
+                eased
+            }
+        };
+        let lift = f32::from(u8::from(lifted == Some(index)));
+        let open = ui
+            .animate(ui.id(("open", name)), f32::from(u8::from(index == active)))
+            .max(lift);
         // Whole device pixels, so a rising tab reuses its rasterized outlines.
         let tall = ((low + (tallest - low) * open) * ui.scale()).round() / ui.scale();
         let colors = theme.section(color);
@@ -77,11 +120,12 @@ pub fn section_tabs(
                 }),
                 gradient: Some(fill),
                 hover_fill: (index != active).then(|| mix(colors.frame[0], [1.0; 4], 0.08)),
-                border: Some(fade(section.edge, open)),
-                shadow: (open > 0.0).then(|| fade([0.0, 0.0, 0.0, 0.35], open)),
+                // A tab not open is outlined in its own hue, fainter than the open one's.
+                border: Some(mix(mix(colors.tab, colors.edge, 0.55), section.edge, open)),
+                shadow: (open > 0.0).then(|| fade([0.0, 0.0, 0.0, 0.35 + 0.15 * lift], open)),
                 radius: TAB_ROUNDING,
                 shape: Shape::Tab { lean: lean(height) },
-                pad: [10.0, 0.0],
+                pad: [TAB_PAD, 0.0],
                 ..Spec::default()
             },
         );
@@ -94,6 +138,9 @@ pub fn section_tabs(
         if signal.dragging {
             held = Some(index);
         }
+        if signal.pressed && signal.unit != SelectionUnit::Grapheme {
+            renamed = Some(index);
+        }
     }
     let open_tab = ui.id(("tab", active));
     ui.close();
@@ -101,8 +148,19 @@ pub fn section_tabs(
         clicked,
         context,
         held,
+        renamed,
+        slot,
+        settled,
         open: open_tab,
     }
+}
+
+/// A section tab being dragged: its index, and its leading edge along the row while it
+/// follows the pointer; none once let go, as it eases into its place over the others.
+#[derive(Clone, Copy, Debug)]
+pub struct Dragged {
+    pub index: usize,
+    pub start: Option<f32>,
 }
 
 /// The id of tab `index` of the section tabs built as `row`.
@@ -117,6 +175,12 @@ pub struct Tabs {
     pub context: Option<(usize, [f32; 2])>,
     /// The tab held down, which a drag moves.
     pub held: Option<usize>,
+    /// The tab pressed twice in a row, which OneNote renames in place.
+    pub renamed: Option<usize>,
+    /// Where the dragged tab would land, as an index in the tabs' new order.
+    pub slot: Option<usize>,
+    /// The dragged tab, let go, stands in its place.
+    pub settled: bool,
     /// The open tab's id, for `tab_base`.
     pub open: Id,
 }
@@ -158,34 +222,62 @@ pub fn tool_button(
     )
 }
 
-/// A button showing `icon`, lit while `on`, with a menu arrow beside it, and optionally
-/// the colour it applies as a bar under the icon. Returns the button's and the arrow's
-/// signals.
+/// A button showing `icon`, lit while `on`, joined to an arrow that opens popup `menu`,
+/// with the colour it applies as a bar under the icon when given. Hovering the button fills
+/// it alone; hovering the arrow, or its menu being open, outlines both as one control.
+/// Returns the button's signal.
 pub fn split_button(
     ui: &mut Ui,
     part: impl Hash,
     icon: &'static [&'static str],
     bar: Option<[f32; 4]>,
     on: bool,
-) -> [Signal; 2] {
-    let theme = ui.theme.clone();
-    ui.open(
-        part,
+    menu: Id,
+) -> Signal {
+    const RADIUS: f32 = 4.0;
+    let hover = ui.theme.hover();
+    let fade =
+        |alpha: f32| (alpha > 0.0).then_some([hover[0], hover[1], hover[2], hover[3] * alpha]);
+    let split = ui.id(part);
+    let [button, arrow] = [split.child("button"), split.child("menu")];
+    let lit = ui.animate(
+        split.child("lit"),
+        f32::from(u8::from(on || ui.hover == Some(button))),
+    );
+    let outlined = ui.hover == Some(arrow) || ui.popup_open(menu);
+    let ring = ui.animate(split.child("ring"), f32::from(u8::from(outlined)));
+    ui.open_as(
+        split,
         Spec {
             size: [children(), px(TOOL)],
             ..Spec::default()
         },
     );
-    let button = ui.open(
-        "button",
+    ui.open_as(
+        button,
         Spec {
-            flags: Flags::CLICKABLE,
+            flags: Flags::CLICKABLE | Flags::CLIP,
+            size: [px(TOOL), px(TOOL)],
+            ..Spec::default()
+        },
+    );
+    // Rounded past the clip, so the fill meets the arrow square.
+    ui.leaf(
+        "face",
+        Spec {
+            flags: Flags::FLOAT,
+            size: [px(TOOL + RADIUS), px(TOOL)],
+            fill: fade(lit),
+            radius: RADIUS,
+            ..Spec::default()
+        },
+    );
+    ui.open(
+        "icon",
+        Spec {
             size: [px(TOOL), px(TOOL)],
             icon: Some(icon),
-            color: Some(theme.text),
-            fill: on.then(|| theme.hover()),
-            hover_fill: Some(theme.hover()),
-            radius: 4.0,
+            color: Some(ui.theme.text),
             center: true,
             ..Spec::default()
         },
@@ -196,21 +288,79 @@ pub fn split_button(
         ui.mark([top, top + 13.0, top + 16.0, top + 16.0], color, 0.0);
     }
     ui.close();
-    let menu = ui.leaf(
-        "menu",
+    ui.close();
+    if ui
+        .leaf(
+            "menu",
+            Spec {
+                flags: Flags::CLICKABLE,
+                size: [px(ARROW), px(TOOL)],
+                icon: Some(CHEVRON),
+                color: Some(ui.theme.text_dim),
+                center: true,
+                ..Spec::default()
+            },
+        )
+        .pressed
+    {
+        ui.open_popup(menu);
+    }
+    ui.leaf(
+        "ring",
         Spec {
-            flags: Flags::CLICKABLE,
-            size: [px(10.0), px(TOOL)],
-            icon: Some(CHEVRON),
-            color: Some(theme.text_dim),
-            hover_fill: Some(theme.hover()),
-            radius: 4.0,
-            center: true,
+            flags: Flags::FLOAT,
+            size: [px(TOOL + ARROW), px(TOOL)],
+            border: fade(ring),
+            radius: RADIUS,
             ..Spec::default()
         },
     );
     ui.close();
-    [ui.signal(button), menu]
+    ui.signal(button)
+}
+
+/// A button showing `icon` and a menu arrow, one control that opens popup `menu`. Returns
+/// where the menu opens so its icons line up under the button's.
+pub fn menu_button(
+    ui: &mut Ui,
+    part: impl Hash,
+    icon: &'static [&'static str],
+    menu: Id,
+) -> Anchor {
+    let theme = ui.theme.clone();
+    let id = ui.open(
+        part,
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [px(TOOL + ARROW), px(TOOL)],
+            fill: ui.popup_open(menu).then(|| theme.hover()),
+            hover_fill: Some(theme.hover()),
+            radius: 4.0,
+            ..Spec::default()
+        },
+    );
+    for (part, icon, width, color) in [
+        ("icon", icon, TOOL, theme.text),
+        ("arrow", CHEVRON, ARROW, theme.text_dim),
+    ] {
+        ui.leaf(
+            part,
+            Spec {
+                size: [px(width), px(TOOL)],
+                icon: Some(icon),
+                color: Some(color),
+                center: true,
+                ..Spec::default()
+            },
+        );
+    }
+    ui.close();
+    if ui.signal(id).pressed {
+        ui.open_popup(menu);
+    }
+    let [left, top, right, bottom] = ui.rect(id).unwrap_or_default();
+    let shift = crate::popup::ICON_INSET - (TOOL - crate::ICON) / 2.0;
+    Anchor::Below([left - shift, top, right - shift, bottom])
 }
 
 /// A drop-down box `width` wide showing `text`.
@@ -295,7 +445,8 @@ impl Ui {
 
     /// Rounds the corners of the clockwise outline `points`, as `border` does: paints
     /// `outside(y)` beyond each outward corner at height `y`, and `inside` into each
-    /// inward one. Called between `end` and `layers`.
+    /// inward one; a transparent colour cuts the corner out to the window's backdrop.
+    /// Called between `end` and `layers`.
     pub fn round_corners(
         &mut self,
         points: &[([f32; 2], f32)],
@@ -311,6 +462,16 @@ impl Ui {
                 corner.start[0] - corner.point[0],
                 corner.start[1] - corner.point[1],
             ];
+            let color = if corner.outward {
+                outside(corner.point[1])
+            } else {
+                inside
+            };
+            let (style, color) = if color[3] == 0.0 {
+                (PathStyle::Erase, [0.0, 0.0, 0.0, 1.0])
+            } else {
+                (PathStyle::Fill, color)
+            };
             self.beneath_popups(Display::Path {
                 data: format!(
                     "M{} {}{}L0 0Z",
@@ -319,12 +480,8 @@ impl Ui {
                     corner.curve(corner.point)
                 ),
                 origin: corner.point,
-                style: PathStyle::Fill,
-                colors: [if corner.outward {
-                    outside(corner.point[1])
-                } else {
-                    inside
-                }; 2],
+                style,
+                colors: [color; 2],
             });
         }
     }

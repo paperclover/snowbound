@@ -5,7 +5,8 @@
 use super::*;
 use winit::window::Theme as Appearance;
 
-/// The window in points, drawn at `SCALE` pixels per point.
+/// The window in points, unless `SNOWBOUND_SCREENSHOT_SIZE` gives it as `WIDTHxHEIGHT`,
+/// drawn at `SCALE` pixels per point or fewer where the GPU caps textures.
 const SIZE: [f32; 2] = [1440.0, 900.0];
 const SCALE: f32 = 2.0;
 /// A standard window's close, minimize and zoom buttons as AppKit places them beside a
@@ -20,10 +21,19 @@ const LIGHTS: [(f32, [u8; 3], [u8; 3]); 3] = [
 impl State {
     /// Writes `PREFIX-light.png` and `PREFIX-dark.png`, the page unfocused so no caret shows.
     pub(crate) fn screenshot(&mut self, prefix: &Path) -> Result<(), Box<dyn Error>> {
-        [self.config.width, self.config.height] = SIZE.map(|side| (side * SCALE) as u32);
+        let size = match std::env::var("SNOWBOUND_SCREENSHOT_SIZE") {
+            Ok(size) => size
+                .split_once('x')
+                .and_then(|(width, height)| Some([width.parse().ok()?, height.parse().ok()?]))
+                .ok_or("SNOWBOUND_SCREENSHOT_SIZE must be WIDTHxHEIGHT in points.")?,
+            Err(_) => SIZE,
+        };
+        let most = self.renderer.device.limits().max_texture_dimension_2d as f32;
+        let scale = SCALE.min(most / size[0].max(size[1]));
+        [self.config.width, self.config.height] = size.map(|side| (side * scale).max(1.0) as u32);
         self.renderer.clear_glyph_cache();
-        self.app_icon = platform::app_icon((16.0 * SCALE) as u32);
-        let response = self.view.scale_factor_changed(SCALE)?;
+        self.app_icon = platform::app_icon((16.0 * scale) as u32);
+        let response = self.view.scale_factor_changed(scale)?;
         self.respond(response);
         self.ui.set_focus(None);
         if let Some(title) = self
@@ -37,9 +47,9 @@ impl State {
         }
         for (name, appearance) in [("light", Appearance::Light), ("dark", Appearance::Dark)] {
             self.window.set_theme(Some(appearance));
-            self.ui.theme = theme(appearance, self.light_pages);
+            self.set_appearance(appearance);
             // The page's box sizes the view whose pictures settle.
-            self.layout(SIZE, SCALE)?;
+            self.layout(size, scale)?;
             let paper = self.paper();
             if let Some((scene, _)) = &mut self.view.scene {
                 scene.settle(Some(&self.view.editor), self.view.viewport.scale, paper);
@@ -47,7 +57,7 @@ impl State {
             // Later frames lay out with earlier frames' measurements while colours ease.
             let deadline = Instant::now() + std::time::Duration::from_secs(2);
             loop {
-                self.layout(SIZE, SCALE)?;
+                self.layout(size, scale)?;
                 if !self.ui.wants_frame() || Instant::now() > deadline {
                     break;
                 }
@@ -56,7 +66,7 @@ impl State {
             let path = PathBuf::from(format!("{}-{name}.png", prefix.display()));
             self.snapshot(&path)?;
             #[cfg(target_os = "macos")]
-            window_frame(&path, appearance)?;
+            window_frame(&path, appearance, scale)?;
         }
         Ok(())
     }
@@ -65,7 +75,7 @@ impl State {
 /// Paints the traffic lights into the PNG at `path`, rounds its corners to transparency
 /// and edges them with the window's hairline.
 #[cfg(target_os = "macos")]
-fn window_frame(path: &Path, appearance: Appearance) -> Result<(), Box<dyn Error>> {
+fn window_frame(path: &Path, appearance: Appearance, scale: f32) -> Result<(), Box<dyn Error>> {
     let mut reader =
         png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?)).read_info()?;
     let mut pixels = vec![0; reader.output_buffer_size().ok_or("Snapshot too large")?];
@@ -84,21 +94,21 @@ fn window_frame(path: &Path, appearance: Appearance) -> Result<(), Box<dyn Error
         }
     };
     let [width, height] = [info.width as f32, info.height as f32];
-    let radius = platform::CORNER_RADIUS * SCALE;
+    let radius = platform::CORNER_RADIUS * scale;
     for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
         let x = (index as u32 % info.width) as f32 + 0.5;
         let y = (index as u32 / info.width) as f32 + 0.5;
         for (centre, fill, rim) in LIGHTS {
-            let distance = (x - centre * SCALE).hypot(y - TITLE / 2.0 * SCALE);
+            let distance = (x - centre * scale).hypot(y - TITLE / 2.0 * scale);
             blend(
                 pixel,
                 [rim[0], rim[1], rim[2], 255],
-                inside(distance - 6.0 * SCALE),
+                inside(distance - 6.0 * scale),
             );
             blend(
                 pixel,
                 [fill[0], fill[1], fill[2], 255],
-                inside(distance - 5.5 * SCALE),
+                inside(distance - 5.5 * scale),
             );
         }
         // Signed distance to the window's rounded rectangle.

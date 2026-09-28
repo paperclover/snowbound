@@ -62,6 +62,36 @@ fn fill_yields_to_strict_siblings_along_the_flow() {
 }
 
 #[test]
+fn padding_wider_than_its_box_leaves_loose_children_empty_not_negative() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut child = None;
+    frame(&mut ui, |ui| {
+        ui.open(
+            "cramped",
+            Spec {
+                size: [px(10.0), px(10.0)],
+                pad: [8.0, 8.0],
+                ..Spec::default()
+            },
+        );
+        let loose = Extent {
+            size: Size::Pixels(20.0),
+            strictness: 0.0,
+        };
+        child = Some(ui.open(
+            "child",
+            Spec {
+                size: [loose; 2],
+                ..Spec::default()
+            },
+        ));
+        ui.close();
+        ui.close();
+    });
+    assert_eq!(ui.rect(child.unwrap()), Some([8.0, 8.0, 8.0, 8.0]));
+}
+
+#[test]
 fn children_sum_with_gaps_and_padding() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut column = None;
@@ -327,10 +357,10 @@ fn wheel_scrolls_within_the_content_and_clips_children() {
     let layers = ui.layers();
     assert!(matches!(
         layers[..],
-        [Layer::Primitives {
+        [Layer::Primitives(Primitives {
             clip: Some([0.0, 0.0, 100.0, 100.0]),
             ..
-        }] | []
+        })] | []
     ));
 }
 
@@ -425,6 +455,20 @@ fn text_fields_edit_with_keys_and_selection() {
 }
 
 #[test]
+fn a_field_focused_whole_selects_its_text_once_for_typing_over() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut text = "New Section 1".to_owned();
+    ui.focus_all(field());
+    field_frame(&mut ui, &mut text);
+    ui.event(typed("K"));
+    field_frame(&mut ui, &mut text);
+    ui.event(typed("i"));
+    let signal = field_frame(&mut ui, &mut text);
+    assert!(signal.focused);
+    assert_eq!(text, "Ki");
+}
+
+#[test]
 #[cfg_attr(not(target_vendor = "apple"), ignore = "macOS editing conventions")]
 fn text_field_carets_fade_on_appkit_s_blink_and_restart_when_moved() {
     let (mut ui, mut text) = focused_field("one");
@@ -448,7 +492,7 @@ fn text_field_carets_fade_on_appkit_s_blink_and_restart_when_moved() {
             .layers()
             .iter()
             .flat_map(|layer| match layer {
-                Layer::Primitives { primitives, .. } => primitives.as_slice(),
+                Layer::Primitives(layer) => layer.primitives.as_slice(),
                 Layer::Custom { .. } => &[],
             })
             .find_map(|primitive| match primitive {
@@ -467,9 +511,16 @@ fn text_field_carets_fade_on_appkit_s_blink_and_restart_when_moved() {
     assert_eq!(at(&mut ui, 700).0, faded);
     assert_eq!(at(&mut ui, 900).0, 0.0);
     ui.event(key(NamedKey::ArrowRight));
-    assert_eq!(at(&mut ui, 910), (1.0, Some(Duration::from_micros(1_597_500))));
+    assert_eq!(
+        at(&mut ui, 910),
+        (1.0, Some(Duration::from_micros(1_597_500)))
+    );
     ui.window_focused = false;
-    assert_eq!(at(&mut ui, 920), (0.0, None), "an inactive window shows no caret");
+    assert_eq!(
+        at(&mut ui, 920),
+        (0.0, None),
+        "an inactive window shows no caret"
+    );
 }
 
 #[test]
@@ -1397,8 +1448,9 @@ fn a_filtered_menu_eases_to_its_new_height_while_its_rows_appear_in_place() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     build(&mut ui);
     ui.open_popup(menu_id());
-    build(&mut ui);
-    build(&mut ui);
+    for _ in 0..12 {
+        build(&mut ui);
+    }
     let results = menu_id().child("results");
     let height = |ui: &Ui| {
         let rect = ui.rect(results).unwrap();
@@ -1406,7 +1458,7 @@ fn a_filtered_menu_eases_to_its_new_height_while_its_rows_appear_in_place() {
     };
     let tall = height(&ui);
     assert!(
-        !ui.wants_frame() && tall > 5.0 * 26.0,
+        !ui.wants_frame() && tall > 5.0 * popup::MENU_ROW,
         "open at its full height"
     );
     ui.event(typed("tnr"));
@@ -1419,13 +1471,556 @@ fn a_filtered_menu_eases_to_its_new_height_while_its_rows_appear_in_place() {
         "Times New Roman at the top"
     );
     let easing = height(&ui);
-    assert!(easing > 26.0 && easing < tall, "{easing}");
+    assert!(easing > popup::MENU_ROW && easing < tall, "{easing}");
     let mut frames = 0;
     while ui.wants_frame() {
         build(&mut ui);
         frames += 1;
         assert_eq!(ui.rect(menu_id().child("rows").child(42_u64)), Some(row));
     }
-    assert_eq!(height(&ui), 26.0);
+    assert_eq!(height(&ui), popup::MENU_ROW);
     assert!(frames <= 10, "settles in {frames} frames");
+}
+
+/// A column `width` wide holding one label: its box, and the label as laid out.
+fn fitted(
+    ui: &mut Ui,
+    text: &str,
+    width: f32,
+    overflow: Overflow,
+    center: bool,
+) -> ([f32; 4], Rc<Label>) {
+    let mut id = None;
+    frame(ui, |ui| {
+        ui.open(
+            "column",
+            Spec {
+                axis: Axis::Y,
+                size: [px(width), children()],
+                ..Spec::default()
+            },
+        );
+        id = Some(ui.open(
+            "label",
+            Spec {
+                size: [fill(), fit()],
+                text: Some(text),
+                overflow,
+                center,
+                pad: [4.0, 2.0],
+                ..Spec::default()
+            },
+        ));
+        ui.close();
+        ui.close();
+    });
+    let node = ui.nodes.iter().find(|node| Some(node.id) == id).unwrap();
+    (node.rect, node.label.clone().unwrap())
+}
+
+fn advances(label: &Label) -> Vec<f32> {
+    label
+        .layout
+        .lines()
+        .map(|line| line.metrics().advance)
+        .collect()
+}
+
+#[test]
+fn wrapped_labels_break_to_their_width_and_the_box_grows_to_their_height() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let text = "Conflicting changes are highlighted in red. This page cannot be edited.";
+    let (_, label) = fitted(&mut ui, text, 1000.0, Overflow::Wrap, false);
+    assert_eq!(
+        advances(&label).len(),
+        1,
+        "a label that fits stays one line"
+    );
+    let line = label.size[1];
+    let mut previous = 2;
+    for width in [320.0, 200.0, 120.0, 60.0] {
+        let (rect, label) = fitted(&mut ui, text, width, Overflow::Wrap, false);
+        let lines = advances(&label);
+        assert!(lines.len() >= previous, "{width}: {lines:?}");
+        assert!(
+            lines.iter().all(|line| *line <= width - 8.0 + 0.01),
+            "{width}: {lines:?}"
+        );
+        assert!((rect[3] - rect[1] - 4.0 - label.size[1]).abs() <= 0.5);
+        assert!((label.size[1] / line - lines.len() as f32).abs() < 0.1);
+        assert_eq!(rect[2] - rect[0], width);
+        previous = lines.len();
+    }
+}
+
+#[test]
+fn wrapping_breaks_cjk_emoji_and_words_longer_than_the_line() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    for text in [
+        "東京都の天気は晴れのち曇り、明日は雨が降るでしょう",
+        "🎉🎈🎂🎁🎊🎉🎈🎂🎁🎊🎉🎈🎂🎁🎊",
+        "Supercalifragilisticexpialidocious-antidisestablishmentarianism",
+    ] {
+        let lines = advances(&fitted(&mut ui, text, 90.0, Overflow::Wrap, false).1);
+        assert!(lines.len() > 2, "{text}: {lines:?}");
+        assert!(lines.iter().all(|line| *line <= 82.01), "{text}: {lines:?}");
+    }
+}
+
+#[test]
+fn centred_wrapped_lines_centre_across_the_box() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let (_, label) = fitted(
+        &mut ui,
+        "A long line that wraps, then short",
+        150.0,
+        Overflow::Wrap,
+        true,
+    );
+    let last = label.layout.lines().last().unwrap();
+    let Some(parley::PositionedLayoutItem::GlyphRun(run)) = last.items().next() else {
+        panic!("no glyphs");
+    };
+    let room = 150.0 - 8.0 - last.metrics().advance;
+    assert!(
+        room > 20.0 && (run.offset() - room / 2.0).abs() < 1.0,
+        "{}",
+        run.offset()
+    );
+}
+
+#[test]
+fn ellipsis_shortens_a_label_to_its_box_and_leaves_one_that_fits() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let text = "Meeting notes from the quarterly planning review";
+    let (whole, label) = fitted(&mut ui, text, 1000.0, Overflow::Ellipsis, false);
+    assert_eq!(label.key.0, text);
+    for width in [200.0, 90.0, 30.0] {
+        let (rect, label) = fitted(&mut ui, text, width, Overflow::Ellipsis, false);
+        let (shown, lines) = (&label.key.0, advances(&label));
+        assert!(shown.ends_with('…') && !shown.ends_with(" …"), "{shown}");
+        assert!(text.starts_with(shown.trim_end_matches('…')));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0] <= width - 8.0 + 0.01, "{width}: {shown} {lines:?}");
+        assert_eq!(rect[3] - rect[1], whole[3] - whole[1]);
+    }
+    let (_, label) = fitted(
+        &mut ui,
+        "東京都の天気は晴れのち曇り",
+        80.0,
+        Overflow::Ellipsis,
+        false,
+    );
+    assert!(
+        label.key.0.ends_with('…') && label.key.0.chars().count() > 1,
+        "{}",
+        label.key.0
+    );
+}
+
+#[test]
+fn popups_ease_open_and_closed_then_stop_asking_for_frames() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let id = Id::ROOT.child("dialog");
+    let build = |ui: &mut Ui| {
+        if ui.popup_open(id) {
+            ui.leaf(
+                "dialog",
+                Spec {
+                    size: [px(100.0), px(50.0)],
+                    fill: Some([1.0; 4]),
+                    anchor: Some(Anchor::Dialog),
+                    ..Spec::default()
+                },
+            );
+        }
+    };
+    let motion = |ui: &Ui| {
+        ui.layers().iter().find_map(|layer| match layer {
+            Layer::Primitives(primitives) => primitives.motion,
+            Layer::Custom { .. } => None,
+        })
+    };
+    frame(&mut ui, |ui| {
+        ui.open_popup(id);
+        build(ui);
+    });
+    let first = motion(&ui).unwrap();
+    assert!(first.opacity < 0.1 && first.zoom < 0.96 && first.tilt > 0.3);
+    assert_eq!(
+        first.pivot,
+        [200.0, 125.0],
+        "the dialog swings from its top centre"
+    );
+    for _ in 0..16 {
+        frame(&mut ui, build);
+    }
+    assert_eq!(motion(&ui).map(|motion| motion.opacity), Some(1.0));
+    assert!(!ui.wants_frame());
+    ui.close_popup(id);
+    frame(&mut ui, build);
+    frame(&mut ui, build);
+    let closing = motion(&ui).unwrap();
+    assert!(closing.opacity < 1.0 && closing.opacity > 0.0);
+    assert!(ui.wants_frame());
+    for _ in 0..10 {
+        frame(&mut ui, build);
+    }
+    assert_eq!(motion(&ui), None);
+    assert!(!ui.wants_frame());
+}
+
+#[test]
+fn a_dragged_box_lands_past_the_middles_it_crossed_and_the_rest_slide_aside() {
+    let spans = [[0.0, 40.0], [40.0, 60.0], [100.0, 20.0], [120.0, 50.0]];
+    // Still over its own place, box 1 stays; past box 2's middle, it lands after it.
+    assert_eq!(drop_slot(&spans, 1, 70.0), 1);
+    assert_eq!(drop_slot(&spans, 1, 111.0), 2);
+    assert_eq!(drop_slot(&spans, 1, 500.0), 3);
+    assert_eq!(drop_slot(&spans, 3, -10.0), 0);
+    assert_eq!(
+        (0..4)
+            .map(|index| slide(index, 1, 3, 60.0))
+            .collect::<Vec<_>>(),
+        [0.0, 0.0, -60.0, -60.0]
+    );
+    assert_eq!(
+        (0..4)
+            .map(|index| slide(index, 3, 1, 50.0))
+            .collect::<Vec<_>>(),
+        [0.0, 50.0, 50.0, 0.0]
+    );
+}
+
+/// Clicks the middle of `id`'s box as laid out now, where it must be hit.
+fn click_box(ui: &mut Ui, id: Id) {
+    let rect = ui.rect(id).unwrap();
+    let middle = [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0];
+    assert_eq!(
+        ui.box_at(middle),
+        Some(id),
+        "the box is hit where it is laid out"
+    );
+    click(ui, middle);
+}
+
+/// What a dialog's controls reported in a frame.
+#[derive(Default)]
+struct Reported {
+    checked: bool,
+    ok: bool,
+    scheme: Option<usize>,
+}
+
+/// A dialog holding a check box, a button, a field and a combo opening a menu of schemes.
+fn dialog_frame(ui: &mut Ui, text: &mut String) -> Reported {
+    let mut reported = Reported::default();
+    frame(ui, |ui| {
+        let dialog = Id::ROOT.child("dialog");
+        if !ui.popup_open(dialog) {
+            return;
+        }
+        ui.open_as(
+            dialog,
+            Spec {
+                axis: Axis::Y,
+                size: [px(240.0), children()],
+                fill: Some([1.0; 4]),
+                pad: [8.0, 8.0],
+                anchor: Some(Anchor::Dialog),
+                ..Spec::default()
+            },
+        );
+        reported.checked = check_box(ui, "check", "Dark pages", false).clicked;
+        reported.ok = button(ui, "ok", "OK").clicked;
+        text_field(
+            ui,
+            Id::ROOT.child("name"),
+            text,
+            "",
+            Spec {
+                size: [fill(), px(26.0)],
+                ..Spec::default()
+            },
+        );
+        let combo = ui.id("combo");
+        if shell::combo(ui, "combo", "Light", 120.0).pressed {
+            ui.open_popup(Id::ROOT.child("schemes"));
+        }
+        let items = ["System", "Light", "Dark"].map(|text| popup::Item {
+            text,
+            ..popup::Item::default()
+        });
+        let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+        reported.scheme = popup::menu(ui, Id::ROOT.child("schemes"), anchor, &items, None);
+        ui.close();
+    });
+    reported
+}
+
+#[test]
+fn every_control_in_an_open_dialog_takes_clicks_where_it_rests() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let mut text = String::new();
+    let dialog = Id::ROOT.child("dialog");
+    dialog_frame(&mut ui, &mut text);
+    ui.open_popup(dialog);
+    let settle = |ui: &mut Ui, text: &mut String| {
+        for _ in 0..20 {
+            dialog_frame(ui, text);
+        }
+        assert!(!ui.wants_frame());
+    };
+    settle(&mut ui, &mut text);
+    click_box(&mut ui, dialog.child("check"));
+    assert!(dialog_frame(&mut ui, &mut text).checked);
+    click_box(&mut ui, dialog.child("ok"));
+    assert!(dialog_frame(&mut ui, &mut text).ok);
+    click_box(&mut ui, Id::ROOT.child("name"));
+    dialog_frame(&mut ui, &mut text);
+    assert_eq!(ui.focused(), Some(Id::ROOT.child("name")));
+    ui.event(typed("a"));
+    dialog_frame(&mut ui, &mut text);
+    assert_eq!(text, "a");
+    click_box(&mut ui, dialog.child("combo"));
+    dialog_frame(&mut ui, &mut text);
+    let schemes = Id::ROOT.child("schemes");
+    assert!(ui.popup_open(schemes) && ui.popup_open(dialog));
+    settle(&mut ui, &mut text);
+    click_box(&mut ui, schemes.child("rows").child(2_u64));
+    assert_eq!(dialog_frame(&mut ui, &mut text).scheme, Some(2));
+    assert!(!ui.popup_open(schemes) && ui.popup_open(dialog));
+}
+
+#[test]
+fn a_combo_s_field_holds_its_place_as_its_list_opens_and_its_rows_take_clicks() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let fonts = fonts();
+    let combo = Id::ROOT.child("combo");
+    let mut chosen = None;
+    let mut build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            shell::combo(ui, "combo", "Calibri", 120.0);
+            let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+            chosen = popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"));
+        });
+        chosen
+    };
+    build(&mut ui);
+    ui.open_popup(menu_id());
+    build(&mut ui);
+    let field = menu_id().child("filter");
+    let [box_rect, first] = [ui.rect(combo).unwrap(), ui.rect(field).unwrap()];
+    assert_eq!(first[..2], box_rect[..2], "the field starts on the box");
+    assert!(first[2] - first[0] < box_rect[2] - box_rect[0] + 20.0);
+    let moving: Vec<_> = ui
+        .layers()
+        .iter()
+        .filter_map(|layer| match layer {
+            Layer::Primitives(layer) => Some(layer.motion.is_some()),
+            Layer::Custom { .. } => None,
+        })
+        .collect();
+    let panel = moving.iter().position(|moving| *moving).unwrap();
+    assert!(
+        moving[panel..].contains(&false),
+        "the field paints without the popup's motion"
+    );
+    for _ in 0..20 {
+        build(&mut ui);
+    }
+    assert!(!ui.wants_frame());
+    let [panel, last] = [ui.rect(menu_id()).unwrap(), ui.rect(field).unwrap()];
+    assert_eq!(last[2], panel[2] - 4.0, "the field widens across the popup");
+    click_box(&mut ui, menu_id().child("rows").child(3_u64));
+    assert_eq!(build(&mut ui), Some(3));
+}
+
+fn built(ui: &Ui, id: Id) -> &Built {
+    ui.nodes.iter().find(|node| node.id == id).unwrap()
+}
+
+/// A split button at (100, 100) opening `split_menu()`; its signal.
+fn split_frame(ui: &mut Ui) -> Signal {
+    let mut signal = Signal::default();
+    frame(ui, |ui| {
+        ui.open(
+            "bar",
+            Spec {
+                flags: Flags::FLOAT,
+                size: [px(200.0), px(shell::TOOL)],
+                position: [100.0, 100.0],
+                ..Spec::default()
+            },
+        );
+        signal = shell::split_button(ui, "split", CHECK_ICON, None, false, split_menu());
+        let item = popup::Item {
+            text: "Item",
+            ..Default::default()
+        };
+        popup::menu(ui, split_menu(), BELOW, &[item], None);
+        ui.close();
+    });
+    signal
+}
+
+const CHECK_ICON: &[&str] = popup::CHECK;
+
+fn split_menu() -> Id {
+    Id::ROOT.child("split menu")
+}
+
+fn split_part(part: &str) -> Id {
+    Id::ROOT.child("bar").child("split").child(part)
+}
+
+fn center(rect: [f32; 4]) -> [f32; 2] {
+    [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0]
+}
+
+#[test]
+fn a_split_button_fills_its_button_alone_and_outlines_both_halves_from_its_arrow() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    split_frame(&mut ui);
+    let [button, arrow] = [split_part("button"), split_part("menu")];
+    let face = button.child("face");
+    let ring = split_part("ring");
+    let settle = |ui: &mut Ui| {
+        for _ in 0..60 {
+            split_frame(ui);
+        }
+    };
+    ui.event(Event::PointerMoved(center(ui.rect(button).unwrap())));
+    settle(&mut ui);
+    // The fill rounds past the button's clip, so it meets the arrow square.
+    let [left, top, right, bottom] = ui.rect(button).unwrap();
+    assert!(built(&ui, face).fill.is_some());
+    assert_eq!(ui.rect(face), Some([left, top, right + 4.0, bottom]));
+    assert!(built(&ui, button).flags.contains(Flags::CLIP));
+    assert!(built(&ui, ring).border.is_none());
+    ui.event(Event::PointerMoved(center(ui.rect(arrow).unwrap())));
+    settle(&mut ui);
+    assert!(built(&ui, face).fill.is_none());
+    assert!(built(&ui, ring).border.is_some());
+    assert_eq!(
+        ui.rect(ring),
+        Some([left, top, ui.rect(arrow).unwrap()[2], bottom])
+    );
+    // The arrow opens the menu, and the outline stays while it is open.
+    let point = center(ui.rect(arrow).unwrap());
+    click(&mut ui, point);
+    assert!(!split_frame(&mut ui).clicked);
+    assert!(ui.popup_open(split_menu()));
+    ui.event(Event::PointerMoved([390.0, 290.0]));
+    settle(&mut ui);
+    assert!(built(&ui, ring).border.is_some());
+    ui.close_popup(split_menu());
+    settle(&mut ui);
+    let point = center(ui.rect(button).unwrap());
+    click(&mut ui, point);
+    assert!(split_frame(&mut ui).clicked);
+    assert!(!ui.popup_open(split_menu()));
+}
+
+#[test]
+fn a_menu_button_opens_its_menu_with_the_icons_under_its_own() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let items = [
+        popup::Item {
+            text: "Align left",
+            icon: Some(CHECK_ICON),
+            ..Default::default()
+        },
+        popup::Item {
+            text: "Center",
+            icon: Some(CHECK_ICON),
+            current: true,
+            ..Default::default()
+        },
+    ];
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            ui.open(
+                "bar",
+                Spec {
+                    flags: Flags::FLOAT,
+                    size: [px(200.0), px(shell::TOOL)],
+                    position: [100.0, 100.0],
+                    ..Spec::default()
+                },
+            );
+            let anchor = shell::menu_button(ui, "align", CHECK_ICON, menu_id());
+            popup::menu(ui, menu_id(), anchor, &items, None);
+            ui.close();
+        });
+    };
+    build(&mut ui);
+    let button = ui.rect(Id::ROOT.child("bar").child("align")).unwrap();
+    // One target: the arrow opens the menu as the icon does.
+    click(&mut ui, [button[2] - 3.0, center(button)[1]]);
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    assert!(ui.popup_open(menu_id()));
+    let icon = ui
+        .rect(
+            menu_id()
+                .child("rows")
+                .child(0_usize)
+                .child("item")
+                .child("icon"),
+        )
+        .unwrap();
+    assert_eq!(icon[0], button[0] + (shell::TOOL - ICON) / 2.0);
+}
+
+#[test]
+fn galleries_choose_across_their_groups_by_keys_and_clicks() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let gallery = Id::ROOT.child("gallery");
+    let groups = [("Recent", 2), ("Library", 5)];
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            chosen = popup::gallery(
+                ui,
+                gallery,
+                BELOW,
+                &groups,
+                3,
+                [30.0, 30.0],
+                Some(3),
+                |ui, index| {
+                    ui.leaf(
+                        "label",
+                        Spec {
+                            size: [fill(), fill()],
+                            text: Some(["a", "b", "c", "d", "e", "f", "g"][index]),
+                            ..Spec::default()
+                        },
+                    );
+                },
+            );
+        });
+        chosen
+    };
+    build(&mut ui);
+    ui.open_popup(gallery);
+    build(&mut ui);
+    // Keys start from the current cell, the library's second.
+    for named in [NamedKey::ArrowDown, NamedKey::ArrowLeft, NamedKey::Enter] {
+        ui.event(key(named));
+    }
+    assert_eq!(build(&mut ui), Some(5));
+    ui.open_popup(gallery);
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    let cell = |index: usize| ui.rect(gallery.child(("cell", index))).unwrap();
+    // The library starts a row of its own under its heading.
+    assert_eq!(cell(2)[0], cell(0)[0]);
+    assert!(cell(2)[1] > cell(0)[3]);
+    let point = center(cell(1));
+    click(&mut ui, point);
+    assert_eq!(build(&mut ui), Some(1));
 }

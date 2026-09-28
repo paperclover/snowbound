@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/*"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "vendor"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -9,6 +9,9 @@ parley = { git = "https://github.com/linebender/parley", rev = "4f67747d3690bb21
 # entries naming the same revision.
 fontique = { git = "https://github.com/linebender/parley", rev = "4f67747d3690bb21d25cc70b674ab0d269595759" }
 wgpu = "30.0.1"
+
+[patch.crates-io]
+sctk-adwaita = { path = "vendor/sctk-adwaita" }
 
 # Shaping, rasterization and GPU submission stay optimised in debug builds, where
 # unoptimised dependencies alone drop frames.

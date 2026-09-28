@@ -1,9 +1,9 @@
 //! OneNote 2010's Enter, Backspace, Delete, Tab and paste replayed against the page XML it
-//! reported after each keystroke (`evidence/structural-edits`): each outline is built from, and
-//! compared with, the one-line-per-paragraph summaries in `summaries/`, whose `L` counts
+//! reported after each keystroke: each outline is built from, and compared with, the
+//! one-line-per-paragraph summaries in `corpus/structural-probe/summaries/`, whose `L` counts
 //! paragraph nesting.
 
-use super::format::{NoteTag, list_definition};
+use super::format::{ListStyle, NoteTag, list_definition};
 use super::*;
 use onestore::document::Tag;
 use onestore::page::ParagraphContent;
@@ -11,7 +11,7 @@ use onestore::page::text::new_id;
 
 fn summary(name: &str) -> String {
     std::fs::read_to_string(format!(
-        "{}/../../evidence/structural-edits/summaries/{name}.txt",
+        "{}/../../corpus/structural-probe/summaries/{name}.txt",
         env!("CARGO_MANIFEST_DIR")
     ))
     .unwrap()
@@ -76,7 +76,14 @@ fn open(engine: &mut TextEngine, summary: &str) -> CanvasEditor {
             .find(|parent| parent.level + 1 == level)
             .map(|parent| parent.id);
         if !list.is_empty() {
-            let definition = list_definition(list.starts_with("num"), &format);
+            let definition = list_definition(
+                if list.starts_with("num") {
+                    ListStyle::NUMBER
+                } else {
+                    ListStyle::BULLET
+                },
+                &format,
+            );
             node.lists = vec![define(format!("list {}", nodes.len()), definition)];
         }
         for tag in tags.split(',').filter(|tag| !tag.is_empty()) {
@@ -162,9 +169,10 @@ fn render(editor: &CanvasEditor) -> String {
                     .paragraphs
                     .iter()
                     .find(|paragraph| paragraph.id == node.id)
-                    .and_then(|paragraph| paragraph.number)
+                    .and_then(|paragraph| paragraph.number.as_ref())
                     .unwrap()
-                    .0;
+                    .0
+                    .number;
                 let numeral = crate::outline::numeral(rest.next(), number).unwrap();
                 format!("num:{numeral}{}", rest.as_str())
             }
@@ -274,7 +282,7 @@ fn replay(
             layout
                 .paragraphs
                 .iter()
-                .map(|paragraph| paragraph.number)
+                .map(|paragraph| paragraph.number.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(numbers(&outline.shaped), numbers(&fresh), "{after}");
@@ -715,7 +723,7 @@ fn structural_edits_on_native_pages_survive_the_page_writer() {
     use onestore::{RevisionIndex, Store, document::Document};
     let section = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../evidence/structural-edits/probe-section/probe.one"
+        "/../../corpus/structural-probe/probe.one"
     ))
     .unwrap();
     let page = |bytes: &[u8], title: &str| {

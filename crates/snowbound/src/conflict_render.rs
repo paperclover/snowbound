@@ -1,6 +1,7 @@
-//! The conflict page views drawn offscreen, from the conflict-page corpus row's candidate:
-//! the page with its information bar, its versions listed beneath it, and a version open.
-//! `SNOWBOUND_CONFLICT_RENDER` names a directory for the PNGs.
+//! The conflict page and page version views drawn offscreen, from the conflict-page and
+//! page-versions corpus rows: the page with its information bar, its conflict pages or
+//! versions listed beneath it, and one open. `SNOWBOUND_CONFLICT_RENDER` names a directory
+//! for the PNGs.
 
 use super::*;
 
@@ -58,7 +59,16 @@ fn layout(ui: &mut Ui, session: &Session, menu: bool) -> Vec<Command> {
             ..Spec::default()
         },
     );
-    let rows = page_rows(ui, &theme, &section, session, &HashSet::new());
+    let rows = page_rows(
+        ui,
+        &theme,
+        &section,
+        session,
+        &HashSet::new(),
+        0.0,
+        None,
+        None,
+    );
     commands.extend(rows.clicked.map(Command::OpenPage));
     ui.close();
     ui.close();
@@ -67,7 +77,13 @@ fn layout(ui: &mut Ui, session: &Session, menu: bool) -> Vec<Command> {
 }
 
 /// The view's pixels, RGBA: the interface with `page` drawn in its box.
-fn paint(ui: &Ui, page: Page, renderer: &mut draw::Renderer, device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u8> {
+fn paint(
+    ui: &Ui,
+    page: Page,
+    renderer: &mut draw::Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Vec<u8> {
     let size = SIZE.map(|side| (side * SCALE) as u32);
     let corner = ui.rect(super::page()).unwrap();
     let box_size = [
@@ -108,13 +124,7 @@ fn paint(ui: &Ui, page: Page, renderer: &mut draw::Renderer, device: &wgpu::Devi
     let layers: Vec<_> = interface
         .iter()
         .map(|layer| match layer {
-            ui::Layer::Primitives { clip, primitives } => draw::Layer {
-                scale: SCALE,
-                origin: [0.0; 2],
-                clip: clip.map(|clip| clip.map(|value| value * SCALE)),
-                backdrop: None,
-                primitives,
-            },
+            ui::Layer::Primitives(primitives) => primitives.layer(SCALE),
             ui::Layer::Custom { rect, .. } => draw::Layer {
                 scale: viewport.scale,
                 origin: [
@@ -123,6 +133,7 @@ fn paint(ui: &Ui, page: Page, renderer: &mut draw::Renderer, device: &wgpu::Devi
                 ],
                 clip: Some(rect.map(|value| value * SCALE)),
                 backdrop: Some(ui.theme.paper),
+                motion: None,
                 primitives: &primitives,
             },
         })
@@ -142,7 +153,12 @@ fn paint(ui: &Ui, page: Page, renderer: &mut draw::Renderer, device: &wgpu::Devi
         view_formats: &[],
     });
     renderer
-        .draw(&texture.create_view(&Default::default()), size, ui.theme.base, &layers)
+        .draw(
+            &texture.create_view(&Default::default()),
+            size,
+            ui.theme.base,
+            &layers,
+        )
         .unwrap();
     let row = (size[0] * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -180,6 +196,33 @@ fn paint(ui: &Ui, page: Page, renderer: &mut draw::Renderer, device: &wgpu::Devi
         .collect()
 }
 
+/// A renderer drawing into `output`'s PNGs.
+fn gpu(output: &Path) -> (draw::Renderer, wgpu::Device, wgpu::Queue) {
+    std::fs::create_dir_all(output).unwrap();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let renderer = draw::Renderer::new(
+        device.clone(),
+        queue.clone(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    );
+    (renderer, device, queue)
+}
+
+/// Writes RGBA `pixels` of the view as a PNG.
+fn save(path: &Path, pixels: &[u8]) {
+    let size = SIZE.map(|side| (side * SCALE) as u32);
+    let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), size[0], size[1]);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(pixels)
+        .unwrap();
+}
+
 /// The page shown, a page's versions listed while shown, and the bar's commands: showing
 /// opens the newest version, hiding returns to the page.
 #[test]
@@ -189,7 +232,11 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(directory.join("cache")).unwrap();
     let file = directory.join("synthetic.one");
-    std::fs::copy(root.join("corpus/conflict-page/candidate/synthetic.one"), &file).unwrap();
+    std::fs::copy(
+        root.join("corpus/conflict-page/candidate/synthetic.one"),
+        &file,
+    )
+    .unwrap();
     let library = Arc::new(crate::Library::section(&file, &directory.join("cache")));
     let section = library.open(&library.location, || {}).unwrap();
     let path = library.location.clone();
@@ -197,17 +244,7 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
     let page = session.space;
     let version = session.versions(page)[0].space;
     let output = std::env::var_os("SNOWBOUND_CONFLICT_RENDER").map(PathBuf::from);
-    let gpu = output.as_ref().map(|output| {
-        std::fs::create_dir_all(output).unwrap();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
-        let renderer =
-            draw::Renderer::new(device.clone(), queue.clone(), wgpu::TextureFormat::Rgba8UnormSrgb);
-        (renderer, device, queue)
-    });
-    let mut gpu = gpu;
+    let mut gpu = output.as_deref().map(gpu);
     for (name, space, shown, menu, appearance) in [
         ("page", page, None, false, Theme::light()),
         ("versions", page, Some(page), false, Theme::light()),
@@ -215,7 +252,13 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
         ("version-menu", version, Some(page), true, Theme::light()),
         ("page-dark", page, None, false, Theme::dark()),
         ("version-dark", version, Some(page), false, Theme::dark()),
-        ("version-menu-dark", version, Some(page), true, Theme::dark()),
+        (
+            "version-menu-dark",
+            version,
+            Some(page),
+            true,
+            Theme::dark(),
+        ),
     ] {
         session.space = space;
         session.shown = shown;
@@ -229,7 +272,10 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
         match (name, bar) {
             ("page" | "page-dark", Some(Bar::Page { shown: false, .. }))
             | ("versions", Some(Bar::Page { shown: true, .. }))
-            | ("version" | "version-menu" | "version-dark" | "version-menu-dark", Some(Bar::Version { .. })) => {}
+            | (
+                "version" | "version-menu" | "version-dark" | "version-menu-dark",
+                Some(Bar::Version { .. }),
+            ) => {}
             other => panic!("{other:?}", other = other.0),
         }
         let row = Id::ROOT.child("frame").child("panel").child(version);
@@ -238,13 +284,7 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
         if let (Some(output), Some((renderer, device, queue))) = (&output, &mut gpu) {
             let shown = session.reader(space)().unwrap();
             let pixels = paint(&ui, shown, renderer, device, queue);
-            let size = SIZE.map(|side| (side * SCALE) as u32);
-            let path = output.join(format!("conflict-{name}.png"));
-            let mut encoder =
-                png::Encoder::new(std::fs::File::create(&path).unwrap(), size[0], size[1]);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+            save(&output.join(format!("conflict-{name}.png")), &pixels);
         }
     }
     // A version reads with its conflicting paragraphs banded as OneNote shows them.
@@ -252,13 +292,136 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
     let marked = session.versions(page)[0].objects.clone();
     assert!(!marked.is_empty());
     let highlighted = kept.objects.iter().any(|object| match object {
-        onestore::page::PageObject::Outline(outline) => outline.paragraphs.iter().any(|paragraph| {
-            paragraph.text().is_some_and(|text| marked.contains(&text.id))
-                && paragraph.format.highlight == Some(canvas::conflict::CONFLICTING)
-        }),
+        onestore::page::PageObject::Outline(outline) => {
+            outline.paragraphs.iter().any(|paragraph| {
+                paragraph
+                    .text()
+                    .is_some_and(|text| marked.contains(&text.id))
+                    && paragraph.format.highlight == Some(canvas::conflict::CONFLICTING)
+            })
+        }
         _ => false,
     });
     assert!(highlighted);
+    session.section.close().unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// A page's versions listed under it while shown, each read-only under OneNote's bar with
+/// what it changed banded, from OneNote's own (`corpus/page-versions/native/step-04`).
+#[test]
+fn page_versions_list_open_read_only_and_render_offscreen() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let directory = std::env::temp_dir().join(format!("snowbound-history-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(directory.join("cache")).unwrap();
+    let file = directory.join("History.one");
+    std::fs::copy(
+        root.join("corpus/page-versions/native/step-04/notebook/History.one"),
+        &file,
+    )
+    .unwrap();
+    let library = Arc::new(crate::Library::section(&file, &directory.join("cache")));
+    let section = library.open(&library.location, || {}).unwrap();
+    let path = library.location.clone();
+    let (mut session, _) = read_session(section, library, path, None).unwrap();
+    let page = session.space;
+    let versions: Vec<_> = session
+        .page_versions(page)
+        .iter()
+        .map(|version| version.context)
+        .collect();
+    assert_eq!(versions.len(), 2);
+    assert_eq!(
+        crate::history::label(&session.page_versions(page)[1])
+            .rsplit_once(' ')
+            .map(|(_, who)| who),
+        Some("virtual")
+    );
+    let output = std::env::var_os("SNOWBOUND_CONFLICT_RENDER").map(PathBuf::from);
+    let mut gpu = output.as_deref().map(gpu);
+    for (name, shown, version, menu, appearance) in [
+        ("history-page", None, None, false, Theme::light()),
+        ("history-shown", Some(page), None, false, Theme::light()),
+        (
+            "history-version",
+            Some(page),
+            Some(versions[0]),
+            false,
+            Theme::light(),
+        ),
+        (
+            "history-menu",
+            Some(page),
+            Some(versions[0]),
+            true,
+            Theme::light(),
+        ),
+        (
+            "history-version-dark",
+            Some(page),
+            Some(versions[0]),
+            false,
+            Theme::dark(),
+        ),
+        (
+            "history-menu-dark",
+            Some(page),
+            Some(versions[0]),
+            true,
+            Theme::dark(),
+        ),
+    ] {
+        session.shown_history = shown;
+        session.version = version;
+        assert_eq!(session.read_only(), version.is_some(), "{name}");
+        match (session.bar(), version) {
+            (
+                Some(Bar::History {
+                    version: open,
+                    grouped: false,
+                    ..
+                }),
+                Some(version),
+            ) => {
+                assert_eq!(open, version)
+            }
+            (None, None) => {}
+            _ => panic!("{name}"),
+        }
+        let mut ui = Ui::new(appearance, std::time::Duration::from_millis(500));
+        for _ in 0..8 {
+            layout(&mut ui, &session, menu);
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        for context in &versions {
+            let row = Id::ROOT.child("frame").child("panel").child(context);
+            assert_eq!(ui.rect(row).is_some(), shown.is_some(), "{name}");
+        }
+        if let (Some(output), Some((renderer, device, queue))) = (&output, &mut gpu) {
+            let shown = match version {
+                Some(version) => session.version_reader(page, version)().unwrap(),
+                None => session.reader(page)().unwrap(),
+            };
+            save(
+                &output.join(format!("{name}.png")),
+                &paint(&ui, shown, renderer, device, queue),
+            );
+        }
+    }
+    // The newest version bands the line its author added since the version before it.
+    let newest = session.version_reader(page, versions[0])().unwrap();
+    let banded: Vec<_> = newest
+        .objects
+        .iter()
+        .flat_map(|object| match object {
+            onestore::page::PageObject::Outline(outline) => outline.paragraphs.clone(),
+            _ => Vec::new(),
+        })
+        .filter(|paragraph| paragraph.format.highlight == Some(canvas::conflict::CHANGED))
+        .filter_map(|paragraph| paragraph.text().map(|text| text.text.text().to_owned()))
+        .collect();
+    assert_eq!(banded, ["Second author line."]);
     session.section.close().unwrap();
     std::fs::remove_dir_all(&directory).unwrap();
 }

@@ -8,7 +8,8 @@ pub struct Theme {
     pub base: [f32; 4],
     /// Side panels.
     pub panel: [f32; 4],
-    /// The window's title bar, toolbar and tab row.
+    /// The window's title bar, toolbar, tab row and sidebar; transparent where the system's
+    /// backdrop shows through them.
     pub strip: [f32; 4],
     pub accent: [f32; 4],
     /// The text caret, and selected text's fill with and without keyboard focus; the
@@ -63,6 +64,14 @@ pub struct Section {
     /// Borders around the open tab and the page.
     pub edge: [f32; 4],
     pub accent: [f32; 4],
+}
+
+impl Section {
+    /// A tab under the pointer: most of the way to the accent, which lies past the frame's
+    /// lightness from the tabs in both themes, so it stands out from both.
+    pub fn hover(&self) -> [f32; 4] {
+        crate::mix(self.tab, self.accent, 0.7)
+    }
 }
 
 impl Theme {
@@ -123,9 +132,59 @@ impl Theme {
         }
     }
 
+    /// The theme over a system material that shows through the strip: dim text, controls
+    /// and fields take the text colour at part opacity, as vibrancy draws them.
+    pub fn over_backdrop(self) -> Self {
+        let text = |alpha| [self.text[0], self.text[1], self.text[2], alpha];
+        Self {
+            strip: [0.0; 4],
+            text_dim: text(0.5),
+            chip: text(0.1),
+            base: text(0.05),
+            ..self
+        }
+    }
+
     /// Hovered controls: the accent over the base.
     pub fn hover(&self) -> [f32; 4] {
         crate::mix(self.base, self.accent, 0.35)
+    }
+
+    /// Colours for icons' slots under a section of `accent`, with `highlight` the colour
+    /// the highlighter applies. The accent keeps its hue but stands as clear of the toolbar's
+    /// lightness as text must; the badge takes the first of green, blue and orange whose hue
+    /// stands clear of the accent's.
+    pub fn icon_palette(&self, accent: [f32; 4], highlight: [f32; 4]) -> draw::Palette {
+        // Over a system material the strip is clear, and the panel has its lightness.
+        let behind = if self.strip[3] == 1.0 {
+            self.strip
+        } else {
+            self.panel
+        };
+        let [under, ..] = draw::oklab(behind);
+        let [lightness, a, b] = draw::oklab(accent);
+        let lightness = if under < 0.5 {
+            lightness.max(under + ICON_CONTRAST)
+        } else {
+            lightness.min(under - ICON_CONTRAST)
+        };
+        let [r, g, b] = draw::from_oklab([lightness, a, b]);
+        let accent = [r, g, b, 1.0];
+        let apart = |a: f32, b: f32| {
+            let turn = (a - b).rem_euclid(360.0);
+            turn.min(360.0 - turn)
+        };
+        let accent_hue = hue(accent);
+        let badge = [135.0, 215.0, 30.0]
+            .into_iter()
+            .find(|badge| apart(*badge, accent_hue) >= 60.0)
+            .expect("Three hues this far apart leave one clear of any other");
+        let rgb = |[r, g, b, _]: [f32; 4]| [r, g, b];
+        draw::Palette {
+            accent: Some(rgb(accent)),
+            highlight: Some(rgb(highlight)),
+            badge: Some(rgb(hsl(badge, 0.65, 0.45))),
+        }
     }
 
     /// The colours a section takes from the hue of `color`, linear RGBA.
@@ -146,6 +205,9 @@ impl Theme {
         }
     }
 }
+
+/// Least OKLab lightness difference between icons' accent marks and the toolbar.
+const ICON_CONTRAST: f32 = 0.4;
 
 /// The hue in degrees of a linear colour, as it looks in sRGB.
 fn hue(color: [f32; 4]) -> f32 {
@@ -194,5 +256,61 @@ mod tests {
         assert!((hue(section.frame[1]) - hue(orange) - 10.0).abs() < 3.0);
         assert_eq!(hsl(0.0, 1.0, 0.5), srgb(0xff, 0, 0));
         assert_eq!(hsl(240.0, 0.0, 1.0), srgb(0xff, 0xff, 0xff));
+    }
+
+    #[test]
+    fn icon_badges_stand_clear_of_the_accent() {
+        let badge = |accent_hue: f32| {
+            let palette = Theme::light().icon_palette(hsl(accent_hue, 0.6, 0.45), [1.0; 4]);
+            let [r, g, b] = palette.badge.unwrap();
+            hue([r, g, b, 1.0]).round()
+        };
+        assert_eq!(badge(210.0), 135.0);
+        assert_eq!(badge(120.0), 215.0);
+        assert_eq!(badge(170.0), 30.0);
+    }
+
+    #[test]
+    fn icon_accents_stand_clear_of_the_toolbar() {
+        for theme in [Theme::light(), Theme::dark()] {
+            let [under, ..] = draw::oklab(theme.strip);
+            for hue in (0..360).step_by(15) {
+                let accent = theme.section(hsl(hue as f32, 0.6, 0.6)).accent;
+                let [r, g, b] = theme.icon_palette(accent, [1.0; 4]).accent.unwrap();
+                let [lightness, ..] = draw::oklab([r, g, b, 1.0]);
+                assert!(
+                    (lightness - under).abs() >= ICON_CONTRAST - 0.02,
+                    "{hue}: {lightness} on {under}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_hovered_tab_stands_out_from_the_frame_and_its_neighbours() {
+        let lightness = |[r, g, b, _]: [f32; 4]| {
+            let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            116.0 * y.cbrt() - 16.0
+        };
+        for theme in [Theme::light(), Theme::dark()] {
+            for hue in (0..360).step_by(5) {
+                let section = theme.section(hsl(hue as f32, 0.6, 0.6));
+                let hover = lightness(section.hover());
+                for other in [section.frame[0], section.frame[1], section.tab] {
+                    assert!((hover - lightness(other)).abs() > 5.0, "{hue}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn colours_mix_as_premultiplied_so_transparency_fades_a_colour_in() {
+        let [white, black] = [[1.0; 4], [0.0, 0.0, 0.0, 1.0]];
+        assert_eq!(crate::mix(white, black, 0.25), [0.75, 0.75, 0.75, 1.0]);
+        let accent = Theme::light().accent;
+        let faded = crate::mix([0.0; 4], accent, 0.6);
+        assert!((0..3).all(|channel| (faded[channel] - accent[channel]).abs() < 1e-6));
+        assert!((faded[3] - 0.6).abs() < 1e-6);
+        assert_eq!(crate::mix([0.0; 4], [0.0; 4], 0.5), [0.0; 4]);
     }
 }

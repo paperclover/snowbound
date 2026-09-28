@@ -1,6 +1,6 @@
 use crate::{
     document::{DocumentEdit, edited_nodes, leaves},
-    layout::{LayoutError, TextEngine, TextLayout},
+    layout::{InlineSpace, LayoutError, TextEngine, TextLayout},
 };
 use onestore::page::text::{Paragraph, TextProjection};
 use onestore::page::{Definition, Outline, PageParagraph, ParagraphContent, Table, Title};
@@ -11,6 +11,7 @@ use onestore::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Range,
+    sync::Arc,
 };
 
 pub(crate) const TITLE_WIDTH: f32 = 468.0;
@@ -43,7 +44,7 @@ struct Block {
     /// A table's vertical coordinates before its offset.
     rel: Vec<f32>,
     /// The number the next numbered sibling at the node's level continues from.
-    count: Option<u32>,
+    count: Option<Count>,
 }
 
 /// A layout of root nodes `range` once an edit applies, and how the nodes after them move.
@@ -196,13 +197,13 @@ pub struct ParagraphLayout {
     pub markers: Vec<(TextLayout, [f32; 2])>,
     /// A numbered paragraph's number, and whether its list restarts the count instead of
     /// continuing from the previous sibling's.
-    pub(crate) number: Option<(u32, bool)>,
+    pub(crate) number: Option<(Count, bool)>,
     pub tags: Vec<ParagraphTag>,
     /// Its siblings' group, whose list markers its tags clear: the parent paragraph, or the
     /// table cell holding a cell's top-level paragraph.
     pub(crate) parent: Option<ExGuid>,
-    /// An equation draws in two dimensions in place of its linear text.
-    pub math: Option<crate::math::MathLayout>,
+    /// The equations drawn in two dimensions in spaces of the text, in order.
+    pub math: Vec<crate::math::MathLayout>,
     /// A highlight of the whole paragraph (its own `highlight`), COLORREF: a band across its
     /// outline behind its lines, as OneNote marks a conflict page's conflicting changes.
     pub band: Option<u32>,
@@ -210,7 +211,9 @@ pub struct ParagraphLayout {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum TagIcon {
-    CheckBox { checked: bool },
+    CheckBox {
+        checked: bool,
+    },
     Star,
     Question,
     Highlight,
@@ -222,6 +225,10 @@ pub enum TagIcon {
     RedSquare,
     YellowSquare,
     BlueSquare,
+    /// An Outlook task flag.
+    Flag,
+    /// A tag symbol without artwork of its own.
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -270,6 +277,8 @@ impl ParagraphTag {
 
 /// How much further than its list spacing OneNote 2010 sets a marker's advance from its text.
 const MARKER_OFFSET: f32 = 3.9;
+/// Points an equation's linear text lays out at, holding the caret without showing.
+const HELD: f32 = 0.01;
 
 /// A one-run paragraph standing in for an object's caption, so it lays out through the same
 /// shaping (and caching) as the outline's text.
@@ -327,20 +336,38 @@ pub(crate) fn indentation(level: u32, indents: &[f32], width: f32) -> Result<f32
     Ok(indent)
 }
 
-/// The number after a previous sibling's, or the first when the sibling is not numbered.
-fn next(previous: Option<u32>) -> u32 {
-    previous.map_or(1, |number| number.saturating_add(1))
+/// A numbered paragraph's number and its NumberListFormat.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Count {
+    pub(crate) number: u32,
+    format: Arc<str>,
+}
+
+/// The number after a previous sibling's in the same `format`, or the first. A number in
+/// another format starts again at 1 even where one in this format came before it; siblings
+/// without a number leave the count alone (`evidence/toolbar-17/restart.txt`).
+fn next(previous: Option<&Count>, format: &str) -> u32 {
+    previous
+        .filter(|count| &*count.format == format)
+        .map_or(1, |count| count.number.saturating_add(1))
 }
 
 /// The number a paragraph laid out as `number` takes once it follows `previous`.
-fn follows(number: Option<(u32, bool)>, previous: Option<u32>) -> Option<u32> {
-    number.map(|(number, restart)| if restart { number } else { next(previous) })
+fn follows(number: Option<&(Count, bool)>, previous: Option<&Count>) -> Option<Count> {
+    number.map(|(count, restart)| Count {
+        number: if *restart {
+            count.number
+        } else {
+            next(previous, &count.format)
+        },
+        format: count.format.clone(),
+    })
 }
 
 /// What the numbered sibling after `node`, numbered `number`, continues from: siblings without
 /// a number leave the count alone, as do empty numbered ones after another number
 /// (`evidence/structural-edits/xml/c8-bs-1.xml`, `c8-enter-empty-1.xml`, `c2s-num-1.xml`).
-fn tally(node: &PageParagraph, number: Option<u32>, previous: Option<u32>) -> Option<u32> {
+fn tally(node: &PageParagraph, number: Option<Count>, previous: Option<Count>) -> Option<Count> {
     number
         .filter(|_| {
             previous.is_none() || node.text().is_some_and(|text| !text.text.text().is_empty())
@@ -350,7 +377,7 @@ fn tally(node: &PageParagraph, number: Option<u32>, previous: Option<u32>) -> Op
 
 /// Removes deeper paragraphs' entries from a flow's `(level, count)` stack of the latest
 /// paragraph at each level, and the previous sibling's at `level`, returning that one's count.
-fn sibling(siblings: &mut Vec<(u32, Option<u32>)>, level: u32) -> Option<u32> {
+fn sibling(siblings: &mut Vec<(u32, Option<Count>)>, level: u32) -> Option<Count> {
     while siblings.last().is_some_and(|(deeper, _)| *deeper > level) {
         siblings.pop();
     }
@@ -360,8 +387,56 @@ fn sibling(siblings: &mut Vec<(u32, Option<u32>)>, level: u32) -> Option<u32> {
     }
 }
 
+/// `text` in `font` as a Unicode font shows it. Windows' Symbol font is symbol-encoded, so
+/// its bytes map through the Adobe Symbol encoding (a bullet is `U+00B7` there); Wingdings'
+/// map into the private use area their symbol cmaps cover, which also keeps a shaper from
+/// dropping `U+00AD` as a soft hyphen.
+pub fn symbol_text(font: &str, text: &str) -> String {
+    /// The Adobe Symbol encoding from 0x20 and from 0xA0, after Unicode's `SYMBOL.TXT`.
+    const SYMBOL: [&str; 2] = [
+        " !∀#∃%&∋()∗+,−./0123456789:;<=>?≅ΑΒΧΔΕΦΓΗΙϑΚΛΜΝΟΠΘΡΣΤΥςΩΞΨΖ[∴]⊥_‾αβχδεφγηιϕκλμνοπθρστυϖωξψζ{|}∼",
+        "€ϒ′≤⁄∞ƒ♣♦♥♠↔←↑→↓°±″≥×∝∂•÷≠≡≈…⏐⎯↵ℵℑℜ℘⊗⊕∅∩∪⊃⊇⊄⊂⊆∈∉∠∇®©™∏√⋅¬∧∨⇔⇐⇑⇒⇓◊〈®©™∑⎛⎜⎝⎡⎢⎣⎧⎨⎩⎪\u{f8ff}〉∫⌠⎮⌡⎞⎟⎠⎤⎥⎦⎫⎬⎭",
+    ];
+    if font.eq_ignore_ascii_case("Symbol") {
+        text.chars()
+            .map(|c| {
+                let (range, from) = match u32::from(c) {
+                    code @ 0x20..0x7f => (SYMBOL[0], code - 0x20),
+                    code @ 0xa0..0xff => (SYMBOL[1], code - 0xa0),
+                    _ => return c,
+                };
+                range.chars().nth(from as usize).unwrap_or(c)
+            })
+            .collect()
+    } else if font.to_ascii_lowercase().starts_with("wingdings") {
+        text.chars()
+            .map(|c| match u32::from(c) {
+                code @ 0x20..0x100 => char::from_u32(0xf000 + code).unwrap_or(c),
+                _ => c,
+            })
+            .collect()
+    } else {
+        text.to_owned()
+    }
+}
+
+/// The marker NumberListFormat `format` shows for `number`.
+pub fn numbered(format: &str, number: u32) -> Result<String, LayoutError> {
+    let (prefix, rest) = format
+        .split_once('\u{fffd}')
+        .ok_or(LayoutError::InvalidList)?;
+    let mut rest = rest.chars();
+    Ok(format!(
+        "{prefix}{}{}",
+        numeral(rest.next(), number)?,
+        rest.as_str()
+    ))
+}
+
 /// `number` in a list numbering sequence: 0 arabic, 1 and 2 upper and lower roman, 3 and 4
-/// upper and lower letters, as OneNote 2010's `numberSequence`.
+/// upper and lower letters, 5 ordinal, 6 and 7 cardinal and ordinal words, 22 arabic of two
+/// digits at least, as OneNote 2010's `numberSequence` spells them in English
+/// (`evidence/toolbar-17/sequences.txt`).
 pub(crate) fn numeral(sequence: Option<char>, number: u32) -> Result<String, LayoutError> {
     let roman = |number: u32| {
         const DIGITS: [(u32, &str); 13] = [
@@ -379,7 +454,9 @@ pub(crate) fn numeral(sequence: Option<char>, number: u32) -> Result<String, Lay
             (4, "IV"),
             (1, "I"),
         ];
-        if !(1..4000).contains(&number) {
+        // Past 3999 the thousands run on as Ms; a million, far past what was observed,
+        // would lay out a thousand of them.
+        if !(1..1_000_000).contains(&number) {
             return Err(LayoutError::UnsupportedContent);
         }
         let mut rest = number;
@@ -392,18 +469,114 @@ pub(crate) fn numeral(sequence: Option<char>, number: u32) -> Result<String, Lay
         }
         Ok(text)
     };
+    // Past Z a letter repeats, AA to ZZ, up to thirty times, then starts over at A.
     let letter = |number: u32| {
-        (1..=26)
-            .contains(&number)
-            .then(|| char::from(b'A' + (number - 1) as u8).to_string())
-            .ok_or(LayoutError::UnsupportedContent)
+        let index = number
+            .checked_sub(1)
+            .ok_or(LayoutError::UnsupportedContent)?;
+        let letter = char::from(b'A' + (index % 26) as u8);
+        Ok(std::iter::repeat_n(letter, (index / 26 % 30) as usize + 1).collect::<String>())
     };
     match sequence.map(u32::from) {
         Some(0) => Ok(number.to_string()),
+        Some(22) => Ok(format!("{number:02}")),
         Some(1) => roman(number),
         Some(2) => roman(number).map(|text| text.to_lowercase()),
         Some(3) => letter(number),
         Some(4) => letter(number).map(|text| text.to_lowercase()),
+        Some(5) => {
+            let suffix = match (number % 10, number % 100) {
+                (_, 11..=13) => "th",
+                (1, _) => "st",
+                (2, _) => "nd",
+                (3, _) => "rd",
+                _ => "th",
+            };
+            Ok(format!("{number}{suffix}"))
+        }
+        Some(sequence @ (6 | 7)) => {
+            let mut words = cardinal(number)?;
+            if sequence == 7 {
+                // The last word turns ordinal: one to first, twenty to twentieth.
+                let at = words.rfind([' ', '-']).map_or(0, |at| at + 1);
+                let last = &words[at..];
+                let ordinal = match last {
+                    "one" => "first".to_owned(),
+                    "two" => "second".to_owned(),
+                    "three" => "third".to_owned(),
+                    "five" => "fifth".to_owned(),
+                    "eight" => "eighth".to_owned(),
+                    "nine" => "ninth".to_owned(),
+                    "twelve" => "twelfth".to_owned(),
+                    _ if last.ends_with('y') => format!("{}ieth", &last[..last.len() - 1]),
+                    _ => format!("{last}th"),
+                };
+                words.replace_range(at.., &ordinal);
+            }
+            let mut chars = words.chars();
+            let first = chars.next().unwrap_or_default();
+            Ok(first.to_uppercase().chain(chars).collect())
+        }
+        _ => Err(LayoutError::UnsupportedContent),
+    }
+}
+
+/// `number` in lowercase English words, "one hundred twenty-one", below a million.
+fn cardinal(number: u32) -> Result<String, LayoutError> {
+    const SMALL: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    fn below_thousand(number: u32) -> String {
+        let (hundreds, rest) = (number / 100, number % 100);
+        let rest = match rest {
+            0 => None,
+            1..20 => Some(SMALL[rest as usize].to_owned()),
+            _ if rest % 10 == 0 => Some(TENS[(rest / 10) as usize].to_owned()),
+            _ => Some(format!(
+                "{}-{}",
+                TENS[(rest / 10) as usize],
+                SMALL[(rest % 10) as usize]
+            )),
+        };
+        match (hundreds, rest) {
+            (0, rest) => rest.unwrap_or_default(),
+            (hundreds, None) => format!("{} hundred", SMALL[hundreds as usize]),
+            (hundreds, Some(rest)) => format!("{} hundred {rest}", SMALL[hundreds as usize]),
+        }
+    }
+    match number {
+        1..1000 => Ok(below_thousand(number)),
+        1000..1_000_000 => {
+            let (thousands, rest) = (number / 1000, number % 1000);
+            let head = format!("{} thousand", below_thousand(thousands));
+            Ok(if rest == 0 {
+                head
+            } else {
+                format!("{head} {}", below_thousand(rest))
+            })
+        }
         _ => Err(LayoutError::UnsupportedContent),
     }
 }
@@ -438,9 +611,6 @@ impl ParagraphLayout {
     }
 
     fn size(&self) -> [f32; 2] {
-        if let Some(math) = &self.math {
-            return [self.origin[0] + math.size[0], math.size[1]];
-        }
         [
             self.origin[0] + self.text.shaped.width(),
             self.markers
@@ -454,7 +624,7 @@ impl ParagraphLayout {
     pub(crate) fn shape(
         engine: &mut TextEngine,
         paragraph: &PageParagraph,
-        previous: Option<u32>,
+        previous: Option<&Count>,
         width: f32,
         indents: &[f32],
         definitions: &BTreeMap<ExGuid, Definition>,
@@ -474,53 +644,111 @@ impl ParagraphLayout {
             return Err(LayoutError::InvalidSpacing);
         }
         // Stored newest first; OneNote lists and paints tags oldest first.
-        let mut tag_definitions = paragraph
+        // An Outlook task tag carries no definition; a tag whose definition is missing shows
+        // nothing, as OneNote draws no icon for it.
+        let mut tag_definitions: Vec<_> = paragraph
             .tags
             .iter()
             .chain(&source.tags)
-            .map(
-                |tag| match tag.definition.as_ref().and_then(|id| definitions.get(id)) {
-                    Some(Definition {
-                        kind:
-                            Kind::TagDefinition {
-                                shape,
-                                label,
-                                color,
-                                highlight,
-                                ..
-                            },
+            .filter_map(|tag| {
+                if tag.status & 4 != 0 {
+                    return Some((tag, None, None, None, None));
+                }
+                match &definitions.get(tag.definition.as_ref()?)?.kind {
+                    Kind::TagDefinition {
+                        shape,
+                        label,
+                        color,
+                        highlight,
                         ..
-                    }) if tag.status & 4 == 0 => Ok((tag, *shape, label, *color, *highlight)),
-                    _ => Err(LayoutError::UnsupportedContent),
-                },
-            )
-            .collect::<Result<Vec<_>, _>>()?;
+                    } => Some((tag, Some(*shape), label.as_deref(), *color, *highlight)),
+                    _ => None,
+                }
+            })
+            .collect();
         tag_definitions.reverse();
         // The newest tag that sets a colour wins.
         let color = tag_definitions.iter().rev().find_map(|tag| tag.3);
         let highlight = tag_definitions.iter().rev().find_map(|tag| tag.4);
-        let equation = onestore::page::Math::is_equation(&source.text);
-        let mut text = if color.is_none() && highlight.is_none() && !equation {
-            engine.layout(projection.text(), width - indent)?
+        // Equations with objects draw in two dimensions in a space kept in their line; their
+        // linear text stays in the text, too small to see, to hold the caret.
+        let visible = projection.text();
+        let mut equations = Vec::new();
+        for zone in crate::math::built(visible) {
+            let units = |byte| {
+                visible
+                    .utf16_offset(byte)
+                    .map_err(|_| LayoutError::InvalidSourceRange)
+            };
+            let math = visible
+                .slice(units(zone.start)?..units(zone.end)?)
+                .map_err(|_| LayoutError::InvalidSourceRange)?;
+            // An equation that does not parse shows its linear text.
+            if let Ok(math) = crate::math::layout(engine, &math) {
+                equations.push((zone, math));
+            }
+        }
+        let spaces: Vec<_> = equations
+            .iter()
+            .map(|(zone, math)| InlineSpace {
+                index: zone.start,
+                width: math.size[0],
+                ascent: math.baseline,
+                descent: math.size[1] - math.baseline,
+            })
+            .collect();
+        // URL text shows as a link, as OneNote links it on opening a page.
+        let mut marks: Vec<(Range<usize>, bool)> = crate::editor::shown_urls(visible)
+            .into_iter()
+            .map(|url| (url, false))
+            .chain(equations.iter().map(|(zone, _)| (zone.clone(), true)))
+            .collect();
+        marks.sort_by_key(|(range, _)| range.start);
+        let mut text = if color.is_none() && highlight.is_none() && marks.is_empty() {
+            engine.layout(visible, width - indent)?
         } else {
-            let visible = projection.text();
             let mut start = 0;
-            let runs = visible.spans().iter().map(|span| {
+            let runs = visible.spans().iter().flat_map(|span| {
                 let mut format = span.format.clone();
                 format.color = color.or(format.color);
                 format.highlight = highlight.or(format.highlight);
-                // An equation draws in two dimensions; its linear text only holds the caret,
-                // which the body font sizes like a line of text.
-                if equation {
-                    format.font = None;
+                let mut runs = Vec::new();
+                let mut from = start;
+                for (range, equation) in &marks {
+                    let (a, b) = (
+                        range.start.clamp(from, span.end),
+                        range.end.clamp(from, span.end),
+                    );
+                    if a < b {
+                        runs.push((visible.text()[from..a].to_owned(), format.clone()));
+                        let marked = if *equation {
+                            Format {
+                                font_size: Some(HELD),
+                                superscript: None,
+                                subscript: None,
+                                ..format.clone()
+                            }
+                        } else {
+                            Format {
+                                hyperlink: Some(true),
+                                ..format.clone()
+                            }
+                        };
+                        runs.push((visible.text()[a..b].to_owned(), marked));
+                        from = b;
+                    }
                 }
-                let run = (visible.text()[start..span.end].to_owned(), format);
+                runs.push((visible.text()[from..span.end].to_owned(), format));
                 start = span.end;
-                run
+                runs
             });
-            engine.layout(
-                &Paragraph::from_runs(runs.collect::<Vec<_>>()),
+            engine.layout_with(
+                &Paragraph::from_runs(
+                    runs.filter(|(text, _)| !text.is_empty())
+                        .collect::<Vec<_>>(),
+                ),
                 width - indent,
+                &spaces,
             )?
         };
         let mut markers = Vec::new();
@@ -538,34 +766,39 @@ impl ParagraphLayout {
                 return Err(LayoutError::InvalidList);
             };
             let mut color = definition.format.color;
-            let value = match value.split_once('\u{fffd}') {
-                Some((prefix, rest)) => {
-                    // An empty numbered paragraph shows its number as a grey placeholder.
-                    if source.text.text().is_empty() {
-                        color = Some(PLACEHOLDER);
-                    }
-                    let current = restart.unwrap_or(next(previous));
-                    number = Some((current, restart.is_some()));
-                    let mut rest = rest.chars();
-                    format!(
-                        "{prefix}{}{}",
-                        numeral(rest.next(), current)?,
-                        rest.as_str()
-                    )
+            let value = if value.contains('\u{fffd}') {
+                // An empty numbered paragraph shows its number as a gray placeholder.
+                if source.text.text().is_empty() {
+                    color = Some(PLACEHOLDER);
                 }
-                None => value.clone(),
+                let current = restart.unwrap_or(next(previous, value));
+                let format = value.as_str().into();
+                number = Some((
+                    Count {
+                        number: current,
+                        format,
+                    },
+                    restart.is_some(),
+                ));
+                numbered(value, current)?
+            } else {
+                value.clone()
             };
             if value.contains('\u{fffd}') {
                 return Err(LayoutError::UnsupportedContent);
             }
+            // Without a font of its own a marker takes its text's, as a number does.
+            let font = font
+                .clone()
+                .or_else(|| definition.format.font.clone())
+                .or_else(|| format.font.clone());
+            let value = font
+                .as_deref()
+                .map_or(value.clone(), |font| symbol_text(font, &value));
             let marker = Paragraph::new(
                 value,
                 Format {
-                    // Without a font of its own a marker takes its text's, as a number does.
-                    font: font
-                        .clone()
-                        .or_else(|| definition.format.font.clone())
-                        .or_else(|| format.font.clone()),
+                    font,
                     font_size: definition.format.font_size.or(format.font_size),
                     color,
                     ..Format::default()
@@ -589,22 +822,24 @@ impl ParagraphLayout {
         for tag in &tag_definitions {
             let (tag, shape, label) = (tag.0, tag.1, tag.2);
             let icon = match shape {
-                Some(0) => continue,
-                Some(3) => TagIcon::CheckBox {
+                None => TagIcon::Flag,
+                Some(Some(0) | None) => continue,
+                Some(Some(3)) => TagIcon::CheckBox {
                     checked: tag.status & 1 != 0,
                 },
-                Some(13) => TagIcon::Star,
-                Some(15) => TagIcon::Question,
-                Some(17) => TagIcon::Exclamation,
-                Some(18) => TagIcon::Phone,
-                Some(23) => TagIcon::Address,
-                Some(118) => TagIcon::Contact,
-                Some(136) => TagIcon::Highlight,
-                Some(100) => TagIcon::RedSquare,
-                Some(101) => TagIcon::YellowSquare,
-                Some(102) => TagIcon::BlueSquare,
-                Some(121) => TagIcon::Music,
-                _ => return Err(LayoutError::UnsupportedContent),
+                Some(Some(13)) => TagIcon::Star,
+                Some(Some(15)) => TagIcon::Question,
+                Some(Some(17)) => TagIcon::Exclamation,
+                Some(Some(18)) => TagIcon::Phone,
+                Some(Some(23)) => TagIcon::Address,
+                Some(Some(118)) => TagIcon::Contact,
+                Some(Some(136)) => TagIcon::Highlight,
+                Some(Some(100)) => TagIcon::RedSquare,
+                Some(Some(101)) => TagIcon::YellowSquare,
+                Some(Some(102)) => TagIcon::BlueSquare,
+                Some(Some(121)) => TagIcon::Music,
+                // A symbol without artwork here shows as a plain tag.
+                Some(_) => TagIcon::Other,
             };
             let size = format.font_size.unwrap_or(11.0);
             let side = ParagraphTag::side(size);
@@ -612,13 +847,11 @@ impl ParagraphLayout {
                 icon,
                 origin: [0.0, ParagraphTag::top(baseline, size, side)],
                 size: side,
-                label: label.clone().unwrap_or_default(),
+                label: label.unwrap_or_default().to_owned(),
                 disabled: tag.status & 2 != 0,
             });
         }
-        let math = equation
-            .then(|| crate::math::layout(engine, &source.text))
-            .transpose()?;
+        let math = equations.into_iter().map(|(_, math)| math).collect();
         let mut result = Self {
             id: paragraph.id,
             origin: [indent, 0.0],
@@ -732,7 +965,7 @@ impl OutlineLayout {
         edit: Option<&DocumentEdit>,
         shape: &mut impl FnMut(
             &PageParagraph,
-            Option<u32>,
+            Option<&Count>,
             f32,
             &[f32],
         ) -> Result<ParagraphLayout, LayoutError>,
@@ -779,10 +1012,10 @@ impl OutlineLayout {
         edit: Option<&DocumentEdit>,
         mut hiding: BTreeSet<ExGuid>,
         mut state: (f64, Option<f32>),
-        siblings: &mut Vec<(u32, Option<u32>)>,
+        siblings: &mut Vec<(u32, Option<Count>)>,
         shape: &mut impl FnMut(
             &PageParagraph,
-            Option<u32>,
+            Option<&Count>,
             f32,
             &[f32],
         ) -> Result<ParagraphLayout, LayoutError>,
@@ -820,8 +1053,8 @@ impl OutlineLayout {
             if !hidden {
                 let (space, height, flow, extent) = match &node.content {
                     ParagraphContent::Text(_) => {
-                        let mut paragraph = shape(node, previous, width, indents)?;
-                        number = paragraph.number.map(|(number, _)| number);
+                        let mut paragraph = shape(node, previous.as_ref(), width, indents)?;
+                        number = paragraph.number.clone().map(|(count, _)| count);
                         let space = spacing(&paragraph.projection.text().spans()[0].format)?;
                         paragraph.origin[1] = top(&mut state, space);
                         let size = paragraph.size();
@@ -951,7 +1184,7 @@ impl OutlineLayout {
                 }
             }
             block.count = tally(node, number, previous);
-            siblings.push((node.level, block.count));
+            siblings.push((node.level, block.count.clone()));
             block.state = state;
             if depth == 0 {
                 result.blocks.push(block);
@@ -963,10 +1196,10 @@ impl OutlineLayout {
     }
 
     /// Root node `root`'s number, when it is numbered text on show.
-    fn number(&self, nodes: &[PageParagraph], root: usize) -> Option<(u32, bool)> {
+    fn number(&self, nodes: &[PageParagraph], root: usize) -> Option<&(Count, bool)> {
         let block = &self.blocks[root];
         (block.metrics.is_some() && nodes[root].text().is_some())
-            .then(|| self.paragraphs[block.first[0]].number)
+            .then(|| self.paragraphs[block.first[0]].number.as_ref())
             .flatten()
     }
 
@@ -996,7 +1229,7 @@ impl OutlineLayout {
         fixed_width: bool,
         shape: &mut impl FnMut(
             &PageParagraph,
-            Option<u32>,
+            Option<&Count>,
             f32,
             &[f32],
         ) -> Result<ParagraphLayout, LayoutError>,
@@ -1047,7 +1280,7 @@ impl OutlineLayout {
             for root in (0..range.start).rev() {
                 if nodes[root].level < level {
                     level = nodes[root].level;
-                    siblings.push((level, self.blocks[root].count));
+                    siblings.push((level, self.blocks[root].count.clone()));
                     if level <= 1 {
                         break;
                     }
@@ -1067,7 +1300,8 @@ impl OutlineLayout {
                     let indent = indentation(node.level, indents, width)?;
                     if let Some((source, cached)) = cached.get(&node.id)
                         && *source == node
-                        && follows(cached.number, previous) == cached.number.map(|(n, _)| n)
+                        && follows(cached.number.as_ref(), previous)
+                            == cached.number.clone().map(|(count, _)| count)
                         && cached.text.shaped.layout_max_advance() == width - indent
                         && cached
                             .markers
@@ -1104,9 +1338,11 @@ impl OutlineLayout {
             for root in range.end..nodes.len() {
                 let previous = sibling(&mut siblings, nodes[root].level);
                 let number = self.number(nodes, root);
-                let now = follows(number, previous);
-                let counted = tally(&nodes[root], now, previous);
-                if now != number.map(|(number, _)| number) || counted != self.blocks[root].count {
+                let now = follows(number, previous.as_ref());
+                let counted = tally(&nodes[root], now.clone(), previous);
+                if now.as_ref() != number.map(|(count, _)| count)
+                    || counted != self.blocks[root].count
+                {
                     renumbered = root + 1;
                 }
                 siblings.push((nodes[root].level, counted));
@@ -1275,7 +1511,7 @@ impl OutlineLayout {
         edit: Option<&DocumentEdit>,
         shape: &mut impl FnMut(
             &PageParagraph,
-            Option<u32>,
+            Option<&Count>,
             f32,
             &[f32],
         ) -> Result<ParagraphLayout, LayoutError>,
@@ -1885,17 +2121,26 @@ mod tests {
             unreachable!()
         };
         *shape = Some(999);
-        assert!(matches!(
+        let mut shaped = |node: &PageParagraph, definitions| {
             ParagraphLayout::shape(
                 &mut engine,
-                &node,
+                node,
                 None,
                 120.0,
                 &[18.0, 0.0, 27.0],
-                &definitions
-            ),
-            Err(LayoutError::UnsupportedContent)
-        ));
+                definitions,
+            )
+            .unwrap()
+        };
+        // A symbol without artwork shows as a plain tag, an Outlook task as its flag, and a
+        // tag whose definition is missing as nothing.
+        assert_eq!(shaped(&node, &definitions).tags[0].icon, TagIcon::Other);
+        let mut task = node.clone();
+        task.text_mut().unwrap().tags[0].status |= 4;
+        assert_eq!(shaped(&task, &definitions).tags[0].icon, TagIcon::Flag);
+        let mut untagged = definitions.clone();
+        untagged.remove(&id);
+        assert!(shaped(&node, &untagged).tags.is_empty());
     }
 
     /// OneNote 2010 at 400% (Calibri bullets and numbers from 8 to 24 pt, default list
@@ -2476,14 +2721,87 @@ mod tests {
     }
 
     #[test]
+    fn symbol_fonts_show_what_windows_draws() {
+        // OneNote's bullet library stores these (`BULLET_LIBRARY`).
+        assert_eq!(symbol_text("Symbol", "\u{b7}"), "\u{2022}");
+        assert_eq!(symbol_text("Symbol", "\u{de}"), "\u{21d2}");
+        assert_eq!(symbol_text("Symbol", "ap\u{f0}"), "\u{3b1}\u{3c0}\u{f8ff}");
+        assert_eq!(symbol_text("Wingdings", "l\u{ad}"), "\u{f06c}\u{f0ad}");
+        assert_eq!(symbol_text("Wingdings 2", "\u{9d}"), "\u{f09d}");
+        assert_eq!(symbol_text("Calibri", "\u{b7}"), "\u{b7}");
+    }
+
+    #[test]
     fn numerals_follow_onenote_number_sequences() {
         assert_eq!(numeral(Some('\u{0}'), 12).unwrap(), "12");
         assert_eq!(numeral(Some('\u{1}'), 1994).unwrap(), "MCMXCIV");
         assert_eq!(numeral(Some('\u{2}'), 4).unwrap(), "iv");
         assert_eq!(numeral(Some('\u{3}'), 3).unwrap(), "C");
         assert_eq!(numeral(Some('\u{4}'), 26).unwrap(), "z");
-        assert!(numeral(Some('\u{4}'), 27).is_err());
         assert!(numeral(Some('\u{1}'), 0).is_err());
+        // As OneNote 2010 renders them through COM: letters to 800, Roman numerals to 4010.
+        assert_eq!(numeral(Some('\u{4}'), 27).unwrap(), "aa");
+        assert_eq!(numeral(Some('\u{3}'), 105).unwrap(), "AAAAA");
+        assert_eq!(numeral(Some('\u{3}'), 780).unwrap(), "Z".repeat(30));
+        assert_eq!(numeral(Some('\u{3}'), 781).unwrap(), "A");
+        assert_eq!(numeral(Some('\u{3}'), 800).unwrap(), "T");
+        assert_eq!(numeral(Some('\u{1}'), 3999).unwrap(), "MMMCMXCIX");
+        assert_eq!(numeral(Some('\u{1}'), 4009).unwrap(), "MMMMIX");
+        assert_eq!(numeral(Some('\u{2}'), 4000).unwrap(), "mmmm");
+        assert_eq!(numeral(Some('\u{16}'), 7).unwrap(), "07");
+        assert_eq!(numeral(Some('\u{16}'), 106).unwrap(), "106");
         assert!(numeral(Some('\u{9}'), 1).is_err());
+        // As OneNote 2010 renders them through COM, 1 to 130.
+        let words = |sequence, numbers: &[u32]| {
+            numbers
+                .iter()
+                .map(|number| numeral(Some(sequence), *number).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            words(
+                '\u{5}',
+                &[1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101, 111, 112, 121]
+            ),
+            [
+                "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd",
+                "101st", "111th", "112th", "121st"
+            ]
+        );
+        assert_eq!(
+            words('\u{6}', &[1, 12, 20, 21, 99, 100, 101, 130]),
+            [
+                "One",
+                "Twelve",
+                "Twenty",
+                "Twenty-one",
+                "Ninety-nine",
+                "One hundred",
+                "One hundred one",
+                "One hundred thirty"
+            ]
+        );
+        assert_eq!(
+            words(
+                '\u{7}',
+                &[1, 2, 3, 5, 8, 9, 12, 20, 21, 40, 100, 101, 112, 130]
+            ),
+            [
+                "First",
+                "Second",
+                "Third",
+                "Fifth",
+                "Eighth",
+                "Ninth",
+                "Twelfth",
+                "Twentieth",
+                "Twenty-first",
+                "Fortieth",
+                "One hundredth",
+                "One hundred first",
+                "One hundred twelfth",
+                "One hundred thirtieth"
+            ]
+        );
     }
 }

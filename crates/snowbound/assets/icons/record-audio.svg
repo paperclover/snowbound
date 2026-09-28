@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#d3d9e0"/><stop offset="1" stop-color="#7b8796"/></linearGradient>
+    <linearGradient id="g1" x2="0" y2="1"><stop offset="0" stop-color="#ff8f80"/><stop offset="1" stop-color="#f03b30"/></linearGradient>
+  </defs>
+  <path d="M2.5 7A4.5 4.5 0 0 0 11.5 7M7 11.5V14M4.5 14.5H9.5" fill="none" stroke="#7b8796" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M7 1.75H7A2.5 2.5 0 0 1 9.5 4.25V8.25A2.5 2.5 0 0 1 7 10.75H7A2.5 2.5 0 0 1 4.5 8.25V4.25A2.5 2.5 0 0 1 7 1.75Z" fill="#000000" fill-opacity="0.16"/>
+  <path d="M7 1H7A2.5 2.5 0 0 1 9.5 3.5V7.5A2.5 2.5 0 0 1 7 10H7A2.5 2.5 0 0 1 4.5 7.5V3.5A2.5 2.5 0 0 1 7 1Z" fill="url(#g0)" stroke="#5a6676" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M5.75 3.25V6.5" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.85"/>
+  <path d="M9 12.25A3 3 0 1 1 15 12.25A3 3 0 1 1 9 12.25Z" fill="#000000" fill-opacity="0.16"/>
+  <path d="M9 11.5A3 3 0 1 1 15 11.5A3 3 0 1 1 9 11.5Z" fill="url(#g1)" stroke="#c42418" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M10.35 11.2A1.8 1.8 0 0 1 11.85 9.7" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.85"/>
+</svg>

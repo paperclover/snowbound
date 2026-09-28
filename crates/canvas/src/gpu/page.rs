@@ -838,7 +838,7 @@ impl crate::outline::OutlineLayout {
                     paragraph.origin[1] - OVERHANG,
                     paragraph.origin[1] + paragraph.text.height() + OVERHANG,
                 ];
-                paragraph.math.is_some() || (end >= rows[0] && start <= rows[1])
+                end >= rows[0] && start <= rows[1]
             })
     }
 
@@ -925,50 +925,50 @@ impl crate::outline::OutlineLayout {
                 bottom + origin[1],
             ]
         });
-        match &paragraph.math {
-            Some(math) => {
-                for item in &math.items {
-                    primitives.push(match item {
-                        crate::math::MathItem::Text { layout, origin } => Primitive::Text {
-                            clip,
-                            text: layout,
-                            origin: [x + origin[0], y + origin[1]],
-                            ink,
-                        },
-                        // As pen strokes, so hairline rules keep a device pixel.
-                        crate::math::MathItem::Rule([x0, y0, x1, y1]) => {
-                            let width = (x1 - x0).min(y1 - y0);
-                            let [from, to] = if x1 - x0 >= y1 - y0 {
-                                let middle = (y0 + y1) / 2.0;
-                                [[x0 + width / 2.0, middle], [x1 - width / 2.0, middle]]
-                            } else {
-                                let middle = (x0 + x1) / 2.0;
-                                [[middle, y0 + width / 2.0], [middle, y1 - width / 2.0]]
-                            };
-                            Primitive::Segment {
-                                from: [x + from[0], y + from[1]],
-                                to: [x + to[0], y + to[1]],
-                                width,
-                                round: false,
-                                color: math.color.map_or(ink, colorref),
-                            }
-                        }
-                        crate::math::MathItem::Stroke { from, to, width } => Primitive::Segment {
+        primitives.push(Primitive::Text {
+            clip,
+            text: &paragraph.text,
+            origin: [x, y],
+            ink,
+        });
+        for (index, [left, baseline]) in paragraph.text.spaces() {
+            let math = &paragraph.math[index];
+            let [x, y] = [x + left, y + baseline - math.baseline];
+            for item in &math.items {
+                primitives.push(match item {
+                    crate::math::MathItem::Text { layout, origin } => Primitive::Text {
+                        clip,
+                        text: layout,
+                        origin: [x + origin[0], y + origin[1]],
+                        ink,
+                    },
+                    // As pen strokes, so hairline rules keep a device pixel.
+                    crate::math::MathItem::Rule([x0, y0, x1, y1]) => {
+                        let width = (x1 - x0).min(y1 - y0);
+                        let [from, to] = if x1 - x0 >= y1 - y0 {
+                            let middle = (y0 + y1) / 2.0;
+                            [[x0 + width / 2.0, middle], [x1 - width / 2.0, middle]]
+                        } else {
+                            let middle = (x0 + x1) / 2.0;
+                            [[middle, y0 + width / 2.0], [middle, y1 - width / 2.0]]
+                        };
+                        Primitive::Segment {
                             from: [x + from[0], y + from[1]],
                             to: [x + to[0], y + to[1]],
-                            width: *width,
-                            round: true,
+                            width,
+                            round: false,
                             color: math.color.map_or(ink, colorref),
-                        },
-                    });
-                }
+                        }
+                    }
+                    crate::math::MathItem::Stroke { from, to, width } => Primitive::Segment {
+                        from: [x + from[0], y + from[1]],
+                        to: [x + to[0], y + to[1]],
+                        width: *width,
+                        round: true,
+                        color: math.color.map_or(ink, colorref),
+                    },
+                });
             }
-            None => primitives.push(Primitive::Text {
-                clip,
-                text: &paragraph.text,
-                origin: [x, y],
-                ink,
-            }),
         }
         for (layout, marker) in &paragraph.markers {
             primitives.push(Primitive::Text {
@@ -987,6 +987,7 @@ impl crate::outline::OutlineLayout {
                 ],
                 size: tag.size,
                 tint: [1.0, 1.0, 1.0, if tag.disabled { 0.45 } else { 1.0 }],
+                palette: draw::Palette::default(),
             });
         }
     }
@@ -1621,15 +1622,15 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tags_and_titles_leave_supported_outlines_editable() {
+    fn unsupported_outlines_and_titles_leave_supported_outlines_editable() {
         use crate::document::TextDocument;
         use onestore::document::{Kind, Tag};
         use onestore::page::{Definition, Outline, Title};
         for title in [false, true] {
-            let definition = ExGuid {
-                guid: [9; 16],
+            let [tag, list] = [9, 10].map(|byte| ExGuid {
+                guid: [byte; 16],
                 n: 1,
-            };
+            });
             let make_outline = |text: &str| {
                 let document =
                     TextDocument::new(vec![Paragraph::new(text.into(), Default::default())])
@@ -1650,18 +1651,8 @@ mod tests {
                     unsupported: Vec::new(),
                 }
             };
-            let mut tagged = make_outline("Tagged");
-            tagged.paragraphs[0].tags.push(Tag {
-                definition: Some(definition),
-                status: 1,
-                action_type: None,
-                created: None,
-                completed: None,
-                start: None,
-                due: None,
-                task_id: None,
-                extra_set: 0,
-            });
+            let mut numbered = make_outline("Numbered");
+            numbered.paragraphs[0].lists.push(list);
             let unsupported = if title {
                 PageObject::Title(Title {
                     date: None,
@@ -1671,31 +1662,59 @@ mod tests {
                         y: Some(20.0),
                         ..Default::default()
                     },
-                    outlines: vec![tagged],
+                    outlines: vec![numbered],
                 })
             } else {
-                PageObject::Outline(tagged)
+                PageObject::Outline(numbered)
             };
+            // A tag symbol without artwork draws as a plain tag and stays editable.
+            let mut editable = make_outline("Editable");
+            editable.paragraphs[0].tags.push(Tag {
+                definition: Some(tag),
+                status: 1,
+                action_type: None,
+                created: None,
+                completed: None,
+                start: None,
+                due: None,
+                task_id: None,
+                extra_set: 0,
+            });
             let page = Page {
                 identity: None,
                 created: None,
                 title: String::new(),
                 margin_origin: [36.0, 14.0],
                 color: None,
-                objects: vec![unsupported, PageObject::Outline(make_outline("Editable"))],
-                definitions: BTreeMap::from([(
-                    definition,
-                    Definition {
-                        kind: Kind::TagDefinition {
-                            shape: Some(999),
-                            label: Some("Unknown icon".into()),
-                            color: None,
-                            highlight: None,
-                            action_type: None,
+                objects: vec![unsupported, PageObject::Outline(editable)],
+                definitions: BTreeMap::from([
+                    (
+                        tag,
+                        Definition {
+                            kind: Kind::TagDefinition {
+                                shape: Some(999),
+                                label: Some("Unknown icon".into()),
+                                color: None,
+                                highlight: None,
+                                action_type: None,
+                            },
+                            format: Default::default(),
                         },
-                        format: Default::default(),
-                    },
-                )]),
+                    ),
+                    (
+                        // A numbering sequence OneNote 2010 does not offer.
+                        list,
+                        Definition {
+                            kind: Kind::List {
+                                font: None,
+                                format: Some("\u{fffd}\u{63}.".into()),
+                                restart: None,
+                                bullet: None,
+                            },
+                            format: Default::default(),
+                        },
+                    ),
+                ]),
             };
             let mut engine = TextEngine::default();
             let (scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();

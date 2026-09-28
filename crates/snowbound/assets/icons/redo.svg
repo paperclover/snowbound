@@ -1,3 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <path d="M10.5 3.5L13.5 6.5L10.5 9.5M13.5 6.5H6.25A3.5 3.5 0 0 0 6.25 13.5H9.5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#79c2ff"/><stop offset="1" stop-color="#1f7cf0"/></linearGradient>
+  </defs>
+  <path d="M7.5 4.75A5.5 5.5 180 1 0 8.924 15.563L8.147 12.665A2.5 2.5 180 1 1 7.5 7.75L8.5 7.75L8.5 10.75L14.5 6.25L8.5 1.75L8.5 4.75Z" fill="#000000" fill-opacity="0.16"/>
+  <path class="accent" d="M7.5 4A5.5 5.5 180 1 0 8.924 14.813L8.147 11.915A2.5 2.5 180 1 1 7.5 7L8.5 7L8.5 10L14.5 5.5L8.5 1L8.5 4Z" fill="url(#g0)" stroke="#1560c4" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M7.5 5A4.5 4.5 180 0 0 3.1 8.7" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.85"/>
 </svg>

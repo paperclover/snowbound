@@ -87,6 +87,9 @@ pub enum Command {
     ScrollPage { up: bool },
     /// Moves the caret a page and the view with it, extending the selection with Shift.
     MovePage { up: bool },
+    /// Moves the selected paragraphs past their sibling above or below: OneNote's Alt+Shift+Up
+    /// and Down, Option-Command on macOS as OneNote for Mac binds them.
+    MoveParagraphs { up: bool },
 }
 
 impl Command {
@@ -285,6 +288,13 @@ fn mac_command(key: &Key, modifiers: Modifiers) -> Option<Command> {
         }))
     };
     match key {
+        Key::Named(arrow @ (NamedKey::ArrowUp | NamedKey::ArrowDown))
+            if command && option && !shift && !control =>
+        {
+            Some(Command::MoveParagraphs {
+                up: *arrow == NamedKey::ArrowUp,
+            })
+        }
         Key::Named(NamedKey::ArrowLeft) => {
             pick(Movement::Left, Movement::WordLeft, Movement::LineStart)
         }
@@ -341,10 +351,18 @@ fn mac_command(key: &Key, modifiers: Modifiers) -> Option<Command> {
 /// and End reaches the document's ends; Control with Up and Down moves by paragraphs.
 fn pc_command(key: &Key, modifiers: Modifiers) -> Option<Command> {
     let Modifiers {
-        control, option, ..
+        shift,
+        control,
+        option,
+        ..
     } = modifiers;
     if option {
-        return None;
+        return match key {
+            _ if !shift || control => None,
+            Key::Named(NamedKey::ArrowUp) => Some(Command::MoveParagraphs { up: true }),
+            Key::Named(NamedKey::ArrowDown) => Some(Command::MoveParagraphs { up: false }),
+            _ => None,
+        };
     }
     let pick =
         |plain, with_control| Some(Command::Move(if control { with_control } else { plain }));
@@ -643,6 +661,16 @@ mod tests {
                 None,
             ),
             (Key::Character("a".into()), Modifiers::default(), None),
+            (
+                named(NamedKey::ArrowDown),
+                with(|m| (m.command, m.option) = (true, true)),
+                Some(Command::MoveParagraphs { up: false }),
+            ),
+            (
+                named(NamedKey::ArrowUp),
+                with(|m| (m.shift, m.option) = (true, true)),
+                Some(Command::Move(Movement::ParagraphStart)),
+            ),
         ];
         for (key, modifiers, command) in cases {
             assert_eq!(
@@ -666,8 +694,15 @@ mod tests {
             option: true,
             ..Modifiers::default()
         };
+        let alt_shift = Modifiers { shift: true, ..alt };
         let named = |named| Key::Named(named);
         let cases = [
+            (
+                named(NamedKey::ArrowUp),
+                alt_shift,
+                Some(Command::MoveParagraphs { up: true }),
+            ),
+            (named(NamedKey::ArrowUp), alt, None),
             (
                 named(NamedKey::ArrowLeft),
                 control,

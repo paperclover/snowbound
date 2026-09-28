@@ -1,4 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <path d="M2.5 3.5H13.5M7.5 6.5H13.5M7.5 9.5H13.5M2.5 12.5H13.5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M5 5.5L2.5 8L5 10.5" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#79c2ff"/><stop offset="1" stop-color="#1f7cf0"/></linearGradient>
+  </defs>
+  <path d="M2 1H15V2H2ZM7 5H15V6H7ZM7 9H15V10H7ZM2 13H15V14H2Z" fill="currentColor"/>
+  <path d="M5 5.75L1.5 8.25L5 10.75Z" fill="#000000" fill-opacity="0.16"/>
+  <path class="accent" d="M5 5L1.5 7.5L5 10Z" fill="url(#g0)" stroke="#1560c4" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

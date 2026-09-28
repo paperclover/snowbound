@@ -3,7 +3,16 @@
 //! the C library's locale.
 
 use canvas::date::DateField;
-use std::{ffi::CStr, path::PathBuf, process::Command, sync::OnceLock, time::Duration};
+use std::{
+    ffi::CStr,
+    path::PathBuf,
+    process::Command,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU32, Ordering},
+    },
+    time::Duration,
+};
 use ui::{Flags, Spec, Ui, px};
 use winit::{
     error::EventLoopError,
@@ -16,8 +25,6 @@ use winit::{
 const APP_ID: &str = "snowbound";
 /// The title bar's leading margin; the window controls sit at its trailing end.
 pub const LEADING: f32 = 8.0;
-/// Square, as compositors that round windows don't report by how much.
-pub const CORNER_RADIUS: f32 = 0.0;
 /// How far inside the window's edges a press resizes it, and how far along them a corner
 /// reaches, in logical pixels.
 const EDGE: f32 = 5.0;
@@ -27,6 +34,9 @@ const MAXIMIZE: &[&str] = &[include_str!("../assets/icons/window-maximize.svg")]
 const RESTORE: &[&str] = &[include_str!("../assets/icons/window-restore.svg")];
 
 static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
+/// Breeze's corner radius in units of the decoration's pixel grid, as `f32` bits; zero where
+/// KWin leaves windows square.
+static BREEZE_RADIUS: AtomicU32 = AtomicU32::new(0);
 
 pub fn event_loop(_headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
     // Month and day names and date orders follow the user's locale; other categories stay C.
@@ -34,7 +44,93 @@ pub fn event_loop(_headless: bool) -> Result<EventLoop<crate::UserEvent>, EventL
     let event_loop = EventLoop::with_user_event().build()?;
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
+    watch_settings(event_loop.create_proxy());
+    if std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| desktop.contains("KDE")) {
+        follow_breeze_radius(event_loop.create_proxy());
+    }
     Ok(event_loop)
+}
+
+/// How far the window manager rounds the window's corners: KWin rounds the bottom corners
+/// of Breeze's borderless windows unless they are maximized or full screen.
+pub fn corner_radius(window: &Window) -> f32 {
+    let units = f32::from_bits(BREEZE_RADIUS.load(Ordering::Relaxed));
+    if units == 0.0
+        || !window.is_decorated()
+        || window.is_maximized()
+        || window.fullscreen().is_some()
+    {
+        return 0.0;
+    }
+    // Breeze snaps its radius to the device pixel grid.
+    let scale = window.scale_factor() as f32;
+    (units * scale).round() / scale
+}
+
+/// Reads Breeze's corner radius now and again whenever KWin is told to reload its
+/// configuration, as Breeze's and the border size's settings pages do, redrawing then.
+fn follow_breeze_radius(proxy: EventLoopProxy<crate::UserEvent>) {
+    let Ok(connection) = zbus::blocking::connection::Builder::session()
+        .and_then(|builder| builder.method_timeout(Duration::from_millis(500)).build())
+    else {
+        return;
+    };
+    let read = |connection: &zbus::blocking::Connection| {
+        let units = breeze_radius(connection).unwrap_or(0.0);
+        BREEZE_RADIUS.store(units.to_bits(), Ordering::Relaxed);
+    };
+    // Before the window's first frame, so its corners never change under the user.
+    read(&connection);
+    std::thread::spawn(move || {
+        let Ok(rule) = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.kde.KWin")
+            .and_then(|rule| rule.member("reloadConfig"))
+            .map(|rule| rule.build())
+        else {
+            return;
+        };
+        let Ok(signals) =
+            zbus::blocking::MessageIterator::for_match_rule(rule, &connection, Some(8))
+        else {
+            return;
+        };
+        for _ in signals {
+            read(&connection);
+            let _ = proxy.send_event(crate::UserEvent::Redraw);
+        }
+    });
+}
+
+/// Breeze's `Frame_FrameRadius` of 2.5 small spacings where KWin 6.5 or later decorates
+/// with Breeze, borderless and with rounded corners, as Breeze's own
+/// `Decoration::recalculateBorders` decides.
+fn breeze_radius(connection: &zbus::blocking::Connection) -> Option<f32> {
+    let proxy =
+        zbus::blocking::Proxy::new(connection, "org.kde.KWin", "/KWin", "org.kde.KWin").ok()?;
+    let info: String = proxy.call("supportInformation", &()).ok()?;
+    let field = |name: &str| {
+        info.lines()
+            .find_map(|line| line.strip_prefix(name)?.strip_prefix(": "))
+    };
+    let mut version = field("KWin version")?.split('.').map(str::parse::<u32>);
+    let (Some(Ok(major)), Some(Ok(minor))) = (version.next(), version.next()) else {
+        return None;
+    };
+    let breezerc = kconfig("breezerc");
+    let rounded = kconfig_entries(&breezerc)
+        .get(&("Common", "RoundedCorners"))
+        .is_none_or(|value| *value != "false");
+    // KDecoration's BorderSize::None is 0.
+    let applies = (major, minor) >= (6, 5)
+        && field("Plugin")? == "org.kde.breeze"
+        && field("borderSize")? == "0"
+        && rounded;
+    Some(if applies {
+        2.5 * field("smallSpacing")?.parse::<f32>().ok()?
+    } else {
+        0.0
+    })
 }
 
 /// Decorated by the window manager, or on Wayland by the compositor where it offers
@@ -68,7 +164,10 @@ impl Clipboard {
 
     pub fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
         match self {
-            Self::Wayland(clipboard) => Ok(clipboard.store(text)),
+            Self::Wayland(clipboard) => {
+                clipboard.store(text);
+                Ok(())
+            }
             Self::X11(clipboard) => clipboard.set_text(text),
         }
     }
@@ -85,6 +184,109 @@ impl Clipboard {
 /// could not be made, leaving the app's own.
 pub fn system_titlebar(window: &Window) -> bool {
     window.is_decorated()
+}
+
+/// Window managers show no document of a window's.
+pub fn represent(_: &Window, _: Option<&std::path::Path>) {}
+
+/// None: the title bars desktops draw are opaque.
+pub fn install_backdrop(_: &Window) -> bool {
+    false
+}
+
+/// The title bar's fills with the window focused and not, where the desktop's are known and
+/// suit `appearance`: KWin's from the KDE colour scheme, or on GNOME the Adwaita header bar
+/// that winit's frame and GNOME's both draw.
+pub fn titlebar(appearance: Theme) -> Option<[[f32; 4]; 2]> {
+    let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let on = |name: &str| desktops.split(':').any(|desktop| desktop == name);
+    let fills = if on("KDE") {
+        kde_titlebar(&kconfig("kdeglobals"))
+    } else if on("GNOME") {
+        adwaita_titlebar(appearance)
+    } else {
+        return None;
+    }
+    .map(|[red, green, blue]| draw::srgb(red, green, blue));
+    // Past mid grey, as against a colour scheme chosen in Options, the theme's own strip.
+    let [red, green, blue, _] = fills[0];
+    let dark = 0.2126 * red + 0.7152 * green + 0.0722 * blue < 0.18;
+    (dark == (appearance == Theme::Dark)).then_some(fills)
+}
+
+/// KConfig file `name` from the system's configuration directories up to the user's, in
+/// rising precedence.
+fn kconfig(name: &str) -> Vec<String> {
+    let system = std::env::var("XDG_CONFIG_DIRS")
+        .ok()
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| "/etc/xdg".into());
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&system).collect();
+    dirs.reverse();
+    dirs.extend(xdg_base("XDG_CONFIG_HOME", ".config"));
+    dirs.iter()
+        .filter_map(|dir| std::fs::read_to_string(dir.join(name)).ok())
+        .collect()
+}
+
+/// The entries of KConfig `files` in rising precedence, by group and key.
+fn kconfig_entries(files: &[String]) -> std::collections::HashMap<(&str, &str), &str> {
+    let mut entries = std::collections::HashMap::new();
+    for file in files {
+        let mut group = "";
+        for line in file.lines().map(str::trim) {
+            if let Some(name) = line
+                .strip_prefix('[')
+                .and_then(|line| line.strip_suffix(']'))
+            {
+                group = name;
+            } else if let Some((key, value)) = line.split_once('=') {
+                entries.insert((group, key.trim()), value.trim());
+            }
+        }
+    }
+    entries
+}
+
+/// KWin's title bar fills, focused and not, from kdeglobals `files` in rising precedence: the
+/// colour scheme's header colours where it has them, as KWin prefers, else its window
+/// manager's, else Breeze Light's header.
+fn kde_titlebar(files: &[String]) -> [[u8; 3]; 2] {
+    let entries = kconfig_entries(files);
+    let color = |group, key| kde_color(entries.get(&(group, key))?);
+    let pair = |active: [u8; 3], inactive: Option<[u8; 3]>| [active, inactive.unwrap_or(active)];
+    if let Some(active) = color("Colors:Header", "BackgroundNormal") {
+        pair(active, color("Colors:Header][Inactive", "BackgroundNormal"))
+    } else if let Some(active) = color("WM", "activeBackground") {
+        pair(active, color("WM", "inactiveBackground"))
+    } else {
+        [[222, 224, 226], [239, 240, 241]]
+    }
+}
+
+/// A KConfig colour: `r,g,b` with an optional alpha, or `#rrggbb`.
+fn kde_color(value: &str) -> Option<[u8; 3]> {
+    if let Some(hex) = value.strip_prefix('#') {
+        let [_, red, green, blue] = u32::from_str_radix(hex, 16)
+            .ok()
+            .filter(|_| hex.len() == 6)?
+            .to_be_bytes();
+        return Some([red, green, blue]);
+    }
+    let mut channels = value.split(',').map(|channel| channel.trim().parse().ok());
+    Some([channels.next()??, channels.next()??, channels.next()??])
+}
+
+/// The header bar of winit's Adwaita frame, focused and not.
+fn adwaita_titlebar(appearance: Theme) -> [[u8; 3]; 2] {
+    let theme = match appearance {
+        Theme::Dark => sctk_adwaita::theme::ColorTheme::dark(),
+        Theme::Light => sctk_adwaita::theme::ColorTheme::light(),
+    };
+    [theme.active, theme.inactive].map(|colors| {
+        let color = colors.headerbar.to_color_u8();
+        [color.red(), color.green(), color.blue()]
+    })
 }
 
 /// Minimize, maximize and close at the title bar's trailing end.
@@ -166,14 +368,14 @@ pub fn install_text_input(_: &Window) {}
 /// Options opens from the sidebar's footer and Ctrl+Comma, as Linux apps have no shared menu.
 pub fn install_menu() {}
 
+/// The toolbar and keyboard stand in for a menu bar.
+pub fn update_menu(_: impl FnOnce() -> Vec<crate::commands::Status>) {}
+
 pub fn clear_marked_text(_: &Window) {}
 
 pub fn configure_presentation(_: &wgpu::Surface<'_>) {}
 
 pub fn commit_presentation(_: &Window) {}
-
-/// GNOME has no character palette to open from an app.
-pub fn show_character_palette() {}
 
 /// GTK's default double-click time.
 pub fn double_click_interval() -> Duration {
@@ -186,6 +388,41 @@ pub fn appearance(_: &Window) -> Theme {
     let dark = portal_color_scheme()
         .unwrap_or_else(|| std::env::var("GTK_THEME").is_ok_and(|theme| theme.ends_with(":dark")));
     if dark { Theme::Dark } else { Theme::Light }
+}
+
+/// Asks for the desktop's colours again whenever the settings portal reports a change to the
+/// colour scheme, or to KDE's colours.
+fn watch_settings(proxy: EventLoopProxy<crate::UserEvent>) {
+    std::thread::spawn(move || {
+        let Ok(connection) = zbus::blocking::Connection::session() else {
+            return;
+        };
+        let Ok(portal) = zbus::blocking::Proxy::new(
+            &connection,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings",
+        ) else {
+            return;
+        };
+        let Ok(changes) = portal.receive_signal("SettingChanged") else {
+            return;
+        };
+        for change in changes {
+            let Ok((namespace, _, _)) = change
+                .body()
+                .deserialize::<(String, String, zbus::zvariant::OwnedValue)>()
+            else {
+                continue;
+            };
+            if (namespace == "org.freedesktop.appearance"
+                || namespace.starts_with("org.kde.kdeglobals"))
+                && proxy.send_event(crate::UserEvent::Appearance).is_err()
+            {
+                return;
+            }
+        }
+    });
 }
 
 fn portal_color_scheme() -> Option<bool> {
@@ -232,14 +469,22 @@ pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
-            let (source, point, kind, options) =
-                (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+            let (source, point, kind, options) = (
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+                fields.next()?,
+            );
             let point = point.replace("\\040", " ");
             (matches!(kind, "cifs" | "smb3") && path.starts_with(&point))
                 .then(|| (source.replace("\\040", " "), point, options.to_owned()))
         })
         .max_by_key(|(_, point, _)| point.len())?;
-    let within = path.strip_prefix(&point).ok()?.to_string_lossy().into_owned();
+    let within = path
+        .strip_prefix(&point)
+        .ok()?
+        .to_string_lossy()
+        .into_owned();
     crate::library::Mount::parse(&source, &within, &options)
 }
 
@@ -258,7 +503,9 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
     {
         return Ok(crate::library::Login {
             user,
-            password: String::from_utf8_lossy(&output.stdout).trim_end_matches('\n').to_owned(),
+            password: String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_owned(),
             domain: mount.domain.clone(),
         });
     }
@@ -268,7 +515,7 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
         ["--password", &title],
     )
     .map_err(str::to_owned)?
-    .ok_or_else(|| "Signing in was cancelled".to_owned())?;
+    .ok_or_else(|| "Signing in was canceled".to_owned())?;
     // zenity answers "user|password"; kdialog only the password.
     let (typed, password) = asked
         .split_once('|')
@@ -288,11 +535,14 @@ pub fn settings_dir() -> Option<PathBuf> {
 
 /// The app's folder in the XDG base directory `variable` names, or in `fallback` under home.
 fn xdg_dir(variable: &str, fallback: &str) -> Option<PathBuf> {
+    Some(xdg_base(variable, fallback)?.join(APP_ID))
+}
+
+fn xdg_base(variable: &str, fallback: &str) -> Option<PathBuf> {
     std::env::var_os(variable)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(fallback)))
-        .map(|base| base.join(APP_ID))
 }
 
 /// The application's icon from the icon theme, the smallest at least `pixels` square.
@@ -543,10 +793,11 @@ fn dialog<const Z: usize, const K: usize>(
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
-/// Opens `folder` in the file manager.
-pub fn reveal(folder: &std::path::Path) {
-    if let Err(error) = Command::new("xdg-open").arg(folder).spawn() {
-        eprintln!("Cannot open {}: {error}", folder.display());
+/// Opens `target`, a folder or a link's URL, with the desktop's handler.
+pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
+    let target = target.as_ref();
+    if let Err(error) = Command::new("xdg-open").arg(target).spawn() {
+        eprintln!("Cannot open {}: {error}", target.display());
     }
 }
 
@@ -585,7 +836,13 @@ pub fn pick_notebook(title: &str) -> Option<PathBuf> {
             &format!("--title={title}"),
             "--file-filter=OneNote notebooks and sections | *.onetoc2 *.one",
         ],
-        ["--getopenfilename", ".", "*.onetoc2 *.one", "--title", title],
+        [
+            "--getopenfilename",
+            ".",
+            "*.onetoc2 *.one",
+            "--title",
+            title,
+        ],
     );
     asked
         .unwrap_or_else(|error| {
@@ -674,5 +931,45 @@ mod tests {
         assert_eq!(locale_tag("pt_BR.UTF-8@euro"), "pt-BR");
         assert_eq!(locale_tag("de_DE"), "de-DE");
         assert_eq!(locale_tag("C.UTF-8"), "");
+    }
+
+    #[test]
+    fn kwin_title_bars_take_the_colour_scheme_s_header_then_its_window_manager_colours() {
+        let breeze_dark = "[Colors:Header]\nBackgroundNormal=41,44,48\nForegroundNormal=252,252,252\n\
+            [Colors:Header][Inactive]\nBackgroundNormal=32,35,38\n\
+            [Colors:Window]\nBackgroundNormal=32,35,38\n\
+            [WM]\nactiveBackground=49,54,59\ninactiveBackground=42,46,50\n";
+        assert_eq!(
+            kde_titlebar(&[breeze_dark.into()]),
+            [[41, 44, 48], [32, 35, 38]]
+        );
+        let legacy = "[General]\nColorScheme=Old\n\n[WM]\nactiveBackground=48,174,232\n\
+            inactiveBackground=#eff0f1\n";
+        assert_eq!(
+            kde_titlebar(&[legacy.into()]),
+            [[48, 174, 232], [239, 240, 241]]
+        );
+        let header_only = "[Colors:Header]\nBackgroundNormal = 10, 20, 30, 255\n";
+        assert_eq!(kde_titlebar(&[header_only.into()]), [[10, 20, 30]; 2]);
+        // The user's file, last, overrides the system's.
+        assert_eq!(
+            kde_titlebar(&[breeze_dark.into(), header_only.into()]),
+            [[10, 20, 30], [32, 35, 38]]
+        );
+        assert_eq!(
+            kde_titlebar(&["# no colours\n[KDE]\nLookAndFeelPackage=x\n".into()]),
+            [[222, 224, 226], [239, 240, 241]],
+            "Breeze Light's header by default"
+        );
+    }
+
+    #[test]
+    fn kconfig_colours_read_as_channels_or_hex() {
+        assert_eq!(kde_color("222,224,226"), Some([222, 224, 226]));
+        assert_eq!(kde_color("1, 2, 3, 128"), Some([1, 2, 3]));
+        assert_eq!(kde_color("#2a2e32"), Some([0x2a, 0x2e, 0x32]));
+        assert_eq!(kde_color("#2a2e"), None);
+        assert_eq!(kde_color("256,0,0"), None);
+        assert_eq!(kde_color("1,2"), None);
     }
 }

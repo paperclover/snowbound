@@ -5,5 +5,5 @@
       <stop offset="1" stop-color="#8f008f"/>
     </linearGradient>
   </defs>
-  <path d="M8 5C8 1 15 1 15 5C15 7 11 8 11 10H9C9 6 13 6 13 5C13 3 10 3 10 5ZM9 12H11V14H9Z" fill="url(#layer0)"/>
+  <path d="M5 5C5 1 12 1 12 5C12 7 8 8 8 10H6C6 6 10 6 10 5C10 3 7 3 7 5ZM6 12H8V14H6Z" fill="url(#layer0)"/>
 </svg>

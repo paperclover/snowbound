@@ -65,8 +65,174 @@ fn main() {
             render(panels, 5, &path);
             println!("{path}");
         }
+        let items = font_items();
+        let fonts = Id::ROOT.child("fonts");
+        let context = Id::ROOT.child("context");
+        let options = Id::ROOT.child("options");
+        let search = Id::ROOT.child("search");
+        let strips: [(&str, Id, &Build<'_>); 4] = [
+            ("menu", context, &|ui, _| {
+                ui::popup::menu(ui, context, Anchor::Point([140.0, 70.0]), &items[..8], None);
+            }),
+            ("combo", fonts, &|ui, [combo, _]| {
+                let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+                ui::popup::menu(ui, fonts, anchor, &items, Some("Calibri"));
+            }),
+            ("search", search, &|ui, [combo, _]| {
+                results(ui, search, combo)
+            }),
+            ("dialog", options, &|ui, _| dialog(ui, options)),
+        ];
+        for (motion, id, build) in strips {
+            let panels = opening_and_closing(&theme, &device, &queue, &mut renderer, id, build);
+            let path = format!("/tmp/ui-motion-{motion}-{name}.png");
+            render(panels, 6, &path);
+            println!("{path}");
+        }
     }
     measure();
+}
+
+/// Builds a frame's popup, given the ids of the combo and the split button's arrow.
+type Build<'a> = dyn Fn(&mut Ui, [Id; 2]) + 'a;
+
+/// Popup `id` as `build` builds it, every 16 ms from the frame it opens until it has
+/// closed again; no frame is asked for once each settles.
+fn opening_and_closing(
+    theme: &Theme,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut draw::Renderer,
+    id: Id,
+    build: &Build<'_>,
+) -> Vec<Vec<u8>> {
+    let mut scene = Scene {
+        ui: Ui::new(theme.clone(), Duration::from_millis(500)),
+        start: Instant::now(),
+        frames: 0,
+    };
+    scene.frame(|_, _| {});
+    scene.frame(|ui, ids| {
+        ui.open_popup(id);
+        build(ui, ids);
+    });
+    let mut panels = vec![paint(device, queue, renderer, &scene.ui)];
+    for _ in 0..17 {
+        scene.frame(build);
+        panels.push(paint(device, queue, renderer, &scene.ui));
+    }
+    assert!(!scene.ui.wants_frame(), "settled open");
+    scene.ui.close_popup(id);
+    for _ in 0..12 {
+        scene.frame(build);
+        panels.push(paint(device, queue, renderer, &scene.ui));
+    }
+    assert!(!scene.ui.wants_frame(), "settled closed");
+    panels
+}
+
+/// A search's dropdown over the box at `combo`, as the app's search box opens: its field
+/// holds the box's place and widens while the panel comes in around it.
+fn results(ui: &mut Ui, id: Id, combo: Id) {
+    if !ui.popup_open(id) {
+        return;
+    }
+    let theme = ui.theme.clone();
+    let [left, top, right, bottom] = ui.rect(combo).unwrap_or_default();
+    let anchor = Anchor::Over([left - 4.0, top - 4.0, right + 4.0, bottom + 4.0]);
+    let width = 300.0;
+    let open = ui.opening(id, anchor).unwrap_or(1.0);
+    ui.open_as(
+        id,
+        Spec {
+            axis: ui::Axis::Y,
+            size: [px(width), ui::children()],
+            fill: Some(theme.popup),
+            border: Some(theme.chip),
+            shadow: Some(theme.shadow),
+            radius: 6.0,
+            pad: [4.0, 4.0],
+            gap: 4.0,
+            anchor: Some(anchor),
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "box",
+        Spec {
+            flags: ui::Flags::STILL,
+            size: [
+                px(right - left + (width - 8.0 - (right - left)) * open),
+                px(bottom - top),
+            ],
+            text: Some("Search All Notebooks (⌘E)"),
+            color: Some(theme.text_dim),
+            fill: Some(theme.base),
+            border: Some(theme.accent),
+            radius: 4.0,
+            pad: [6.0, 0.0],
+            ..Spec::default()
+        },
+    );
+    for (index, page) in ["Meeting notes", "Quarterly planning", "Reading list"]
+        .iter()
+        .enumerate()
+    {
+        ui.leaf(
+            index,
+            Spec {
+                size: [fill(), px(22.0)],
+                text: Some(page),
+                pad: [8.0, 0.0],
+                ..Spec::default()
+            },
+        );
+    }
+    ui.close();
+}
+
+/// A small dialog, as Options opens over the window.
+fn dialog(ui: &mut Ui, id: Id) {
+    if !ui.popup_open(id) {
+        return;
+    }
+    let theme = ui.theme.clone();
+    ui.open_as(
+        id,
+        Spec {
+            axis: ui::Axis::Y,
+            size: [px(260.0), ui::children()],
+            fill: Some(theme.popup),
+            border: Some(theme.chip),
+            shadow: Some(theme.shadow),
+            radius: 8.0,
+            pad: [14.0, 12.0],
+            gap: 8.0,
+            anchor: Some(Anchor::Dialog),
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "title",
+        Spec {
+            size: [fill(), ui::fit()],
+            text: Some("Options"),
+            bold: true,
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "body",
+        Spec {
+            size: [fill(), ui::fit()],
+            text: Some("These choices apply to every notebook, and are kept when OK is chosen."),
+            overflow: ui::Overflow::Wrap,
+            color: Some(theme.text_dim),
+            ..Spec::default()
+        },
+    );
+    ui::button(ui, "ok", "OK");
+    ui.close();
 }
 
 /// Frames a change shows at: before it, then each of the 150 ms it takes.
@@ -344,6 +510,7 @@ impl Scene {
             art!("icons/font-color"),
             Some(draw::srgb(0xe8, 0x3a, 0x30)),
             false,
+            Id::ROOT.child("font color"),
         );
         ui.close();
         ui.close();
@@ -568,7 +735,7 @@ fn highlight(scene: &mut Scene) {
     let id = Id::ROOT.child("highlight");
     scene.open(id, vec![key(NamedKey::ArrowDown)], |ui, [_, split]| {
         let anchor = below(ui, split);
-        ui::popup::colors(ui, id, anchor, "No colour", &swatches, 5);
+        ui::popup::colors(ui, id, anchor, "No Color", &swatches, 5);
     });
 }
 
@@ -601,14 +768,34 @@ fn palette(scene: &mut Scene) {
 fn tags(scene: &mut Scene) {
     let tags = [
         ("To Do", None::<&'static [&'static str]>, "⌘1"),
-        ("Important", Some(&[include_str!("../../canvas/assets/tags/star.svg")]), "⌘2"),
+        (
+            "Important",
+            Some(&[include_str!("../../canvas/assets/tags/star.svg")]),
+            "⌘2",
+        ),
         ("Question", None, "⌘3"),
         ("Remember for later", Some(art!("tags/remember")), "⌘4"),
         ("Definition", Some(art!("tags/definition")), "⌘5"),
-        ("Highlight", Some(&[include_str!("../../canvas/assets/tags/highlight.svg")]), "⌘6"),
-        ("Contact", Some(&[include_str!("../../canvas/assets/tags/contact.svg")]), "⌘7"),
-        ("Address", Some(&[include_str!("../../canvas/assets/tags/address.svg")]), "⌘8"),
-        ("Phone number", Some(&[include_str!("../../canvas/assets/tags/phone.svg")]), "⌘9"),
+        (
+            "Highlight",
+            Some(&[include_str!("../../canvas/assets/tags/highlight.svg")]),
+            "⌘6",
+        ),
+        (
+            "Contact",
+            Some(&[include_str!("../../canvas/assets/tags/contact.svg")]),
+            "⌘7",
+        ),
+        (
+            "Address",
+            Some(&[include_str!("../../canvas/assets/tags/address.svg")]),
+            "⌘8",
+        ),
+        (
+            "Phone number",
+            Some(&[include_str!("../../canvas/assets/tags/phone.svg")]),
+            "⌘9",
+        ),
         ("Web site to visit", None, ""),
         ("Idea", None, ""),
         ("Password", None, ""),
@@ -686,13 +873,7 @@ fn paint(
     let layers: Vec<_> = interface
         .iter()
         .filter_map(|layer| match layer {
-            ui::Layer::Primitives { clip, primitives } => Some(draw::Layer {
-                scale: SCALE,
-                origin: [0.0; 2],
-                clip: clip.map(|clip| clip.map(|value| value * SCALE)),
-                backdrop: None,
-                primitives,
-            }),
+            ui::Layer::Primitives(primitives) => Some(primitives.layer(SCALE)),
             ui::Layer::Custom { .. } => None,
         })
         .collect();

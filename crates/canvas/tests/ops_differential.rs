@@ -22,7 +22,7 @@ use std::{collections::BTreeMap, path::Path};
 #[path = "../../onestore/tests/support/sweep.rs"]
 mod sweep;
 
-const SECTIONS: [&str; 15] = [
+const SECTIONS: [&str; 18] = [
     "corpus/outline-edit/before/notebook/synthetic.one",
     "corpus/paragraph-edit/before/notebook/synthetic.one",
     "corpus/outline-edit/tree/before/notebook/synthetic.one",
@@ -36,6 +36,9 @@ const SECTIONS: [&str; 15] = [
     "corpus/ink-edit/drawing/cold/notebook/ink.one",
     "corpus/math-edit/native-editor/notebook/links.one",
     "corpus/link-edit/native-links/notebook/links.one",
+    "corpus/link-edit/native-typed/notebook/links.one",
+    "corpus/math-edit/native-editor-3/notebook/links.one",
+    "corpus/math-edit/native-enter/notebook/links.one",
     "corpus/paragraph-format/cold/notebook/synthetic.one",
     "corpus/canvas/baseline-anchors.one",
 ];
@@ -82,11 +85,17 @@ enum Kind {
     PlaceImage,
     RemoveImage,
     Date,
+    Link,
+    Unlink,
+    TypedUrl,
+    Equation,
+    Linear,
+    Professional,
     Undo,
     Redo,
 }
 
-const KINDS: [Kind; 42] = [
+const KINDS: [Kind; 48] = [
     Kind::Type,
     Kind::TypeEnd,
     Kind::Compose,
@@ -127,6 +136,12 @@ const KINDS: [Kind; 42] = [
     Kind::PlaceImage,
     Kind::RemoveImage,
     Kind::Date,
+    Kind::Link,
+    Kind::Unlink,
+    Kind::TypedUrl,
+    Kind::Equation,
+    Kind::Linear,
+    Kind::Professional,
     Kind::Undo,
     Kind::Redo,
 ];
@@ -371,6 +386,28 @@ fn perform(
                     ["Friday, July 04, 2025".into(), "9:45 AM".into()],
                 )
                 .unwrap_or(false)
+        }
+        Kind::Link => {
+            range(editor, random)
+                && editor
+                    .set_link(engine, "linked", "https://example.invalid/ops")
+                    .is_ok()
+        }
+        Kind::Unlink => place(editor, middle) && editor.remove_link(engine).unwrap_or(false),
+        Kind::TypedUrl => {
+            place(editor, middle)
+                && editor.insert(engine, " www.example.invalid").is_ok()
+                && editor.insert(engine, " ").is_ok()
+        }
+        Kind::Equation => {
+            place(editor, middle)
+                && editor.insert_equation(engine).is_ok()
+                && editor.insert(engine, "x^2").is_ok()
+                && editor.insert(engine, " ").is_ok()
+        }
+        Kind::Linear => place(editor, middle) && editor.linear_equation(engine).unwrap_or(false),
+        Kind::Professional => {
+            place(editor, middle) && editor.build_equation(engine).unwrap_or(false)
         }
         Kind::Undo => editor.undo(engine).unwrap_or(false),
         Kind::Redo => editor.redo(engine).unwrap_or(false),

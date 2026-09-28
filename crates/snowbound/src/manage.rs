@@ -52,6 +52,13 @@ fn follow(current: &str, from: &str, to: &str) -> String {
     }
 }
 
+/// The section `library` shows after a change: `open` where it still lists it, else its
+/// first, or none once it has no sections.
+fn shown(library: &Library, open: Option<String>) -> Option<String> {
+    open.filter(|path| library.contains(path))
+        .or_else(|| library.first_section())
+}
+
 /// The first of `base`, `base 2`, `base 3`… that `taken` does not hold, as OneNote names
 /// new sections ("New Section 1", …) and groups.
 fn unused(taken: &[String], base: &str, numbered: bool) -> String {
@@ -162,13 +169,16 @@ impl State {
     /// Closes `library`: its files stay, and the sidebar and the next launch leave it out.
     pub(crate) fn close_notebook(&mut self, library: &Arc<Library>) {
         self.notebooks.retain(|open| !Arc::ptr_eq(open, library));
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| Arc::ptr_eq(&session.library, library))
+        let shown = |shown: &Arc<Library>| shown.location == library.location;
+        if self.sectionless.as_ref().is_some_and(shown)
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| shown(&session.library))
         {
             self.persist().unwrap_or_else(|error| eprintln!("{error}"));
             self.session = None;
+            self.sectionless = None;
             self.templates = crate::templates::View::Strip;
             match self
                 .notebooks
@@ -176,7 +186,10 @@ impl State {
                 .find_map(|open| Some((Arc::clone(open), open.first_section()?)))
             {
                 Some((open, path)) => self.commands.push(Command::OpenSection(open, path)),
-                None => self.title(),
+                None => {
+                    self.sectionless = self.notebooks.first().cloned();
+                    self.title();
+                }
             }
         }
         self.save_settings();
@@ -257,20 +270,24 @@ impl State {
                     (current, None)
                 }
             };
+            let fresh = created.is_some();
             let open = created.or(followed.clone());
             let library = Arc::new(library.with(notebook));
-            let path = open
-                .filter(|path| library.contains(path))
-                .or_else(|| library.first_section())
-                .ok_or("The notebook has no sections left")?;
+            let Some(path) = shown(&library, open) else {
+                return Ok(Loaded::Library(library, None));
+            };
             // The open section, perhaps renamed or moved, stays open: its replica is this
             // thread's to reopen only where no section holds it.
             if followed.as_deref() == Some(path.as_str()) {
-                return Ok(Loaded::Library(library, path));
+                return Ok(Loaded::Library(library, Some(path)));
             }
             let section = library.open(&path, notify)?;
             let (session, page) = read_session(section, library, path, None)?;
-            Ok(Loaded::Section(Box::new(session), page))
+            Ok(if fresh {
+                Loaded::Created(Box::new(session), page)
+            } else {
+                Loaded::Section(Box::new(session), page)
+            })
         });
     }
 
@@ -762,6 +779,36 @@ mod tests {
         if let Some(directory) = std::env::var_os("SNOWBOUND_MANAGEMENT_EXPORT") {
             copy(&root, Path::new(&directory));
         }
+        std::fs::remove_dir_all(&temporary).unwrap();
+    }
+
+    /// Deleting a group's last section shows the notebook's other one; deleting that too
+    /// leaves the notebook showing no section, where it failed before.
+    #[test]
+    fn deleting_every_section_leaves_the_notebook_showing_none() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        std::fs::create_dir_all(&temporary).unwrap();
+        let root = temporary.join("Emptied");
+        let location = root.to_str().unwrap();
+        let cache = temporary.join("cache");
+        let mut notebook = Notebook::create(location, &cache, NOTEBOOK_COLOR, &dated()).unwrap();
+        notebook.create_group("", "Group").unwrap();
+        notebook.create_section("Group", "Inner", &dated()).unwrap();
+
+        notebook.delete("Group/Inner.one").unwrap();
+        let library = Library::created(location, notebook, &cache);
+        assert_eq!(
+            shown(&library, Some("Group/Inner.one".into())).as_deref(),
+            Some("New Section 1.one")
+        );
+
+        let mut notebook = library.reopen().unwrap();
+        notebook.delete("New Section 1.one").unwrap();
+        let library = library.with(notebook);
+        assert_eq!(shown(&library, Some("New Section 1.one".into())), None);
+        assert!(library.tabs("").is_empty());
         std::fs::remove_dir_all(&temporary).unwrap();
     }
 

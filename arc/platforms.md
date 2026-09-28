@@ -23,6 +23,9 @@ page inside it. `snowbound` picks a platform module at compile time
 in the crate is shared: library and settings, the sidebar, menus, page and
 section management, templates, and screenshot and replay support.
 Accessibility for the page goes through AccessKit's winit adapter on both.
+`commands.rs` is the one table of commands: each one's title, its chords on
+macOS and elsewhere, when it is enabled or checked, and what it does. The
+keyboard, the toolbar and the macOS menu bar all run commands from it.
 
 ### macOS
 
@@ -40,6 +43,10 @@ Accessibility for the page goes through AccessKit's winit adapter on both.
 - A notebook on a mounted SMB share is opened through the embedded SMB client,
   signed in with the password the keychain keeps for that mount (see
   [sync](sync.md) for why the mount itself isn't enough).
+- The menu bar (`menubar.rs`) is laid out as OneNote for Mac's. Its items are
+  the command table's, validated from the statuses each frame publishes, and
+  their key equivalents are the table's chords, so AppKit takes a chord the
+  menu enables before winit sees the key. Linux has no menu bar.
 - `tools/canvas/build_macos.py` builds and ad-hoc signs `target/Snowbound.app`.
 
 ### Linux

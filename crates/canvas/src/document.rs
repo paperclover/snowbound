@@ -248,28 +248,27 @@ fn divides_link(text: &Paragraph, offset: u32) -> Result<bool, EditError> {
 }
 
 /// Whether a split or join keeping `first` up to UTF-16 `start` and `last` from `end` on meets
-/// an equation or embedded object at the seam or carries one to another paragraph: their run
-/// data belongs to the whole paragraph, and OneNote has not been seen dividing them.
+/// an embedded object at the seam or carries one to another paragraph, or joins inside an
+/// equation: the object's run data belongs to its paragraph, and an equation divides only at
+/// its edges (Enter inside one breaks its line instead, `CanvasEditor::enter`).
 fn moves_object(
     first: &Paragraph,
     start: u32,
     last: &Paragraph,
     end: u32,
 ) -> Result<bool, EditError> {
-    let object = |text: &Paragraph, span: usize| {
-        let format = &text.spans()[span].format;
-        [format.math, format.embedded_object].contains(&Some(true))
+    let math = |text: &Paragraph, offset: u32| {
+        text.format_at(offset)
+            .is_ok_and(|format| format.math == Some(true))
     };
     let (before, after) = (first.byte_offset(start)?, last.byte_offset(end)?);
+    let following = last.text()[after..]
+        .chars()
+        .next()
+        .map(|c| end + c.len_utf16() as u32);
     Ok(first.text()[..before].ends_with('\u{fffc}')
         || last.text()[after..].contains('\u{fffc}')
-        || before > 0
-            && first
-                .spans()
-                .iter()
-                .position(|span| before - 1 < span.end)
-                .is_some_and(|span| object(first, span))
-        || (0..last.spans().len()).any(|span| last.spans()[span].end > after && object(last, span)))
+        || start > 0 && math(first, start) && following.is_some_and(|next| math(last, next)))
 }
 
 /// Paragraph positions of each node's first text leaf, counting from `first`.
@@ -279,6 +278,50 @@ fn starts(nodes: &[PageParagraph], first: usize) -> impl Iterator<Item = usize> 
         *next += leaves(std::slice::from_ref(node), None).count();
         Some(start)
     })
+}
+
+fn enclosing(
+    nodes: &[PageParagraph],
+    first: usize,
+    paragraph: usize,
+    ranges: &mut Vec<Range<usize>>,
+) {
+    let count = |nodes: &[PageParagraph]| leaves(nodes, None).count();
+    let Some((index, start)) = starts(nodes, first)
+        .enumerate()
+        .take_while(|(_, start)| *start <= paragraph)
+        .last()
+    else {
+        return;
+    };
+    let ParagraphContent::Table(table) = &nodes[index].content else {
+        let end = subtree_end(nodes, index);
+        if end > index + 1 {
+            ranges.push(start..start + count(&nodes[index..end]));
+        }
+        return;
+    };
+    let mut cell_start = start;
+    for row in &table.rows {
+        let row_start = cell_start;
+        let mut holder = None;
+        for cell in &row.cells {
+            let cell_end = cell_start + count(&cell.paragraphs);
+            if (cell_start..cell_end).contains(&paragraph) {
+                holder = Some((cell, cell_start..cell_end));
+            }
+            cell_start = cell_end;
+        }
+        if let Some((cell, range)) = holder {
+            enclosing(&cell.paragraphs, range.start, paragraph, ranges);
+            ranges.extend([
+                range,
+                row_start..cell_start,
+                start..start + count(&nodes[index..=index]),
+            ]);
+            return;
+        }
+    }
 }
 
 /// The index after `nodes[index]`'s last descendant. Descendants follow their ancestor
@@ -549,6 +592,14 @@ impl TextDocument {
                 .leaf(paragraph)
                 .map(|(_, _, node)| (node, Some(paragraph))),
         }
+    }
+
+    /// Text leaf ranges holding `paragraph`, innermost first: its subtree when it has
+    /// descendants, then the cell, row and table of each table around it.
+    pub(crate) fn enclosing(&self, paragraph: usize) -> Vec<Range<usize>> {
+        let mut ranges = Vec::new();
+        enclosing(&self.nodes, 0, paragraph, &mut ranges);
+        ranges
     }
 
     /// The root node holding a table cell.

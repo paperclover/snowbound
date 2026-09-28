@@ -1,12 +1,22 @@
-use crate::{Axis, Built, Flags, Id, Size, State};
+use crate::{Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, text::Texts};
 use std::collections::HashMap;
 
 /// Sizes each box on both axes, then places it: standalone sizes, sizes taken from
 /// ancestors (pre-order), sizes summed from children (post-order), overflow shared out
-/// by strictness, and positions along each parent's flow. Boxes are in build order, so
+/// by strictness, and positions along each parent's flow. Labels too wide for their
+/// solved width wrap or shorten before heights are solved. Boxes are in build order, so
 /// index order is pre-order.
-pub(crate) fn solve(nodes: &mut [Built], states: &HashMap<Id, State>, scale: f32) {
+pub(crate) fn solve(
+    nodes: &mut [Built],
+    states: &HashMap<Id, State>,
+    scale: f32,
+    texts: &mut Texts,
+    frame: u64,
+) {
     for axis in 0..2 {
+        if axis == 1 {
+            fit_labels(nodes, texts, frame);
+        }
         for node in nodes.iter_mut() {
             node.computed[axis] = match node.size[axis].size {
                 Size::Pixels(pixels) => pixels,
@@ -47,7 +57,7 @@ pub(crate) fn solve(nodes: &mut [Built], states: &HashMap<Id, State>, scale: f32
             if node.children.is_empty() || (axis == 1 && node.flags.contains(Flags::SCROLL)) {
                 continue;
             }
-            let room = node.computed[axis] - 2.0 * node.pad[axis];
+            let room = (node.computed[axis] - 2.0 * node.pad[axis]).max(0.0);
             let children: Vec<_> = in_flow(nodes, index).collect();
             if along(node, axis) {
                 let excess = flow(nodes, index, axis) - room;
@@ -110,8 +120,9 @@ pub(crate) fn solve(nodes: &mut [Built], states: &HashMap<Id, State>, scale: f32
             } else {
                 0.0
             };
-        let x = parent.rect[0] + nodes[index].relative[0];
-        let y = parent.rect[1] + nodes[index].relative[1] - scroll;
+        let [dx, dy] = nodes[index].offset;
+        let x = parent.rect[0] + nodes[index].relative[0] + dx;
+        let y = parent.rect[1] + nodes[index].relative[1] - scroll + dy;
         nodes[index].rect = [
             snap(x),
             snap(y),
@@ -143,5 +154,28 @@ fn flow(nodes: &[Built], index: usize, axis: usize) -> f32 {
         sum + nodes[index].gap * (count.max(1) - 1) as f32
     } else {
         sizes.fold(0.0, f32::max)
+    }
+}
+
+fn fit_labels(nodes: &mut [Built], texts: &mut Texts, frame: u64) {
+    for node in nodes.iter_mut() {
+        let Some(label) = node.label.clone() else {
+            continue;
+        };
+        let icon = if node.icon.is_some() || node.image.is_some() {
+            ICON + ICON_GAP
+        } else {
+            0.0
+        };
+        let [left, _, right, _] = node.inset;
+        let width = (node.computed[0] - left - right - 2.0 * node.pad[0] - icon).max(0.0);
+        if label.size[0] <= width {
+            continue;
+        }
+        node.label = match node.overflow {
+            Overflow::Clip => continue,
+            Overflow::Wrap => Some(label.wrapped(width, node.center)),
+            Overflow::Ellipsis => Some(texts.ellipsis(&label, width, frame)),
+        };
     }
 }

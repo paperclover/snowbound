@@ -384,7 +384,7 @@ fn sweep(
 #[test]
 fn structural_edits_reread_as_saved() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut paths = vec![root.join("evidence/structural-edits/probe-section/probe.one")];
+    let mut paths = vec![root.join("corpus/structural-probe/probe.one")];
     if let Some(extra) = std::env::var_os("CANVAS_SWEEP_SECTIONS") {
         paths.extend(std::env::split_paths(&extra));
     }
@@ -522,7 +522,7 @@ fn structural_edits_write_what_onenote_reads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let read = |path: &str| std::fs::read(root.join(path)).unwrap();
     let mut engine = TextEngine::default();
-    let mut probe = read("evidence/structural-edits/probe-section/probe.one");
+    let mut probe = read("corpus/structural-probe/probe.one");
     for (title, keys) in [
         ("c6-plain", vec![(Before("Above"), Press::Tab)]),
         ("c6-first", vec![(Before("Target text"), Press::ShiftTab)]),

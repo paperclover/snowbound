@@ -608,6 +608,8 @@ fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>
                     TagIcon::RedSquare => "Project A",
                     TagIcon::YellowSquare => "Project B",
                     TagIcon::BlueSquare => "Project C",
+                    TagIcon::Flag => "Outlook task",
+                    TagIcon::Other => "Tag",
                 };
                 let label = if tag.label.is_empty() {
                     fallback

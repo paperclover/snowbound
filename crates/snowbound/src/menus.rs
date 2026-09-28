@@ -7,12 +7,43 @@ use std::sync::Arc;
 use ui::{Anchor, Id, popup::Item};
 
 /// What a drag holds.
-pub enum Drag {
+pub enum Dragged {
     Page(ExGuid),
-    /// A sidebar row.
-    Entry(crate::sidebar::Entry),
+    /// A sidebar row, where it would land, and where it came from.
+    Entry {
+        entry: crate::sidebar::Entry,
+        landing: crate::sidebar::Landing,
+        home: crate::sidebar::Landing,
+    },
     /// A section tab, by index.
     Tab(usize),
+}
+
+/// Something held down to drag: where the pointer took it, whether it has moved far enough
+/// to lift, and for rows, the index in their list where the gap it would land in opens.
+pub struct Drag {
+    pub what: Dragged,
+    /// The pointer when pressed, and its distance from the box's corner.
+    from: [f32; 2],
+    grab: [f32; 2],
+    pub lifted: bool,
+    /// Escape called it off; it ends when the button comes up.
+    pub cancelled: bool,
+    /// Let go: what it held eases into its place, then the drag ends.
+    pub released: bool,
+    pub slot: Option<usize>,
+}
+
+impl Drag {
+    /// Whether it follows the pointer: lifted, held, and not called off.
+    pub fn live(&self) -> bool {
+        self.lifted && !self.cancelled && !self.released
+    }
+
+    /// Where the dragged box's corner follows the pointer at `pointer`.
+    pub fn corner(&self, pointer: [f32; 2]) -> [f32; 2] {
+        [pointer[0] - self.grab[0], pointer[1] - self.grab[1]]
+    }
 }
 
 /// What a context menu was opened on.
@@ -28,12 +59,72 @@ pub fn id() -> Id {
 }
 
 /// The catalog folder holding `path`.
-fn folder(path: &str) -> String {
+pub(crate) fn folder(path: &str) -> String {
     path.rsplit_once('/')
         .map_or(String::new(), |(folder, _)| folder.to_owned())
 }
 
 impl State {
+    /// Follows a drag of what `held` names, pressed in its box's rectangle, this frame:
+    /// starts one, lifts it once the pointer has moved a few pixels as a click's doesn't,
+    /// and says when it was let go while it followed the pointer. `mine` tells this list's
+    /// drags from others'. A drag let go stays, as what it held eases into place, until
+    /// `settle` ends it.
+    pub(crate) fn follow_drag(
+        &mut self,
+        held: Option<(Dragged, [f32; 4])>,
+        mine: impl Fn(&Dragged) -> bool,
+    ) -> bool {
+        let pointer = self.ui.pointer();
+        match (held, &mut self.drag) {
+            (Some(_), Some(drag)) if mine(&drag.what) && !drag.released => {
+                if let Some([x, y]) = pointer {
+                    drag.lifted |= (x - drag.from[0]).hypot(y - drag.from[1]) > 4.0;
+                }
+                false
+            }
+            (Some((what, rect)), None | Some(Drag { released: true, .. })) => {
+                self.drag = pointer.map(|pointer| Drag {
+                    what,
+                    from: pointer,
+                    grab: [pointer[0] - rect[0], pointer[1] - rect[1]],
+                    lifted: false,
+                    cancelled: false,
+                    released: false,
+                    slot: None,
+                });
+                false
+            }
+            (None, Some(drag)) if mine(&drag.what) && !drag.released => {
+                let dropped = drag.live();
+                drag.released = true;
+                if !drag.lifted {
+                    self.drag = None;
+                }
+                dropped
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether something dragged is lifted, still following the pointer or easing into place,
+    /// so letting go of it isn't a click.
+    pub(crate) fn dragged(&self) -> bool {
+        self.drag.as_ref().is_some_and(|drag| drag.lifted)
+    }
+
+    /// Ends this list's drag, let go, once what it held stands in its place.
+    pub(crate) fn settle(&mut self, mine: impl Fn(&Dragged) -> bool, placed: bool) {
+        if placed
+            && self
+                .drag
+                .as_ref()
+                .is_some_and(|drag| drag.released && mine(&drag.what))
+        {
+            self.drag = None;
+        }
+    }
+
     /// The open context menu, and what its choice does.
     pub(crate) fn context_menu(&mut self) {
         let Some((target, point)) = &self.menu else {
@@ -58,8 +149,18 @@ impl State {
                 let above = at
                     .and_then(|at| at.checked_sub(1))
                     .map_or(0, |above| pages[above].2);
+                let (versions, shown) = self.session.as_ref().map_or((false, false), |session| {
+                    (
+                        !session.page_versions(*space).is_empty(),
+                        session.shown_history == Some(*space),
+                    )
+                });
                 vec![
                     item("Delete"),
+                    Item {
+                        separated: true,
+                        ..item("Copy Link to Page")
+                    },
                     Item {
                         separated: true,
                         ..item("New Page")
@@ -74,6 +175,15 @@ impl State {
                     Item {
                         disabled: level <= 1,
                         ..item("Promote Subpage")
+                    },
+                    Item {
+                        separated: true,
+                        disabled: !versions,
+                        ..item(if shown {
+                            "Hide Page Versions"
+                        } else {
+                            "Show Page Versions"
+                        })
                     },
                 ]
             }
@@ -104,8 +214,19 @@ impl State {
         };
         let command = match (target, items[chosen].text) {
             (Target::Page(space), "Delete") => Some(Command::DeletePages(vec![space])),
+            (Target::Page(space), "Copy Link to Page") => {
+                let copied = self
+                    .page_link(space, None)
+                    .and_then(|link| Ok(self.clipboard.set_text(link)?));
+                if let Err(error) = copied {
+                    eprintln!("Copying the link failed: {error}");
+                }
+                None
+            }
             (Target::Page(_), "New Page") => Some(Command::NewPage { under: None }),
             (Target::Page(space), "New Subpage") => Some(Command::NewPage { under: Some(space) }),
+            (Target::Page(page), "Show Page Versions") => Some(Command::History { page, show: true }),
+            (Target::Page(page), "Hide Page Versions") => Some(Command::History { page, show: false }),
             (Target::Page(space), text) => self.session.as_ref().and_then(|session| {
                 let level = session
                     .pages
@@ -123,13 +244,11 @@ impl State {
                 Target::Section { library, path } | Target::Group { library, path },
                 "Rename",
             ) => {
-                let name = path.rsplit('/').next().unwrap_or_default();
-                self.renaming = Some(crate::sidebar::Renaming {
+                self.rename(crate::rename::Target::Entry {
                     library,
-                    name: name.strip_suffix(".one").unwrap_or(name).to_owned(),
                     path,
+                    in_tab: false,
                 });
-                self.sidebar = true;
                 None
             }
             (Target::Section { library, path }, "Delete") => platform::confirm(
@@ -166,8 +285,18 @@ impl State {
     /// The section tab, of those built as `row`, under the pointer while a page is dragged
     /// there, which a drop moves the page into.
     pub(crate) fn page_drop(&self, row: Id) -> Option<usize> {
-        let (Some(Drag::Page(_)), Some(session), Some([x, y])) =
-            (&self.drag, &self.session, self.ui.pointer())
+        let (
+            Some(Drag {
+                what: Dragged::Page(_),
+                ..
+            }),
+            Some(session),
+            Some([x, y]),
+        ) = (
+            self.drag.as_ref().filter(|drag| drag.live()),
+            &self.session,
+            self.ui.pointer(),
+        )
         else {
             return None;
         };
@@ -180,156 +309,166 @@ impl State {
             })
     }
 
-    /// Moves a page by dragging its tab: while `held`, a line shows where it would go; let
-    /// go, it moves there at its level, or under a page at most one level above it. Onto a
-    /// section tab of those built as `row`, it moves to the end of that section, as
-    /// OneNote moves a page dropped on a section's tab. `panel` is the page list's rectangle.
+    /// The page tab dragged, as the page list, built as the current box, shows it.
+    pub(crate) fn dragged_page(&self) -> Option<crate::PageDrag> {
+        let drag = self.drag.as_ref().filter(|drag| drag.lifted)?;
+        let Dragged::Page(space) = drag.what else {
+            return None;
+        };
+        let origin = self.ui.rect(self.ui.id(crate::page_list_top()))?[1];
+        Some(crate::PageDrag {
+            space,
+            top: drag.live().then(|| drag.corner(self.pointer)[1] - origin),
+            slot: drag.slot,
+        })
+    }
+
+    /// Moves a page by dragging its tab, `held` in the page list whose tabs stand at
+    /// `places`: let go, it moves where the gap the other tabs opened for it is, at its
+    /// level, or under a page at most one level above it. Onto a section tab of those built
+    /// as `row`, it moves to the end of that section, as OneNote moves a page dropped on a
+    /// section's tab.
     pub(crate) fn drag_pages(
         &mut self,
         held: Option<ExGuid>,
-        section: &ui::Section,
-        panel: [f32; 4],
+        places: &[f32],
+        settled: bool,
         row: Id,
     ) {
-        let Some(session) = &self.session else {
-            return;
-        };
-        let dropped = match (&self.drag, held) {
-            (_, Some(space)) => Some(space),
-            (Some(Drag::Page(space)), None) => Some(*space),
-            _ => None,
-        };
+        let mine = |what: &Dragged| matches!(what, Dragged::Page(_));
+        self.settle(mine, settled);
+        let held =
+            held.and_then(|space| Some((Dragged::Page(space), self.ui.rect(self.ui.id(space))?)));
         let target = self.page_drop(row);
-        if let Some(space) = held {
-            self.drag = Some(Drag::Page(space));
-        } else if matches!(self.drag, Some(Drag::Page(_))) {
-            self.drag = None;
-        }
-        let (Some(space), Some([_, y])) = (dropped, self.ui.pointer()) else {
-            return;
-        };
-        if let Some(tab) = target {
-            if held.is_none() {
-                let path = session.tabs[tab].path.clone();
-                self.commands.push(Command::MovePage { space, path });
-            }
-            return;
-        }
-        // Rows other than the dragged one, with where each lies.
-        let rows: Vec<(ExGuid, u32, [f32; 4])> = session
-            .pages
-            .iter()
-            .filter(|(listed, ..)| *listed != space)
-            .filter_map(|(listed, _, level)| {
-                Some((*listed, *level, self.ui.rect(self.ui.id(listed))?))
-            })
-            .collect();
-        let Some(level) = session
-            .pages
-            .iter()
-            .find(|(listed, ..)| *listed == space)
-            .map(|(.., level)| *level)
+        let origin = self.ui.rect(self.ui.id(crate::page_list_top()));
+        let dropped = self.follow_drag(held, mine);
+        let (
+            Some(session),
+            Some(
+                drag @ Drag {
+                    what: Dragged::Page(_),
+                    ..
+                },
+            ),
+        ) = (&self.session, &mut self.drag)
         else {
             return;
         };
-        let at = rows
-            .iter()
-            .position(|(.., rect)| y < (rect[1] + rect[3]) / 2.0)
-            .unwrap_or(rows.len());
-        let before = rows.get(at).map(|(listed, ..)| *listed);
-        let level = at
-            .checked_sub(1)
-            .map_or(1, |above| level.min(rows[above].1 + 1));
-        let stays = session
+        let Dragged::Page(space) = drag.what else {
+            return;
+        };
+        let Some(from) = session
             .pages
             .iter()
-            .skip_while(|(listed, ..)| *listed != space)
-            .nth(1)
-            .map(|(listed, ..)| *listed)
-            == before;
-        if stays {
+            .position(|(listed, ..)| *listed == space)
+        else {
+            // The page left the section, dropped on another's tab.
+            self.drag = None;
+            return;
+        };
+        if drag.cancelled {
+            drag.slot = None;
+        } else if drag.live()
+            && let Some(origin) = origin
+        {
+            let middle = drag.corner(self.pointer)[1] - origin[1] + crate::ROW / 2.0;
+            let spans: Vec<[f32; 2]> = places.iter().map(|top| [*top, crate::ROW]).collect();
+            drag.slot = Some(if target.is_some() {
+                from
+            } else {
+                ui::drop_slot(&spans, from, middle)
+            });
+        }
+        if !dropped {
             return;
         }
-        if held.is_some() {
-            // The line lies between the rows the page would go between.
-            let line = match (at.checked_sub(1).map(|above| rows[above].2), rows.get(at)) {
-                (_, Some((.., below))) => below[1],
-                (Some(above), None) => above[3],
-                (None, None) => return,
-            } - panel[1];
-            let indent = 10.0 + 16.0 * (level - 1) as f32;
-            self.ui.mark(
-                [indent, line - 1.5, crate::PAGE_LIST - 6.0, line + 1.5],
-                section.accent,
-                1.5,
-            );
-        } else if let Ok(edit) = PageEdit::move_to(space, before, level) {
+        let slot = drag.slot.take();
+        if let Some(tab) = target {
+            let path = session.tabs[tab].path.clone();
+            self.commands.push(Command::MovePage { space, path });
+            return;
+        }
+        let Some(slot) = slot.filter(|slot| *slot != from) else {
+            return;
+        };
+        let others: Vec<_> = session
+            .pages
+            .iter()
+            .filter(|(listed, ..)| *listed != space)
+            .collect();
+        let before = others.get(slot).map(|(listed, ..)| *listed);
+        let level = slot
+            .checked_sub(1)
+            .map_or(1, |above| session.pages[from].2.min(others[above].2 + 1));
+        if let Ok(edit) = PageEdit::move_to(space, before, level) {
             self.commands.push(Command::Pages(vec![edit]));
         }
     }
 
-    /// Reorders section tabs by dragging one: while `held`, a line shows where it would go
-    /// among the tabs built as `row` in the tab row `bar`; let go, the folder takes that
-    /// order.
+    /// The section tab dragged, as the tabs built as `row` show it: its index, and its
+    /// leading edge following the pointer along the row.
+    pub(crate) fn dragged_tab(&self, row: Id) -> Option<ui::shell::Dragged> {
+        let drag = self.drag.as_ref().filter(|drag| drag.lifted)?;
+        let Dragged::Tab(index) = drag.what else {
+            return None;
+        };
+        let start = drag.corner(self.pointer)[0] - self.ui.rect(row)?[0];
+        Some(ui::shell::Dragged {
+            index,
+            start: drag.live().then_some(start),
+        })
+    }
+
+    /// Reorders section tabs by dragging one, as browser tabs reorder: let go, the tab
+    /// `held` of those built as `row` lands at `slot`, and the folder takes that order. The
+    /// tabs take it at once, so none slides back while the notebook changes.
     pub(crate) fn drag_tabs(
         &mut self,
         held: Option<usize>,
+        slot: Option<usize>,
+        settled: bool,
         row: Id,
-        bar: [f32; 4],
-        accent: [f32; 4],
     ) {
-        let Some(session) = &self.session else {
+        let mine = |what: &Dragged| matches!(what, Dragged::Tab(_));
+        self.settle(mine, settled);
+        let held = held.and_then(|tab| {
+            Some((
+                Dragged::Tab(tab),
+                self.ui.rect(ui::shell::tab_id(row, tab))?,
+            ))
+        });
+        let dropped = self.follow_drag(held, mine);
+        let (
+            true,
+            Some(Drag {
+                what: Dragged::Tab(tab),
+                ..
+            }),
+            Some(slot),
+            Some(session),
+        ) = (dropped, &mut self.drag, slot, &mut self.session)
+        else {
             return;
         };
-        let dragged = match (&self.drag, held) {
-            (_, Some(tab)) => Some(tab),
-            (Some(Drag::Tab(tab)), None) => Some(*tab),
-            _ => None,
-        };
-        if let Some(tab) = held {
-            self.drag = Some(Drag::Tab(tab));
-        } else if matches!(self.drag, Some(Drag::Tab(_))) {
-            self.drag = None;
+        // It eases into its new place from where it was let go.
+        let tab = std::mem::replace(tab, slot);
+        if slot == tab {
+            return;
         }
-        let (Some(tab), Some([x, _])) = (dragged, self.ui.pointer()) else {
-            return;
-        };
-        let others: Vec<(usize, [f32; 4])> = (0..session.tabs.len())
-            .filter(|other| *other != tab)
-            .filter_map(|other| Some((other, self.ui.rect(ui::shell::tab_id(row, other))?)))
-            .collect();
-        let at = others
+        let open = session.tabs[session.tab].path.clone();
+        let moved = session.tabs.remove(tab);
+        session.tabs.insert(slot, moved);
+        session.tab = session
+            .tabs
             .iter()
-            .position(|(_, rect)| x < (rect[0] + rect[2]) / 2.0)
-            .unwrap_or(others.len());
-        let mut order: Vec<usize> = others.iter().map(|(other, _)| *other).collect();
-        order.insert(at, tab);
-        if order.iter().copied().eq(0..session.tabs.len()) {
-            return;
-        }
-        if held.is_some() {
-            let edge = match (
-                at.checked_sub(1).map(|before| others[before].1),
-                others.get(at),
-            ) {
-                (_, Some((_, after))) => after[0],
-                (Some(before), None) => before[2],
-                (None, None) => return,
-            } - bar[0];
-            self.ui
-                .mark([edge - 1.5, 4.0, edge + 1.5, bar[3] - bar[1]], accent, 1.5);
-        } else {
-            let path = &session.tabs[tab].path;
-            let folder = folder(path);
-            let paths = order
-                .into_iter()
-                .map(|index| session.tabs[index].path.clone())
-                .collect();
-            self.commands.push(Command::Structure(
-                Arc::clone(&session.library),
-                Structure::Reorder { folder, paths },
-            ));
-        }
+            .position(|tab| tab.path == open)
+            .unwrap_or_default();
+        let folder = folder(&open);
+        let paths = session.tabs.iter().map(|tab| tab.path.clone()).collect();
+        self.commands.push(Command::Structure(
+            Arc::clone(&session.library),
+            Structure::Reorder { folder, paths },
+        ));
     }
 }
 

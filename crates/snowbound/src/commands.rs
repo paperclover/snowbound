@@ -1,0 +1,1015 @@
+//! The commands the menu bar, the toolbar and the keyboard share: each one's title, its
+//! chords on each platform, when it applies and what it does.
+
+use crate::{Command as Work, FONTS, HIGHLIGHTS, SIZES, State, page, platform, search};
+use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, NoteTag, Toggle};
+use canvas::interaction::Request;
+use draw::edit::{Key, Modifiers, NamedKey, Platform};
+use std::{error::Error, sync::Arc};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Id {
+    Settings,
+    NewNotebook,
+    OpenNotebook,
+    CloseNotebook,
+    NewSection,
+    NewSectionGroup,
+    NewPage,
+    NewSubpage,
+    PageVersions,
+    CopyPageLink,
+    ShowNotebook,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Find,
+    Search,
+    Back,
+    Forward,
+    ZoomIn,
+    ZoomOut,
+    ActualSize,
+    Sidebar,
+    PageList,
+    DarkPages,
+    Table,
+    Picture,
+    Attachment,
+    Link,
+    Equation,
+    Date,
+    Time,
+    DateTime,
+    Toggle(Toggle),
+    Highlight,
+    FontColor,
+    Bullets,
+    Numbering,
+    Align(Alignment),
+    Indent,
+    Outdent,
+    ClearFormatting,
+    Tag(NoteTag),
+    RemoveTags,
+    Help,
+}
+
+/// What a menu or toolbar offers: a command, or one of a list's entries.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    Command(Id),
+    Font(String),
+    Size(f32),
+    /// A COLORREF, or `None` for no highlight.
+    Highlight(Option<u32>),
+    /// A COLORREF, or `None` for automatic.
+    Color(Option<u32>),
+    List(Option<ListStyle>),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Status {
+    pub enabled: bool,
+    pub checked: bool,
+}
+
+/// A key with modifiers; `command` is the shortcut modifier, Control off macOS.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chord {
+    pub key: Press,
+    pub shift: bool,
+    pub option: bool,
+    pub control: bool,
+    pub command: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Press {
+    /// Unshifted and lowercase, as on a US keyboard.
+    Char(char),
+    Named(NamedKey),
+}
+
+pub struct Command {
+    pub id: Id,
+    pub title: &'static str,
+    pub mac: &'static [Chord],
+    pub pc: &'static [Chord],
+}
+
+const fn key(key: char) -> Chord {
+    press(Press::Char(key))
+}
+
+pub(crate) const fn named(key: NamedKey) -> Chord {
+    press(Press::Named(key))
+}
+
+const fn press(key: Press) -> Chord {
+    Chord {
+        key,
+        shift: false,
+        option: false,
+        control: false,
+        command: false,
+    }
+}
+
+/// `key` with the shortcut modifier.
+pub(crate) const fn cmd(key: char) -> Chord {
+    self::key(key).command()
+}
+
+impl Chord {
+    pub(crate) const fn command(mut self) -> Self {
+        self.command = true;
+        self
+    }
+
+    const fn shift(mut self) -> Self {
+        self.shift = true;
+        self
+    }
+
+    pub(crate) const fn option(mut self) -> Self {
+        self.option = true;
+        self
+    }
+
+    pub(crate) const fn control(mut self) -> Self {
+        self.control = true;
+        self
+    }
+}
+
+macro_rules! row {
+    ($id:expr, $title:expr, $mac:expr, $pc:expr $(,)?) => {
+        Command {
+            id: $id,
+            title: $title,
+            mac: $mac,
+            pc: $pc,
+        }
+    };
+}
+
+macro_rules! tag {
+    ($tag:expr, $digit:literal) => {
+        row!(Id::Tag($tag), $tag.label(), &[cmd($digit)], &[cmd($digit)])
+    };
+}
+
+const NONE: &[Chord] = &[];
+
+/// OneNote 2010's chords off macOS; there, AppKit's and OneNote for Mac's.
+pub const COMMANDS: &[Command] = &[
+    row!(Id::Settings, "Settings…", &[cmd(',')], &[cmd(',')]),
+    row!(Id::NewNotebook, "New Notebook…", NONE, NONE),
+    row!(Id::OpenNotebook, "Open Notebook…", &[cmd('o')], &[cmd('o')]),
+    row!(Id::CloseNotebook, "Close This Notebook", NONE, NONE),
+    row!(Id::NewSection, "New Section", &[cmd('t')], &[cmd('t')]),
+    row!(Id::NewSectionGroup, "New Section Group", NONE, NONE),
+    row!(Id::NewPage, "New Page", &[cmd('n')], &[cmd('n')]),
+    row!(
+        Id::NewSubpage,
+        "New Subpage",
+        &[cmd('n').shift().option()],
+        &[cmd('n').shift().option()],
+    ),
+    row!(Id::PageVersions, "Page Versions", NONE, NONE),
+    row!(Id::CopyPageLink, "Copy Link to Page", NONE, NONE),
+    row!(
+        Id::ShowNotebook,
+        if cfg!(target_os = "macos") {
+            "Show in Finder"
+        } else {
+            "Open Notebook Folder"
+        },
+        NONE,
+        NONE,
+    ),
+    row!(Id::Undo, "Undo", &[cmd('z')], &[cmd('z')]),
+    row!(
+        Id::Redo,
+        "Redo",
+        &[cmd('z').shift()],
+        if cfg!(windows) {
+            &[cmd('y'), cmd('z').shift()]
+        } else {
+            &[cmd('z').shift()]
+        },
+    ),
+    row!(Id::Cut, "Cut", &[cmd('x')], &[cmd('x')]),
+    row!(Id::Copy, "Copy", &[cmd('c')], &[cmd('c')]),
+    row!(Id::Paste, "Paste", &[cmd('v')], &[cmd('v')]),
+    row!(Id::SelectAll, "Select All", &[cmd('a')], &[cmd('a')]),
+    row!(Id::Find, "Find on This Page", &[cmd('f')], &[cmd('f')]),
+    row!(Id::Search, "Search Notebooks", &[cmd('e')], &[cmd('e')]),
+    // Option-Command-arrows move the caret; Xcode goes back with Control-Command.
+    row!(
+        Id::Back,
+        "Back",
+        &[named(NamedKey::ArrowLeft).command().control()],
+        &[named(NamedKey::ArrowLeft).option()],
+    ),
+    row!(
+        Id::Forward,
+        "Forward",
+        &[named(NamedKey::ArrowRight).command().control()],
+        &[named(NamedKey::ArrowRight).option()],
+    ),
+    // OneNote 2010 leaves Control with = and - to subscript and strikethrough.
+    row!(
+        Id::ZoomIn,
+        "Zoom In",
+        &[cmd('='), cmd('=').shift()],
+        &[cmd('=').option(), cmd('=').option().shift()],
+    ),
+    row!(Id::ZoomOut, "Zoom Out", &[cmd('-')], &[cmd('-').option()]),
+    row!(
+        Id::ActualSize,
+        "Actual Size",
+        &[cmd('0')],
+        &[cmd('0').option()]
+    ),
+    row!(Id::Sidebar, "Sidebar", &[cmd('s').control()], NONE),
+    row!(Id::PageList, "Page List", NONE, NONE),
+    row!(Id::DarkPages, "Dark Pages", NONE, NONE),
+    row!(Id::Table, "Table", NONE, NONE),
+    row!(Id::Picture, "Picture…", NONE, NONE),
+    row!(Id::Attachment, "Attach File…", NONE, NONE),
+    row!(Id::Link, "Link…", &[cmd('k')], &[cmd('k')]),
+    row!(
+        Id::Equation,
+        "Equation",
+        &[key('=').control()],
+        &[key('=').option()],
+    ),
+    row!(Id::Date, "Date", NONE, &[key('d').option().shift()]),
+    row!(Id::Time, "Time", NONE, &[key('t').option().shift()]),
+    row!(
+        Id::DateTime,
+        "Date & Time",
+        NONE,
+        &[key('f').option().shift()]
+    ),
+    row!(Id::Toggle(Toggle::Bold), "Bold", &[cmd('b')], &[cmd('b')]),
+    row!(
+        Id::Toggle(Toggle::Italic),
+        "Italic",
+        &[cmd('i')],
+        &[cmd('i')]
+    ),
+    row!(
+        Id::Toggle(Toggle::Underline),
+        "Underline",
+        &[cmd('u')],
+        &[cmd('u')]
+    ),
+    row!(
+        Id::Toggle(Toggle::Strikethrough),
+        "Strikethrough",
+        &[cmd('x').shift()],
+        &[cmd('-')],
+    ),
+    row!(
+        Id::Toggle(Toggle::Subscript),
+        "Subscript",
+        &[cmd('=').control().option()],
+        &[cmd('=')],
+    ),
+    row!(
+        Id::Toggle(Toggle::Superscript),
+        "Superscript",
+        &[cmd('=').option().shift()],
+        &[cmd('=').shift()],
+    ),
+    // AppKit's Hide Others takes Option-Command-H.
+    row!(
+        Id::Highlight,
+        "Highlight",
+        &[cmd('h').control()],
+        &[cmd('h').option()]
+    ),
+    row!(Id::FontColor, "Font Color", NONE, NONE),
+    row!(Id::Bullets, "Bullets", &[cmd('.')], &[cmd('.')]),
+    row!(Id::Numbering, "Numbering", &[cmd('/')], &[cmd('/')]),
+    row!(
+        Id::Align(Alignment::Left),
+        "Align Left",
+        &[cmd('l')],
+        &[cmd('l')]
+    ),
+    row!(Id::Align(Alignment::Center), "Center", NONE, NONE),
+    row!(
+        Id::Align(Alignment::Right),
+        "Align Right",
+        &[cmd('r')],
+        &[cmd('r')]
+    ),
+    row!(
+        Id::Indent,
+        "Increase Indent",
+        &[cmd(']')],
+        &[named(NamedKey::ArrowRight).option().shift()],
+    ),
+    row!(
+        Id::Outdent,
+        "Decrease Indent",
+        &[cmd('[')],
+        &[named(NamedKey::ArrowLeft).option().shift()],
+    ),
+    row!(
+        Id::ClearFormatting,
+        "Clear Formatting",
+        &[cmd('n').shift()],
+        &[cmd('n').shift()]
+    ),
+    tag!(NoteTag::ToDo, '1'),
+    tag!(NoteTag::Important, '2'),
+    tag!(NoteTag::Question, '3'),
+    tag!(NoteTag::RememberForLater, '4'),
+    tag!(NoteTag::Definition, '5'),
+    tag!(NoteTag::Highlight, '6'),
+    tag!(NoteTag::Contact, '7'),
+    tag!(NoteTag::Address, '8'),
+    tag!(NoteTag::PhoneNumber, '9'),
+    row!(
+        Id::RemoveTags,
+        "Remove Tag",
+        &[cmd('0').control()],
+        &[cmd('0')]
+    ),
+    row!(Id::Help, "Snowbound Help", NONE, NONE),
+];
+
+/// Where Snowbound Help leads.
+const HELP: &str = "https://shale.paperclover.net/snowbound";
+
+pub fn command(id: Id) -> &'static Command {
+    COMMANDS
+        .iter()
+        .find(|command| command.id == id)
+        .expect("Every command has a row")
+}
+
+impl Command {
+    pub fn chords(&self, platform: Platform) -> &'static [Chord] {
+        match platform {
+            Platform::MacOs => self.mac,
+            Platform::Gtk | Platform::Windows => self.pc,
+        }
+    }
+}
+
+/// Every choice the menu bar offers, in the order its `index` counts them.
+pub fn choices() -> impl Iterator<Item = Choice> {
+    COMMANDS
+        .iter()
+        .map(|command| Choice::Command(command.id))
+        .chain(FONTS.map(|name| Choice::Font(name.to_owned())))
+        .chain(SIZES.into_iter().map(Choice::Size))
+        .chain(std::iter::once(Choice::Highlight(None)))
+        .chain(
+            HIGHLIGHTS
+                .iter()
+                .map(|(color, _)| Choice::Highlight(Some(*color))),
+        )
+}
+
+/// How a menu names `choice`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn title(choice: Choice) -> String {
+    match choice {
+        Choice::Command(id) => command(id).title.to_owned(),
+        Choice::Font(name) => name,
+        Choice::Size(size) => format!("{size}"),
+        Choice::Highlight(None) => "No Color".to_owned(),
+        Choice::Highlight(Some(color)) => HIGHLIGHTS
+            .iter()
+            .find(|(listed, _)| *listed == color)
+            .map_or_else(String::new, |(_, name)| (*name).to_owned()),
+        Choice::Color(_) | Choice::List(_) => unreachable!("Only the toolbar offers these"),
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn index(choice: &Choice) -> usize {
+    choices()
+        .position(|listed| listed == *choice)
+        .expect("Menus offer listed choices")
+}
+
+/// The command `key` with `modifiers` runs here.
+pub fn find(key: &Key, modifiers: Modifiers) -> Option<Id> {
+    let pressed = pressed(key, modifiers, Platform::CURRENT)?;
+    COMMANDS
+        .iter()
+        .find(|command| command.chords(Platform::CURRENT).contains(&pressed))
+        .map(|command| command.id)
+}
+
+fn pressed(key: &Key, modifiers: Modifiers, platform: Platform) -> Option<Chord> {
+    let (key, shifted) = match key {
+        Key::Named(named) => (Press::Named(*named), false),
+        Key::Character(text) => {
+            let mut chars = text.chars();
+            let character = chars.next().filter(|_| chars.next().is_none())?;
+            match SHIFTED.iter().find(|(shifted, _)| *shifted == character) {
+                Some((_, base)) => (Press::Char(*base), true),
+                None => (Press::Char(character.to_ascii_lowercase()), false),
+            }
+        }
+    };
+    Some(Chord {
+        key,
+        shift: modifiers.shift || shifted,
+        option: modifiers.option,
+        // Off macOS Control is the shortcut modifier.
+        control: modifiers.control && platform == Platform::MacOs,
+        command: modifiers.command,
+    })
+}
+
+/// The US keyboard's shifted symbols and the keys they share.
+const SHIFTED: [(char, char); 21] = [
+    ('+', '='),
+    ('_', '-'),
+    ('{', '['),
+    ('}', ']'),
+    ('<', ','),
+    ('>', '.'),
+    ('?', '/'),
+    (':', ';'),
+    ('"', '\''),
+    ('|', '\\'),
+    ('~', '`'),
+    (')', '0'),
+    ('!', '1'),
+    ('@', '2'),
+    ('#', '3'),
+    ('$', '4'),
+    ('%', '5'),
+    ('^', '6'),
+    ('&', '7'),
+    ('*', '8'),
+    ('(', '9'),
+];
+
+impl Chord {
+    /// The key AppKit matches and shows: a shifted symbol stands for Shift with its key.
+    pub fn equivalent(self) -> (String, bool) {
+        match self.key {
+            Press::Char(base) if self.shift && !base.is_ascii_alphabetic() => {
+                let shifted = SHIFTED.iter().find(|(_, key)| *key == base);
+                shifted.map_or((base.to_string(), true), |(symbol, _)| {
+                    (symbol.to_string(), false)
+                })
+            }
+            Press::Char(base) => (base.to_string(), self.shift),
+            Press::Named(NamedKey::Space) => (" ".to_owned(), self.shift),
+            Press::Named(NamedKey::ArrowLeft) => ('\u{f702}'.to_string(), self.shift),
+            Press::Named(NamedKey::ArrowRight) => ('\u{f703}'.to_string(), self.shift),
+            Press::Named(named) => unreachable!("No command takes {named:?}"),
+        }
+    }
+
+    /// As a menu shows it on `platform`: ⌃⌥⇧⌘K on macOS, Ctrl+Alt+Shift+K elsewhere.
+    pub fn label(self, platform: Platform) -> String {
+        if platform == Platform::MacOs {
+            let (key, shift) = self.equivalent();
+            let key = match self.key {
+                Press::Named(NamedKey::Space) => "Space".to_owned(),
+                Press::Named(NamedKey::ArrowLeft) => "←".to_owned(),
+                Press::Named(NamedKey::ArrowRight) => "→".to_owned(),
+                _ => key.to_uppercase(),
+            };
+            [
+                (self.control, "⌃"),
+                (self.option, "⌥"),
+                (shift, "⇧"),
+                (self.command, "⌘"),
+            ]
+            .iter()
+            .filter(|(held, _)| *held)
+            .map(|(_, symbol)| *symbol)
+            .chain([key.as_str()])
+            .collect()
+        } else {
+            let key = match self.key {
+                Press::Char(key) => key.to_uppercase().to_string(),
+                Press::Named(NamedKey::ArrowLeft) => "Left".to_owned(),
+                Press::Named(NamedKey::ArrowRight) => "Right".to_owned(),
+                Press::Named(named) => format!("{named:?}"),
+            };
+            [
+                (self.command, "Ctrl+"),
+                (self.option, "Alt+"),
+                (self.shift, "Shift+"),
+            ]
+            .iter()
+            .filter(|(held, _)| *held)
+            .map(|(_, modifier)| *modifier)
+            .chain([key.as_str()])
+            .collect()
+        }
+    }
+}
+
+/// The chord a menu or hint shows for `id` here, empty where it has none.
+pub fn shortcut(id: Id) -> String {
+    command(id)
+        .chords(Platform::CURRENT)
+        .first()
+        .map_or_else(String::new, |chord| chord.label(Platform::CURRENT))
+}
+
+impl State {
+    pub(crate) fn format_state(&self) -> FormatState {
+        self.view.editor.format_state().unwrap_or_default()
+    }
+
+    /// Queues `choice` to run after this frame's input, as a key or a click on it does.
+    pub(crate) fn choose(&mut self, choice: Choice) {
+        self.commands.push(Work::Choose(choice));
+        self.window.request_redraw();
+    }
+
+    /// Every choice's status, in `choices` order, for the menu bar.
+    pub(crate) fn statuses(&self) -> Vec<Status> {
+        let format = self.format_state();
+        choices()
+            .map(|choice| self.status(&choice, &format))
+            .collect()
+    }
+
+    pub(crate) fn status(&self, choice: &Choice, format: &FormatState) -> Status {
+        let session = self.session.as_ref();
+        let welcome = session.is_none() && !self.temporary && self.sectionless.is_none();
+        let modal = self.options.is_some() || self.link.is_some();
+        let page = (session.is_some() || self.temporary) && !modal;
+        let writable = page && !session.is_some_and(|session| session.read_only());
+        let text = writable && self.view.accepts_text();
+        // Edit commands act on a focused field instead of the page.
+        let field = self
+            .ui
+            .focused()
+            .is_some_and(|focus| focus != crate::page());
+        let [anchor, focus] = self.view.editor.selection().positions;
+        let selected = page && !field && self.view.accepts_text() && anchor != focus;
+        let enabled = |enabled| Status {
+            enabled,
+            checked: false,
+        };
+        let checked = |checked| Status {
+            enabled: text,
+            checked,
+        };
+        let id = match choice {
+            Choice::Command(id) => *id,
+            Choice::Font(name) => return checked(format.font.as_ref() == Some(name)),
+            Choice::Size(size) => return checked(format.font_size == Some(*size)),
+            Choice::Highlight(_) | Choice::Color(_) | Choice::List(_) => return enabled(text),
+        };
+        match id {
+            Id::Settings | Id::NewNotebook | Id::OpenNotebook | Id::Help => enabled(!modal),
+            Id::CloseNotebook | Id::ShowNotebook => enabled(!modal && self.notebook().is_some()),
+            Id::NewSection | Id::NewSectionGroup => enabled(
+                !modal
+                    && self
+                        .notebook()
+                        .is_some_and(|library| library.catalog().is_some()),
+            ),
+            Id::NewPage | Id::NewSubpage | Id::CopyPageLink | Id::Find | Id::Search => {
+                enabled(!modal && session.is_some())
+            }
+            Id::PageVersions => {
+                session
+                    .filter(|_| !modal)
+                    .map_or_else(Status::default, |session| Status {
+                        enabled: !session.page_versions(session.space).is_empty(),
+                        checked: session.shown_history == Some(session.space),
+                    })
+            }
+            Id::Undo => enabled(writable && !field && self.view.editor.can_undo()),
+            Id::Redo => enabled(writable && !field && self.view.editor.can_redo()),
+            Id::Cut => enabled(writable && selected),
+            Id::Copy => enabled(selected),
+            Id::Paste => enabled(text && !field),
+            Id::SelectAll => enabled(field || page),
+            Id::Back => enabled(!modal && self.trail.open()[0]),
+            Id::Forward => enabled(!modal && self.trail.open()[1]),
+            Id::ZoomIn | Id::ZoomOut | Id::ActualSize => enabled(page),
+            Id::Sidebar => Status {
+                enabled: !welcome && !modal,
+                checked: self.sidebar,
+            },
+            Id::PageList => Status {
+                enabled: !modal && session.is_some(),
+                checked: self.pages_open,
+            },
+            Id::DarkPages => Status {
+                enabled: !modal,
+                checked: !self.light_pages,
+            },
+            Id::Table | Id::Picture | Id::Attachment => enabled(false),
+            Id::Link
+            | Id::Equation
+            | Id::Date
+            | Id::Time
+            | Id::DateTime
+            | Id::Highlight
+            | Id::FontColor
+            | Id::Indent
+            | Id::Outdent
+            | Id::ClearFormatting
+            | Id::RemoveTags => enabled(text),
+            Id::Toggle(toggle) => checked(format.toggles.contains(&toggle)),
+            Id::Bullets => checked(format.bullets),
+            Id::Numbering => checked(format.numbering),
+            Id::Align(alignment) => checked(format.alignment == Some(alignment)),
+            Id::Tag(tag) => checked(format.tags.contains(&tag)),
+        }
+    }
+
+    /// Applies `formatting`, remembering its font, colour or list style as the toolbar's
+    /// last pick.
+    fn format(&mut self, formatting: Formatting) -> Result<(), Box<dyn Error>> {
+        let kept = self.toolbar.clone();
+        let pens = &mut self.toolbar;
+        match &formatting {
+            Formatting::Font(name) => crate::remember(&mut self.recent_fonts, name.clone()),
+            Formatting::Highlight(color) => pens.highlight = *color,
+            Formatting::Color(color) => pens.font_color = *color,
+            Formatting::List(Some(ListStyle::Bullet(place))) => {
+                crate::remember(&mut pens.bullets, *place);
+            }
+            Formatting::List(Some(ListStyle::Number(place))) => {
+                crate::remember(&mut pens.numbering, *place);
+            }
+            _ => {}
+        }
+        if matches!(formatting, Formatting::Font(_)) || self.toolbar != kept {
+            self.save_settings();
+        }
+        let response = self.view.format(formatting)?;
+        self.respond(response);
+        Ok(())
+    }
+
+    /// The notebook the open section, or the notebook showing none, belongs to.
+    fn notebook(&self) -> Option<&Arc<crate::Library>> {
+        self.session
+            .as_ref()
+            .map(|session| &session.library)
+            .or(self.sectionless.as_ref())
+    }
+
+    /// Runs `choice` where it applies now.
+    pub(crate) fn run(&mut self, choice: Choice) -> Result<(), Box<dyn Error>> {
+        if !self.status(&choice, &self.format_state()).enabled {
+            return Ok(());
+        }
+        let format = Self::format;
+        let id = match choice {
+            Choice::Command(id) => id,
+            Choice::Font(name) => return format(self, Formatting::Font(name)),
+            Choice::Size(size) => return format(self, Formatting::FontSize(size)),
+            Choice::Highlight(color) => return format(self, Formatting::Highlight(color)),
+            Choice::Color(color) => return format(self, Formatting::Color(color)),
+            Choice::List(style) => return format(self, Formatting::List(style)),
+        };
+        let field = self.ui.focused().filter(|focus| *focus != page());
+        let response = match id {
+            Id::Settings => {
+                self.open_options();
+                return Ok(());
+            }
+            Id::NewNotebook => Work::NewNotebook,
+            Id::OpenNotebook => Work::OpenNotebook,
+            Id::CloseNotebook => {
+                Work::CloseNotebook(Arc::clone(self.notebook().ok_or("No notebook is open")?))
+            }
+            Id::NewSection | Id::NewSectionGroup => {
+                let library = Arc::clone(self.notebook().ok_or("No notebook is open")?);
+                let folder = self.session.as_ref().map_or_else(String::new, |session| {
+                    crate::menus::folder(&session.tabs[session.tab].path)
+                });
+                Work::Structure(
+                    library,
+                    if id == Id::NewSection {
+                        crate::manage::Structure::NewSection { folder }
+                    } else {
+                        crate::manage::Structure::NewGroup { folder }
+                    },
+                )
+            }
+            Id::NewPage => Work::NewPage { under: None },
+            Id::NewSubpage => Work::NewPage {
+                under: self.session.as_ref().map(|session| session.space),
+            },
+            Id::PageVersions => {
+                let session = self.session.as_ref().ok_or("No notebook is open")?;
+                Work::History {
+                    page: session.space,
+                    show: session.shown_history != Some(session.space),
+                }
+            }
+            Id::CopyPageLink => {
+                let space = self.session.as_ref().ok_or("No notebook is open")?.space;
+                let link = self.page_link(space, None)?;
+                self.clipboard.set_text(link)?;
+                return Ok(());
+            }
+            Id::ShowNotebook => {
+                platform::reveal(&self.notebook().ok_or("No notebook is open")?.location);
+                return Ok(());
+            }
+            Id::Undo | Id::Redo => {
+                let response = self.view.undo(id == Id::Redo)?;
+                self.respond(response);
+                return Ok(());
+            }
+            Id::Cut | Id::Copy => {
+                let response = self.view.copy(id == Id::Cut)?;
+                self.respond(response);
+                return Ok(());
+            }
+            Id::Paste => Work::Page(Request::Paste),
+            Id::SelectAll => {
+                match field {
+                    Some(field) => self.ui.focus_all(field),
+                    None => {
+                        let response = self.view.widen_selection()?;
+                        self.respond(response);
+                    }
+                }
+                return Ok(());
+            }
+            Id::Find => {
+                return self.start_find(field == Some(search::field()));
+            }
+            Id::Search => {
+                self.start_search();
+                return Ok(());
+            }
+            Id::Back | Id::Forward => {
+                self.travel(id == Id::Forward);
+                return Ok(());
+            }
+            Id::ZoomIn | Id::ZoomOut | Id::ActualSize => {
+                let zoom = match id {
+                    Id::ZoomIn => self.view.zoom() * 1.1,
+                    Id::ZoomOut => self.view.zoom() / 1.1,
+                    _ => 1.0,
+                };
+                let response = self.view.set_zoom(zoom)?;
+                self.respond(response);
+                return Ok(());
+            }
+            Id::Sidebar => {
+                self.sidebar = !self.sidebar;
+                return Ok(());
+            }
+            Id::PageList => {
+                self.pages_open = !self.pages_open;
+                return Ok(());
+            }
+            Id::DarkPages => {
+                self.light_pages = !self.light_pages;
+                self.follow_color_scheme();
+                self.save_settings();
+                return Ok(());
+            }
+            Id::Table | Id::Picture | Id::Attachment => return Ok(()),
+            Id::Link => {
+                self.open_link_dialog();
+                return Ok(());
+            }
+            Id::Equation => {
+                let response = self.view.insert_equation()?;
+                self.respond(response);
+                return Ok(());
+            }
+            // OneNote inserts the system's short date or time and a space.
+            Id::Date | Id::Time | Id::DateTime => {
+                let now = crate::filetime();
+                let date = platform::short_date(now);
+                let [_, time] = platform::date_text(now);
+                let text = match id {
+                    Id::Date => date,
+                    Id::Time => time,
+                    _ => format!("{date} {time}"),
+                };
+                let response = self.view.insert_text(format!("{text} "))?;
+                self.respond(response);
+                return Ok(());
+            }
+            Id::Help => {
+                platform::reveal(HELP);
+                return Ok(());
+            }
+            Id::Toggle(toggle) => return format(self, Formatting::Toggle(toggle)),
+            // The highlighter and font colour apply their last pick.
+            Id::Highlight => return format(self, Formatting::Highlight(self.toolbar.highlight)),
+            Id::FontColor => return format(self, Formatting::Color(self.toolbar.font_color)),
+            Id::Bullets => return format(self, Formatting::Bullets),
+            Id::Numbering => return format(self, Formatting::Numbering),
+            Id::Align(alignment) => return format(self, Formatting::Align(alignment)),
+            Id::Indent => return format(self, Formatting::Indent),
+            Id::Outdent => return format(self, Formatting::Outdent),
+            Id::ClearFormatting => return format(self, Formatting::Clear),
+            Id::Tag(tag) => return format(self, Formatting::Tag(tag)),
+            Id::RemoveTags => return format(self, Formatting::RemoveTags),
+        };
+        self.commands.push(response);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PLATFORMS: [Platform; 3] = [Platform::MacOs, Platform::Gtk, Platform::Windows];
+
+    #[test]
+    fn each_chord_runs_one_command_on_each_platform() {
+        for platform in PLATFORMS {
+            let chords: Vec<_> = COMMANDS
+                .iter()
+                .flat_map(|command| {
+                    command
+                        .chords(platform)
+                        .iter()
+                        .map(move |chord| (chord, command.title))
+                })
+                .collect();
+            for (at, (chord, title)) in chords.iter().enumerate() {
+                if let Some((_, other)) =
+                    chords[at + 1..].iter().find(|(listed, _)| listed == chord)
+                {
+                    panic!(
+                        "{platform:?}: {} runs both {title} and {other}",
+                        chord.label(platform)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn each_command_and_choice_is_listed_once() {
+        for (at, command) in COMMANDS.iter().enumerate() {
+            assert!(
+                COMMANDS[at + 1..]
+                    .iter()
+                    .all(|other| other.id != command.id),
+                "{:?}",
+                command.id
+            );
+        }
+        let choices: Vec<_> = choices().collect();
+        for (at, choice) in choices.iter().enumerate() {
+            assert_eq!(index(choice), at, "{choice:?}");
+        }
+    }
+
+    #[test]
+    fn keys_find_their_command_as_each_platform_types_them() {
+        let find = |platform, key: &str, shift, option, control, command| {
+            let modifiers = Modifiers {
+                shift,
+                option,
+                control,
+                command,
+            };
+            let pressed = pressed(&Key::Character(key.into()), modifiers, platform)?;
+            COMMANDS
+                .iter()
+                .find(|listed| listed.chords(platform).contains(&pressed))
+                .map(|listed| listed.id)
+        };
+        let mac = Platform::MacOs;
+        assert_eq!(
+            find(mac, "b", false, false, false, true),
+            Some(Id::Toggle(Toggle::Bold))
+        );
+        assert_eq!(
+            find(mac, "N", true, false, false, true),
+            Some(Id::ClearFormatting)
+        );
+        assert_eq!(find(mac, "+", true, false, false, true), Some(Id::ZoomIn));
+        assert_eq!(find(mac, "=", false, false, false, true), Some(Id::ZoomIn));
+        assert_eq!(
+            find(mac, "+", true, true, false, true),
+            Some(Id::Toggle(Toggle::Superscript))
+        );
+        assert_eq!(
+            find(mac, "=", false, false, true, false),
+            Some(Id::Equation)
+        );
+        assert_eq!(
+            find(mac, "0", false, false, true, true),
+            Some(Id::RemoveTags)
+        );
+        assert_eq!(
+            find(mac, "7", false, false, false, true),
+            Some(Id::Tag(NoteTag::Contact))
+        );
+        assert_eq!(find(mac, "q", false, false, false, true), None);
+        // The highlighter's chord runs the command that applies its last pick.
+        assert_eq!(
+            find(mac, "h", false, false, true, true),
+            Some(Id::Highlight)
+        );
+        // Control comes with the shortcut modifier off macOS.
+        let gtk = Platform::Gtk;
+        assert_eq!(
+            find(gtk, "b", false, false, true, true),
+            Some(Id::Toggle(Toggle::Bold))
+        );
+        assert_eq!(
+            find(gtk, "+", true, false, true, true),
+            Some(Id::Toggle(Toggle::Superscript))
+        );
+        assert_eq!(
+            find(gtk, "=", false, false, true, true),
+            Some(Id::Toggle(Toggle::Subscript))
+        );
+        assert_eq!(find(gtk, "+", true, true, true, true), Some(Id::ZoomIn));
+        assert_eq!(find(gtk, "D", true, true, false, false), Some(Id::Date));
+        assert_eq!(find(gtk, "h", false, true, true, true), Some(Id::Highlight));
+        assert_eq!(
+            find(gtk, "y", false, false, true, true),
+            cfg!(windows).then_some(Id::Redo)
+        );
+        let indent = pressed(
+            &Key::Named(NamedKey::ArrowRight),
+            Modifiers {
+                shift: true,
+                option: true,
+                ..Modifiers::default()
+            },
+            gtk,
+        );
+        assert!(
+            command(Id::Indent)
+                .pc
+                .iter()
+                .any(|chord| Some(*chord) == indent)
+        );
+    }
+
+    #[test]
+    fn chords_read_as_each_platform_labels_them() {
+        let label = |id, platform| command(id).chords(platform)[0].label(platform);
+        assert_eq!(
+            label(Id::Toggle(Toggle::Superscript), Platform::MacOs),
+            "⌥⌘+"
+        );
+        assert_eq!(
+            label(Id::Toggle(Toggle::Subscript), Platform::MacOs),
+            "⌃⌥⌘="
+        );
+        assert_eq!(label(Id::ClearFormatting, Platform::MacOs), "⇧⌘N");
+        assert_eq!(
+            label(Id::Toggle(Toggle::Superscript), Platform::Gtk),
+            "Ctrl+Shift+="
+        );
+        assert_eq!(label(Id::Indent, Platform::Gtk), "Alt+Shift+Right");
+        assert_eq!(label(Id::Date, Platform::Windows), "Alt+Shift+D");
+    }
+
+    /// Each toolbar button chooses a command or a list's entry, so it runs, enables and
+    /// checks as the menu bar and keyboard do.
+    #[test]
+    fn toolbar_buttons_run_commands() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("    fn toolbar(")
+            .expect("The toolbar is built in main.rs");
+        let body = &source[start..];
+        let body = &body[..body[1..]
+            .find("\n    fn ")
+            .map_or(body.len(), |end| end + 1)];
+        assert!(body.contains("self.choose("));
+        for effect in [
+            "self.respond(",
+            "self.changed",
+            "self.view.format(",
+            "self.view.set_zoom(",
+            "self.view.insert",
+            "self.open_link_dialog(",
+        ] {
+            assert!(
+                !body.contains(effect),
+                "A toolbar button acts through `{effect}`; have it choose a command instead"
+            );
+        }
+    }
+}

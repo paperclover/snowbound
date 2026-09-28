@@ -23,12 +23,17 @@ pub enum Formatting {
     Highlight(Option<u32>),
     /// Returns text to its paragraph style.
     Clear,
+    /// Toggles OneNote's default bullet or number, as Ctrl+. and Ctrl+/ do.
     Bullets,
     Numbering,
+    /// Applies a style from OneNote's bullet or numbering library; `None` removes lists.
+    List(Option<ListStyle>),
     Indent,
     Outdent,
     Align(Alignment),
     Tag(NoteTag),
+    /// Removes every note tag from the selected paragraphs.
+    RemoveTags,
     /// Checks the selected paragraphs' check boxes, or clears them when all are checked.
     Check,
 }
@@ -52,8 +57,108 @@ pub enum Alignment {
     Right,
 }
 
+/// A style of OneNote 2010's bullet or numbering library, by its place in the gallery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListStyle {
+    Bullet(usize),
+    Number(usize),
+}
+
+/// OneNote 2010's bullet library in gallery order, as it stores each: font, glyph and
+/// ListMSAAIndex. Ctrl+. applies the third.
+pub const BULLET_LIBRARY: [(&str, &str, u16); 34] = [
+    ("Wingdings", "l", 3),
+    ("Symbol", "\u{b7}", 1),
+    ("Calibri", "\u{2022}", 1),
+    ("Courier New", "\u{25cb}", 4),
+    ("Wingdings 2", "\u{9d}", 6),
+    ("Wingdings 2", "\u{9c}", 5),
+    ("Wingdings", "\u{b2}", 13),
+    ("Tahoma", "\u{25ca}", 14),
+    ("Wingdings", "w", 15),
+    ("Wingdings 2", "\u{ae}", 34),
+    ("Wingdings", "v", 16),
+    ("Arial", "\u{25aa}", 7),
+    ("Verdana", "\u{25ab}", 8),
+    ("Wingdings", "\u{a7}", 9),
+    ("Arial", "\u{25a1}", 10),
+    ("Wingdings 3", "}", 11),
+    ("Arial", "\u{25ba}", 12),
+    ("Arial", "\u{2192}", 21),
+    ("Symbol", "\u{de}", 22),
+    ("Arial", ">", 20),
+    ("Wingdings", "\u{d8}", 23),
+    ("Arial", "*", 24),
+    ("Wingdings", "\u{ad}", 17),
+    ("Wingdings", "\u{ae}", 19),
+    ("Wingdings", "\u{af}", 18),
+    ("Arial", "-", 25),
+    ("Arial", "\u{2013}", 26),
+    ("Arial", "\u{2014}", 27),
+    ("Wingdings", "J", 28),
+    ("Wingdings", "K", 29),
+    ("Wingdings", "L", 30),
+    ("Wingdings", "\u{fc}", 31),
+    ("Wingdings", "(", 32),
+    ("Wingdings", "*", 33),
+];
+
+/// OneNote 2010's numbering library in gallery order, as NumberListFormat stores each: the
+/// number's sequence follows U+FFFD. Ctrl+/ applies the first.
+pub const NUMBER_LIBRARY: [&str; 19] = [
+    "\u{fffd}\u{0}.",
+    "\u{fffd}\u{5}.",
+    "\u{fffd}\u{4}.",
+    "\u{fffd}\u{3}.",
+    "\u{fffd}\u{2}.",
+    "\u{fffd}\u{1}.",
+    "\u{fffd}\u{0})",
+    "\u{fffd}\u{4})",
+    "\u{fffd}\u{3})",
+    "\u{fffd}\u{2})",
+    "\u{fffd}\u{1})",
+    "(\u{fffd}\u{0})",
+    "(\u{fffd}\u{3})",
+    "(\u{fffd}\u{4})",
+    "(\u{fffd}\u{2})",
+    "(\u{fffd}\u{1})",
+    "\u{fffd}\u{6}.",
+    "\u{fffd}\u{7}.",
+    "\u{fffd}\u{0}-",
+];
+
+impl ListStyle {
+    pub(super) const BULLET: Self = Self::Bullet(2);
+    pub(super) const NUMBER: Self = Self::Number(0);
+
+    /// The library style a stored list has, if it is one.
+    fn of(kind: &Kind) -> Option<Self> {
+        let Kind::List {
+            font,
+            format: Some(format),
+            bullet,
+            ..
+        } = kind
+        else {
+            return None;
+        };
+        match bullet {
+            Some(bullet) => BULLET_LIBRARY
+                .iter()
+                .position(|entry| {
+                    (Some(entry.0), entry.1, entry.2) == (font.as_deref(), format.as_str(), *bullet)
+                })
+                .map(Self::Bullet),
+            None => NUMBER_LIBRARY
+                .iter()
+                .position(|known| known == format)
+                .map(Self::Number),
+        }
+    }
+}
+
 /// OneNote 2010's default tags, Ctrl+1 to Ctrl+9, as it stores their definitions
-/// (`evidence/structural-edits/tags/tags.one`); declared in that order, their action types.
+/// (`corpus/structural-probe/tags.one`); declared in that order, their action types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoteTag {
     ToDo,
@@ -68,7 +173,7 @@ pub enum NoteTag {
 }
 
 /// What the selection shows on the toolbar.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct FormatState {
     /// Attributes every selected character has.
     pub toggles: Vec<Toggle>,
@@ -80,6 +185,8 @@ pub struct FormatState {
     /// Whether every selected paragraph is bulleted or numbered.
     pub bullets: bool,
     pub numbering: bool,
+    /// The library style every selected paragraph's list shares.
+    pub list: Option<ListStyle>,
     /// Tags every selected paragraph has.
     pub tags: Vec<NoteTag>,
 }
@@ -118,7 +225,7 @@ impl Toggle {
 }
 
 impl NoteTag {
-    pub(super) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::ToDo,
         Self::Important,
         Self::Question,
@@ -130,21 +237,36 @@ impl NoteTag {
         Self::PhoneNumber,
     ];
 
+    /// The tag's name, as OneNote stores and lists it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ToDo => "To Do",
+            Self::Important => "Important",
+            Self::Question => "Question",
+            Self::RememberForLater => "Remember for later",
+            Self::Definition => "Definition",
+            Self::Highlight => "Highlight",
+            Self::Contact => "Contact",
+            Self::Address => "Address",
+            Self::PhoneNumber => "Phone number",
+        }
+    }
+
     pub(super) fn definition(self) -> Definition {
-        let (label, shape, highlight) = match self {
-            Self::ToDo => ("To Do", CHECKBOX, None),
-            Self::Important => ("Important", 13, None),
-            Self::Question => ("Question", 15, None),
-            Self::RememberForLater => ("Remember for later", 0, Some(0x0000_ffff)),
-            Self::Definition => ("Definition", 0, Some(0x0000_ff00)),
-            Self::Highlight => ("Highlight", 136, None),
-            Self::Contact => ("Contact", 118, None),
-            Self::Address => ("Address", 23, None),
-            Self::PhoneNumber => ("Phone number", 18, None),
+        let (shape, highlight) = match self {
+            Self::ToDo => (CHECKBOX, None),
+            Self::Important => (13, None),
+            Self::Question => (15, None),
+            Self::RememberForLater => (0, Some(0x0000_ffff)),
+            Self::Definition => (0, Some(0x0000_ff00)),
+            Self::Highlight => (136, None),
+            Self::Contact => (118, None),
+            Self::Address => (23, None),
+            Self::PhoneNumber => (18, None),
         };
         Definition {
             kind: Kind::TagDefinition {
-                label: Some(label.into()),
+                label: Some(self.label().into()),
                 action_type: Some(self as u16),
                 shape: Some(shape),
                 // The highlighting tags also set black text.
@@ -161,7 +283,7 @@ type Ends = [(ExGuid, usize); 2];
 
 /// The selection's ends and the container range holding both; a selection ending at a
 /// paragraph's start ends with the paragraph before.
-fn selected(
+pub(super) fn selected(
     document: &TextDocument,
     selection: Selection,
 ) -> Result<(Option<ExGuid>, Range<usize>, Ends), EditError> {
@@ -224,7 +346,7 @@ fn covered(
         })
 }
 
-fn leaves_mut(nodes: &mut [PageParagraph], change: &mut impl FnMut(&mut PageParagraph)) {
+pub(super) fn leaves_mut(nodes: &mut [PageParagraph], change: &mut impl FnMut(&mut PageParagraph)) {
     for node in nodes {
         match &mut node.content {
             ParagraphContent::Text(_) => change(node),
@@ -239,7 +361,11 @@ fn leaves_mut(nodes: &mut [PageParagraph], change: &mut impl FnMut(&mut PagePara
 }
 
 /// `text` with `change` applied to the formats of bytes `range`, or to its only format when empty.
-fn restyle(text: &Paragraph, range: Range<usize>, change: impl Fn(&mut Format)) -> Paragraph {
+pub(super) fn restyle(
+    text: &Paragraph,
+    range: Range<usize>,
+    change: impl Fn(&mut Format),
+) -> Paragraph {
     if text.text().is_empty() {
         let mut format = text.spans()[0].format.clone();
         change(&mut format);
@@ -316,7 +442,8 @@ fn tags(node: &PageParagraph) -> impl Iterator<Item = &Tag> {
 
 impl CanvasEditor {
     /// The format text typed at `position` takes: the caret's pending format, else the text's
-    /// before it.
+    /// before it. Text after a link's label or field code is plain, as OneNote types it, and
+    /// math typed into an equation is a run between its objects until it is built up.
     pub(super) fn typing_format(&self, position: TextPosition) -> Result<Format, EditError> {
         if let Some((id, at, format)) = &self.pending
             && *id == self.active_outline().id
@@ -324,13 +451,23 @@ impl CanvasEditor {
         {
             return Ok(format.clone());
         }
-        Ok(self
+        let text = self
             .active_outline()
             .document
             .paragraph(position.paragraph)
-            .ok_or(EditError::InvalidRange)?
-            .format_at(position.offset)?
-            .clone())
+            .ok_or(EditError::InvalidRange)?;
+        let mut format = text.format_at(position.offset)?.clone();
+        if format.hidden == Some(true) && format.hyperlink == Some(true)
+            || super::link::links(text, position.paragraph)
+                .iter()
+                .any(|link| link.code.is_some() && link.label.end == position.offset)
+        {
+            super::link::unlinked(&mut format);
+        }
+        if format.math == Some(true) {
+            format = onestore::page::Math::format(&format);
+        }
+        Ok(format)
     }
 
     fn list(&self, node: &PageParagraph) -> Option<Formatting> {
@@ -347,6 +484,10 @@ impl CanvasEditor {
             ),
             _ => None,
         }
+    }
+
+    fn list_style(&self, node: &PageParagraph) -> Option<ListStyle> {
+        ListStyle::of(&self.definitions.get(node.lists.last()?)?.kind)
     }
 
     fn tag_kind(&self, tag: &Tag) -> Option<&Kind<'static>> {
@@ -395,6 +536,7 @@ impl CanvasEditor {
             })),
             bullets: list(Formatting::Bullets),
             numbering: list(Formatting::Numbering),
+            list: common(paragraphs.iter().map(|node| self.list_style(node))),
             tags: NoteTag::ALL
                 .into_iter()
                 .filter(|tag| {
@@ -429,7 +571,9 @@ impl CanvasEditor {
             Formatting::Align(_)
             | Formatting::Bullets
             | Formatting::Numbering
+            | Formatting::List(_)
             | Formatting::Tag(_)
+            | Formatting::RemoveTags
             | Formatting::Check
                 if title =>
             {
@@ -455,13 +599,27 @@ impl CanvasEditor {
                     }
                 });
             }
-            Formatting::Bullets | Formatting::Numbering => {
-                let remove = covered(&replacement, ends)
-                    .all(|(node, _)| self.list(node).as_ref() == Some(&command));
+            Formatting::Bullets | Formatting::Numbering | Formatting::List(_) => {
+                let style = match command {
+                    Formatting::Bullets => Some(ListStyle::BULLET),
+                    Formatting::Numbering => Some(ListStyle::NUMBER),
+                    Formatting::List(style) => style,
+                    _ => unreachable!(),
+                };
+                // A toggle leaves paragraphs already of its kind as they are, however styled.
+                let has = |node: &PageParagraph| match command {
+                    Formatting::List(_) => self.list_style(node) == style,
+                    _ => self.list(node).as_ref() == Some(&command),
+                };
+                let remove = style.is_none()
+                    || !matches!(command, Formatting::List(_))
+                        && covered(&replacement, ends).all(|(node, _)| has(node));
                 // A list applied after a plain sibling nests under it, as Tab would
-                // (`evidence/structural-edits/xml/pb-1.xml`); removing it leaves it there.
+                // (`evidence/structural-edits/xml/pb-1.xml`); removing it, or restyling a
+                // list, leaves it where it is, as OneNote 2010 does.
                 let nodes = outline.document.container(container)?;
                 if !remove
+                    && nodes[range.start].lists.is_empty()
                     && crate::document::previous_sibling(nodes, range.start, &BTreeSet::new())
                         .is_some_and(|sibling| nodes[sibling].lists.is_empty())
                     && let Some(edit) =
@@ -472,13 +630,10 @@ impl CanvasEditor {
                 }
                 let wanted = covered(&replacement, ends)
                     .map(|(node, _)| node)
-                    .filter(|node| !remove && self.list(node).as_ref() != Some(&command))
-                    .map(|node| {
+                    .filter(|node| !remove && !has(node))
+                    .filter_map(|node| {
                         let format = &node.text().unwrap().text.spans()[0].format;
-                        (
-                            node.id,
-                            list_definition(command == Formatting::Numbering, format),
-                        )
+                        Some((node.id, list_definition(style?, format)))
                     })
                     .collect::<Vec<_>>();
                 // A list definition belongs to one paragraph, as OneNote stores it.
@@ -560,6 +715,12 @@ impl CanvasEditor {
                     }
                 });
             }
+            Formatting::RemoveTags => leaves_mut(&mut replacement, &mut |node| {
+                if ranges.remove(&node.id).is_some() {
+                    node.tags.clear();
+                    node.text_mut().unwrap().tags.clear();
+                }
+            }),
             Formatting::Check => self.check(&mut replacement, ranges, ends),
             Formatting::Toggle(_)
             | Formatting::Font(_)
@@ -567,10 +728,20 @@ impl CanvasEditor {
             | Formatting::Color(_)
             | Formatting::Highlight(_)
             | Formatting::Clear => {
+                let caret = (ends[0] == ends[1])
+                    .then(|| {
+                        let [anchor, focus] = selection.positions;
+                        let caret = anchor.min(focus);
+                        Ok::<_, EditError>((caret, self.typing_format(caret)?))
+                    })
+                    .transpose()?;
                 let on = match command {
-                    Formatting::Toggle(toggle) => !character_formats(covered(&replacement, ends))
-                        .iter()
-                        .all(|format| toggle.get(format) == Some(true)),
+                    Formatting::Toggle(toggle) => !match &caret {
+                        Some((_, format)) => vec![format],
+                        None => character_formats(covered(&replacement, ends)),
+                    }
+                    .iter()
+                    .all(|format| toggle.get(format) == Some(true)),
                     _ => true,
                 };
                 let change = |base: &Format, format: &mut Format| match &command {
@@ -606,10 +777,7 @@ impl CanvasEditor {
                     }
                 };
                 let bases = bases(&replacement)?;
-                if ends[0] == ends[1] {
-                    let [anchor, focus] = selection.positions;
-                    let caret = anchor.min(focus);
-                    let mut format = self.typing_format(caret)?;
+                if let Some((caret, mut format)) = caret {
                     change(&bases[&ends[0].0], &mut format);
                     self.pending = Some((id, caret, format));
                     return Ok(());
@@ -717,79 +885,47 @@ impl CanvasEditor {
     }
 }
 
-/// The list a Tab (`deeper`) or Shift+Tab gives a paragraph with a default list, as OneNote
-/// 2010 steps • to ○ and 1. to a. (`evidence/structural-edits/xml/c6-bullet-tab.xml`,
-/// `c8-tab-1.xml`), then to ■ as `corpus/private` nests bullets, and to i.; outdenting stops at
-/// the first style.
+/// The list a Tab (`deeper`) or Shift+Tab gives a paragraph whose list is one OneNote 2010
+/// steps through as Tab nests it: from Ctrl+. through nine bullets, and from Ctrl+/ through
+/// eight number formats, each as its gallery stores it, starting over after the last
+/// (`evidence/toolbar-17/tab-lists.txt`). Outdenting stops at the first.
 pub(super) fn nested_list(definition: &Definition, deeper: bool) -> Option<Definition> {
-    const BULLETS: [(&str, &str, u16); 3] = [
-        ("Calibri", "\u{2022}", 1),
-        ("Courier New", "\u{25cb}", 4),
-        ("Wingdings", "\u{a7}", 7),
-    ];
-    const SEQUENCES: [char; 3] = ['\0', '\u{4}', '\u{2}'];
-    let Kind::List {
-        font,
-        format: Some(format),
-        restart,
-        bullet,
-    } = &definition.kind
-    else {
+    const BULLETS: [usize; 9] = [2, 3, 13, 14, 9, 7, 15, 26, 8];
+    const NUMBERS: [usize; 8] = [0, 2, 4, 6, 7, 9, 16, 17];
+    let Kind::List { restart, .. } = &definition.kind else {
         return None;
     };
-    let step = |index: usize| {
-        if deeper {
-            Some((index + 1) % 3)
-        } else {
-            index.checked_sub(1)
-        }
+    let current = ListStyle::of(&definition.kind)?;
+    let (chain, style): (&[usize], fn(usize) -> ListStyle) = match current {
+        ListStyle::Bullet(_) => (&BULLETS, ListStyle::Bullet),
+        ListStyle::Number(_) => (&NUMBERS, ListStyle::Number),
     };
-    let kind = match bullet {
-        Some(_) => {
-            let index = BULLETS.iter().position(|(name, glyph, index)| {
-                (font.as_deref(), format.as_str(), *bullet) == (Some(*name), *glyph, Some(*index))
-            })?;
-            let (name, glyph, index) = BULLETS[step(index)?];
-            Kind::List {
-                font: Some(name.into()),
-                format: Some(glyph.into()),
-                restart: *restart,
-                bullet: Some(index),
-            }
-        }
-        None => {
-            let (prefix, rest) = format.split_once('\u{fffd}')?;
-            let mut rest = rest.chars();
-            let sequence = rest.next()?;
-            let index = SEQUENCES.iter().position(|known| *known == sequence)?;
-            Kind::List {
-                font: font.clone(),
-                format: Some(format!(
-                    "{prefix}\u{fffd}{}{}",
-                    SEQUENCES[step(index)?],
-                    rest.as_str()
-                )),
-                restart: *restart,
-                bullet: None,
-            }
-        }
+    let at = chain.iter().position(|place| style(*place) == current)?;
+    let at = if deeper {
+        (at + 1) % chain.len()
+    } else {
+        at.checked_sub(1)?
     };
+    let mut kind = list_definition(style(chain[at]), &Format::default()).kind;
+    if let Kind::List { restart: value, .. } = &mut kind {
+        *value = *restart;
+    }
     Some(Definition {
         kind,
         format: definition.format.clone(),
     })
 }
 
-/// The list OneNote 2010 gives a paragraph with `format`: its Ctrl+. bullet
-/// (`corpus/paragraph-edit/reconciliation/keyboard`), or the `##.` arabic numbering it stores
-/// from its COM interface (`corpus/outline-edit/tree`).
-pub(super) fn list_definition(numbering: bool, format: &Format) -> Definition {
+/// The list OneNote 2010 gives a paragraph with `format` in library `style`, as its gallery
+/// and its Ctrl+. bullet store it (`corpus/paragraph-edit/reconciliation/keyboard`); a number
+/// also takes the text's font and language (`corpus/outline-edit/tree`).
+pub(super) fn list_definition(style: ListStyle, format: &Format) -> Definition {
     let font_size = Some(format.font_size.unwrap_or(11.0));
-    if numbering {
-        Definition {
+    match style {
+        ListStyle::Number(index) => Definition {
             kind: Kind::List {
                 font: None,
-                format: Some("\u{fffd}\u{0}.".into()),
+                format: Some(NUMBER_LIBRARY[index].into()),
                 restart: None,
                 bullet: None,
             },
@@ -802,20 +938,22 @@ pub(super) fn list_definition(numbering: bool, format: &Format) -> Definition {
                 language: format.language,
                 ..Format::default()
             },
-        }
-    } else {
-        Definition {
-            kind: Kind::List {
-                font: Some("Calibri".into()),
-                format: Some("\u{2022}".into()),
-                restart: None,
-                bullet: Some(1),
-            },
-            format: Format {
-                font_size,
-                color: Some(AUTOMATIC),
-                ..Format::default()
-            },
+        },
+        ListStyle::Bullet(index) => {
+            let (font, glyph, bullet) = BULLET_LIBRARY[index];
+            Definition {
+                kind: Kind::List {
+                    font: Some(font.into()),
+                    format: Some(glyph.into()),
+                    restart: None,
+                    bullet: Some(bullet),
+                },
+                format: Format {
+                    font_size,
+                    color: Some(AUTOMATIC),
+                    ..Format::default()
+                },
+            }
         }
     }
 }
@@ -928,6 +1066,44 @@ mod tests {
         assert!(!editor.undo(&mut engine).unwrap());
         assert!(editor.redo(&mut engine).unwrap());
         assert_eq!(bold(&editor)[1], [run("ne", Some(true)), run("xt", None)]);
+    }
+
+    #[test]
+    fn a_second_toggle_at_a_caret_turns_the_typing_format_back_off() {
+        for toggle in Toggle::ALL {
+            for text in ["", "ab"] {
+                let mut engine = TextEngine::default();
+                let mut editor = plain(&mut engine, &[text]);
+                let caret = at(0, text.len() as u32);
+                editor.select([caret; 2].into()).unwrap();
+                let press = |editor: &mut CanvasEditor, engine: &mut TextEngine| {
+                    editor.format(engine, Formatting::Toggle(toggle)).unwrap();
+                    editor.format_state().unwrap().toggles
+                };
+                assert_eq!(press(&mut editor, &mut engine), [toggle], "{toggle:?}");
+                assert_eq!(press(&mut editor, &mut engine), [], "{toggle:?}");
+                editor.insert(&mut engine, "x").unwrap();
+                assert_eq!(
+                    runs(&editor, |format| toggle.get(format))[0],
+                    [run(&format!("{text}x"), None)]
+                );
+            }
+            let mut engine = TextEngine::default();
+            let mut on = calibri();
+            *toggle.slot(&mut on) = Some(true);
+            let mut editor = editor(&mut engine, vec![Paragraph::new("ab".into(), on)]);
+            editor.select([at(0, 1); 2].into()).unwrap();
+            editor
+                .format(&mut engine, Formatting::Toggle(toggle))
+                .unwrap();
+            assert_eq!(editor.format_state().unwrap().toggles, [], "{toggle:?}");
+            editor.insert(&mut engine, "x").unwrap();
+            assert_eq!(
+                runs(&editor, |format| toggle.get(format) == Some(true))[0],
+                [("a".into(), true), ("x".into(), false), ("b".into(), true)],
+                "{toggle:?}"
+            );
+        }
     }
 
     #[test]
@@ -1112,7 +1288,7 @@ mod tests {
                     let markers = paragraph.markers.iter().map(|(marker, origin)| {
                         (*origin, marker.lines().next().unwrap().0.metrics().advance)
                     });
-                    (paragraph.number, markers.collect::<Vec<_>>())
+                    (paragraph.number.clone(), markers.collect::<Vec<_>>())
                 })
                 .collect::<Vec<_>>()
         };
@@ -1121,7 +1297,7 @@ mod tests {
             .shaped
             .paragraphs
             .iter()
-            .map(|paragraph| paragraph.number.map(|(number, _)| number))
+            .map(|paragraph| paragraph.number.as_ref().map(|(count, _)| count.number))
             .collect()
     }
 
@@ -1139,7 +1315,7 @@ mod tests {
         let bullet = editor.active_outline().document.nodes()[0].lists[0];
         assert_eq!(
             editor.definitions[&bullet],
-            list_definition(false, &calibri())
+            list_definition(ListStyle::BULLET, &calibri())
         );
         editor.format(&mut engine, Formatting::Numbering).unwrap();
         let state = editor.format_state().unwrap();
@@ -1198,6 +1374,136 @@ mod tests {
     }
 
     #[test]
+    fn library_styles_replace_any_list_and_none_removes_them() {
+        let mut engine = TextEngine::default();
+        let mut editor = plain(&mut engine, &["one", "two", "three"]);
+        let original = editor.active_outline().document.clone();
+        let all = Selection::from([at(0, 0), at(2, 5)]);
+        editor.select(all).unwrap();
+        editor.format(&mut engine, Formatting::Bullets).unwrap();
+        assert_eq!(editor.format_state().unwrap().list, Some(ListStyle::BULLET));
+        let pick = |style| Formatting::List(Some(style));
+        editor
+            .format(&mut engine, pick(ListStyle::Bullet(0)))
+            .unwrap();
+        let state = editor.format_state().unwrap();
+        assert!(state.bullets && !state.numbering);
+        assert_eq!(state.list, Some(ListStyle::Bullet(0)));
+        let first = editor.active_outline().document.nodes()[0].lists[0];
+        assert_eq!(
+            editor.definitions[&first],
+            list_definition(ListStyle::Bullet(0), &calibri())
+        );
+        // Picking the style again leaves the lists as they are.
+        let stored = editor.active_outline().document.clone();
+        editor
+            .format(&mut engine, pick(ListStyle::Bullet(0)))
+            .unwrap();
+        assert_eq!(editor.active_outline().document, stored);
+        // A number format replaces the bullets; "First." lays out as any number does.
+        editor
+            .format(&mut engine, pick(ListStyle::Number(17)))
+            .unwrap();
+        let state = editor.format_state().unwrap();
+        assert!(state.numbering && !state.bullets);
+        assert_eq!(state.list, Some(ListStyle::Number(17)));
+        assert_eq!(numbers(&mut engine, &editor), [Some(1), Some(2), Some(3)]);
+        // Paragraphs of different styles share none.
+        editor.select([at(1, 0); 2].into()).unwrap();
+        editor
+            .format(&mut engine, pick(ListStyle::Number(0)))
+            .unwrap();
+        editor.select(all).unwrap();
+        let state = editor.format_state().unwrap();
+        assert!(state.numbering && state.list.is_none());
+        editor.format(&mut engine, Formatting::List(None)).unwrap();
+        let state = editor.format_state().unwrap();
+        assert!(!state.bullets && !state.numbering && state.list.is_none());
+        assert_eq!(numbers(&mut engine, &editor), [None; 3]);
+        for _ in 0..6 {
+            editor.undo(&mut engine).unwrap();
+        }
+        assert_eq!(editor.active_outline().document, original);
+    }
+
+    #[test]
+    fn restyling_a_list_after_a_plain_sibling_leaves_it_where_it_is() {
+        let mut engine = TextEngine::default();
+        let mut editor = plain(&mut engine, &["head", "item"]);
+        let levels = |editor: &CanvasEditor| {
+            editor
+                .active_outline()
+                .document
+                .nodes()
+                .iter()
+                .map(|node| node.level)
+                .collect::<Vec<_>>()
+        };
+        editor.select([at(1, 0); 2].into()).unwrap();
+        editor.format(&mut engine, Formatting::Numbering).unwrap();
+        assert_eq!(levels(&editor), [1, 2]);
+        editor.format(&mut engine, Formatting::Outdent).unwrap();
+        assert_eq!(levels(&editor), [1, 1]);
+        editor.format(&mut engine, Formatting::Bullets).unwrap();
+        editor
+            .format(&mut engine, Formatting::List(Some(ListStyle::Bullet(0))))
+            .unwrap();
+        assert_eq!(levels(&editor), [1, 1]);
+        assert_eq!(
+            editor.format_state().unwrap().list,
+            Some(ListStyle::Bullet(0))
+        );
+    }
+
+    #[test]
+    fn tab_steps_through_onenotes_nested_bullets_and_numbers() {
+        let chain = |start: ListStyle, steps: usize| {
+            let mut definition = list_definition(start, &calibri());
+            let mut styles = vec![ListStyle::of(&definition.kind).unwrap()];
+            for _ in 0..steps {
+                definition = nested_list(&definition, true).unwrap();
+                styles.push(ListStyle::of(&definition.kind).unwrap());
+            }
+            (styles, definition)
+        };
+        let (bullets, deepest) = chain(ListStyle::BULLET, 9);
+        assert_eq!(
+            bullets,
+            [2, 3, 13, 14, 9, 7, 15, 26, 8, 2].map(ListStyle::Bullet)
+        );
+        // Wingdings § is ListMSAAIndex 9 here, as the gallery stores it.
+        assert_eq!(BULLET_LIBRARY[13], ("Wingdings", "\u{a7}", 9));
+        assert_eq!(
+            deepest.format,
+            list_definition(ListStyle::BULLET, &calibri()).format
+        );
+        let (numbers, _) = chain(ListStyle::NUMBER, 8);
+        assert_eq!(
+            numbers,
+            [0, 2, 4, 6, 7, 9, 16, 17, 0].map(ListStyle::Number)
+        );
+        let second = nested_list(&list_definition(ListStyle::NUMBER, &calibri()), true).unwrap();
+        assert_eq!(
+            ListStyle::of(&nested_list(&second, false).unwrap().kind),
+            Some(ListStyle::NUMBER)
+        );
+        assert!(nested_list(&list_definition(ListStyle::BULLET, &calibri()), false).is_none());
+        // A style off both paths keeps its list.
+        assert!(nested_list(&list_definition(ListStyle::Bullet(33), &calibri()), true).is_none());
+    }
+
+    #[test]
+    fn every_library_style_reads_back_as_itself() {
+        let styles = (0..BULLET_LIBRARY.len())
+            .map(ListStyle::Bullet)
+            .chain((0..NUMBER_LIBRARY.len()).map(ListStyle::Number));
+        for style in styles {
+            let definition = list_definition(style, &calibri());
+            assert_eq!(ListStyle::of(&definition.kind), Some(style));
+        }
+    }
+
+    #[test]
     fn numbering_follows_stored_sequences_restarts_and_nesting() {
         let mut engine = TextEngine::default();
         let mut editor = plain(&mut engine, &["a", "b", "c", "d", "e"]);
@@ -1207,10 +1513,10 @@ mod tests {
             ('\u{1}', None, 1),
             ('\u{4}', None, 2),
             ('\u{1}', Some(9), 1),
-            ('\u{0}', None, 1),
+            ('\u{1}', None, 1),
         ]) {
             let id = new_id().unwrap();
-            let mut definition = list_definition(true, &calibri());
+            let mut definition = list_definition(ListStyle::NUMBER, &calibri());
             let Kind::List {
                 format,
                 restart: value,
@@ -1234,6 +1540,78 @@ mod tests {
         assert_eq!(
             numbers(&mut engine, &editor),
             [Some(1), Some(2), Some(1), Some(9), Some(10)]
+        );
+    }
+
+    /// OneNote 2010's numbers for siblings and children in the formats and levels given, as
+    /// its COM interface reports them (`evidence/toolbar-17/restart.txt`); `None` is a plain
+    /// paragraph, `Some("•")` a bullet.
+    #[test]
+    fn numbers_restart_where_the_format_changes() {
+        let numbered = |paragraphs: &[(Option<&str>, u32)]| {
+            let mut engine = TextEngine::default();
+            let texts = vec!["x"; paragraphs.len()];
+            let mut editor = plain(&mut engine, &texts);
+            let mut nodes = editor.active_outline().document.nodes().to_vec();
+            for (node, (list, level)) in nodes.iter_mut().zip(paragraphs) {
+                node.level = *level;
+                let style = match list {
+                    None => continue,
+                    Some("•") => ListStyle::BULLET,
+                    Some(_) => ListStyle::NUMBER,
+                };
+                let mut definition = list_definition(style, &calibri());
+                if let (Some(value), Kind::List { format, .. }) = (list, &mut definition.kind)
+                    && style == ListStyle::NUMBER
+                {
+                    *format = Some((*value).into());
+                }
+                let id = new_id().unwrap();
+                editor.definitions.insert(id, definition);
+                node.lists = vec![id];
+            }
+            let outline = Outline {
+                paragraphs: nodes,
+                ..editor.active_outline().snapshot()
+            };
+            let editor =
+                CanvasEditor::from_outlines(&mut engine, vec![outline], editor.definitions)
+                    .unwrap();
+            numbers(&mut engine, &editor)
+        };
+        let [dot, paren, letter] = ["\u{fffd}\u{0}.", "\u{fffd}\u{0})", "\u{fffd}\u{4}."];
+        // Another format starts again, and so does the first format after it.
+        assert_eq!(
+            numbered(&[
+                (Some(dot), 1),
+                (Some(dot), 1),
+                (Some(paren), 1),
+                (Some(dot), 1),
+                (Some(paren), 1),
+            ]),
+            [Some(1), Some(2), Some(1), Some(1), Some(1)]
+        );
+        // Plain and bulleted siblings leave the count alone.
+        assert_eq!(
+            numbered(&[(Some(dot), 1), (None, 1), (Some("•"), 1), (Some(dot), 1)]),
+            [Some(1), None, None, Some(2)]
+        );
+        // So does another sequence; children count apart from their parents, afresh under each.
+        assert_eq!(
+            numbered(&[(Some(dot), 1), (Some(letter), 1), (Some(dot), 1)]),
+            [Some(1), Some(1), Some(1)]
+        );
+        assert_eq!(
+            numbered(&[
+                (Some(dot), 1),
+                (Some(dot), 2),
+                (Some(dot), 2),
+                (Some(dot), 1),
+                (Some(dot), 2),
+                (None, 1),
+                (Some(dot), 1),
+            ]),
+            [Some(1), Some(1), Some(2), Some(2), Some(1), None, Some(3)]
         );
     }
 
@@ -1389,7 +1767,7 @@ mod tests {
     #[test]
     fn the_nine_default_tags_are_onenotes_stored_definitions_and_all_draw() {
         use onestore::{RevisionIndex, Store, document::Document};
-        let bytes = include_bytes!("../../../../evidence/structural-edits/tags/tags.one");
+        let bytes = include_bytes!("../../../../corpus/structural-probe/tags.one");
         let store = Store::parse(bytes).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();
@@ -1561,6 +1939,7 @@ mod tests {
                 alignment: Some(Alignment::Center),
                 bullets: false,
                 numbering: true,
+                list: Some(ListStyle::NUMBER),
                 tags: vec![NoteTag::ToDo, NoteTag::Question],
             }
         );

@@ -2,7 +2,7 @@
 //! results dropping down from it, and Find on This Page. The index is kept on a thread of
 //! its own, from the section files and the open section's replica.
 
-use crate::{Command, Library, State, Theme, art, lap, page};
+use crate::{Command, Library, State, Theme, art, commands, lap, page};
 use canvas::search::{Entry, Found, Index, Query, page_matches};
 use notebook::Replica;
 use onestore::ExGuid;
@@ -43,16 +43,6 @@ impl Scope {
     }
 }
 
-const SEARCH_KEY: &str = if cfg!(target_os = "macos") {
-    "⌘E"
-} else {
-    "Ctrl+E"
-};
-const FIND_KEY: &str = if cfg!(target_os = "macos") {
-    "⌘F"
-} else {
-    "Ctrl+F"
-};
 /// The results list's rows, the headings above their groups, and its width.
 const RESULT: f32 = 42.0;
 const HEADING: f32 = 24.0;
@@ -71,7 +61,7 @@ fn scope_menu() -> Id {
 }
 
 /// The field of the box, and of the results over it.
-fn field() -> Id {
+pub(crate) fn field() -> Id {
     Id::ROOT.child("search-field")
 }
 
@@ -274,7 +264,7 @@ fn sections(library: &Library) -> Vec<String> {
                     folder
                         .groups
                         .iter()
-                        .filter(|group| !crate::library::recycle_bin(group)),
+                        .filter(|group| !crate::library::recycle_bin(&group.path)),
                 );
             }
             paths
@@ -678,7 +668,11 @@ impl State {
                 },
             );
         } else {
-            let placeholder = format!("Search {} ({SEARCH_KEY})", self.search.scope.name());
+            let placeholder = format!(
+                "Search {} ({})",
+                self.search.scope.name(),
+                commands::shortcut(commands::Id::Search)
+            );
             let signal = ui::text_field(
                 &mut self.ui,
                 field(),
@@ -705,15 +699,6 @@ impl State {
         Ok(())
     }
 
-    /// Whether `signal`, a field's, holds the command key with `letter`.
-    fn shortcut(&self, signal: &ui::Signal, letter: &str) -> bool {
-        self.view.modifiers().command
-            && signal.events.iter().any(|event| {
-                matches!(event, ui::Event::Key { key: winit::keyboard::Key::Character(key), .. }
-                    if key.eq_ignore_ascii_case(letter))
-            })
-    }
-
     fn scope_button(&mut self, theme: &Theme) {
         let button = self.ui.id("scope");
         if ui::shell::tool_button(&mut self.ui, "scope", art::SEARCH, theme.text_dim, false).pressed
@@ -727,6 +712,7 @@ impl State {
     /// OneNote's "Search In:" menu.
     fn scope_popup(&mut self) {
         let current = self.search.scope;
+        let find = commands::shortcut(commands::Id::Find);
         let mut items = vec![
             ui::popup::Item {
                 text: "Search In:",
@@ -734,8 +720,8 @@ impl State {
                 ..Default::default()
             },
             ui::popup::Item {
-                text: "Find on This Page",
-                shortcut: FIND_KEY,
+                text: commands::command(commands::Id::Find).title,
+                shortcut: &find,
                 ..Default::default()
             },
         ];
@@ -800,30 +786,31 @@ impl State {
             self.ui.set_focus(Some(field()));
         }
         let [left, top, right, bottom] = rect;
+        let anchor = Anchor::Over([left - 4.0, top - 4.0, right + 4.0, bottom + 4.0]);
+        let width = RESULTS.max(right - left);
+        // The box takes the toolbar's box's place at once and widens as the dropdown comes in.
+        let open = self.ui.opening(results(), anchor).unwrap_or(1.0);
+        let field_width = right - left + (width - 8.0 - (right - left)) * open;
         self.ui.open_as(
             results(),
             Spec {
                 axis: Axis::Y,
-                size: [px(RESULTS.max(right - left)), children()],
+                size: [px(width), children()],
                 fill: Some(theme.popup),
                 border: Some(theme.chip),
                 shadow: Some(theme.shadow),
                 radius: 6.0,
                 pad: [4.0, 4.0],
                 gap: 4.0,
-                anchor: Some(Anchor::Over([
-                    left - 4.0,
-                    top - 4.0,
-                    right + 4.0,
-                    bottom + 4.0,
-                ])),
+                anchor: Some(anchor),
                 ..Spec::default()
             },
         );
         self.ui.open(
             "box",
             Spec {
-                size: [fill(), px(ui::shell::TOOL)],
+                flags: Flags::STILL,
+                size: [px(field_width), px(ui::shell::TOOL)],
                 fill: Some(theme.base),
                 border: Some(theme.accent),
                 radius: 4.0,
@@ -832,8 +819,12 @@ impl State {
                 ..Spec::default()
             },
         );
-        let placeholder = format!("Search {} ({SEARCH_KEY})", self.search.scope.name());
-        let signal = ui::text_field(
+        let placeholder = format!(
+            "Search {} ({})",
+            self.search.scope.name(),
+            commands::shortcut(commands::Id::Search)
+        );
+        ui::text_field(
             &mut self.ui,
             field(),
             &mut self.search.query,
@@ -846,10 +837,6 @@ impl State {
         );
         self.scope_button(theme);
         self.ui.close();
-        if self.shortcut(&signal, "f") {
-            self.ui.close();
-            return self.start_find(true);
-        }
         let query = self.search.query.trim().to_owned();
         let found = &self.search.found;
         let titled = found.iter().take_while(|found| found.in_title).count();
@@ -916,7 +903,10 @@ impl State {
             "find",
             Spec {
                 size: [fit(), px(22.0)],
-                text: Some(&format!("Find on page: {FIND_KEY}")),
+                text: Some(&format!(
+                    "Find on page: {}",
+                    commands::shortcut(commands::Id::Find)
+                )),
                 color: Some(theme.text_dim),
                 ..Spec::default()
             },
@@ -1018,7 +1008,10 @@ impl State {
         let label = if self.search.query.trim().is_empty() {
             "Find on page".to_owned()
         } else if count == 0 {
-            format!("No matches. Try {SEARCH_KEY}")
+            format!(
+                "No matches. Try {}",
+                commands::shortcut(commands::Id::Search)
+            )
         } else {
             format!(
                 "Match {} of {count}",
@@ -1051,7 +1044,7 @@ impl State {
                 step = Some(true);
             }
         }
-        let signal = ui::text_field(
+        ui::text_field(
             &mut self.ui,
             find_field(),
             &mut self.search.query,
@@ -1064,10 +1057,6 @@ impl State {
         );
         if std::mem::take(&mut self.search.claim) {
             self.ui.set_focus(Some(find_field()));
-        }
-        if self.shortcut(&signal, "e") {
-            self.start_search();
-            return Ok(());
         }
         if ui::shell::tool_button(&mut self.ui, "close", art::CLOSE, theme.text_dim, false).clicked
         {

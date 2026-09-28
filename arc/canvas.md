@@ -26,8 +26,10 @@ host                       translates platform events in; carries out the Reques
 A host feeds `PageView` pointer, key and text-input events. It gets back a
 `Response` saying whether the page, the selection or only the view changed,
 plus the occasional `Request` the page can't do itself: show a date picker,
-read the clipboard, open the character palette. Everything platform-specific
-stays on the host's side of that line.
+read the clipboard, open a link. Everything platform-specific stays on the
+host's side of that line, shortcuts included: the page takes editing keys, and
+the host's command table runs the chords for formatting, tags, zoom and the
+clipboard through the page's own methods.
 
 ## Editing emits ops
 
@@ -73,13 +75,15 @@ gives outline sizes, its PDF export gives exact line breaks, and screenshots
 give placement. The comparators in `tools/canvas` (with the probes
 `layout-probe` and `page-probe`) keep checking them.
 
-Equations draw in two dimensions from the tree `onestore::page::Math` parses.
-They are edited as OneNote's equation editor edits them: Alt+= starts one,
+Equations draw in two dimensions from the tree `onestore::page::Math` parses,
+each in a space kept in its line of text, so text and links around them keep
+their look and the line grows to hold them. They are edited as OneNote's equation editor edits them: Alt+= starts one,
 typing is its linear format (UnicodeMath), and a space builds up what it ends.
 Linear and Professional switch an equation between the forms, and OneNote
 stores both. Links follow OneNote too: a typed URL links itself when a space or
 Enter ends it, the Link dialog stores its address in a hidden field code before
-the label, and a click opens a link. Ink draws stroke by stroke in page
+the label, and a click or Enter opens a link. URL text shows as a link, as
+OneNote links it when it opens a page, without being stored as one. Ink draws stroke by stroke in page
 coordinates. Page templates' background art is recreated as vector art and
 recognised by the stored picture's hash. OneNote's bitmaps aren't shipped.
 

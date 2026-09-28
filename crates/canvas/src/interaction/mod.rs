@@ -53,8 +53,20 @@ pub enum Request {
     Copy(String),
     /// Read the clipboard and hand its text to `PageView::commit_text`.
     Paste,
-    /// Show the platform's character picker.
-    CharacterPalette,
+    /// Open a link's address, as a click on a link does.
+    OpenLink(String),
+}
+
+/// What a secondary press lands on, which its context menu offers commands for.
+#[derive(Debug, Default, PartialEq)]
+pub struct Context {
+    /// The address of the link at the caret.
+    pub link: Option<String>,
+    pub equation: bool,
+    /// Whether text is selected, which Cut and Copy take.
+    pub selected: bool,
+    /// The paragraph at the caret, which Copy Link to Paragraph names.
+    pub paragraph: Option<onestore::ExGuid>,
 }
 
 /// What an event did: `changed` means the page or selection changed (the host saves,
@@ -167,10 +179,7 @@ impl ObjectFocus {
 }
 
 fn read_only_shortcut(key: &Key, modifiers: Modifiers) -> bool {
-    key == &Key::Named(NamedKey::Escape)
-        || (modifiers.control && key == &Key::Named(NamedKey::Tab))
-        || (modifiers.command
-            && matches!(key, Key::Character(value) if matches!(value.as_str(), "+" | "=" | "-" | "0") || (modifiers.shift && value.eq_ignore_ascii_case("n"))))
+    key == &Key::Named(NamedKey::Escape) || (modifiers.control && key == &Key::Named(NamedKey::Tab))
 }
 
 /// Where a page was left: its scroll and the focused outline's selection.
@@ -750,6 +759,11 @@ impl PageView {
             (Some(Drag::Resize { .. }), _) | (None, Some(Hit::Resize { .. })) => Cursor::EwResize,
             (Some(Drag::Outline { .. }), _) | (None, Some(Hit::Handle { .. })) => Cursor::Move,
             (None, Some(Hit::Date(_))) => Cursor::Pointer,
+            (None, Some(Hit::Text { id, point }))
+                if self.editor.link_under(id, point).is_some() =>
+            {
+                Cursor::Pointer
+            }
             (None, Some(Hit::ReadOnly(_) | Hit::Check { .. })) => Cursor::Default,
             _ => Cursor::Text,
         }
@@ -902,6 +916,17 @@ impl PageView {
                     grab,
                 });
             }
+            Some(Hit::Text { id, point })
+                if unit == SelectionUnit::Grapheme
+                    && !self.modifiers.shift
+                    && let Some(address) = self.editor.link_under(id, point) =>
+            {
+                self.drag = None;
+                return Ok(Response {
+                    request: Some(Request::OpenLink(address)),
+                    ..Response::default()
+                });
+            }
             Some(Hit::Text { id, point }) => {
                 let extend = self.modifiers.shift
                     && self.object_focus.is_none()
@@ -1050,6 +1075,118 @@ impl PageView {
         self.edited()
     }
 
+    /// Copy, or Cut with `cut`: the selected text goes to the clipboard.
+    pub fn copy(&mut self, cut: bool) -> Result<Response> {
+        let [anchor, focus] = self.editor.selection().positions;
+        let selected = self
+            .editor
+            .active_outline()
+            .document()
+            .slice(anchor.min(focus)..anchor.max(focus))?;
+        let text = selected
+            .iter()
+            .map(|paragraph| {
+                paragraph
+                    .project()
+                    .map(|projection| projection.text().text().to_owned())
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .join("\n");
+        if text.is_empty() {
+            return Ok(Response::default());
+        }
+        if cut {
+            self.editor.insert(&mut self.engine, "")?;
+        }
+        Ok(Response {
+            request: Some(Request::Copy(text)),
+            ..self.edited()?
+        })
+    }
+
+    /// A secondary press at the pointer: text there takes the caret unless it lies in the
+    /// selection, as OneNote's context menu acts where it opens. `None` off text.
+    pub fn context(&mut self) -> Result<Option<(Response, Context)>> {
+        let point = self.viewport.document_point(self.pointer);
+        let Some(Hit::Text { id, point }) = self.hit_test(point) else {
+            return Ok(None);
+        };
+        if self.object_focus.is_some() || !self.accepts_text() {
+            return Ok(None);
+        }
+        let outline = self.editor.active_outline().id;
+        let [anchor, focus] = self.editor.selection().positions;
+        self.editor.focus_outline(id)?;
+        let at = self
+            .editor
+            .selection_at(point[0], point[1], SelectionUnit::Grapheme)?;
+        let inside = outline == id
+            && anchor.min(focus) <= at.positions[0]
+            && at.positions[0] <= anchor.max(focus);
+        if !inside {
+            self.editor.select(at)?;
+        }
+        let [anchor, focus] = self.editor.selection().positions;
+        let context = Context {
+            link: self
+                .editor
+                .link_at(anchor.min(focus))
+                .map(|link| link.target),
+            equation: self.editor.in_equation(),
+            selected: anchor != focus,
+            paragraph: self
+                .editor
+                .active_outline()
+                .document()
+                .leaf(anchor.min(focus).paragraph)
+                .map(|(_, _, node)| node.id),
+        };
+        Ok(Some((self.changed()?, context)))
+    }
+
+    /// The text and address the Link dialog opens with for the selection.
+    pub fn link_prefill(&self) -> (String, String) {
+        self.editor.link_prefill()
+    }
+
+    /// OK in the Link dialog: links what [`Self::link_prefill`] picked, shown as `text`.
+    pub fn set_link(&mut self, text: &str, address: &str) -> Result<Response> {
+        if !self.accepts_text() {
+            return Ok(Response::default());
+        }
+        self.editor.set_link(&mut self.engine, text, address)?;
+        self.edited()
+    }
+
+    /// Remove Link, or Select Link with `select`, on the link at the caret.
+    pub fn unlink(&mut self, select: bool) -> Result<Response> {
+        if select {
+            self.editor.select_link()?;
+        } else {
+            self.editor.remove_link(&mut self.engine)?;
+        }
+        self.edited()
+    }
+
+    /// Alt+= and the toolbar's Equation: see [`CanvasEditor::insert_equation`].
+    pub fn insert_equation(&mut self) -> Result<Response> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok(Response::default());
+        }
+        self.editor.insert_equation(&mut self.engine)?;
+        self.edited()
+    }
+
+    /// Professional, or Linear with `linear`, on the equation at the caret.
+    pub fn switch_equation(&mut self, linear: bool) -> Result<Response> {
+        if linear {
+            self.editor.linear_equation(&mut self.engine)?;
+        } else {
+            self.editor.build_equation(&mut self.engine)?;
+        }
+        self.edited()
+    }
+
     /// Undoes the last edit, or redoes the last undone one.
     pub fn undo(&mut self, redo: bool) -> Result<Response> {
         if redo {
@@ -1062,6 +1199,12 @@ impl PageView {
         {
             self.set_object_focus(None);
         }
+        self.edited()
+    }
+
+    /// Select All, widening the selection a unit at a time as OneNote 2010's Ctrl+A does.
+    pub fn widen_selection(&mut self) -> Result<Response> {
+        self.editor.widen_selection()?;
         self.edited()
     }
 
@@ -1113,23 +1256,14 @@ impl PageView {
             self.set_object_focus(None);
             return self.edited();
         }
-        if let Some(focus) = self.object_focus {
-            let undo = matches!(focus, ObjectFocus::Image(_))
-                && command
-                && matches!(key, Key::Character(value) if value.eq_ignore_ascii_case("z"));
-            if !undo && !read_only_shortcut(key, self.modifiers) {
+        if self.object_focus.is_some() {
+            if !read_only_shortcut(key, self.modifiers) {
                 return Ok(Response::default());
             }
             if key == &Key::Named(NamedKey::Escape) {
                 self.set_object_focus(None);
                 return self.edited();
             }
-        }
-        if command && control && key == &Key::Named(NamedKey::Space) {
-            return Ok(Response {
-                request: Some(Request::CharacterPalette),
-                ..Response::default()
-            });
         }
         if matches!(
             self.drag,
@@ -1139,6 +1273,12 @@ impl PageView {
             if key == &Key::Named(NamedKey::Escape) {
                 return self.changed();
             }
+        }
+        if let Some(Command::MoveParagraphs { up }) = Command::from_key(key, self.modifiers)
+            && self.editor.marked_range().is_none()
+        {
+            self.editor.move_paragraphs(&mut self.engine, up)?;
+            return self.edited();
         }
         if command && option {
             let delta = match key {
@@ -1195,124 +1335,75 @@ impl PageView {
             }
             return self.edited();
         }
-        let mut request = None;
-        if command && let Key::Character(key) = key {
-            match key.to_lowercase().as_str() {
-                "n" if shift => {
-                    let position = if let Some(focus) = self.object_focus {
-                        let rect = self.object_rect(focus);
-                        [rect[2] + 24.0, rect[1]]
-                    } else {
-                        let bounds = self.editor.active_outline().bounds();
-                        [bounds.x1 as f32 + 24.0, bounds.y0 as f32]
-                    };
-                    self.editor.place_caret(
-                        &mut self.engine,
-                        snap_to_grid(position, self.editor.margin_origin()),
-                        DEFAULT_OUTLINE_WIDTH,
-                    )?;
-                    self.set_object_focus(None);
-                }
-                "a" => self.editor.select_all()?,
-                "z" => return self.undo(shift),
-                "y" if edit::Platform::CURRENT == edit::Platform::Windows => {
-                    return self.undo(true);
-                }
-                "c" | "x" => {
-                    let [anchor, focus] = self.editor.selection().positions;
-                    let selected = self
-                        .editor
-                        .active_outline()
-                        .document()
-                        .slice(anchor.min(focus)..anchor.max(focus))?;
-                    let text = selected
-                        .iter()
-                        .map(|paragraph| {
-                            paragraph
-                                .project()
-                                .map(|projection| projection.text().text().to_owned())
-                        })
-                        .collect::<std::result::Result<Vec<_>, _>>()?
-                        .join("\n");
-                    if !text.is_empty() {
-                        if key.eq_ignore_ascii_case("x") {
-                            self.editor.insert(&mut self.engine, "")?;
-                        }
-                        request = Some(Request::Copy(text));
-                    }
-                }
-                "v" => request = Some(Request::Paste),
-                "+" | "=" => {
-                    self.zoom_about(1.1, self.pointer);
-                    return self.moved();
-                }
-                "-" => {
-                    self.zoom_about(1.0 / 1.1, self.pointer);
-                    return self.moved();
-                }
-                "0" => {
-                    self.zoom_about(1.0 / self.zoom(), self.pointer);
-                    return self.moved();
-                }
-                _ => return Ok(Response::default()),
-            }
-        } else {
-            let chord = Command::from_key(key, self.modifiers);
-            if let Some(Command::Move(movement)) = chord {
-                self.editor
-                    .move_selection(&mut self.engine, movement, shift)?;
-            } else if let Some(Command::ScrollPage { up }) = chord {
-                // AppKit keeps ten points of the last page in view.
-                let page = self.viewport.size[1] as f32 - 10.0 * self.display_scale;
-                self.viewport.origin[1] += if up { page } else { -page };
-                return self.moved();
-            } else if let Some(Command::MovePage { up }) = chord {
-                self.move_page(up, shift)?;
-            } else if self.editor.marked_range().is_none() {
-                match (chord, key) {
-                    (Some(Command::DeleteTo(movement)), _) => {
-                        self.editor.delete_to(&mut self.engine, movement)?;
-                    }
-                    (Some(Command::Delete { backward }), _) => {
-                        self.editor.delete(&mut self.engine, backward)?;
-                    }
-                    (Some(Command::Kill), _) => {
-                        if !self.editor.delete_to(&mut self.engine, Movement::LineEnd)? {
-                            self.editor.delete(&mut self.engine, false)?;
-                        }
-                    }
-                    (_, Key::Named(end @ (NamedKey::Home | NamedKey::End))) => {
-                        let limits = self.scroll();
-                        self.viewport.origin[1] = -if *end == NamedKey::Home {
-                            limits.min[1]
-                        } else {
-                            limits.max[1]
-                        };
-                        return self.moved();
-                    }
-                    (_, Key::Named(NamedKey::Enter)) => {
-                        self.editor.enter(&mut self.engine, shift)?;
-                    }
-                    (_, Key::Named(NamedKey::Tab)) => {
-                        self.editor.tab(&mut self.engine, shift)?;
-                    }
-                    _ if !command && !control => {
-                        if let Some(text) = text
-                            .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
-                        {
-                            self.editor.insert(&mut self.engine, text)?;
-                        }
-                    }
-                    _ => {}
-                }
-            } else if key == &Key::Named(NamedKey::Escape) {
-                self.editor.cancel_composition(&mut self.engine)?;
-            }
+        // The host runs the shortcut modifier's chords from its command table.
+        if command && let Key::Character(_) = key {
+            return Ok(Response::default());
         }
-        Ok(Response {
-            request,
-            ..self.edited()?
-        })
+        let chord = Command::from_key(key, self.modifiers);
+        if let Some(Command::Move(movement)) = chord {
+            self.editor
+                .move_selection(&mut self.engine, movement, shift)?;
+        } else if let Some(Command::ScrollPage { up }) = chord {
+            // AppKit keeps ten points of the last page in view.
+            let page = (self.viewport.size[1] as f32 - 10.0 * self.display_scale).max(0.0);
+            self.viewport.origin[1] += if up { page } else { -page };
+            return self.moved();
+        } else if let Some(Command::MovePage { up }) = chord {
+            self.move_page(up, shift)?;
+        } else if self.editor.marked_range().is_none() {
+            match (chord, key) {
+                (Some(Command::DeleteTo(movement)), _) => {
+                    self.editor.delete_to(&mut self.engine, movement)?;
+                }
+                (Some(Command::Delete { backward }), _) => {
+                    self.editor.delete(&mut self.engine, backward)?;
+                }
+                (Some(Command::Kill), _) => {
+                    if !self.editor.delete_to(&mut self.engine, Movement::LineEnd)? {
+                        self.editor.delete(&mut self.engine, false)?;
+                    }
+                }
+                (_, Key::Named(end @ (NamedKey::Home | NamedKey::End))) => {
+                    let limits = self.scroll();
+                    self.viewport.origin[1] = -if *end == NamedKey::Home {
+                        limits.min[1]
+                    } else {
+                        limits.max[1]
+                    };
+                    return self.moved();
+                }
+                (_, Key::Named(NamedKey::Enter)) => {
+                    // Enter inside a link follows it, as OneNote's does.
+                    let [anchor, focus] = self.editor.selection().positions;
+                    if let Some(link) = self.editor.link_at(focus).filter(|link| {
+                        anchor == focus
+                            && !shift
+                            && link.label.start < focus.offset
+                            && focus.offset < link.label.end
+                    }) {
+                        return Ok(Response {
+                            request: Some(Request::OpenLink(link.target)),
+                            ..Response::default()
+                        });
+                    }
+                    self.editor.enter(&mut self.engine, shift)?;
+                }
+                (_, Key::Named(NamedKey::Tab)) => {
+                    self.editor.tab(&mut self.engine, shift)?;
+                }
+                _ if !command && !control => {
+                    if let Some(text) =
+                        text.filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+                    {
+                        self.editor.insert(&mut self.engine, text)?;
+                    }
+                }
+                _ => {}
+            }
+        } else if key == &Key::Named(NamedKey::Escape) {
+            self.editor.cancel_composition(&mut self.engine)?;
+        }
+        self.edited()
     }
 }
 
@@ -1526,7 +1617,9 @@ fn page_primitives<'a>(
             Some(PointerFeedback::Move(id, origin)) if id == outline.id => origin,
             _ => outline.origin(),
         };
-        if (paint.chrome && object_focus.is_none() && outline.id == editor.active_outline().id)
+        // OneNote frames the title whether or not it is focused or hovered.
+        if outline.title
+            || (paint.chrome && object_focus.is_none() && outline.id == editor.active_outline().id)
             || matches!(preview, Some(PointerFeedback::Hover(id) | PointerFeedback::Move(id, _)) if id == outline.id)
             || matches!(preview, Some(PointerFeedback::Resize(resized)) if resized.id == outline.id)
         {
@@ -1860,8 +1953,10 @@ fn append_outline_chrome(
     if outline.title {
         primitives.push(Primitive::RoundedRect {
             rect: [left, top, right, bottom],
-            radius: [6.0 * pixel, (bottom - top) * 0.5],
-            stroke: Some(Stroke::Dashed(pixel)),
+            radius: [4.5, (bottom - top) * 0.5],
+            // A page pixel at 100% zoom, so it scales when zoomed in but stays a screen pixel
+            // when zoomed out.
+            stroke: Some(Stroke::Dashed(pixel.max(0.75))),
             color: paper.shade(crate::gpu::colorref(0x007f7f7f)),
         });
         return;

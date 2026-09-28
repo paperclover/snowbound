@@ -62,6 +62,18 @@ pub struct TextLayout {
     id: u64,
     pub(crate) shaped: Arc<Layout<TextBrush>>,
     lines: Vec<LineBox>,
+    /// Where each inline space lies: its index in the spaces laid out, its x, and its line.
+    spaces: Vec<(usize, f32, usize)>,
+}
+
+/// Room kept in a line for something drawn inline, such as an equation, before the text at
+/// byte `index`; the line grows to its ascent and descent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlineSpace {
+    pub index: usize,
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +267,7 @@ impl TextEngine {
         &mut self,
         paragraph: &Paragraph,
         width: f32,
+        spaces: &[InlineSpace],
     ) -> Result<Layout<TextBrush>, LayoutError> {
         if !width.is_finite() || width <= 0.0 {
             return Err(LayoutError::InvalidWidth);
@@ -335,6 +348,16 @@ impl TextEngine {
             }
             start = span.end;
         }
+        for (id, space) in spaces.iter().enumerate() {
+            builder.push_inline_box(parley::InlineBox {
+                id: id as u64,
+                kind: parley::InlineBoxKind::InFlow,
+                index: space.index,
+                width: space.width,
+                height: space.ascent + space.descent,
+                baseline: Some(space.ascent),
+            });
+        }
         let mut shaped = builder.build(text);
         shaped.break_all_lines(Some(width));
         let alignment = match paragraph.spans()[0].format.alignment {
@@ -364,6 +387,19 @@ impl TextEngine {
             )
         } else if let (Ok(head), Ok(os2)) = (font.head(), font.os2())
             && head.units_per_em() != 0
+            && font
+                .table_data(skrifa::raw::types::Tag::new(b"MATH"))
+                .is_some()
+        {
+            // A math font's Windows extents reach its tallest operators; OneNote sets linear
+            // math in lines of text height.
+            let scale = run.font_size() / f32::from(head.units_per_em());
+            (
+                f32::from(os2.s_typo_ascender()) * scale,
+                -f32::from(os2.s_typo_descender()) * scale,
+            )
+        } else if let (Ok(head), Ok(os2)) = (font.head(), font.os2())
+            && head.units_per_em() != 0
             && (os2.us_win_ascent() != 0 || os2.us_win_descent() != 0)
         {
             let scale = run.font_size() / f32::from(head.units_per_em());
@@ -378,7 +414,18 @@ impl TextEngine {
     }
 
     pub fn layout(&mut self, paragraph: &Paragraph, width: f32) -> Result<TextLayout, LayoutError> {
-        let shaped = self.shape(paragraph, width)?;
+        self.layout_with(paragraph, width, &[])
+    }
+
+    /// Lays out `paragraph` keeping `spaces` inline, for what draws in them.
+    pub fn layout_with(
+        &mut self,
+        paragraph: &Paragraph,
+        width: f32,
+        spaces: &[InlineSpace],
+    ) -> Result<TextLayout, LayoutError> {
+        let shaped = self.shape(paragraph, width, spaces)?;
+        let mut placed = Vec::new();
         let text = paragraph.text();
         let mut lines = Vec::with_capacity(shaped.len());
         let mut top = 0.0_f64;
@@ -417,7 +464,7 @@ impl TextEngine {
                         .unwrap_or_else(|| paragraph.spans().last().unwrap())
                         .format;
                     let sample =
-                        self.shape(&Paragraph::new("Mg".into(), format.clone()), f32::MAX)?;
+                        self.shape(&Paragraph::new("Mg".into(), format.clone()), f32::MAX, &[])?;
                     sample.lines().flat_map(|line| line.runs()).try_fold(
                         (0.0_f32, 0.0_f32),
                         |(a, d), run| {
@@ -433,6 +480,14 @@ impl TextEngine {
                 }
                 ascent = ascent.max(a);
                 descent = descent.max(d);
+            }
+            for item in line.items() {
+                if let PositionedLayoutItem::InlineBox(inline) = item {
+                    let space = &spaces[inline.id as usize];
+                    ascent = ascent.max(space.ascent);
+                    descent = descent.max(space.descent);
+                    placed.push((inline.id as usize, inline.x, lines.len()));
+                }
             }
             let height = ascent + descent;
             if height <= 0.0 || !height.is_finite() {
@@ -460,6 +515,7 @@ impl TextEngine {
             id,
             shaped: Arc::new(shaped),
             lines,
+            spaces: placed,
         })
     }
 }
@@ -489,6 +545,13 @@ impl TextLayout {
             }
         }
         Ok(())
+    }
+
+    /// Each inline space laid out, by its index, with its x and its line's baseline.
+    pub fn spaces(&self) -> impl Iterator<Item = (usize, [f32; 2])> + '_ {
+        self.spaces
+            .iter()
+            .map(|&(id, x, line)| (id, [x, self.lines[line].baseline]))
     }
 
     pub fn lines(&self) -> impl Iterator<Item = (parley::Line<'_, TextBrush>, &LineBox)> {

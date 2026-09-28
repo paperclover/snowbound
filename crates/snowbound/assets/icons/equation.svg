@@ -1,3 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <path d="M2.5 4H13.5M6 4V12.5M10.5 4V11C10.5 12.25 11.25 12.75 12.75 12.25" fill="none" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#79c2ff"/><stop offset="1" stop-color="#1f7cf0"/></linearGradient>
+  </defs>
+  <path d="M1.8 5.35C2.2 3.75 3.1 2.75 4.6 2.75L14.2 2.75L14.2 5.15L11.4 5.15L11.4 11.75C11.4 12.45 11.7 12.75 12.2 12.75C12.6 12.75 12.9 12.55 13.2 12.15L14.3 13.35C13.6 14.35 12.6 14.75 11.5 14.75C9.8 14.75 8.8 13.75 8.8 11.95L8.8 5.15L6.8 5.15C6.7 9.15 6 12.25 5 14.75L2.3 14.75C3.5 12.05 4.2 9.15 4.3 5.15L4.1 5.15C3.5 5.15 3.2 5.45 3 6.05Z" fill="#000000" fill-opacity="0.16"/>
+  <path class="accent" d="M1.8 4.6C2.2 3 3.1 2 4.6 2H14.2V4.4H11.4V11C11.4 11.7 11.7 12 12.2 12C12.6 12 12.9 11.8 13.2 11.4L14.3 12.6C13.6 13.6 12.6 14 11.5 14C9.8 14 8.8 13 8.8 11.2V4.4H6.8C6.7 8.4 6 11.5 5 14H2.3C3.5 11.3 4.2 8.4 4.3 4.4H4.1C3.5 4.4 3.2 4.7 3 5.3Z" fill="url(#g0)" stroke="#1560c4" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

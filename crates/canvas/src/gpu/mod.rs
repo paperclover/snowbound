@@ -33,6 +33,7 @@ impl Viewport {
             origin: self.origin,
             clip: None,
             backdrop: None,
+            motion: None,
             primitives,
         }
     }
@@ -151,6 +152,8 @@ const EXCLAMATION: &str = include_str!("../../assets/tags/exclamation.svg");
 const RED_SQUARE: &str = include_str!("../../assets/tags/red-square.svg");
 const YELLOW_SQUARE: &str = include_str!("../../assets/tags/yellow-square.svg");
 const BLUE_SQUARE: &str = include_str!("../../assets/tags/blue-square.svg");
+const FLAG: &str = include_str!("../../assets/tags/flag.svg");
+const TAG: &str = include_str!("../../assets/tags/tag.svg");
 
 /// The tag's artwork, drawn in order.
 pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
@@ -168,6 +171,8 @@ pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
         TagIcon::RedSquare => &[RED_SQUARE],
         TagIcon::YellowSquare => &[YELLOW_SQUARE],
         TagIcon::BlueSquare => &[BLUE_SQUARE],
+        TagIcon::Flag => &[FLAG],
+        TagIcon::Other => &[TAG],
     }
 }
 
@@ -190,7 +195,13 @@ mod tests {
     #[test]
     fn page_colours_colour_the_paper() {
         let teal = 0x00f2f9d4;
-        assert_eq!(Paper::WHITE.colored(Some(teal)).color.map(|c| (c * 1000.0).round()), colorref(teal).map(|c| (c * 1000.0).round()));
+        assert_eq!(
+            Paper::WHITE
+                .colored(Some(teal))
+                .color
+                .map(|c| (c * 1000.0).round()),
+            colorref(teal).map(|c| (c * 1000.0).round())
+        );
         let dark = Paper {
             color: draw::srgb(0x1f, 0x20, 0x22),
             ink: draw::srgb(0xe6, 0xe6, 0xe6),
@@ -290,6 +301,8 @@ mod tests {
             TagIcon::RedSquare,
             TagIcon::YellowSquare,
             TagIcon::BlueSquare,
+            TagIcon::Flag,
+            TagIcon::Other,
         ];
         let text = TextEngine::default()
             .layout(
@@ -322,6 +335,7 @@ mod tests {
                 origin: [2.0 + 16.0 * index as f32, 2.0],
                 size: crate::outline::ParagraphTag::SIZE,
                 tint: [1.0; 4],
+                palette: draw::Palette::default(),
             })
             .collect();
         primitives.push(Primitive::Text {

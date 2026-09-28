@@ -15,6 +15,7 @@ pub struct Settings {
     pub sidebar: bool,
     /// Fonts picked from the font box, latest first.
     pub recent_fonts: Vec<String>,
+    pub toolbar: Toolbar,
     /// The name edits are stored under, OneNote's User name; the account's full name until
     /// first saved.
     pub user_name: Option<String>,
@@ -23,6 +24,31 @@ pub struct Settings {
     pub light_pages: bool,
     /// Where searches look first, as "Set This Scope as Default" chose.
     pub search_scope: crate::search::Scope,
+}
+
+/// What the toolbar's buttons apply from their menus' last picks.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Toolbar {
+    /// COLORREFs the highlighter and the font colour button apply; `None` removes the
+    /// highlight, or makes the colour automatic.
+    pub highlight: Option<u32>,
+    pub font_color: Option<u32>,
+    /// Places in OneNote's bullet and numbering libraries picked lately, latest first.
+    pub bullets: Vec<usize>,
+    pub numbering: Vec<usize>,
+}
+
+impl Default for Toolbar {
+    /// Office's yellow highlighter and red font colour.
+    fn default() -> Self {
+        Self {
+            highlight: Some(0x00ffff),
+            font_color: Some(0x0000ff),
+            bullets: Vec::new(),
+            numbering: Vec::new(),
+        }
+    }
 }
 
 /// The interface's colours: the system's appearance, or one chosen in Options.
@@ -97,6 +123,7 @@ impl crate::State {
                 .map(|library| library.location.clone()),
             sidebar: self.sidebar,
             recent_fonts: self.recent_fonts.clone(),
+            toolbar: self.toolbar.clone(),
             user_name: Some(self.author.clone()),
             color_scheme: self.color_scheme,
             light_pages: self.light_pages,
@@ -140,6 +167,12 @@ mod tests {
             current: Some("/notebooks/Personal".into()),
             sidebar: true,
             recent_fonts: vec!["Georgia".into()],
+            toolbar: Toolbar {
+                highlight: None,
+                font_color: Some(0x00ff00),
+                bullets: vec![3, 0],
+                numbering: vec![16],
+            },
             user_name: Some("Snowbound Test".into()),
             color_scheme: ColorScheme::Dark,
             light_pages: true,
@@ -155,6 +188,11 @@ mod tests {
                 ..Settings::default()
             }
         );
+        // A picked "No color" stays picked; what was never picked keeps Office's default.
+        std::fs::write(&path, br#"{"toolbar": {"highlight": null}}"#).unwrap();
+        let toolbar = Settings::load(&path).toolbar;
+        assert_eq!(toolbar.highlight, None);
+        assert_eq!(toolbar.font_color, Toolbar::default().font_color);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }

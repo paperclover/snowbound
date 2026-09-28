@@ -596,6 +596,62 @@ mod tests {
         assert_eq!((*target, range.clone()), (text(0), 1..4));
     }
 
+    /// Alt+Shift+Up and Down swap a paragraph, children and all, with its sibling as moves,
+    /// keeping the caret on the moved text, and stop at the first and last sibling.
+    #[test]
+    fn moving_paragraphs_swaps_sibling_subtrees_as_move_ops() {
+        let mut engine = TextEngine::default();
+        let lines = ["A", "a", "B"].map(|line| Paragraph::new(line.into(), Format::default()));
+        let document = crate::document::TextDocument::new(lines.to_vec()).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document, 400.0).unwrap();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 1,
+                    offset: 0,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.indent(&mut engine, false).unwrap();
+        editor.take_ops().unwrap();
+        let texts = |editor: &CanvasEditor| {
+            editor.outlines()[0]
+                .document()
+                .nodes()
+                .iter()
+                .map(|node| (node.text().unwrap().text.text().to_owned(), node.level))
+                .collect::<Vec<_>>()
+        };
+        let caret = TextPosition {
+            paragraph: 2,
+            offset: 1,
+        };
+        editor.select([caret; 2].into()).unwrap();
+        assert!(!editor.move_paragraphs(&mut engine, false).unwrap());
+        assert!(editor.move_paragraphs(&mut engine, true).unwrap());
+        let moved = [("B".into(), 1), ("A".into(), 1), ("a".into(), 2)];
+        assert_eq!(texts(&editor), moved);
+        assert_eq!(
+            editor.selection().positions,
+            [TextPosition {
+                paragraph: 0,
+                offset: 1
+            }; 2]
+        );
+        let ops = editor.take_ops().unwrap();
+        assert!(
+            !ops.is_empty() && ops.iter().all(|op| matches!(op, PageOp::Move { .. })),
+            "{ops:?}"
+        );
+        assert!(!editor.move_paragraphs(&mut engine, true).unwrap());
+        assert!(editor.move_paragraphs(&mut engine, false).unwrap());
+        assert_eq!(texts(&editor)[2], ("B".into(), 1));
+        assert_eq!(editor.selection().positions[0].paragraph, 2);
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(texts(&editor), moved);
+    }
+
     /// A change from elsewhere reaches only what it changed: a refresh whose stored page is
     /// what the editor's ops left (though storage normalized it) changes nothing, history
     /// included; one that changes an outline drops that outline's history and keeps the

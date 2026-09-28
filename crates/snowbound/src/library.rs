@@ -83,6 +83,7 @@ pub struct Login {
 
 impl Login {
     /// The guest account a mount without one signed in as.
+    #[cfg(any(target_os = "macos", test))]
     pub fn guest(mount: &Mount) -> Self {
         Self {
             user: String::new(),
@@ -327,7 +328,12 @@ impl Library {
             if let Some(tab) = tabs(folder).into_iter().next() {
                 return Some(tab.path);
             }
-            folders.extend(folder.groups.iter().filter(|group| !recycle_bin(group)));
+            folders.extend(
+                folder
+                    .groups
+                    .iter()
+                    .filter(|group| !recycle_bin(&group.path)),
+            );
         }
         None
     }
@@ -356,9 +362,9 @@ impl Library {
     }
 }
 
-/// Whether `folder` is the notebook's recycle bin, which OneNote keeps out of its lists.
-pub fn recycle_bin(folder: &Folder) -> bool {
-    folder.path.rsplit('/').next() == Some("OneNote_RecycleBin")
+/// Whether the folder at `path` is the notebook's recycle bin, which OneNote keeps out of its lists.
+pub fn recycle_bin(path: &str) -> bool {
+    path.rsplit('/').next() == Some("OneNote_RecycleBin")
 }
 
 pub fn file_name(path: &Path) -> String {
