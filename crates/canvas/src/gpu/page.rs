@@ -1777,6 +1777,8 @@ mod tests {
                 definition: Some(tag),
                 status: 1,
                 action_type: None,
+                shape: None,
+                property_status: None,
                 created: None,
                 completed: None,
                 start: None,

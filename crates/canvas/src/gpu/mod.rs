@@ -141,7 +141,6 @@ pub(crate) fn painted_layout(text: &dyn Glyphs) -> &TextLayout {
 }
 
 const CHECKMARK: &str = include_str!("../../assets/tags/checkmark.svg");
-const FLAG: &str = include_str!("../../assets/tags/flag.svg");
 const BOX_SMALL: &str = include_str!("../../assets/tags/box-small.svg");
 const CHECK_SMALL: &str = include_str!("../../assets/tags/check-small.svg");
 const TAG: &str = include_str!("../../assets/tags/tag.svg");
@@ -155,8 +154,7 @@ enum Art {
 }
 
 /// The artwork of symbol `shape` of MS-ONE's NoteTagShape, as OneNote 2010 draws it on the
-/// page: it draws 54, Green 8-Point Star, blue there. A shape MS-ONE does not list shows a
-/// plain tag.
+/// page. A shape MS-ONE does not list shows a plain tag.
 fn art(shape: u16) -> Art {
     use Art::{Badged, Box, Plain};
     macro_rules! tag {
@@ -218,7 +216,7 @@ fn art(shape: u16) -> Art {
         51 => Plain(tag!("circle-2-green")),
         52 => Badged(tag!("mark-three-green")),
         53 => Plain(tag!("circle-3-green")),
-        54 => Plain(tag!("star8-blue")),
+        54 => Plain(tag!("star8-green")),
         55 => Plain(tag!("tick-green")),
         56 => Plain(tag!("circle-green")),
         57 => Plain(tag!("arrow-down-green")),
@@ -318,8 +316,9 @@ const SYMBOLS: u16 = 143;
 /// The tag's artwork, drawn in order.
 pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
     static SOURCES: std::sync::OnceLock<Vec<[Vec<&'static str>; 2]>> = std::sync::OnceLock::new();
-    let TagIcon::Symbol { shape, checked } = icon else {
-        return &[FLAG];
+    let (shape, checked) = match icon {
+        TagIcon::Symbol { shape, checked } => (shape, checked),
+        TagIcon::Task { shape } => (shape, false),
     };
     let sources = SOURCES.get_or_init(|| {
         (0..=SYMBOLS)
@@ -349,6 +348,83 @@ mod tests {
     use onestore::document::Format;
     use onestore::page::text::Paragraph;
     use std::time::Duration;
+
+    /// OneNote 2010 draws paragraph `shape N` of `corpus/custom-tags/native/shapes.one` with
+    /// the art `DRAWN`'s Nth word names (its render: `shapes-1-72.png`, `shapes-73-143.png`);
+    /// each paragraph's tag definition stores the NoteTagShape.
+    #[test]
+    fn symbols_draw_the_art_onenote_draws_for_their_number() {
+        use onestore::page::{PageObject, ParagraphContent};
+        use onestore::{RevisionIndex, Store, document::Document, document::Kind, page::Page};
+        const DRAWN: &str = "\
+            checkbox-green checkbox-yellow checkbox mark-star-green mark-star-yellow \
+            mark-star-blue mark-exclamation-green mark-exclamation-yellow mark-exclamation-blue \
+            mark-arrow-green mark-arrow-yellow mark-arrow-blue star follow-up question \
+            arrow-right-blue exclamation phone calendar clock idea pushpin address blog smiley \
+            ribbon key mark-one-blue circle-1-blue mark-two-blue circle-2-blue mark-three-blue \
+            circle-3-blue star8-blue tick-blue circle-blue arrow-down-blue arrow-left-blue \
+            solid-target-blue star-blue sun-blue target-blue triangle-blue umbrella-blue \
+            arrow-up-blue x-dots-blue x-blue mark-one-green circle-1-green mark-two-green \
+            circle-2-green mark-three-green circle-3-green star8-green tick-green circle-green \
+            arrow-down-green arrow-left-green arrow-right-green solid-target-green star-green \
+            sun-green target-green triangle-green umbrella-green arrow-up-green x-dots-green \
+            x-green mark-one-yellow circle-1-yellow mark-two-yellow circle-2-yellow \
+            mark-three-yellow circle-3-yellow star8-yellow tick-yellow circle-yellow \
+            arrow-down-yellow arrow-left-yellow arrow-right-yellow solid-target-yellow \
+            sun-yellow target-yellow triangle-yellow umbrella-yellow arrow-up-yellow \
+            x-dots-yellow x-yellow flag-today flag-tomorrow flag-this-week flag-next-week \
+            flag-no-date mark-person-blue mark-person-yellow mark-person-green mark-flag-blue \
+            mark-flag-yellow mark-flag-green red-square yellow-square blue-square green-square \
+            orange-square pink-square email envelope envelope-open mobile phone-clock \
+            question-balloon paperclip frown im-contact person people bell contact rose date \
+            music movie quote globe web laptop plane car binoculars presentation password book \
+            notebook paper research highlight dollar coins schedule lightning cloud heart \
+            sunflower";
+        let bytes = include_bytes!("../../../../corpus/custom-tags/native/shapes.one");
+        let store = Store::parse(bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let files: Vec<&str> = DRAWN.split_whitespace().collect();
+        let mut seen = Vec::new();
+        for (space, _) in document.pages().unwrap() {
+            let page = Page::from_space(&document, space).unwrap();
+            if !page.title.starts_with("Shapes") {
+                continue;
+            }
+            for object in &page.objects {
+                let PageObject::Outline(outline) = object else {
+                    continue;
+                };
+                for paragraph in &outline.paragraphs {
+                    let ParagraphContent::Text(text) = &paragraph.content else {
+                        continue;
+                    };
+                    let label: usize = text.text.text()["shape ".len()..].parse().unwrap();
+                    let definition = text.tags[0].definition.unwrap();
+                    let Kind::TagDefinition {
+                        shape: Some(shape), ..
+                    } = page.definitions[&definition].kind
+                    else {
+                        panic!("shape {label} stores no symbol");
+                    };
+                    let (Art::Box(drawn) | Art::Badged(drawn) | Art::Plain(drawn)) = art(shape);
+                    let file = files[label - 1];
+                    let expected = std::fs::read_to_string(format!(
+                        "{}/assets/tags/{file}.svg",
+                        env!("CARGO_MANIFEST_DIR")
+                    ))
+                    .unwrap();
+                    assert_eq!(
+                        drawn, expected,
+                        "shape {label}, stored {shape}, draws {file}"
+                    );
+                    seen.push(label);
+                }
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (1..=143).collect::<Vec<_>>());
+    }
 
     /// A page colour paints as OneNote paints it on white paper, and on dark paper as a
     /// dark paper of its hue; no colour leaves the paper as it was.
@@ -465,7 +541,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(shape, checked)| TagIcon::of(shape, checked).unwrap())
-        .chain([TagIcon::Task])
+        .chain([TagIcon::Task { shape: 91 }])
         .collect();
         let text = TextEngine::default()
             .layout(

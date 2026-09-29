@@ -256,6 +256,8 @@ fn mutate(page: &mut Page, bytes: &mut Bytes<'_>) {
                     text.tags.push(onestore::document::Tag {
                         definition: Some(definition),
                         action_type: None,
+                        shape: None,
+                        property_status: None,
                         status: u16::from(bytes.next().unwrap_or(0) % 2),
                         created: Some(1_262_401_445),
                         completed: None,

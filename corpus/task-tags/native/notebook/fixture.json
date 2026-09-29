@@ -1,0 +1,15 @@
+{
+  "sections": [
+    "Tasks.one"
+  ],
+  "pages": [
+    {
+      "section": "Tasks.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:TagDef index=\"0\" type=\"0\" symbol=\"3\" name=\"To Do\"/><one:Title><one:OE><one:T>Remove a task</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"200\"/><one:OEChildren><one:OE><one:OutlookTask guidTask=\"{3C1A5E10-6B2F-4C8E-9D71-0A2B3C4D5E61}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-02T00:00:00Z\" dueDate=\"2020-01-03T00:00:00Z\"/><one:T>First task</one:T></one:OE><one:OE><one:OutlookTask guidTask=\"{3C1A5E10-6B2F-4C8E-9D71-0A2B3C4D5E62}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-06T00:00:00Z\" dueDate=\"2020-01-10T00:00:00Z\"/><one:T>Second task</one:T></one:OE><one:OE><one:Tag index=\"0\" completed=\"false\"/><one:OutlookTask guidTask=\"{3C1A5E10-6B2F-4C8E-9D71-0A2B3C4D5E63}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-02T00:00:00Z\" dueDate=\"2020-01-02T00:00:00Z\"/><one:T>Tagged task</one:T></one:OE><one:OE><one:T>Untagged</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    },
+    {
+      "section": "Tasks.one",
+      "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:TagDef index=\"0\" type=\"0\" symbol=\"3\" name=\"To Do\"/><one:Title><one:OE><one:T>Delete and undo</one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"480\" height=\"200\"/><one:OEChildren><one:OE><one:OutlookTask guidTask=\"{3C1A5E10-6B2F-4C8E-9D71-0A2B3C4D5E61}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-02T00:00:00Z\" dueDate=\"2020-01-03T00:00:00Z\"/><one:T>First task</one:T></one:OE><one:OE><one:OutlookTask guidTask=\"{3C1A5E10-6B2F-4C8E-9D71-0A2B3C4D5E62}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-06T00:00:00Z\" dueDate=\"2020-01-10T00:00:00Z\"/><one:T>Second task</one:T></one:OE><one:OE><one:Tag index=\"0\" completed=\"false\"/><one:OutlookTask guidTask=\"{3C1A5E10-6B2F-4C8E-9D71-0A2B3C4D5E63}\" completed=\"false\" disabled=\"true\" creationDate=\"2020-01-02T03:04:05Z\" startDate=\"2020-01-02T00:00:00Z\" dueDate=\"2020-01-02T00:00:00Z\"/><one:T>Tagged task</one:T></one:OE><one:OE><one:T>Untagged</one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+    }
+  ]
+}

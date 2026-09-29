@@ -138,6 +138,22 @@ pub fn menu(
 /// delay, or at once while another has just shown. A press or the wheel hides it until the
 /// pointer leaves.
 pub fn tooltip(ui: &mut Ui, title: &str, keys: &str, description: Option<&str>) {
+    tooltip_below(ui, None, title, keys, description);
+}
+
+/// A `tooltip` below `part`, a window rectangle within the box built last, as a custom
+/// box names what it draws.
+pub fn tooltip_over(ui: &mut Ui, part: [f32; 4], title: &str, description: Option<&str>) {
+    tooltip_below(ui, Some(part), title, "", description);
+}
+
+fn tooltip_below(
+    ui: &mut Ui,
+    part: Option<[f32; 4]>,
+    title: &str,
+    keys: &str,
+    description: Option<&str>,
+) {
     let Some(&index) = ui.nodes[*ui.stack.last().unwrap()].children.last() else {
         return;
     };
@@ -183,7 +199,7 @@ pub fn tooltip(ui: &mut Ui, title: &str, keys: &str, description: Option<&str>) 
     } else {
         format!("{title} ({keys})")
     };
-    let [left, top, right, bottom] = ui.rect(id).unwrap_or_default();
+    let [left, top, right, bottom] = part.or(ui.rect(id)).unwrap_or_default();
     let theme = &ui.theme;
     let spec = Spec {
         axis: Axis::Y,

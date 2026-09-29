@@ -88,6 +88,7 @@ fn stroke(points: &[[f32; 2]], color: Option<u32>) -> InkStroke {
         color,
         transparency: None,
         pen_tip: None,
+        raster_operation: None,
     }
 }
 
@@ -109,6 +110,7 @@ fn drawing() -> Ink {
             stroke(&[[300.0, 120.0], [360.0, 180.0]], Some(0x0000ff)),
         ],
         groups: Vec::new(),
+        shape: None,
     }
 }
 
@@ -231,4 +233,373 @@ fn stored_strokes_keep_their_paths() {
         }
     }
     assert!(ops::saved(NATIVE, space, &moved).is_err());
+}
+
+/// OneNote 2010's Draw tab used with the mouse (`corpus/ink-tools/native-ui`): every favourite
+/// pen and highlighter, shapes, and ink erased, moved and deleted.
+const TOOLS: &[u8] = include_bytes!("../../../corpus/ink-tools/native-ui/notebook/ink.one");
+
+fn titled(bytes: &[u8], title: &str) -> (ExGuid, Page) {
+    let store = Store::parse(bytes).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    document
+        .pages()
+        .unwrap()
+        .into_iter()
+        .map(|(space, _)| (space, Page::from_space(&document, space).unwrap()))
+        .find(|(_, page)| page.title == title)
+        .unwrap()
+}
+
+fn himetric(value: f32) -> f32 {
+    value * 72.0 / 2540.0
+}
+
+use onestore::page::ink::{InkShape, ShapeKind};
+
+#[test]
+fn native_pens_highlighters_and_shapes_read_as_drawn() {
+    let (_, gallery) = titled(TOOLS, "Gallery");
+    let pens: Vec<_> = drawings(&gallery)
+        .iter()
+        .map(|ink| {
+            let [stroke] = ink.strokes.as_slice() else {
+                panic!("OneNote keeps each stroke a drawing of its own")
+            };
+            (
+                (stroke.width / himetric(1.0)).round(),
+                (stroke.height / himetric(1.0)).round(),
+                stroke.color,
+                stroke.raster_operation,
+            )
+        })
+        .collect();
+    let (red, blue, green, grey) = (0x241ced, 0xbb6531, 0x367d17, 0x808080);
+    let pen = |width, color| (width, width, color, None);
+    let marker = |color| (70.0, 400.0, Some(color), Some(9));
+    assert_eq!(
+        pens,
+        [
+            pen(35.0, None),
+            pen(35.0, Some(red)),
+            pen(35.0, Some(blue)),
+            pen(35.0, Some(green)),
+            pen(35.0, Some(grey)),
+            marker(0x00ffff),
+            marker(0xffff00),
+            pen(50.0, None),
+            pen(50.0, Some(red)),
+            pen(50.0, Some(blue)),
+            pen(50.0, Some(green)),
+            pen(50.0, Some(grey)),
+            marker(0x00ff00),
+            marker(0xff00ff),
+        ]
+    );
+    let highlighter = &drawings(&gallery)[5].strokes[0];
+    assert_eq!(
+        (highlighter.transparency, highlighter.pen_tip),
+        (Some(127), Some(1))
+    );
+
+    let (_, pens) = titled(TOOLS, "Pens");
+    let shapes: Vec<&Ink> = drawings(&pens)
+        .into_iter()
+        .filter(|ink| ink.shape.is_some())
+        .collect();
+    let [rectangle, line, arrow, ellipse] = shapes.as_slice() else {
+        panic!("{}", shapes.len())
+    };
+    let pen = InkStroke {
+        points: Vec::new(),
+        ..rectangle.strokes[0].clone()
+    };
+    assert!((pen.width - himetric(50.0)).abs() < 1e-5);
+    let close_points = |a: &[[f32; 2]], b: &[[f32; 2]]| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(a, b)| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05)
+    };
+    for (native, kind, from, to) in [
+        (rectangle, ShapeKind::Rectangle, [252.0, 86.4], [324.0, 122.4]),
+        (line, ShapeKind::Line, [342.0, 86.4], [414.0, 122.4]),
+        (arrow, ShapeKind::Arrow, [252.0, 158.4], [324.0, 194.4]),
+        (ellipse, ShapeKind::Ellipse, [342.0, 158.4], [414.0, 194.4]),
+    ] {
+        let drawn = Ink::drawn(kind, from, to, &pen).unwrap();
+        assert_eq!(drawn.strokes.len(), native.strokes.len(), "{kind:?}");
+        for (drawn, native) in drawn.strokes.iter().zip(&native.strokes) {
+            assert!(
+                close_points(&drawn.points, &native.points),
+                "{kind:?}: {:?} against {:?}",
+                drawn.points,
+                native.points
+            );
+        }
+        match (drawn.shape.unwrap(), native.shape.clone().unwrap()) {
+            (InkShape::Line(a), InkShape::Line(b)) => assert!(close_points(&a, &b)),
+            (
+                InkShape::Closed { transform, anchors },
+                InkShape::Closed {
+                    transform: native_transform,
+                    anchors: native_anchors,
+                },
+            ) => {
+                assert_eq!(anchors, native_anchors);
+                assert!(
+                    transform
+                        .iter()
+                        .zip(native_transform)
+                        .all(|(a, b)| (a - b).abs() < 0.05)
+                );
+            }
+            shapes => panic!("{shapes:?}"),
+        }
+    }
+
+    // Erased and deleted drawings leave the page; a moved one keeps its strokes and takes
+    // an offset.
+    let (_, edits) = titled(TOOLS, "Edits");
+    let moved: Vec<_> = drawings(&edits)
+        .into_iter()
+        .filter(|ink| ink.shape.is_none())
+        .map(|ink| (ink.layout.x, ink.layout.y))
+        .collect();
+    assert_eq!(moved.len(), 2);
+    assert!(moved.iter().any(|&(x, y)| x == Some(45.0)
+        && y.is_some_and(|y| (y - 15.0).abs() < 1e-4)));
+}
+
+fn tool_page(source: &[u8]) -> (ExGuid, Page, Vec<Ink>) {
+    let (space, page) = first_page(source);
+    let accent = InkStroke {
+        id: new_id().unwrap(),
+        points: Vec::new(),
+        width: snap(himetric(35.0)),
+        height: snap(himetric(35.0)),
+        color: Some(0x7a9a1f),
+        transparency: None,
+        pen_tip: None,
+        raster_operation: None,
+    };
+    let marker = InkStroke {
+        width: himetric(70.0),
+        height: himetric(400.0),
+        color: Some(0x00ffff),
+        transparency: Some(127),
+        pen_tip: Some(1),
+        raster_operation: Some(9),
+        ..accent.clone()
+    };
+    let shape_pen = InkStroke {
+        width: himetric(50.0),
+        height: himetric(50.0),
+        ..accent.clone()
+    };
+    let free = |pen: &InkStroke, points: Vec<[f32; 2]>| Ink {
+        id: new_id().unwrap(),
+        layout: Default::default(),
+        strokes: vec![InkStroke {
+            id: new_id().unwrap(),
+            points: points.into_iter().map(|p| p.map(snap)).collect(),
+            ..pen.clone()
+        }],
+        groups: Vec::new(),
+        shape: None,
+    };
+    let wave: Vec<[f32; 2]> = (0..=40)
+        .map(|step| {
+            let x = 60.0 + step as f32 * 4.0;
+            [x, 150.0 + 12.0 * (x / 18.0).sin()]
+        })
+        .collect();
+    let inks = vec![
+        free(&marker, vec![[60.0, 190.0], [220.0, 190.0]]),
+        free(&accent, wave),
+        Ink::drawn(ShapeKind::Rectangle, [252.0, 140.4], [324.0, 194.4], &shape_pen).unwrap(),
+        Ink::drawn(ShapeKind::Ellipse, [342.0, 140.4], [432.0, 194.4], &shape_pen).unwrap(),
+        Ink::drawn(ShapeKind::Arrow, [252.0, 230.4], [360.0, 266.4], &shape_pen).unwrap(),
+        Ink::drawn(ShapeKind::Line, [378.0, 230.4], [450.0, 230.4], &shape_pen).unwrap(),
+    ];
+    (space, page, inks)
+}
+
+fn added(source: &[u8], space: ExGuid, inks: &[Ink]) -> Vec<u8> {
+    let mut bytes = source.to_vec();
+    for ink in inks {
+        bytes = ops::page_edited(
+            &bytes,
+            space,
+            vec![onestore::op::PageOp::Add {
+                object: PageObject::Ink(ink.clone()),
+                before: None,
+            }],
+        )
+        .unwrap();
+    }
+    bytes
+}
+
+/// `ONESTORE_INK_TOOLS_EXPORT` names a new directory receiving the candidate for a cold
+/// reopen.
+#[test]
+fn pens_highlighters_and_shapes_are_written_as_onenote_draws_them() {
+    use onestore::document::{FieldValue, Kind};
+    let source = onestore::create_section("ink.one", "Drawn in Snowbound", "Author").unwrap();
+    let (space, before, inks) = tool_page(&source);
+    // Each stroke is one edit, as the canvas stores it.
+    let written = added(&source, space, &inks);
+    let stored = page_in(&written, space);
+    let mut expected = before.clone();
+    expected
+        .objects
+        .extend(inks.iter().cloned().map(PageObject::Ink));
+    expected.title = stored.title.clone();
+    assert_eq!(stored, expected);
+    export("ONESTORE_INK_TOOLS_EXPORT", "ink.one", &written);
+
+    let store = Store::parse(&written).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let revision = document.active(space).unwrap();
+    let node = |id: ExGuid| &revision.nodes[&id];
+    let extra = |id: ExGuid, property: u32| {
+        node(id)
+            .extra
+            .iter()
+            .flatten()
+            .find(|field| field.id == property)
+            .map(|field| match field.value {
+                FieldValue::Bytes(bytes) => bytes.to_vec(),
+                _ => Vec::new(),
+            })
+    };
+    let style = |stroke: ExGuid| match node(stroke).kind {
+        Kind::InkStroke {
+            style: Some(style),
+            bias,
+            index,
+            ..
+        } => (node(style).kind.clone(), bias, index),
+        _ => panic!(),
+    };
+    let [marker, wave, rectangle, _, arrow, _] = inks.as_slice() else {
+        unreachable!()
+    };
+    match style(marker.strokes[0].id) {
+        (
+            Kind::InkStyle {
+                raster_operation: Some(9),
+                pen_tip: Some(1),
+                transparency: Some(127),
+                ignore_pressure: Some(true),
+                ..
+            },
+            Some(2),
+            Some(1),
+        ) => {}
+        other => panic!("{other:?}"),
+    }
+    match style(wave.strokes[0].id) {
+        (
+            Kind::InkStyle {
+                raster_operation: None,
+                ignore_pressure: Some(true),
+                color: Some(0x7a9a1f),
+                ..
+            },
+            Some(0),
+            Some(2),
+        ) => {}
+        other => panic!("{other:?}"),
+    }
+    for stroke in &arrow.strokes {
+        match style(stroke.id) {
+            (
+                Kind::InkStyle {
+                    ignore_pressure: None,
+                    ..
+                },
+                None,
+                None,
+            ) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(extra(wave.id, 0x14001d4e), Some(1u32.to_le_bytes().to_vec()));
+    assert_eq!(extra(rectangle.id, 0x14001d4e), Some(2u32.to_le_bytes().to_vec()));
+    match &node(rectangle.id).kind {
+        Kind::Ink {
+            shape_kind: Some(12),
+            anchors: Some(anchors),
+            ..
+        } => assert_eq!(anchors.len(), 24 + 8 * 8),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// `ONESTORE_INK_TOOLS_EDIT_EXPORT` names a new directory receiving the candidate for a cold
+/// reopen: OneNote's own drawings after Snowbound erases one, moves another and draws more.
+#[test]
+fn onenote_drawings_take_erasing_moving_and_more_strokes() {
+    use onestore::{OutlineEdit, op::PageOp};
+    let (space, page) = titled(TOOLS, "Pens");
+    let native = drawings(&page);
+    let zigzag = native
+        .iter()
+        .find(|ink| ink.strokes[0].color == Some(0x241ced))
+        .unwrap()
+        .id;
+    let line = native[1].id;
+    let edited = ops::page_edited(
+        TOOLS,
+        space,
+        vec![
+            PageOp::Delete { object: zigzag },
+            PageOp::Outline {
+                object: line,
+                edit: OutlineEdit::Position { x: 36.0, y: 18.0 },
+            },
+        ],
+    )
+    .unwrap();
+    let (_, _, inks) = tool_page(&onestore::create_section("x.one", "x", "x").unwrap());
+    let moved: Vec<Ink> = inks
+        .into_iter()
+        .map(|mut ink| {
+            for stroke in &mut ink.strokes {
+                for point in &mut stroke.points {
+                    point[1] = snap(point[1] + 200.0);
+                }
+            }
+            if let Some(shape) = &mut ink.shape {
+                *shape = match shape {
+                    InkShape::Line([a, b]) => InkShape::Line([[a[0], a[1] + 200.0], [b[0], b[1] + 200.0]]),
+                    InkShape::Closed { transform, anchors } => InkShape::Closed {
+                        transform: {
+                            let mut t = *transform;
+                            t[5] += 200.0;
+                            t
+                        },
+                        anchors: anchors.clone(),
+                    },
+                }
+                .snapped();
+            }
+            ink
+        })
+        .collect();
+    let written = added(&edited, space, &moved);
+    let stored = page_in(&written, space);
+    let found = drawings(&stored);
+    assert!(!found.iter().any(|ink| ink.id == zigzag));
+    let line = found.iter().find(|ink| ink.id == line).unwrap();
+    assert_eq!((line.layout.x, line.layout.y), (Some(36.0), Some(18.0)));
+    assert_eq!(line.strokes, native[1].strokes);
+    for ink in &moved {
+        assert_eq!(found.iter().find(|found| found.id == ink.id), Some(&ink));
+    }
+    export("ONESTORE_INK_TOOLS_EDIT_EXPORT", "ink.one", &written);
 }

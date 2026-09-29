@@ -176,13 +176,35 @@ online again.
 
 ## Sections that aren't open
 
-OneNote keeps every section of an open notebook in sync, not just the one on screen: it
-reads a section another client changed within seconds and publishes a closed section's
-offline edits the moment the share is back. Snowbound's `session::Background` does the
-same with one thread per notebook. Each round reads every section file's stamp. Only a
-section whose replica has edits waiting, or whose file moved past the replica's base,
-has its replica opened for the usual sync steps, and it is closed again afterwards. The
-open section is left to its own session.
+OneNote keeps every section of an open notebook in sync and on this computer, not just
+the one on screen. Watched in the lab with a notebook of 200 sections on Samba, OneNote
+2010:
+
+- reads every section file once when the notebook opens (all 200 within 15 seconds), so a
+  section never shown before opens with the share gone;
+- arms one CHANGE_NOTIFY on the notebook's folder, with WATCH_TREE and a filter of names,
+  attributes, size and last write, and otherwise sends nothing: 22 idle minutes put no SMB
+  request on the wire, not even an echo;
+- lists the folder once when the server reports a change, and reads only the section that
+  changed, some seconds later;
+- tries a section it could not reach again about every 31 seconds.
+
+Snowbound's `session::Background` does the same, with one thread per notebook:
+
+```text
+share ─ CHANGE_NOTIFY (tree) ─► the sections it names are due in 1 s ─► stamp ─► moved: rebase
+first pass:  one section every 100 ms; a section without a replica gets its offline copy
+failing:     again in 31 s        otherwise: again in an hour, against a lost notification
+```
+
+A check costs one stamp read. Only a section whose replica has edits waiting, or whose file
+moved past the replica's base, has its replica opened for the usual sync steps, and it is
+closed again afterwards; the open section is left to its own session. A connection that
+drops takes its watch with it, so the next one checks every section again. A notebook in a
+folder on this computer has no copies and learns of changes from FSEvents or inotify; one on
+a network volume the system mounted, whose server's changes those never report, keeps copies
+and is checked every 15 seconds. Closing a notebook deletes its copies, except any with
+edits still waiting.
 
 ## Notebook structure
 

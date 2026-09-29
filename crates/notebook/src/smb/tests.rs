@@ -421,6 +421,44 @@ fn live_stamp_and_transaction() {
     poller.delete(&path).unwrap();
 }
 
+/// A watch names the file another client commits to in the watched folder.
+#[test]
+#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
+fn live_watch() {
+    let watcher = client();
+    let writer = client();
+    let folder = format!(
+        "watch-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    writer.create_directory(&folder).unwrap();
+    let path = format!("{folder}/Watched.one");
+    let source = onestore::create_section("Watched.one", "Watched", "Author").unwrap();
+    create(&writer, &path, &source);
+    let (sender, changes) = std::sync::mpsc::channel();
+    watcher
+        .watch(&folder, move |changed| {
+            let _ = sender.send(changed.map_err(|error| error.kind()));
+        })
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    writer
+        .commit_transaction(&path, &replaced(&source, 0..0, "Changed "))
+        .unwrap();
+    let changed = changes.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(changed.unwrap().contains(&"Watched.one".to_owned()));
+    // An idle watch hears nothing more.
+    while let Ok(changed) = changes.recv_timeout(Duration::from_secs(2)) {
+        assert!(changed.unwrap().iter().all(|path| path == "Watched.one"));
+    }
+    drop(watcher);
+    writer.delete(&path).unwrap();
+    writer.delete(&folder).unwrap();
+}
+
 #[test]
 #[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
 fn live_storage_inspection() {

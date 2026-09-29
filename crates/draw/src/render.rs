@@ -224,7 +224,6 @@ enum AtlasKey {
     Icon {
         sources: &'static [&'static str],
         size: u32,
-        phase: [u8; 2],
         /// The bits of the colour `currentColor` paints.
         ink: [u32; 3],
         palette: [Option<[u32; 3]>; 3],
@@ -1104,27 +1103,24 @@ impl Renderer {
         tint: [f32; 4],
         palette: &Palette,
     ) -> Result<(), RenderError> {
-        let size = size * space.scale;
-        let [x, y] = space.origin.map(|v| (v * 4.0).round() * 0.25);
+        // Whole device pixels keep a sprite's pixel-art edges crisp at every scale.
+        let size = (size * space.scale).round().max(1.0);
+        let [x, y] = space.origin.map(f32::round);
         if !size.is_finite() || [x, y].iter().any(|v| !v.is_finite()) {
             return Err(RenderError::InvalidPrimitive);
         }
-        if x + size + 1.0 < 0.0
-            || y + size + 1.0 < 0.0
-            || x - 1.0 > space.size[0] as f32
-            || y - 1.0 > space.size[1] as f32
+        if x + size < 0.0 || y + size < 0.0 || x > space.size[0] as f32 || y > space.size[1] as f32
         {
             return Ok(());
         }
-        if size + 3.0 > self.atlas_side() as f32 {
+        if size + 2.0 > self.atlas_side() as f32 {
             return Err(RenderError::AtlasFull);
         }
-        let phase = [((x - x.floor()) * 4.0) as u8, ((y - y.floor()) * 4.0) as u8];
+        let size = size as u32;
         let ink = [tint[0], tint[1], tint[2]];
         let key = AtlasKey::Icon {
             sources,
-            size: size.to_bits(),
-            phase,
+            size,
             ink: ink.map(f32::to_bits),
             palette: palette.bits(),
         };
@@ -1134,20 +1130,13 @@ impl Renderer {
             if self.glyphs.len() >= self.glyph_limit() {
                 return Err(RenderError::AtlasFull);
             }
-            let glyph = self.upload(icon::rasterize(sources, size, phase, ink, palette))?;
+            let glyph = self.upload(icon::rasterize(sources, size, ink, palette))?;
             self.glyphs.insert(key, Some(glyph));
             glyph
         };
-        let left = x.floor();
-        let top = y.floor();
         self.quad(
             space,
-            [
-                left,
-                top,
-                left + glyph.width as f32,
-                top + glyph.height as f32,
-            ],
+            [x, y, x + glyph.width as f32, y + glyph.height as f32],
             self.uv(glyph),
             [1.0, 1.0, 1.0, tint[3]],
         )

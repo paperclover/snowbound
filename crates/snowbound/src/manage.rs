@@ -189,9 +189,13 @@ impl State {
         Ok(())
     }
 
-    /// Closes `library`: its files stay, and the sidebar and the next launch leave it out.
+    /// Closes `library`: its files stay, its offline copies go unless edits wait in them,
+    /// and the sidebar and the next launch leave it out.
     pub(crate) fn close_notebook(&mut self, library: &Arc<Library>) {
         self.notebooks.retain(|open| !Arc::ptr_eq(open, library));
+        if let Some(background) = &library.background {
+            background.discard();
+        }
         let shown = |shown: &Arc<Library>| shown.location == library.location;
         if self.sectionless.as_ref().is_some_and(shown)
             || self

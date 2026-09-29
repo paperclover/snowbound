@@ -105,23 +105,28 @@ impl Replica {
     /// Seeds a new cache from a validated section image, refusing any existing path.
     /// An initialization error preserves the created file for inspection.
     pub fn create(path: impl AsRef<Path>, source: &[u8]) -> Result<Self> {
+        Self::seed(path.as_ref(), source)?;
+        Self::start(cache_connection(path.as_ref())?)
+    }
+
+    /// `create` without opening the cache it made, as for an offline copy.
+    pub(crate) fn seed(path: &Path, source: &[u8]) -> Result<()> {
         validate(source)?;
-        let path = path.as_ref();
-        // Built under another name and linked into place whole, so that a cache that exists
-        // is complete: a background step or a failed creation never leaves one half made.
+        // Built under a name of its own and linked into place whole, so that a cache that
+        // exists is complete, and two threads making the same one never share a build.
+        static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let build = BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut building = path.as_os_str().to_owned();
-        building.push(".creating");
+        building.push(format!(".creating-{}-{build}", std::process::id()));
         let building = PathBuf::from(building);
-        for stale in ["", "-wal", "-shm"] {
-            let mut file = building.as_os_str().to_owned();
-            file.push(stale);
-            let _ = std::fs::remove_file(file);
-        }
         let built = Self::build(&building, source);
         let linked = built.and_then(|()| Ok(std::fs::hard_link(&building, path)?));
-        let _ = std::fs::remove_file(&building);
-        linked?;
-        Self::start(cache_connection(path)?)
+        for suffix in ["", "-wal", "-shm"] {
+            let mut file = building.as_os_str().to_owned();
+            file.push(suffix);
+            let _ = std::fs::remove_file(file);
+        }
+        linked
     }
 
     fn build(path: &Path, source: &[u8]) -> Result<()> {

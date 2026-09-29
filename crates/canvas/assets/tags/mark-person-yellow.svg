@@ -1,9 +1,71 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <defs>
-    <linearGradient id="layer0" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9aa2ae"/><stop offset="1" stop-color="#4a525e"/></linearGradient>
-    <linearGradient id="layer1" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#f5d45c"/><stop offset="1" stop-color="#b8901e"/></linearGradient>
-  </defs>
-  <path d="M4 0.5A2.5 2.5 0 1 1 4 5.5A2.5 2.5 0 1 1 4 0.5Z" fill="url(#layer0)"/>
-  <path d="M4 5.5C6.4 5.5 7.75 6.5 7.75 8.5V10H0.25V8.5C0.25 6.5 1.6 5.5 4 5.5Z" fill="url(#layer1)"/>
-  <path d="M3.4 5.75H4.6L4 7.25Z" fill="#ffffff"/>
+  <path d="M0 0h1v1h-1z" fill="#7b7b7b" fill-opacity="0.14"/>
+  <path d="M1 0h1v1h-1z" fill="#6f6f6f" fill-opacity="0.62"/>
+  <path d="M2 0h1v1h-1zM4 1h1v1h-1z" fill="#8d8d8d"/>
+  <path d="M3 0h1v1h-1z" fill="#888888"/>
+  <path d="M4 0h1v1h-1zM6 2h1v1h-1zM5 4h1v1h-1zM4 5h1v1h-1z" fill="#858585"/>
+  <path d="M5 0h1v1h-1z" fill="#565656" fill-opacity="0.6"/>
+  <path d="M6 0h1v1h-1z" fill="#686868" fill-opacity="0.13"/>
+  <path d="M0 1h1v1h-1z" fill="#666666" fill-opacity="0.51"/>
+  <path d="M1 1h1v1h-1zM3 2h1v1h-1z" fill="#6c6c6c"/>
+  <path d="M2 1h1v1h-1z" fill="#828282"/>
+  <path d="M3 1h1v1h-1zM5 3h1v1h-1zM4 4h1v1h-1zM3 5h1v1h-1z" fill="#a2a2a2"/>
+  <path d="M5 1h1v1h-1zM0 3h1v1h-1zM5 5h1v1h-1zM3 6h1v1h-1z" fill="#555555"/>
+  <path d="M6 1h1v1h-1z" fill="#5b5b5b" fill-opacity="0.65"/>
+  <path d="M0 2h1v1h-1z" fill="#7e7e7e"/>
+  <path d="M1 2h1v1h-1zM6 4h1v1h-1zM4 6h1v1h-1z" fill="#636363"/>
+  <path d="M2 2h1v1h-1z" fill="#5d5d5d"/>
+  <path d="M4 2h1v1h-1z" fill="#585858"/>
+  <path d="M5 2h1v1h-1zM4 3h1v1h-1zM3 4h1v1h-1zM2 5h1v1h-1z" fill="#c1c1c1"/>
+  <path d="M1 3h1v1h-1z" fill="#494949"/>
+  <path d="M2 3h1v1h-1z" fill="#b4b4b4"/>
+  <path d="M3 3h1v1h-1zM2 4h1v1h-1z" fill="#d5d5d5"/>
+  <path d="M6 3h1v1h-1z" fill="#757575"/>
+  <path d="M0 4h1v1h-1z" fill="#383838"/>
+  <path d="M1 4h1v1h-1z" fill="#2c2c2c"/>
+  <path d="M0 5h1v1h-1z" fill="#252525" fill-opacity="0.45"/>
+  <path d="M1 5h1v1h-1z" fill="#000000"/>
+  <path d="M6 5h1v1h-1z" fill="#868a8c"/>
+  <path d="M0 6h1v1h-1z" fill="#343434" fill-opacity="0.09"/>
+  <path d="M1 6h1v1h-1z" fill="#d3d0cd"/>
+  <path d="M2 6h1v1h-1z" fill="#6c6661"/>
+  <path d="M5 6h1v1h-1z" fill="#a59806"/>
+  <path d="M6 6h1v1h-1z" fill="#c9c7b9"/>
+  <path d="M13 6h1v8h-1zM5 13h8v1h-8z" fill="#ccd5d9"/>
+  <path d="M0 7h1v1h-1z" fill="#968d0c" fill-opacity="0.54"/>
+  <path d="M1 7h1v1h-1z" fill="#ab9813"/>
+  <path d="M2 7h1v1h-1z" fill="#b3a71a"/>
+  <path d="M3 7h1v1h-1z" fill="#d4d8c7"/>
+  <path d="M4 7h1v1h-1z" fill="#f0f6f9"/>
+  <path d="M5 7h1v2h-1z" fill="#b8a105"/>
+  <path d="M6 7h1v1h-1z" fill="#8d8206"/>
+  <path d="M7 7h1v1h-1z" fill="#d7d6cf"/>
+  <path d="M0 8h1v1h-1z" fill="#bbae18"/>
+  <path d="M1 8h1v1h-1z" fill="#e3db80"/>
+  <path d="M2 8h1v1h-1z" fill="#e4d35f"/>
+  <path d="M3 8h1v1h-1z" fill="#9c9003"/>
+  <path d="M4 8h1v1h-1z" fill="#e1c718"/>
+  <path d="M6 8h1v1h-1z" fill="#dec519"/>
+  <path d="M7 8h1v1h-1z" fill="#a39012"/>
+  <path d="M0 9h1v2h-1z" fill="#b6a113"/>
+  <path d="M1 9h1v1h-1z" fill="#e8d867"/>
+  <path d="M2 9h1v1h-1z" fill="#e7d450"/>
+  <path d="M3 9h1v1h-1z" fill="#e6d24d"/>
+  <path d="M4 9h1v2h-1z" fill="#988c03"/>
+  <path d="M5 9h1v2h-1z" fill="#ddcd18"/>
+  <path d="M6 9h1v1h-1z" fill="#c6b713"/>
+  <path d="M7 9h1v1h-1z" fill="#807003"/>
+  <path d="M1 10h1v1h-1z" fill="#d4c737"/>
+  <path d="M2 10h1v1h-1z" fill="#e3cf48"/>
+  <path d="M3 10h1v1h-1z" fill="#ddd042"/>
+  <path d="M6 10h1v1h-1z" fill="#a6920b"/>
+  <path d="M7 10h1v1h-1z" fill="#7a721a"/>
+  <path d="M0 11h1v1h-1z" fill="#9a9269" fill-opacity="0.43"/>
+  <path d="M1 11h1v1h-1z" fill="#aea21a"/>
+  <path d="M2 11h1v1h-1z" fill="#ac9603"/>
+  <path d="M3 11h1v1h-1z" fill="#9e8a03"/>
+  <path d="M4 11h1v1h-1z" fill="#8e7c03"/>
+  <path d="M5 11h1v1h-1z" fill="#867501"/>
+  <path d="M6 11h1v1h-1z" fill="#7c7100"/>
+  <path d="M7 11h1v1h-1z" fill="#cfd1cd"/>
 </svg>

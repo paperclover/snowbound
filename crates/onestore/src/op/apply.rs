@@ -63,9 +63,16 @@ impl<'a> Section<'a> {
                     .collect();
                 for space in spaces {
                     // A page the edit went on to delete has no cells left to check.
-                    let Ok(page) = section.active(space) else {
+                    if section.active(space).is_err() {
                         continue;
-                    };
+                    }
+                    Writer {
+                        section: &mut *section,
+                        space,
+                        author,
+                    }
+                    .playlist()?;
+                    let page = section.active(space)?;
                     if page.view.nodes.values().any(|node| {
                         matches!(node.kind, Kind::Cell { .. }) && node.children.is_empty()
                     }) {
@@ -474,6 +481,41 @@ impl<'a> Writer<'_, 'a> {
         Ok(())
     }
 
+    /// Lists the page's recordings in its AudioRecordingGuids as OneNote keeps them: in
+    /// the order they arrived, without those since removed, absent when there are none.
+    fn playlist(&mut self) -> Result<(), Failure> {
+        let page = self.page()?;
+        let [id] = page.pages[..] else {
+            return Ok(());
+        };
+        let Kind::Page { recordings, .. } = &page.view.nodes[&id].kind else {
+            return Ok(());
+        };
+        let present: Vec<[u8; 16]> = page
+            .view
+            .nodes
+            .values()
+            .filter_map(|node| match node.kind {
+                Kind::Attachment { recording_id, .. } => recording_id,
+                _ => None,
+            })
+            .collect();
+        let mut listed: Vec<[u8; 16]> = recordings
+            .iter()
+            .filter(|recording| present.contains(recording))
+            .copied()
+            .collect();
+        for recording in present {
+            if !listed.contains(&recording) {
+                listed.push(recording);
+            }
+        }
+        if listed == *recordings {
+            return Ok(());
+        }
+        self.write(|page| content::playlist_changes(page, id, &listed))
+    }
+
     /// Requires `id` reachable on the page.
     fn target(&mut self, id: ExGuid) -> Result<(), Failure> {
         let page = self.page()?;
@@ -746,6 +788,33 @@ impl<'a> Writer<'_, 'a> {
                 let text = self.text_of(*paragraph)?;
                 self.write(|page| properties::style_changes(page, text, *style, Some(definition)))
             }
+            PageOp::Media { paragraph, media } => {
+                self.target(*paragraph)?;
+                let page = self.page()?;
+                let content = match page.view.nodes[paragraph].content.as_slice() {
+                    [content]
+                        if matches!(
+                            page.view.nodes[content].kind,
+                            Kind::RichText { .. } | Kind::Attachment { .. }
+                        ) =>
+                    {
+                        *content
+                    }
+                    _ => {
+                        return Err(OpError::Unsupported(
+                            "Link a paragraph of text or a file to a recording",
+                        )
+                        .into());
+                    }
+                };
+                if media.recordings.is_empty() != media.time_ms.is_none() {
+                    return Err(OpError::Unsupported(
+                        "A recording link names recordings and a moment in them",
+                    )
+                    .into());
+                }
+                self.write(|page| properties::media_changes(page, content, media))
+            }
             PageOp::List { paragraph, lists } => {
                 self.target(*paragraph)?;
                 let page = self.page()?;
@@ -772,17 +841,16 @@ impl<'a> Writer<'_, 'a> {
                 definitions,
             } => {
                 self.target(*target)?;
-                let mut entries = Vec::new();
-                for tag in tags {
-                    let definition = tag
-                        .definition
-                        .ok_or(OpError::Unsupported("A note tag names its definition"))?;
-                    let model = definitions
-                        .iter()
-                        .find(|(id, _)| *id == definition)
-                        .map(|(_, definition)| definition);
-                    entries.push((definition, tag, model));
-                }
+                let entries: Vec<_> = tags
+                    .iter()
+                    .map(|tag| {
+                        let model = definitions
+                            .iter()
+                            .find(|(id, _)| Some(*id) == tag.definition)
+                            .map(|(_, definition)| definition);
+                        (tag, model)
+                    })
+                    .collect();
                 self.write(|page| properties::tag_changes(page, *target, &entries))
             }
             PageOp::Add { object, before } => self.add(object, *before),
@@ -1449,7 +1517,7 @@ fn bare(paragraph: &PageParagraph) -> Result<(), OpError> {
     }
     if paragraph.media != Default::default() {
         return Err(OpError::Unsupported(
-            "Recording annotations are made by OneNote while it records",
+            "Link a paragraph to a recording with its own op",
         ));
     }
     match &paragraph.content {
@@ -1470,9 +1538,6 @@ fn bare(paragraph: &PageParagraph) -> Result<(), OpError> {
             }
             Ok(())
         }
-        ParagraphContent::Attachment(attachment) if attachment.recording.is_some() => Err(
-            OpError::Unsupported("Recordings are captured by OneNote, not inserted"),
-        ),
         _ => Ok(()),
     }
 }

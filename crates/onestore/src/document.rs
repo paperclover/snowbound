@@ -405,9 +405,12 @@ impl Revision<'_> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 /// Tag dates count seconds since 1980-01-01 UTC; status retains the ActionItemStatus bits.
+/// A task tag (status bit 4) has no definition and carries its own icon and property status.
 pub struct Tag {
     pub definition: Option<ExGuid>,
     pub action_type: Option<u16>,
+    pub shape: Option<u16>,
+    pub property_status: Option<u32>,
     pub status: u16,
     pub created: Option<u32>,
     pub completed: Option<u32>,
@@ -446,6 +449,8 @@ pub enum Kind<'a> {
         margin_origin_x: Option<f32>,
         margin_origin_y: Option<f32>,
         rtl: Option<bool>,
+        /// Every audio and video recording on the page (AudioRecordingGuids).
+        recordings: Vec<[u8; 16]>,
     },
     Metadata {
         title: Option<String>,
@@ -475,11 +480,16 @@ pub enum Kind<'a> {
     },
     OutlineGroup,
     /// An ink drawing or handwriting container: strokes hang off `data`, nested containers off
-    /// the element's content list. Scaling multiplies stroke coordinates.
+    /// the element's content list. Scaling multiplies stroke coordinates. A drawn shape adds
+    /// its kind (11 a line, 12 a closed shape) and geometry: a line's ends, or a closed
+    /// shape's transform and anchors, as `page::InkShape` reads them.
     Ink {
         data: Option<ExGuid>,
         scale_x: Option<f32>,
         scale_y: Option<f32>,
+        shape_kind: Option<u8>,
+        line: Option<Vec<u8>>,
+        anchors: Option<Vec<u8>>,
     },
     InkData {
         strokes: Vec<ExGuid>,
@@ -555,6 +565,8 @@ pub enum Kind<'a> {
         source_path: Option<String>,
         recording_id: Option<[u8; 16]>,
         recording_type: Option<u32>,
+        /// AudioRecordingDuration, in milliseconds.
+        recording_duration: Option<u32>,
         /// Displayed icon width and height in points.
         icon_width: Option<f32>,
         icon_height: Option<f32>,
@@ -674,6 +686,16 @@ impl<'a, 'o> Fields<'a, 'o> {
 
     fn u32(&mut self, id: u32) -> Result<Option<u32>> {
         Ok(self.fixed(id)?.map(u32::from_le_bytes))
+    }
+    fn guids(&mut self, id: u32) -> Result<Vec<[u8; 16]>> {
+        let bytes = self.bytes(id)?.unwrap_or_default();
+        if !bytes.len().is_multiple_of(16) {
+            return Err(invalid("Media identifiers have an invalid length"));
+        }
+        Ok(bytes
+            .chunks_exact(16)
+            .map(|id| id.try_into().unwrap())
+            .collect())
     }
     fn u16(&mut self, id: u32) -> Result<Option<u16>> {
         Ok(self.fixed(id)?.map(u16::from_le_bytes))
@@ -1058,6 +1080,8 @@ impl<'a> Element<'a> {
                 tags.push(Tag {
                     definition: tag.one(0x20003488)?,
                     action_type: tag.u16(0x10003463)?,
+                    shape: tag.u16(0x10003464)?,
+                    property_status: tag.u32(0x14003467)?,
                     status: tag
                         .u16(0x10003470)?
                         .ok_or_else(|| invalid("Note tag has no status"))?,
@@ -1114,6 +1138,7 @@ impl<'a> Element<'a> {
                 margin_origin_x: f.float(0x14001d0f, 36.0)?,
                 margin_origin_y: f.float(0x14001d10, 36.0)?,
                 rtl: f.boolean(0x08001c92)?,
+                recordings: f.guids(0x1c001ca3)?,
             },
             0x20030 => Kind::Metadata {
                 title: f.text(0x1c001cf3)?,
@@ -1128,6 +1153,9 @@ impl<'a> Element<'a> {
                 data: f.one(0x20003415)?,
                 scale_x: f.float(0x14001c46, 1.0)?,
                 scale_y: f.float(0x14001c47, 1.0)?,
+                shape_kind: f.bytes(0x0c001d4f)?.and_then(|b| b.first().copied()),
+                line: f.bytes(0x1c001dac)?.map(<[u8]>::to_vec),
+                anchors: f.bytes(0x1c001daa)?.map(<[u8]>::to_vec),
             },
             0x2003b => Kind::InkData {
                 strokes: f.refs(0x24003416, IdStream::Objects)?,
@@ -1327,6 +1355,7 @@ impl<'a> Element<'a> {
                 source_path: f.text(0x1c001d9d)?,
                 recording_id: f.fixed(0x1c001c97)?,
                 recording_type: f.u32(0x14001d24)?,
+                recording_duration: f.u32(0x14001cfd)?,
                 icon_width: f.float(0x140034cd, 36.0)?,
                 icon_height: f.float(0x140034ce, 36.0)?,
             },
@@ -1349,14 +1378,7 @@ impl<'a> Element<'a> {
             },
             _ => Kind::Unknown,
         };
-        let media_ids = f.bytes(0x1c001c98)?.unwrap_or_default();
-        if !media_ids.len().is_multiple_of(16) {
-            return Err(invalid("Media identifiers have an invalid length"));
-        }
-        let media_ids = media_ids
-            .chunks_exact(16)
-            .map(|id| id.try_into().unwrap())
-            .collect();
+        let media_ids = f.guids(0x1c001c98)?;
         Ok(Self {
             jcid: object.jcid,
             children,

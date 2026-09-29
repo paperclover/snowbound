@@ -33,8 +33,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const LIMIT: usize = 256 * 1024 * 1024;
 /// The tab colour OneNote gives a section that stores none, as the desktop shows it.
 const SECTION_COLOR: u32 = 0x00e4_a88a;
-/// How often sections no page shows are polled, as the desktop polls them.
-const BACKGROUND: Duration = Duration::from_secs(15);
 
 /// Called on a background thread when a notebook's sync status may have changed.
 static SYNC_WAKE: OnceLock<extern "C" fn()> = OnceLock::new();
@@ -239,7 +237,7 @@ fn stem(path: &str) -> String {
 fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
     for section in &folder.sections {
         let (name, color, readable) = match &section.state {
-            SectionState::Readable { name, color } => (name.clone(), *color, true),
+            SectionState::Readable { name, color, .. } => (name.clone(), *color, true),
             SectionState::Locked | SectionState::Unreadable(_) => (None, None, false),
         };
         tabs.push(Tab {
@@ -272,8 +270,10 @@ impl Library {
             (None, Place::File(path.to_owned()), None)
         } else {
             let notebook = Notebook::open(path, cache)?;
+            // Nothing here tells a file provider's folder on this device from one elsewhere.
             let background = notebook.background_with(
-                BACKGROUND,
+                Background::UNWATCHED,
+                false,
                 |file| Coordinated(file.to_owned()),
                 sync_woken,
             )?;
@@ -300,13 +300,7 @@ impl Library {
     pub(crate) fn server(server: Server, root: &str, cache: &Path) -> Result<Self> {
         let server = Arc::new(server);
         let connect = Arc::clone(&server);
-        let background = Background::smb(
-            root,
-            LIMIT,
-            BACKGROUND,
-            move || connect.connect(),
-            sync_woken,
-        )?;
+        let background = Background::smb(root, LIMIT, move || connect.connect(), sync_woken)?;
         let library = Self {
             notebook: Mutex::default(),
             place: Place::Share {

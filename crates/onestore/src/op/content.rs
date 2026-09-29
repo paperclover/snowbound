@@ -6,7 +6,7 @@ use crate::{
     Error, ExGuid,
     active::{ActivePage, Changes},
     document::{Format, Layout},
-    page::{Attachment, Image, Ink, InkStroke, Paragraph},
+    page::{Attachment, Image, Ink, InkStroke, Paragraph, Recording},
     write::PropertyObject,
 };
 use std::collections::BTreeMap;
@@ -319,8 +319,10 @@ pub(crate) fn attachment_changes(
             "An attachment needs a file name without path separators",
         ));
     }
-    if attachment.recording.is_some() {
-        return Err(invalid("Recordings are captured by OneNote, not inserted"));
+    if Recording::kind_of(name).is_some() != attachment.recording.is_some() {
+        return Err(invalid(
+            "Audio and video files are recordings, and only they are",
+        ));
     }
     if attachment.bytes.is_none() {
         return Err(invalid("A new attachment needs its payload"));
@@ -374,6 +376,19 @@ pub(crate) fn attachment_changes(
     if let Some(path) = &attachment.source_path {
         values.push((0x1c001d9d, crate::create::string(path)));
     }
+    if let Some(recording) = attachment.recording {
+        if recording.id == [0; 16] || !matches!(recording.kind, 1 | 2) {
+            return Err(invalid(
+                "A recording needs an identity and is audio or video",
+            ));
+        }
+        // AudioRecordingGuid, IRecordMedia and AudioRecordingDuration.
+        values.push((0x1c001c97, recording.id.to_vec()));
+        values.push((0x14001d24, recording.kind.to_le_bytes().to_vec()));
+        if let Some(duration) = recording.duration_ms {
+            values.push((0x14001cfd, duration.to_le_bytes().to_vec()));
+        }
+    }
     values.extend(layout_values(&Default::default(), &attachment.layout)?.0);
     let mut changed = BTreeMap::new();
     let mut file = PropertyObject::file(ids.file, &payload_reference(ids.payload), extension)?;
@@ -400,6 +415,21 @@ pub(crate) fn attachment_changes(
     Ok(changed)
 }
 
+/// Page `page` listing `recordings` in its AudioRecordingGuids, or none.
+pub(crate) fn playlist_changes(
+    active: &ActivePage<'_>,
+    page: ExGuid,
+    recordings: &[[u8; 16]],
+) -> Result<Changes, Error> {
+    let mut node = PropertyObject::from_object(&active.live.revision.objects[&page])?;
+    if recordings.is_empty() {
+        node.remove(&[0x1c001ca3])?;
+    } else {
+        node.set(&[(0x1c001ca3, recordings.concat().as_slice())])?;
+    }
+    Ok(BTreeMap::from([(page, node)]))
+}
+
 /// A stored attachment keeps its payload and preview; its shown name, recorded source
 /// path and icon size change in place, as OneNote's rename does.
 pub(crate) fn attachment_edit_changes(
@@ -415,7 +445,7 @@ pub(crate) fn attachment_edit_changes(
             .to_vec(),
     )];
     if attachment.recording != stored.recording {
-        return Err(invalid("A recording stays the recording OneNote captured"));
+        return Err(invalid("A file keeps its recording"));
     }
     let name = attachment.filename.as_str();
     if name.is_empty() || name.contains(['\0', '/', '\\']) {
@@ -425,6 +455,11 @@ pub(crate) fn attachment_edit_changes(
     }
     let mut removed = Vec::new();
     if attachment.filename != stored.filename {
+        if Recording::kind_of(name).is_some() != attachment.recording.is_some() {
+            return Err(invalid(
+                "Audio and video files are recordings, and only they are",
+            ));
+        }
         let name = crate::create::string(&attachment.filename);
         values.push((0x1c001c22, name.clone()));
         values.push((0x1c001d9c, name));
@@ -457,19 +492,31 @@ pub(crate) fn attachment_edit_changes(
     Ok(BTreeMap::from([(object, node)]))
 }
 
-/// Creates stroke objects (numbered from `first`) and one drawing-attribute object per
-/// distinct pen; returns the compact references for the data node's stroke list.
+/// Creates stroke objects (numbered on from the page's last stroke) and one
+/// drawing-attribute object per distinct pen; returns the compact references for the data
+/// node's stroke list. A shape's strokes carry only their path and pen, as OneNote's do.
 fn write_strokes(
+    active: &ActivePage<'_>,
     changed: &mut Changes,
     data_object: &mut PropertyObject,
     strokes: &[(ExGuid, &InkStroke)],
-    first: usize,
+    shape: bool,
     filetime: u64,
 ) -> Result<Vec<u8>, Error> {
+    let first = active
+        .view
+        .nodes
+        .values()
+        .filter_map(|node| match node.kind {
+            crate::document::Kind::InkStroke { index, .. } => index,
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
     let mut styles: Vec<(InkPen, ExGuid)> = Vec::new();
     let mut references = Vec::new();
     for (offset, (stroke_id, stroke)) in strokes.iter().enumerate() {
-        let pen = InkPen::of(stroke);
+        let pen = InkPen::of(stroke, shape);
         let style = match styles.iter().find(|(known, _)| *known == pen) {
             Some((_, id)) => *id,
             None => {
@@ -488,13 +535,14 @@ fn write_strokes(
                 id
             }
         };
+        let values = if shape {
+            stroke_path(stroke)?
+        } else {
+            stroke_values(stroke, first + offset as u32 + 1, filetime)?
+        };
         let mut object = PropertyObject {
             jcid: 0x20047,
-            bytes: crate::create::properties(&stroke_values(
-                stroke,
-                (first + offset) as u32 + 1,
-                filetime,
-            )?)?,
+            bytes: crate::create::properties(&values)?,
             global_ids: std::sync::Arc::new(BTreeMap::from([(0, stroke_id.guid)])),
         };
         object.reference(*stroke_id)?;
@@ -506,7 +554,8 @@ fn write_strokes(
     Ok(references)
 }
 
-/// The drawing attributes OneNote shares between strokes drawn with the same pen.
+/// The drawing attributes OneNote shares between strokes drawn with the same pen. A pen
+/// drawn with the mouse ignores pressure; a shape's pen spans every coordinate instead.
 #[derive(PartialEq)]
 struct InkPen {
     width: u32,
@@ -514,22 +563,31 @@ struct InkPen {
     color: Option<u32>,
     transparency: Option<u8>,
     pen_tip: Option<u8>,
+    raster_operation: Option<u8>,
+    shape: bool,
 }
 
 impl InkPen {
-    fn of(stroke: &InkStroke) -> Self {
+    fn of(stroke: &InkStroke, shape: bool) -> Self {
         Self {
             width: (stroke.width * 2540.0 / 72.0).to_bits(),
             height: (stroke.height * 2540.0 / 72.0).to_bits(),
             color: stroke.color,
             transparency: stroke.transparency,
             pen_tip: stroke.pen_tip,
+            raster_operation: stroke.raster_operation,
+            shape,
         }
     }
 
     fn values(&self) -> Values {
+        let dimensions = if self.shape {
+            crate::page::ink::SHAPE_DIMENSIONS
+        } else {
+            crate::page::ink::DIMENSIONS
+        };
         let mut values: Values = vec![
-            (0x1c00340a, crate::page::ink::DIMENSIONS.to_vec()),
+            (0x1c00340a, dimensions.to_vec()),
             (0x1400340c, self.height.to_le_bytes().to_vec()),
             (0x1400340d, self.width.to_le_bytes().to_vec()),
         ];
@@ -542,11 +600,17 @@ impl InkPen {
         if let Some(tip) = self.pen_tip {
             values.push((0x0c003412, vec![tip]));
         }
+        if let Some(operation) = self.raster_operation {
+            values.push((0x0c003413, vec![operation]));
+        }
+        if !self.shape {
+            values.push((0x88003411, Vec::new()));
+        }
         values
     }
 }
 
-fn stroke_values(stroke: &InkStroke, index: u32, filetime: u64) -> Result<Values, Error> {
+fn stroke_path(stroke: &InkStroke) -> Result<Values, Error> {
     if stroke.points.is_empty() {
         return Err(invalid("A stroke needs at least one point"));
     }
@@ -562,27 +626,32 @@ fn stroke_values(stroke: &InkStroke, index: u32, filetime: u64) -> Result<Values
             "Stroke points and pen size must be finite and positive",
         ));
     }
-    let left = stroke
-        .points
-        .iter()
-        .map(|p| p[0])
-        .fold(f32::INFINITY, f32::min);
-    let top = stroke
-        .points
-        .iter()
-        .map(|p| p[1])
-        .fold(f32::INFINITY, f32::min);
+    Ok(vec![(0x1c00340b, stroke.packet())])
+}
+
+/// A drawn stroke as OneNote stores one: its path, index on the page, language, identity,
+/// time and half-inch origin, and a bias of 2 for a highlighter.
+fn stroke_values(stroke: &InkStroke, index: u32, filetime: u64) -> Result<Values, Error> {
+    let mut values = stroke_path(stroke)?;
+    let [left, top] = [0, 1].map(|axis| {
+        stroke
+            .points
+            .iter()
+            .map(|p| p[axis])
+            .fold(f32::INFINITY, f32::min)
+    });
     let mut origin = ((left - stroke.width / 2.0) / 36.0).to_le_bytes().to_vec();
     origin.extend_from_slice(&((top - stroke.height / 2.0) / 36.0).to_le_bytes());
-    Ok(vec![
-        (0x1c00340b, stroke.packet()),
+    let bias = if stroke.raster_operation == Some(9) { 2 } else { 0 };
+    values.extend([
         (0x14003419, index.to_le_bytes().to_vec()),
         (0x1000341b, 0x409_u16.to_le_bytes().to_vec()),
-        (0x0c00341c, vec![0]),
+        (0x0c00341c, vec![bias]),
         (0x1c00341a, crate::write::fresh_guid()?.to_vec()),
         (0x1c00341d, filetime.to_le_bytes().to_vec()),
         (0x1c00345b, origin),
-    ])
+    ]);
+    Ok(values)
 }
 
 /// New ink as OneNote 2010 stores a drawing: container `id` that the page lists as a child
@@ -614,15 +683,27 @@ pub(crate) fn ink_changes(
         global_ids: std::sync::Arc::new(BTreeMap::from([(0, data.guid)])),
     };
     data_object.reference(data)?;
-    let references = write_strokes(&mut changed, &mut data_object, strokes, 0, filetime)?;
+    let references = write_strokes(
+        active,
+        &mut changed,
+        &mut data_object,
+        strokes,
+        ink.shape.is_some(),
+        filetime,
+    )?;
     data_object.set(&[(0x24003416, &references)])?;
     changed.insert(data, data_object);
+    // A shape keeps its kind and geometry beside the strokes, and counts as a second kind of
+    // drawing.
+    let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
+    if let Some(shape) = &ink.shape {
+        let (kind, property, bytes) = shape.stored();
+        values.extend([(0x0c001d4f, vec![kind]), (property, bytes)]);
+    }
+    values.push((0x14001d4e, (1 + u32::from(ink.shape.is_some())).to_le_bytes().to_vec()));
     let mut object = PropertyObject {
         jcid: 0x60014,
-        bytes: crate::create::properties(&[
-            (0x14001d7a, modified.to_vec()),
-            (0x14001d4e, 1u32.to_le_bytes().to_vec()),
-        ])?,
+        bytes: crate::create::properties(&values)?,
         global_ids: std::sync::Arc::new(BTreeMap::from([(0, id.guid)])),
     };
     object.reference(id)?;
@@ -641,10 +722,12 @@ pub(crate) fn strokes_changes(
     kept: &[ExGuid],
     added: &[(ExGuid, &InkStroke)],
 ) -> Result<Changes, Error> {
-    let data = match active.view.nodes.get(&container).map(|node| &node.kind) {
+    let (data, shape) = match active.view.nodes.get(&container).map(|node| &node.kind) {
         Some(crate::document::Kind::Ink {
-            data: Some(data), ..
-        }) => *data,
+            data: Some(data),
+            shape_kind,
+            ..
+        }) => (*data, shape_kind.is_some()),
         _ => return Err(invalid("Stored ink has no stroke data to rewrite")),
     };
     let (modified, filetime) = crate::create::current_timestamps()?;
@@ -657,10 +740,11 @@ pub(crate) fn strokes_changes(
         references.extend(data_object.reference(*id)?);
     }
     references.extend(write_strokes(
+        active,
         &mut changed,
         &mut data_object,
         added,
-        kept.len(),
+        shape,
         filetime,
     )?);
     data_object.set(&[(0x24003416, &references)])?;

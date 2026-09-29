@@ -113,6 +113,8 @@ fn tag(definition: ExGuid, completed: bool) -> Tag {
     Tag {
         definition: Some(definition),
         action_type: None,
+        shape: None,
+        property_status: None,
         status: u16::from(completed),
         created: Some(1_262_401_445),
         completed: completed.then_some(1_262_405_106),
@@ -304,4 +306,50 @@ fn new_definitions_and_tags_publish_on_a_fresh_page() {
         )
         .unwrap();
     }
+}
+
+/// An Outlook task tag names no definition: rewritten beside a normal tag it keeps its icon,
+/// property status and dates, and one missing its icon is refused.
+#[test]
+fn a_task_tag_rewrites_without_a_definition() {
+    let features = include_bytes!("../../../corpus/m6/native-features-01/notebook/Features.one");
+    let (space, before) = page_by_title(features, "Task controls");
+    let at = tagged(&before);
+    let task = body_paragraphs(&mut before.clone())[at]
+        .text()
+        .unwrap()
+        .tags[0]
+        .clone();
+    assert_eq!(
+        (
+            task.definition,
+            task.shape,
+            task.property_status,
+            task.status
+        ),
+        (None, Some(89), Some(0), 6)
+    );
+    let mut after = before.clone();
+    let id = new_id().unwrap();
+    after.definitions.insert(id, definition("To Do", 3));
+    body_paragraphs(&mut after)[at]
+        .text_mut()
+        .unwrap()
+        .tags
+        .insert(0, tag(id, false));
+    let written = ops::saved(features, space, &after).unwrap();
+    let stored = assert_same(written.as_slice(), space, &after);
+    let mut untagged = stored.clone();
+    body_paragraphs(&mut untagged)[at]
+        .text_mut()
+        .unwrap()
+        .tags
+        .remove(0);
+    untagged.definitions.remove(&id);
+    let again = ops::saved(&written, space, &untagged).unwrap();
+    assert_same(again.as_slice(), space, &before);
+    let mut shapeless = before.clone();
+    body_paragraphs(&mut shapeless)[at].text_mut().unwrap().tags[0].shape = None;
+    body_paragraphs(&mut shapeless)[at].text_mut().unwrap().tags[0].created = Some(1);
+    assert!(ops::saved(features, space, &shapeless).is_err());
 }

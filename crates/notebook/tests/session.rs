@@ -1029,7 +1029,7 @@ fn a_closed_sections_queued_edits_publish_in_the_background_when_online() {
     let notebook = two_sections(directory.path());
     let file = directory.path().join("Shared/Second.one");
     let background = notebook
-        .background(Duration::from_millis(20), || {})
+        .background(Duration::from_millis(20), false, || {})
         .unwrap();
     background.set_offline(true);
     background.watch(notebook.replicas());
@@ -1083,7 +1083,7 @@ fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
     let notified = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&notified);
     let background = notebook
-        .background(Duration::from_millis(20), move || {
+        .background(Duration::from_millis(20), false, move || {
             counter.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
@@ -1124,4 +1124,78 @@ fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
         opened.is_some()
     });
     assert_same(opened.unwrap().page(*space).unwrap(), native);
+}
+
+#[test]
+fn a_reported_change_wakes_its_section_without_polling() {
+    let directory = tempfile::tempdir().unwrap();
+    let notebook = two_sections(directory.path());
+    let background = notebook
+        .background(Duration::from_secs(3600), false, || {})
+        .unwrap();
+    background.watch(notebook.replicas());
+    until("both sections were reached", || {
+        background
+            .status()
+            .iter()
+            .all(|(_, status)| status.synced.is_some())
+    });
+    let file = directory.path().join("Shared/Second.one");
+    let bytes = onestore::read_file(&file).unwrap();
+    let space = notebook::session::stored_pages(&bytes).unwrap()[0].space;
+    let native = edited(&model_ops::page_of(&bytes, space), "Native ");
+    ops::save(&bytes, space, &native)
+        .unwrap()
+        .commit_file(&file)
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        background.changed().is_empty(),
+        "nothing polls an idle notebook"
+    );
+    background.touched(&["Second.one".to_owned()]);
+    let mut noticed = Vec::new();
+    until("the reported change was noticed", || {
+        noticed.extend(background.changed());
+        !noticed.is_empty()
+    });
+    assert_eq!(noticed, ["Second.one"]);
+}
+
+#[test]
+fn every_section_gets_an_offline_copy_that_closing_the_notebook_discards() {
+    let directory = tempfile::tempdir().unwrap();
+    let notebook = two_sections(directory.path());
+    let replicas: Vec<_> = notebook
+        .replicas()
+        .into_iter()
+        .map(|(_, replica)| replica.unwrap())
+        .collect();
+    assert!(replicas.iter().all(|replica| !replica.exists()));
+    let background = notebook
+        .background(Duration::from_secs(3600), true, || {})
+        .unwrap();
+    background.watch(notebook.replicas());
+    until("both sections have offline copies", || {
+        replicas.iter().all(|replica| replica.exists())
+            && background
+                .status()
+                .iter()
+                .all(|(_, status)| status.synced.is_some())
+    });
+    // Opening a section starts from its copy, and edits made offline wait in it.
+    let section = notebook.section("Second.one", || {}).unwrap();
+    section.set_offline(true);
+    let space = section.pages().unwrap()[0].0;
+    let before = section.page(space).unwrap();
+    typed(&section, space, &before, 0..0, "Waiting ");
+    section.close().unwrap();
+    background.discard();
+    let second = notebook.replica_path("Second.one").unwrap();
+    until("the copy with nothing waiting was discarded", || {
+        !notebook.replica_path("First.one").unwrap().exists()
+    });
+    assert!(second.exists(), "a copy with edits waiting stays");
+    let kept = notebook::Replica::open(&second).unwrap();
+    assert_eq!(kept.pending().unwrap().len(), 1);
 }

@@ -887,13 +887,16 @@ impl Notebook {
     /// `smb` on a share. It exists once the section has been opened.
     pub fn replica_path(&self, path: &str) -> Result<PathBuf> {
         let section = self.section_path(path)?;
-        Ok(match &self.root {
-            Some(_) => {
+        Ok(match (&self.root, &section.state) {
+            (Some(_), discover::SectionState::Readable { document, .. }) => {
+                replica_file(&self.cache, document)
+            }
+            (Some(_), _) => {
                 let image = self.storage.read(&section.path)?;
                 let root = RevisionIndex::parse(&Store::parse(&image)?)?.root;
                 replica_file(&self.cache, &root.guid)
             }
-            None => replica_file(&self.cache.join("smb"), &section.file_id),
+            (None, _) => replica_file(&self.cache.join("smb"), &section.file_id),
         })
     }
 
@@ -914,13 +917,16 @@ impl Notebook {
     }
 
     /// Keeps the sections of a mounted notebook in sync while they are not open
-    /// (`Background`), polling each file every `interval` once watched.
+    /// (`Background`): each file is checked every `interval`, and sooner when
+    /// `Background::touched` reports it changed. `copies` keeps an offline copy of every
+    /// section, for a folder that is not on this computer.
     pub fn background(
         &self,
         interval: Duration,
+        copies: bool,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Background> {
-        self.background_with(interval, |file| FileRemote(file.to_owned()), notify)
+        self.background_with(interval, copies, |file| FileRemote(file.to_owned()), notify)
     }
 
     /// `background`, reaching each section file through the remote `remote` makes for it
@@ -928,6 +934,7 @@ impl Notebook {
     pub fn background_with<R: Remote + 'static>(
         &self,
         interval: Duration,
+        copies: bool,
         remote: impl Fn(&Path) -> R + Clone + Send + 'static,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Background> {
@@ -939,10 +946,10 @@ impl Notebook {
             .into());
         };
         Background::start(
-            interval,
-            move || {
+            copies,
+            move |_| {
                 let (root, remote) = (root.clone(), remote.clone());
-                Ok(move |path: &str| remote(&root.join(path)))
+                Ok((move |path: &str| remote(&root.join(path)), interval))
             },
             notify,
         )

@@ -25,6 +25,8 @@ use winit::{
 const APP_ID: &str = "snowbound";
 /// The title bar's leading margin; the window controls sit at its trailing end.
 pub const LEADING: f32 = 8.0;
+/// The margin past the window controls.
+pub const TRAILING: f32 = 8.0;
 /// How far inside the window's edges a press resizes it, and how far along them a corner
 /// reaches, in logical pixels.
 const EDGE: f32 = 5.0;

@@ -225,7 +225,7 @@ pub(crate) fn collect_containers(list: &[PageParagraph], out: &mut Vec<ExGuid>) 
 
 /// What the writers keep as stored, checked before any op: titles, unsupported objects,
 /// definitions other than lists and tags, outline roles, paragraph styles and formats,
-/// recording links, fields and content types.
+/// fields and content types.
 pub(crate) fn validate(
     before: &Page,
     after: &Page,
@@ -309,17 +309,13 @@ pub(crate) fn validate(
         let Some(previous) = old.paragraphs.get(id) else {
             continue;
         };
-        // A join moves a text object, with its style and recording link, into an emptied
-        // paragraph; one new to the page starts as a copy without the link.
+        // A join moves a text object, with its style, into an emptied paragraph.
         let owner = paragraph.text().map(|text| owners.get(&text.id));
-        let (style, media) = match owner {
-            Some(Some(owner)) => (owner.style, owner.media.clone()),
-            Some(None) => (paragraph.style, Default::default()),
-            None => (previous.style, previous.media.clone()),
+        let style = match owner {
+            Some(Some(owner)) => owner.style,
+            Some(None) => paragraph.style,
+            None => previous.style,
         };
-        if paragraph.media != media {
-            return Err(invalid("Recording annotations cannot be edited"));
-        }
         if paragraph.style != style || paragraph.format != previous.format {
             return Err(invalid(
                 "Paragraph styles and paragraph formatting cannot be edited",
@@ -695,6 +691,8 @@ pub(crate) fn same_tags(a: &[Tag], b: &[Tag]) -> bool {
         (
             t.definition,
             t.action_type,
+            t.shape,
+            t.property_status,
             t.status,
             t.created,
             t.completed,
@@ -745,6 +743,7 @@ fn bare(paragraph: &PageParagraph) -> PageParagraph {
     stripped.lists.clear();
     stripped.tags.clear();
     stripped.collapsed = false;
+    stripped.media = Default::default();
     match &mut stripped.content {
         ParagraphContent::Text(text) => text.tags.clear(),
         ParagraphContent::Table(table) => {
@@ -820,6 +819,7 @@ impl Lowering {
         self.styles(after, new)?;
         self.lists(after, new)?;
         self.tags(after, new)?;
+        self.media(new)?;
         self.paragraph_formatting(new)?;
         self.formatting(old, new)?;
         self.layout(old, new)?;
@@ -1775,9 +1775,9 @@ impl Lowering {
                 }
                 let mut definitions = Vec::new();
                 for tag in tags {
-                    let definition = tag
-                        .definition
-                        .ok_or_else(|| invalid("A note tag names its definition"))?;
+                    let Some(definition) = tag.definition else {
+                        continue;
+                    };
                     if let Some(model) = after.definitions.get(&definition)
                         && !definitions.iter().any(|(id, _)| *id == definition)
                     {
@@ -1788,6 +1788,20 @@ impl Lowering {
                     target,
                     tags: tags.clone(),
                     definitions,
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn media(&mut self, new: &View<'_>) -> Result<(), Error> {
+        for (id, paragraph) in &new.paragraphs {
+            let current = model::paragraph(&self.current, *id)
+                .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
+            if current.media != paragraph.media {
+                self.emit(PageOp::Media {
+                    paragraph: *id,
+                    media: paragraph.media.clone(),
                 })?;
             }
         }

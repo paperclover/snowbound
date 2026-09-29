@@ -260,7 +260,7 @@ fn folder(
     };
     for section in &folder.sections {
         let (name, color, readable) = match &section.state {
-            SectionState::Readable { name, color } => (
+            SectionState::Readable { name, color, .. } => (
                 crate::library::section_name(&section.path, name),
                 *color,
                 true,

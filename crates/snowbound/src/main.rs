@@ -31,6 +31,7 @@ mod surface;
 mod sync;
 mod tags;
 mod templates;
+mod watch;
 
 use canvas::gpu::page::PageScene;
 use canvas::interaction::{Cursor, PageView, Place, Request, Response, TextColors, accessibility};
@@ -1200,6 +1201,13 @@ impl State {
         if self.session.is_some() {
             self.page_tools(&theme);
         }
+        self.ui.leaf(
+            "trail",
+            Spec {
+                size: [px(self.trailing() - FRAME), px(1.0)],
+                ..Spec::default()
+            },
+        );
         self.ui.close();
 
         self.ui.open_as(
@@ -1268,6 +1276,23 @@ impl State {
             }
         }
         self.ui.close();
+        if let Some(task) = self.view.task_under_pointer() {
+            let [left, top, ..] = self.ui.rect(page()).unwrap_or_default();
+            let scale = self.ui.scale();
+            let [x0, y0, x1, y1] = task;
+            let part = [
+                left + x0 / scale,
+                top + y0 / scale,
+                left + x1 / scale,
+                top + y1 / scale,
+            ];
+            ui::popup::tooltip_over(
+                &mut self.ui,
+                part,
+                "Outlook task",
+                Some("Edit it in OneNote with Outlook"),
+            );
+        }
         let signal = self.ui.signal(page());
         let focused = self.ui.window_focused && self.ui.focused() == Some(page());
         if focused != self.page_focused {
@@ -1411,6 +1436,16 @@ impl State {
         );
     }
 
+    /// The toolbar and tab row's margin at the window's trailing side, which matches the
+    /// leading gap where the row is the title bar.
+    fn trailing(&self) -> f32 {
+        if platform::system_titlebar(&self.window) {
+            FRAME
+        } else {
+            platform::TRAILING
+        }
+    }
+
     /// Whether the chrome's empty space drags the window: where it is the title bar, or
     /// over the title's gradient.
     fn chrome_drags(&self) -> bool {
@@ -1468,7 +1503,7 @@ impl State {
         self.ui.leaf(
             "trail",
             Spec {
-                size: [px(FRAME - GAP), px(1.0)],
+                size: [px(self.trailing() - GAP), px(1.0)],
                 ..Spec::default()
             },
         );

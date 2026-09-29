@@ -30,6 +30,9 @@ pub enum SectionState {
         name: Option<String>,
         /// The tab colour as a COLORREF; OneNote assigns one when absent.
         color: Option<u32>,
+        /// The root object space's GUID, the document identity that names the section's
+        /// replica in a mounted notebook.
+        document: [u8; 16],
     },
     Locked,
     Unreadable(onestore::Error),
@@ -310,6 +313,7 @@ fn scan(
                     state: SectionState::Readable {
                         name,
                         color: color.filter(|color| *color != 0xffff_ffff),
+                        document: index.root.guid,
                     },
                 });
             } else {

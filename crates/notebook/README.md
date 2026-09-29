@@ -65,14 +65,21 @@ and how many edits wait for it. `set_offline(true)` works offline as OneNote doe
 worker stops connecting and edits queue until `wake()` (Sync Now) or `set_offline(false)`.
 
 `session::Background` keeps the sections no session holds in sync, as OneNote 2010 keeps
-every section of an open notebook: `Notebook::background(interval, notify)` for a mounted
-notebook, `Background::smb(root, limit, interval, connect, notify)` on a share, then
-`watch(notebook.replicas())`. Each round reads every watched file's stamp; a section whose
-replica has edits waiting, or whose file moved past the replica's base, has the replica
-opened for the synchronization steps that publish or rebase it and closed again. A replica
-a session holds is skipped (`Error::busy`), so opening a section may wait out one step.
-`status()` gives each section's `SyncStatus`, `changed()` the sections another client
-changed, and `wake` and `set_offline` follow Sync Now and Work Offline.
+every section of an open notebook: `Background::smb(root, limit, connect, notify)` on a
+share, `Notebook::background(interval, copies, notify)` for a mounted notebook, then
+`watch(notebook.replicas())`. On a share, one CHANGE_NOTIFY on the notebook's folder
+(`smb::Client::watch`) reports what changed; a host watching a mounted folder passes the
+changed paths to `touched`. A reported section is checked a second later, a failing one
+every 31 seconds, and any other every `interval` (`Background::BACKSTOP` while a watch
+reports). Newly watched sections, and every section after a reconnect, are checked one at a
+time 100 ms apart. A check reads the file's stamp; a section whose replica has edits waiting,
+or whose file moved past the replica's base, has the replica opened for the synchronization
+steps that publish or rebase it and closed again, and a section without a replica gets one
+from the file, its offline copy, on a share or with `copies`. A replica a session holds is
+skipped (`Error::busy`), so opening a section may wait out one step. `status()` gives each
+section's `SyncStatus`, `changed()` the sections another client changed, `wake` and
+`set_offline` follow Sync Now and Work Offline, and `discard` stops the thread and deletes the
+replicas holding nothing unpublished, as when the notebook closes.
 `Notebook::replica_path(path)` names a section's replica for either kind of notebook.
 
 `Section::resume(file, replica, notify)` starts from an owned `Replica` without
@@ -372,6 +379,12 @@ flags. Concurrent directory changes are not an atomic snapshot; repeated names
 are rejected with `ResourceBusy`. Notebook identities come from the files, not
 directory names or sizes. Missing paths, denied access and non-directory paths
 have distinct I/O error kinds.
+
+`Client::watch(path, changed)` arms one CHANGE_NOTIFY with WATCH_TREE on a directory, as
+OneNote 2010 watches a notebook's folder, and keeps it armed on the client's runtime without
+probing the connection, so an idle watch sends nothing. `changed` hears each batch of changed
+paths relative to the directory, `""` when the server lost count, and an error when the watch
+ends with its connection.
 
 `Client::read_asset(path, byte_limit)` reads an external payload under a read-only
 share handle that excludes writes and deletion. Empty files succeed; limits,

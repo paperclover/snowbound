@@ -282,21 +282,34 @@ pub struct Attachment {
     pub bytes: Option<Arc<[u8]>>,
     #[serde(with = "payload")]
     pub preview: Option<Arc<[u8]>>,
-    /// Set when the file is an audio or video recording OneNote captured; annotations on
-    /// the page refer to it by identity (`PageParagraph::media`).
+    /// Set when the file is audio or video OneNote plays; notes on the page refer to it by
+    /// identity (`PageParagraph::media`).
     pub recording: Option<Recording>,
 }
 
-/// A recording's identity and OneNote's type code for it.
+/// A recording's identity, whether it is audio (1) or video (2), and its length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Recording {
     pub id: [u8; 16],
     pub kind: u32,
+    pub duration_ms: Option<u32>,
+}
+
+impl Recording {
+    /// The kind of recording MS-ONE requires a file named `filename` to be, if any: audio
+    /// for .wma, .mp3 and .wav, video for .wmv, .avi and .mpg.
+    pub fn kind_of(filename: &str) -> Option<u32> {
+        let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+        match extension.as_str() {
+            "wma" | "mp3" | "wav" => Some(1),
+            "wmv" | "avi" | "mpg" => Some(2),
+            _ => None,
+        }
+    }
 }
 
 /// A paragraph's link to a moment in recordings on the page: OneNote plays from
-/// `time_ms` when the paragraph is chosen. Read from native pages and preserved through
-/// edits; OneNote alone creates them while recording.
+/// `time_ms` when the paragraph is chosen, and links what is written while it records.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MediaIndex {
     pub recordings: Vec<[u8; 16]>,
@@ -328,6 +341,7 @@ impl Attachment {
             source_path,
             recording_id,
             recording_type,
+            recording_duration,
             icon_width,
             icon_height,
         } = &node.kind
@@ -357,7 +371,10 @@ impl Attachment {
             preview: payload(preview)?,
             recording: recording_id.map(|id| Recording {
                 id,
-                kind: recording_type.unwrap_or(0),
+                kind: recording_type
+                    .or_else(|| Recording::kind_of(filename.as_deref().unwrap_or_default()))
+                    .unwrap_or(1),
+                duration_ms: *recording_duration,
             }),
         })
     }
@@ -1369,6 +1386,7 @@ mod tests {
             margin_origin_x: Some(36.0),
             margin_origin_y: Some(12.0),
             rtl: None,
+            recordings: Vec::new(),
         });
         page.children.push(id(2));
         let mut outline = element(Kind::Outline {
@@ -1621,6 +1639,8 @@ mod tests {
             source.nodes.get_mut(&id(4)).unwrap().tags.push(Tag {
                 definition: Some(id(7)),
                 action_type: None,
+                shape: None,
+                property_status: None,
                 status: 0,
                 created: Some(123),
                 completed: None,

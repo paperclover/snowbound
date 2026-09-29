@@ -1,9 +1,6 @@
 use swash::{
     scale::image::{Content, Image},
-    zeno::{
-        self, Cap, Fill, Join, Mask, PathBuilder, Placement, Point, Stroke, Style, Transform,
-        Vector,
-    },
+    zeno::{self, Cap, Fill, Join, Mask, PathBuilder, Placement, Point, Stroke, Style, Transform},
 };
 
 /// Colours for an icon's slots, linear RGB: paths of `class="accent"`, `"highlight"` or
@@ -32,24 +29,17 @@ impl Palette {
     }
 }
 
-/// Rasterizes 16×16 SVG sources over each other at `size` device pixels, offset by
-/// `phase` quarter pixels. Paths are filled and stroked with `#rrggbb`, `currentColor`,
+/// Rasterizes 16×16 SVG sources over each other at a whole `size` of device pixels. Paths are filled and stroked with `#rrggbb`, `currentColor`,
 /// which paints the linear `ink`, or two-stop `linearGradient`s with SVG's defaults
 /// (`objectBoundingBox` unless `userSpaceOnUse`, `x1`..`y2`, stop offsets, pad spread; no
 /// `gradientTransform`). `fill-opacity` and `stroke-opacity` apply, and strokes have round
 /// caps and joins. A slot's paths keep the shading among their colours: the hue turn,
 /// saturation scale and lightness shift that carry the mean of the slot's colours in a
 /// source onto the palette's colour apply to each of them.
-pub(crate) fn rasterize(
-    sources: &[&str],
-    size: f32,
-    phase: [u8; 2],
-    ink: [f32; 3],
-    palette: &Palette,
-) -> Image {
-    let side = (size + 1.0).ceil() as u32;
+pub(crate) fn rasterize(sources: &[&str], size: u32, ink: [f32; 3], palette: &Palette) -> Image {
+    let side = size;
+    let size = size as f32;
     let mut pixels = vec![[0.0_f32; 4]; (side * side) as usize];
-    let offset = phase.map(|quarters| f32::from(quarters) * 0.25);
     for source in sources {
         let svg = roxmltree::Document::parse(source).expect("Bundled icon SVG must be valid");
         assert_eq!(svg.root_element().attribute("viewBox"), Some("0 0 16 16"));
@@ -135,7 +125,6 @@ pub(crate) fn rasterize(
                 let (mask, _) = Mask::new(data)
                     .style(style)
                     .transform(Some(Transform::scale(size / 16.0, size / 16.0)))
-                    .render_offset(Vector::new(offset[0], offset[1]))
                     .size(side, side)
                     .render();
                 for (index, (pixel, coverage)) in pixels.iter_mut().zip(mask).enumerate() {
@@ -147,7 +136,7 @@ pub(crate) fn rasterize(
                     let [x, y] = [index % side as usize, index / side as usize]
                         .map(|device| device as f32 + 0.5)
                         .map(|device| device * 16.0 / size);
-                    let color = color([x - offset[0] * 16.0 / size, y - offset[1] * 16.0 / size]);
+                    let color = color([x, y]);
                     for channel in 0..3 {
                         pixel[channel] = color[channel] * alpha + pixel[channel] * (1.0 - alpha);
                     }
@@ -468,7 +457,7 @@ mod tests {
     /// The grey painted at a pixel of `source` rasterized at 16 pixels, and the grey a
     /// black-to-white ramp paints at fraction `t`.
     fn grey(source: &str, x: usize, y: usize) -> u8 {
-        rasterize(&[source], 16.0, [0, 0], [1.0; 3], &Palette::default()).data[(y * 17 + x) * 4]
+        rasterize(&[source], 16, [1.0; 3], &Palette::default()).data[(y * 16 + x) * 4]
     }
 
     fn ramp(t: f32) -> u8 {
@@ -516,8 +505,8 @@ mod tests {
         // Two blues of one hue in the accent slot, a red outside it.
         const ART: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path class="accent" d="M0 0H16V4H0Z" fill="#80a0ff"/><path class="accent" d="M0 4H16V8H0Z" fill="#0040e0"/><path d="M0 8H16V12H0Z" fill="#ff0000"/><path class="accent" d="M0 12H16V16H0Z" fill="currentColor"/></svg>"##;
         let pixel = |palette: &Palette, y: usize| {
-            let image = rasterize(&[ART], 16.0, [0, 0], [0.0; 3], palette);
-            let at = (y * 17 + 8) * 4;
+            let image = rasterize(&[ART], 16, [0.0; 3], palette);
+            let at = (y * 16 + 8) * 4;
             let [r, g, b] = [0, 1, 2].map(|channel| f32::from(image.data[at + channel]) / 255.0);
             hsl([r, g, b])
         };
@@ -542,14 +531,8 @@ mod tests {
     fn current_color_paints_the_ink_and_fixed_colours_keep_theirs() {
         const LINE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 8H14" fill="none" stroke="currentColor" stroke-width="2"/><path d="M2 12H14" fill="none" stroke="#ff0000" stroke-width="2"/></svg>"##;
         let ink = super::super::srgb(0x20, 0x60, 0xa0);
-        let image = rasterize(
-            &[LINE],
-            16.0,
-            [0, 0],
-            [ink[0], ink[1], ink[2]],
-            &Palette::default(),
-        );
-        let pixel = |x: usize, y: usize| &image.data[(y * 17 + x) * 4..][..4];
+        let image = rasterize(&[LINE], 16, [ink[0], ink[1], ink[2]], &Palette::default());
+        let pixel = |x: usize, y: usize| &image.data[(y * 16 + x) * 4..][..4];
         assert_eq!(pixel(8, 7), [0x20, 0x60, 0xa0, 255]);
         assert_eq!(pixel(8, 11), [255, 0, 0, 255]);
         assert_eq!(pixel(8, 2)[3], 0);
@@ -560,8 +543,8 @@ mod tests {
     #[test]
     fn opacity_scales_each_paint_on_its_own() {
         const HALF: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 2H14V14H2Z" fill="#ffffff" fill-opacity="0.5" stroke="#000000" stroke-width="2" stroke-opacity="0.25"/></svg>"##;
-        let image = rasterize(&[HALF], 16.0, [0, 0], [1.0; 3], &Palette::default());
-        let alpha = |x: usize, y: usize| image.data[(y * 17 + x) * 4 + 3];
+        let image = rasterize(&[HALF], 16, [1.0; 3], &Palette::default());
+        let alpha = |x: usize, y: usize| image.data[(y * 16 + x) * 4 + 3];
         assert_eq!(alpha(8, 8), 128);
         // The stroke's outer half covers only what the fill leaves.
         assert_eq!(alpha(1, 8), 64);
@@ -569,28 +552,26 @@ mod tests {
 
     #[test]
     fn icons_keep_transparency_and_overlays_across_scales() {
-        for size in [8.0, 16.0, 32.0, 57.5] {
-            for phase in [[0, 0], [1, 2], [3, 3]] {
-                let plain = rasterize(&[BOX], size, phase, [1.0; 3], &Palette::default());
-                let marked = rasterize(&[BOX, MARK], size, phase, [1.0; 3], &Palette::default());
-                for image in [&plain, &marked] {
-                    assert_eq!(
-                        image.data.len(),
-                        (image.placement.width * image.placement.height * 4) as usize
-                    );
-                    assert!(image.data.chunks_exact(4).any(|p| p[3] > 0));
-                    assert!(image.data.chunks_exact(4).any(|p| p[3] < 255));
-                    assert!(
-                        image
-                            .data
-                            .chunks_exact(4)
-                            .filter(|p| p[3] == 0)
-                            .all(|p| p[..3] == [0; 3])
-                    );
-                }
-                assert_ne!(plain.data, marked.data);
-                assert!(marked.data.chunks_exact(4).any(|p| p[0] > p[2] && p[3] > 0));
+        for size in [8, 16, 32, 57] {
+            let plain = rasterize(&[BOX], size, [1.0; 3], &Palette::default());
+            let marked = rasterize(&[BOX, MARK], size, [1.0; 3], &Palette::default());
+            for image in [&plain, &marked] {
+                assert_eq!(
+                    image.data.len(),
+                    (image.placement.width * image.placement.height * 4) as usize
+                );
+                assert!(image.data.chunks_exact(4).any(|p| p[3] > 0));
+                assert!(image.data.chunks_exact(4).any(|p| p[3] < 255));
+                assert!(
+                    image
+                        .data
+                        .chunks_exact(4)
+                        .filter(|p| p[3] == 0)
+                        .all(|p| p[..3] == [0; 3])
+                );
             }
+            assert_ne!(plain.data, marked.data);
+            assert!(marked.data.chunks_exact(4).any(|p| p[0] > p[2] && p[3] > 0));
         }
     }
 }

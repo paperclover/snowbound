@@ -834,6 +834,8 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                         text.tags.push(crate::document::Tag {
                             definition: Some(definition),
                             action_type: None,
+                            shape: None,
+                            property_status: None,
                             status,
                             created: Some(1_262_401_445),
                             completed: (status == 1).then_some(1_262_402_000),
@@ -1159,6 +1161,7 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     layout: Layout::default(),
                     strokes: vec![stroke(rng)],
                     groups: Vec::new(),
+                    shape: None,
                 })
             };
             page.objects.insert(at, object);
@@ -1251,6 +1254,8 @@ fn stroke(rng: &mut Rng) -> InkStroke {
         color: Some(0x0000ff),
         transparency: None,
         pen_tip: None,
+        // Every other stroke a highlighter's.
+        raster_operation: (x as u32).is_multiple_of(2).then_some(9),
     }
 }
 
@@ -1595,6 +1600,8 @@ fn random_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
                 tags: vec![crate::document::Tag {
                     definition: Some(definition),
                     action_type: None,
+                    shape: None,
+                    property_status: None,
                     status: 0,
                     created: Some(1_262_401_445),
                     completed: None,
@@ -1639,15 +1646,20 @@ fn random_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
             }),
             before: None,
         },
-        _ => PageOp::Add {
-            object: PageObject::Ink(Ink {
-                id: id(),
-                layout: Layout::default(),
-                strokes: vec![stroke(rng)],
-                groups: Vec::new(),
-            }),
-            before: None,
-        },
+        _ => {
+            let stroke = stroke(rng);
+            let ends = [stroke.points[0], stroke.points[stroke.points.len() - 1]];
+            PageOp::Add {
+                object: PageObject::Ink(Ink {
+                    id: id(),
+                    layout: Layout::default(),
+                    strokes: vec![stroke],
+                    groups: Vec::new(),
+                    shape: Some(crate::page::ink::InkShape::Line(ends)),
+                }),
+                before: None,
+            }
+        }
     })
 }
 

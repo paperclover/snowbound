@@ -598,7 +598,7 @@ fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>
                 let label = match tag.icon {
                     _ if !tag.label.is_empty() => &tag.label,
                     TagIcon::Symbol { shape, .. } => symbol_name(shape).unwrap_or("Tag"),
-                    TagIcon::Task => "Outlook task",
+                    TagIcon::Task { .. } => "Outlook task",
                 };
                 let state = match tag.icon {
                     TagIcon::Symbol { checked: true, .. } => ", completed",
@@ -946,6 +946,8 @@ pub(super) mod tests {
             paragraphs[index].text_mut().unwrap().tags.push(Tag {
                 definition: Some(id),
                 action_type: None,
+                shape: None,
+                property_status: None,
                 status,
                 created: None,
                 completed: None,

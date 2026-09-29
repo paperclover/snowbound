@@ -97,6 +97,8 @@ fn open(engine: &mut TextEngine, summary: &str) -> CanvasEditor {
             node.text_mut().unwrap().tags.push(Tag {
                 definition: Some(definition),
                 action_type: None,
+                shape: None,
+                property_status: None,
                 status: u16::from(completed),
                 created: Some(1),
                 completed: Some(u32::from(completed)),

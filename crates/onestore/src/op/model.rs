@@ -468,6 +468,7 @@ fn stroked(stroke: &crate::page::InkStroke) -> crate::page::InkStroke {
 fn inked(ink: &crate::page::Ink) -> crate::page::Ink {
     crate::page::Ink {
         strokes: ink.strokes.iter().map(stroked).collect(),
+        shape: ink.shape.as_ref().map(crate::page::ink::InkShape::snapped),
         ..ink.clone()
     }
 }
@@ -1041,6 +1042,21 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                     .collect();
                 text.text = Paragraph::from_runs(runs);
             }
+        }
+        PageOp::Media { paragraph, media } => {
+            let paragraph = paragraph_mut(page, *paragraph)?;
+            if !matches!(
+                paragraph.content,
+                ParagraphContent::Text(_) | ParagraphContent::Attachment(_)
+            ) {
+                return Err(invalid("Link a paragraph of text or a file to a recording"));
+            }
+            if media.recordings.is_empty() != media.time_ms.is_none() {
+                return Err(invalid(
+                    "A recording link names recordings and a moment in them",
+                ));
+            }
+            paragraph.media = media.clone();
         }
         PageOp::List { paragraph, lists } => {
             paragraph_mut(page, *paragraph)?.lists = lists.iter().map(|(id, _)| *id).collect();

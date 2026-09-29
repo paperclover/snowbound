@@ -103,13 +103,13 @@ fn label(ui: &mut Ui, part: &str, text: &str, tag: &NoteTag) {
     );
 }
 
-fn icon(ui: &mut Ui, part: &str, art: Option<&'static [&'static str]>) {
+fn icon(ui: &mut Ui, part: &str, art: Option<&'static [&'static str]>, tint: [f32; 4]) {
     ui.leaf(
         part,
         Spec {
             size: [px(SIDE + 4.0), px(ROW)],
             icon: art,
-            color: Some([1.0; 4]),
+            color: Some(tint),
             center: true,
             ..Spec::default()
         },
@@ -324,7 +324,11 @@ impl State {
                     ..Spec::default()
                 },
             );
-            icon(ui, "icon", artwork(tag));
+            // OneNote's list marks a tag without a symbol with its "None" symbol art.
+            match artwork(tag) {
+                Some(art) => icon(ui, "icon", Some(art), [1.0; 4]),
+                None => icon(ui, "icon", Some(crate::art::FONT_COLOR), theme.text),
+            }
             let text = match commands::tag_chord(place) {
                 Some(chord) => format!("{} ({})", tag.label, chord.label(Platform::CURRENT)),
                 None => tag.label.clone(),
@@ -585,7 +589,7 @@ fn tag_editor(
             ..Spec::default()
         },
     );
-    icon(ui, "icon", artwork(tag));
+    icon(ui, "icon", artwork(tag), [1.0; 4]);
     label(ui, "label", &tag.label, tag);
     ui.leaf(
         "end",

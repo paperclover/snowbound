@@ -103,18 +103,29 @@ fn editing_a_recorded_page_keeps_the_recording_and_its_annotation() {
     assert_eq!(recording(&stored), recording(&before));
     assert_eq!(stored.objects.len(), before.objects.len());
 
-    let mut annotated = after.clone();
-    let outline = annotated
-        .objects
-        .iter_mut()
-        .find_map(|object| match object {
-            PageObject::Outline(outline) if !outline.title => Some(outline),
-            _ => None,
-        })
-        .unwrap();
-    let last = outline.paragraphs.last_mut().unwrap();
-    last.media = recording(&before).1;
-    assert!(ops::saved(written.as_slice(), space, &annotated).is_err());
+    // A note linked to the recording, then unlinked, as Snowbound links notes taken while
+    // it records.
+    let annotate = |page: &Page, media: MediaIndex| {
+        let mut page = page.clone();
+        for object in &mut page.objects {
+            if let PageObject::Outline(outline) = object
+                && !outline.title
+            {
+                outline.paragraphs.last_mut().unwrap().media = media.clone();
+            }
+        }
+        page
+    };
+    let linked = ops::saved(
+        written.as_slice(),
+        space,
+        &annotate(&stored, recording(&before).1),
+    )
+    .unwrap();
+    let (_, relinked) = page(linked.as_slice());
+    assert_eq!(relinked, annotate(&stored, recording(&before).1));
+    let unlinked = ops::saved(linked.as_slice(), space, &stored).unwrap();
+    assert_eq!(page(unlinked.as_slice()).1, stored);
     let mut recaptured = after.clone();
     for object in &mut recaptured.objects {
         if let PageObject::Outline(outline) = object {

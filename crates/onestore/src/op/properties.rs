@@ -5,7 +5,7 @@ use crate::{
     Error, ExGuid, PropertySets, Value,
     active::{ActivePage, Changes},
     document::{Kind, Tag},
-    page::Definition,
+    page::{Definition, MediaIndex},
     write::PropertyObject,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -165,54 +165,78 @@ fn tag_definition_values(definition: &Definition) -> Result<Values, Error> {
     Ok(values)
 }
 
-/// Replaces the note tags of `object`. Each entry names the stored identity of its tag's
-/// definition and, where the tag does not carry its action type or the page lacks the
-/// definition, the definition itself.
+/// Replaces the note tags of `object`. A normal tag comes with its definition where the page
+/// lacks it; a task tag has none and stores its own icon, in the order OneNote writes it.
 pub(crate) fn tag_changes(
     active: &ActivePage<'_>,
     object: ExGuid,
-    tags: &[(ExGuid, &Tag, Option<&Definition>)],
+    tags: &[(&Tag, Option<&Definition>)],
 ) -> Result<Changes, Error> {
     let raw = &active.live.revision;
     let mut definitions: Vec<(ExGuid, Option<Values>)> = Vec::new();
-    let mut sets: Vec<(usize, Values)> = Vec::new();
+    let mut sets: Vec<(Option<ExGuid>, Values)> = Vec::new();
     let mut action_types = BTreeSet::new();
-    for (written, tag, definition) in tags {
-        let action_type = if tag.status & 4 != 0 {
-            tag.action_type
-        } else {
-            match definition.map(|d| &d.kind) {
-                Some(Kind::TagDefinition { action_type, .. }) => *action_type,
-                _ => return Err(invalid("A note tag must reference a tag definition")),
-            }
-        };
-        if !action_types.insert(action_type.unwrap_or(0)) {
-            return Err(invalid("An element holds one note tag per action type"));
-        }
-        let index = match definitions.iter().position(|(id, _)| id == written) {
-            Some(index) => index,
-            None => {
-                let values = if raw.objects.contains_key(written) {
-                    None
-                } else {
-                    let definition = definition
-                        .ok_or_else(|| invalid("A note tag references a missing tag definition"))?;
-                    Some(tag_definition_values(definition)?)
-                };
-                definitions.push((*written, values));
-                definitions.len() - 1
-            }
-        };
-        let mut fields: Values = Vec::new();
-        if let Some(action_type) = tag.action_type {
-            fields.push((0x10003463, action_type.to_le_bytes().to_vec()));
-        }
-        for (id, value) in [
+    for (tag, definition) in tags {
+        let dates = [
             (0x1400346e, tag.created),
             (0x1400346f, tag.completed),
             (0x1400346a, tag.start),
             (0x1400346b, tag.due),
-        ] {
+        ];
+        let mut fields: Values = Vec::new();
+        if tag.status & 4 != 0 {
+            let (Some(action_type), Some(shape), Some(property_status)) =
+                (tag.action_type, tag.shape, tag.property_status)
+            else {
+                return Err(invalid(
+                    "A task tag stores its action type, icon and property status",
+                ));
+            };
+            if !action_types.insert(action_type) {
+                return Err(invalid("An element holds one note tag per action type"));
+            }
+            fields.extend([
+                (0x0c003473, vec![0]),
+                (0x10003463, action_type.to_le_bytes().to_vec()),
+                (0x10003464, shape.to_le_bytes().to_vec()),
+                (0x14003467, property_status.to_le_bytes().to_vec()),
+            ]);
+            if let Some(task) = tag.task_id {
+                fields.push((0x1c003469, task.to_vec()));
+            }
+            for (id, value) in [dates[2], dates[3], dates[0], dates[1]] {
+                if let Some(value) = value {
+                    fields.push((id, value.to_le_bytes().to_vec()));
+                }
+            }
+            fields.push((0x10003470, tag.status.to_le_bytes().to_vec()));
+            sets.push((None, fields));
+            continue;
+        }
+        let written = tag
+            .definition
+            .ok_or_else(|| invalid("A note tag must reference a tag definition"))?;
+        let action_type = match definition.map(|d| &d.kind) {
+            Some(Kind::TagDefinition { action_type, .. }) => *action_type,
+            _ => return Err(invalid("A note tag must reference a tag definition")),
+        };
+        if !action_types.insert(action_type.unwrap_or(0)) {
+            return Err(invalid("An element holds one note tag per action type"));
+        }
+        if !definitions.iter().any(|(id, _)| *id == written) {
+            let values = if raw.objects.contains_key(&written) {
+                None
+            } else {
+                let definition = definition
+                    .ok_or_else(|| invalid("A note tag references a missing tag definition"))?;
+                Some(tag_definition_values(definition)?)
+            };
+            definitions.push((written, values));
+        }
+        if let Some(action_type) = tag.action_type {
+            fields.push((0x10003463, action_type.to_le_bytes().to_vec()));
+        }
+        for (id, value) in dates {
             if let Some(value) = value {
                 fields.push((id, value.to_le_bytes().to_vec()));
             }
@@ -221,7 +245,7 @@ pub(crate) fn tag_changes(
         if let Some(task) = tag.task_id {
             fields.push((0x1c003469, task.to_vec()));
         }
-        sets.push((index, fields));
+        sets.push((Some(written), fields));
     }
     let parents = active.editable_parents(object)?;
     let modified = crate::create::current_timestamps()?.0.to_le_bytes();
@@ -240,9 +264,12 @@ pub(crate) fn tag_changes(
     }
     let mut target = PropertyObject::from_object(&raw.objects[&object])?;
     let mut encoded = Vec::new();
-    for (index, fields) in &sets {
-        let reference = target.reference(definitions[*index].0)?;
-        let mut set = vec![(0x20003488, reference.to_vec())];
+    for (definition, fields) in &sets {
+        let mut set = Vec::new();
+        if let Some(definition) = definition {
+            let reference = target.reference(*definition)?;
+            set.push((0x20003488, reference.to_vec()));
+        }
         set.extend(fields.iter().cloned());
         encoded.push(set);
     }
@@ -374,6 +401,32 @@ pub(crate) fn paragraph_format_changes(
             let value = (previous & !7) | (u32::from(alignment[0]) + 1);
             target.set(&[(property, &value.to_le_bytes())])?;
         }
+    }
+    target.set(&[(0x14001d7a, &modified)])?;
+    let mut changed = BTreeMap::from([(object, target)]);
+    crate::formatting::touch_ancestors(raw, parents, object, &modified, &mut changed)?;
+    Ok(changed)
+}
+
+/// Links content `object` to a moment in recordings (MediaIndex), or unlinks it.
+pub(crate) fn media_changes(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    media: &MediaIndex,
+) -> Result<Changes, Error> {
+    let parents = active.editable_parents(object)?;
+    let modified = crate::create::current_timestamps()?.0.to_le_bytes();
+    let raw = &active.live.revision;
+    let mut target = PropertyObject::from_object(&raw.objects[&object])?;
+    match media.time_ms {
+        Some(time) => {
+            let recordings = media.recordings.concat();
+            target.set(&[
+                (0x1c001c98, recordings.as_slice()),
+                (0x14001c99, &time.to_le_bytes()),
+            ])?;
+        }
+        None => target.remove(&[0x1c001c98, 0x14001c99])?,
     }
     target.set(&[(0x14001d7a, &modified)])?;
     let mut changed = BTreeMap::from([(object, target)]);

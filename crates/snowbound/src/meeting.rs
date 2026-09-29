@@ -164,6 +164,8 @@ pub fn content(page: &Page) -> Result<Page, Box<dyn Error>> {
                         vec![Tag {
                             definition: Some(to_do),
                             action_type: None,
+                            shape: None,
+                            property_status: None,
                             status: 0,
                             created: Some(created),
                             completed: Some(0),

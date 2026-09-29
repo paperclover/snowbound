@@ -1,11 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
   <defs>
-    <linearGradient id="layer0" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#91b6f7"/><stop offset="1" stop-color="#6498ef"/></linearGradient>
-    <linearGradient id="layer1" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#7caff6"/><stop offset="1" stop-color="#5587e9"/></linearGradient>
-    <linearGradient id="layer2" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#d6e6f5"/></linearGradient>
+    <linearGradient id="interior" x1="7.5" y1="7.5" x2="12.5" y2="12.5" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e8f3fe"/></linearGradient>
   </defs>
-  <path d="M5 5H15V15H5Z" fill="url(#layer0)"/>
-  <path d="M5.75 5.75H14.25V14.25H5.75Z" fill="#ffffff"/>
-  <path d="M6.5 6.5H13.5V13.5H6.5Z" fill="url(#layer1)"/>
-  <path d="M7.25 7.25H12.75V12.75H7.25Z" fill="url(#layer2)"/>
+  <path d="M3 3H16V16H3Z" fill="#90a0ac"/>
+  <path d="M4 4H15V15H4Z" fill="#f7f8fa"/>
+  <path d="M5 5H14V14H5Z" fill="#b4bfc7"/>
+  <path d="M5 5H14V6H6V13H5Z" fill="#ccd5d9"/>
+  <path d="M6 6H13V13H6Z" fill="url(#interior)"/>
 </svg>

@@ -227,8 +227,8 @@ pub struct ParagraphLayout {
 pub enum TagIcon {
     /// Symbol `shape` of MS-ONE's NoteTagShape, `checked` only where it is a check box.
     Symbol { shape: u16, checked: bool },
-    /// An Outlook task, which OneNote 2010 flags.
-    Task,
+    /// An Outlook task, drawn with its stored follow-up flag and never checked from the page.
+    Task { shape: u16 },
 }
 
 impl TagIcon {
@@ -887,8 +887,8 @@ impl ParagraphLayout {
             return Err(LayoutError::InvalidSpacing);
         }
         // Stored newest first; OneNote lists and paints tags oldest first.
-        // An Outlook task tag carries no definition; a tag whose definition is missing shows
-        // nothing, as OneNote draws no icon for it.
+        // An Outlook task tag carries no definition but its own icon; a tag whose definition
+        // is missing shows nothing, as OneNote draws no icon for it.
         let mut tag_definitions: Vec<_> = paragraph
             .tags
             .iter()
@@ -1065,7 +1065,9 @@ impl ParagraphLayout {
         for tag in &tag_definitions {
             let (tag, shape, label) = (tag.0, tag.1, tag.2);
             let icon = match shape {
-                None => TagIcon::Task,
+                None => TagIcon::Task {
+                    shape: tag.shape.unwrap_or(0),
+                },
                 Some(shape) => match TagIcon::of(shape.unwrap_or(0), tag.status & 1 != 0) {
                     Some(icon) => icon,
                     None => continue,
@@ -2241,6 +2243,8 @@ mod tests {
             definition: Some(id),
             status: 3,
             action_type: None,
+            shape: None,
+            property_status: None,
             created: None,
             completed: None,
             start: None,
@@ -2356,8 +2360,13 @@ mod tests {
             }
         );
         let mut task = node.clone();
-        task.text_mut().unwrap().tags[0].status |= 4;
-        assert_eq!(shaped(&task, &definitions).tags[0].icon, TagIcon::Task);
+        let stored = &mut task.text_mut().unwrap().tags[0];
+        stored.status |= 4;
+        stored.shape = Some(89);
+        assert_eq!(
+            shaped(&task, &definitions).tags[0].icon,
+            TagIcon::Task { shape: 89 }
+        );
         let mut untagged = definitions.clone();
         untagged.remove(&id);
         assert!(shaped(&node, &untagged).tags.is_empty());
@@ -2403,6 +2412,8 @@ mod tests {
         let tag = Tag {
             definition: Some(id(902)),
             action_type: None,
+            shape: None,
+            property_status: None,
             status: 0,
             created: None,
             completed: None,
@@ -2499,6 +2510,8 @@ mod tests {
         let tag = Tag {
             definition: Some(id(902)),
             action_type: None,
+            shape: None,
+            property_status: None,
             status: 0,
             created: None,
             completed: None,
@@ -2665,6 +2678,8 @@ mod tests {
                 definition: Some(id),
                 status: 1,
                 action_type: None,
+                shape: None,
+                property_status: None,
                 created: None,
                 completed: None,
                 start: None,

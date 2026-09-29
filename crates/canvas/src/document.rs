@@ -1578,6 +1578,8 @@ mod tests {
         nodes[1].tags.push(onestore::document::Tag {
             definition: Some(new_id().unwrap()),
             action_type: Some(0),
+            shape: None,
+            property_status: None,
             status: 1,
             created: Some(123),
             completed: None,

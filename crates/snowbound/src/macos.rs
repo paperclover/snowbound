@@ -86,6 +86,8 @@ fn ns_window(window: &Window) -> Retained<AnyObject> {
 
 /// Room the traffic lights take at the title bar's leading edge.
 pub const LEADING: f32 = 78.0;
+/// The title bar's trailing margin, the gap the traffic lights leave before the toolbar.
+pub const TRAILING: f32 = 12.0;
 /// How far AppKit rounds a window's corners.
 pub const CORNER_RADIUS: f32 = 10.0;
 

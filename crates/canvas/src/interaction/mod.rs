@@ -504,6 +504,37 @@ impl PageView {
         self.hit_test(self.viewport.document_point(position))
     }
 
+    /// The Outlook task icon under the pointer, in view device pixels, for the host to name.
+    pub fn task_under_pointer(&self) -> Option<[f32; 4]> {
+        if !self.pointer_inside || self.drag.is_some() {
+            return None;
+        }
+        let [x, y] = self.viewport.document_point(self.pointer);
+        let view = |v: f32, axis: usize| v * self.viewport.scale + self.viewport.origin[axis];
+        self.editor.visible_outlines().find_map(|outline| {
+            let offset = match &self.scene {
+                Some((_, offset)) if self.editor.has_page_outline(outline.id) => *offset,
+                _ => [0.0; 2],
+            };
+            let shaped = outline.shaped();
+            let left = offset[0] + outline.origin()[0] + shaped.tag_column_offset();
+            let top = offset[1] + outline.origin()[1];
+            shaped.paragraphs.iter().find_map(|paragraph| {
+                paragraph.tags.iter().find_map(|tag| {
+                    let x0 = left + tag.origin[0];
+                    let y0 = top + paragraph.origin[1] + tag.origin[1];
+                    (matches!(tag.icon, crate::outline::TagIcon::Task { .. })
+                        && (x0..=x0 + tag.size).contains(&x)
+                        && (y0..=y0 + tag.size).contains(&y))
+                    .then(|| {
+                        let [x1, y1] = [x0 + tag.size, y0 + tag.size];
+                        [view(x0, 0), view(y0, 1), view(x1, 0), view(y1, 1)]
+                    })
+                })
+            })
+        })
+    }
+
     fn set_object_focus(&mut self, focus: Option<ObjectFocus>) {
         if self.object_focus != focus {
             self.editor.finish_composition();

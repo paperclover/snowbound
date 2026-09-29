@@ -1,9 +1,44 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
-  <defs>
-    <linearGradient id="layer0" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff1b0"/><stop offset="1" stop-color="#e0a82e"/></linearGradient>
-    <linearGradient id="layer1" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#b58a3a"/><stop offset="1" stop-color="#8a6420"/></linearGradient>
-  </defs>
-  <path d="M3.5 0.25C5.2 0.25 5.8 1.3 5.4 3L4.4 7.25H2.6L1.6 3C1.2 1.3 1.8 0.25 3.5 0.25Z" fill="url(#layer1)"/>
-  <path d="M3.5 1C4.6 1 4.9 1.7 4.6 3L3.8 6.5H3.2L2.4 3C2.1 1.7 2.4 1 3.5 1Z" fill="url(#layer0)"/>
-  <path d="M3.5 8A1 1 0 1 1 3.5 10A1 1 0 1 1 3.5 8Z" fill="url(#layer1)"/>
+  <path d="M1 0h1v1h-1zM2 7h1v1h-1z" fill="#ecbb1c" fill-opacity="0.55"/>
+  <path d="M2 0h1v1h-1z" fill="#eba23a"/>
+  <path d="M3 0h1v1h-1z" fill="#db8a16"/>
+  <path d="M4 0h1v1h-1z" fill="#db9e34"/>
+  <path d="M5 0h1v1h-1z" fill="#d3aa07" fill-opacity="0.62"/>
+  <path d="M1 1h1v1h-1z" fill="#d29e43"/>
+  <path d="M2 1h1v1h-1z" fill="#fffbeb"/>
+  <path d="M3 1h1v1h-1z" fill="#fdf1c6"/>
+  <path d="M4 1h1v1h-1z" fill="#f8da7f"/>
+  <path d="M5 1h1v1h-1z" fill="#a68131"/>
+  <path d="M1 2h1v1h-1z" fill="#cd8f24"/>
+  <path d="M2 2h1v1h-1z" fill="#fef4d3"/>
+  <path d="M3 2h1v1h-1z" fill="#fde2a2"/>
+  <path d="M4 2h1v1h-1z" fill="#ecca61"/>
+  <path d="M5 2h1v1h-1z" fill="#8c6d21"/>
+  <path d="M1 3h1v1h-1z" fill="#d5a01b" fill-opacity="0.89"/>
+  <path d="M2 3h1v1h-1z" fill="#fde6ae"/>
+  <path d="M3 3h1v1h-1z" fill="#fad885"/>
+  <path d="M4 3h1v1h-1z" fill="#d9b04e"/>
+  <path d="M5 3h1v1h-1z" fill="#9e7939"/>
+  <path d="M1 4h1v1h-1z" fill="#d4a71f" fill-opacity="0.7"/>
+  <path d="M2 4h1v1h-1z" fill="#d6b347"/>
+  <path d="M3 4h1v1h-1z" fill="#eec86b"/>
+  <path d="M4 4h1v1h-1z" fill="#b79238"/>
+  <path d="M5 4h1v1h-1z" fill="#bfa064"/>
+  <path d="M1 5h1v1h-1z" fill="#cea51d" fill-opacity="0.36"/>
+  <path d="M2 5h1v1h-1z" fill="#b28925"/>
+  <path d="M3 5h1v1h-1z" fill="#e1b754"/>
+  <path d="M4 5h1v1h-1z" fill="#94702b"/>
+  <path d="M5 5h1v1h-1z" fill="#dbc890"/>
+  <path d="M2 6h1v1h-1z" fill="#cea208" fill-opacity="0.65"/>
+  <path d="M3 6h1v1h-1z" fill="#8a6619"/>
+  <path d="M4 6h1v1h-1z" fill="#c7a976"/>
+  <path d="M3 7h1v1h-1z" fill="#db870e"/>
+  <path d="M4 7h1v1h-1z" fill="#f4cc87"/>
+  <path d="M2 8h1v1h-1z" fill="#d49a29"/>
+  <path d="M3 8h1v1h-1z" fill="#f5eac6"/>
+  <path d="M4 8h1v1h-1z" fill="#573406"/>
+  <path d="M2 9h1v1h-1z" fill="#d2ab1f" fill-opacity="0.59"/>
+  <path d="M3 9h1v1h-1z" fill="#603a09"/>
+  <path d="M4 9h1v1h-1z" fill="#cfa956"/>
+  <path d="M3 10h1v1h-1z" fill="#cdad40"/>
 </svg>

@@ -769,6 +769,8 @@ impl CanvasEditor {
                             Tag {
                                 definition: Some(id),
                                 action_type: None,
+                                shape: None,
+                                property_status: None,
                                 status: u16::from(!checkable),
                                 created,
                                 completed: if checkable { Some(0) } else { created },
@@ -1809,6 +1811,8 @@ mod tests {
         nodes[2].tags.push(Tag {
             definition: Some(music),
             action_type: None,
+            shape: None,
+            property_status: None,
             status: 1,
             created: Some(1),
             completed: Some(1),
@@ -1938,7 +1942,7 @@ mod tests {
             .iter()
             .map(|tag| match tag.icon {
                 crate::outline::TagIcon::Symbol { shape, .. } => shape,
-                crate::outline::TagIcon::Task => unreachable!(),
+                crate::outline::TagIcon::Task { .. } => unreachable!(),
             })
             .collect::<Vec<_>>();
         assert_eq!(shapes.len(), defaults.len() - 2);

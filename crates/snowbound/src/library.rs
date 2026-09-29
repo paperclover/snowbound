@@ -33,10 +33,6 @@ pub fn on_background(notify: impl Fn() + Send + Sync + 'static) {
     let _ = NOTIFY.set(Box::new(notify));
 }
 
-/// How often the sections no tab shows are polled; OneNote 2010 read a closed section
-/// fifteen seconds after another client changed it.
-const BACKGROUND: Duration = Duration::from_secs(15);
-
 fn notify_background() {
     if let Some(notify) = NOTIFY.get() {
         notify();
@@ -171,6 +167,8 @@ pub struct Library {
     /// Syncs the notebook's sections while no tab shows them, as OneNote syncs every
     /// section of an open notebook.
     pub background: Option<Arc<Background>>,
+    /// Reports the changes to a folder on this computer to `background`.
+    watch: Option<Arc<crate::watch::Watch>>,
 }
 
 impl Library {
@@ -192,10 +190,15 @@ impl Library {
             }
         }
         let notebook = Notebook::open(location, cache);
+        let (background, watch) = match &notebook {
+            Ok(notebook) => local_background(notebook, location),
+            Err(_) => (None, None),
+        };
         Self {
             location: location.to_owned(),
             name: file_name(Path::new(location)),
-            background: notebook.as_ref().ok().and_then(local_background),
+            background,
+            watch,
             notebook: notebook.map(Some).map_err(|error| error.to_string()),
             server: None,
             notice,
@@ -219,7 +222,6 @@ impl Library {
         let background = Background::smb(
             &server.mount.root,
             LIMIT,
-            BACKGROUND,
             move || connect.connect(),
             notify_background,
         )
@@ -234,6 +236,7 @@ impl Library {
             notice: None,
             cache: cache.to_owned(),
             background: Some(Arc::new(background)),
+            watch: None,
         })
     }
 
@@ -260,15 +263,18 @@ impl Library {
             notice: self.notice.clone(),
             cache: self.cache.clone(),
             background: self.background.clone(),
+            watch: self.watch.clone(),
         }
     }
 
     /// A notebook `Notebook::create` just made in the folder at `location`.
     pub fn created(location: &str, notebook: Notebook, cache: &Path) -> Self {
+        let (background, watch) = local_background(&notebook, location);
         Self {
             location: location.to_owned(),
             name: file_name(Path::new(location)),
-            background: local_background(&notebook),
+            background,
+            watch,
             notebook: Ok(Some(notebook)),
             server: None,
             notice: None,
@@ -286,6 +292,7 @@ impl Library {
             notice: None,
             cache: cache.to_owned(),
             background: None,
+            watch: None,
         }
     }
 
@@ -296,7 +303,8 @@ impl Library {
         path: &str,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Section, Box<dyn Error>> {
-        // The background may hold the replica for a step, which takes a network round trip.
+        // The background may hold the replica for a step, which takes a network round trip,
+        // or be making it as an offline copy.
         let deadline = Instant::now() + TIMEOUT * 3;
         let notify = Arc::new(Mutex::new(notify));
         let notifier = || {
@@ -335,7 +343,12 @@ impl Library {
                 (Err(error), _) => return Err(error.clone().into()),
             };
             match opened {
-                Err(error) if error.busy() && Instant::now() < deadline => {
+                Err(error)
+                    if (error.busy()
+                        || matches!(&error, notebook::Error::Io(error)
+                            if error.kind() == io::ErrorKind::AlreadyExists))
+                        && Instant::now() < deadline =>
+                {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 opened => break opened?,
@@ -446,15 +459,37 @@ pub fn recycle_bin(path: &str) -> bool {
     path.rsplit('/').next() == Some("OneNote_RecycleBin")
 }
 
-/// A mounted notebook's background sync, following Work Offline.
-fn local_background(notebook: &Notebook) -> Option<Arc<Background>> {
-    let background = notebook
-        .background(BACKGROUND, notify_background)
+/// A mounted notebook's background sync, following Work Offline, and the watch that reports
+/// the folder's changes to it. Only a folder on this computer reports every change; one on a
+/// network volume is checked more often and kept in offline copies, as on a share.
+fn local_background(
+    notebook: &Notebook,
+    location: &str,
+) -> (Option<Arc<Background>>, Option<Arc<crate::watch::Watch>>) {
+    let reports = Arc::new(OnceLock::<std::sync::Weak<Background>>::new());
+    let report = Arc::clone(&reports);
+    let watch = crate::watch::watch(Path::new(location), move |paths| {
+        if let Some(background) = report.get().and_then(std::sync::Weak::upgrade) {
+            background.touched(&paths);
+        }
+    });
+    let remote = !crate::watch::on_this_computer(Path::new(location));
+    let interval = match watch {
+        Some(_) if !remote => Background::BACKSTOP,
+        _ => Background::UNWATCHED,
+    };
+    let Some(background) = notebook
+        .background(interval, remote, notify_background)
         .inspect_err(|error| eprintln!("Background sync did not start: {error}"))
-        .ok()?;
+        .ok()
+    else {
+        return (None, None);
+    };
     background.set_offline(offline());
     background.watch(notebook.replicas());
-    Some(Arc::new(background))
+    let background = Arc::new(background);
+    let _ = reports.set(Arc::downgrade(&background));
+    (Some(background), watch.map(Arc::new))
 }
 
 pub fn file_name(path: &Path) -> String {
@@ -483,7 +518,7 @@ fn tabs(catalog: &Folder) -> Vec<Tab> {
         .sections
         .iter()
         .filter_map(|section| match &section.state {
-            SectionState::Readable { name, color } => Some(Tab {
+            SectionState::Readable { name, color, .. } => Some(Tab {
                 name: section_name(&section.path, name),
                 path: section.path.clone(),
                 color: *color,
@@ -668,6 +703,7 @@ mod tests {
             notice: None,
             cache: PathBuf::new(),
             background: None,
+            watch: None,
         };
         let shown = |root, file| library(root).local(Path::new(file));
         let under = Some(PathBuf::from("/Volumes/agent/lab/Group/New Section 1.one"));

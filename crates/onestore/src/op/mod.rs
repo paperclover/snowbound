@@ -6,8 +6,8 @@ use crate::{
     ExGuid, OutlineEdit, PageCreation, PageEdit, TextAttribute,
     document::{Layout, Tag},
     page::{
-        Definition, InkStroke, Page, PageObject, PageParagraph, Paragraph, TableCell, TableColumn,
-        TableRow,
+        Definition, InkStroke, MediaIndex, Page, PageObject, PageParagraph, Paragraph, TableCell,
+        TableColumn, TableRow,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,12 @@ pub enum PageOp {
         paragraph: ExGuid,
         style: ExGuid,
         definition: Definition,
+    },
+    /// Links a paragraph's text or file to a moment in recordings on the page, or with
+    /// empty `media` unlinks it.
+    Media {
+        paragraph: ExGuid,
+        media: MediaIndex,
     },
     /// Replaces a paragraph's list nodes; a node another paragraph owns is copied.
     List {

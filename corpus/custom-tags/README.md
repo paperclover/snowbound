@@ -18,7 +18,9 @@ absolute directory while running the test, then cold-open it with
 `native/shapes.one` is OneNote 2010's own work in a lab clone:
 
 - "Shapes 1-72" and "Shapes 73-143" tag a paragraph with every NoteTagShape, set through
-  COM (its definitions store NoteTagPropertyStatus 0).
+  COM (its definitions store NoteTagPropertyStatus 0). `shapes-1-72.png` and
+  `shapes-73-143.png` are OneNote's render of them at 100%, which
+  `crates/canvas/src/gpu/mod.rs` pins each shape's art to.
 - "Custom tags" holds a tag made with New Tag (Snow check, as above), applied at the top
   of the list (action type 0), then after moving it below To Do (a second definition,
   action type 1), with To Do applied from both places. The UI stores status 15 and 9.

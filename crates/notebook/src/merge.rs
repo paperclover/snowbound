@@ -164,6 +164,7 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
         PageOp::Level { paragraph, .. }
         | PageOp::Paragraph { paragraph, .. }
         | PageOp::Style { paragraph, .. }
+        | PageOp::Media { paragraph, .. }
         | PageOp::List { paragraph, .. } => vec![*paragraph],
         PageOp::Tags { target, .. } => vec![*target],
         PageOp::Add { object, .. } => vec![object.id()],
@@ -736,6 +737,7 @@ impl Diff {
             }
             PageOp::Paragraph { paragraph, .. }
             | PageOp::Style { paragraph, .. }
+            | PageOp::Media { paragraph, .. }
             | PageOp::List { paragraph, .. } => {
                 require(self.kept(*paragraph) && self.new_has(*paragraph))?
             }

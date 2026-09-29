@@ -32,6 +32,119 @@ pub struct Ink {
     pub strokes: Vec<InkStroke>,
     /// Nested ink containers, as newer OneNote versions group handwriting.
     pub groups: Vec<Ink>,
+    /// The shape drawn, for a drawing made from Draw's Insert Shapes.
+    #[serde(default)]
+    pub shape: Option<InkShape>,
+}
+
+/// The shapes of Draw's Insert Shapes that Snowbound draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShapeKind {
+    Line,
+    Arrow,
+    Rectangle,
+    Ellipse,
+}
+
+impl Ink {
+    /// A shape dragged from `from` to `to` in page points, drawn with `pen`'s width and
+    /// colour as OneNote 2010 draws it (`corpus/ink-tools`): a rectangle clockwise from its
+    /// top left corner, an ellipse in 50 steps clockwise from its right end, and an arrow's
+    /// head as a second stroke of two barbs at atan(1/2) to the line, 8 points plus twice
+    /// the pen's width long. The result reads back unchanged once stored.
+    pub fn drawn(
+        kind: ShapeKind,
+        from: [f32; 2],
+        to: [f32; 2],
+        pen: &InkStroke,
+    ) -> Result<Self, Error> {
+        let [x0, y0] = [from[0].min(to[0]), from[1].min(to[1])];
+        let [x1, y1] = [from[0].max(to[0]), from[1].max(to[1])];
+        let (shape, paths) = match kind {
+            ShapeKind::Line | ShapeKind::Arrow => {
+                let mut paths = vec![vec![from, to]];
+                let [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+                if kind == ShapeKind::Arrow && dx.hypot(dy) > 0.0 {
+                    let back = (-dy).atan2(-dx);
+                    let length = 8.0 + 2.0 * pen.width;
+                    let barb = |turn: f32| {
+                        let angle = back + turn;
+                        [to[0] + length * angle.cos(), to[1] + length * angle.sin()]
+                    };
+                    let spread = 0.5f32.atan();
+                    paths.push(vec![barb(spread), to, barb(-spread)]);
+                }
+                (InkShape::Line([from, to]), paths)
+            }
+            ShapeKind::Rectangle | ShapeKind::Ellipse => {
+                let [w, h] = [x1 - x0, y1 - y0];
+                let transform = [w, 0.0, 0.0, h, x0, y0];
+                let (anchors, path): (&[[f32; 2]], Vec<[f32; 2]>) = if kind == ShapeKind::Rectangle
+                {
+                    (
+                        &[
+                            [0.0, 0.0],
+                            [0.5, 0.0],
+                            [1.0, 0.0],
+                            [1.0, 0.5],
+                            [1.0, 1.0],
+                            [0.5, 1.0],
+                            [0.0, 1.0],
+                            [0.0, 0.5],
+                        ],
+                        vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]],
+                    )
+                } else {
+                    let [cx, cy, rx, ry] = [x0 + w / 2.0, y0 + h / 2.0, w / 2.0, h / 2.0];
+                    (
+                        &[[0.5, 0.0], [1.0, 0.5], [0.5, 1.0], [0.0, 0.5]],
+                        (0..=50)
+                            .map(|step| {
+                                let angle = step as f32 * std::f32::consts::TAU / 50.0;
+                                [cx + rx * angle.cos(), cy + ry * angle.sin()]
+                            })
+                            .collect(),
+                    )
+                };
+                (
+                    InkShape::Closed {
+                        transform,
+                        anchors: anchors.to_vec(),
+                    },
+                    vec![path],
+                )
+            }
+        };
+        let mut strokes = Vec::new();
+        for path in paths {
+            strokes.push(InkStroke {
+                id: super::text::new_id()?,
+                points: path.into_iter().map(|p| p.map(snap)).collect(),
+                ..pen.clone()
+            });
+        }
+        Ok(Self {
+            id: super::text::new_id()?,
+            layout: Layout::default(),
+            strokes,
+            groups: Vec::new(),
+            shape: Some(shape.snapped()),
+        })
+    }
+}
+
+/// What OneNote keeps beside a drawn shape's strokes to edit it by (`corpus/ink-tools`), in
+/// page points before the drawing's offset.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum InkShape {
+    /// A line or arrow from one end to the other.
+    Line([[f32; 2]; 2]),
+    /// A closed shape: `transform` (`[a, b, c, d, x, y]`) takes its anchors, in the unit
+    /// square, onto the page.
+    Closed {
+        transform: [f32; 6],
+        anchors: Vec<[f32; 2]>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -48,6 +161,10 @@ pub struct InkStroke {
     pub transparency: Option<u8>,
     /// 0 is a round (ball) tip, 1 a rectangle.
     pub pen_tip: Option<u8>,
+    /// The ISF raster operation: 9 (MaskPen) for a highlighter, whose colour multiplies
+    /// what lies beneath.
+    #[serde(default)]
+    pub raster_operation: Option<u8>,
 }
 
 impl Ink {
@@ -61,6 +178,9 @@ impl Ink {
             data,
             scale_x,
             scale_y,
+            shape_kind,
+            line,
+            anchors,
         } = &node.kind
         else {
             unreachable!()
@@ -98,6 +218,7 @@ impl Ink {
             layout: node.layout.clone(),
             strokes,
             groups,
+            shape: InkShape::read(*shape_kind, line.as_deref(), anchors.as_deref()),
         })
     }
 
@@ -151,6 +272,7 @@ impl InkStroke {
             color,
             transparency,
             pen_tip,
+            raster_operation,
             ..
         } = &style.kind
         else {
@@ -190,7 +312,75 @@ impl InkStroke {
             color: *color,
             transparency: *transparency,
             pen_tip: *pen_tip,
+            raster_operation: *raster_operation,
         })
+    }
+}
+
+impl InkShape {
+    /// Any geometry this does not recognise reads as no shape: the strokes still draw it.
+    fn read(kind: Option<u8>, line: Option<&[u8]>, anchors: Option<&[u8]>) -> Option<Self> {
+        let floats = |bytes: &[u8]| -> Vec<f32> {
+            bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect()
+        };
+        match (kind?, line, anchors) {
+            (11, Some(line), _) if line.len() == 16 => {
+                let v = floats(line);
+                Some(Self::Line([[v[0], v[1]], [v[2], v[3]]].map(|end| end.map(|v| v * 36.0))))
+                    .filter(Self::finite)
+            }
+            (12, _, Some(bytes)) if bytes.len() >= 24 && (bytes.len() - 24) % 8 == 0 => {
+                let v = floats(bytes);
+                Some(Self::Closed {
+                    transform: std::array::from_fn(|i| v[i] * 36.0),
+                    anchors: v[6..].chunks_exact(2).map(|p| [p[0], p[1]]).collect(),
+                })
+                .filter(Self::finite)
+            }
+            _ => None,
+        }
+    }
+
+    fn finite(&self) -> bool {
+        match self {
+            Self::Line(ends) => ends.iter().flatten().all(|v| v.is_finite()),
+            Self::Closed { transform, anchors } => transform
+                .iter()
+                .chain(anchors.iter().flatten())
+                .all(|v| v.is_finite()),
+        }
+    }
+
+    /// The kind, property and bytes OneNote stores the shape as.
+    pub(crate) fn stored(&self) -> (u8, u32, Vec<u8>) {
+        let half = |v: &f32| (v / 36.0).to_le_bytes();
+        match self {
+            Self::Line(ends) => (11, 0x1c001dac, ends.iter().flatten().flat_map(half).collect()),
+            Self::Closed { transform, anchors } => (
+                12,
+                0x1c001daa,
+                transform
+                    .iter()
+                    .flat_map(half)
+                    .chain(anchors.iter().flatten().flat_map(|v| v.to_le_bytes()))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// This shape as it reads back once stored.
+    pub fn snapped(&self) -> Self {
+        let half = |v: f32| (v / 36.0) * 36.0;
+        match self {
+            Self::Line(ends) => Self::Line(ends.map(|end| end.map(half))),
+            Self::Closed { transform, anchors } => Self::Closed {
+                transform: transform.map(half),
+                anchors: anchors.clone(),
+            },
+        }
     }
 }
 
@@ -268,6 +458,15 @@ pub(crate) const DIMENSIONS: [u8; 64] = [
     0x00, 0x00, 0x00, 0x00, 0x38, 0x04, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x8b, 0xc5, 0xe2, 0x41,
 ];
 
+/// The dimension table OneNote 2010 writes for a drawn shape's pen: X and Y in HIMETRIC over
+/// the whole 32-bit range, at a resolution of 1000.
+pub(crate) const SHAPE_DIMENSIONS: [u8; 64] = [
+    0x8f, 0x6a, 0x8a, 0x59, 0xc0, 0x52, 0xa0, 0x4b, 0x93, 0xaf, 0xaf, 0x35, 0x74, 0x11, 0xa5, 0x61,
+    0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7a, 0x44,
+    0x75, 0x9f, 0x3f, 0xb5, 0xe0, 0x04, 0x98, 0x44, 0xa7, 0xee, 0xc3, 0x0d, 0xbb, 0x5a, 0x90, 0x11,
+    0x00, 0x00, 0x00, 0x80, 0xff, 0xff, 0xff, 0x7f, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7a, 0x44,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,6 +481,7 @@ mod tests {
             color: None,
             transparency: None,
             pen_tip: None,
+            raster_operation: None,
         };
         let values = multi_byte(&stroke.packet()).unwrap();
         assert_eq!(values.len(), 6);
