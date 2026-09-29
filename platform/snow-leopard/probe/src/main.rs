@@ -1,4 +1,4 @@
-use objc2::{rc::{Retained, autoreleasepool}, runtime::NSObjectProtocol};
+use objc2::rc::{Retained, autoreleasepool};
 use objc2_foundation::NSCopying;
 use objc2_foundation::{NSObject, NSString};
 

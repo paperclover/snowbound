@@ -12,7 +12,7 @@ mod theme;
 mod widgets;
 
 pub use list::{List, Row, Rows, list};
-pub use theme::{Section, Shades, Theme};
+pub use theme::{Menu, PopupMotion, Section, Shades, Shadow, Theme};
 pub use widgets::{button, check_box, edit_key, edit_modifiers, scrollbar, text_field};
 
 use draw::{
@@ -46,6 +46,12 @@ const ICON_GAP: f32 = 6.0;
 /// Seconds a dialog and other popups take to open and to close.
 const DIALOG: [f32; 2] = [0.24, 0.16];
 const POPUP: [f32; 2] = [0.16, 0.12];
+/// Seconds the pointer rests on a control before its tooltip shows, as Windows' tooltips
+/// wait a double-click interval; after one shows, others show at once for `TIP_WARM`
+/// seconds, and one showing cold fades in over `TIP_FADE`.
+const TIP_DELAY: f32 = 0.5;
+const TIP_WARM: f32 = 0.5;
+const TIP_FADE: f32 = 0.1;
 
 /// A box's identity across frames: its parent's id combined with a builder-chosen part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -200,8 +206,9 @@ pub enum Anchor {
 
 impl Anchor {
     /// Where a popup `size` long on `axis` starts in a window `room` long: past the
-    /// anchor on the axis it opens along, level with it otherwise.
-    fn place(self, axis: usize, size: f32, room: f32) -> f32 {
+    /// anchor on the axis it opens along, level with it otherwise. Shown only `shown` long
+    /// as it opens, it keeps the edge it would have at full size.
+    fn place(self, axis: usize, size: f32, shown: f32, room: f32) -> f32 {
         let (rect, along) = match self {
             Anchor::Below(rect) => (rect, Some(1)),
             Anchor::Right(rect) => (rect, Some(0)),
@@ -218,15 +225,16 @@ impl Anchor {
         if first + size <= room {
             first
         } else if second >= 0.0 {
-            second
+            second + size - shown
         } else {
-            first.min(room - size).max(0.0)
+            first.min(room - size).max(0.0) + size - shown
         }
     }
 
     /// How a popup laid out at `rect` beside the anchor shows `open` of the way open: it
-    /// grows out of the anchor as it fades in, and a dialog swings up into place.
-    fn motion(self, rect: [f32; 4], open: f32) -> Motion {
+    /// grows out of the anchor as it fades in where it `grows`, and a dialog swings up into
+    /// place.
+    fn motion(self, rect: [f32; 4], open: f32, grows: bool) -> Motion {
         let pivot = match self {
             Anchor::Below(anchor) => [anchor[0], anchor[3]],
             Anchor::Right(anchor) => [anchor[2], anchor[1]],
@@ -235,8 +243,11 @@ impl Anchor {
             Anchor::Dialog => [(rect[0] + rect[2]) / 2.0, rect[1]],
         };
         let (from, tilt) = match self {
+            _ if !grows => (1.0, 0.0),
             Anchor::Dialog => (0.95, 0.4),
-            Anchor::Over(_) => (0.94, 0.25),
+            // Over a box, the popup widens out of it in layout instead of growing.
+            Anchor::Over(_) => (1.0, 0.2),
+            Anchor::Point(_) => (0.94, 0.2),
             _ => (0.94, 0.0),
         };
         Motion {
@@ -290,7 +301,8 @@ pub struct Spec<'a> {
     pub fill: Option<[f32; 4]>,
     /// The fill's colour at the bottom, fading from `fill` at the top.
     pub gradient: Option<[f32; 4]>,
-    /// A soft shadow of the box's outline, painted beneath it.
+    /// A soft shadow of the box's outline, painted beneath it; a popup other than a dialog
+    /// casts the theme's menu shadows instead.
     pub shadow: Option<[f32; 4]>,
     /// How far the box draws inside its leading, top, trailing and bottom edges: fill,
     /// border, shadow, icon and label; the pointer still finds the whole box.
@@ -445,6 +457,8 @@ struct Built {
     offset: [f32; 2],
     cursor: Option<CursorIcon>,
     anchor: Option<Anchor>,
+    /// How far open a popup over a box is, as it widens out of the box.
+    open: f32,
     motion: Option<Motion>,
     /// Rectangles relative to the box, painted over its fill.
     marks: Vec<([f32; 4], [f32; 4], f32)>,
@@ -487,6 +501,15 @@ struct Popup {
     /// The height its results ease from and to, and the seconds since they set out.
     height: Option<[f32; 3]>,
     opened: Instant,
+}
+
+/// The tooltip of the box under the pointer, the last frame it was built, and when it
+/// shows: never while None, after a press or the wheel, until the pointer leaves the box.
+#[derive(Clone, Copy)]
+struct Tip {
+    id: Id,
+    frame: u64,
+    due: Option<Instant>,
 }
 
 /// A popup's painting as it last showed, fading out since it closed.
@@ -591,6 +614,9 @@ pub struct Ui {
     /// `popups_painted`.
     painted: Vec<(Id, Anchor, [f32; 4], std::ops::Range<usize>)>,
     closing: Vec<Closing>,
+    tip: Option<Tip>,
+    /// When a tooltip last showed.
+    warm: Option<Instant>,
     animating: bool,
     /// This frame routed input, whose effects the builder may only have seen after boxes
     /// built before it read their state; one more frame shows them.
@@ -633,6 +659,8 @@ impl Ui {
             popups_painted: 0,
             painted: Vec::new(),
             closing: Vec::new(),
+            tip: None,
+            warm: None,
             animating: false,
             routed: false,
             caret: None,
@@ -742,6 +770,12 @@ impl Ui {
     }
 
     fn route(&mut self, event: Event) {
+        if matches!(event, Event::Button { pressed: true, .. } | Event::Wheel(_)) {
+            if let Some(tip) = &mut self.tip {
+                tip.due = None;
+            }
+            self.warm = None;
+        }
         match event {
             Event::PointerMoved(point) => {
                 self.pointer = Some(point);
@@ -997,10 +1031,18 @@ impl Ui {
         } else {
             *self.stack.last().unwrap()
         };
+        let open = match spec.anchor {
+            Some(anchor @ Anchor::Over(_)) if self.popup_motion(anchor) == PopupMotion::Grow => {
+                self.opening(id, anchor).unwrap_or(1.0)
+            }
+            _ => 1.0,
+        };
         let index = self.nodes.len();
         self.states.entry(id).or_default().touched = self.frame;
-        self.nodes
-            .push(Built::new(id, parent, spec, label, self.theme.text));
+        self.nodes.push(Built {
+            open,
+            ..Built::new(id, parent, spec, label, self.theme.text)
+        });
         self.nodes[parent].children.push(index);
         self.stack.push(index);
         id
@@ -1116,6 +1158,13 @@ impl Ui {
         {
             self.close_from(gone);
         }
+        if let Some(tip) = self.tip.filter(|tip| tip.frame != self.frame) {
+            if tip.due.is_some_and(|due| due <= self.now) {
+                self.warm = Some(self.now);
+            }
+            self.tip = None;
+        }
+        let tip = self.tip.map(|tip| tip.id.child("tooltip"));
         let last = std::mem::take(&mut self.display);
         let last_popups = self.popups_painted;
         self.hits.clear();
@@ -1129,9 +1178,13 @@ impl Ui {
                 continue;
             };
             let (id, rect) = (node.id, node.rect);
+            if Some(id) == tip {
+                continue;
+            }
             if let Some(open) = self.opening(id, anchor) {
                 self.scrim(anchor, open);
-                self.nodes[index].motion = Some(anchor.motion(rect, open));
+                let grows = self.popup_motion(anchor) == PopupMotion::Grow;
+                self.nodes[index].motion = Some(anchor.motion(rect, open, grows));
             }
             let from = self.display.len() - self.popups_painted;
             self.paint(index, None, None);
@@ -1167,23 +1220,47 @@ impl Ui {
                 closed: self.now,
             });
         }
-        let closing = std::mem::take(&mut self.closing);
-        for closing in &closing {
-            let shut = self.progress(closing.closed, closing.anchor.durations()[1]);
-            let open = (1.0 - shut).powi(3);
+        for closing in std::mem::take(&mut self.closing) {
+            let motion = self.popup_motion(closing.anchor);
+            let open = match motion {
+                PopupMotion::Grow => {
+                    (1.0 - self.progress(closing.closed, closing.anchor.durations()[1])).powi(3)
+                }
+                PopupMotion::Cut => 0.0,
+                PopupMotion::Fade([_, close]) => {
+                    (1.0 - self.progress(closing.closed, close)).powi(4)
+                }
+            };
+            if open == 0.0 {
+                continue;
+            }
             self.scrim(closing.anchor, open);
-            let motion = closing.anchor.motion(closing.rect, open);
+            let grows = motion == PopupMotion::Grow;
+            let motion = closing.anchor.motion(closing.rect, open, grows);
             self.display.push(Display::Motion(Some(motion)));
             self.display.extend(closing.display.iter().cloned());
             self.display.push(Display::Motion(None));
+            if !self.painted.iter().any(|(shown, ..)| *shown == closing.id) {
+                self.closing.push(closing);
+            }
         }
-        self.closing = closing
-            .into_iter()
-            .filter(|closing| {
-                self.progress(closing.closed, closing.anchor.durations()[1]) < 1.0
-                    && !self.painted.iter().any(|(shown, ..)| *shown == closing.id)
-            })
-            .collect();
+        // Over everything, closing popups included; it goes at once, without closing.
+        if let Some(index) = self.nodes[0]
+            .children
+            .iter()
+            .copied()
+            .find(|index| Some(self.nodes[*index].id) == tip)
+            && let Some(due) = self.tip.and_then(|tip| tip.due)
+        {
+            let opacity = self.progress(due, TIP_FADE);
+            self.nodes[index].motion = Some(Motion {
+                zoom: 1.0,
+                pivot: [0.0; 2],
+                tilt: 0.0,
+                opacity,
+            });
+            self.paint(index, None, None);
+        }
         self.modal = if self.popups.is_empty() { 0 } else { beneath };
         for id in [&mut self.hover, &mut self.active, &mut self.focus] {
             if id.is_some_and(|id| !self.states.contains_key(&id)) {
@@ -1195,7 +1272,20 @@ impl Ui {
     /// How far open popup `id` beside `anchor` shows this frame, from 0 to 1, while open.
     pub fn opening(&mut self, id: Id, anchor: Anchor) -> Option<f32> {
         let opened = self.popups.iter().find(|popup| popup.id == id)?.opened;
-        Some(1.0 - (1.0 - self.progress(opened, anchor.durations()[0])).powi(3))
+        Some(match self.popup_motion(anchor) {
+            PopupMotion::Grow => 1.0 - (1.0 - self.progress(opened, anchor.durations()[0])).powi(3),
+            PopupMotion::Cut => 1.0,
+            PopupMotion::Fade([open, _]) => self.progress(opened, open),
+        })
+    }
+
+    /// How popups beside `anchor` open and close; dialogs always swing as Snowbound's own.
+    fn popup_motion(&self, anchor: Anchor) -> PopupMotion {
+        if anchor == Anchor::Dialog {
+            PopupMotion::Grow
+        } else {
+            self.theme.menu().motion
+        }
     }
 
     /// How far through an animation `duration` seconds long that began at `start` this
@@ -1255,18 +1345,43 @@ impl Ui {
             rect[3] - bottom,
         ];
         let size = [painted[2] - painted[0], painted[3] - painted[1]];
-        if let Some(shadow) = node.shadow {
-            let [spread, drop] = if node.anchor.is_some() {
-                POPUP_SHADOW
-            } else {
-                SHADOW
+        if let Some(color) = node.shadow {
+            let (own, menu);
+            let shadows: &[Shadow] = match node.anchor {
+                Some(Anchor::Dialog) | None => {
+                    let [blur, drop] = if node.anchor.is_some() {
+                        POPUP_SHADOW
+                    } else {
+                        SHADOW
+                    };
+                    own = [Shadow {
+                        color,
+                        blur,
+                        drop,
+                        spread: 0.0,
+                    }];
+                    &own
+                }
+                Some(_) => {
+                    menu = self.theme.menu();
+                    &menu.shadows
+                }
             };
-            self.display.push(Display::Path {
-                data: outline(node.shape, size, node.radius),
-                origin: [painted[0], painted[1] + drop],
-                style: PathStyle::Shadow(spread),
-                colors: [shadow; 2],
-            });
+            for &Shadow {
+                color,
+                blur,
+                drop,
+                spread,
+            } in shadows
+            {
+                let grown = size.map(|side| side + 2.0 * spread);
+                self.display.push(Display::Path {
+                    data: outline(node.shape, grown, node.radius + spread),
+                    origin: [painted[0] - spread, painted[1] + drop - spread],
+                    style: PathStyle::Shadow(blur),
+                    colors: [color; 2],
+                });
+            }
         }
         if node.shape == Shape::Rounded {
             if fill.is_some() || border.is_some() {
@@ -1581,6 +1696,7 @@ impl Built {
             offset: spec.offset,
             cursor: spec.cursor,
             anchor: spec.anchor,
+            open: 1.0,
             motion: None,
             marks: Vec::new(),
             computed: [0.0; 2],

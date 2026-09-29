@@ -7,7 +7,7 @@
 
 use canvas::{
     document::TextPosition,
-    editor::{Alignment, CanvasEditor, Formatting, NoteTag, Toggle},
+    editor::{Alignment, CanvasEditor, Formatting, NoteTag, Toggle, Whole},
     layout::TextEngine,
 };
 use draw::edit::Movement;
@@ -91,11 +91,15 @@ enum Kind {
     Equation,
     Linear,
     Professional,
+    PageDelete,
+    PageType,
+    PageMove,
+    PageBold,
     Undo,
     Redo,
 }
 
-const KINDS: [Kind; 48] = [
+const KINDS: [Kind; 52] = [
     Kind::Type,
     Kind::TypeEnd,
     Kind::Compose,
@@ -142,6 +146,10 @@ const KINDS: [Kind; 48] = [
     Kind::Equation,
     Kind::Linear,
     Kind::Professional,
+    Kind::PageDelete,
+    Kind::PageType,
+    Kind::PageMove,
+    Kind::PageBold,
     Kind::Undo,
     Kind::Redo,
 ];
@@ -253,6 +261,18 @@ fn perform(
         |editor: &mut CanvasEditor, engine: &mut TextEngine, random: &mut Random, command| {
             range(editor, random) && editor.format(engine, command).is_ok()
         };
+    // Select All until it holds every body outline.
+    let page = |editor: &mut CanvasEditor| {
+        for _ in 0..16 {
+            if editor.whole() == Some(Whole::Page) {
+                return true;
+            }
+            if editor.widen_selection().is_err() {
+                return false;
+            }
+        }
+        false
+    };
     match kind {
         Kind::Type => place(editor, middle) && editor.insert(engine, "ab").is_ok(),
         Kind::TypeEnd => place(editor, length) && editor.commit_text(engine, "z".into()).is_ok(),
@@ -408,6 +428,15 @@ fn perform(
         Kind::Linear => place(editor, middle) && editor.linear_equation(engine).unwrap_or(false),
         Kind::Professional => {
             place(editor, middle) && editor.build_equation(engine).unwrap_or(false)
+        }
+        Kind::PageDelete => page(editor) && editor.delete(engine, false).is_ok(),
+        Kind::PageType => page(editor) && editor.insert(engine, "Z").is_ok(),
+        Kind::PageMove => page(editor) && editor.move_page([36.0, 18.0]).is_ok(),
+        Kind::PageBold => {
+            page(editor)
+                && editor
+                    .format(engine, Formatting::Toggle(Toggle::Bold))
+                    .is_ok()
         }
         Kind::Undo => editor.undo(engine).unwrap_or(false),
         Kind::Redo => editor.redo(engine).unwrap_or(false),

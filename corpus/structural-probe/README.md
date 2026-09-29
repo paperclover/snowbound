@@ -8,6 +8,9 @@ synthetic pages. Every page starts with a plain paragraph `Above`.
   page per case (`c1-bullet`, `c8-split`, ...).
 - `tags.one`: a section holding one page with the nine Ctrl+1..9 default tags,
   closed and flushed by OneNote.
+- `tag-gallery.one`: one page with each of the 29 default tags of the Home tab's
+  Tags gallery applied from the gallery in order, one per paragraph (VM `tbar`,
+  2026-09-28); two paragraphs also carry Call back. Copied while OneNote was open.
 - `summaries/<case>-<step>.txt`: the page after each step, from COM
   `GetPageContent`, one line per paragraph:
   `L<level>[+indentN] [tags; [x]=completed] [list] qsN text`.

@@ -17,8 +17,8 @@ for arg; do
     if [ "$prev" = -framework ]; then
         case "$arg" in
             CoreGraphics | CoreText | ImageIO | ColorSync) arg=ApplicationServices ;;
-            # Until draw's wgpu backend is optional: wgpu names Metal, which 10.6 lacks,
-            # and nothing a 10.6 binary reaches calls into it.
+            # Test binaries whose dev-dependencies take draw's wgpu backend (ui, canvas)
+            # name Metal, which 10.6 lacks; nothing they run on 10.6 calls into it.
             Metal) arg=Foundation ;;
         esac
     fi

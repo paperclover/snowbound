@@ -3,32 +3,28 @@
 //! frame it is, closing the popup.
 
 use crate::{
-    Anchor, Axis, Event, Flags, ICON, ICON_GAP, Id, List, Popup, Row, Rows, Spec, Ui, children,
-    fill, fit, list::GUTTER, mix, px, text_field,
+    Anchor, Axis, Event, Flags, ICON, ICON_GAP, Id, List, Menu, Overflow, Popup, Row, Rows, Spec,
+    TIP_DELAY, TIP_FADE, TIP_WARM, Tip, Ui, children, fill, fit, list::GUTTER, mix, px, text_field,
 };
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
 };
-use std::cell::RefCell;
+use std::{cell::RefCell, time::Duration};
 use winit::keyboard::{Key, NamedKey};
 
 pub(crate) const CHECK: &[&str] = &[include_str!("../assets/check.svg")];
 /// Inset of a popup's contents, and its distance from what it drops down from.
-const PAD: f32 = 4.0;
-/// A palette's rows and filter field, and a menu's more compact rows.
+pub(crate) const PAD: f32 = 4.0;
+/// A palette's rows and filter field, and Snowbound's more compact menu rows.
 const ROW: f32 = 26.0;
 pub(crate) const MENU_ROW: f32 = 22.0;
-/// Inset of a menu row's icon and text.
-const ROW_PAD: f32 = 8.0;
-/// How far a menu's icons sit inside its leading edge.
-pub(crate) const ICON_INSET: f32 = PAD + ROW_PAD;
 /// Rows a list shows before it scrolls.
 const ROWS: f32 = 12.0;
-/// Height of the rule between groups.
-const RULE: f32 = 9.0;
 const NARROWEST: f32 = 140.0;
 const PALETTE: f32 = 560.0;
+/// Where a tooltip's description wraps.
+const TIP_WIDTH: f32 = 280.0;
 /// A colour grid's cell, around its swatch.
 const CELL: f32 = 22.0;
 /// Seconds a popup takes to ease to the height of its results.
@@ -83,10 +79,16 @@ pub fn menu(
     if !ui.popup_open(id) {
         return None;
     }
+    let style = ui.theme.menu();
+    let mut measure = |text| {
+        ui.texts
+            .label(text, style.font_size, false, None, ui.frame)
+            .size[0]
+    };
     let [text, shortcut] = items.iter().fold([0.0_f32; 2], |[text, shortcut], item| {
         [
-            text.max(ui.measure(item.text)[0]),
-            shortcut.max(ui.measure(item.shortcut)[0]),
+            text.max(measure(item.text)),
+            shortcut.max(measure(item.shortcut)),
         ]
     });
     let icons = items.iter().any(|item| item.icon.is_some() || item.checked);
@@ -101,10 +103,10 @@ pub fn menu(
             } else {
                 0.0
             }
-            + 2.0 * (PAD + 8.0);
+            + 2.0 * (style.pad + style.row_pad);
     let least = match anchor {
         Anchor::Below(rect) => rect[2] - rect[0],
-        Anchor::Over(rect) => rect[2] - rect[0] + 2.0 * PAD,
+        Anchor::Over(rect) => rect[2] - rect[0] + 2.0 * style.pad,
         _ => 0.0,
     };
     choose(
@@ -114,8 +116,96 @@ pub fn menu(
         items,
         filter,
         width.max(least).max(NARROWEST),
-        MENU_ROW,
+        style.row,
     )
+}
+
+/// Shows `title`, with the `keys` that run it and a `description` under it, in a tooltip
+/// below the box built last while the pointer rests on it or on a box inside it: after a
+/// delay, or at once while another has just shown. A press or the wheel hides it until the
+/// pointer leaves.
+pub fn tooltip(ui: &mut Ui, title: &str, keys: &str, description: Option<&str>) {
+    let Some(&index) = ui.nodes[*ui.stack.last().unwrap()].children.last() else {
+        return;
+    };
+    // The boxes built since are the box's own.
+    let hovered = ui
+        .hover
+        .is_some_and(|hover| ui.nodes[index..].iter().any(|node| node.id == hover));
+    if !hovered || ui.active.is_some() {
+        return;
+    }
+    let id = ui.nodes[index].id;
+    let now = ui.now;
+    let showing = ui
+        .tip
+        .is_some_and(|tip| tip.due.is_some_and(|due| due <= now));
+    let warm = showing
+        || ui
+            .warm
+            .is_some_and(|warm| now.saturating_duration_since(warm).as_secs_f32() < TIP_WARM);
+    let due = match ui.tip {
+        Some(tip) if tip.id == id => tip.due,
+        // Shown at once, already faded in.
+        _ if warm => Some(
+            now.checked_sub(Duration::from_secs_f32(TIP_FADE))
+                .unwrap_or(now),
+        ),
+        _ => Some(now + Duration::from_secs_f32(TIP_DELAY)),
+    };
+    ui.tip = Some(Tip {
+        id,
+        frame: ui.frame,
+        due,
+    });
+    let Some(due) = due else {
+        return;
+    };
+    if now < due {
+        ui.wake = Some(ui.wake.map_or(due, |wake| wake.min(due)));
+        return;
+    }
+    let title = if keys.is_empty() {
+        title.to_owned()
+    } else {
+        format!("{title} ({keys})")
+    };
+    let [left, top, right, bottom] = ui.rect(id).unwrap_or_default();
+    let theme = &ui.theme;
+    let spec = Spec {
+        axis: Axis::Y,
+        fill: Some(theme.popup),
+        border: Some(theme.chip),
+        shadow: Some(theme.shadow),
+        radius: 4.0,
+        pad: [8.0, 5.0],
+        gap: 3.0,
+        anchor: Some(Anchor::Below([left, top, right, bottom + PAD])),
+        ..Spec::default()
+    };
+    ui.open_as(id.child("tooltip"), spec);
+    ui.leaf(
+        "title",
+        Spec {
+            size: [fit(), fit()],
+            text: Some(&title),
+            bold: true,
+            ..Spec::default()
+        },
+    );
+    if let Some(description) = description {
+        let width = ui.measure(description)[0].min(TIP_WIDTH);
+        ui.leaf(
+            "description",
+            Spec {
+                size: [px(width), fit()],
+                text: Some(description),
+                overflow: Overflow::Wrap,
+                ..Spec::default()
+            },
+        );
+    }
+    ui.close();
 }
 
 /// Builds popup `id` as a command palette across the top of the window while it is open,
@@ -157,19 +247,11 @@ fn choose(
     let mut query = std::mem::take(&mut popup.query);
     let mut highlight = popup.highlight;
     let theme = ui.theme.clone();
-    // Over a combo box, the field takes the box's place at once and widens as the popup
-    // comes in around it.
-    let (flags, size) = match anchor {
-        Anchor::Over(rect) => {
-            let open = ui.opening(id, anchor).unwrap_or(1.0);
-            let from = rect[2] - rect[0];
-            let to = width - 2.0 * PAD;
-            (
-                Flags::STILL,
-                [px(from + (to - from) * open), px(rect[3] - rect[1])],
-            )
-        }
-        _ => (Flags::default(), [fill(), px(ROW)]),
+    let style = theme.menu();
+    // Over a combo box, the field takes the box's place at once, widening with the popup.
+    let (flags, height) = match anchor {
+        Anchor::Over(rect) => (Flags::STILL, rect[3] - rect[1]),
+        _ => (Flags::default(), ROW),
     };
     surface(ui, id, anchor, width);
     if let Some(placeholder) = filter {
@@ -181,7 +263,7 @@ fn choose(
             placeholder,
             Spec {
                 flags,
-                size,
+                size: [fill(), px(height)],
                 fill: Some(theme.base),
                 border: Some(theme.accent),
                 radius: 4.0,
@@ -193,7 +275,7 @@ fn choose(
             highlight = None;
         }
     }
-    let matches = Matches::new(items, &query);
+    let matches = Matches::new(items, &query, style.rule_band);
     // Unfiltered, the current or checked item starts highlighted; filtered, the best match.
     highlight = highlight.or_else(|| {
         let first = if query.is_empty() {
@@ -207,7 +289,11 @@ fn choose(
         first.map(|row| matches.key(row))
     });
     let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
-    let field = if filter.is_some() { ROW + PAD } else { 0.0 };
+    let field = if filter.is_some() {
+        ROW + style.pad
+    } else {
+        0.0
+    };
     let content = matches.count() as f32 * row + matches.space_before(matches.count());
     let view = content
         .max(row)
@@ -236,7 +322,8 @@ fn choose(
             Spec {
                 size: [fill(), px(row)],
                 text: Some("No matches"),
-                color: Some(theme.text_dim),
+                font_size: Some(style.font_size),
+                color: Some(style.dim),
                 pad: [8.0, 0.0],
                 ..Spec::default()
             },
@@ -254,12 +341,12 @@ fn choose(
             id.child("rows"),
             Spec {
                 size: [fill(), px(view)],
-                fill: Some(theme.popup),
+                fill: Some(style.fill),
                 ..Spec::default()
             },
             list,
             &mut highlight,
-            |ui, row| menu_row(ui, &theme, &matches, row),
+            |ui, row| menu_row(ui, &style, &matches, row),
         );
         let entered = keys.contains(&NamedKey::Enter);
         clicked.or_else(|| {
@@ -282,7 +369,7 @@ fn choose(
 
 /// Builds a menu's row: the item's icon or check, its text and its shortcut, on the
 /// highlight when selected, under a rule when it starts a group.
-fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
+fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, row: Row) {
     let item = &matches.items[row.key as usize];
     if row.index > 0 && matches.ruled && item.separated {
         ui.leaf(
@@ -290,24 +377,28 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
             Spec {
                 flags: Flags::FLOAT,
                 size: [fill(), px(1.0)],
-                position: [0.0, -(RULE + 1.0) / 2.0],
-                fill: Some(theme.chip),
+                position: [0.0, -(style.rule_band + 1.0) / 2.0],
+                inset: [style.rule_inset, 0.0, style.rule_inset, 0.0],
+                fill: Some(style.rule),
                 ..Spec::default()
             },
         );
     }
-    let color = if item.disabled || item.heading {
-        theme.text_dim
+    let color = if item.heading {
+        style.dim
+    } else if item.disabled {
+        style.disabled
     } else {
-        theme.text
+        style.text
     };
     ui.open(
         "item",
         Spec {
             size: [fill(), fill()],
-            fill: row.selected.then(|| theme.hover()),
-            radius: 4.0,
-            pad: [ROW_PAD, 0.0],
+            fill: row.selected.then_some(style.highlight),
+            border: style.highlight_border.filter(|_| row.selected),
+            radius: style.row_radius,
+            pad: [style.row_pad, 0.0],
             gap: ICON_GAP,
             ..Spec::default()
         },
@@ -324,7 +415,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
                 size: [px(ICON), fill()],
                 icon: if item.checked { Some(CHECK) } else { item.icon },
                 color: Some(if item.disabled {
-                    mix(tint, theme.popup, 0.5)
+                    mix(tint, style.fill, 0.5)
                 } else {
                     tint
                 }),
@@ -338,7 +429,7 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
             size: [fill(), fill()],
             text: Some(item.text),
             font: item.font,
-            font_size: item.heading.then_some(theme.font_size - 2.0),
+            font_size: Some(style.font_size - if item.heading { 2.0 } else { 0.0 }),
             bold: item.heading,
             color: Some(color),
             ..Spec::default()
@@ -350,7 +441,8 @@ fn menu_row(ui: &mut Ui, theme: &crate::Theme, matches: &Matches, row: Row) {
             Spec {
                 size: [fit(), fill()],
                 text: Some(item.shortcut),
-                color: Some(theme.text_dim),
+                font_size: Some(style.font_size),
+                color: Some(style.dim),
                 ..Spec::default()
             },
         );
@@ -419,7 +511,12 @@ pub fn colors(
 
     let theme = ui.theme.clone();
     let lit = |index: usize| (highlight == Some(index)).then(|| theme.hover());
-    surface(ui, id, anchor, columns as f32 * CELL + 2.0 * PAD);
+    surface(
+        ui,
+        id,
+        anchor,
+        columns as f32 * CELL + 2.0 * ui.theme.menu().pad,
+    );
     ui.open_as(
         cell(0),
         Spec {
@@ -468,6 +565,130 @@ pub fn colors(
         }
         ui.close();
     }
+    ui.close();
+    state(ui, id).highlight = highlight.map(|cell| cell as u64);
+    None
+}
+
+/// Builds popup `id` as a grid of `size` columns and rows beside `anchor` while it is open,
+/// lit from its corner to the cell pointed at, as Office's table picker is. Returns the
+/// columns and rows chosen.
+pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Option<[usize; 2]> {
+    if !ui.popup_open(id) {
+        return None;
+    }
+    let cell = |index: usize| id.child(("cell", index));
+    let keys = navigation(
+        ui,
+        &[id],
+        &[
+            NamedKey::ArrowLeft,
+            NamedKey::ArrowRight,
+            NamedKey::ArrowUp,
+            NamedKey::ArrowDown,
+            NamedKey::Enter,
+        ],
+    );
+    let [columns, rows] = size;
+    let mut highlight = state(ui, id).highlight.map(|cell| cell as usize);
+    let mut chosen = None;
+    for index in 0..columns * rows {
+        let signal = ui.signal(cell(index));
+        if signal.hovered && ui.moved {
+            highlight = Some(index);
+        }
+        if signal.clicked {
+            chosen = Some(index);
+        }
+    }
+    for key in keys {
+        let at = highlight.unwrap_or(0);
+        let [column, row] = [at % columns, at / columns];
+        highlight = Some(match key {
+            NamedKey::Enter => {
+                chosen = chosen.or(highlight);
+                continue;
+            }
+            _ if highlight.is_none() => 0,
+            NamedKey::ArrowLeft => at - usize::from(column > 0),
+            NamedKey::ArrowRight => at + usize::from(column + 1 < columns),
+            NamedKey::ArrowUp => at - if row > 0 { columns } else { 0 },
+            _ => at + if row + 1 < rows { columns } else { 0 },
+        });
+    }
+    let extent = |index: usize| [index % columns + 1, index / columns + 1];
+    if let Some(index) = chosen {
+        ui.close_popup(id);
+        return Some(extent(index));
+    }
+    let theme = ui.theme.clone();
+    let reach = highlight.map_or([0, 0], extent);
+    surface(
+        ui,
+        id,
+        anchor,
+        columns as f32 * CELL + 2.0 * ui.theme.menu().pad,
+    );
+    let heading = match highlight {
+        Some(_) => format!("{}x{} Table", reach[0], reach[1]),
+        None => "Insert Table".to_owned(),
+    };
+    ui.leaf(
+        "heading",
+        Spec {
+            size: [fill(), px(ROW)],
+            text: Some(&heading),
+            bold: true,
+            pad: [8.0, 0.0],
+            ..Spec::default()
+        },
+    );
+    ui.open(
+        "grid",
+        Spec {
+            axis: Axis::Y,
+            size: [fill(), children()],
+            ..Spec::default()
+        },
+    );
+    for row in 0..rows {
+        ui.open(
+            ("row", row),
+            Spec {
+                size: [fill(), px(CELL)],
+                ..Spec::default()
+            },
+        );
+        for column in 0..columns {
+            let lit = column < reach[0] && row < reach[1];
+            ui.open_as(
+                cell(row * columns + column),
+                Spec {
+                    flags: Flags::CLICKABLE,
+                    size: [px(CELL), px(CELL)],
+                    pad: [3.0, 3.0],
+                    ..Spec::default()
+                },
+            );
+            ui.leaf(
+                "square",
+                Spec {
+                    size: [fill(), fill()],
+                    fill: Some(if lit { theme.hover() } else { theme.base }),
+                    border: Some(if lit {
+                        theme.accent
+                    } else {
+                        mix(theme.text, theme.popup, 0.7)
+                    }),
+                    radius: 2.0,
+                    ..Spec::default()
+                },
+            );
+            ui.close();
+        }
+        ui.close();
+    }
+    ui.close();
     ui.close();
     state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
@@ -533,7 +754,12 @@ pub fn gallery(
         return Some(index);
     }
     let theme = ui.theme.clone();
-    surface(ui, id, anchor, columns as f32 * size[0] + 2.0 * PAD);
+    surface(
+        ui,
+        id,
+        anchor,
+        columns as f32 * size[0] + 2.0 * ui.theme.menu().pad,
+    );
     let mut index = 0;
     for (group, (heading, cells)) in groups.iter().enumerate() {
         ui.leaf(
@@ -584,29 +810,30 @@ pub fn gallery(
 
 /// Opens popup `id`'s panel `width` wide beside `anchor`; the caller closes it.
 fn surface(ui: &mut Ui, id: Id, anchor: Anchor, width: f32) {
+    let style = ui.theme.menu();
+    let pad = style.pad;
     let anchor = match anchor {
         Anchor::Below([left, top, right, bottom]) => {
             Anchor::Below([left, top - PAD, right, bottom + PAD])
         }
         // Level with the row it opens from, or with its contents over the box.
         Anchor::Right([left, top, right, bottom]) => {
-            Anchor::Right([left, top - PAD, right, bottom + PAD])
+            Anchor::Right([left, top - pad, right, bottom + pad])
         }
         Anchor::Over([left, top, right, bottom]) => {
-            Anchor::Over([left - PAD, top - PAD, right + PAD, bottom + PAD])
+            Anchor::Over([left - pad, top - pad, right + pad, bottom + pad])
         }
         point => point,
     };
-    let theme = &ui.theme;
     let spec = Spec {
         axis: Axis::Y,
         size: [px(width), children()],
-        fill: Some(theme.popup),
-        border: Some(theme.chip),
-        shadow: Some(theme.shadow),
-        radius: 6.0,
-        pad: [PAD; 2],
-        gap: PAD,
+        fill: Some(style.fill),
+        border: Some(style.border),
+        shadow: Some(ui.theme.shadow),
+        radius: style.radius,
+        pad: [pad; 2],
+        gap: pad,
         anchor: Some(anchor),
         ..Spec::default()
     };
@@ -661,11 +888,13 @@ pub(crate) struct Matches<'a> {
     /// Rules above each row and the end, counted from the top; only while unfiltered.
     rules: Vec<u32>,
     ruled: bool,
+    /// Height of the band a rule takes.
+    rule: f32,
     icons: bool,
 }
 
 impl<'a> Matches<'a> {
-    pub(crate) fn new(items: &'a [Item<'a>], query: &str) -> Self {
+    pub(crate) fn new(items: &'a [Item<'a>], query: &str, rule: f32) -> Self {
         let pattern = Pattern::new(
             query,
             CaseMatching::Ignore,
@@ -708,6 +937,7 @@ impl<'a> Matches<'a> {
             rows,
             rules,
             ruled,
+            rule,
             icons: items.iter().any(|item| item.icon.is_some() || item.checked),
         }
     }
@@ -732,6 +962,6 @@ impl Rows for Matches<'_> {
     }
 
     fn space_before(&self, index: usize) -> f32 {
-        self.rules[index] as f32 * RULE
+        self.rules[index] as f32 * self.rule
     }
 }

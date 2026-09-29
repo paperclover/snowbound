@@ -5,9 +5,11 @@ edition = "2024"
 publish = false
 
 [features]
-default = ["render"]
-# The wgpu renderer; `edit` needs only parley.
-render = ["dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:swash", "dep:wgpu"]
+default = ["wgpu"]
+# The renderer; `edit` needs only parley. It submits through wgpu, or without it through
+# OpenGL 2.1, for Mac OS X 10.6.
+render = ["dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:swash"]
+wgpu = ["render", "dep:wgpu"]
 
 [dependencies]
 parley.workspace = true

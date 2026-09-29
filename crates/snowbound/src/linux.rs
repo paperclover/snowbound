@@ -45,7 +45,7 @@ pub fn event_loop(_headless: bool) -> Result<EventLoop<crate::UserEvent>, EventL
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     watch_settings(event_loop.create_proxy());
-    if std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|desktop| desktop.contains("KDE")) {
+    if desktop() == Desktop::Kde {
         follow_breeze_radius(event_loop.create_proxy());
     }
     Ok(event_loop)
@@ -198,20 +198,194 @@ pub fn install_backdrop(_: &Window) -> bool {
 /// suit `appearance`: KWin's from the KDE colour scheme, or on GNOME the Adwaita header bar
 /// that winit's frame and GNOME's both draw.
 pub fn titlebar(appearance: Theme) -> Option<[[f32; 4]; 2]> {
-    let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    let on = |name: &str| desktops.split(':').any(|desktop| desktop == name);
-    let fills = if on("KDE") {
-        kde_titlebar(&kconfig("kdeglobals"))
-    } else if on("GNOME") {
-        adwaita_titlebar(appearance)
-    } else {
-        return None;
+    let fills = match desktop() {
+        Desktop::Kde => kde_titlebar(&kconfig("kdeglobals")),
+        Desktop::Gnome => adwaita_titlebar(appearance),
+        Desktop::Other => return None,
     }
     .map(|[red, green, blue]| draw::srgb(red, green, blue));
     // Past mid grey, as against a colour scheme chosen in Options, the theme's own strip.
     let [red, green, blue, _] = fills[0];
     let dark = 0.2126 * red + 0.7152 * green + 0.0722 * blue < 0.18;
     (dark == (appearance == Theme::Dark)).then_some(fills)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Desktop {
+    Gnome,
+    Kde,
+    Other,
+}
+
+/// The desktop the session runs, whose look and motion the chrome follows.
+fn desktop() -> Desktop {
+    static DESKTOP: OnceLock<Desktop> = OnceLock::new();
+    *DESKTOP.get_or_init(|| {
+        let desktops = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        let on = |name: &str| desktops.split(':').any(|desktop| desktop == name);
+        if on("KDE") {
+            Desktop::Kde
+        } else if on("GNOME") {
+            Desktop::Gnome
+        } else {
+            Desktop::Other
+        }
+    })
+}
+
+/// Menus in `appearance` as the desktop draws its own: libadwaita's popover menus on GNOME
+/// and Breeze's on KDE, each moving as that desktop moves them.
+pub fn menu(appearance: Theme) -> Option<ui::Menu> {
+    match desktop() {
+        Desktop::Gnome => {
+            // GNOME's interface font, as "Family Size".
+            let points = portal_setting("org.gnome.desktop.interface", "font-name")
+                .and_then(|font| String::try_from(font).ok())
+                .and_then(|font| font.rsplit_once(' ')?.1.parse().ok());
+            Some(adwaita_menu(appearance, points.unwrap_or(11.0)))
+        }
+        Desktop::Kde => Some(breeze_menu(
+            appearance,
+            &kconfig("kdeglobals"),
+            &kconfig("kwinrc"),
+        )),
+        Desktop::Other => None,
+    }
+}
+
+/// libadwaita 1.7's `popover.menu` at `points`, which GTK 4 shows and hides at once.
+fn adwaita_menu(appearance: Theme, points: f32) -> ui::Menu {
+    let dark = appearance == Theme::Dark;
+    let fill = if dark { [0x36, 0x36, 0x3a] } else { [0xff; 3] };
+    // `--popover-fg-color`, and `currentColor` mixed with transparency at each strength.
+    let (ink, strength) = if dark {
+        ([0xff; 3], 1.0)
+    } else {
+        ([0, 0, 6], 0.8)
+    };
+    let ink = |alpha: f32| linear(over(ink, strength * alpha, fill));
+    ui::Menu {
+        fill: linear(fill),
+        border: linear(over([0; 3], 0.14, fill)),
+        shadows: vec![
+            css_shadow(0.09, 5.0, 1.0, 1.0),
+            css_shadow(0.05, 14.0, 2.0, 3.0),
+        ],
+        text: ink(1.0),
+        // The accelerator's `--dim-opacity`, and `--disabled-opacity`.
+        dim: ink(0.55),
+        disabled: ink(0.5),
+        highlight: ink(0.1),
+        highlight_border: None,
+        // `$border_color`.
+        rule: ink(0.15),
+        font_size: points * 4.0 / 3.0,
+        radius: 15.0,
+        pad: 6.0,
+        row: 32.0,
+        row_radius: 9.0,
+        row_pad: 12.0,
+        rule_band: 13.0,
+        rule_inset: 0.0,
+        motion: ui::PopupMotion::Cut,
+    }
+}
+
+/// Breeze's `QMenu` in `appearance`, coloured by kdeglobals `files` where the scheme suits
+/// it, and faded by KWin's Fading Popups unless kwinrc `kwin` turns them off.
+fn breeze_menu(appearance: Theme, files: &[String], kwin: &[String]) -> ui::Menu {
+    let entries = kconfig_entries(files);
+    let color = |group, key| kde_color(entries.get(&(group, key))?);
+    // Breeze Light's or Breeze Dark's window, its text, a view and the focus decoration.
+    let stock = if appearance == Theme::Dark {
+        [[32, 35, 38], [252; 3], [20, 22, 24], [61, 174, 233]]
+    } else {
+        [[239, 240, 241], [35, 38, 41], [255; 3], [61, 174, 233]]
+    };
+    let scheme = [
+        ("Colors:Window", "BackgroundNormal"),
+        ("Colors:Window", "ForegroundNormal"),
+        ("Colors:View", "BackgroundNormal"),
+        ("Colors:View", "DecorationFocus"),
+    ];
+    let mut colors: [[u8; 3]; 4] = std::array::from_fn(|index| {
+        let (group, key) = scheme[index];
+        color(group, key).unwrap_or(stock[index])
+    });
+    let window = linear(colors[0]);
+    let dark = 0.2126 * window[0] + 0.7152 * window[1] + 0.0722 * window[2] < 0.18;
+    if dark != (appearance == Theme::Dark) {
+        colors = stock;
+    }
+    let [window, text, view, focus] = colors;
+    // As `Helper::frameBackgroundColor`, `frameOutlineColor` and `focusOutlineColor` mix them.
+    let fill = over(view, 0.3, window);
+    let outline = linear(over(text, 0.2, window));
+    let kwin = kconfig_entries(kwin);
+    let factor = entries
+        .get(&("KDE", "AnimationDurationFactor"))
+        .and_then(|factor| factor.parse().ok())
+        .unwrap_or(1.0_f32);
+    let fades = kwin
+        .get(&("Plugins", "fadingpopupsEnabled"))
+        .is_none_or(|enabled| *enabled != "false");
+    let points = entries
+        .get(&("General", "font"))
+        .and_then(|font| font.split(',').nth(1)?.parse().ok())
+        .unwrap_or(10.0_f32);
+    ui::Menu {
+        fill: linear(fill),
+        border: outline,
+        // `ShadowHelper`'s default large shadow, which KWin draws around the menu.
+        shadows: vec![
+            css_shadow(0.22, 20.0, 5.0, 0.0),
+            css_shadow(0.12, 10.0, 2.0, 0.0),
+        ],
+        text: linear(text),
+        // Accelerators draw at 70% opacity; disabled text approximates the scheme's fade.
+        dim: linear(over(text, 0.7, fill)),
+        disabled: linear(over(text, 0.35, fill)),
+        highlight: linear(over(focus, 0.3, fill)),
+        highlight_border: Some(linear(over(text, 0.15, focus))),
+        rule: outline,
+        font_size: points * 4.0 / 3.0,
+        radius: 5.0,
+        pad: 4.0,
+        row: 26.0,
+        row_radius: 5.0,
+        // `MenuItem_MarginWidth` and `MenuItem_ExtraLeftMargin`.
+        row_pad: 9.0,
+        rule_band: 7.0,
+        rule_inset: 5.0,
+        motion: if fades && factor > 0.0 {
+            ui::PopupMotion::Fade([0.15 * factor, 0.6 * factor])
+        } else {
+            ui::PopupMotion::Cut
+        },
+    }
+}
+
+/// `top` over `under` at `alpha`, blended in sRGB as GTK and Qt paint.
+fn over(top: [u8; 3], alpha: f32, under: [u8; 3]) -> [u8; 3] {
+    std::array::from_fn(|channel| {
+        let [top, under] = [top[channel], under[channel]].map(f32::from);
+        (under + (top - under) * alpha).round() as u8
+    })
+}
+
+fn linear([red, green, blue]: [u8; 3]) -> [f32; 4] {
+    draw::srgb(red, green, blue)
+}
+
+/// A black `box-shadow` at `alpha`, as dark over white as GTK and Qt blend it in sRGB.
+fn css_shadow(alpha: f32, blur: f32, drop: f32, spread: f32) -> ui::Shadow {
+    let [left, ..] = linear(over([0; 3], alpha, [0xff; 3]));
+    ui::Shadow {
+        color: [0.0, 0.0, 0.0, 1.0 - left],
+        blur,
+        drop,
+        spread,
+    }
 }
 
 /// KConfig file `name` from the system's configuration directories up to the user's, in
@@ -373,8 +547,10 @@ pub fn update_menu(_: impl FnOnce() -> Vec<crate::commands::Status>) {}
 
 pub fn clear_marked_text(_: &Window) {}
 
+#[cfg(feature = "wgpu")]
 pub fn configure_presentation(_: &wgpu::Surface<'_>) {}
 
+#[cfg(feature = "wgpu")]
 pub fn commit_presentation(_: &Window) {}
 
 /// GTK's default double-click time.
@@ -426,6 +602,16 @@ fn watch_settings(proxy: EventLoopProxy<crate::UserEvent>) {
 }
 
 fn portal_color_scheme() -> Option<bool> {
+    let scheme = portal_setting("org.freedesktop.appearance", "color-scheme")?;
+    match u32::try_from(scheme).ok()? {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Setting `key` in `namespace` from the settings portal.
+fn portal_setting(namespace: &str, key: &str) -> Option<zbus::zvariant::OwnedValue> {
     use zbus::zvariant::{OwnedValue, Value};
     // A missing portal must not hold up the window for D-Bus's 25 s default.
     let connection = zbus::blocking::connection::Builder::session()
@@ -440,7 +626,7 @@ fn portal_color_scheme() -> Option<bool> {
         "org.freedesktop.portal.Settings",
     )
     .ok()?;
-    let key = ("org.freedesktop.appearance", "color-scheme");
+    let key = (namespace, key);
     // Portals before ReadOne answer Read, with the value in a second variant.
     let reply: OwnedValue = proxy
         .call("ReadOne", &key)
@@ -450,11 +636,7 @@ fn portal_color_scheme() -> Option<bool> {
     while let Value::Value(inner) = value {
         value = *inner;
     }
-    match u32::try_from(value).ok()? {
-        1 => Some(true),
-        2 => Some(false),
-        _ => None,
-    }
+    value.try_into_owned().ok()
 }
 
 pub fn cache_dir() -> Option<PathBuf> {
@@ -793,6 +975,41 @@ fn dialog<const Z: usize, const K: usize>(
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
+/// Asks for a picture to insert.
+pub fn pick_picture() -> Option<PathBuf> {
+    let patterns = crate::PICTURE_TYPES
+        .map(|kind| format!("*.{kind}"))
+        .join(" ");
+    let asked = dialog(
+        [
+            "--file-selection",
+            "--title=Insert Picture",
+            &format!("--file-filter=Pictures | {patterns}"),
+        ],
+        [
+            "--getopenfilename",
+            ".",
+            &patterns,
+            "--title",
+            "Insert Picture",
+        ],
+    );
+    asked
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            None
+        })
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Opens GNOME's character map, whose picks the user copies in.
+pub fn character_palette() {
+    if let Err(error) = Command::new("gnome-characters").spawn() {
+        eprintln!("Cannot open the character map: {error}");
+    }
+}
+
 /// Opens `target`, a folder or a link's URL, with the desktop's handler.
 pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     let target = target.as_ref();
@@ -961,6 +1178,51 @@ mod tests {
             [[222, 224, 226], [239, 240, 241]],
             "Breeze Light's header by default"
         );
+    }
+
+    #[test]
+    fn breeze_menus_take_the_scheme_s_colours_and_kwin_s_fade() {
+        let srgb = |[red, green, blue]: [u8; 3]| draw::srgb(red, green, blue);
+        let menu = breeze_menu(Theme::Light, &[], &[]);
+        // As measured from Dolphin's context menu under Breeze Light.
+        assert_eq!(menu.fill, srgb([0xf4, 0xf5, 0xf5]));
+        assert_eq!(menu.border, srgb([0xc6, 0xc8, 0xc9]));
+        assert_eq!(menu.highlight, srgb([0xbd, 0xe0, 0xf1]));
+        assert_eq!(menu.highlight_border, Some(srgb([0x39, 0x9a, 0xcc])));
+        assert_eq!(menu.font_size, 10.0 * 4.0 / 3.0);
+        assert_eq!(menu.motion, ui::PopupMotion::Fade([0.15, 0.6]));
+
+        let settings = "[General]\nfont=Noto Sans,12,-1,5,400,0,0,0,0,0\n\
+            [KDE]\nAnimationDurationFactor=0.5\n\
+            [Colors:Window]\nBackgroundNormal=32,35,38\nForegroundNormal=252,252,252\n";
+        let menu = breeze_menu(Theme::Dark, &[settings.into()], &[]);
+        assert_eq!(menu.text, srgb([252; 3]));
+        assert_eq!(menu.font_size, 16.0);
+        assert_eq!(menu.motion, ui::PopupMotion::Fade([0.075, 0.3]));
+        assert_eq!(
+            breeze_menu(Theme::Light, &[settings.into()], &[]).fill,
+            srgb([0xf4, 0xf5, 0xf5]),
+            "a dark scheme under a light appearance takes Breeze Light's"
+        );
+
+        let instant = "[KDE]\nAnimationDurationFactor=0\n";
+        let unfaded = "[Plugins]\nfadingpopupsEnabled=false\n";
+        for (kdeglobals, kwinrc) in [(instant, ""), ("", unfaded)] {
+            let motion = breeze_menu(Theme::Light, &[kdeglobals.into()], &[kwinrc.into()]).motion;
+            assert_eq!(motion, ui::PopupMotion::Cut);
+        }
+    }
+
+    #[test]
+    fn adwaita_menus_mix_the_popover_s_ink_as_its_stylesheet_does() {
+        let srgb = |[red, green, blue]: [u8; 3]| draw::srgb(red, green, blue);
+        let light = adwaita_menu(Theme::Light, 11.0);
+        assert_eq!(light.text, srgb([51, 51, 56]));
+        assert_eq!(light.highlight, srgb([235; 3]));
+        assert_eq!(light.border, srgb([219; 3]));
+        let dark = adwaita_menu(Theme::Dark, 11.0);
+        assert_eq!(dark.highlight, srgb([74, 74, 78]));
+        assert_eq!(dark.motion, ui::PopupMotion::Cut);
     }
 
     #[test]

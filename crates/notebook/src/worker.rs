@@ -4,7 +4,7 @@ use std::{
     hash::BuildHasher,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
     },
     thread::{self, JoinHandle},
@@ -13,6 +13,11 @@ use std::{
 
 pub(super) struct Signal {
     stopped: AtomicBool,
+    offline: AtomicBool,
+    /// FILETIME of the last step or poll that reached the remote; 0 before one has.
+    synced: AtomicU64,
+    /// Asked for by `SyncWorker::wake`: steps run while offline until one leaves nothing to do.
+    requested: AtomicBool,
     sender: SyncSender<()>,
 }
 
@@ -31,9 +36,23 @@ pub struct SyncWorker {
 }
 
 impl SyncWorker {
-    /// Requests a retry, for example after a network reachability change.
+    /// Requests a retry, for example after a network reachability change. Working
+    /// offline, it synchronizes once, as OneNote's Sync Now does.
     /// A pending contention backoff finishes before processing the notification.
     pub fn wake(&self) {
+        self.signal.requested.store(true, Ordering::Release);
+        self.signal.wake();
+    }
+
+    /// When a step or poll last reached the remote.
+    pub fn synced(&self) -> Option<u64> {
+        Some(self.signal.synced.load(Ordering::Acquire)).filter(|time| *time != 0)
+    }
+
+    /// Working offline, the worker neither connects nor steps: local edits stay queued
+    /// until `wake`, or until working online again.
+    pub fn set_offline(&self, offline: bool) {
+        self.signal.offline.store(offline, Ordering::Release);
         self.signal.wake();
     }
 
@@ -94,6 +113,9 @@ impl Replica {
         let (sender, receiver) = mpsc::sync_channel(1);
         let signal = Arc::new(Signal {
             stopped: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
+            synced: AtomicU64::new(0),
+            requested: AtomicBool::new(false),
             sender,
         });
         let replica = Arc::clone(self);
@@ -108,9 +130,19 @@ impl Replica {
                 // hears that the remote is reachable and what state the queue is in.
                 let mut reported = false;
                 while !worker_signal.stopped.load(Ordering::Acquire) {
+                    if worker_signal.offline.load(Ordering::Acquire)
+                        && !worker_signal.requested.load(Ordering::Acquire)
+                    {
+                        remote = None;
+                        reported = false;
+                        let _ = receiver.recv();
+                        continue;
+                    }
                     let result = match remote.as_mut() {
                         Some(remote) => {
                             if reported && replica.settled(remote).unwrap_or(false) {
+                                worker_signal.requested.store(false, Ordering::Release);
+                                worker_signal.synced.store(crate::now(), Ordering::Release);
                                 let _ = receiver.recv_timeout(interval);
                                 continue;
                             }
@@ -126,6 +158,9 @@ impl Replica {
                             Err(error) => Err(Error::RemoteIo(error)),
                         },
                     };
+                    if result.is_ok() {
+                        worker_signal.synced.store(crate::now(), Ordering::Release);
+                    }
                     observe(&result);
                     match result {
                         Ok(Synced {
@@ -168,6 +203,7 @@ impl Replica {
                         Err(Error::Io(ref error)) if error.kind() == io::ErrorKind::WouldBlock => {}
                         Err(error) => return Err(error),
                     }
+                    worker_signal.requested.store(false, Ordering::Release);
                     if !worker_signal.stopped.load(Ordering::Acquire) {
                         let _ = receiver.recv_timeout(interval);
                     }

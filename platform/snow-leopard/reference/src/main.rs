@@ -1,18 +1,26 @@
-//! `reference OUT.png` paints the render-probe scene through `draw::Renderer` over wgpu;
-//! `reference --compare A.png B.png DIFF.png` reports how two renders differ and writes
-//! their difference, amplified.
+//! `reference OUT.png` paints the render-probe scene through `draw` over wgpu,
+//! `reference --text SCALE OUT.png` the text-probe scene; `reference --compare A.png B.png
+//! DIFF.png` reports how two renders differ and writes their difference, amplified.
 #[path = "../../probe/src/scene.rs"]
 mod scene;
-
-use draw::{Layer, Primitive, RasterImage, Stroke};
-use scene::Shape;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [flag, a, b, diff] if flag == "--compare" => compare(a, b, diff),
-        [out] => paint(out),
-        _ => panic!("usage: reference OUT.png | reference --compare A.png B.png DIFF.png"),
+        [flag, scale, out] if flag == "--text" => {
+            let scale: f32 = scale.parse().unwrap();
+            let ui = scene::interface(scale);
+            let layers = ui.layers();
+            let size = scene::TEXT_SIZE.map(|side| (side as f32 * scale) as u32);
+            paint(out, size, [1.0; 4], &scene::interface_layers(&layers, scale));
+        }
+        [out] => {
+            let checker = scene::checker();
+            let primitives = scene::primitives(&checker);
+            paint(out, scene::SIZE, scene::CLEAR, &[scene::layer(&primitives)]);
+        }
+        _ => panic!("usage: reference [--text SCALE] OUT.png | reference --compare A.png B.png DIFF.png"),
     }
 }
 
@@ -47,31 +55,13 @@ fn write(path: &str, [width, height]: [u32; 2], pixels: &[u8]) {
     encoder.write_header().unwrap().write_image_data(pixels).unwrap();
 }
 
-fn paint(out: &str) {
+fn paint(out: &str, size: [u32; 2], clear: [f32; 4], layers: &[draw::Layer<'_>]) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut renderer = draw::Renderer::new(device.clone(), queue.clone(), format);
-    let (checker_size, checker) = scene::checker();
-    let image = RasterImage::new(checker_size, checker).unwrap();
-    let primitives: Vec<Primitive> = scene::shapes()
-        .into_iter()
-        .map(|shape| match shape {
-            Shape::Rect { rect, color } => Primitive::Rect { rect, color },
-            Shape::Rounded { rect, radius, stroke, colors } => match stroke {
-                None => Primitive::Gradient { rect, radius, colors },
-                Some((width, dashed)) => Primitive::RoundedRect {
-                    rect,
-                    radius,
-                    stroke: Some(if dashed { Stroke::Dashed(width) } else { Stroke::Solid(width) }),
-                    color: colors[0],
-                },
-            },
-            Shape::Image { rect } => Primitive::Image { image: &image, rect },
-        })
-        .collect();
-    let [width, height] = scene::SIZE;
+    let [width, height] = size;
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: None,
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -82,9 +72,8 @@ fn paint(out: &str) {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
-    let layer = Layer { scale: 1.0, origin: [0.0; 2], clip: None, backdrop: None, primitives: &primitives };
     renderer
-        .draw(&texture.create_view(&Default::default()), scene::SIZE, scene::CLEAR, &[layer])
+        .draw(&texture.create_view(&Default::default()), size, clear, layers)
         .unwrap();
     let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -107,5 +96,5 @@ fn paint(out: &str) {
     device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).unwrap();
     let mapped = buffer.get_mapped_range(..).unwrap();
     let pixels: Vec<u8> = mapped.chunks(row as usize).flat_map(|r| &r[..width as usize * 4]).copied().collect();
-    write(out, scene::SIZE, &pixels);
+    write(out, size, &pixels);
 }

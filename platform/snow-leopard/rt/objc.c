@@ -37,3 +37,14 @@ void *objc_autoreleasePoolPush(void) {
 }
 
 void objc_autoreleasePoolPop(void *pool) { SEND((id)pool, "drain"); }
+
+// 10.6 has no zeroing weak references for non-GC code. These hold the object unretained
+// and never zero: sound only while the referent outlives the reference, as winit's view
+// and its window do.
+id objc_initWeak(id *location, id value) { return *location = value; }
+id objc_storeWeak(id *location, id value) { return *location = value; }
+id objc_loadWeakRetained(id *location) { return objc_retain(*location); }
+id objc_loadWeak(id *location) { return objc_autorelease(objc_loadWeakRetained(location)); }
+void objc_destroyWeak(id *location) { *location = nil; }
+void objc_copyWeak(id *to, id *from) { *to = *from; }
+void objc_moveWeak(id *to, id *from) { *to = *from; *from = nil; }

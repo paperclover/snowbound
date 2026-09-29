@@ -32,6 +32,7 @@ pub enum NamedKey {
     End,
     PageUp,
     PageDown,
+    F11,
     /// Shift, Control, Option or Command pressed alone.
     Modifier,
     Other,

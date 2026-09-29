@@ -1028,6 +1028,20 @@ pub enum Event {
 
 type Notify = Arc<dyn Fn() + Send + Sync>;
 
+/// How a section's synchronization stands, for the host to show.
+#[derive(Debug)]
+pub struct SyncStatus {
+    /// FILETIME of the last synchronization step that reached the section file.
+    pub synced: Option<u64>,
+    /// Why the last step failed, until one reaches the section file again.
+    pub error: Option<io::Error>,
+    /// Edits the section file does not hold yet, uncertain attempts included.
+    pub queued: u64,
+}
+
+/// The last attempt's outcome; `None` before the first.
+type Observed = Option<Option<io::Error>>;
+
 /// A section file with its replica and background publication. `Send + Sync`: edits
 /// arrive from any thread without waiting, and `notify` wakes the host when events wait.
 pub struct Section {
@@ -1037,6 +1051,7 @@ pub struct Section {
     events: Mutex<Receiver<Event>>,
     sender: Sender<Event>,
     notify: Notify,
+    observed: Arc<Mutex<Observed>>,
 }
 
 impl Section {
@@ -1129,9 +1144,24 @@ impl Section {
                 notify();
             }
         });
+        let observed: Arc<Mutex<Observed>> = Arc::new(Mutex::new(None));
         let worker = {
             let (sender, notify) = (sender.clone(), Arc::clone(&notify));
+            let observed = Arc::clone(&observed);
             replica.start_sync(Duration::from_secs(2), connect, move |result| {
+                let error = result.as_ref().err().map(|error| match error {
+                    Error::RemoteIo(error) => io::Error::new(error.kind(), error.to_string()),
+                    Error::Remote(error) => io::Error::new(error.error.kind(), error.to_string()),
+                    error => io::Error::other(error.to_string()),
+                });
+                // Reaching the file as the last attempt did is no news to the host.
+                let mut changed = false;
+                if let Ok(mut observed) = observed.lock() {
+                    changed = observed
+                        .as_ref()
+                        .is_none_or(|last| last.is_some() != error.is_some());
+                    *observed = Some(error);
+                }
                 let mut events = Vec::new();
                 match result {
                     Ok(synced) => {
@@ -1157,7 +1187,8 @@ impl Section {
                     ))),
                     Err(error) => events.push(Event::Failed(error.to_string())),
                 }
-                if !events.is_empty() && events.into_iter().all(|event| sender.send(event).is_ok())
+                if (changed || !events.is_empty())
+                    && events.into_iter().all(|event| sender.send(event).is_ok())
                 {
                     notify();
                 }
@@ -1170,6 +1201,7 @@ impl Section {
             events: Mutex::new(events),
             sender,
             notify,
+            observed,
         })
     }
 
@@ -1332,11 +1364,37 @@ impl Section {
             .unwrap_or_default()
     }
 
-    /// Requests a synchronization attempt now.
+    /// Requests a synchronization attempt now, working offline included (Sync Now).
     pub fn wake(&self) {
         if let Some(worker) = &self.worker {
             worker.wake();
         }
+    }
+
+    /// Stops or resumes synchronizing: working offline, edits queue until `wake` or until
+    /// working online again (OneNote's Work Offline).
+    pub fn set_offline(&self, offline: bool) {
+        if let Some(worker) = &self.worker {
+            worker.set_offline(offline);
+        }
+    }
+
+    /// When the section file was last reached, why it could not be since, and what waits
+    /// for it. `notify` runs when it is first reached and when an error comes or goes.
+    pub fn sync_status(&self) -> Result<SyncStatus> {
+        let queued = self.replica.recovery_summary()?.queued_edits;
+        let observed = self
+            .observed
+            .lock()
+            .map_err(|_| io::Error::other("Synchronization observer panicked"))?;
+        Ok(SyncStatus {
+            synced: self.worker.as_ref().and_then(SyncWorker::synced),
+            error: observed
+                .as_ref()
+                .and_then(Option::as_ref)
+                .map(|error| io::Error::new(error.kind(), error.to_string())),
+            queued,
+        })
     }
 
     /// The replica, which other threads may read pages from while the section is open.

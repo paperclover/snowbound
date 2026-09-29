@@ -7,9 +7,24 @@ use std::{
     error::Error,
     io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
+
+/// OneNote's Work Offline, which like OneNote's holds for every notebook.
+static OFFLINE: AtomicBool = AtomicBool::new(false);
+
+pub fn offline() -> bool {
+    OFFLINE.load(Ordering::Relaxed)
+}
+
+/// Works offline or online again; sections opened from now on follow.
+pub fn set_offline(offline: bool) {
+    OFFLINE.store(offline, Ordering::Relaxed);
+}
 
 /// How long an SMB request may take before the share counts as unreachable.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -243,7 +258,7 @@ impl Library {
         path: &str,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Section, Box<dyn Error>> {
-        Ok(match (&self.notebook, &self.server) {
+        let section = match (&self.notebook, &self.server) {
             (Ok(Some(notebook)), Some(server)) => {
                 let identity = self
                     .catalog_section(notebook.catalog(), path)
@@ -268,7 +283,21 @@ impl Library {
             (Ok(Some(notebook)), None) => notebook.section(path, notify)?,
             (Ok(None), _) => Section::open(path, &self.cache, notify)?,
             (Err(error), _) => return Err(error.clone().into()),
-        })
+        };
+        section.set_offline(offline());
+        Ok(section)
+    }
+
+    /// How the notebook's files are reached.
+    pub fn transport(&self) -> String {
+        match (&self.server, &self.notice) {
+            (Some(server), _) => format!(
+                "Snowbound’s SMB client, {}/{}",
+                server.mount.server, server.mount.share
+            ),
+            (None, Some(_)) => "The system’s mount of the share".to_owned(),
+            (None, None) => "Folder on this computer".to_owned(),
+        }
     }
 
     /// The file identity, in hex, of the section at catalog `path`.

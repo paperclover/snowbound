@@ -222,6 +222,49 @@ pub fn tool_button(
     )
 }
 
+/// A tool button, with a menu arrow where `menu`, whose command does not apply now: `icon`
+/// tinted by `tint` shows faded, and it takes no clicks.
+pub fn unavailable(
+    ui: &mut Ui,
+    part: impl Hash,
+    icon: &'static [&'static str],
+    tint: [f32; 4],
+    menu: bool,
+) {
+    let faded = |[red, green, blue, alpha]: [f32; 4]| [red, green, blue, alpha * 0.35];
+    let arrow = faded(ui.theme.text_dim);
+    ui.open(
+        part,
+        Spec {
+            size: [children(), px(TOOL)],
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "icon",
+        Spec {
+            size: [px(TOOL), px(TOOL)],
+            icon: Some(icon),
+            color: Some(faded(tint)),
+            center: true,
+            ..Spec::default()
+        },
+    );
+    if menu {
+        ui.leaf(
+            "arrow",
+            Spec {
+                size: [px(ARROW), px(TOOL)],
+                icon: Some(CHEVRON),
+                color: Some(arrow),
+                center: true,
+                ..Spec::default()
+            },
+        );
+    }
+    ui.close();
+}
+
 /// A button showing `icon`, lit while `on`, joined to an arrow that opens popup `menu`,
 /// with the colour it applies as a bar under the icon when given. Hovering the button fills
 /// it alone; hovering the arrow, or its menu being open, outlines both as one control.
@@ -359,7 +402,9 @@ pub fn menu_button(
         ui.open_popup(menu);
     }
     let [left, top, right, bottom] = ui.rect(id).unwrap_or_default();
-    let shift = crate::popup::ICON_INSET - (TOOL - crate::ICON) / 2.0;
+    let menu = ui.theme.menu();
+    // The menu's icons line up under the button's.
+    let shift = menu.pad + menu.row_pad - (TOOL - crate::ICON) / 2.0;
     Anchor::Below([left - shift, top, right - shift, bottom])
 }
 

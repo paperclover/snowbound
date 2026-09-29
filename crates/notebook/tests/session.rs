@@ -2,7 +2,7 @@
 mod ops;
 use notebook::{
     EditStatus, Recovery, Resolution,
-    session::{Event, Notebook, Section},
+    session::{Event, Notebook, Section, SyncStatus},
 };
 use onestore::{
     ExGuid,
@@ -95,6 +95,18 @@ fn published(section: &Section, id: u64) {
         Some(EditStatus::Published { .. })
     ) {
         assert!(Instant::now() < deadline, "the edit was not published");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn status_until(section: &Section, accept: impl Fn(&SyncStatus) -> bool) -> SyncStatus {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let status = section.sync_status().unwrap();
+        if accept(&status) {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "the status stayed {status:?}");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -915,5 +927,75 @@ fn page_versions_restore_and_delete_through_the_session() {
     let (page, after) = stored(&file);
     assert!(after.is_empty());
     assert_eq!(page.objects, old.objects);
+    section.close().unwrap();
+}
+
+#[test]
+fn working_offline_queues_edits_until_sync_now_or_working_online() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("notes.one");
+    let cache = directory.path().join("cache");
+    std::fs::write(
+        &file,
+        onestore::create_section("notes.one", "Original", "Author").unwrap(),
+    )
+    .unwrap();
+    let (section, _) = open(&file, &cache);
+    let space = section.pages().unwrap()[0].0;
+    let before = section.page(space).unwrap();
+    let reached = status_until(&section, |status| status.synced.is_some());
+    assert!(reached.error.is_none());
+    assert_eq!(reached.queued, 0);
+
+    section.set_offline(true);
+    let id = typed(&section, space, &before, 0..0, "Offline ");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(section.status(id).unwrap(), Some(EditStatus::Pending));
+    assert_eq!(section.sync_status().unwrap().queued, 1);
+    assert_eq!(stored_page(&file, space), before);
+
+    // Sync Now publishes while working offline.
+    section.wake();
+    published(&section, id);
+    let after = edited(&before, "Offline ");
+    assert_same(stored_page(&file, space), &after);
+    let synced = status_until(&section, |status| status.queued == 0);
+    assert!(synced.synced > reached.synced);
+
+    let next = typed(&section, space, &after, 0..0, "Again ");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(section.status(next).unwrap(), Some(EditStatus::Pending));
+    section.set_offline(false);
+    published(&section, next);
+    status_until(&section, |status| status.queued == 0);
+    section.close().unwrap();
+}
+
+#[test]
+fn a_missing_section_file_reports_its_error_until_it_returns() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("notes.one");
+    let away = directory.path().join("away.one");
+    let cache = directory.path().join("cache");
+    std::fs::write(
+        &file,
+        onestore::create_section("notes.one", "Original", "Author").unwrap(),
+    )
+    .unwrap();
+    let (section, notified) = open(&file, &cache);
+    status_until(&section, |status| status.synced.is_some());
+    std::fs::rename(&file, &away).unwrap();
+    section.wake();
+    let failed = status_until(&section, |status| status.error.is_some());
+    assert_eq!(
+        failed.error.map(|error| error.kind()),
+        Some(std::io::ErrorKind::NotFound)
+    );
+    let before = notified.load(Ordering::SeqCst);
+    std::fs::rename(&away, &file).unwrap();
+    section.wake();
+    let back = status_until(&section, |status| status.error.is_none());
+    assert!(back.synced > failed.synced);
+    assert!(notified.load(Ordering::SeqCst) > before);
     section.close().unwrap();
 }

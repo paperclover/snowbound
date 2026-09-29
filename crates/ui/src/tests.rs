@@ -777,6 +777,74 @@ fn click(ui: &mut Ui, point: [f32; 2]) {
     press(ui, at, false);
 }
 
+/// Two tool buttons with tooltips, the second at the window's trailing edge; returns
+/// their tooltips' rectangles.
+fn tip_frame(ui: &mut Ui) -> [Option<[f32; 4]>; 2] {
+    let mut tips = [Id::ROOT; 2];
+    frame(ui, |ui| {
+        for (index, x) in [0.0, 380.0].into_iter().enumerate() {
+            let id = ui.open(
+                ("tool", index),
+                Spec {
+                    flags: Flags::CLICKABLE | Flags::FLOAT,
+                    size: [px(20.0), px(20.0)],
+                    position: [x, 0.0],
+                    ..Spec::default()
+                },
+            );
+            ui.close();
+            popup::tooltip(ui, "Bold", "Ctrl+B", Some("Makes the selected text bold."));
+            tips[index] = id.child("tooltip");
+        }
+    });
+    tips.map(|tip| ui.rect(tip))
+}
+
+/// Frames the pointer rests through for `millis`, returning the tooltips as they end.
+fn rest(ui: &mut Ui, millis: u32) -> [Option<[f32; 4]>; 2] {
+    let mut tips = [None; 2];
+    for _ in 0..millis / 16 {
+        tips = tip_frame(ui);
+    }
+    tips
+}
+
+#[test]
+fn tooltips_wait_then_switch_at_once_and_hide_on_press_until_left() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    tip_frame(&mut ui);
+    ui.event(Event::PointerMoved([10.0, 10.0]));
+    assert_eq!(rest(&mut ui, 400), [None; 2]);
+    assert!(ui.wake_at().is_some(), "the delay wakes the host");
+    let [Some(first), None] = rest(&mut ui, 200) else {
+        panic!("the first tooltip shows after its delay");
+    };
+    assert_eq!(first[..2], [0.0, 20.0 + popup::PAD]);
+
+    ui.event(Event::PointerMoved([390.0, 10.0]));
+    let [None, Some(second)] = tip_frame(&mut ui) else {
+        panic!("moving to another shows its tooltip at once");
+    };
+    assert_eq!(second[2], 400.0, "kept inside the window");
+
+    press(&mut ui, Instant::now(), true);
+    press(&mut ui, Instant::now(), false);
+    assert_eq!(
+        rest(&mut ui, 1000),
+        [None; 2],
+        "a press hides it while hovered"
+    );
+    ui.event(Event::PointerMoved([200.0, 10.0]));
+    rest(&mut ui, 100);
+    ui.event(Event::PointerMoved([10.0, 10.0]));
+    assert_eq!(
+        rest(&mut ui, 100),
+        [None; 2],
+        "after a press it waits again"
+    );
+    assert!(rest(&mut ui, 500)[0].is_some());
+}
+
 #[test]
 fn popups_open_beside_their_anchor_and_flip_to_stay_in_the_window() {
     let mut ui = open_menu(None);
@@ -1060,6 +1128,40 @@ fn colour_grids_move_in_two_dimensions_and_choose_a_swatch_or_none() {
     let rect = ui.rect(grid.child(("cell", 0_usize))).unwrap();
     click(&mut ui, [rect[0] + 4.0, rect[1] + 4.0]);
     assert_eq!(build(&mut ui), Some(None));
+}
+
+#[test]
+fn table_pickers_choose_columns_and_rows_by_keys_or_a_click() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let grid = Id::ROOT.child("table");
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            chosen = popup::table_picker(ui, grid, BELOW, [4, 3]);
+        });
+        chosen
+    };
+    build(&mut ui);
+    ui.open_popup(grid);
+    build(&mut ui);
+    for named in [
+        NamedKey::ArrowDown,
+        NamedKey::ArrowRight,
+        NamedKey::ArrowRight,
+        NamedKey::ArrowDown,
+        NamedKey::ArrowDown,
+        NamedKey::Enter,
+    ] {
+        ui.event(key(named));
+    }
+    assert_eq!(build(&mut ui), Some([3, 3]));
+    ui.open_popup(grid);
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    let rect = ui.rect(grid.child(("cell", 5_usize))).unwrap();
+    click(&mut ui, [rect[0] + 4.0, rect[1] + 4.0]);
+    assert_eq!(build(&mut ui), Some([2, 2]));
 }
 
 #[test]
@@ -1369,7 +1471,7 @@ fn fonts() -> Vec<popup::Item<'static>> {
 }
 
 fn ranked(items: &[popup::Item], query: &str) -> Vec<&'static str> {
-    let order = popup::Matches::new(items, query).order;
+    let order = popup::Matches::new(items, query, 9.0).order;
     order.into_iter().map(|index| FONTS[index]).collect()
 }
 
@@ -1836,6 +1938,39 @@ fn a_combo_s_field_holds_its_place_as_its_list_opens_and_its_rows_take_clicks() 
     assert_eq!(build(&mut ui), Some(3));
 }
 
+#[test]
+fn a_popup_over_a_box_by_the_window_s_edge_widens_away_from_it() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let fonts = fonts();
+    let anchor = Anchor::Over([330.0, 10.0, 390.0, 30.0]);
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            _ = popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"))
+        })
+    };
+    build(&mut ui);
+    ui.open_popup(menu_id());
+    build(&mut ui);
+    let field = menu_id().child("filter");
+    let edges =
+        |ui: &Ui| [ui.rect(field).unwrap(), ui.rect(menu_id()).unwrap()].map(|rect| rect[2]);
+    let first = ui.rect(field).unwrap();
+    assert_eq!(
+        edges(&ui),
+        [390.0, 394.0],
+        "the trailing edges start on the box"
+    );
+    assert!(first[0] > 290.0, "the field starts near the box");
+    for _ in 0..20 {
+        build(&mut ui);
+    }
+    assert_eq!(edges(&ui), [390.0, 394.0], "the trailing edges hold");
+    assert!(
+        ui.rect(field).unwrap()[0] < first[0] - 30.0,
+        "the field widens leftward"
+    );
+}
+
 fn built(ui: &Ui, id: Id) -> &Built {
     ui.nodes.iter().find(|node| node.id == id).unwrap()
 }
@@ -2023,4 +2158,51 @@ fn galleries_choose_across_their_groups_by_keys_and_clicks() {
     let point = center(cell(1));
     click(&mut ui, point);
     assert_eq!(build(&mut ui), Some(1));
+}
+
+#[test]
+fn desktop_menus_cut_or_fade_without_growing() {
+    let motion = |ui: &Ui| {
+        ui.layers().iter().find_map(|layer| match layer {
+            Layer::Primitives(primitives) => primitives.motion,
+            Layer::Custom { .. } => None,
+        })
+    };
+    let at = Anchor::Point([50.0, 50.0]);
+    let styled = |motion| {
+        let mut theme = Theme::light();
+        theme.desktop_menu = Some(Menu {
+            motion,
+            ..theme.menu()
+        });
+        let mut ui = Ui::new(theme, DOUBLE_CLICK);
+        menu_frame(&mut ui, at, None);
+        ui.open_popup(menu_id());
+        menu_frame(&mut ui, at, None);
+        ui
+    };
+
+    let mut ui = styled(PopupMotion::Cut);
+    let shown = motion(&ui).unwrap();
+    assert_eq!([shown.opacity, shown.zoom, shown.tilt], [1.0, 1.0, 0.0]);
+    ui.close_popup(menu_id());
+    menu_frame(&mut ui, at, None);
+    assert_eq!(motion(&ui), None, "gone the frame it closes");
+    assert!(!ui.wants_frame());
+
+    let mut ui = styled(PopupMotion::Fade([0.15, 0.6]));
+    let first = motion(&ui).unwrap();
+    assert!(first.opacity < 0.2 && first.zoom == 1.0 && first.tilt == 0.0);
+    for _ in 0..10 {
+        menu_frame(&mut ui, at, None);
+    }
+    assert_eq!(motion(&ui).map(|motion| motion.opacity), Some(1.0));
+    ui.close_popup(menu_id());
+    // 96 ms into the fade out, OutQuart leaves about half.
+    for _ in 0..7 {
+        menu_frame(&mut ui, at, None);
+    }
+    let closing = motion(&ui).unwrap();
+    assert!((closing.opacity - (1.0 - 0.096 / 0.6_f32).powi(4)).abs() < 0.01);
+    assert!(ui.wants_frame());
 }

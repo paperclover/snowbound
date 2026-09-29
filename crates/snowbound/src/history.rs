@@ -165,7 +165,6 @@ impl State {
         session
             .section
             .restore_version(page, version, &self.author)?;
-        session.status = "Saving";
         session.refresh_history()?;
         self.commands.push(Command::OpenPage(page));
         Ok(())
@@ -178,7 +177,6 @@ impl State {
     ) -> Result<(), Box<dyn Error>> {
         let session = self.session.as_mut().ok_or("No section is open")?;
         session.section.delete_versions(&[(page, vec![version])])?;
-        session.status = "Saving";
         session.refresh_history()?;
         self.commands.push(Command::OpenPage(page));
         Ok(())
@@ -221,7 +219,6 @@ impl State {
             .collect();
         if !all.is_empty() {
             session.section.delete_versions(&all)?;
-            session.status = "Saving";
         }
         session.refresh_history()?;
         if session.version.is_some() {

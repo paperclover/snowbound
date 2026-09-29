@@ -28,9 +28,9 @@ impl State {
                 .ok_or("SNOWBOUND_SCREENSHOT_SIZE must be WIDTHxHEIGHT in points.")?,
             Err(_) => SIZE,
         };
-        let most = self.renderer.device.limits().max_texture_dimension_2d as f32;
+        let most = self.renderer.max_texture_dimension() as f32;
         let scale = SCALE.min(most / size[0].max(size[1]));
-        [self.config.width, self.config.height] = size.map(|side| (side * scale).max(1.0) as u32);
+        self.surface.size = size.map(|side| (side * scale).max(1.0) as u32);
         self.renderer.clear_glyph_cache();
         self.app_icon = platform::app_icon((16.0 * scale) as u32);
         let response = self.view.scale_factor_changed(scale)?;

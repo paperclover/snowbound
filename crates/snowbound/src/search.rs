@@ -788,9 +788,6 @@ impl State {
         let [left, top, right, bottom] = rect;
         let anchor = Anchor::Over([left - 4.0, top - 4.0, right + 4.0, bottom + 4.0]);
         let width = RESULTS.max(right - left);
-        // The box takes the toolbar's box's place at once and widens as the dropdown comes in.
-        let open = self.ui.opening(results(), anchor).unwrap_or(1.0);
-        let field_width = right - left + (width - 8.0 - (right - left)) * open;
         self.ui.open_as(
             results(),
             Spec {
@@ -809,8 +806,9 @@ impl State {
         self.ui.open(
             "box",
             Spec {
+                // Takes the toolbar's box's place at once, widening with the dropdown.
                 flags: Flags::STILL,
-                size: [px(field_width), px(ui::shell::TOOL)],
+                size: [fill(), px(ui::shell::TOOL)],
                 fill: Some(theme.base),
                 border: Some(theme.accent),
                 radius: 4.0,

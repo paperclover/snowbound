@@ -60,6 +60,9 @@ failures; `notify` runs on a background thread whenever an event waits.
 removes; `release(id, archive, Resolution)` ends an uncertain attempt. The author an
 edit names is the host's: the app passes the account's full name.
 `import_page` creates a page holding a copy of another; `delete_pages` removes pages.
+`sync_status()` gives when the section file was last reached, why it could not be since
+and how many edits wait for it. `set_offline(true)` works offline as OneNote does: the
+worker stops connecting and edits queue until `wake()` (Sync Now) or `set_offline(false)`.
 
 `Section::resume(file, replica, notify)` starts from an owned `Replica` without
 consulting the remote file; with the `smb` feature, `Section::resume_smb(path,

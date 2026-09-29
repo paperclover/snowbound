@@ -78,6 +78,116 @@ fn cell_range(document: &TextDocument, cell: &TableCell) -> Result<Range<TextPos
 }
 
 impl CanvasEditor {
+    /// Insert, Table: an empty table of `rows` by `columns` at the caret with the caret in
+    /// its first cell, as OneNote 2010 inserts one: in place of an empty paragraph, before
+    /// or after the caret's paragraph at its start or end, and between its halves otherwise.
+    pub fn insert_table(
+        &mut self,
+        engine: &mut TextEngine,
+        rows: usize,
+        columns: usize,
+    ) -> Result<(), EditorError> {
+        let outline = self.active_outline();
+        if outline.title || rows == 0 || columns == 0 {
+            return Ok(());
+        }
+        let [anchor, focus] = outline.selection.positions;
+        let caret = anchor.max(focus);
+        let (container, index, node) = outline
+            .document
+            .leaf(caret.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let text = &node.text().unwrap().text;
+        let end = text.utf16_offset(text.text().len())?;
+        let format = text.format_at(caret.offset)?;
+        let cell = || -> Result<TableCell, EditError> {
+            let mut paragraph = crate::document::node(
+                Paragraph::new(String::new(), format.clone()),
+                node.format.clone(),
+            )?;
+            paragraph.style = node.style;
+            Ok(TableCell {
+                id: new_id()?,
+                layout: Default::default(),
+                indents: outline.indents.clone(),
+                shading: None,
+                paragraphs: vec![paragraph],
+                unsupported: Vec::new(),
+            })
+        };
+        let table = PageParagraph {
+            id: new_id()?,
+            parent: node.parent,
+            level: node.level,
+            style: None,
+            format: node.format.clone(),
+            lists: Vec::new(),
+            tags: Vec::new(),
+            media: Default::default(),
+            collapsed: false,
+            content: ParagraphContent::Table(onestore::page::Table {
+                id: new_id()?,
+                columns: vec![
+                    TableColumn {
+                        width: 37.11,
+                        locked: false
+                    };
+                    columns
+                ],
+                rows: (0..rows)
+                    .map(|_| {
+                        Ok(TableRow {
+                            id: new_id()?,
+                            cells: (0..columns).map(|_| cell()).collect::<Result<_, _>>()?,
+                        })
+                    })
+                    .collect::<Result<_, EditError>>()?,
+                borders: Some(true),
+                layout: Default::default(),
+                tags: Vec::new(),
+            }),
+        };
+        let parent = |candidate: &PageParagraph| candidate.parent == Some(node.id);
+        let childless = !outline.document.container(container)?.iter().any(parent);
+        let (edit, first) = if end == 0 && childless {
+            let edit = DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index..index + 1,
+                replacement: vec![table],
+            };
+            (edit, caret.paragraph)
+        } else if caret.offset == 0 && end > 0 {
+            let edit = DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index..index,
+                replacement: vec![table],
+            };
+            (edit, caret.paragraph)
+        } else if caret.offset == end {
+            let edit = DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index + 1..index + 1,
+                replacement: vec![table],
+            };
+            (edit, caret.paragraph + 1)
+        } else {
+            let empty = Paragraph::new(String::new(), format.clone());
+            let mut edit = outline
+                .document
+                .replace(caret..caret, vec![empty.clone(), empty])?;
+            edit.replacement.insert(1, table);
+            (edit, caret.paragraph + 1)
+        };
+        let first = TextPosition {
+            paragraph: first,
+            offset: 0,
+        };
+        self.commit(engine, edit, [first; 2].into())
+    }
+
     pub fn tab(&mut self, engine: &mut TextEngine, backward: bool) -> Result<(), EditorError> {
         if self.active_outline().title && !backward {
             return self.leave_title(engine);
@@ -397,6 +507,48 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// As OneNote 2010 inserts from the Table gallery (lab, 2026-09-28).
+    #[test]
+    fn an_inserted_table_takes_an_empty_paragraph_or_splits_at_the_caret() {
+        let mut engine = TextEngine::default();
+        let texts = |editor: &CanvasEditor| {
+            editor
+                .active_outline()
+                .document
+                .nodes()
+                .iter()
+                .map(|node| match &node.content {
+                    ParagraphContent::Table(table) => {
+                        format!("{}x{}", table.columns.len(), table.rows.len())
+                    }
+                    _ => node.text().unwrap().text.text().to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        for (text, offset, expected) in [
+            ("", 0, vec!["3x2"]),
+            ("abc", 0, vec!["3x2", "abc"]),
+            ("abc", 3, vec!["abc", "3x2"]),
+            ("abc", 1, vec!["a", "3x2", "bc"]),
+        ] {
+            let mut editor = editor(&mut engine, text);
+            let caret = TextPosition {
+                paragraph: 0,
+                offset,
+            };
+            editor.select([caret; 2].into()).unwrap();
+            editor.insert_table(&mut engine, 2, 3).unwrap();
+            assert_eq!(texts(&editor), expected, "{text:?} at {offset}");
+            let first = usize::from(expected[0] != "3x2");
+            let (cell, _, _) = editor
+                .active_outline()
+                .document
+                .leaf(editor.selection().positions[0].paragraph)
+                .unwrap();
+            assert!(cell.is_some() && editor.selection().positions[0].paragraph == first);
+        }
     }
 
     #[test]

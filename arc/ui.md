@@ -25,7 +25,8 @@ frame-rate independent, a retargeted animation continues smoothly from where
 it is, and it settles fast. Popups open and close on short timed curves,
 slow enough to follow: a menu grows out of the pointer or its button as it
 fades in, a combo's field widens into its list, and a dialog swings up into
-place over a dimmed window, as Windows opens a window.
+place over a dimmed window, as Windows opens a window. On GNOME and KDE, menus instead
+look and move as the desktop's own (see [platforms](platforms.md)).
 
 ## Why not native widgets
 

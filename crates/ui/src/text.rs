@@ -47,12 +47,17 @@ impl Texts {
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
         // Fontconfig configurations without a system-ui alias still have a sans-serif.
-        let system =
-            [GenericFamily::SystemUi, GenericFamily::SansSerif].map(FontFamilyName::Generic);
+        // Before 10.10 macOS's interface font is Lucida Grande, which fontique's system-ui
+        // doesn't name.
+        let system = [
+            Some(FontFamilyName::Generic(GenericFamily::SystemUi)),
+            cfg!(target_os = "macos").then(|| FontFamilyName::named("Lucida Grande")),
+            Some(FontFamilyName::Generic(GenericFamily::SansSerif)),
+        ];
         let families: Vec<_> = font
             .into_iter()
             .map(FontFamilyName::named)
-            .chain(system)
+            .chain(system.into_iter().flatten())
             .collect();
         builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(
             families,

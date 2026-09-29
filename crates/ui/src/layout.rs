@@ -1,4 +1,4 @@
-use crate::{Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, text::Texts};
+use crate::{Anchor, Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, text::Texts};
 use std::collections::HashMap;
 
 /// Sizes each box on both axes, then places it: standalone sizes, sizes taken from
@@ -19,7 +19,13 @@ pub(crate) fn solve(
         }
         for node in nodes.iter_mut() {
             node.computed[axis] = match node.size[axis].size {
-                Size::Pixels(pixels) => pixels,
+                Size::Pixels(pixels) => match node.anchor {
+                    Some(Anchor::Over(rect)) if axis == 0 => {
+                        let from = rect[2] - rect[0];
+                        from + (pixels - from) * node.open
+                    }
+                    _ => pixels,
+                },
                 Size::Text => {
                     let content = if axis == 0 {
                         node.content_width()
@@ -89,7 +95,12 @@ pub(crate) fn solve(
             let mut cursor = nodes[index].pad[axis];
             for child in nodes[index].children.clone() {
                 nodes[child].relative[axis] = if let Some(anchor) = nodes[child].anchor {
-                    anchor.place(axis, nodes[child].computed[axis], window)
+                    let shown = nodes[child].computed[axis];
+                    let size = match nodes[child].size[axis].size {
+                        Size::Pixels(pixels) => pixels,
+                        _ => shown,
+                    };
+                    anchor.place(axis, size, shown, window)
                 } else if nodes[child].flags.contains(Flags::FLOAT) {
                     nodes[child].position[axis]
                 } else if along(&nodes[index], axis) {

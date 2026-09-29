@@ -1,10 +1,21 @@
+#[cfg(not(feature = "wgpu"))]
+mod gl;
 mod icon;
-
-pub use icon::Palette;
 mod text;
+#[cfg(feature = "wgpu")]
 mod translucent;
+#[cfg(feature = "wgpu")]
+mod webgpu;
 
+#[cfg(not(feature = "wgpu"))]
+use gl as backend;
+#[cfg(feature = "wgpu")]
+use webgpu as backend;
+
+pub use backend::Target;
+pub use icon::Palette;
 pub use text::{Decoration, Glyph, GlyphRun, Glyphs, paint_parley_run};
+#[cfg(feature = "wgpu")]
 pub use translucent::Translucent;
 
 use bytemuck::{Pod, Zeroable};
@@ -24,6 +35,7 @@ use swash::{
 const ATLAS_SIZE: u32 = 2048;
 const MAX_GLYPHS: usize = 8192;
 const MAX_VERTICES: usize = 65_536;
+const VERTEX_BUFFER_BYTES: u64 = (MAX_VERTICES * size_of::<Vertex>()) as u64;
 /// Decoded bytes of all images one frame may paint.
 pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
@@ -146,7 +158,7 @@ impl RasterImage {
 }
 
 struct CachedImage {
-    binding: wgpu::BindGroup,
+    texture: backend::Image,
     bytes: u64,
     /// The texture goes when every copy of its image has.
     pixels: WeakBlob<u8>,
@@ -190,6 +202,8 @@ enum AtlasKey {
         phase: [u8; 2],
         embolden: bool,
         skew: u32,
+        /// The ink's sRGB luminance in sixteenths, which `text_coverage` weights by.
+        tone: u8,
     },
     Icon {
         sources: &'static [&'static str],
@@ -435,15 +449,11 @@ pub struct Occupancy {
 }
 
 pub struct Renderer {
+    #[cfg(feature = "wgpu")]
     pub device: wgpu::Device,
+    #[cfg(feature = "wgpu")]
     pub queue: wgpu::Queue,
-    pipeline: wgpu::RenderPipeline,
-    image_pipeline: wgpu::RenderPipeline,
-    erase_pipeline: wgpu::RenderPipeline,
-    atlas: wgpu::Texture,
-    bind_group: wgpu::BindGroup,
-    image_sampler: wgpu::Sampler,
-    vertex_buffer: wgpu::Buffer,
+    gpu: backend::Gpu,
     vertices: Vec<Vertex>,
     glyphs: HashMap<AtlasKey, Option<AtlasGlyph>>,
     images: HashMap<u64, CachedImage>,
@@ -454,150 +464,17 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let shader = device.create_shader_module(wgpu::include_wgsl!("draw.wgsl"));
-        let binding_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Draw texture"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Draw"),
-            bind_group_layouts: &[Some(&binding_layout)],
-            ..Default::default()
-        });
-        let make_pipeline = |blend| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Draw"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vertex"),
-                    compilation_options: Default::default(),
-                    buffers: &[Some(wgpu::VertexBufferLayout {
-                        array_stride: size_of::<Vertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4, 5 => Float32],
-                    })],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fragment"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: Some(blend),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-        // Coverage accumulates in alpha, leaving premultiplied colour over a transparent clear.
-        let pipeline = make_pipeline(wgpu::BlendState {
-            color: wgpu::BlendState::ALPHA_BLENDING.color,
-            alpha: wgpu::BlendComponent::OVER,
-        });
-        let image_pipeline = make_pipeline(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
-        let erase = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::Zero,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let erase_pipeline = make_pipeline(wgpu::BlendState {
-            color: erase,
-            alpha: erase,
-        });
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Glyph atlas"),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = atlas.create_view(&Default::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Glyph atlas"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Draw vertices"),
-            size: (MAX_VERTICES * size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Draw image filtering"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-        queue.write_texture(
-            atlas.as_image_copy(),
-            &[255; 4],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4),
-                rows_per_image: Some(1),
-            },
-            wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-        );
-        Self {
+    fn with_gpu(
+        #[cfg(feature = "wgpu")] device: wgpu::Device,
+        #[cfg(feature = "wgpu")] queue: wgpu::Queue,
+        gpu: backend::Gpu,
+    ) -> Self {
+        let renderer = Self {
+            #[cfg(feature = "wgpu")]
             device,
+            #[cfg(feature = "wgpu")]
             queue,
-            pipeline,
-            image_pipeline,
-            erase_pipeline,
-            atlas,
-            bind_group,
-            image_sampler,
-            vertex_buffer,
+            gpu,
             vertices: Vec::new(),
             glyphs: HashMap::new(),
             images: HashMap::new(),
@@ -605,7 +482,10 @@ impl Renderer {
             scaler: ScaleContext::with_max_entries(32),
             pen: [1, 0],
             row_height: 1,
-        }
+        };
+        // The atlas's first texel is the white that solid fills sample.
+        renderer.write_atlas([0, 0], [1, 1], &[255; 4]);
+        renderer
     }
 
     pub fn clear_glyph_cache(&mut self) {
@@ -637,8 +517,8 @@ impl Renderer {
             batch_capacity_bytes: self.batches.capacity() * size_of::<Batch>(),
             glyph_capacity: self.glyphs.capacity(),
             image_capacity: self.images.capacity(),
-            atlas_bytes: u64::from(self.atlas.width()) * u64::from(self.atlas.height()) * 4,
-            vertex_buffer_bytes: self.vertex_buffer.size(),
+            atlas_bytes: u64::from(ATLAS_SIZE) * u64::from(ATLAS_SIZE) * 4,
+            vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             within_budget: self.glyphs.len() <= MAX_GLYPHS
                 && self.images.len() <= MAX_IMAGES
                 && image_bytes <= MAX_IMAGE_BYTES
@@ -649,7 +529,7 @@ impl Renderer {
     /// Clears `target`, `size` device pixels, to linear `clear` and paints the layers in order.
     pub fn draw(
         &mut self,
-        target: &wgpu::TextureView,
+        target: &Target,
         size: [u32; 2],
         clear: [f32; 4],
         layers: &[Layer<'_>],
@@ -702,39 +582,7 @@ impl Renderer {
                 }
             }
         }
-        self.queue
-            .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let [r, g, b, a] = clear.map(f64::from);
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Draw"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            for batch in &self.batches {
-                let [x, y, width, height] = batch.scissor;
-                pass.set_scissor_rect(x, y, width, height);
-                let (pipeline, binding) = match batch.blend {
-                    Blend::Over => (&self.pipeline, &self.bind_group),
-                    Blend::Image(id) => (&self.image_pipeline, &self.images[&id].binding),
-                    Blend::Erase => (&self.erase_pipeline, &self.bind_group),
-                };
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, binding, &[]);
-                pass.draw(batch.vertices.clone(), 0..1);
-            }
-        }
-        self.queue.submit([encoder.finish()]);
+        self.submit(target, clear);
         Ok(())
     }
 
@@ -892,11 +740,7 @@ impl Renderer {
         if self.images.contains_key(&image.id()) {
             return Ok(());
         }
-        if image
-            .size
-            .iter()
-            .any(|v| *v > self.device.limits().max_texture_dimension_2d)
-        {
+        if image.size.iter().any(|v| *v > self.max_texture_dimension()) {
             return Err(RenderError::ImageTooLarge);
         }
         let bytes = image.pixels().len() as u64;
@@ -911,51 +755,10 @@ impl Renderer {
                 .ok_or(RenderError::ImageBudget)?;
             self.images.remove(&id);
         }
-        let size = wgpu::Extent3d {
-            width: image.size[0],
-            height: image.size[1],
-            depth_or_array_layers: 1,
-        };
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Draw image"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            texture.as_image_copy(),
-            image.pixels(),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.size[0] * 4),
-                rows_per_image: Some(image.size[1]),
-            },
-            size,
-        );
-        let binding = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Draw image"),
-            layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
-                },
-            ],
-        });
         self.images.insert(
             image.id(),
             CachedImage {
-                binding,
+                texture: self.upload_image(image),
                 bytes,
                 pixels: image.pixels.downgrade(),
             },
@@ -980,6 +783,12 @@ impl Renderer {
         if !size.is_finite() || size > ATLAS_SIZE as f32 {
             return Err(RenderError::AtlasFull);
         }
+        let color = run
+            .color
+            .map_or(ink, |color| legible(color, space.backdrop, run.backdrop));
+        let [red, green, blue, _] = color;
+        let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+        let tone = (f32::from(srgb_byte(luminance)) / 255.0 * 16.0).round() as u8;
         for glyph in run.glyphs {
             let x = glyph.x * scale + origin[0];
             let y = glyph.y * scale + origin[1];
@@ -1000,6 +809,7 @@ impl Renderer {
                 phase,
                 embolden: run.embolden,
                 skew: run.skew.unwrap_or(0.0).to_bits(),
+                tone,
             };
             let cached = if let Some(cached) = self.glyphs.get(&key) {
                 *cached
@@ -1035,7 +845,15 @@ impl Renderer {
                         Angle::from_degrees(0.0),
                     )));
                 }
-                let image = render.render(&mut scaler, glyph_id);
+                let image = render.render(&mut scaler, glyph_id).map(|mut image| {
+                    if image.content == Content::Mask {
+                        let coverage = text_coverage(tone);
+                        for alpha in &mut image.data {
+                            *alpha = coverage[usize::from(*alpha)];
+                        }
+                    }
+                    image
+                });
                 let cached = if let Some(image) =
                     image.filter(|i| i.placement.width > 0 && i.placement.height > 0)
                 {
@@ -1068,12 +886,7 @@ impl Renderer {
                         (glyph.x + glyph.width) as f32 / atlas_size,
                         (glyph.y + glyph.height) as f32 / atlas_size,
                     ],
-                    if glyph.color {
-                        [1.0; 4]
-                    } else {
-                        run.color
-                            .map_or(ink, |color| legible(color, space.backdrop, run.backdrop))
-                    },
+                    if glyph.color { [1.0; 4] } else { color },
                 )?;
             }
         }
@@ -1127,27 +940,7 @@ impl Renderer {
                 .collect(),
             _ => image.data,
         };
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                origin: wgpu::Origin3d {
-                    x: cached.x,
-                    y: cached.y,
-                    z: 0,
-                },
-                ..self.atlas.as_image_copy()
-            },
-            &rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(p.width * 4),
-                rows_per_image: Some(p.height),
-            },
-            wgpu::Extent3d {
-                width: p.width,
-                height: p.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        self.write_atlas([cached.x, cached.y], [p.width, p.height], &rgba);
         self.pen[0] += p.width + 1;
         self.row_height = self.row_height.max(p.height);
         Ok(cached)
@@ -1558,6 +1351,32 @@ fn srgb_byte(value: f32) -> u8 {
     (srgb * 255.0).round() as u8
 }
 
+/// Coverage for text of sRGB luminance `tone` sixteenths that, blended in linear light,
+/// darkens a white backdrop as the rasterized coverage would blended sRGB-encoded, as
+/// systems blend text: dark text keeps its weight instead of thinning, light text is
+/// nearly untouched.
+fn text_coverage(tone: u8) -> [u8; 256] {
+    let encoded = f32::from(tone) / 16.0;
+    let ink = linear(encoded);
+    std::array::from_fn(|coverage| {
+        let coverage = coverage as f32 / 255.0;
+        let weighted = if ink < 0.999 {
+            (1.0 - linear(1.0 - coverage * (1.0 - encoded))) / (1.0 - ink)
+        } else {
+            coverage
+        };
+        (weighted * 255.0).round() as u8
+    })
+}
+
+fn linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// Least OKLab lightness difference between text and the backdrop it stays legible on.
 const LEGIBLE: f32 = 0.4;
 
@@ -1609,18 +1428,11 @@ pub fn from_oklab([lightness, a, b]: [f32; 3]) -> [f32; 3] {
 
 /// Linear RGBA of an opaque sRGB colour.
 pub fn srgb(red: u8, green: u8, blue: u8) -> [f32; 4] {
-    let linear = |byte: u8| {
-        let value = f32::from(byte) / 255.0;
-        if value <= 0.04045 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    [linear(red), linear(green), linear(blue), 1.0]
+    let [red, green, blue] = [red, green, blue].map(|byte| linear(f32::from(byte) / 255.0));
+    [red, green, blue, 1.0]
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "wgpu"))]
 mod tests {
     use super::*;
     use parley::{
@@ -2032,8 +1844,8 @@ mod tests {
                 let mut moment = 0.0_f64;
                 for y in 212..252 {
                     for x in (40 + 48 * step)..(72 + 48 * step) {
-                        let value = captures[0][(y * 512 + x) * 4];
-                        let coverage = 1.0 - f64::from(srgb(value, 0, 0)[0]);
+                        // Black text over white leaves the rasterized coverage sRGB-encoded.
+                        let coverage = 1.0 - f64::from(captures[0][(y * 512 + x) * 4]) / 255.0;
                         weight += coverage;
                         moment += coverage * y as f64;
                     }

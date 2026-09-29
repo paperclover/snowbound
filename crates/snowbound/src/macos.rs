@@ -116,9 +116,15 @@ impl Clipboard {
 /// AppKit draws the traffic lights.
 pub fn window_controls(_: &mut ui::Ui, _: &Window) {}
 
-/// The app draws the title bar around the traffic lights.
-pub fn system_titlebar(_: &Window) -> bool {
-    false
+/// Whether AppKit draws the title bar: before 10.10 content can't extend under it, and
+/// otherwise the app draws it around the traffic lights.
+pub fn system_titlebar(window: &Window) -> bool {
+    let window = ns_window(window);
+    unsafe {
+        let frame: NSRect = msg_send![&window, frame];
+        let content: NSRect = msg_send![&window, contentRectForFrameRect: frame];
+        content.size.height < frame.size.height
+    }
 }
 
 unsafe extern "C" fn no_document_drag(
@@ -163,6 +169,11 @@ pub fn represent(window: &Window, file: Option<&std::path::Path>) {
     }
 }
 
+/// None: the kit's own menus stand in for AppKit's.
+pub fn menu(_: winit::window::Theme) -> Option<ui::Menu> {
+    None
+}
+
 /// Nothing the backdrop leaves to colour.
 pub fn titlebar(_: winit::window::Theme) -> Option<[[f32; 4]; 2]> {
     None
@@ -178,6 +189,10 @@ unsafe extern "C" fn hit_nothing(_: &AnyObject, _: Sel, _: NSPoint) -> *mut AnyO
 /// through it to the view it lies in.
 pub fn install_backdrop(window: &Window) -> bool {
     MainThreadMarker::new().expect("Views belong to the main thread");
+    // Before 10.10 AppKit has no materials.
+    let Some(effect) = AnyClass::get("NSVisualEffectView") else {
+        return false;
+    };
     let RawWindowHandle::AppKit(handle) =
         window.window_handle().expect("Live AppKit window").as_raw()
     else {
@@ -186,7 +201,6 @@ pub fn install_backdrop(window: &Window) -> bool {
     unsafe {
         let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
         let class = BACKDROP_CLASS.get_or_init(|| {
-            let effect = AnyClass::get("NSVisualEffectView").expect("AppKit is linked");
             let mut class =
                 ClassBuilder::new("SnowboundBackdrop", effect).expect("Unique backdrop class");
             class.add_method(
@@ -349,6 +363,46 @@ pub fn pick_new(title: &str, name: &str) -> Option<std::path::PathBuf> {
         }
         Some(panel.URL()?.path()?.to_string().into())
     }
+}
+
+/// Asks for a picture to insert, with the system's open panel.
+pub fn pick_picture() -> Option<std::path::PathBuf> {
+    let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
+    unsafe {
+        let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
+        let types = crate::PICTURE_TYPES.map(NSString::from_str);
+        #[allow(deprecated, reason = "Allowed content types need macOS 11")]
+        panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_vec(types.into())));
+        panel.setPrompt(Some(&NSString::from_str("Insert")));
+        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+            return None;
+        }
+        let path = panel.URLs().firstObject()?.path()?;
+        Some(path.to_string().into())
+    }
+}
+
+/// Lets the user drag out part of the screen, then sends it as a PNG.
+pub fn clip_screen(proxy: EventLoopProxy<crate::UserEvent>) {
+    std::thread::spawn(move || {
+        let path = std::env::temp_dir().join(format!("snowbound-clip-{}.png", std::process::id()));
+        let taken = std::process::Command::new("/usr/sbin/screencapture")
+            .arg("-i")
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        // Escape leaves no file.
+        if taken && let Ok(bytes) = std::fs::read(&path) {
+            let _ = std::fs::remove_file(&path);
+            let _ = proxy.send_event(crate::UserEvent::Picture(bytes));
+        }
+    });
+}
+
+/// Shows the system's character palette, whose picks arrive as inserted text.
+pub fn character_palette() {
+    let mtm = MainThreadMarker::new().expect("AppKit belongs to the main thread");
+    NSApplication::sharedApplication(mtm).orderFrontCharacterPalette(None);
 }
 
 /// Tells the user something they asked for could not be done: `message`, then what to do.
@@ -598,6 +652,7 @@ mod date_tests {
     }
 }
 
+#[cfg(feature = "wgpu")]
 pub fn configure_presentation(surface: &wgpu::Surface<'_>) {
     MainThreadMarker::new().expect("Layer presentation belongs to the main thread");
     // Retain wgpu's surface ownership while synchronizing presentation with AppKit resize transactions.
@@ -612,6 +667,7 @@ pub fn configure_presentation(surface: &wgpu::Surface<'_>) {
 /// Commits a frame presented with the transaction: winit redraws after Core Animation's
 /// commit observer, so otherwise the frame waits for the next event. A live resize leaves
 /// the commit to AppKit, which pairs the frame with the window's new size.
+#[cfg(feature = "wgpu")]
 pub fn commit_presentation(window: &Window) {
     let resizing: bool = unsafe { msg_send![&ns_window(window), inLiveResize] };
     if !resizing {

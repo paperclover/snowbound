@@ -616,7 +616,11 @@ impl crate::State {
         }
         let width = self.ui.animate(
             self.ui.id("sidebar"),
-            if self.sidebar { WIDTH } else { 0.0 },
+            if self.sidebar && !self.full_page {
+                WIDTH
+            } else {
+                0.0
+            },
         );
         self.ui.open(
             "sidebar",
@@ -735,6 +739,7 @@ impl crate::State {
             self.sidebar = !self.sidebar;
             self.save_settings();
         }
+        crate::tip(&mut self.ui, crate::commands::Id::Sidebar);
         self.ui.close();
     }
 

@@ -612,7 +612,7 @@ pub(crate) fn built(paragraph: &Paragraph) -> Vec<std::ops::Range<usize>> {
 pub fn layout(engine: &mut TextEngine, paragraph: &Paragraph) -> Result<MathLayout, LayoutError> {
     let nodes = Math::parse(paragraph).map_err(|_| LayoutError::UnsupportedContent)?;
     let format = &paragraph.spans()[0].format;
-    let size = format.font_size.unwrap_or(11.0);
+    let size = format.font_size.unwrap_or(crate::layout::DEFAULT_FONT_SIZE);
     let color = format.color.filter(|color| *color != 0xff00_0000);
     // An equation line is at least as tall as a line of text at its size.
     let strut = engine.layout(

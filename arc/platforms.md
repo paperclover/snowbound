@@ -59,6 +59,10 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   focused and not: on KDE the colour scheme's header colours from
   `kdeglobals`, as KWin paints its title bars, and on GNOME winit's Adwaita
   frame's. A settings portal signal re-reads them when the scheme changes.
+- Menus and other popups take the desktop's look and motion: libadwaita's
+  popover menus on GNOME, shown and hidden at once as GTK 4 does, and Breeze's
+  on KDE, faded as KWin fades popups and scaled by Plasma's animation speed.
+  The desktop is read once from `XDG_CURRENT_DESKTOP`; elsewhere the kit's own.
 - zenity or kdialog provide the pickers and alerts. The XDG settings portal
   provides the colour scheme. Text conventions come from the C library's
   locale. Fontconfig is loaded at run time, so builds need no headers for it.

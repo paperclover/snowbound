@@ -32,6 +32,62 @@ pub struct Theme {
     pub shadow: [f32; 4],
     /// Saturation and lightness each of a section's colours takes from its hue.
     pub shades: Shades,
+    /// Menus as the desktop draws its own, where Snowbound follows it; see `Theme::menu`.
+    pub desktop_menu: Option<Menu>,
+}
+
+/// How menus and the other popups look and move. Colours are linear RGBA; sizes are
+/// logical pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Menu {
+    pub fill: [f32; 4],
+    pub border: [f32; 4],
+    /// The layers of the shadow a popup casts, painted in order.
+    pub shadows: Vec<Shadow>,
+    pub text: [f32; 4],
+    /// Shortcuts and headings.
+    pub dim: [f32; 4],
+    pub disabled: [f32; 4],
+    /// The row the pointer or keyboard is on, and its outline.
+    pub highlight: [f32; 4],
+    pub highlight_border: Option<[f32; 4]>,
+    /// The line between groups of rows.
+    pub rule: [f32; 4],
+    pub font_size: f32,
+    pub radius: f32,
+    /// Inset of the popup's contents.
+    pub pad: f32,
+    pub row: f32,
+    pub row_radius: f32,
+    /// Inset of a row's icon and text inside its highlight.
+    pub row_pad: f32,
+    /// Height of the band between groups, and how far the rule across it stays from the
+    /// rows' ends.
+    pub rule_band: f32,
+    pub rule_inset: f32,
+    pub motion: PopupMotion,
+}
+
+/// A soft shadow blurred `blur` wide, `drop` below its box and grown `spread` past it, as
+/// CSS's `box-shadow` takes them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shadow {
+    pub color: [f32; 4],
+    pub blur: f32,
+    pub drop: f32,
+    pub spread: f32,
+}
+
+/// How popups other than dialogs open and close.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PopupMotion {
+    /// Growing out of what they open from as they fade, Snowbound's own.
+    Grow,
+    /// At once, as GTK 4 shows its popovers.
+    Cut,
+    /// Opacity alone: in linearly over the first seconds, out over the second easing as
+    /// OutQuart, as KWin's Fading Popups.
+    Fade([f32; 2]),
 }
 
 /// The platform's caret and selection colours in a light or `dark` appearance.
@@ -101,6 +157,7 @@ impl Theme {
                 edge: [0.30, 0.16],
                 accent: [0.55, 0.55],
             },
+            desktop_menu: None,
         }
     }
 
@@ -129,6 +186,7 @@ impl Theme {
                 edge: [0.30, 0.52],
                 accent: [0.60, 0.45],
             },
+            desktop_menu: None,
         }
     }
 
@@ -143,6 +201,36 @@ impl Theme {
             base: text(0.05),
             ..self
         }
+    }
+
+    /// Menus as the desktop draws them, or Snowbound's own.
+    pub fn menu(&self) -> Menu {
+        use crate::popup::{MENU_ROW, PAD};
+        self.desktop_menu.clone().unwrap_or_else(|| Menu {
+            fill: self.popup,
+            border: self.chip,
+            shadows: vec![Shadow {
+                color: self.shadow,
+                blur: crate::POPUP_SHADOW[0],
+                drop: crate::POPUP_SHADOW[1],
+                spread: 0.0,
+            }],
+            text: self.text,
+            dim: self.text_dim,
+            disabled: self.text_dim,
+            highlight: self.hover(),
+            highlight_border: None,
+            rule: self.chip,
+            font_size: self.font_size,
+            radius: 6.0,
+            pad: PAD,
+            row: MENU_ROW,
+            row_radius: 4.0,
+            row_pad: 8.0,
+            rule_band: 9.0,
+            rule_inset: 0.0,
+            motion: PopupMotion::Grow,
+        })
     }
 
     /// Hovered controls: the accent over the base.

@@ -14,7 +14,7 @@ mod tests;
 use crate::gpu::{Paper, Viewport, page::PageScene};
 use crate::{
     date::DateField,
-    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, Formatting, Selection, TextOutline},
+    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, Formatting, Selection, TextOutline, Whole},
     layout::TextEngine,
 };
 use draw::{
@@ -156,6 +156,7 @@ enum Drag {
 #[derive(Clone, Copy)]
 enum PointerFeedback<'a> {
     Hover(onestore::ExGuid),
+    /// An outline dragged this far, with the rest of the page selection it belongs to.
     Move(onestore::ExGuid, [f32; 2]),
     Resize(&'a TextOutline),
     /// A picture being moved or resized, drawn at this origin and size.
@@ -382,6 +383,18 @@ impl PageView {
                 snap_to_grid(position, self.editor.margin_origin())
             },
         ))
+    }
+
+    /// The dragged outline and how far it would move.
+    fn drag_delta(&self) -> Option<(onestore::ExGuid, [f32; 2])> {
+        let (id, [x, y]) = self.outline_preview()?;
+        let outline = self
+            .editor
+            .outlines()
+            .iter()
+            .find(|outline| outline.id == id)?;
+        let [from_x, from_y] = outline.origin();
+        Some((id, [x - from_x, y - from_y]))
     }
 
     fn image_preview(&self) -> Option<(onestore::ExGuid, [f32; 2], [f32; 2])> {
@@ -701,8 +714,8 @@ impl PageView {
                 ..
             }) => Some(PointerFeedback::Resize(outline)),
             _ => self
-                .outline_preview()
-                .map(|(id, origin)| PointerFeedback::Move(id, origin))
+                .drag_delta()
+                .map(|(id, delta)| PointerFeedback::Move(id, delta))
                 .or_else(|| {
                     self.image_preview()
                         .map(|(id, origin, size)| PointerFeedback::Image(id, origin, size))
@@ -901,7 +914,10 @@ impl PageView {
             }
             Some(Hit::Handle { id, grab }) => {
                 self.set_object_focus(None);
-                self.editor.focus_outline(id)?;
+                // Any outline's handle drags the whole page selection.
+                if self.editor.whole() != Some(Whole::Page) {
+                    self.editor.focus_outline(id)?;
+                }
                 self.drag = Some(Drag::Outline {
                     id,
                     grab,
@@ -975,7 +991,16 @@ impl PageView {
         let inside =
             (0..2).all(|axis| (0.0..self.viewport.size[axis] as f32).contains(&self.pointer[axis]));
         let moving_image = matches!(self.drag, Some(Drag::Image { handle: [0, 0], .. }));
+        let clicked = match self.drag {
+            Some(Drag::Outline {
+                id,
+                pending_press: Some(_),
+                ..
+            }) => Some(id),
+            _ => None,
+        };
         let preview = self.outline_preview().filter(|_| inside);
+        let delta = self.drag_delta().filter(|_| inside);
         if let Some((id, origin, size)) = self.image_preview().filter(|_| inside || !moving_image) {
             self.editor
                 .place_image(&mut self.engine, id, origin, size)?;
@@ -988,7 +1013,14 @@ impl PageView {
             self.editor
                 .resize(&mut self.engine, outline.bounds().width() as f32)?;
         }
-        if let Some((id, origin)) = preview {
+        if let Some(id) = clicked {
+            // A click on an outline's handle selects it as OneNote does.
+            self.editor.select_outline(id)?;
+        } else if let Some((_, delta)) = delta
+            && self.editor.whole() == Some(Whole::Page)
+        {
+            self.editor.move_page(delta)?;
+        } else if let Some((id, origin)) = preview {
             self.editor.move_outline(id, origin)?;
         }
         self.changed()
@@ -1075,27 +1107,49 @@ impl PageView {
         self.edited()
     }
 
-    /// Copy, or Cut with `cut`: the selected text goes to the clipboard.
+    /// Copy, or Cut with `cut`: the selected text goes to the clipboard, the page selection's
+    /// outlines top to bottom with a blank line between, as OneNote 2010 copies them.
     pub fn copy(&mut self, cut: bool) -> Result<Response> {
-        let [anchor, focus] = self.editor.selection().positions;
-        let selected = self
-            .editor
-            .active_outline()
-            .document()
-            .slice(anchor.min(focus)..anchor.max(focus))?;
-        let text = selected
-            .iter()
-            .map(|paragraph| {
-                paragraph
-                    .project()
-                    .map(|projection| projection.text().text().to_owned())
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .join("\n");
+        let text = |outline: &TextOutline, selection: Selection| -> Result<String> {
+            let [anchor, focus] = selection.positions;
+            Ok(outline
+                .document()
+                .slice(anchor.min(focus)..anchor.max(focus))?
+                .iter()
+                .map(|paragraph| {
+                    paragraph
+                        .project()
+                        .map(|projection| projection.text().text().to_owned())
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .join("\n"))
+        };
+        let page = self.editor.whole() == Some(Whole::Page);
+        let text = if page {
+            let mut outlines = self
+                .editor
+                .outlines()
+                .iter()
+                .filter(|outline| !outline.title)
+                .collect::<Vec<_>>();
+            outlines.sort_by(|a, b| {
+                let ([ax, ay], [bx, by]) = (a.origin(), b.origin());
+                ay.total_cmp(&by).then(ax.total_cmp(&bx))
+            });
+            outlines
+                .into_iter()
+                .map(|outline| text(outline, outline.whole()))
+                .collect::<Result<Vec<_>>>()?
+                .join("\n\n")
+        } else {
+            text(self.editor.active_outline(), self.editor.selection())?
+        };
         if text.is_empty() {
             return Ok(Response::default());
         }
-        if cut {
+        if cut && page {
+            self.editor.delete(&mut self.engine, false)?;
+        } else if cut {
             self.editor.insert(&mut self.engine, "")?;
         }
         Ok(Response {
@@ -1177,6 +1231,36 @@ impl PageView {
         self.edited()
     }
 
+    /// Insert, Table: see [`CanvasEditor::insert_table`].
+    pub fn insert_table(&mut self, rows: usize, columns: usize) -> Result<Response> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok(Response::default());
+        }
+        self.editor.insert_table(&mut self.engine, rows, columns)?;
+        self.edited()
+    }
+
+    /// Insert, Picture: a PNG, JPEG or GIF `size` points large after the caret's paragraph.
+    pub fn insert_picture(&mut self, bytes: Vec<u8>, size: [f32; 2]) -> Result<Response> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok(Response::default());
+        }
+        let image = onestore::page::Image {
+            id: onestore::page::text::new_id()?,
+            layout: onestore::document::Layout {
+                max_width: Some(size[0]),
+                max_height: Some(size[1]),
+                ..Default::default()
+            },
+            size: Some(size),
+            bytes: Some(bytes.into()),
+            alt: None,
+            background: false,
+        };
+        self.editor.insert_picture(&mut self.engine, image)?;
+        self.edited()
+    }
+
     /// Professional, or Linear with `linear`, on the equation at the caret.
     pub fn switch_equation(&mut self, linear: bool) -> Result<Response> {
         if linear {
@@ -1205,6 +1289,10 @@ impl PageView {
     /// Select All, widening the selection a unit at a time as OneNote 2010's Ctrl+A does.
     pub fn widen_selection(&mut self) -> Result<Response> {
         self.editor.widen_selection()?;
+        // Revealing the last outline would scroll the page selection's start away.
+        if self.editor.whole() == Some(Whole::Page) {
+            return self.changed();
+        }
         self.edited()
     }
 
@@ -1274,6 +1362,27 @@ impl PageView {
                 return self.changed();
             }
         }
+        if self.editor.whole() == Some(Whole::Page) {
+            match (Command::from_key(key, self.modifiers), key) {
+                // OneNote 2010 keeps its page selection on these.
+                (
+                    Some(
+                        Command::Move(Movement::Up | Movement::Down)
+                        | Command::MovePage { .. }
+                        | Command::MoveParagraphs { .. },
+                    ),
+                    _,
+                )
+                | (_, Key::Named(NamedKey::Tab)) => return Ok(Response::default()),
+                // Enter leaves the caret at the selection's end, as Right does.
+                (_, Key::Named(NamedKey::Enter)) => {
+                    self.editor
+                        .move_selection(&mut self.engine, Movement::Right, false)?;
+                    return self.edited();
+                }
+                _ => {}
+            }
+        }
         if let Some(Command::MoveParagraphs { up }) = Command::from_key(key, self.modifiers)
             && self.editor.marked_range().is_none()
         {
@@ -1288,6 +1397,13 @@ impl PageView {
                 Key::Named(NamedKey::ArrowDown) => Some([0.0, 1.0]),
                 _ => None,
             };
+            if let Some(delta) = delta
+                && self.editor.whole() == Some(Whole::Page)
+            {
+                let step = if shift { 10.0 } else { 1.0 };
+                self.editor.move_page(delta.map(|axis| axis * step))?;
+                return self.edited();
+            }
             if let Some(delta) = delta {
                 let outline = self.editor.active_outline();
                 let origin = outline.origin();
@@ -1604,6 +1720,15 @@ fn page_primitives<'a>(
     paint: Paint,
 ) -> Result<Vec<Primitive<'a>>> {
     let mut primitives = Vec::new();
+    let active = editor.active_outline().id;
+    let whole = editor
+        .whole()
+        .filter(|_| paint.chrome && object_focus.is_none());
+    let selected = |outline: &TextOutline| match whole {
+        Some(Whole::Page) => !outline.title,
+        Some(Whole::Outline) => outline.id == active,
+        None => false,
+    };
     let draw_outline = |id, offset: [f32; 2], primitives: &mut Vec<_>| {
         // An emptied page outline leaves the editor but keeps its paint slot for undo.
         let Some(outline) = editor.visible_outlines().find(|outline| outline.id == id) else {
@@ -1613,13 +1738,19 @@ fn page_primitives<'a>(
             Some(PointerFeedback::Resize(resized)) if resized.id == outline.id => resized,
             _ => outline,
         };
+        let [x, y] = outline.origin();
         let origin = match preview {
-            Some(PointerFeedback::Move(id, origin)) if id == outline.id => origin,
-            _ => outline.origin(),
+            Some(PointerFeedback::Move(id, [dx, dy]))
+                if id == outline.id || whole == Some(Whole::Page) && !outline.title =>
+            {
+                [x + dx, y + dy]
+            }
+            _ => [x, y],
         };
         // OneNote frames the title whether or not it is focused or hovered.
         if outline.title
-            || (paint.chrome && object_focus.is_none() && outline.id == editor.active_outline().id)
+            || selected(outline)
+            || (paint.chrome && object_focus.is_none() && outline.id == active)
             || matches!(preview, Some(PointerFeedback::Hover(id) | PointerFeedback::Move(id, _)) if id == outline.id)
             || matches!(preview, Some(PointerFeedback::Resize(resized)) if resized.id == outline.id)
         {
@@ -1628,14 +1759,16 @@ fn page_primitives<'a>(
                 [origin[0] + offset[0], origin[1] + offset[1]],
                 paint.pixel,
                 paint.colors.paper,
+                selected(outline),
                 primitives,
             );
         }
         append_outline(
             (object_focus.is_none()
-                && outline.id == editor.active_outline().id
+                && outline.id == active
                 && !matches!(preview, Some(PointerFeedback::Resize(_))))
             .then_some(editor),
+            selected(outline),
             outline,
             [origin[0] + offset[0], origin[1] + offset[1]],
             paint,
@@ -1692,6 +1825,7 @@ fn page_primitives<'a>(
     {
         append_outline(
             Some(editor),
+            false,
             outline,
             outline.origin(),
             paint,
@@ -1892,22 +2026,26 @@ fn snap_to_grid(point: [f32; 2], margin: [f32; 2]) -> [f32; 2] {
 
 fn outline_chrome(outline: &TextOutline, pixel: f32) -> ([f32; 4], f32) {
     let bounds = outline.bounds();
+    if outline.title {
+        // The title's box scales with the page, 5 px from its text at 100% (6 px more to the
+        // left, 2 px less to the right).
+        let inset = 3.75;
+        let (_, paragraph) = outline.layouts().last().unwrap();
+        let bottom = outline.origin()[1] + paragraph.origin[1] + paragraph.text.height();
+        let top = bounds.y0 as f32 - inset;
+        return (
+            [
+                bounds.x0 as f32 - inset - 4.5,
+                top,
+                bounds.x1 as f32 + inset - 1.5,
+                bottom + inset,
+            ],
+            top,
+        );
+    }
     // Native chrome combines page-scaled gutters with a fixed screen inset.
     let inset = 5.0 * pixel;
     let body_top = bounds.y0 as f32 - inset;
-    if outline.title {
-        let (_, paragraph) = outline.layouts().last().unwrap();
-        let bottom = outline.origin()[1] + paragraph.origin[1] + paragraph.text.height();
-        return (
-            [
-                bounds.x0 as f32 - inset - 6.0 * pixel,
-                body_top,
-                bounds.x1 as f32 + inset - 2.0 * pixel,
-                bottom + inset,
-            ],
-            body_top,
-        );
-    }
     // OneNote widens the box leftward to hold the tag column and list markers; text and right
     // edge stay.
     let shaped = outline.shaped();
@@ -1933,11 +2071,13 @@ fn outline_chrome(outline: &TextOutline, pixel: f32) -> ([f32; 4], f32) {
     )
 }
 
+/// `selected` greys the body, as OneNote marks an outline Select All has selected whole.
 fn append_outline_chrome(
     outline: &TextOutline,
     origin: [f32; 2],
     pixel: f32,
     paper: crate::gpu::Paper,
+    selected: bool,
     primitives: &mut Vec<Primitive<'_>>,
 ) {
     let [x, y] = origin;
@@ -1973,6 +2113,14 @@ fn append_outline_chrome(
         stroke: None,
         color: paper.shade(crate::gpu::colorref(0x00e5dee7)),
     });
+    if selected {
+        primitives.push(Primitive::RoundedRect {
+            rect: [left, body_top, right, bottom],
+            radius: [3.0 * pixel; 2],
+            stroke: None,
+            color: paper.shade(crate::gpu::colorref(0x00f0f0f0)),
+        });
+    }
     primitives.push(Primitive::RoundedRect {
         rect: [left, top, right, bottom],
         radius: [3.0 * pixel; 2],
@@ -2008,8 +2156,11 @@ fn append_outline_chrome(
     }
 }
 
+/// `editor` paints its selection and caret in the focused outline; `selected` highlights all
+/// the text of another.
 fn append_outline<'a>(
     editor: Option<&'a CanvasEditor>,
+    selected: bool,
     outline: &'a TextOutline,
     origin: [f32; 2],
     paint: Paint,
@@ -2052,18 +2203,21 @@ fn append_outline<'a>(
             });
         }
     }
-    if let Some(editor) = editor {
-        for rect in editor.selection_rects()? {
-            primitives.push(Primitive::Rect {
-                rect: [
-                    rect.x0 as f32 + x,
-                    rect.y0 as f32 + y,
-                    rect.x1 as f32 + x,
-                    rect.y1 as f32 + y,
-                ],
-                color: colors.selection,
-            });
-        }
+    let highlight = match editor {
+        Some(editor) => editor.selection_rects()?,
+        None if selected => outline.range_rects(outline.whole())?,
+        None => Vec::new(),
+    };
+    for rect in highlight {
+        primitives.push(Primitive::Rect {
+            rect: [
+                rect.x0 as f32 + x,
+                rect.y0 as f32 + y,
+                rect.x1 as f32 + x,
+                rect.y1 as f32 + y,
+            ],
+            color: colors.selection,
+        });
     }
     for (index, paragraph) in outline.shaped().visible(rows) {
         outline.shaped().append_paragraph_primitives(

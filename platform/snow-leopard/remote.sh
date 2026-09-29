@@ -4,6 +4,14 @@
 #   remote.sh run [-C DIR] BINARY [ARGS...]
 #                                    ship to /tmp/snow-leopard, run in DIR (default there),
 #                                    print any new crash log
+#   remote.sh start BINARY [ARGS...] ship and leave running there, output in NAME.log;
+#                                    BINARY may be an .app bundle
+#   remote.sh stop NAME              end what start started (a bundle by its executable)
+#   remote.sh screen LOCAL.png       wake the display and capture it (screencapture
+#                                    writes nothing from ssh)
+#   remote.sh input ARGS...          click X Y | type TEXT | key KEYCODE [command]
+#   remote.sh selectors BINARY       selector-like names BINARY holds that nothing on
+#                                    10.6 implements
 #   remote.sh mirror PATH...         copy repo paths to the same absolute paths there, so
 #                                    test binaries find fixtures by CARGO_MANIFEST_DIR
 #   remote.sh pull REMOTE [LOCAL]    copy a file back (e.g. a screenshot)
@@ -14,6 +22,33 @@ host=${SNOW_LEOPARD_HOST:-osx10.6@10.0.0.1}
 here=$(cd "$(dirname "$0")" && pwd)
 dir=/tmp/snow-leopard
 
+ship() {
+    base=$(basename "$1")
+    if [ -d "$1" ]; then
+        (cd "$(dirname "$1")" && COPYFILE_DISABLE=1 tar czf - --no-mac-metadata --no-xattrs "$base") |
+            ssh "$host" "mkdir -p $dir && rm -rf '$dir/${base:?}' && tar xzf - -C $dir"
+    else
+        ssh "$host" "mkdir -p $dir && cat > $dir/$base && chmod +x $dir/$base" < "$1"
+    fi
+}
+
+# Builds a console/ tool against the 10.6 SDK and ships it.
+tool() {
+    sdk=$here/../../target/snow-leopard/MacOSX10.6.sdk
+    out=$here/../../target/snow-leopard/$1
+    if [ ! "$out" -nt "$here/console/$1.c" ]; then
+        clang -arch x86_64 -isysroot "$sdk" -mmacosx-version-min=10.6 -O2 -Wall \
+            -framework ApplicationServices -framework CoreServices -lobjc \
+            "$here/console/$1.c" -o "$out" 2>&1 | grep -v -e "MH_DYLIB_STUB" -e "no platform load" >&2 || true
+    fi
+    ship "$out"
+}
+
+quote() {
+    quoted=
+    for arg; do quoted="$quoted '$(printf %s "$arg" | sed "s/'/'\\\\''/g")'"; done
+}
+
 case "${1:-}" in
 run)
     shift
@@ -22,9 +57,8 @@ run)
     binary=$1
     shift
     name=$(basename "$binary")
-    ssh "$host" "mkdir -p $dir && cat > $dir/$name && chmod +x $dir/$name" < "$binary"
-    quoted=
-    for arg; do quoted="$quoted '$(printf %s "$arg" | sed "s/'/'\\\\''/g")'"; done
+    ship "$binary"
+    quote "$@"
     # A crash report lands a few seconds after the process dies.
     ssh "$host" "touch $dir/.start && cd '$cwd' && status=0 && $dir/$name$quoted || status=\$?
         if [ \$status -ge 128 ]; then
@@ -34,6 +68,37 @@ run)
             done
         fi
         exit \$status" < /dev/null
+    ;;
+start)
+    shift
+    name=$(basename "$1")
+    program=./$name
+    if [ -d "$1" ]; then
+        name=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$1/Contents/Info.plist")
+        program=./$(basename "$1")/Contents/MacOS/$name
+    fi
+    ship "$1"
+    shift
+    quote "$@"
+    ssh "$host" "cd $dir && (nohup $program$quoted < /dev/null > $name.log 2>&1 &)"
+    ;;
+stop)
+    ssh "$host" "kill \$(ps axo pid,command | awk '{ sub(\".*/\", \"\", \$2) } \$2 == \"$2\" { print \$1 }')"
+    ;;
+screen)
+    tool screen
+    ssh "$host" "$dir/screen $dir/screen.png && cat $dir/screen.png" > "$2"
+    ;;
+input)
+    shift
+    tool input
+    quote "$@"
+    ssh "$host" "$dir/input$quoted"
+    ;;
+selectors)
+    tool selectors
+    strings -a "$2" | grep -E '^[a-z][a-z]+([A-Z][a-z0-9]+)*[A-Z]?[A-Za-z0-9]*(:([A-Za-z][A-Za-z0-9]*:)*)?$' |
+        grep -E '[a-z]{2}[A-Z][a-z]|:$' | sort -u | ssh "$host" "$dir/selectors 2>/dev/null"
     ;;
 mirror)
     shift
@@ -54,7 +119,7 @@ sh)
     ssh "$host" "$@"
     ;;
 *)
-    sed -n '2,12s/^# \{0,1\}//p' "$0" >&2
+    sed -n '2,20s/^# \{0,1\}//p' "$0" >&2
     exit 2
     ;;
 esac

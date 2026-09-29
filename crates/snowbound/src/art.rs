@@ -46,41 +46,22 @@ pub const UNDO: &[&str] = art!("icons/undo");
 pub const ZOOM_IN: &[&str] = art!("icons/zoom-in");
 pub const ZOOM_OUT: &[&str] = art!("icons/zoom-out");
 
-// The toolbar layout's new buttons (resources/toolbar-spec.md); each loses its `expect`
-// when its button lands.
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const BACK: &[&str] = art!("icons/back");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const COPY: &[&str] = art!("icons/copy");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const CUT: &[&str] = art!("icons/cut");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const DATE_TIME: &[&str] = art!("icons/date-time");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const FIND_TAGS: &[&str] = art!("icons/find-tags");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const FORMAT_PAINTER: &[&str] = art!("icons/format-painter");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const FORWARD: &[&str] = art!("icons/forward");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const FULL_PAGE_VIEW: &[&str] = art!("icons/full-page-view");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const INSERT_SPACE: &[&str] = art!("icons/insert-space");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const PAGE_COLOR: &[&str] = art!("icons/page-color");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const PASTE: &[&str] = art!("icons/paste");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const RECORD_AUDIO: &[&str] = art!("icons/record-audio");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const RECORD_VIDEO: &[&str] = art!("icons/record-video");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const RULE_LINES: &[&str] = art!("icons/rule-lines");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const SCREEN_CLIPPING: &[&str] = art!("icons/screen-clipping");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const SPELLING: &[&str] = art!("icons/spelling");
-#[expect(dead_code, reason = "Its toolbar button has not landed")]
 pub const SYMBOL: &[&str] = art!("icons/symbol");
 
 pub const TAG_REMEMBER: &[&str] = art!("tags/remember");

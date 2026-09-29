@@ -231,6 +231,30 @@ pub enum TagIcon {
     Other,
 }
 
+impl TagIcon {
+    /// How the page draws tag symbol `shape`, `checked` where it is a check box; none for
+    /// shape 0, which marks the text instead.
+    pub fn of(shape: u16, checked: bool) -> Option<Self> {
+        Some(match shape {
+            0 => return None,
+            // OneNote's check boxes, plain and with a person, arrow, number or bulb.
+            3 | 8 | 12 | 28 | 71 | 94 | 95 => Self::CheckBox { checked },
+            13 => Self::Star,
+            15 => Self::Question,
+            17 => Self::Exclamation,
+            18 => Self::Phone,
+            23 => Self::Address,
+            118 => Self::Contact,
+            136 => Self::Highlight,
+            100 => Self::RedSquare,
+            101 => Self::YellowSquare,
+            102 => Self::BlueSquare,
+            121 => Self::Music,
+            _ => Self::Other,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphTag {
     pub icon: TagIcon,
@@ -823,25 +847,12 @@ impl ParagraphLayout {
             let (tag, shape, label) = (tag.0, tag.1, tag.2);
             let icon = match shape {
                 None => TagIcon::Flag,
-                Some(Some(0) | None) => continue,
-                Some(Some(3)) => TagIcon::CheckBox {
-                    checked: tag.status & 1 != 0,
+                Some(shape) => match TagIcon::of(shape.unwrap_or(0), tag.status & 1 != 0) {
+                    Some(icon) => icon,
+                    None => continue,
                 },
-                Some(Some(13)) => TagIcon::Star,
-                Some(Some(15)) => TagIcon::Question,
-                Some(Some(17)) => TagIcon::Exclamation,
-                Some(Some(18)) => TagIcon::Phone,
-                Some(Some(23)) => TagIcon::Address,
-                Some(Some(118)) => TagIcon::Contact,
-                Some(Some(136)) => TagIcon::Highlight,
-                Some(Some(100)) => TagIcon::RedSquare,
-                Some(Some(101)) => TagIcon::YellowSquare,
-                Some(Some(102)) => TagIcon::BlueSquare,
-                Some(Some(121)) => TagIcon::Music,
-                // A symbol without artwork here shows as a plain tag.
-                Some(_) => TagIcon::Other,
             };
-            let size = format.font_size.unwrap_or(11.0);
+            let size = format.font_size.unwrap_or(crate::layout::DEFAULT_FONT_SIZE);
             let side = ParagraphTag::side(size);
             tags.push(ParagraphTag {
                 icon,

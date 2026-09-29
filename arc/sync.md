@@ -163,6 +163,9 @@ last listing lets it open while the server is unreachable, and a section opens
 from its replica. On reconnect the queue publishes, or rebases and publishes,
 through the same path as always. A failed directory read keeps the previous
 catalog, so an unreachable share never looks like an emptied notebook.
+Working offline on purpose, as OneNote's Work Offline does, is the same state
+chosen: the sync thread stops stepping until Sync Now or until the user works
+online again.
 
 ## Notebook structure
 

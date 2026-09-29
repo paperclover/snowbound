@@ -77,6 +77,14 @@ pub struct Selection {
     pub affinities: [Affinity; 2],
 }
 
+/// What OneNote 2010's Ctrl+A selects beyond text: the focused outline as an object, then every
+/// body outline on the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Whole {
+    Outline,
+    Page,
+}
+
 impl From<[TextPosition; 2]> for Selection {
     fn from(positions: [TextPosition; 2]) -> Self {
         Self {
@@ -105,6 +113,9 @@ pub struct CanvasEditor {
     /// since, which `refresh` compares a changed stored page with; none once the editor
     /// holds an edit that could not be stored.
     stored: Option<(Page, Vec<PageOp>)>,
+    /// What Select All widened to, holding until the selection is moved or set, and while the
+    /// focused outline and its selection stay as they were then.
+    whole: Option<(Whole, ExGuid, Selection)>,
 }
 
 /// Imported page state the editable content does not carry.
@@ -433,6 +444,25 @@ impl TextOutline {
             .join("\n")
     }
 
+    /// All the outline's shown text.
+    pub fn whole(&self) -> Selection {
+        let paragraph = self.source_index(self.shaped.paragraphs.len() - 1);
+        let last = self.document.paragraph(paragraph).unwrap();
+        [
+            TextPosition {
+                paragraph: 0,
+                offset: 0,
+            },
+            TextPosition {
+                paragraph,
+                offset: last
+                    .utf16_offset(last.text().len())
+                    .expect("paragraph text fits UTF-16 offsets"),
+            },
+        ]
+        .into()
+    }
+
     /// Highlight rectangles of `selection` in the outline, in its coordinates.
     pub fn range_rects(&self, selection: Selection) -> Result<Vec<BoundingBox>, EditError> {
         let [anchor, focus] = selection.positions;
@@ -712,6 +742,7 @@ struct Placement {
     position: [Option<f32>; 2],
 }
 
+#[derive(Clone)]
 enum RestoreFocus {
     Outline(ExGuid),
     Caret {
@@ -766,6 +797,8 @@ enum History {
         selection: Selection,
         focus: RestoreFocus,
     },
+    /// One undo step of edits to OneNote's page selection, undone last first.
+    Group(Vec<History>),
 }
 
 impl CanvasEditor {
@@ -800,6 +833,7 @@ impl CanvasEditor {
             pending: None,
             ops: Ok(Vec::new()),
             stored: None,
+            whole: None,
         })
     }
 
@@ -983,7 +1017,7 @@ impl CanvasEditor {
         }
         // Undoing an outline's creation focuses the outline focused before, if it is there.
         let gone = |focus: &RestoreFocus| matches!(focus, RestoreFocus::Outline(id) if !fresh.outlines.iter().any(|o| o.id == *id));
-        let reaches = |history: &History| match history {
+        let reaches_one = |history: &History| match history {
             History::Date(_) => date_changed,
             History::Image { .. } | History::Picture { .. } => objects_changed,
             History::Draft { outlines, .. } => changed.contains(&outlines[0].id),
@@ -1000,6 +1034,11 @@ impl CanvasEditor {
             History::Remove { outline, focus } => changed.contains(outline) || gone(focus),
             History::Insert { outline, focus, .. } => changed.contains(&outline.id) || gone(focus),
             History::Restore { source, focus, .. } => changed.contains(&source.id) || gone(focus),
+            History::Group(_) => unreachable!("groups do not nest"),
+        };
+        let reaches = |history: &History| match history {
+            History::Group(entries) => entries.iter().any(reaches_one),
+            history => reaches_one(history),
         };
         fresh.undo = std::mem::take(&mut self.undo)
             .into_iter()
@@ -1347,6 +1386,7 @@ impl CanvasEditor {
             pending: None,
             ops: Ok(Vec::new()),
             stored: None,
+            whole: None,
         })
     }
 
@@ -2000,33 +2040,24 @@ impl CanvasEditor {
         }
         self.finish_composition();
         self.preferred_x = None;
+        self.whole = None;
         self.active_outline_mut().selection = selection;
         Ok(())
     }
 
     pub fn select_all(&mut self) -> Result<(), EditError> {
-        let paragraph = self
-            .active_outline()
-            .source_index(self.active_outline().shaped.paragraphs.len() - 1);
-        let last = self.active_outline().document.paragraph(paragraph).unwrap();
-        self.select(
-            [
-                TextPosition {
-                    paragraph: 0,
-                    offset: 0,
-                },
-                TextPosition {
-                    paragraph,
-                    offset: last.utf16_offset(last.text().len())?,
-                },
-            ]
-            .into(),
-        )
+        self.select(self.active_outline().whole())
     }
 
     /// Selects the smallest unit strictly holding the selection, as OneNote 2010's Ctrl+A widens
-    /// it: the paragraph, its subtree, each enclosing table cell, row and table, then the outline.
+    /// it: the paragraph, its subtree, each enclosing table cell, row and table, then a body
+    /// outline as an object (the title's text instead), then every body outline on the page.
     pub fn widen_selection(&mut self) -> Result<(), EditError> {
+        match self.whole() {
+            Some(Whole::Page) => return Ok(()),
+            Some(Whole::Outline) => return self.select_page(),
+            None => {}
+        }
         let outline = self.active_outline();
         let [anchor, focus] = outline.selection.positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
@@ -2055,17 +2086,138 @@ impl CanvasEditor {
                     .into_iter()
                     .map(|range| (first(range.start), last_shown(range))),
             )
-            .chain([(
-                first(0),
-                last_shown(0..outline.document.paragraphs().count()),
-            )]);
-        match units
+            .chain(outline.title.then(|| {
+                (
+                    first(0),
+                    last_shown(0..outline.document.paragraphs().count()),
+                )
+            }))
             .filter_map(|(unit_start, unit_end)| Some([unit_start, unit_end?]))
-            .find(|&unit| unit[0] <= start && end <= unit[1] && unit != [start, end])
-        {
+            .find(|&unit| unit[0] <= start && end <= unit[1] && unit != [start, end]);
+        let (id, title) = (outline.id, outline.title);
+        match units {
             Some(unit) => self.select(unit.into()),
-            None => Ok(()),
+            None if title => self.select_page(),
+            None => self.select_outline(id),
         }
+    }
+
+    /// Selects outline `id` as an object, as a click on its handle does.
+    pub fn select_outline(&mut self, id: ExGuid) -> Result<(), EditError> {
+        self.focus_outline(id)?;
+        let whole = self.active_outline().whole();
+        self.select(whole)?;
+        self.whole = Some((Whole::Outline, id, whole));
+        Ok(())
+    }
+
+    /// What Select All has selected beyond text, if the selection is still what it chose.
+    pub fn whole(&self) -> Option<Whole> {
+        let (whole, id, selection) = self.whole?;
+        let outline = self.active_outline();
+        (outline.id == id && outline.selection == selection && self.composition.is_none())
+            .then_some(whole)
+    }
+
+    fn page_selected(&self) -> bool {
+        self.whole() == Some(Whole::Page)
+    }
+
+    /// Selects every body outline, focusing the last in page order as OneNote does: arrows
+    /// leave the selection at its ends, and typing replaces its text.
+    fn select_page(&mut self) -> Result<(), EditError> {
+        let Some(last) = self.outlines.iter().rev().find(|outline| !outline.title) else {
+            return Ok(());
+        };
+        let (id, whole) = (last.id, last.whole());
+        self.focus_outline(id)?;
+        self.select(whole)?;
+        self.whole = Some((Whole::Page, id, whole));
+        Ok(())
+    }
+
+    /// Runs `edit` as one undo step.
+    fn grouped<T>(
+        &mut self,
+        edit: impl FnOnce(&mut Self) -> Result<T, EditorError>,
+    ) -> Result<T, EditorError> {
+        let depth = self.undo.len();
+        let result = edit(self);
+        let entries = self.undo.split_off(depth);
+        if !entries.is_empty() {
+            self.undo.push(History::Group(entries));
+        }
+        result
+    }
+
+    /// Removes the page selection's outlines, last first, but its last when `keep`, whose
+    /// text stays selected to be replaced. Deleting the page selection leaves a caret where
+    /// its first outline began, as OneNote 2010's does.
+    fn remove_page(&mut self, engine: &mut TextEngine, keep: bool) -> Result<(), EditorError> {
+        self.finish_composition();
+        self.whole = None;
+        let mut body = (0..self.outlines.len())
+            .filter(|&index| !self.outlines[index].title)
+            .collect::<Vec<_>>();
+        let Some(&first) = body.first() else {
+            return Ok(());
+        };
+        let kept = if keep { body.pop() } else { None };
+        let caret = TextOutline::new(
+            engine,
+            TextDocument::new(vec![Paragraph::new(String::new(), Default::default())])?,
+            DEFAULT_OUTLINE_WIDTH,
+            self.outlines[first].origin(),
+        )?;
+        let index = self.outlines.len() - body.len();
+        let focus = RestoreFocus::Caret {
+            source: Box::new(caret.snapshot()),
+            selection: caret.selection,
+            index,
+        };
+        for &removed in body.iter().rev() {
+            let outline = self.outlines.remove(removed);
+            self.record(Ok(vec![PageOp::Delete { object: outline.id }]));
+            self.undo.push(History::Insert {
+                index: removed,
+                outline: Box::new(outline),
+                focus: focus.clone(),
+            });
+        }
+        self.redo.clear();
+        self.preferred_x = None;
+        match kept {
+            Some(kept) => {
+                self.active = Focus::Outline(kept - body.len());
+                self.select_all()?;
+            }
+            None => {
+                self.active = Focus::Caret {
+                    outline: Box::new(caret),
+                    index,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves every outline of the page selection by `delta`, as one undo step keeping it.
+    pub fn move_page(&mut self, delta: [f32; 2]) -> Result<(), EditorError> {
+        let moves = self
+            .outlines
+            .iter()
+            .filter(|outline| !outline.title)
+            .map(|outline| {
+                let [x, y] = outline.origin();
+                (outline.id, [x + delta[0], y + delta[1]])
+            })
+            .collect::<Vec<_>>();
+        self.grouped(|editor| {
+            for (id, position) in moves {
+                editor.move_outline(id, position)?;
+            }
+            Ok(editor.select_page()?)
+        })
     }
 
     pub fn select_at(&mut self, x: f32, y: f32, extend: bool) -> Result<(), EditError> {
@@ -2145,6 +2297,7 @@ impl CanvasEditor {
         extend: bool,
     ) -> Result<(), EditorError> {
         self.finish_composition();
+        self.whole = None;
         if !extend && movement == Movement::Right && self.leave_equation()? {
             return Ok(());
         }
@@ -2614,6 +2767,12 @@ impl CanvasEditor {
 
     /// Types `text` at the selection; a space ends a typed URL, which becomes a link.
     pub fn insert(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
+        if self.page_selected() {
+            return self.grouped(|editor| {
+                editor.remove_page(engine, true)?;
+                editor.insert(engine, text)
+            });
+        }
         self.leave_link_code()?;
         let start = self.active_outline().selection.positions[0]
             .min(self.active_outline().selection.positions[1]);
@@ -2640,6 +2799,12 @@ impl CanvasEditor {
         text: &str,
         language: u32,
     ) -> Result<(), EditorError> {
+        if self.page_selected() {
+            return self.grouped(|editor| {
+                editor.remove_page(engine, true)?;
+                editor.paste(engine, text, language)
+            });
+        }
         let lines = text
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line))
@@ -2888,6 +3053,10 @@ impl CanvasEditor {
     /// properties win; Delete at its end joins the paragraph below (`evidence/structural-edits/
     /// xml/c4-*`, `c5b-*`). Joins pass over a collapsed paragraph's hidden children.
     pub fn delete(&mut self, engine: &mut TextEngine, backward: bool) -> Result<bool, EditorError> {
+        if self.page_selected() {
+            self.grouped(|editor| editor.remove_page(engine, false))?;
+            return Ok(true);
+        }
         let selection = self.active_outline().selection;
         let [anchor, focus] = selection.positions;
         let mut range = anchor.min(focus)..anchor.max(focus);
@@ -2975,6 +3144,9 @@ impl CanvasEditor {
         engine: &mut TextEngine,
         movement: Movement,
     ) -> Result<bool, EditorError> {
+        if self.page_selected() {
+            return self.delete(engine, false);
+        }
         self.finish_composition();
         let original = self.selection();
         let preferred_x = self.preferred_x;
@@ -3040,7 +3212,12 @@ impl CanvasEditor {
         };
         match self.apply_history(engine, history) {
             Ok(inverse) => {
+                let group = matches!(inverse, History::Group(_));
                 self.redo.push(inverse);
+                // Undoing an edit to the page selection selects the page again.
+                if group {
+                    self.select_page()?;
+                }
                 Ok(true)
             }
             Err((history, error)) => {
@@ -3113,6 +3290,7 @@ impl CanvasEditor {
             History::Insert { index, .. } | History::Restore { index, .. } => {
                 *index <= self.outlines.len()
             }
+            History::Group(_) => true,
         };
         if !valid {
             return Err((history, EditError::InvalidRange.into()));
@@ -3376,6 +3554,19 @@ impl CanvasEditor {
                 self.active = Focus::Outline(index);
                 History::Remove { outline: id, focus }
             }
+            History::Group(mut entries) => {
+                let mut inverses = Vec::with_capacity(entries.len());
+                while let Some(entry) = entries.pop() {
+                    match self.apply_history(engine, entry) {
+                        Ok(inverse) => inverses.push(inverse),
+                        Err((entry, error)) => {
+                            entries.push(entry);
+                            return Err((History::Group(entries), error));
+                        }
+                    }
+                }
+                History::Group(inverses)
+            }
         };
         self.preferred_x = None;
         Ok(inverse)
@@ -3395,6 +3586,9 @@ impl CanvasEditor {
     ) -> Result<(), EditorError> {
         if selected.start > selected.end {
             return Err(EditError::InvalidRange.into());
+        }
+        if self.page_selected() {
+            self.grouped(|editor| editor.remove_page(engine, true))?;
         }
         let range = self.marked_range().unwrap_or_else(|| {
             self.active_outline().selection.positions[0]

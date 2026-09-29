@@ -102,6 +102,10 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
+/// What a run without a font or size of its own is laid out in.
+pub const DEFAULT_FONT: &str = "Arial";
+pub const DEFAULT_FONT_SIZE: f32 = 11.0;
+
 /// Metric-compatible faces for the fonts OneNote pages use most, under the SIL Open Font
 /// Licence files beside them, by the family each stands in for.
 const BUNDLED: [(&str, &[&[u8]]); 4] = [
@@ -283,7 +287,7 @@ impl TextEngine {
         for (index, span) in paragraph.spans().iter().enumerate() {
             let format = &span.format;
             let link = format.hyperlink == Some(true);
-            let size = format.font_size.unwrap_or(11.0);
+            let size = format.font_size.unwrap_or(DEFAULT_FONT_SIZE);
             if !size.is_finite() || size <= 0.0 {
                 return Err(LayoutError::InvalidFontSize);
             }
@@ -303,7 +307,7 @@ impl TextEngine {
                 StyleProperty::FontFamily(FontFamily::List(
                     [
                         Some(FontFamilyName::named(
-                            format.font.as_deref().unwrap_or("Arial"),
+                            format.font.as_deref().unwrap_or(DEFAULT_FONT),
                         )),
                         // macOS ships STIX Two Math where Windows has Cambria Math.
                         (format.font.as_deref() == Some("Cambria Math"))

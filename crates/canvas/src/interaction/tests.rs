@@ -1,9 +1,11 @@
 use super::*;
-use crate::document::TextDocument;
+use crate::document::{TextDocument, TextPosition};
+use crate::editor::Toggle;
 use crate::gpu::painted_layout;
 use onestore::document::Format;
 use onestore::page::Page;
 use onestore::page::text::Paragraph;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 const COLORS: TextColors = TextColors {
@@ -143,6 +145,11 @@ fn title_chrome_selects_text_and_exposes_a_named_editable_field() {
     assert_eq!(editor.active_outline().bounds().width(), 162.0);
     assert_eq!(editor.active_outline().snapshot().min_width, Some(162.0));
     let (native_rect, _) = outline_chrome(editor.active_outline(), 0.75);
+    // Unlike a body outline's, the title's box scales with zoom (OneNote 2010 at 200%).
+    assert_eq!(
+        outline_chrome(editor.active_outline(), 0.375).0,
+        native_rect
+    );
     for (axis, (actual, expected)) in native_rect
         .iter()
         .zip([85.0, 98.0, 315.0, 134.0])
@@ -621,7 +628,7 @@ fn chrome_follows_focus_hover_and_drag_without_changing_hit_geometry() {
     assert_eq!(borders(None).len(), 1);
     let hovered = borders(Some(PointerFeedback::Hover(second)));
     assert_eq!(hovered.len(), 2);
-    let moved = borders(Some(PointerFeedback::Move(second, [240.0, 50.0])));
+    let moved = borders(Some(PointerFeedback::Move(second, [20.0, 50.0])));
     assert_eq!(moved[1][0] - hovered[1][0], 20.0);
     assert_eq!(moved[1][1] - hovered[1][1], 50.0);
     assert!(
@@ -868,6 +875,7 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
     let mut primitives = Vec::new();
     append_outline(
         Some(&editor),
+        false,
         editor.active_outline(),
         [24.0, 48.0],
         Paint {
@@ -941,6 +949,7 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
     let mut primitives = Vec::new();
     append_outline(
         Some(&editor),
+        false,
         editor.active_outline(),
         [24.0, 48.0],
         Paint {
@@ -2064,4 +2073,355 @@ fn an_empty_preedit_without_a_composition_changes_nothing() {
     assert!(view.compose("k".into(), Some((1, 1))).unwrap().changed);
     assert!(view.compose(String::new(), None).unwrap().changed);
     assert!(view.editor.marked_range().is_none());
+}
+
+/// The lab's page: a title, then outlines placed in the order Alpha, Beta, Gamma, Delta, with
+/// Delta highest on the page, drawn at 1 point per pixel.
+fn page_selection_view() -> (PageView, [onestore::ExGuid; 4]) {
+    let mut engine = TextEngine::default();
+    let outline = |engine: &mut TextEngine, text: &str, origin| {
+        let paragraphs = text
+            .split('\n')
+            .map(|line| Paragraph::new(line.into(), Default::default()))
+            .collect();
+        TextOutline::new(
+            engine,
+            TextDocument::new(paragraphs).unwrap(),
+            240.0,
+            origin,
+        )
+        .unwrap()
+        .snapshot()
+    };
+    let mut title = outline(&mut engine, "Multi", [0.0; 2]);
+    title.title = true;
+    let body = [
+        ("Alpha one\nAlpha two", [36.0, 90.0]),
+        ("Beta", [300.0, 180.0]),
+        ("Gamma long line of text", [90.0, 300.0]),
+        ("Delta", [380.0, 72.0]),
+    ]
+    .map(|(text, origin)| outline(&mut engine, text, origin));
+    let ids = body.each_ref().map(|outline| outline.id);
+    let page = Page {
+        title: "Multi".into(),
+        identity: None,
+        created: None,
+        margin_origin: [36.0, 14.4],
+        color: None,
+        definitions: Default::default(),
+        objects: std::iter::once(onestore::page::PageObject::Title(onestore::page::Title {
+            id: onestore::page::text::new_id().unwrap(),
+            date: None,
+            layout: Default::default(),
+            outlines: vec![title],
+        }))
+        .chain(body.map(onestore::page::PageObject::Outline))
+        .collect(),
+    };
+    let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        Some((scene, [0.0; 2])),
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    view.viewport.scale = 1.0;
+    view.viewport.origin = [0.0; 2];
+    (view, ids)
+}
+
+const START: TextPosition = TextPosition {
+    paragraph: 0,
+    offset: 0,
+};
+
+fn select_page(view: &mut PageView, from: onestore::ExGuid) {
+    view.editor.focus_outline(from).unwrap();
+    view.editor.select([START; 2].into()).unwrap();
+    while view.editor.whole() != Some(Whole::Page) {
+        let _ = view.widen_selection().unwrap();
+    }
+}
+
+fn origins(view: &PageView) -> Vec<[f32; 2]> {
+    let body = view
+        .editor
+        .outlines()
+        .iter()
+        .filter(|outline| !outline.title);
+    body.map(TextOutline::origin).collect()
+}
+
+/// As OneNote 2010 widens Ctrl+A past an outline (lab, 2026-09-28): a body outline's
+/// paragraph, the outline as an object, then every body outline, focusing the last.
+#[test]
+fn select_all_widens_from_an_outline_to_the_page() {
+    let (mut view, [alpha, beta, _, delta]) = page_selection_view();
+    let levels = |view: &mut PageView, from| {
+        view.editor.focus_outline(from).unwrap();
+        view.editor.select([START; 2].into()).unwrap();
+        (0..4)
+            .map(|_| {
+                let _ = view.widen_selection().unwrap();
+                (view.editor.whole(), view.editor.active_outline().id)
+            })
+            .collect::<Vec<_>>()
+    };
+    let page = (Some(Whole::Page), delta);
+    for from in [alpha, beta] {
+        assert_eq!(
+            levels(&mut view, from),
+            [(None, from), (Some(Whole::Outline), from), page, page]
+        );
+    }
+    // The title has no object level: its text, then the page.
+    let title = view.editor.outlines()[0].id;
+    assert_eq!(levels(&mut view, title), [(None, title), page, page, page]);
+    // The selection it chose ends with any other; an arrow leaves the caret at its start.
+    let _ = view.key(&Key::Named(NamedKey::ArrowLeft), None).unwrap();
+    assert_eq!(view.editor.whole(), None);
+    assert_eq!(view.editor.active_outline().id, delta);
+    assert_eq!(view.editor.selection().positions, [START; 2]);
+}
+
+/// Each outline Select All holds shows its frame and a grey body, its text highlighted.
+#[test]
+fn a_page_selection_frames_and_greys_every_body_outline() {
+    let (mut view, [alpha, ..]) = page_selection_view();
+    let grey = crate::gpu::colorref(0x00f0f0f0);
+    let paint = |view: &PageView| {
+        let primitives = view.primitives(COLORS).unwrap();
+        let count =
+            |wanted: &dyn Fn(&Primitive) -> bool| primitives.iter().filter(|p| wanted(p)).count();
+        (
+            count(
+                &|p| matches!(p, Primitive::RoundedRect { color, stroke: None, .. } if *color == grey),
+            ),
+            count(&|p| matches!(p, Primitive::Rect { color, .. } if *color == COLORS.selection)),
+        )
+    };
+    view.editor.focus_outline(alpha).unwrap();
+    assert_eq!(paint(&view).0, 0);
+    let _ = view.widen_selection().unwrap();
+    let _ = view.widen_selection().unwrap();
+    let (greyed, alpha) = paint(&view);
+    assert_eq!(greyed, 1);
+    let _ = view.widen_selection().unwrap();
+    // One line each of the others besides Alpha's.
+    assert_eq!(paint(&view), (4, alpha + 3));
+}
+
+/// Keys on the page selection (lab): arrows up and down and Tab leave it, Enter and Right
+/// put the caret at the last outline's end, Delete and Backspace remove every outline and
+/// leave the caret where the first began, and typing replaces them all with the last outline
+/// holding the text. Each edit stores as one edit and undoes in one step to the selection.
+#[test]
+fn keys_act_on_the_page_selection_as_onenote_does() {
+    let (mut view, [alpha, beta, gamma, delta]) = page_selection_view();
+    let end = TextPosition {
+        paragraph: 0,
+        offset: 5,
+    };
+    for key in [
+        NamedKey::ArrowUp,
+        NamedKey::ArrowDown,
+        NamedKey::Tab,
+        NamedKey::Enter,
+    ] {
+        select_page(&mut view, beta);
+        let _ = view.key(&Key::Named(key), None).unwrap();
+        let kept = key != NamedKey::Enter;
+        assert_eq!(view.editor.whole() == Some(Whole::Page), kept, "{key:?}");
+        if !kept {
+            assert_eq!(view.editor.selection().positions, [end; 2]);
+        }
+    }
+    assert_eq!(view.editor.take_ops().unwrap(), []);
+
+    let stored = origins(&view);
+    for key in [NamedKey::Delete, NamedKey::Backspace] {
+        select_page(&mut view, gamma);
+        let _ = view.key(&Key::Named(key), None).unwrap();
+        assert!(view.editor.outlines().iter().all(|outline| outline.title));
+        assert_eq!(
+            view.editor.caret_outline().map(TextOutline::origin),
+            Some(stored[0])
+        );
+        let ops = view.editor.take_ops().unwrap();
+        let deleted = ops.iter().filter_map(|op| match op {
+            onestore::op::PageOp::Delete { object } => Some(*object),
+            _ => None,
+        });
+        assert_eq!(
+            deleted.collect::<BTreeSet<_>>(),
+            BTreeSet::from([alpha, beta, gamma, delta])
+        );
+        assert_eq!(ops.len(), 4);
+        let _ = view.undo(false).unwrap();
+        assert_eq!(origins(&view), stored);
+        assert_eq!(view.editor.whole(), Some(Whole::Page));
+        view.editor.take_ops().unwrap();
+    }
+
+    select_page(&mut view, alpha);
+    let _ = view.key(&Key::Character("Z".into()), Some("Z")).unwrap();
+    let left = view
+        .editor
+        .outlines()
+        .iter()
+        .filter(|outline| !outline.title);
+    assert_eq!(
+        left.map(|outline| (outline.id, outline.shown_text()))
+            .collect::<Vec<_>>(),
+        [(delta, "Z".to_owned())]
+    );
+    let _ = view.undo(false).unwrap();
+    assert_eq!(origins(&view), stored);
+    assert_eq!(view.editor.whole(), Some(Whole::Page));
+    assert_eq!(view.editor.active_outline().shown_text(), "Delta");
+}
+
+/// Copy takes the outlines top to bottom with a blank line between, as OneNote's plain text
+/// does; Cut removes them as Delete does.
+#[test]
+fn copy_and_cut_take_the_page_selection() {
+    let (mut view, [alpha, ..]) = page_selection_view();
+    select_page(&mut view, alpha);
+    let copied = Some(Request::Copy(
+        "Delta\n\nAlpha one\nAlpha two\n\nBeta\n\nGamma long line of text".into(),
+    ));
+    assert_eq!(view.copy(false).unwrap().request, copied);
+    assert_eq!(view.editor.whole(), Some(Whole::Page));
+    assert_eq!(view.copy(true).unwrap().request, copied);
+    assert!(view.editor.outlines().iter().all(|outline| outline.title));
+    assert!(view.editor.caret_outline().is_some());
+}
+
+/// Dragging any selected outline's handle moves them all by one snapped offset, stored as one
+/// edit and undone in one step; a click on a handle selects that outline alone.
+#[test]
+fn a_dragged_page_selection_moves_every_outline() {
+    let (mut view, [alpha, beta, ..]) = page_selection_view();
+    let stored = origins(&view);
+    select_page(&mut view, alpha);
+    let now = Instant::now();
+    let bounds = view
+        .editor
+        .outlines()
+        .iter()
+        .find(|outline| outline.id == beta)
+        .unwrap()
+        .bounds();
+    let header = [(bounds.x0 + bounds.x1) as f32 / 2.0, bounds.y0 as f32 - 8.0];
+    let _ = view.pointer_moved(header).unwrap();
+    let _ = view.pointer_pressed(now).unwrap();
+    assert_eq!(view.editor.whole(), Some(Whole::Page));
+    let _ = view
+        .pointer_moved([header[0] + 30.0, header[1] + 40.0])
+        .unwrap();
+    // Every selected outline follows the drag while it lasts.
+    let dragged = view.primitives(COLORS).unwrap().len();
+    assert!(dragged > 0);
+    let _ = view.pointer_released().unwrap();
+    // Beta lands on the grid, 18 pt cells from the margin origin, and the rest follow.
+    let moved = origins(&view);
+    assert_eq!(moved[1], [324.0, 212.4]);
+    for (before, after) in stored.iter().zip(&moved) {
+        for axis in 0..2 {
+            let delta = moved[1][axis] - stored[1][axis];
+            assert!((after[axis] - before[axis] - delta).abs() < 1e-3);
+        }
+    }
+    assert_eq!(view.editor.whole(), Some(Whole::Page));
+    assert_eq!(view.editor.take_ops().unwrap().len(), 4);
+    let _ = view.undo(false).unwrap();
+    assert_eq!(origins(&view), stored);
+
+    // Option-Command-arrows nudge the whole selection.
+    let _ = view
+        .modifiers_changed(Modifiers {
+            command: true,
+            option: true,
+            ..Modifiers::default()
+        })
+        .unwrap();
+    let _ = view.key(&Key::Named(NamedKey::ArrowRight), None).unwrap();
+    let _ = view.modifiers_changed(Modifiers::default()).unwrap();
+    assert!(
+        origins(&view)
+            .iter()
+            .zip(&stored)
+            .all(|(after, before)| *after == [before[0] + 1.0, before[1]])
+    );
+
+    let _ = view.pointer_moved(header).unwrap();
+    let _ = view.pointer_pressed(now + Duration::from_secs(1)).unwrap();
+    let _ = view.pointer_released().unwrap();
+    assert_eq!(view.editor.whole(), Some(Whole::Outline));
+    assert_eq!(view.editor.active_outline().id, beta);
+}
+
+/// A toggle on the page selection turns on everywhere unless every outline has it, as one
+/// undo step that keeps the selection.
+#[test]
+fn formatting_the_page_selection_settles_on_one_state() {
+    let (mut view, [alpha, beta, ..]) = page_selection_view();
+    let bold = |view: &mut PageView| {
+        let ids = view
+            .editor
+            .outlines()
+            .iter()
+            .filter(|outline| !outline.title)
+            .map(|outline| outline.id)
+            .collect::<Vec<_>>();
+        let focus = view.editor.active_outline().id;
+        let selection = view.editor.selection();
+        let whole = view.editor.whole();
+        let states = ids
+            .into_iter()
+            .map(|id| {
+                view.editor.focus_outline(id).unwrap();
+                view.editor.select_all().unwrap();
+                view.editor
+                    .format_state()
+                    .unwrap()
+                    .toggles
+                    .contains(&Toggle::Bold)
+            })
+            .collect::<Vec<_>>();
+        if whole == Some(Whole::Page) {
+            select_page(view, focus);
+        } else {
+            view.editor.focus_outline(focus).unwrap();
+            view.editor.select(selection).unwrap();
+        }
+        states
+    };
+    view.editor.focus_outline(beta).unwrap();
+    view.editor.select_all().unwrap();
+    let _ = view.format(Formatting::Toggle(Toggle::Bold)).unwrap();
+    assert_eq!(bold(&mut view), [false, true, false, false]);
+    select_page(&mut view, alpha);
+    let _ = view.format(Formatting::Toggle(Toggle::Bold)).unwrap();
+    assert_eq!(view.editor.whole(), Some(Whole::Page));
+    assert_eq!(bold(&mut view), [true; 4]);
+    let _ = view.format(Formatting::Toggle(Toggle::Bold)).unwrap();
+    assert_eq!(bold(&mut view), [false; 4]);
+    let _ = view.undo(false).unwrap();
+    assert_eq!(bold(&mut view), [true; 4]);
+    assert_eq!(view.editor.whole(), Some(Whole::Page));
+}
+
+/// Selecting the last outline's text again by other means selects only that text.
+#[test]
+fn the_page_selection_does_not_return_with_its_text_selection() {
+    let (mut view, [alpha, ..]) = page_selection_view();
+    select_page(&mut view, alpha);
+    let whole = view.editor.selection();
+    let _ = view.key(&Key::Named(NamedKey::ArrowRight), None).unwrap();
+    view.editor.select(whole).unwrap();
+    assert_eq!(view.editor.whole(), None);
 }

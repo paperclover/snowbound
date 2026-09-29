@@ -25,6 +25,7 @@ pub enum Id {
     Cut,
     Copy,
     Paste,
+    FormatPainter,
     SelectAll,
     Find,
     Search,
@@ -36,14 +37,21 @@ pub enum Id {
     Sidebar,
     PageList,
     DarkPages,
+    FullPageView,
+    PageColor,
     Table,
     Picture,
+    ScreenClipping,
     Attachment,
     Link,
+    InsertSpace,
     Equation,
+    Symbol,
     Date,
     Time,
     DateTime,
+    RecordAudio,
+    RecordVideo,
     Toggle(Toggle),
     Highlight,
     FontColor,
@@ -69,6 +77,10 @@ pub enum Choice {
     /// A COLORREF, or `None` for automatic.
     Color(Option<u32>),
     List(Option<ListStyle>),
+    /// An empty table of rows by columns.
+    Table([usize; 2]),
+    /// An index into `PAGE_COLORS`, or `None` for no colour.
+    PageColor(Option<usize>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -161,6 +173,9 @@ macro_rules! tag {
     ($tag:expr, $digit:literal) => {
         row!(Id::Tag($tag), $tag.label(), &[cmd($digit)], &[cmd($digit)])
     };
+    ($tag:expr) => {
+        row!(Id::Tag($tag), $tag.label(), NONE, NONE)
+    };
 }
 
 const NONE: &[Chord] = &[];
@@ -206,6 +221,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Cut, "Cut", &[cmd('x')], &[cmd('x')]),
     row!(Id::Copy, "Copy", &[cmd('c')], &[cmd('c')]),
     row!(Id::Paste, "Paste", &[cmd('v')], &[cmd('v')]),
+    row!(Id::FormatPainter, "Format Painter", NONE, NONE),
     row!(Id::SelectAll, "Select All", &[cmd('a')], &[cmd('a')]),
     row!(Id::Find, "Find on This Page", &[cmd('f')], &[cmd('f')]),
     row!(Id::Search, "Search Notebooks", &[cmd('e')], &[cmd('e')]),
@@ -239,16 +255,27 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Sidebar, "Sidebar", &[cmd('s').control()], NONE),
     row!(Id::PageList, "Page List", NONE, NONE),
     row!(Id::DarkPages, "Dark Pages", NONE, NONE),
+    // AppKit's Enter Full Screen takes Control-Command-F.
+    row!(
+        Id::FullPageView,
+        "Full Page View",
+        NONE,
+        &[named(NamedKey::F11)]
+    ),
+    row!(Id::PageColor, "Page Color", NONE, NONE),
     row!(Id::Table, "Table", NONE, NONE),
     row!(Id::Picture, "Picture…", NONE, NONE),
+    row!(Id::ScreenClipping, "Screen Clipping", NONE, NONE),
     row!(Id::Attachment, "Attach File…", NONE, NONE),
     row!(Id::Link, "Link…", &[cmd('k')], &[cmd('k')]),
+    row!(Id::InsertSpace, "Insert Space", NONE, NONE),
     row!(
         Id::Equation,
         "Equation",
         &[key('=').control()],
         &[key('=').option()],
     ),
+    row!(Id::Symbol, "Symbol", NONE, NONE),
     row!(Id::Date, "Date", NONE, &[key('d').option().shift()]),
     row!(Id::Time, "Time", NONE, &[key('t').option().shift()]),
     row!(
@@ -257,6 +284,8 @@ pub const COMMANDS: &[Command] = &[
         NONE,
         &[key('f').option().shift()]
     ),
+    row!(Id::RecordAudio, "Record Audio", NONE, NONE),
+    row!(Id::RecordVideo, "Record Video", NONE, NONE),
     row!(Id::Toggle(Toggle::Bold), "Bold", &[cmd('b')], &[cmd('b')]),
     row!(
         Id::Toggle(Toggle::Italic),
@@ -338,6 +367,26 @@ pub const COMMANDS: &[Command] = &[
     tag!(NoteTag::Contact, '7'),
     tag!(NoteTag::Address, '8'),
     tag!(NoteTag::PhoneNumber, '9'),
+    tag!(NoteTag::WebSiteToVisit),
+    tag!(NoteTag::Idea),
+    tag!(NoteTag::Password),
+    tag!(NoteTag::Critical),
+    tag!(NoteTag::ProjectA),
+    tag!(NoteTag::ProjectB),
+    tag!(NoteTag::MovieToSee),
+    tag!(NoteTag::BookToRead),
+    tag!(NoteTag::MusicToListenTo),
+    tag!(NoteTag::SourceForArticle),
+    tag!(NoteTag::RememberForBlog),
+    tag!(NoteTag::DiscussWithPersonA),
+    tag!(NoteTag::DiscussWithPersonB),
+    tag!(NoteTag::DiscussWithManager),
+    tag!(NoteTag::SendInEmail),
+    tag!(NoteTag::ScheduleMeeting),
+    tag!(NoteTag::CallBack),
+    tag!(NoteTag::ToDoPriority1),
+    tag!(NoteTag::ToDoPriority2),
+    tag!(NoteTag::ClientRequest),
     row!(
         Id::RemoveTags,
         "Remove Tag",
@@ -393,7 +442,9 @@ pub fn title(choice: Choice) -> String {
             .iter()
             .find(|(listed, _)| *listed == color)
             .map_or_else(String::new, |(_, name)| (*name).to_owned()),
-        Choice::Color(_) | Choice::List(_) => unreachable!("Only the toolbar offers these"),
+        Choice::Color(_) | Choice::List(_) | Choice::Table(_) | Choice::PageColor(_) => {
+            unreachable!("Only the toolbar offers these")
+        }
     }
 }
 
@@ -574,6 +625,8 @@ impl State {
             Choice::Font(name) => return checked(format.font.as_ref() == Some(name)),
             Choice::Size(size) => return checked(format.font_size == Some(*size)),
             Choice::Highlight(_) | Choice::Color(_) | Choice::List(_) => return enabled(text),
+            Choice::Table(_) => Id::Table,
+            Choice::PageColor(_) => Id::PageColor,
         };
         match id {
             Id::Settings | Id::NewNotebook | Id::OpenNotebook | Id::Help => enabled(!modal),
@@ -595,6 +648,10 @@ impl State {
                         checked: session.shown_history == Some(session.space),
                     })
             }
+            Id::FullPageView => Status {
+                enabled: !welcome && !modal,
+                checked: self.full_page,
+            },
             Id::Undo => enabled(writable && !field && self.view.editor.can_undo()),
             Id::Redo => enabled(writable && !field && self.view.editor.can_redo()),
             Id::Cut => enabled(writable && selected),
@@ -616,8 +673,18 @@ impl State {
                 enabled: !modal,
                 checked: !self.light_pages,
             },
-            Id::Table | Id::Picture | Id::Attachment => enabled(false),
-            Id::Link
+            Id::FormatPainter => Status {
+                enabled: text,
+                checked: self.painter.is_some(),
+            },
+            Id::PageColor => enabled(writable && session.is_some()),
+            Id::ScreenClipping => enabled(text && cfg!(target_os = "macos")),
+            // Attach File awaits #23, Record Audio and Video #36, and Insert Space a drag mode.
+            Id::Attachment | Id::RecordAudio | Id::RecordVideo | Id::InsertSpace => enabled(false),
+            Id::Table
+            | Id::Picture
+            | Id::Symbol
+            | Id::Link
             | Id::Equation
             | Id::Date
             | Id::Time
@@ -638,7 +705,7 @@ impl State {
 
     /// Applies `formatting`, remembering its font, colour or list style as the toolbar's
     /// last pick.
-    fn format(&mut self, formatting: Formatting) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn format(&mut self, formatting: Formatting) -> Result<(), Box<dyn Error>> {
         let kept = self.toolbar.clone();
         let pens = &mut self.toolbar;
         match &formatting {
@@ -657,6 +724,26 @@ impl State {
             self.save_settings();
         }
         let response = self.view.format(formatting)?;
+        self.respond(response);
+        Ok(())
+    }
+
+    /// Puts an encoded picture after the caret's paragraph at its size on a 96 dpi screen,
+    /// as OneNote 2010 inserts one.
+    pub(crate) fn insert_picture(&mut self, bytes: Vec<u8>) -> Result<(), Box<dyn Error>> {
+        let pixels = match draw::RasterImage::measure(&bytes) {
+            Ok(pixels) => pixels,
+            Err(_) => {
+                platform::alert(
+                    "Couldn't insert the picture",
+                    "Choose a PNG, JPEG or GIF picture.",
+                );
+                return Ok(());
+            }
+        };
+        let response = self
+            .view
+            .insert_picture(bytes, pixels.map(|side| side as f32 * 0.75))?;
         self.respond(response);
         Ok(())
     }
@@ -682,6 +769,15 @@ impl State {
             Choice::Highlight(color) => return format(self, Formatting::Highlight(color)),
             Choice::Color(color) => return format(self, Formatting::Color(color)),
             Choice::List(style) => return format(self, Formatting::List(style)),
+            Choice::Table([rows, columns]) => {
+                let response = self.view.insert_table(rows, columns)?;
+                self.respond(response);
+                return Ok(());
+            }
+            Choice::PageColor(color) => {
+                let color = color.map(|index| canvas::template::PAGE_COLORS[index].1);
+                return self.color_page(color);
+            }
         };
         let field = self.ui.focused().filter(|focus| *focus != page());
         let response = match id {
@@ -740,6 +836,13 @@ impl State {
                 return Ok(());
             }
             Id::Paste => Work::Page(Request::Paste),
+            Id::FormatPainter => {
+                self.painter = match self.painter {
+                    Some(_) => None,
+                    None => Some(self.view.editor.painted_format()?),
+                };
+                return Ok(());
+            }
             Id::SelectAll => {
                 match field {
                     Some(field) => self.ui.focus_all(field),
@@ -779,13 +882,44 @@ impl State {
                 self.pages_open = !self.pages_open;
                 return Ok(());
             }
+            Id::FullPageView => {
+                self.full_page = !self.full_page;
+                return Ok(());
+            }
+            // The menu bar and keys open the toolbar's gallery.
+            Id::Table | Id::PageColor => {
+                let name = if id == Id::Table {
+                    "table"
+                } else {
+                    "page color"
+                };
+                self.ui.open_popup(crate::toolbar_popup(name));
+                return Ok(());
+            }
+            Id::Picture => {
+                let Some(path) = platform::pick_picture() else {
+                    return Ok(());
+                };
+                return self.insert_picture(std::fs::read(path)?);
+            }
+            Id::ScreenClipping => {
+                #[cfg(target_os = "macos")]
+                platform::clip_screen(self.proxy.clone());
+                return Ok(());
+            }
+            Id::Symbol => {
+                platform::character_palette();
+                return Ok(());
+            }
             Id::DarkPages => {
                 self.light_pages = !self.light_pages;
                 self.follow_color_scheme();
                 self.save_settings();
                 return Ok(());
             }
-            Id::Table | Id::Picture | Id::Attachment => return Ok(()),
+            Id::Attachment | Id::RecordAudio | Id::RecordVideo | Id::InsertSpace => {
+                return Ok(());
+            }
             Id::Link => {
                 self.open_link_dialog();
                 return Ok(());

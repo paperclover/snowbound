@@ -193,7 +193,6 @@ impl State {
                 }],
             },
         )?;
-        session.status = "Saving";
         session.pages = session.section.pages()?;
         self.edited(vec![space]);
         self.refresh()

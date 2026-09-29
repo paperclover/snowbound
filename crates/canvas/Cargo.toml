@@ -34,6 +34,7 @@ name = "page-probe"
 path = "src/bin/page_probe.rs"
 
 [dev-dependencies]
+draw = { path = "../draw", features = ["wgpu"] }
 accesskit_consumer = "0.39.0"
 pollster = "0.4"
 wgpu.workspace = true

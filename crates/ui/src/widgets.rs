@@ -348,6 +348,7 @@ pub fn edit_key(key: &Key) -> edit::Key {
             NamedKey::End => Edit::End,
             NamedKey::PageUp => Edit::PageUp,
             NamedKey::PageDown => Edit::PageDown,
+            NamedKey::F11 => Edit::F11,
             NamedKey::Alt
             | NamedKey::AltGraph
             | NamedKey::Control

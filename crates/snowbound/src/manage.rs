@@ -116,7 +116,6 @@ impl State {
                 ops,
             },
         )?;
-        session.status = "Saving";
         self.title_focus = Some(space);
         self.commands.push(Command::OpenPage(space));
         Ok(())
@@ -130,11 +129,26 @@ impl State {
     ) -> Result<(), Box<dyn Error>> {
         self.persist()?;
         let session = self.session.as_ref().ok_or("No section is open")?;
-        let space = session.space;
-        let ops = template_ops(&session.section.page(space)?, choice)?;
+        let ops = template_ops(&session.section.page(session.space)?, choice)?;
+        self.edit_page(ops)
+    }
+
+    /// View, Page Color: gives the open page `color`, a COLORREF, or none; its art stays.
+    pub(crate) fn color_page(&mut self, color: Option<u32>) -> Result<(), Box<dyn Error>> {
+        if self.view.editor.page_color() == color {
+            return Ok(());
+        }
+        self.persist()?;
+        self.edit_page(vec![PageOp::Color(color)])
+    }
+
+    /// Applies `ops` to the open page as one edit and shows the result.
+    fn edit_page(&mut self, ops: Vec<PageOp>) -> Result<(), Box<dyn Error>> {
         if ops.is_empty() {
             return Ok(());
         }
+        let session = self.session.as_ref().ok_or("No section is open")?;
+        let space = session.space;
         session.section.apply(
             &self.author,
             Edit {
@@ -410,7 +424,6 @@ impl State {
                 ops: vec![Op::Section(SectionOp::Pages(edits))],
             },
         )?;
-        session.status = "Saving";
         session.pages = session.section.pages()?;
         Ok(())
     }
