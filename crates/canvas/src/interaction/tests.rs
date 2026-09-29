@@ -52,6 +52,7 @@ fn date_buttons_keep_accessibility_identity_and_match_mouse_hits_after_reflow() 
         created: Some(1),
         margin_origin: [36.0, 14.4],
         color: None,
+        rule_lines: None,
         definitions: Default::default(),
         objects: vec![onestore::page::PageObject::Title(onestore::page::Title {
             id: onestore::ExGuid::default(),
@@ -584,6 +585,7 @@ fn extension_hits_yield_to_objects_and_keep_their_source_coordinate_frame() {
         created: None,
         margin_origin: [0.0; 2],
         color: None,
+        rule_lines: None,
         definitions: Default::default(),
         objects: vec![onestore::page::PageObject::Outline(source)],
     };
@@ -707,6 +709,7 @@ fn a_picture_in_an_outline_takes_the_click_over_its_text() {
             created: None,
             margin_origin: [36.0, 14.4],
             color: None,
+            rule_lines: None,
             definitions: Default::default(),
             objects: vec![PageObject::Outline(source)],
         },
@@ -1219,6 +1222,7 @@ fn overlapping_objects_follow_paint_order_through_creation_movement_and_undo() {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: Default::default(),
             objects,
         };
@@ -1416,6 +1420,7 @@ fn read_only_focus_retires_text_overlays_and_draws_a_scaled_focus_border() {
         title: String::new(),
         margin_origin: [0.0; 2],
         color: None,
+        rule_lines: None,
         definitions: Default::default(),
         objects: vec![PageObject::Unsupported(Unsupported {
             id: Default::default(),
@@ -1531,6 +1536,7 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
             created: None,
             margin_origin: [36.0, 14.4],
             color: None,
+            rule_lines: None,
             definitions: Default::default(),
             objects: vec![PageObject::Outline(source)],
         },
@@ -1568,6 +1574,7 @@ fn a_page_outline_emptied_by_backspace_still_draws() {
         created: None,
         margin_origin: [36.0, 14.4],
         color: None,
+        rule_lines: None,
         definitions: Default::default(),
         objects,
     };
@@ -2018,6 +2025,7 @@ fn page_keys_scroll_or_carry_the_caret_as_the_platform_does() {
             created: None,
             margin_origin: [36.0, 14.4],
             color: None,
+            rule_lines: None,
             definitions: Default::default(),
             objects: vec![onestore::page::PageObject::Outline(outline.snapshot())],
         },
@@ -2109,6 +2117,7 @@ fn page_selection_view() -> (PageView, [onestore::ExGuid; 4]) {
         created: None,
         margin_origin: [36.0, 14.4],
         color: None,
+        rule_lines: None,
         definitions: Default::default(),
         objects: std::iter::once(onestore::page::PageObject::Title(onestore::page::Title {
             id: onestore::page::text::new_id().unwrap(),
@@ -2424,4 +2433,195 @@ fn the_page_selection_does_not_return_with_its_text_selection() {
     let _ = view.key(&Key::Named(NamedKey::ArrowRight), None).unwrap();
     view.editor.select(whole).unwrap();
     assert_eq!(view.editor.whole(), None);
+}
+
+#[test]
+fn pinch_zooms_about_the_pointer_within_range() {
+    let mut engine = TextEngine::default();
+    let editor = CanvasEditor::new(
+        &mut engine,
+        TextDocument::new(vec![Paragraph::new("text".into(), Format::default())]).unwrap(),
+        240.0,
+    )
+    .unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        None,
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    // The host's own scrolling leaves the anchor unclamped, as iOS's does.
+    view.host_viewport = true;
+    let pointer = [300.0, 200.0];
+    let _ = view.pointer_moved(pointer).unwrap();
+    let under = view.viewport.document_point(pointer);
+    let zoom = view.zoom();
+    assert!(view.pinch(1.5).unwrap().moved);
+    assert!((view.zoom() / zoom - 1.5).abs() < 1e-5);
+    let after = view.viewport.document_point(pointer);
+    assert!((after[0] - under[0]).abs() < 1e-3 && (after[1] - under[1]).abs() < 1e-3);
+    let _ = view.pinch(100.0).unwrap();
+    assert!((view.zoom() - 4.0).abs() < 1e-5);
+}
+
+fn texts(view: &PageView) -> Vec<(String, [f32; 2])> {
+    view.editor
+        .outlines()
+        .iter()
+        .filter(|outline| !outline.title)
+        .map(|outline| (outline.shown_text(), outline.origin()))
+        .collect()
+}
+
+/// Drags Insert Space from `from` to `to`, view points at 1:1.
+fn insert_space(view: &mut PageView, from: [f32; 2], to: [f32; 2]) {
+    let _ = view.insert_space();
+    let _ = view.pointer_moved(from).unwrap();
+    let _ = view.pointer_pressed(Instant::now()).unwrap();
+    let _ = view.pointer_moved(to).unwrap();
+    let _ = view.pointer_released().unwrap();
+}
+
+/// As OneNote 2010's Insert Space (lab, 2026-09-29): what starts at or below the line moves
+/// by the drag, an outline it crosses parts between paragraphs into a new outline below, the
+/// title stays, and one undo step puts everything back.
+#[test]
+fn insert_space_moves_what_lies_below_and_parts_a_crossed_outline() {
+    let (mut view, [alpha, ..]) = page_selection_view();
+    let stored = texts(&view);
+    let title = view.editor.outlines()[0].origin();
+    let alpha_outline = view
+        .editor
+        .outlines()
+        .iter()
+        .find(|o| o.id == alpha)
+        .unwrap();
+    let second = alpha_outline.origin()[1] + alpha_outline.shaped().paragraphs[1].origin[1];
+    let _ = view.insert_space();
+    let _ = view.pointer_moved([400.0, second]).unwrap();
+    assert!(view.inserting_space());
+    assert_eq!(view.cursor(), Cursor::RowResize);
+    let _ = view.pointer_pressed(Instant::now()).unwrap();
+    let _ = view.pointer_moved([400.0, second + 50.0]).unwrap();
+    // Nothing moves until the drag ends; its lines, arrow and landing tints show.
+    assert_eq!(texts(&view), stored);
+    assert!(view.primitives(COLORS).is_ok());
+    let _ = view.pointer_released().unwrap();
+    assert!(!view.inserting_space());
+    let moved = texts(&view);
+    let expected: Vec<(String, [f32; 2])> = vec![
+        ("Alpha one".into(), stored[0].1),
+        ("Alpha two".into(), [stored[0].1[0], second + 50.0]),
+        ("Beta".into(), [300.0, 230.0]),
+        ("Gamma long line of text".into(), [90.0, 350.0]),
+        ("Delta".into(), [380.0, 72.0]),
+    ];
+    assert_eq!(moved, expected);
+    assert_eq!(view.editor.outlines()[0].origin(), title);
+    assert!(!view.editor.take_ops().unwrap().is_empty());
+    let _ = view.undo(false).unwrap();
+    assert_eq!(texts(&view), stored);
+    assert_eq!(view.editor.whole(), None);
+    let _ = view.undo(true).unwrap();
+    assert_eq!(texts(&view), expected);
+}
+
+/// Within half an inch of the view's side the line runs down the page and moves what starts
+/// right of it; taking space back stops at the end of what stays before the line.
+#[test]
+fn insert_space_runs_down_the_page_near_its_side_and_takes_back_only_space() {
+    let (mut view, _) = page_selection_view();
+    let stored = texts(&view);
+    let _ = view.insert_space();
+    let _ = view.pointer_moved([20.0, 200.0]).unwrap();
+    assert_eq!(view.cursor(), Cursor::ColResize);
+    let _ = view.pointer_moved([790.0, 200.0]).unwrap();
+    assert_eq!(view.cursor(), Cursor::ColResize);
+    insert_space(&mut view, [20.0, 200.0], [60.0, 200.0]);
+    let right: Vec<_> = stored
+        .iter()
+        .map(|(text, [x, y])| (text.clone(), [x + 40.0, *y]))
+        .collect();
+    assert_eq!(texts(&view), right);
+    let _ = view.undo(false).unwrap();
+    // Undo scrolls to what it restores; the drags below are in page points.
+    view.viewport.origin = [0.0; 2];
+
+    // Beta ends at its line's bottom; Gamma, below the line at 250, comes up to it and no
+    // further.
+    let beta = view.editor.outlines()[2].bounds().y1 as f32;
+    insert_space(&mut view, [400.0, 250.0], [400.0, 20.0]);
+    let gamma = texts(&view)[2].1[1];
+    assert!((gamma - (300.0 - (250.0 - beta))).abs() < 1e-3, "{gamma}");
+    // A line with something stationary across it cannot take space back.
+    let _ = view.undo(false).unwrap();
+    view.viewport.origin = [0.0; 2];
+    insert_space(&mut view, [400.0, 185.0], [400.0, 20.0]);
+    assert_eq!(texts(&view), stored);
+}
+
+#[test]
+fn escape_cancels_insert_space() {
+    let (mut view, _) = page_selection_view();
+    let stored = texts(&view);
+    let _ = view.editor.take_ops().unwrap();
+    let _ = view.insert_space();
+    let _ = view.pointer_moved([400.0, 150.0]).unwrap();
+    let _ = view.key(&Key::Named(NamedKey::Escape), None).unwrap();
+    assert!(!view.inserting_space());
+    let _ = view.insert_space();
+    let _ = view.pointer_pressed(Instant::now()).unwrap();
+    let _ = view.pointer_moved([400.0, 250.0]).unwrap();
+    let _ = view.key(&Key::Named(NamedKey::Escape), None).unwrap();
+    let _ = view.pointer_released().unwrap();
+    assert!(!view.inserting_space());
+    assert_eq!(texts(&view), stored);
+    assert!(view.editor.take_ops().unwrap().is_empty());
+}
+
+/// Rule lines draw as OneNote 2010 draws them: horizontal lines from the margin origin
+/// down, a margin line 1/96 inch left of it, and grid lines through it either way.
+#[test]
+fn rule_lines_start_at_the_margin_origin() {
+    // Each line's axis and the centre across it, to a hundredth of a point.
+    let lines = |lines| {
+        super::rule_primitives(
+            Some(lines),
+            [36.0, 14.4],
+            [0.0, 0.0, 100.0, 100.0],
+            0.5,
+            Paper::WHITE,
+        )
+        .into_iter()
+        .map(|primitive| match primitive {
+            Primitive::Rect {
+                rect: [x0, y0, x1, y1],
+                ..
+            } => {
+                let vertical = y1 - y0 > x1 - x0;
+                let center = if vertical { x0 + x1 } else { y0 + y1 } / 2.0;
+                (vertical, (center * 100.0).round() / 100.0)
+            }
+            _ => panic!("rule lines are rectangles"),
+        })
+        .collect::<Vec<_>>()
+    };
+    let [(_, standard), (_, small)] = [
+        crate::template::RULE_LINES[2],
+        crate::template::RULE_LINES[4],
+    ];
+    assert_eq!(
+        lines(standard),
+        [(false, 14.4), (false, 47.52), (false, 80.64), (true, 35.25)]
+    );
+    let vertical: Vec<f32> = lines(small)
+        .into_iter()
+        .filter_map(|(vertical, at)| vertical.then_some(at))
+        .collect();
+    assert_eq!(
+        vertical,
+        [0.0, 12.0, 24.0, 36.0, 48.0, 60.0, 72.0, 84.0, 96.0]
+    );
 }

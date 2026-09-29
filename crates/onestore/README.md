@@ -46,7 +46,7 @@ harness also accepts `--client-profile release`.
 | `Page::copy` | The page's content under fresh identities for copying into another section, definitions and payloads included; indent levels only an outline group carries refuse |
 | `page::link::internal_link`, `page::link::parse_internal_link` | Build and read the `onenote:#…` URLs OneNote stores for links to sections, pages and paragraphs, by identity |
 | `page::Recording`, `page::MediaIndex` | A recording attachment's identity and type, and a paragraph's link to a moment in recordings; read from native pages and kept through edits, never authored |
-| `page::Page`, `page::Paragraph`, `page::Ink`, `page::Math` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments, ink drawings and handwriting decoded to stroke polylines in page points) with stored identities; equations parse from their linear text and run data into a tree that renders the MathML OneNote exports; content outside the model is retained as `Unsupported` |
+| `page::Page`, `page::Paragraph`, `page::Ink`, `page::Math` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments, ink drawings and handwriting decoded to stroke polylines in page points, a moved drawing offset by its position) with stored identities; equations parse from their linear text and run data into a tree that renders the MathML OneNote exports; content outside the model is retained as `Unsupported` |
 | `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `PageCreation`, `SectionOp::Create` | Add an empty top-level page and its section entry atomically, under identities the intent retains across retries |
@@ -91,7 +91,8 @@ text, as OneNote titles a new page; `keeping(identity, created)` keeps another p
 identity and creation time, as a page moved to the recycle bin keeps them. The page has
 no body outlines or applied template; `create_empty_section` makes a section for such
 pages, and `PageOp::Color` sets or clears a page's colour (`0x14001d2a` on the page node,
-absent for "No color").
+absent for "No color"), and `PageOp::RuleLines` its rule lines (six properties on the page
+node, absent for None; [rule-lines](../../corpus/rule-lines/README.md)).
 Retain the intent to preserve its page, title and space identities; existing
 identities require reconciliation before retry. Body insertion and title edits
 use those identities through page ops. [Native page-creation fixtures](../../corpus/page-lifecycle/creation/README.md)

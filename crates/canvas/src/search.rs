@@ -6,6 +6,7 @@ use crate::document::TextPosition;
 use crate::editor::{CanvasEditor, Selection};
 use icu_normalizer::DecomposingNormalizerBorrowed;
 use onestore::ExGuid;
+use onestore::document::Kind;
 use onestore::page::{Page, PageObject, PageParagraph, ParagraphContent, text::Paragraph};
 use std::ops::Range;
 
@@ -176,30 +177,94 @@ pub fn shown(paragraph: &Paragraph) -> String {
         .collect()
 }
 
-/// A page's text outside its title, a paragraph to a line: outlines in page order, tables
+/// Calls `visit` with each text paragraph of the page's outlines, in page order, tables
 /// cell by cell.
-pub fn page_text(page: &Page) -> String {
-    fn walk(paragraphs: &[PageParagraph], out: &mut Vec<String>) {
+fn text_paragraphs<'a>(page: &'a Page, mut visit: impl FnMut(&'a PageParagraph, &'a Paragraph)) {
+    fn walk<'a>(
+        paragraphs: &'a [PageParagraph],
+        visit: &mut impl FnMut(&'a PageParagraph, &'a Paragraph),
+    ) {
         for paragraph in paragraphs {
             match &paragraph.content {
-                ParagraphContent::Text(text) => out.push(shown(&text.text)),
+                ParagraphContent::Text(text) => visit(paragraph, &text.text),
                 ParagraphContent::Table(table) => {
                     for cell in table.rows.iter().flat_map(|row| &row.cells) {
-                        walk(&cell.paragraphs, out);
+                        walk(&cell.paragraphs, visit);
                     }
                 }
                 _ => {}
             }
         }
     }
-    let mut out = Vec::new();
     for object in &page.objects {
         if let PageObject::Outline(outline) = object {
-            walk(&outline.paragraphs, &mut out);
+            walk(&outline.paragraphs, &mut visit);
         }
     }
+}
+
+/// A page's text outside its title, a paragraph to a line.
+pub fn page_text(page: &Page) -> String {
+    let mut out = Vec::new();
+    text_paragraphs(page, |_, text| out.push(shown(text)));
     out.retain(|line| !line.trim().is_empty());
     out.join("\n")
+}
+
+/// A tagged paragraph, as OneNote's Tags Summary lists it: once for each of its tags.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tagged {
+    pub section: String,
+    pub space: ExGuid,
+    /// The page's title.
+    pub title: String,
+    pub paragraph: ExGuid,
+    /// The tag's name, as its definition stores it.
+    pub name: String,
+    /// The tag's symbol, as its definition stores it.
+    pub shape: u16,
+    /// A check box tag is checked.
+    pub checked: bool,
+    pub text: String,
+    /// When the tag was applied, in Time32, or the page's modification time where unknown.
+    pub created: u64,
+}
+
+/// The page's tagged paragraphs, oldest tag first on each, as OneNote lists them; a tag
+/// without a definition, as an Outlook task's, is left out.
+fn tagged(section: &str, space: ExGuid, page: &Page, modified: u64) -> Vec<Tagged> {
+    let mut out = Vec::new();
+    text_paragraphs(page, |paragraph, text| {
+        let ParagraphContent::Text(object) = &paragraph.content else {
+            return;
+        };
+        // Stored newest first.
+        for tag in paragraph.tags.iter().chain(&object.tags).rev() {
+            let Some(Kind::TagDefinition {
+                label: Some(name),
+                shape,
+                ..
+            }) = tag
+                .definition
+                .and_then(|id| page.definitions.get(&id))
+                .map(|definition| &definition.kind)
+            else {
+                continue;
+            };
+            out.push(Tagged {
+                section: section.to_owned(),
+                space,
+                title: page.title.clone(),
+                paragraph: paragraph.id,
+                name: name.to_string(),
+                shape: shape.unwrap_or(0),
+                checked: tag.status & 1 != 0,
+                text: shown(text),
+                created: tag.created.map_or(modified, u64::from),
+            });
+        }
+    });
+    out
 }
 
 /// A page as search knows it.
@@ -213,6 +278,7 @@ pub struct Entry {
     text: String,
     folded_title: String,
     folded_text: String,
+    tagged: Vec<Tagged>,
 }
 
 impl Entry {
@@ -227,6 +293,7 @@ impl Entry {
             title: page.title.clone(),
             modified,
             text,
+            tagged: tagged(section, space, page, modified),
         }
     }
 }
@@ -237,6 +304,9 @@ pub struct Found {
     pub section: String,
     pub space: ExGuid,
     pub title: String,
+    pub modified: u64,
+    /// The page's place in the index, which keeps each section's pages in order.
+    pub order: usize,
     /// Every word is in the title, as OneNote's "Title contains" lists it.
     pub in_title: bool,
     /// Byte ranges of the title the words match.
@@ -259,6 +329,11 @@ impl Index {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Every page, each section's in order.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
     }
 
     /// Adds `entry`, replacing the page it names.
@@ -291,35 +366,48 @@ impl Index {
         if query.is_empty() {
             return Vec::new();
         }
-        let mut found: Vec<(&Entry, bool)> = self
+        let mut found: Vec<(usize, &Entry, bool)> = self
             .entries
             .iter()
-            .filter(|entry| scope(&entry.section))
-            .filter_map(|entry| {
+            .enumerate()
+            .filter(|(_, entry)| scope(&entry.section))
+            .filter_map(|(order, entry)| {
                 let in_title = query.all_in(&entry.folded_title);
                 let matches = in_title
                     || query.terms.iter().all(|term| {
                         starts_word(term, &entry.folded_title)
                             || starts_word(term, &entry.folded_text)
                     });
-                matches.then_some((entry, in_title))
+                matches.then_some((order, entry, in_title))
             })
             .collect();
-        found.sort_by_key(|(entry, in_title)| (!in_title, std::cmp::Reverse(entry.modified)));
+        found.sort_by_key(|(_, entry, in_title)| (!in_title, std::cmp::Reverse(entry.modified)));
         found
             .into_iter()
-            .map(|(entry, in_title)| {
+            .map(|(order, entry, in_title)| {
                 let (snippet, snippet_hits) = snippet(entry, query);
                 Found {
                     section: entry.section.clone(),
                     space: entry.space,
                     title: entry.title.clone(),
+                    modified: entry.modified,
+                    order,
                     in_title,
                     title_hits: query.find(&entry.title),
                     snippet,
                     snippet_hits,
                 }
             })
+            .collect()
+    }
+
+    /// The tagged paragraphs of the pages whose section and page `scope` accepts, in page
+    /// order.
+    pub fn tagged(&self, scope: impl Fn(&Entry) -> bool) -> Vec<Tagged> {
+        self.entries
+            .iter()
+            .filter(|entry| scope(entry))
+            .flat_map(|entry| entry.tagged.iter().cloned())
             .collect()
     }
 }
@@ -427,4 +515,19 @@ pub fn page_matches(editor: &CanvasEditor, query: &Query) -> Vec<PageMatch> {
         }
     }
     matches
+}
+
+/// The whole of paragraph `id` on the page `editor` shows, as a tag summary selects it.
+pub fn paragraph_match(editor: &CanvasEditor, id: ExGuid) -> Option<PageMatch> {
+    editor.outlines().iter().find_map(|outline| {
+        let document = outline.document();
+        let index = document.text_nodes().position(|node| node.id == id)?;
+        let paragraph = document.paragraph(index)?;
+        let end = paragraph.utf16_offset(paragraph.text().len()).ok()?;
+        let at = |offset| TextPosition {
+            paragraph: index,
+            offset,
+        };
+        Some((outline.id, [at(0), at(end)].into()))
+    })
 }

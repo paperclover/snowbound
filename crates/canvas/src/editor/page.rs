@@ -76,9 +76,9 @@ impl Content {
         match self {
             Self::Outline { source, .. } => Some((source.id, &mut source.layout)),
             Self::Image(source) => Some((source.id, &mut source.layout)),
+            Self::Ink(source) => Some((source.id, &mut source.layout)),
             Self::ReadOnly(object) => Some((object.source.id(), object.source.layout_mut())),
-            // Strokes carry their own page coordinates, so a layout move would not move them.
-            Self::Date { .. } | Self::Ink(_) | Self::Editable(_) => None,
+            Self::Date { .. } | Self::Editable(_) => None,
         }
     }
 }
@@ -357,8 +357,19 @@ pub(crate) fn build(
     })
 }
 
-/// The painted extent of every stroke, pen included, as `[x0, y0, x1, y1]` page points.
+/// The painted extent of a page's ink drawing, pen included, as `[x0, y0, x1, y1]` page
+/// points.
 pub(crate) fn ink_bounds(ink: &Ink) -> Option<[f32; 4]> {
+    let [x, y] = ink_offset(ink);
+    stroke_bounds(ink).map(|[x0, y0, x1, y1]| [x0 + x, y0 + y, x1 + x, y1 + y])
+}
+
+pub(crate) fn ink_offset(ink: &Ink) -> [f32; 2] {
+    [ink.layout.x.unwrap_or(0.0), ink.layout.y.unwrap_or(0.0)]
+}
+
+/// The painted extent of every stroke before the drawing's offset.
+fn stroke_bounds(ink: &Ink) -> Option<[f32; 4]> {
     ink.strokes
         .iter()
         .flat_map(|stroke| {
@@ -368,7 +379,7 @@ pub(crate) fn ink_bounds(ink: &Ink) -> Option<[f32; 4]> {
                 .iter()
                 .map(move |[x, y]| [x - r, y - r, x + r, y + r])
         })
-        .chain(ink.groups.iter().filter_map(ink_bounds))
+        .chain(ink.groups.iter().filter_map(stroke_bounds))
         .reduce(|a, b| {
             [
                 a[0].min(b[0]),

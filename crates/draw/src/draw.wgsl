@@ -5,6 +5,8 @@ struct Vertex {
     @location(2) local: vec2<f32>,
     @location(3) @interpolate(flat) shape: vec4<f32>,
     @location(4) @interpolate(flat) stroke: f32,
+    @location(5) clip_local: vec2<f32>,
+    @location(6) @interpolate(flat) clip: vec3<f32>,
 }
 
 @group(0) @binding(0) var atlas: texture_2d<f32>;
@@ -13,8 +15,9 @@ struct Vertex {
 @vertex
 fn vertex(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>,
           @location(2) color: vec4<f32>, @location(3) local: vec2<f32>,
-          @location(4) shape: vec4<f32>, @location(5) stroke: f32) -> Vertex {
-    return Vertex(vec4<f32>(position, 0.0, 1.0), uv, color, local, shape, stroke);
+          @location(4) shape: vec4<f32>, @location(5) stroke: f32,
+          @location(6) clip_local: vec2<f32>, @location(7) clip: vec3<f32>) -> Vertex {
+    return Vertex(vec4<f32>(position, 0.0, 1.0), uv, color, local, shape, stroke, clip_local, clip);
 }
 
 fn ellipse_arc(angle: f32, radius: vec2<f32>) -> f32 {
@@ -82,6 +85,11 @@ fn fragment(input: Vertex) -> @location(0) vec4<f32> {
             coverage *= clamp(width + 0.5 - abs(phase - 2.0 * width), 0.0, 1.0);
         }
         color *= coverage;
+    }
+    if input.clip.x > 0.0 {
+        let q = abs(input.clip_local) - input.clip.xy + input.clip.z;
+        let distance = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - input.clip.z;
+        color *= clamp(0.5 - distance, 0.0, 1.0);
     }
     return color;
 }

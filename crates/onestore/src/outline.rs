@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum OutlineEdit {
-    /// Moves an ordinary page outline to coordinates measured in points.
+    /// Moves an ordinary page outline to coordinates measured in points, or offsets a page's
+    /// ink drawing from its strokes' coordinates by that much, as OneNote 2010 moves one.
     /// Refreshes automatic page titles when the leading outline changes.
     Position { x: f32, y: f32 },
     /// Changes an ordinary outline's maximum width in points, at least 36.
@@ -63,7 +64,17 @@ impl OutlineEdit {
                     return Err(invalid("Select a paragraph for its saved expansion state"));
                 }
             }
-            _ => {
+            Self::Position { .. } => {
+                if !matches!(node.kind, Kind::Outline { .. } | Kind::Ink { .. })
+                    || parents.get(&object).map(Vec::as_slice) != Some(pages.as_slice())
+                    || !view.nodes[page].children.contains(&object)
+                {
+                    return Err(invalid(
+                        "Select an ordinary outline or ink drawing directly on the page",
+                    ));
+                }
+            }
+            Self::Width { .. } => {
                 if !matches!(node.kind, Kind::Outline { .. })
                     || parents.get(&object).map(Vec::as_slice) != Some(pages.as_slice())
                     || !view.nodes[page].children.contains(&object)

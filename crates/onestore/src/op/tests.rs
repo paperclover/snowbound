@@ -8,7 +8,8 @@ use crate::{
     document::{Document, Format, Kind, Layout},
     page::{
         Attachment, Definition, Image, Ink, InkStroke, Outline, PageObject, PageParagraph,
-        ParagraphContent, Table, TableCell, TableColumn, TableRow, TextObject, text::new_id,
+        ParagraphContent, Table, TableCell, TableColumn, TableRow, TextObject, VerticalRule,
+        text::new_id,
     },
     write::GUIDS,
 };
@@ -352,11 +353,12 @@ pub(super) enum Family {
     AttachmentRename,
     NewInk,
     InkStrokes,
+    InkPosition,
     Link,
     Equation,
 }
 
-pub(super) const FAMILIES: [Family; 33] = [
+pub(super) const FAMILIES: [Family; 34] = [
     Family::Text,
     Family::Format,
     Family::Insert,
@@ -388,6 +390,7 @@ pub(super) const FAMILIES: [Family; 33] = [
     Family::AttachmentRename,
     Family::NewInk,
     Family::InkStrokes,
+    Family::InkPosition,
     Family::Link,
     Family::Equation,
 ];
@@ -1221,6 +1224,17 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                 let at = rng.pick(ink.strokes.len()).unwrap();
                 ink.strokes.remove(at);
             }
+            true
+        }
+        Family::InkPosition => {
+            let Some(ink) = page.objects.iter_mut().find_map(|o| match o {
+                PageObject::Ink(ink) => Some(ink),
+                _ => None,
+            }) else {
+                return false;
+            };
+            ink.layout.x = Some((rng.next() % 40) as f32 - 20.0);
+            ink.layout.y = Some((rng.next() % 90) as f32);
             true
         }
     }
@@ -2763,6 +2777,180 @@ fn a_page_date_stores_what_onenote_stores() {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../corpus/page-date/native/notebook/Open Notebook.onetoc2"
+            ),
+            directory.join("Open Notebook.onetoc2"),
+        )
+        .unwrap();
+    }
+}
+
+/// OneNote 2010's View, Rule Lines (`corpus/rule-lines/native`): each page is titled for
+/// what its menu gave it, and "Narrow" was ruled, then set back to None.
+const RULED: &[u8] = include_bytes!("../../../../corpus/rule-lines/native/notebook/Rules.one");
+
+/// The rule-line properties on `space`'s page node, in stored order.
+fn rule_properties(image: &[u8], space: ExGuid) -> Vec<(u32, Vec<u8>)> {
+    let store = Store::parse(image).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let revision = index.resolve(space, index.active(space).unwrap()).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let [node] = crate::active::manifest_pages(document.active(space).unwrap())[..] else {
+        panic!("one page node")
+    };
+    let crate::ObjectData::Properties(bytes) = revision.objects[&node].data else {
+        panic!("a page node's properties")
+    };
+    crate::PropertySets::parse(bytes).unwrap().sets[0]
+        .iter()
+        .filter(|property| crate::page::RULE_LINES.contains(&property.id))
+        .map(|property| match property.value {
+            crate::Value::Bytes(bytes) => (property.id, bytes.to_vec()),
+            _ => panic!("rule lines are scalars"),
+        })
+        .collect()
+}
+
+/// Rule lines read as OneNote's page XML reports them, and the `RuleLines` op stores the
+/// properties OneNote stores, in its order, or removes them for None.
+#[test]
+fn rule_lines_store_what_onenote_stores() {
+    let apply = |section: &mut Section, op| {
+        section.apply(
+            "Author",
+            &Edit {
+                at: AT,
+                ops: vec![op],
+            },
+        )
+    };
+    let titled = |image: &[u8], title: &str| {
+        *pages(image)
+            .iter()
+            .find(|space| read(image, **space).title == title)
+            .unwrap()
+    };
+    let lines = |title| read(RULED, titled(RULED, title)).rule_lines;
+    let blue = 0xfdebca;
+    assert_eq!(lines("None"), None);
+    assert_eq!(lines("Narrow"), None);
+    // The page XML reports these spacings in points.
+    for (title, spacing, vertical) in [
+        ("College", 23.76, None),
+        ("Standard", 33.12, None),
+        ("Wide", 46.8, None),
+        ("SmallGrid", 12.0, Some(blue)),
+        ("MediumGrid", 28.3464, Some(0xffc9e0)),
+        ("LargeGrid", 42.5196, Some(blue)),
+        ("VeryLargeGrid", 56.6928, Some(blue)),
+    ] {
+        let lines = lines(title).unwrap();
+        assert!((lines.spacing * 36.0 - spacing).abs() < 1e-3, "{title}");
+        assert_eq!(lines.color, vertical.unwrap_or(blue), "{title}");
+        assert_eq!(
+            lines.vertical,
+            match vertical {
+                Some(color) => VerticalRule::Grid {
+                    spacing: lines.spacing,
+                    color,
+                },
+                None => VerticalRule::Margin(0x5050ff),
+            },
+            "{title}"
+        );
+    }
+    assert_eq!(lines("ColorRed").unwrap().color, 0xd6d4ff);
+    // "Hidden" is Standard in the menu's "<none>" colour, white, on a Teal page.
+    assert_eq!(lines("Hidden").unwrap().color, 0xffffff);
+
+    // Each page's lines given to the unruled page store what OneNote stored for them.
+    let arena = Arena::default();
+    let bare = titled(RULED, "None");
+    for title in [
+        "College",
+        "Standard",
+        "Wide",
+        "SmallGrid",
+        "MediumGrid",
+        "LargeGrid",
+        "VeryLargeGrid",
+        "ColorRed",
+        "Hidden",
+    ] {
+        let mut section = Section::open(&arena, RULED.to_vec()).unwrap();
+        let op = PageOp::RuleLines(lines(title));
+        let mut predicted = section.page(bare).unwrap();
+        model::apply(&mut predicted, &op).unwrap();
+        apply(&mut section, Op::Page { space: bare, op }).unwrap();
+        section.seal().unwrap();
+        let image = section.image();
+        assert_eq!(read(&image, bare), predicted, "{title}");
+        assert_eq!(
+            rule_properties(&image, bare),
+            rule_properties(RULED, titled(RULED, title)),
+            "{title}"
+        );
+    }
+
+    // The candidate: rules added, changed between ruled and grid, and removed on OneNote's
+    // pages, and a created page ruled.
+    let mut section = Section::open(&arena, RULED.to_vec()).unwrap();
+    let creation = crate::PageCreation::new(None, Some("Created"), "Author").unwrap();
+    apply(
+        &mut section,
+        Op::Section(SectionOp::Create(creation.clone())),
+    )
+    .unwrap();
+    let wide = lines("Wide");
+    let red_narrow = crate::page::RuleLines {
+        spacing: f32::from_bits(0x3ebe_f8d2),
+        color: 0xd6d4ff,
+        vertical: VerticalRule::Margin(0x5050ff),
+    };
+    let edits = [
+        (bare, wide),
+        (titled(RULED, "College"), None),
+        (titled(RULED, "Standard"), lines("SmallGrid")),
+        (titled(RULED, "MediumGrid"), Some(red_narrow)),
+        (creation.space(), lines("VeryLargeGrid")),
+    ];
+    for (space, lines) in edits {
+        apply(
+            &mut section,
+            Op::Page {
+                space,
+                op: PageOp::RuleLines(lines),
+            },
+        )
+        .unwrap();
+        section.seal().unwrap();
+    }
+    let image = section.image();
+    RevisionIndex::parse(&Store::parse(&image).unwrap())
+        .unwrap()
+        .validate_current()
+        .unwrap();
+    for (space, lines) in edits {
+        assert_eq!(read(&image, space).rule_lines, lines);
+    }
+    assert!(rule_properties(&image, titled(&image, "College")).is_empty());
+
+    // The whole-page lowering reaches the same pages through the same op.
+    let before = read(RULED, bare);
+    let mut after = before.clone();
+    after.rule_lines = wide;
+    assert_eq!(
+        lower_page(&before, &after).unwrap(),
+        [PageOp::RuleLines(wide)]
+    );
+
+    if let Some(directory) = std::env::var_os("ONESTORE_RULE_LINES_EXPORT") {
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join("Rules.one"), &image).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../corpus/rule-lines/native/notebook/Open Notebook.onetoc2"
             ),
             directory.join("Open Notebook.onetoc2"),
         )

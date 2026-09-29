@@ -288,6 +288,17 @@ impl Library {
         Ok(section)
     }
 
+    /// Where `file`, a section file of this notebook, sits on this computer: under the
+    /// mount it was opened from when the embedded client holds it share-relative.
+    pub fn local(&self, file: &Path) -> Option<PathBuf> {
+        if file.is_absolute() {
+            return Some(file.to_owned());
+        }
+        let server = self.server.as_ref()?;
+        let file = file.strip_prefix(&server.mount.root).ok()?;
+        Some(Path::new(&self.location).join(file))
+    }
+
     /// How the notebook's files are reached.
     pub fn transport(&self) -> String {
         match (&self.server, &self.notice) {
@@ -582,6 +593,43 @@ mod tests {
         }
         section.close().unwrap();
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn share_relative_sections_show_under_their_mount() {
+        let library = |root: &str| Library {
+            location: "/Volumes/agent/lab".into(),
+            name: "lab".into(),
+            notebook: Ok(None),
+            server: Some(Arc::new(Server {
+                mount: Mount {
+                    server: "nas".into(),
+                    share: "agent".into(),
+                    user: None,
+                    domain: String::new(),
+                    root: root.into(),
+                },
+                login: Login {
+                    user: String::new(),
+                    password: String::new(),
+                    domain: String::new(),
+                },
+            })),
+            notice: None,
+            cache: PathBuf::new(),
+        };
+        let shown = |root, file| library(root).local(Path::new(file));
+        let under = Some(PathBuf::from("/Volumes/agent/lab/Group/New Section 1.one"));
+        assert_eq!(
+            shown("notes/lab", "notes/lab/Group/New Section 1.one"),
+            under
+        );
+        assert_eq!(shown("", "Group/New Section 1.one"), under);
+        assert_eq!(shown("notes/lab", "elsewhere/New Section 1.one"), None);
+        assert_eq!(
+            shown("notes/lab", "/tmp/Section.one"),
+            Some(PathBuf::from("/tmp/Section.one"))
+        );
     }
 
     #[test]

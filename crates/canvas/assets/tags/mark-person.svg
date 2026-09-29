@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="layer0" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9aa2ae"/><stop offset="1" stop-color="#4a525e"/></linearGradient>
+    <linearGradient id="layer1" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#6f9ae0"/><stop offset="1" stop-color="#1e4494"/></linearGradient>
+  </defs>
+  <path d="M4 0.5A2.5 2.5 0 1 1 4 5.5A2.5 2.5 0 1 1 4 0.5Z" fill="url(#layer0)"/>
+  <path d="M4 5.5C6.4 5.5 7.75 6.5 7.75 8.5V10H0.25V8.5C0.25 6.5 1.6 5.5 4 5.5Z" fill="url(#layer1)"/>
+  <path d="M3.4 5.75H4.6L4 7.25Z" fill="#ffffff"/>
+</svg>

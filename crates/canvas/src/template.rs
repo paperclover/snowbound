@@ -1,6 +1,8 @@
 //! The page templates Snowbound offers: OneNote 2010's background art, recreated
-//! (`gpu::page::template_picture`), placed where OneNote's templates place it, and plain
-//! page colours.
+//! (`gpu::page::template_picture`), placed where OneNote's templates place it, plain
+//! page colours and rule lines.
+
+use onestore::page::{RuleLines, VerticalRule};
 
 /// One background picture of a template: the recreated art's name, and the picture's
 /// position and size in points from the page origin as OneNote's template stores them.
@@ -622,6 +624,42 @@ pub const PAGE_COLORS: &[(&str, u32)] = &[
     ("Orange", 0xe1f2fb),
     ("Teal", 0xf2f9d4),
 ];
+
+/// OneNote 2010's View, Rule Lines presets in its menu order, in its default light blue
+/// with a red margin line
+/// (`corpus/rule-lines/native`).
+pub const RULE_LINES: &[(&str, RuleLines)] = &[
+    ("Narrow Ruled", ruled(0x3ebe_f8d2)),
+    ("College Ruled", ruled(0x3f28_f5c3)),
+    ("Standard Ruled", ruled(0x3f6b_851f)),
+    ("Wide Ruled", ruled(0x3fa6_6666)),
+    ("Small Grid", grid(0x3eaa_aaab)),
+    ("Medium Grid", grid(0x3f49_930c)),
+    ("Large Grid", grid(0x3f97_2e49)),
+    ("Very Large Grid", grid(0x3fc9_930c)),
+];
+
+const RULE_COLOR: u32 = 0xfdebca;
+
+/// Lines `spacing` apart, the bits of the half inches OneNote stores.
+const fn ruled(spacing: u32) -> RuleLines {
+    RuleLines {
+        spacing: f32::from_bits(spacing),
+        color: RULE_COLOR,
+        vertical: VerticalRule::Margin(0x5050ff),
+    }
+}
+
+const fn grid(spacing: u32) -> RuleLines {
+    RuleLines {
+        spacing: f32::from_bits(spacing),
+        color: RULE_COLOR,
+        vertical: VerticalRule::Grid {
+            spacing: f32::from_bits(spacing),
+            color: RULE_COLOR,
+        },
+    }
+}
 
 /// The template named `name`.
 pub fn find(name: &str) -> Option<&'static Template> {

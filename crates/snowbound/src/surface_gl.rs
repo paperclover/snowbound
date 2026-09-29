@@ -18,6 +18,9 @@ pub struct Surface {
     /// Device pixels frames and snapshots are drawn at; `configure` gives the window it.
     pub size: [u32; 2],
     context: Retained<AnyObject>,
+    /// Frames leave the window's textured backdrop showing through their transparent
+    /// pixels.
+    translucent: bool,
     /// The frame target, kept between frames.
     target: Option<Target>,
 }
@@ -29,10 +32,10 @@ pub struct Frame {
 pub type Offscreen = Frame;
 
 impl Surface {
-    /// No backdrop shows through an OpenGL view.
+    /// With `backdrop`, the surface is transparent where frames are.
     pub async fn new(
         window: Arc<Window>,
-        _backdrop: bool,
+        backdrop: bool,
     ) -> Result<(Self, Renderer), Box<dyn Error>> {
         let RawWindowHandle::AppKit(handle) = window.window_handle()?.as_raw() else {
             unreachable!()
@@ -59,6 +62,11 @@ impl Surface {
             // NSOpenGLCPSwapInterval: present on the display's refresh.
             let interval: i32 = 1;
             let _: () = msg_send![&context, setValues: &interval, forParameter: 222 as NSInteger];
+            if backdrop {
+                // NSOpenGLCPSurfaceOpacity.
+                let opaque: i32 = 0;
+                let _: () = msg_send![&context, setValues: &opaque, forParameter: 236 as NSInteger];
+            }
             context
         };
         let renderer = Renderer::new()?;
@@ -68,6 +76,7 @@ impl Surface {
             Self {
                 size: [size.width, size.height],
                 context,
+                translucent: backdrop,
                 target: None,
             },
             renderer,
@@ -75,7 +84,7 @@ impl Surface {
     }
 
     pub fn translucent(&self) -> bool {
-        false
+        self.translucent
     }
 
     pub fn configure(&mut self, _: &Renderer) {
@@ -94,8 +103,12 @@ impl Surface {
         Ok(Some(Frame { target }))
     }
 
-    pub fn present(&mut self, _: &Renderer, frame: Frame) {
-        frame.target.present();
+    pub fn present(&mut self, renderer: &Renderer, frame: Frame) {
+        if self.translucent {
+            renderer.present_translucent(&frame.target);
+        } else {
+            frame.target.present();
+        }
         let _: () = unsafe { msg_send![&self.context, flushBuffer] };
         self.target = Some(frame.target);
     }

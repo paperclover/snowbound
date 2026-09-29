@@ -1895,13 +1895,19 @@ mod tests {
             |editor: &CanvasEditor| editor.active_outline().shaped.paragraphs[1].tags[0].icon;
         assert_eq!(
             icon(&editor),
-            crate::outline::TagIcon::CheckBox { checked: false }
+            crate::outline::TagIcon::CheckBox {
+                checked: false,
+                mark: None
+            }
         );
         editor.format(&mut engine, Formatting::Check).unwrap();
         assert_eq!(text_tags(&editor, 1), [("To Do".into(), 1, true)]);
         assert_eq!(
             icon(&editor),
-            crate::outline::TagIcon::CheckBox { checked: true }
+            crate::outline::TagIcon::CheckBox {
+                checked: true,
+                mark: None
+            }
         );
         editor.select([at(1, 0); 2].into()).unwrap();
         editor.format(&mut engine, Formatting::Check).unwrap();
@@ -1976,7 +1982,10 @@ mod tests {
         assert_eq!(
             icons[..7],
             [
-                TagIcon::CheckBox { checked: false },
+                TagIcon::CheckBox {
+                    checked: false,
+                    mark: None
+                },
                 TagIcon::Star,
                 TagIcon::Question,
                 TagIcon::Highlight,

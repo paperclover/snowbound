@@ -12,7 +12,7 @@ use ui::{Axis, Flags, Spec, Theme, Ui, fill, px};
 
 /// What a thumbnail shows: the top of a letter page, in points from the page origin.
 const REGION: [f32; 4] = [-72.0, -40.0, 540.0, 419.0];
-const TILE: [f32; 2] = [112.0, 84.0];
+pub(crate) const TILE: [f32; 2] = [112.0, 84.0];
 const SWATCH: f32 = 24.0;
 const LABEL: f32 = 22.0;
 const GAP: f32 = 12.0;
@@ -59,7 +59,7 @@ pub struct Thumbnails(HashMap<(&'static str, bool), Art>);
 
 impl Thumbnails {
     /// `template`'s art and where it lies in a `TILE`, drawn at `scale` for `paper`.
-    fn art(
+    pub(crate) fn art(
         &mut self,
         template: &'static Template,
         paper: Paper,

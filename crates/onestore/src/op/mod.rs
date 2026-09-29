@@ -88,6 +88,8 @@ pub enum PageOp {
     },
     /// The page's colour (View, Page Color), COLORREF; `None` is OneNote's "No color".
     Color(Option<u32>),
+    /// The page's rule lines (View, Rule Lines); `None` is OneNote's "None".
+    RuleLines(Option<crate::page::RuleLines>),
     /// Inserts paragraphs before a direct child of `container`, or last. Children follow
     /// their parents in `paragraphs`; levels are absolute. Text keeps its spans' formats;
     /// lists, tags, styles and collapse state are set by their own ops.

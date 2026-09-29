@@ -1,10 +1,12 @@
 //! The sync status at the top right, and the popup it opens: OneNote's Shared Notebook
 //! Synchronization for the open section.
 
-use crate::{Session, State, filetime, library, platform};
+use crate::{Session, State, art, filetime, library, platform};
 use notebook::session::SyncStatus;
 use std::{error::Error, io::ErrorKind};
-use ui::{Anchor, Axis, Flags, Id, Overflow, Spec, Theme, Ui, children, fill, fit, px};
+use ui::{
+    Anchor, Axis, Flags, Id, Overflow, Spec, Theme, Ui, children, fill, fit, px, shell::TOOL,
+};
 
 const WIDTH: f32 = 380.0;
 
@@ -16,24 +18,27 @@ fn button() -> Id {
     Id::ROOT.child("sync-button")
 }
 
-/// The status's label, and what the reader can do about an error.
-fn describe(sync: &SyncStatus) -> (&'static str, Option<&'static str>) {
+/// The status's label and icon, and what the reader can do about an error.
+fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option<&'static str>) {
     use ErrorKind::*;
     if library::offline() {
         return (
             "Working offline",
+            art::SYNC_OFFLINE,
             Some("Changes stay on this computer until you sync."),
         );
     }
     match sync.error.as_ref().map(std::io::Error::kind) {
         Some(PermissionDenied | ReadOnlyFilesystem) => (
             "Unable to sync",
+            art::SYNC_ERROR,
             Some(
                 "You can’t change this notebook where it’s stored. Changes stay on this computer.",
             ),
         ),
         Some(WouldBlock | ResourceBusy) => (
             "Section in use",
+            art::SYNC_BUSY,
             Some("Someone else is saving this section. Sync continues when they finish."),
         ),
         Some(
@@ -42,11 +47,12 @@ fn describe(sync: &SyncStatus) -> (&'static str, Option<&'static str>) {
             | AddrNotAvailable,
         ) => (
             "Not connected",
+            art::SYNC_OFFLINE,
             Some("Changes stay on this computer and sync when the notebook is back."),
         ),
-        Some(_) => ("Unable to sync", None),
-        None if sync.synced.is_none() || sync.queued > 0 => ("Syncing…", None),
-        None => ("Up to date", None),
+        Some(_) => ("Unable to sync", art::SYNC_ERROR, None),
+        None if sync.synced.is_none() || sync.queued > 0 => ("Syncing…", art::SYNC_BUSY, None),
+        None => ("Up to date", art::SYNC_DONE, None),
     }
 }
 
@@ -65,25 +71,47 @@ fn when(time: u64) -> String {
     }
 }
 
-/// The status beside the window's controls, which opens the popup.
-pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme, height: f32) {
+/// The status in the toolbar, which opens the popup: its label, or where `compact` its icon,
+/// naming it in a tooltip.
+pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme, compact: bool) {
     let strong = ui.popup_open(id()) || session.sync.error.is_some() && !library::offline();
+    let (label, icon, _) = describe(&session.sync);
+    let spec = Spec {
+        flags: Flags::CLICKABLE,
+        color: Some(if strong { theme.text } else { theme.text_dim }),
+        hover_fill: Some(theme.hover()),
+        radius: 4.0,
+        center: true,
+        ..Spec::default()
+    };
+    // The popup opens from the label's box, which stands where the icon shows.
+    let shown = if compact {
+        button().child("icon")
+    } else {
+        button()
+    };
     ui.open_as(
-        button(),
-        Spec {
-            flags: Flags::CLICKABLE,
-            size: [fit(), px(height)],
-            text: Some(label(&session.sync)),
-            color: Some(if strong { theme.text } else { theme.text_dim }),
-            hover_fill: Some(theme.hover()),
-            radius: 4.0,
-            pad: [8.0, 0.0],
-            center: true,
-            ..Spec::default()
+        shown,
+        if compact {
+            Spec {
+                size: [px(TOOL), px(TOOL)],
+                icon: Some(icon),
+                ..spec
+            }
+        } else {
+            Spec {
+                size: [fit(), px(TOOL)],
+                text: Some(label),
+                pad: [8.0, 0.0],
+                ..spec
+            }
         },
     );
     ui.close();
-    if ui.signal(button()).clicked {
+    if compact {
+        ui::popup::tooltip(ui, label, "", None);
+    }
+    if ui.signal(shown).clicked {
         if ui.popup_open(id()) {
             ui.close_popup(id());
         } else {
@@ -107,7 +135,7 @@ impl State {
         session.sync = session.section.sync_status()?;
         let theme = ui.theme.clone();
         let offline = library::offline();
-        let (progress, advice) = describe(&session.sync);
+        let (progress, _, advice) = describe(&session.sync);
         ui.open_as(
             id(),
             Spec {
@@ -209,6 +237,26 @@ impl State {
                 ..Spec::default()
             },
         );
+        let file = session.library.local(session.section.file());
+        let show = match file {
+            Some(_) => ui::button(ui, "show-file", platform::SHOW_FILE).clicked,
+            None => {
+                ui.leaf(
+                    "show-file",
+                    Spec {
+                        size: [fit(), px(theme.font_size * 2.0)],
+                        text: Some(platform::SHOW_FILE),
+                        color: Some(theme.text_dim),
+                        fill: Some(theme.chip),
+                        radius: 4.0,
+                        pad: [theme.font_size * 0.75, 0.0],
+                        center: true,
+                        ..Spec::default()
+                    },
+                );
+                false
+            }
+        };
         let now = ui::button(ui, "sync-now", "Sync Now").clicked;
         ui.close();
         ui.close();
@@ -218,6 +266,9 @@ impl State {
         }
         if now {
             session.section.wake();
+        }
+        if let Some(file) = file.filter(|_| show) {
+            platform::show_file(&file);
         }
         Ok(())
     }

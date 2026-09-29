@@ -9,13 +9,12 @@ use winit::window::Theme as Appearance;
 /// drawn at `SCALE` pixels per point or fewer where the GPU caps textures.
 const SIZE: [f32; 2] = [1440.0, 900.0];
 const SCALE: f32 = 2.0;
-/// A standard window's close, minimize and zoom buttons as AppKit places them beside a
-/// transparent title bar: centres in points, fill and rim.
+/// The close, minimize and zoom buttons' fill and rim.
 #[cfg(target_os = "macos")]
-const LIGHTS: [(f32, [u8; 3], [u8; 3]); 3] = [
-    (14.0, [0xff, 0x5f, 0x57], [0xe2, 0x46, 0x3f]),
-    (34.0, [0xfe, 0xbc, 0x2e], [0xe1, 0xa1, 0x16]),
-    (54.0, [0x28, 0xc8, 0x40], [0x12, 0xac, 0x28]),
+const LIGHTS: [([u8; 3], [u8; 3]); 3] = [
+    ([0xff, 0x5f, 0x57], [0xe2, 0x46, 0x3f]),
+    ([0xfe, 0xbc, 0x2e], [0xe1, 0xa1, 0x16]),
+    ([0x28, 0xc8, 0x40], [0x12, 0xac, 0x28]),
 ];
 
 impl State {
@@ -32,7 +31,6 @@ impl State {
         let scale = SCALE.min(most / size[0].max(size[1]));
         self.surface.size = size.map(|side| (side * scale).max(1.0) as u32);
         self.renderer.clear_glyph_cache();
-        self.app_icon = platform::app_icon((16.0 * scale) as u32);
         let response = self.view.scale_factor_changed(scale)?;
         self.respond(response);
         self.ui.set_focus(None);
@@ -66,16 +64,26 @@ impl State {
             let path = PathBuf::from(format!("{}-{name}.png", prefix.display()));
             self.snapshot(&path)?;
             #[cfg(target_os = "macos")]
-            window_frame(&path, appearance, scale)?;
+            window_frame(
+                &path,
+                appearance,
+                scale,
+                platform::traffic_lights(&self.window),
+            )?;
         }
         Ok(())
     }
 }
 
-/// Paints the traffic lights into the PNG at `path`, rounds its corners to transparency
-/// and edges them with the window's hairline.
+/// Paints the traffic lights centred at `lights` into the PNG at `path`, rounds its corners
+/// to transparency and edges them with the window's hairline.
 #[cfg(target_os = "macos")]
-fn window_frame(path: &Path, appearance: Appearance, scale: f32) -> Result<(), Box<dyn Error>> {
+fn window_frame(
+    path: &Path,
+    appearance: Appearance,
+    scale: f32,
+    lights: [[f32; 2]; 3],
+) -> Result<(), Box<dyn Error>> {
     let mut reader =
         png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path)?)).read_info()?;
     let mut pixels = vec![0; reader.output_buffer_size().ok_or("Snapshot too large")?];
@@ -98,8 +106,8 @@ fn window_frame(path: &Path, appearance: Appearance, scale: f32) -> Result<(), B
     for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
         let x = (index as u32 % info.width) as f32 + 0.5;
         let y = (index as u32 / info.width) as f32 + 0.5;
-        for (centre, fill, rim) in LIGHTS {
-            let distance = (x - centre * scale).hypot(y - TITLE / 2.0 * scale);
+        for ([cx, cy], (fill, rim)) in lights.into_iter().zip(LIGHTS) {
+            let distance = (x - cx * scale).hypot(y - cy * scale);
             blend(
                 pixel,
                 [rim[0], rim[1], rim[2], 255],

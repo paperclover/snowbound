@@ -56,6 +56,94 @@ pub use text::Paragraph;
 /// MS-ONE, observed in OneNote 2010's pages (`corpus/notebook-management/native/page-color`).
 pub(crate) const PAGE_COLOR: u32 = 0x14001d2a;
 
+/// The page node's rule lines (View, Rule Lines), as OneNote 2010 orders them; not in MS-ONE,
+/// observed in its pages (`corpus/rule-lines/native`). Each direction stores a kind (1 grid,
+/// 2 ruled, 3 margin line), a spacing in half inches and a colour as 0xAARRGGBB.
+pub(crate) const RULE_LINES: [u32; 6] = [
+    HORIZONTAL_COLOR,
+    HORIZONTAL_KIND,
+    HORIZONTAL_SPACING,
+    VERTICAL_KIND,
+    VERTICAL_SPACING,
+    VERTICAL_COLOR,
+];
+const HORIZONTAL_KIND: u32 = 0x14001cd3;
+const HORIZONTAL_SPACING: u32 = 0x14001cd4;
+const HORIZONTAL_COLOR: u32 = 0x14001cd5;
+const VERTICAL_KIND: u32 = 0x14001cd6;
+const VERTICAL_SPACING: u32 = 0x14001cd7;
+const VERTICAL_COLOR: u32 = 0x14001cd8;
+
+/// A page's rule lines (View, Rule Lines): horizontal lines every `spacing` from the margin
+/// origin down, crossed by a margin line or a grid's vertical lines. Spacings are in half
+/// inches, as stored, so OneNote's presets survive exactly.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RuleLines {
+    pub spacing: f32,
+    /// COLORREF.
+    pub color: u32,
+    pub vertical: VerticalRule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum VerticalRule {
+    /// One line just left of the margin origin, COLORREF.
+    Margin(u32),
+    /// Lines every `spacing` either side of the margin origin.
+    Grid { spacing: f32, color: u32 },
+}
+
+impl RuleLines {
+    /// The page node's properties for these lines, in `RULE_LINES` order.
+    pub(crate) fn properties(&self) -> [(u32, [u8; 4]); 6] {
+        let argb = |color: u32| {
+            let [red, green, blue, _] = color.to_le_bytes();
+            [blue, green, red, 0xff]
+        };
+        let (kinds, spacing, color) = match self.vertical {
+            VerticalRule::Margin(color) => ([2, 3], 0.0, color),
+            VerticalRule::Grid { spacing, color } => ([1, 1], spacing, color),
+        };
+        [
+            (HORIZONTAL_COLOR, argb(self.color)),
+            (HORIZONTAL_KIND, u32::to_le_bytes(kinds[0])),
+            (HORIZONTAL_SPACING, self.spacing.to_le_bytes()),
+            (VERTICAL_KIND, u32::to_le_bytes(kinds[1])),
+            (VERTICAL_SPACING, spacing.to_le_bytes()),
+            (VERTICAL_COLOR, argb(color)),
+        ]
+    }
+
+    /// The lines a page node's `fields` store, if any are whole enough to draw.
+    fn read(fields: &[crate::document::Field<'_>]) -> Option<Self> {
+        let value = |id: u32| {
+            fields
+                .iter()
+                .find(|field| field.id == id)
+                .and_then(|field| match field.value {
+                    FieldValue::Bytes(&[a, b, c, d]) => Some([a, b, c, d]),
+                    _ => None,
+                })
+        };
+        let spacing = |id| value(id).map(f32::from_le_bytes);
+        let color =
+            |id| value(id).map(|[blue, green, red, _]| u32::from_le_bytes([red, green, blue, 0]));
+        value(HORIZONTAL_KIND)?;
+        let vertical = match value(VERTICAL_KIND).map(u32::from_le_bytes) {
+            Some(1) => VerticalRule::Grid {
+                spacing: spacing(VERTICAL_SPACING)?,
+                color: color(VERTICAL_COLOR)?,
+            },
+            _ => VerticalRule::Margin(color(VERTICAL_COLOR)?),
+        };
+        Some(Self {
+            spacing: spacing(HORIZONTAL_SPACING).filter(|spacing| *spacing > 0.0)?,
+            color: color(HORIZONTAL_COLOR)?,
+            vertical,
+        })
+    }
+}
+
 /// The role of a title-outline paragraph that displays the page's creation date or time.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DateField {
@@ -74,6 +162,8 @@ pub struct Page {
     /// The page's colour (View, Page Color), COLORREF; `None` is OneNote's "No color".
     #[serde(default)]
     pub color: Option<u32>,
+    #[serde(default)]
+    pub rule_lines: Option<RuleLines>,
     pub objects: Vec<PageObject>,
     pub definitions: BTreeMap<ExGuid, Definition>,
 }
@@ -617,6 +707,10 @@ impl Page {
                     _ => Err(invalid("The page color is damaged")),
                 })
                 .transpose()?,
+            rule_lines: root
+                .extra
+                .first()
+                .and_then(|fields| RuleLines::read(fields)),
             objects: Vec::new(),
             definitions: BTreeMap::new(),
         };

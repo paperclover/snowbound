@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="layer0" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#c8a049"/><stop offset="1" stop-color="#a57a2c"/></linearGradient>
+    <linearGradient id="layer1" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fffbd8"/><stop offset="1" stop-color="#f5cf4e"/></linearGradient>
+    <linearGradient id="layer2" x1="0" y1="0" x2="0" y2="16" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#b8c0cc"/><stop offset="1" stop-color="#7a8494"/></linearGradient>
+  </defs>
+  <path d="M8 0.75C11.2 0.75 13.25 3 13.25 5.75C13.25 8 11.75 9.25 10.75 10.5V11.5H5.25V10.5C4.25 9.25 2.75 8 2.75 5.75C2.75 3 4.8 0.75 8 0.75Z" fill="url(#layer0)"/>
+  <path d="M8 1.75C10.6 1.75 12.25 3.6 12.25 5.75C12.25 7.6 11 8.6 9.9 10.5H6.1C5 8.6 3.75 7.6 3.75 5.75C3.75 3.6 5.4 1.75 8 1.75Z" fill="url(#layer1)"/>
+  <path d="M5.25 11.5H10.75V13.5L9.5 15H6.5L5.25 13.5Z" fill="url(#layer2)"/>
+  <path d="M5.25 12.25H10.75V13H5.25Z" fill="#5d6675"/>
+</svg>

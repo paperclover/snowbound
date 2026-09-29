@@ -2,6 +2,7 @@
 //! structure through `notebook::session::Notebook`, pages as ops on the open section.
 
 use crate::{Command, Library, Loaded, State, notify, platform, read_session};
+use canvas::template::Template;
 use notebook::session::Notebook;
 use onestore::{
     ExGuid, PageCreation, PageEdit,
@@ -133,13 +134,28 @@ impl State {
         self.edit_page(ops)
     }
 
-    /// View, Page Color: gives the open page `color`, a COLORREF, or none; its art stays.
-    pub(crate) fn color_page(&mut self, color: Option<u32>) -> Result<(), Box<dyn Error>> {
-        if self.view.editor.page_color() == color {
-            return Ok(());
-        }
+    /// Gives the open page `template`'s art, or none, in place of the art it had; its colour
+    /// and rule lines stay.
+    pub(crate) fn art_page(
+        &mut self,
+        template: Option<&'static Template>,
+    ) -> Result<(), Box<dyn Error>> {
         self.persist()?;
-        self.edit_page(vec![PageOp::Color(color)])
+        let session = self.session.as_ref().ok_or("No section is open")?;
+        let ops = art_ops(&session.section.page(session.space)?, template)?;
+        self.edit_page(ops)
+    }
+
+    /// View, Page Color and Rule Lines: gives the open page `color`, a COLORREF, and
+    /// `rule_lines` as one undo step; its art stays.
+    pub(crate) fn paper_page(
+        &mut self,
+        color: Option<u32>,
+        rule_lines: Option<onestore::page::RuleLines>,
+    ) -> Result<(), Box<dyn Error>> {
+        let response = self.view.set_paper(color, rule_lines)?;
+        self.respond(response);
+        Ok(())
     }
 
     /// Applies `ops` to the open page as one edit and shows the result.
@@ -429,59 +445,25 @@ impl State {
     }
 }
 
-/// The ops giving `page` `choice`'s background: its template art (OneNote's pictures'
-/// places, our recreations' bytes) or a page colour, in place of the background it had.
+/// The ops giving `page` `choice`'s background: its template art or a page colour, in
+/// place of the background it had.
 pub fn template_ops(
     page: &Page,
     choice: crate::templates::Choice,
 ) -> Result<Vec<PageOp>, Box<dyn Error>> {
     use crate::templates::Choice;
-    let mut ops: Vec<PageOp> = page
-        .objects
-        .iter()
-        .filter(|object| matches!(object, PageObject::Image(image) if image.background))
-        .map(|object| PageOp::Delete {
-            object: object.id(),
-        })
-        .collect();
+    let mut ops = match choice {
+        Choice::Template(name) => art_ops(
+            page,
+            Some(canvas::template::find(name).ok_or("That template is not available")?),
+        )?,
+        Choice::Color(_) => art_ops(page, None)?,
+        Choice::More | Choice::Dismiss | Choice::Colors => return Ok(Vec::new()),
+    };
     match choice {
         Choice::Template(name) => {
-            let template = canvas::template::find(name).ok_or("That template is not available")?;
             if page.color.is_some() {
                 ops.push(PageOp::Color(None));
-            }
-            // Art lies under everything else on the page, first of its children (the title
-            // is no child).
-            let under = page
-                .objects
-                .iter()
-                .find(|object| match object {
-                    PageObject::Title(_) => false,
-                    PageObject::Image(image) => !image.background,
-                    _ => true,
-                })
-                .map(PageObject::id);
-            for art in template.art {
-                let bytes = canvas::gpu::page::template_picture(art.art)
-                    .ok_or("That template's art is missing")?;
-                ops.push(PageOp::Add {
-                    object: PageObject::Image(Image {
-                        id: onestore::page::text::new_id()?,
-                        layout: onestore::document::Layout {
-                            x: Some(art.position[0]),
-                            y: Some(art.position[1]),
-                            max_width: art.size.map(|size| size[0]),
-                            max_height: art.size.map(|size| size[1]),
-                            width_set_by_user: art.size.map(|_| true),
-                            ..Default::default()
-                        },
-                        size: art.size,
-                        bytes: Some(bytes.into()),
-                        alt: None,
-                        background: true,
-                    }),
-                    before: under,
-                });
             }
             // The one template with content worth keeping.
             if name == "Informal Meeting Notes" {
@@ -494,7 +476,54 @@ pub fn template_ops(
         Choice::Color(index) => {
             ops.push(PageOp::Color(Some(canvas::template::PAGE_COLORS[index].1)))
         }
-        Choice::More | Choice::Dismiss | Choice::Colors => return Ok(Vec::new()),
+        Choice::More | Choice::Dismiss | Choice::Colors => {}
+    }
+    Ok(ops)
+}
+
+/// The ops giving `page` `template`'s art (OneNote's pictures' places, our recreations'
+/// bytes), or none, in place of the background pictures it had.
+pub fn art_ops(page: &Page, template: Option<&Template>) -> Result<Vec<PageOp>, Box<dyn Error>> {
+    let mut ops: Vec<PageOp> = page
+        .objects
+        .iter()
+        .filter(|object| matches!(object, PageObject::Image(image) if image.background))
+        .map(|object| PageOp::Delete {
+            object: object.id(),
+        })
+        .collect();
+    // Art lies under everything else on the page, first of its children (the title is no
+    // child).
+    let under = page
+        .objects
+        .iter()
+        .find(|object| match object {
+            PageObject::Title(_) => false,
+            PageObject::Image(image) => !image.background,
+            _ => true,
+        })
+        .map(PageObject::id);
+    for art in template.map_or(&[][..], |template| template.art) {
+        let bytes =
+            canvas::gpu::page::template_picture(art.art).ok_or("That template's art is missing")?;
+        ops.push(PageOp::Add {
+            object: PageObject::Image(Image {
+                id: onestore::page::text::new_id()?,
+                layout: onestore::document::Layout {
+                    x: Some(art.position[0]),
+                    y: Some(art.position[1]),
+                    max_width: art.size.map(|size| size[0]),
+                    max_height: art.size.map(|size| size[1]),
+                    width_set_by_user: art.size.map(|_| true),
+                    ..Default::default()
+                },
+                size: art.size,
+                bytes: Some(bytes.into()),
+                alt: None,
+                background: true,
+            }),
+            before: under,
+        });
     }
     Ok(ops)
 }
@@ -841,5 +870,67 @@ mod tests {
             ),
             "New Section Group 2"
         );
+    }
+
+    /// Backgrounds the Page Color menu gives OneNote's ruled pages
+    /// (`corpus/rule-lines/native`): art on a page with rule lines, keeping them, art taken
+    /// away, and a colour outside OneNote's menu. `SNOWBOUND_BACKGROUND_EXPORT` names a new
+    /// directory that receives the notebook for a cold reopen in OneNote 2010.
+    #[test]
+    fn backgrounds_go_on_and_off_pages_that_have_content() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-background-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        copy(
+            Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../corpus/rule-lines/native/notebook"
+            )),
+            &temporary,
+        );
+        let file = temporary.join("Rules.one");
+        let titled = |title: &str| {
+            pages(&file)
+                .into_iter()
+                .find(|(_, name, _)| name == title)
+                .unwrap()
+                .0
+        };
+        let on_page = |space, ops: Vec<PageOp>| {
+            edit(
+                &file,
+                ops.into_iter().map(|op| Op::Page { space, op }).collect(),
+            )
+        };
+        let ivy = canvas::template::find("Ivy");
+        let (standard, wide, grid) = (titled("Standard"), titled("Wide"), titled("SmallGrid"));
+        on_page(standard, art_ops(&page(&file, standard), ivy).unwrap());
+        on_page(wide, art_ops(&page(&file, wide), ivy).unwrap());
+        on_page(wide, art_ops(&page(&file, wide), None).unwrap());
+        // A warm grey no menu offers.
+        on_page(grid, vec![PageOp::Color(Some(0x00c8d8e8))]);
+
+        let standard = page(&file, standard);
+        assert!(standard.rule_lines.is_some());
+        assert_eq!(
+            standard
+                .objects
+                .iter()
+                .filter(|object| matches!(object, PageObject::Image(image) if image.background))
+                .count(),
+            ivy.unwrap().art.len()
+        );
+        let wide = page(&file, wide);
+        assert!(
+            !wide
+                .objects
+                .iter()
+                .any(|object| matches!(object, PageObject::Image(_)))
+        );
+        assert_eq!(page(&file, grid).color, Some(0x00c8d8e8));
+        if let Some(directory) = std::env::var_os("SNOWBOUND_BACKGROUND_EXPORT") {
+            copy(&temporary, Path::new(&directory));
+        }
+        std::fs::remove_dir_all(&temporary).unwrap();
     }
 }

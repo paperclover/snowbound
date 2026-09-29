@@ -1,0 +1,20 @@
+none #FFFFFF
+Light Blue #CAEBFD
+Blue #D1E5FC
+Yellow #FFF2AE
+Green #D9E2C7
+Red #FFD4D6
+Purple #E0C9FF
+Cyan #BBE8DB
+Orange #F5DFB4
+Magenta #F5D3E8
+Blue Mist #BED3E2
+Purple Mist #C5BACD
+Tan #F1E3C2
+Lemon #F9FBA9
+Apple #CFF1BF
+Teal #94D7DF
+Red Chalk #D6ACAC
+Silver #C8C8D3
+
+[exited with code 0]

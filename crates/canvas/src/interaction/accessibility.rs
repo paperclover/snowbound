@@ -609,6 +609,13 @@ fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>
                     TagIcon::YellowSquare => "Project B",
                     TagIcon::BlueSquare => "Project C",
                     TagIcon::Flag => "Outlook task",
+                    TagIcon::Idea => "Idea",
+                    TagIcon::Password => "Password",
+                    TagIcon::Movie => "Movie to see",
+                    TagIcon::Book => "Book to read",
+                    TagIcon::Web => "Web site to visit",
+                    TagIcon::Blog => "Remember for blog",
+                    TagIcon::Email => "Send in email",
                     TagIcon::Other => "Tag",
                 };
                 let label = if tag.label.is_empty() {
@@ -617,8 +624,8 @@ fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>
                     &tag.label
                 };
                 let state = match tag.icon {
-                    TagIcon::CheckBox { checked: true } => ", completed",
-                    TagIcon::CheckBox { checked: false } => ", incomplete",
+                    TagIcon::CheckBox { checked: true, .. } => ", completed",
+                    TagIcon::CheckBox { checked: false, .. } => ", incomplete",
                     _ => "",
                 };
                 format!(
@@ -739,6 +746,7 @@ pub(super) mod tests {
             created: None,
             margin_origin: [36.0, 14.4],
             color: None,
+            rule_lines: None,
             definitions: Default::default(),
             objects: vec![
                 PageObject::Title(Title {
@@ -832,6 +840,7 @@ pub(super) mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: Default::default(),
             objects: vec![PageObject::Unsupported(Unsupported {
                 id: Default::default(),

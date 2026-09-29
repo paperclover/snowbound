@@ -17,7 +17,7 @@ use ui::{Flags, Spec, Ui, px};
 use winit::{
     error::EventLoopError,
     event_loop::{EventLoop, EventLoopProxy},
-    platform::wayland::WindowAttributesExtWayland,
+    platform::wayland::{EventLoopExtWayland, WindowAttributesExtWayland},
     window::{Icon, ResizeDirection, Theme, Window, WindowAttributes},
 };
 
@@ -48,23 +48,32 @@ pub fn event_loop(_headless: bool) -> Result<EventLoop<crate::UserEvent>, EventL
     if desktop() == Desktop::Kde {
         follow_breeze_radius(event_loop.create_proxy());
     }
+    let libadwaita = desktop() == Desktop::Gnome && event_loop.is_wayland();
+    sctk_adwaita::LIBADWAITA_EDGE.store(libadwaita, Ordering::Relaxed);
     Ok(event_loop)
 }
 
-/// How far the window manager rounds the window's corners: KWin rounds the bottom corners
-/// of Breeze's borderless windows unless they are maximized or full screen.
+/// How far the window's corners round unless it is maximized or full screen: KWin rounds
+/// the bottom corners of Breeze's borderless windows, and on GNOME's Wayland the window cuts
+/// its own to libadwaita's radius, which winit's Adwaita frame edges.
 pub fn corner_radius(window: &Window) -> f32 {
-    let units = f32::from_bits(BREEZE_RADIUS.load(Ordering::Relaxed));
-    if units == 0.0
-        || !window.is_decorated()
-        || window.is_maximized()
-        || window.fullscreen().is_some()
-    {
+    if !window.is_decorated() || window.is_maximized() || window.fullscreen().is_some() {
         return 0.0;
     }
+    if cuts_corners() {
+        return sctk_adwaita::WINDOW_RADIUS;
+    }
     // Breeze snaps its radius to the device pixel grid.
+    let units = f32::from_bits(BREEZE_RADIUS.load(Ordering::Relaxed));
     let scale = window.scale_factor() as f32;
     (units * scale).round() / scale
+}
+
+/// Whether the window erases its own bottom corners to transparent pixels: under winit's
+/// Adwaita frame on GNOME's Wayland, which draws libadwaita's window edge. Mutter's X11
+/// frames stay square at the bottom, as libadwaita's own `ssd-frame` style has them.
+pub fn cuts_corners() -> bool {
+    sctk_adwaita::LIBADWAITA_EDGE.load(Ordering::Relaxed)
 }
 
 /// Reads Breeze's corner radius now and again whenever KWin is told to reload its
@@ -141,7 +150,11 @@ pub fn window_attributes() -> WindowAttributes {
     Window::default_attributes()
         .with_name(APP_ID, APP_ID)
         .with_window_icon(icon)
+        .with_transparent(cuts_corners())
 }
+
+/// The window manager or the frame draws the title bar.
+pub fn install_title_bar(_: &Window) {}
 
 /// Wayland's clipboard through the window's own connection, as not every compositor offers
 /// a clipboard to clients without a window; X11's otherwise.
@@ -180,10 +193,11 @@ impl Clipboard {
     }
 }
 
-/// Whether the system draws the title bar; false only where Wayland's client-side frame
-/// could not be made, leaving the app's own.
+/// Whether the system draws the title bar: the window manager, or on Wayland the compositor.
+/// Where winit's Adwaita frame decorates the window instead, as on GNOME, the frame has no
+/// header and the toolbar's row is the title bar, as it is where no frame could be made.
 pub fn system_titlebar(window: &Window) -> bool {
-    window.is_decorated()
+    window.is_decorated() && !sctk_adwaita::FRAMED.load(Ordering::Relaxed)
 }
 
 /// Window managers show no document of a window's.
@@ -463,41 +477,63 @@ fn adwaita_titlebar(appearance: Theme) -> [[u8; 3]; 2] {
     })
 }
 
-/// Minimize, maximize and close at the title bar's trailing end.
+/// The window's buttons at the title bar's trailing end, in the order GNOME's
+/// `button-layout` lists them, which is close alone by default; elsewhere minimize,
+/// maximize and close.
 pub fn window_controls(ui: &mut Ui, window: &Window) {
-    let theme = ui.theme.clone();
-    let mut button = |part: &str, icon| {
-        ui.leaf(
-            part,
-            Spec {
-                flags: Flags::CLICKABLE,
-                size: [px(crate::TITLE + 12.0), px(crate::TITLE)],
-                icon: Some(icon),
-                color: Some(theme.text),
-                hover_fill: Some(theme.hover()),
-                center: true,
-                ..Spec::default()
-            },
-        )
-        .clicked
-    };
-    if button("minimize", MINIMIZE) {
-        window.set_minimized(true);
-    }
-    if button(
-        "maximize",
-        if window.is_maximized() {
-            RESTORE
-        } else {
-            MAXIMIZE
-        },
-    ) {
-        zoom(window);
-    }
-    if button("close", crate::art::CLOSE)
-        && let Some(proxy) = QUIT.get()
-    {
-        let _ = proxy.send_event(crate::UserEvent::Quit);
+    static CONTROLS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    let controls = CONTROLS.get_or_init(|| {
+        let layout = portal_setting("org.gnome.desktop.wm.preferences", "button-layout")
+            .and_then(|value| String::try_from(value).ok());
+        match layout {
+            Some(layout) => layout
+                .split([':', ','])
+                .filter_map(|name| {
+                    ["minimize", "maximize", "close"]
+                        .into_iter()
+                        .find(|known| *known == name)
+                })
+                .collect(),
+            None if desktop() == Desktop::Gnome => vec!["close"],
+            None => vec!["minimize", "maximize", "close"],
+        }
+    });
+    let text = ui.theme.text;
+    let disc = |alpha| [text[0], text[1], text[2], alpha];
+    for control in controls {
+        let icon = match *control {
+            "minimize" => MINIMIZE,
+            "maximize" if window.is_maximized() => RESTORE,
+            "maximize" => MAXIMIZE,
+            _ => crate::art::CLOSE,
+        };
+        // Round, on a faint disc, as libadwaita's are.
+        let clicked = ui
+            .leaf(
+                control,
+                Spec {
+                    flags: Flags::CLICKABLE,
+                    size: [px(ui::shell::TOOL); 2],
+                    icon: Some(icon),
+                    color: Some(text),
+                    fill: Some(disc(0.1)),
+                    hover_fill: Some(disc(0.18)),
+                    radius: ui::shell::TOOL / 2.0,
+                    center: true,
+                    ..Spec::default()
+                },
+            )
+            .clicked;
+        match *control {
+            _ if !clicked => {}
+            "minimize" => window.set_minimized(true),
+            "maximize" => zoom(window),
+            _ => {
+                if let Some(proxy) = QUIT.get() {
+                    let _ = proxy.send_event(crate::UserEvent::Quit);
+                }
+            }
+        }
     }
 }
 
@@ -538,6 +574,21 @@ pub fn zoom(window: &Window) {
 
 /// Winit delivers typed text with its key events on Linux.
 pub fn install_text_input(_: &Window) {}
+
+pub fn move_cursor() -> winit::window::CursorIcon {
+    winit::window::CursorIcon::Move
+}
+
+/// Window drags are the app's own.
+pub fn set_window_drags(_: bool) {}
+
+/// Scrollbars overlay the content.
+pub fn scrollers() -> Option<ui::Scrollers> {
+    None
+}
+
+/// Resizing takes the window's edges.
+pub fn resize_grip(_: &mut Ui, _: &Window, _: [f32; 2]) {}
 
 /// Options opens from the sidebar's footer and Ctrl+Comma, as Linux apps have no shared menu.
 pub fn install_menu() {}
@@ -639,6 +690,45 @@ fn portal_setting(namespace: &str, key: &str) -> Option<zbus::zvariant::OwnedVal
     value.try_into_owned().ok()
 }
 
+pub const SHOW_FILE: &str = "Show in Files";
+
+/// Selects `file` in the desktop's file manager, or opens its folder where none answers
+/// `org.freedesktop.FileManager1`.
+pub fn show_file(file: &std::path::Path) {
+    let shown = zbus::blocking::connection::Builder::session()
+        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+        .and_then(|connection| {
+            connection.call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                &(vec![file_uri(file)], ""),
+            )
+        });
+    if shown.is_err()
+        && let Some(folder) = file.parent()
+    {
+        let _ = Command::new("xdg-open").arg(folder).spawn();
+    }
+}
+
+/// The `file://` URI of absolute `path`, its bytes outside RFC 3986's unreserved set and `/`
+/// percent-encoded.
+fn file_uri(path: &std::path::Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = "file://".to_owned();
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(byte as char)
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
+}
+
 pub fn cache_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")
 }
@@ -725,12 +815,6 @@ fn xdg_base(variable: &str, fallback: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(fallback)))
-}
-
-/// The application's icon from the icon theme, the smallest at least `pixels` square.
-pub fn app_icon(pixels: u32) -> Option<draw::RasterImage> {
-    let (side, rgba) = icon_pixels(pixels)?;
-    draw::RasterImage::new([side; 2], rgba).ok()
 }
 
 /// Looks beside the executable first, as the release archive installs it, then in the
@@ -1223,6 +1307,15 @@ mod tests {
         let dark = adwaita_menu(Theme::Dark, 11.0);
         assert_eq!(dark.highlight, srgb([74, 74, 78]));
         assert_eq!(dark.motion, ui::PopupMotion::Cut);
+    }
+
+    #[test]
+    fn file_uris_escape_all_but_unreserved_bytes() {
+        let path = std::path::Path::new("/home/me/Notes & Plans/Café.one");
+        assert_eq!(
+            file_uri(path),
+            "file:///home/me/Notes%20%26%20Plans/Caf%C3%A9.one"
+        );
     }
 
     #[test]

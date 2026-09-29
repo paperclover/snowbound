@@ -761,7 +761,7 @@ fn palette(scene: &mut Scene) {
     });
     let id = Id::ROOT.child("palette");
     scene.open(id, typed("ne"), |ui, _| {
-        ui::popup::palette(ui, id, &commands);
+        ui::popup::palette(ui, id, &commands, "Search commands");
     });
 }
 

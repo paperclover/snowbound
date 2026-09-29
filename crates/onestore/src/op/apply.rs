@@ -638,6 +638,26 @@ impl<'a> Writer<'_, 'a> {
                 }
                 Ok(BTreeMap::from([(node, object)]))
             }),
+            PageOp::RuleLines(lines) => self.write(|page| {
+                let [node] = crate::active::manifest_pages(&page.view)[..] else {
+                    return Err(invalid("The page has no page node to rule"));
+                };
+                let mut object =
+                    crate::write::PropertyObject::from_object(&page.live.revision.objects[&node])?;
+                // OneNote's "None" removes the properties.
+                match lines {
+                    Some(lines) => {
+                        let properties = lines.properties();
+                        let values: Vec<_> = properties
+                            .iter()
+                            .map(|(id, value)| (*id, &value[..]))
+                            .collect();
+                        object.set(&values)?
+                    }
+                    None => object.remove(&crate::page::RULE_LINES)?,
+                }
+                Ok(BTreeMap::from([(node, object)]))
+            }),
             PageOp::Insert {
                 container,
                 before,

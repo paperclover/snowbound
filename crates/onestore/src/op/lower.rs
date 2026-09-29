@@ -45,6 +45,7 @@ pub fn lower(
         created: None,
         margin_origin: [0.0; 2],
         color: None,
+        rule_lines: None,
         objects: vec![PageObject::Outline(Outline {
             id: container,
             title: false,
@@ -1424,8 +1425,25 @@ impl Lowering {
     }
 
     fn strokes(&mut self, stored: &crate::page::Ink, ink: &crate::page::Ink) -> Result<(), Error> {
-        if stored.layout != ink.layout || stored.groups != ink.groups {
-            return Err(invalid("Ink position and groups stay as stored"));
+        let placed = |layout: &crate::document::Layout| crate::document::Layout {
+            x: None,
+            y: None,
+            ..layout.clone()
+        };
+        if placed(&stored.layout) != placed(&ink.layout) || stored.groups != ink.groups {
+            return Err(invalid("Ink size and groups stay as stored"));
+        }
+        if (stored.layout.x, stored.layout.y) != (ink.layout.x, ink.layout.y) {
+            let (Some(x), Some(y)) = (ink.layout.x, ink.layout.y) else {
+                return Err(invalid("An ink position needs both coordinates"));
+            };
+            self.emit(PageOp::Outline {
+                object: ink.id,
+                edit: crate::OutlineEdit::Position { x, y },
+            })?;
+            if stored.strokes == ink.strokes {
+                return Ok(());
+            }
         }
         let mut add = Vec::new();
         for stroke in &ink.strokes {
@@ -1568,6 +1586,9 @@ impl Lowering {
         });
         if before.color != after.color {
             self.emit(PageOp::Color(after.color))?;
+        }
+        if before.rule_lines != after.rule_lines {
+            self.emit(PageOp::RuleLines(after.rule_lines))?;
         }
         if before.created == after.created && shown {
             return Ok(());

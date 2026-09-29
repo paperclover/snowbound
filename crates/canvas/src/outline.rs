@@ -213,6 +213,8 @@ pub struct ParagraphLayout {
 pub enum TagIcon {
     CheckBox {
         checked: bool,
+        /// The badge on the small box of OneNote's check box variants.
+        mark: Option<BoxMark>,
     },
     Star,
     Question,
@@ -227,8 +229,26 @@ pub enum TagIcon {
     BlueSquare,
     /// An Outlook task flag.
     Flag,
+    Idea,
+    Password,
+    Movie,
+    Book,
+    Web,
+    Blog,
+    Email,
     /// A tag symbol without artwork of its own.
     Other,
+}
+
+/// What OneNote draws on a check box variant's small box.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum BoxMark {
+    Person,
+    Manager,
+    Arrow,
+    One,
+    Two,
+    Client,
 }
 
 impl TagIcon {
@@ -238,7 +258,21 @@ impl TagIcon {
         Some(match shape {
             0 => return None,
             // OneNote's check boxes, plain and with a person, arrow, number or bulb.
-            3 | 8 | 12 | 28 | 71 | 94 | 95 => Self::CheckBox { checked },
+            3 => Self::CheckBox {
+                checked,
+                mark: None,
+            },
+            8 | 12 | 28 | 71 | 94 | 95 => Self::CheckBox {
+                checked,
+                mark: Some(match shape {
+                    8 => BoxMark::Client,
+                    12 => BoxMark::Arrow,
+                    28 => BoxMark::One,
+                    71 => BoxMark::Two,
+                    94 => BoxMark::Person,
+                    _ => BoxMark::Manager,
+                }),
+            },
             13 => Self::Star,
             15 => Self::Question,
             17 => Self::Exclamation,
@@ -250,6 +284,13 @@ impl TagIcon {
             101 => Self::YellowSquare,
             102 => Self::BlueSquare,
             121 => Self::Music,
+            21 => Self::Idea,
+            131 => Self::Password,
+            122 => Self::Movie,
+            132 => Self::Book,
+            125 => Self::Web,
+            24 => Self::Blog,
+            106 => Self::Email,
             _ => Self::Other,
         })
     }
@@ -1214,6 +1255,19 @@ impl OutlineLayout {
             .flatten()
     }
 
+    /// Where each root node's flow starts and ends in the outline, or `None` while a collapsed
+    /// parent hides it.
+    pub(crate) fn spans(&self) -> impl Iterator<Item = Option<[f32; 2]>> + '_ {
+        let mut state = (0.0, None);
+        self.blocks.iter().map(move |block| {
+            let span = block
+                .metrics
+                .map(|[before, after, _]| [top(&mut state, [before, after]), block.state.0 as f32]);
+            state = block.state;
+            span
+        })
+    }
+
     /// The paragraphs, tables and objects of root nodes `range`.
     pub(crate) fn pieces(&self, range: Range<usize>) -> [Range<usize>; 3] {
         let first = |root: usize| {
@@ -2039,7 +2093,13 @@ mod tests {
             extra_set: 0,
         });
         for (shape, expected) in [
-            (3, TagIcon::CheckBox { checked: true }),
+            (
+                3,
+                TagIcon::CheckBox {
+                    checked: true,
+                    mark: None,
+                },
+            ),
             (13, TagIcon::Star),
             (15, TagIcon::Question),
             (17, TagIcon::Exclamation),

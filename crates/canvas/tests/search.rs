@@ -5,7 +5,7 @@ use canvas::{
     document::TextDocument,
     editor::CanvasEditor,
     layout::TextEngine,
-    search::{Entry, Index, Query, fold, page_matches},
+    search::{Entry, Index, Query, fold, page_matches, paragraph_match},
 };
 use onestore::{
     ExGuid, RevisionIndex, Store,
@@ -213,4 +213,48 @@ fn words_match_word_starts_and_pages_rank_by_title_then_recency() {
     index.retain(|entry| entry.section != "b");
     assert_eq!(order(&index, "cafe"), ["Café list"]);
     assert_eq!(index.len(), 2);
+}
+
+/// OneNote's tag gallery (`corpus/structural-probe`): a paragraph under each default tag,
+/// listed once for each tag with its stored name, and selected whole from the summary.
+#[test]
+fn tags_summary_lists_each_tagged_paragraph() {
+    let file =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/structural-probe/tag-gallery.one");
+    let bytes = std::fs::read(file).unwrap();
+    let store = Store::parse(&bytes).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (space, _) = document.pages().unwrap()[0];
+    let page = Page::from_space(&document, space).unwrap();
+    let mut index = Index::default();
+    index.set(Entry::new("gallery", space, &page, 7));
+    let tagged = index.tagged(|_| true);
+    let mut names: Vec<&str> = tagged.iter().map(|tagged| tagged.name.as_str()).collect();
+    names.sort_unstable();
+    // The probe's T24 and T25 also carry Call back, one entry under each tag.
+    assert_eq!(tagged.len(), names.len());
+    names.dedup();
+    let mut labels = canvas::editor::NoteTag::ALL.map(|tag| tag.label());
+    labels.sort_unstable();
+    assert_eq!(names, labels);
+    assert!(tagged.iter().all(|tagged| tagged.space == space));
+    assert!(index.tagged(|entry| entry.section != "gallery").is_empty());
+    let mut engine = TextEngine::default();
+    let editor = CanvasEditor::from_page(page, &mut engine).unwrap();
+    let (outline, selection) = paragraph_match(&editor, tagged[0].paragraph).unwrap();
+    let outline = editor
+        .outlines()
+        .iter()
+        .find(|candidate| candidate.id == outline)
+        .unwrap();
+    let [start, end] = selection.positions;
+    let text = outline
+        .document()
+        .paragraphs()
+        .nth(start.paragraph)
+        .unwrap();
+    assert_eq!(start.offset, 0);
+    assert_eq!(end.offset as usize, text.text().encode_utf16().count());
+    assert_eq!(canvas::search::shown(text), tagged[0].text);
 }

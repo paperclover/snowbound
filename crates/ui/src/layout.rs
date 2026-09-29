@@ -2,8 +2,9 @@ use crate::{Anchor, Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, Stat
 use std::collections::HashMap;
 
 /// Sizes each box on both axes, then places it: standalone sizes, sizes taken from
-/// ancestors (pre-order), sizes summed from children (post-order), overflow shared out
-/// by strictness, and positions along each parent's flow. Labels too wide for their
+/// ancestors (pre-order), sizes summed from children (post-order), overflow taken back
+/// (from space sized by ancestors, then by folding a row's groups, then from the least
+/// strict boxes first), and positions along each parent's flow. Labels too wide for their
 /// solved width wrap or shorten before heights are solved. Boxes are in build order, so
 /// index order is pre-order.
 pub(crate) fn solve(
@@ -13,6 +14,12 @@ pub(crate) fn solve(
     texts: &mut Texts,
     frame: u64,
 ) {
+    for index in 0..nodes.len() {
+        if nodes[index].fold.is_some() {
+            let folded = nodes[index].children[1];
+            nodes[folded].hidden = true;
+        }
+    }
     for axis in 0..2 {
         if axis == 1 {
             fit_labels(nodes, texts, frame);
@@ -48,7 +55,7 @@ pub(crate) fn solve(
                 while ancestor != 0 && nodes[ancestor].size[axis].size == Size::Children {
                     ancestor = nodes[ancestor].parent;
                 }
-                let room = nodes[ancestor].computed[axis] - 2.0 * nodes[ancestor].pad[axis];
+                let room = across(nodes, ancestor, index, axis) - 2.0 * nodes[ancestor].pad[axis];
                 nodes[index].computed[axis] = room.max(0.0) * fraction;
             }
         }
@@ -66,22 +73,48 @@ pub(crate) fn solve(
             let room = (node.computed[axis] - 2.0 * node.pad[axis]).max(0.0);
             let children: Vec<_> = in_flow(nodes, index).collect();
             if along(node, axis) {
-                let excess = flow(nodes, index, axis) - room;
-                let give: f32 = children
+                let space =
+                    |child: &&usize| matches!(nodes[**child].size[axis].size, Size::Fraction(_));
+                let (space, sized): (Vec<_>, Vec<_>) = children.iter().partition(space);
+                let mut excess = flow(nodes, index, axis) - room;
+                excess = give_back(nodes, &space, axis, excess);
+                while excess > 0.0 && axis == 0 {
+                    let Some(group) = children
+                        .iter()
+                        .copied()
+                        .filter(|child| {
+                            nodes[*child].fold.is_some() && !nodes[nodes[*child].children[0]].hidden
+                        })
+                        .min_by_key(|child| nodes[*child].fold)
+                    else {
+                        break;
+                    };
+                    let [full, folded] = [nodes[group].children[0], nodes[group].children[1]];
+                    nodes[full].hidden = true;
+                    nodes[folded].hidden = false;
+                    let width = nodes[folded].computed[0] + 2.0 * nodes[group].pad[0];
+                    excess -= nodes[group].computed[0] - width;
+                    nodes[group].computed[0] = width;
+                }
+                let mut tiers: Vec<f32> = sized
                     .iter()
-                    .map(|child| {
-                        nodes[*child].computed[axis] * (1.0 - strictness(nodes, *child, axis))
-                    })
-                    .sum();
-                if excess > 0.0 && give > 0.0 {
-                    for child in children {
-                        let share =
-                            nodes[child].computed[axis] * (1.0 - strictness(nodes, child, axis));
-                        nodes[child].computed[axis] -= excess.min(give) * share / give;
-                    }
+                    .map(|child| strictness(nodes, *child, axis))
+                    .filter(|strictness| *strictness < 1.0)
+                    .collect();
+                tiers.sort_by(f32::total_cmp);
+                tiers.dedup();
+                for tier in tiers {
+                    let members: Vec<_> = sized
+                        .iter()
+                        .copied()
+                        .filter(|child| strictness(nodes, *child, axis) == tier)
+                        .collect();
+                    excess = give_back(nodes, &members, axis, excess);
                 }
             } else {
                 for child in children {
+                    let room =
+                        (across(nodes, index, child, axis) - 2.0 * nodes[index].pad[axis]).max(0.0);
                     let over = nodes[child].computed[axis] - room;
                     if over > 0.0 {
                         nodes[child].computed[axis] -=
@@ -93,6 +126,13 @@ pub(crate) fn solve(
         let window = nodes[0].computed[axis];
         for index in 0..nodes.len() {
             let mut cursor = nodes[index].pad[axis];
+            // Where a popup widening over its anchor lays its children out, from where it is.
+            let shift = match (nodes[index].anchor, nodes[index].size[axis].size) {
+                (Some(anchor @ Anchor::Over(_)), Size::Pixels(full)) if axis == 0 => {
+                    anchor.place(axis, full, full, window) - nodes[index].relative[axis]
+                }
+                _ => 0.0,
+            };
             for child in nodes[index].children.clone() {
                 nodes[child].relative[axis] = if let Some(anchor) = nodes[child].anchor {
                     let shown = nodes[child].computed[axis];
@@ -103,6 +143,8 @@ pub(crate) fn solve(
                     anchor.place(axis, size, shown, window)
                 } else if nodes[child].flags.contains(Flags::FLOAT) {
                     nodes[child].position[axis]
+                } else if nodes[child].hidden {
+                    nodes[index].pad[axis]
                 } else if along(&nodes[index], axis) {
                     let at = cursor;
                     cursor += nodes[child].computed[axis] + nodes[index].gap;
@@ -110,6 +152,9 @@ pub(crate) fn solve(
                 } else {
                     nodes[index].pad[axis]
                 };
+                if !nodes[child].flags.contains(Flags::STILL) {
+                    nodes[child].relative[axis] += shift;
+                }
             }
             if axis == 1 {
                 nodes[index].content = flow(nodes, index, axis) + 2.0 * nodes[index].pad[axis];
@@ -124,7 +169,13 @@ pub(crate) fn solve(
         snap(nodes[0].computed[1]),
     ];
     for index in 1..nodes.len() {
-        let parent = &nodes[nodes[index].parent];
+        let parent = nodes[index].parent;
+        if nodes[index].hidden || nodes[parent].hidden {
+            nodes[index].hidden = true;
+            nodes[index].rect = nodes[parent].rect;
+            continue;
+        }
+        let parent = &nodes[parent];
         let scroll =
             if parent.flags.contains(Flags::SCROLL) && !nodes[index].flags.contains(Flags::FLOAT) {
                 states.get(&parent.id).map_or(0.0, |state| state.scroll)
@@ -143,17 +194,60 @@ pub(crate) fn solve(
     }
 }
 
+/// The length `parent` lays `child` out across: a popup widening over its anchor lays its
+/// contents out at its full width, but for boxes standing in for the anchor, which widen with it.
+fn across(nodes: &[Built], parent: usize, child: usize, axis: usize) -> f32 {
+    let node = &nodes[parent];
+    match (node.anchor, node.size[axis].size) {
+        (Some(Anchor::Over(_)), Size::Pixels(full))
+            if axis == 0 && !nodes[child].flags.contains(Flags::STILL) =>
+        {
+            full
+        }
+        _ => node.computed[axis],
+    }
+}
+
+/// Takes up to `excess` back from `boxes`, each giving in proportion to what its strictness
+/// lets it, and returns what is left.
+fn give_back(nodes: &mut [Built], boxes: &[usize], axis: usize, excess: f32) -> f32 {
+    let give = |nodes: &[Built], child: usize| {
+        nodes[child].computed[axis] * (1.0 - strictness(nodes, child, axis))
+    };
+    let total: f32 = boxes.iter().map(|child| give(nodes, *child)).sum();
+    if excess <= 0.0 || total <= 0.0 {
+        return excess;
+    }
+    let taken = excess.min(total);
+    for child in boxes {
+        nodes[*child].computed[axis] -= taken * give(nodes, *child) / total;
+    }
+    excess - taken
+}
+
 fn along(node: &Built, axis: usize) -> bool {
     (node.axis == Axis::Y) == (axis == 1)
 }
 
+/// The share of its size a box keeps when its siblings overflow. A box sized by the children
+/// along its flow keeps what they keep.
 fn strictness(nodes: &[Built], index: usize, axis: usize) -> f32 {
-    nodes[index].size[axis].strictness.clamp(0.0, 1.0)
+    let node = &nodes[index];
+    let declared = node.size[axis].strictness.clamp(0.0, 1.0);
+    if node.size[axis].size != Size::Children || !along(node, axis) || node.computed[axis] <= 0.0 {
+        return declared;
+    }
+    let give: f32 = in_flow(nodes, index)
+        .map(|child| nodes[child].computed[axis] * (1.0 - strictness(nodes, child, axis)))
+        .sum();
+    declared.min(1.0 - give / node.computed[axis])
 }
 
 fn in_flow(nodes: &[Built], index: usize) -> impl Iterator<Item = usize> + '_ {
     nodes[index].children.iter().copied().filter(|child| {
-        !nodes[*child].flags.contains(Flags::FLOAT) && nodes[*child].anchor.is_none()
+        !nodes[*child].flags.contains(Flags::FLOAT)
+            && nodes[*child].anchor.is_none()
+            && !nodes[*child].hidden
     })
 }
 

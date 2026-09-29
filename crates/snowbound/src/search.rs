@@ -2,8 +2,9 @@
 //! results dropping down from it, and Find on This Page. The index is kept on a thread of
 //! its own, from the section files and the open section's replica.
 
+use crate::pane::Pane;
 use crate::{Command, Library, State, Theme, art, commands, lap, page};
-use canvas::search::{Entry, Found, Index, Query, page_matches};
+use canvas::search::{Entry, Found, Index, PageMatch, Query, page_matches, paragraph_match};
 use notebook::Replica;
 use onestore::ExGuid;
 use std::{
@@ -31,9 +32,9 @@ pub enum Scope {
 }
 
 impl Scope {
-    const ALL: [Scope; 4] = [Scope::Section, Scope::Group, Scope::Notebook, Scope::All];
+    pub(crate) const ALL: [Scope; 4] = [Scope::Section, Scope::Group, Scope::Notebook, Scope::All];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Scope::Section => "This Section",
             Scope::Group => "This Section Group",
@@ -52,7 +53,7 @@ const PLACE: f32 = 150.0;
 /// How long typing pauses before the index reads the pages it changed.
 const SETTLE: Duration = Duration::from_millis(400);
 
-fn results() -> Id {
+pub(crate) fn results() -> Id {
     Id::ROOT.child("results")
 }
 
@@ -71,7 +72,12 @@ fn find_field() -> Id {
 
 /// Whether `focus` is one of the box's fields, which take typed text.
 pub fn takes_text(focus: Option<Id>) -> bool {
-    [Some(field()), Some(find_field())].contains(&focus)
+    [
+        Some(field()),
+        Some(find_field()),
+        Some(crate::pane::field()),
+    ]
+    .contains(&focus)
 }
 
 /// Work for the index thread.
@@ -97,26 +103,27 @@ pub struct Search {
     /// Scope searches start in, as "Set This Scope as Default" leaves it.
     pub default: Scope,
     /// Find on This Page is open, at the match selected.
-    finding: bool,
+    pub(crate) finding: bool,
     current: Option<usize>,
-    /// The page a result opened, whose first match is selected once it shows.
-    reveal: Option<ExGuid>,
-    index: Arc<Mutex<Index>>,
+    /// The page a result opened, whose first match, or paragraph, is selected once it shows.
+    reveal: Option<(ExGuid, Option<ExGuid>)>,
+    pub(crate) index: Arc<Mutex<Index>>,
     /// Counts the index's changes, so results are made again when it changes.
     version: Arc<AtomicU64>,
-    busy: Arc<AtomicBool>,
+    pub(crate) busy: Arc<AtomicBool>,
     jobs: mpsc::Sender<Job>,
-    found: Vec<Found>,
+    pub(crate) found: Vec<Found>,
     found_for: Option<(Query, Scope, u64, String)>,
-    selected: Option<u64>,
+    pub(crate) selected: Option<u64>,
     /// The notebooks and open section the index was last brought to, by identity.
     synced: Vec<usize>,
     /// The results drop down, until chosen from or dismissed.
-    open: bool,
+    pub(crate) open: bool,
     /// Where the scope menu opens.
     anchor: Option<Anchor>,
-    /// The find field takes the keys once built.
-    claim: bool,
+    /// The find field, or the Search Results pane's, takes the keys once built.
+    pub(crate) claim: bool,
+    pub(crate) pane: Option<Pane>,
 }
 
 impl Search {
@@ -148,6 +155,7 @@ impl Search {
             open: false,
             anchor: None,
             claim: false,
+            pane: None,
         }
     }
 
@@ -188,7 +196,7 @@ fn stamp(file: &Path) -> Stamp {
 }
 
 /// Now in Time32, seconds since 1980, as page modification times are kept.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().saturating_sub(315_532_800))
@@ -395,7 +403,13 @@ fn reread(
 }
 
 /// A text box's label with `hits`, byte ranges of `text`, marked in OneNote's yellow.
-fn marked(ui: &mut Ui, part: &str, text: &str, hits: &[std::ops::Range<usize>], spec: Spec) {
+pub(crate) fn marked(
+    ui: &mut Ui,
+    part: &str,
+    text: &str,
+    hits: &[std::ops::Range<usize>],
+    spec: Spec,
+) {
     let height = match spec.size[1].size {
         ui::Size::Pixels(height) => height,
         _ => 0.0,
@@ -481,7 +495,7 @@ impl State {
     }
 
     /// Whether `key` names a section the search's scope takes in.
-    fn in_scope(&self, scope: Scope, key: &str) -> bool {
+    pub(crate) fn in_scope(&self, scope: Scope, key: &str) -> bool {
         let Some(session) = &self.session else {
             return scope == Scope::All;
         };
@@ -499,7 +513,7 @@ impl State {
     }
 
     /// The results for the query in its scope, made again when either or the index changed.
-    fn refresh_results(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn refresh_results(&mut self) -> Result<(), Box<dyn Error>> {
         let query = Query::new(&self.search.query);
         let version = self.search.version.load(Ordering::Relaxed);
         let open = self
@@ -538,33 +552,37 @@ impl State {
     }
 
     /// Marks the query's matches on the page; with `select`, selects the match Find on
-    /// This Page is at, or the first when a result opened the page.
+    /// This Page is at, or the first, or the paragraph, when a result opened the page.
     pub(crate) fn refind(&mut self, select: bool) -> Result<(), Box<dyn Error>> {
         self.view.found = page_matches(&self.view.editor, &self.search.shown());
         if !select {
             return Ok(());
         }
         let space = self.session.as_ref().map(|session| session.space);
-        let at = if self.search.finding {
+        let target = if self.search.finding {
             self.search.current = match self.search.current {
                 Some(at) if at < self.view.found.len() => Some(at),
                 _ => (!self.view.found.is_empty()).then_some(0),
             };
-            self.search.current
-        } else if self.search.reveal.is_some() && self.search.reveal == space {
+            self.search
+                .current
+                .and_then(|at| self.view.found.get(at).copied())
+        } else if let Some((_, paragraph)) =
+            self.search.reveal.filter(|(page, _)| Some(*page) == space)
+        {
             self.search.reveal = None;
-            (!self.view.found.is_empty()).then_some(0)
+            match paragraph {
+                Some(paragraph) => paragraph_match(&self.view.editor, paragraph),
+                None => self.view.found.first().copied(),
+            }
         } else {
             None
         };
-        match at {
-            Some(at) => self.select_match(at),
-            None => Ok(()),
-        }
+        self.select(target)
     }
 
-    fn select_match(&mut self, at: usize) -> Result<(), Box<dyn Error>> {
-        let Some(&(outline, selection)) = self.view.found.get(at) else {
+    fn select(&mut self, target: Option<PageMatch>) -> Result<(), Box<dyn Error>> {
+        let Some((outline, selection)) = target else {
             return Ok(());
         };
         self.view.editor.focus_outline(outline)?;
@@ -598,26 +616,38 @@ impl State {
     }
 
     /// Ends the search or find: the box empties, the marks go and the page takes the keys,
-    /// keeping any match selected.
-    fn end_search(&mut self) {
+    /// keeping any match selected. The Search Results pane keeps the search while open.
+    pub(crate) fn end_search(&mut self) {
         self.search.open = false;
-        self.search.query.clear();
         self.search.finding = false;
         self.search.current = None;
-        self.search.scope = self.search.default;
-        self.view.found.clear();
         self.ui.close_popup(results());
         self.ui.set_focus(Some(page()));
+        if !matches!(self.search.pane, Some(Pane::Search { .. })) {
+            self.search.query.clear();
+            self.search.scope = self.search.default;
+            self.view.found.clear();
+        }
     }
 
     /// Opens a result's page, whose first match is selected once it shows.
     fn open_result(&mut self, index: usize) -> Result<(), Box<dyn Error>> {
-        let Some(found) = self.search.found.get(index) else {
-            return Ok(());
-        };
-        let (location, path) = found.section.split_once('\n').unwrap_or_default();
-        let (space, section) = (found.space, found.section.clone());
-        self.search.reveal = Some(space);
+        match self.search.found.get(index) {
+            Some(found) => self.reveal(found.section.clone(), found.space, None),
+            None => Ok(()),
+        }
+    }
+
+    /// Opens page `space` of `section`, whose first match, or `paragraph`, is selected once
+    /// it shows.
+    pub(crate) fn reveal(
+        &mut self,
+        section: String,
+        space: ExGuid,
+        paragraph: Option<ExGuid>,
+    ) -> Result<(), Box<dyn Error>> {
+        let (location, path) = section.split_once('\n').unwrap_or_default();
+        self.search.reveal = Some((space, paragraph));
         let open = self.session.as_ref().map(|session| {
             (
                 session.library.key(&session.tabs[session.tab].path),
@@ -633,9 +663,9 @@ impl State {
                     .iter()
                     .find(|library| library.location == location)
                     .ok_or("The notebook is no longer open")?;
-                self.last_pages.insert(section, space);
                 self.commands
                     .push(Command::OpenSection(Arc::clone(library), path.to_owned()));
+                self.last_pages.insert(section, space);
             }
         }
         Ok(())
@@ -984,8 +1014,29 @@ impl State {
                     .or_else(|| entered.then_some(0))
             });
         }
+        let link = format!(
+            "Open Search Results Pane ({})",
+            commands::shortcut(commands::Id::SearchResults)
+        );
+        let pane = self
+            .ui
+            .leaf(
+                "pane",
+                Spec {
+                    flags: Flags::CLICKABLE,
+                    size: [fit(), px(22.0)],
+                    icon: Some(art::SEARCH),
+                    text: Some(&link),
+                    color: Some(theme.accent),
+                    pad: [6.0, 0.0],
+                    ..Spec::default()
+                },
+            )
+            .clicked;
         self.ui.close();
-        if let Some(index) = chosen {
+        if pane {
+            self.open_search_pane();
+        } else if let Some(index) = chosen {
             self.open_result(index)?;
             self.search.open = false;
             self.ui.close_popup(results());
@@ -1084,7 +1135,7 @@ impl State {
                 (at + count - 1) % count
             };
             self.search.current = Some(next);
-            self.select_match(next)?;
+            self.select(self.view.found.get(next).copied())?;
         }
         Ok(())
     }

@@ -58,6 +58,12 @@ impl Surface {
             config.view_formats.push(window_format);
             draw::Translucent::new(&device, config.format, window_format)
         });
+        if platform::cuts_corners() {
+            let alpha = &surface.get_capabilities(&adapter).alpha_modes;
+            if alpha.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
+            }
+        }
         surface.configure(&device, &config);
         eprintln!("Canvas GPU: {:?}", adapter.get_info());
         let renderer = Renderer::new(device, queue, config.format);
@@ -205,17 +211,15 @@ impl Surface {
             self.config.format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
-        Ok(buffer
-            .get_mapped_range(..)?
-            .chunks_exact(row as usize)
-            .flat_map(|line| line[..size[0] as usize * 4].chunks_exact(4))
-            .flat_map(|pixel| {
-                if bgra {
-                    [pixel[2], pixel[1], pixel[0], pixel[3]]
-                } else {
-                    [pixel[0], pixel[1], pixel[2], pixel[3]]
-                }
-            })
-            .collect())
+        let mut pixels = Vec::with_capacity(size[0] as usize * size[1] as usize * 4);
+        for line in buffer.get_mapped_range(..)?.chunks_exact(row as usize) {
+            pixels.extend_from_slice(&line[..size[0] as usize * 4]);
+        }
+        if bgra {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+        Ok(pixels)
     }
 }

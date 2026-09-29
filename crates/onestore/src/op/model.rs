@@ -627,6 +627,7 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             page.created = Some(*created);
         }
         PageOp::Color(color) => page.color = *color,
+        PageOp::RuleLines(lines) => page.rule_lines = *lines,
         PageOp::Text { text, range, with } => {
             let object = text_mut(page, *text)?;
             object.text = replace_text(&object.text, range.clone(), with)?;
@@ -923,9 +924,12 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
         PageOp::Outline { object, edit } => match edit {
             OutlineEdit::Collapsed(value) => paragraph_mut(page, *object)?.collapsed = *value,
             OutlineEdit::Position { x, y } => {
-                let outline = outline_mut(page, *object)?;
-                outline.layout.x = Some(stored(*x));
-                outline.layout.y = Some(stored(*y));
+                let layout = match page.objects.iter_mut().find(|o| o.id() == *object) {
+                    Some(PageObject::Ink(ink)) => &mut ink.layout,
+                    _ => &mut outline_mut(page, *object)?.layout,
+                };
+                layout.x = Some(stored(*x));
+                layout.y = Some(stored(*y));
                 retitle(page, None);
             }
             OutlineEdit::Width { points, user_set } => {

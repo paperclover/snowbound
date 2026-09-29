@@ -209,24 +209,15 @@ pub fn tooltip(ui: &mut Ui, title: &str, keys: &str, description: Option<&str>) 
 }
 
 /// Builds popup `id` as a command palette across the top of the window while it is open,
-/// listing `commands` that match what is typed, most relevant first. Returns the index of
-/// the command chosen.
-pub fn palette(ui: &mut Ui, id: Id, commands: &[Item]) -> Option<usize> {
+/// listing `items` that match what is typed, most relevant first, under a filter field
+/// showing `placeholder` while empty. Returns the index of the item chosen.
+pub fn palette(ui: &mut Ui, id: Id, items: &[Item], placeholder: &str) -> Option<usize> {
     if !ui.popup_open(id) {
         return None;
     }
     let window = ui.rect(Id::ROOT).unwrap_or_default();
     let width = PALETTE.min(window[2] - 8.0 * PAD).max(NARROWEST);
-    let [left, top] = [(window[2] - width) / 2.0, window[3] / 8.0];
-    choose(
-        ui,
-        id,
-        Anchor::Below([left, top, left, top]),
-        commands,
-        Some("Search commands"),
-        width,
-        ROW,
-    )
+    choose(ui, id, Anchor::Top, items, Some(placeholder), width, ROW)
 }
 
 fn choose(
@@ -694,26 +685,42 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
     None
 }
 
-/// Builds popup `id` as a gallery beside `anchor` while it is open: `groups` of cells, each
-/// a heading and a count, in rows of `columns` cells `size` large, with cell `current`
-/// outlined. `cell` builds a cell's contents from its index, counted through the groups.
-/// Returns the index of the cell chosen.
-#[allow(clippy::too_many_arguments)]
+/// A gallery's run of `cells` under `heading`, in rows of `columns` cells `size` large.
+#[derive(Clone, Copy, Debug)]
+pub struct Group<'a> {
+    pub heading: &'a str,
+    pub cells: usize,
+    pub columns: usize,
+    pub size: [f32; 2],
+}
+
+/// Builds popup `id` as a gallery beside `anchor` while it is open: `groups` of cells, with
+/// the cells in `current` outlined. `cell` builds a cell's contents from its index, counted
+/// through the groups. Returns the index of the cell chosen.
 pub fn gallery(
     ui: &mut Ui,
     id: Id,
     anchor: Anchor,
-    groups: &[(&str, usize)],
-    columns: usize,
-    size: [f32; 2],
-    current: Option<usize>,
+    groups: &[Group],
+    current: &[usize],
     mut cell: impl FnMut(&mut Ui, usize),
 ) -> Option<usize> {
     if !ui.popup_open(id) {
         return None;
     }
     let cell_id = |index: usize| id.child(("cell", index));
-    let count: usize = groups.iter().map(|(_, count)| count).sum();
+    let count: usize = groups.iter().map(|group| group.cells).sum();
+    // The columns of the group holding cell `at`.
+    let columns = |at: usize| {
+        let mut start = 0;
+        groups
+            .iter()
+            .find(|group| {
+                start += group.cells;
+                at < start
+            })
+            .map_or(1, |group| group.columns)
+    };
     let keys = navigation(
         ui,
         &[id],
@@ -737,7 +744,7 @@ pub fn gallery(
         }
     }
     for key in keys {
-        let at = highlight.or(current).unwrap_or(0);
+        let at = highlight.or(current.first().copied()).unwrap_or(0);
         highlight = Some(match key {
             NamedKey::Enter => {
                 chosen = chosen.or(highlight);
@@ -745,8 +752,8 @@ pub fn gallery(
             }
             NamedKey::ArrowLeft => at.saturating_sub(1),
             NamedKey::ArrowRight => (at + 1).min(count - 1),
-            NamedKey::ArrowUp => at.saturating_sub(columns),
-            _ => (at + columns).min(count - 1),
+            NamedKey::ArrowUp => at.saturating_sub(columns(at)),
+            _ => (at + columns(at)).min(count - 1),
         });
     }
     if let Some(index) = chosen {
@@ -754,19 +761,18 @@ pub fn gallery(
         return Some(index);
     }
     let theme = ui.theme.clone();
-    surface(
-        ui,
-        id,
-        anchor,
-        columns as f32 * size[0] + 2.0 * ui.theme.menu().pad,
-    );
+    let width = groups
+        .iter()
+        .map(|group| group.columns as f32 * group.size[0])
+        .fold(0.0, f32::max);
+    surface(ui, id, anchor, width + 2.0 * ui.theme.menu().pad);
     let mut index = 0;
-    for (group, (heading, cells)) in groups.iter().enumerate() {
+    for (number, group) in groups.iter().enumerate() {
         ui.leaf(
-            ("heading", group),
+            ("heading", number),
             Spec {
                 size: [fill(), px(MENU_ROW)],
-                text: Some(heading),
+                text: Some(group.heading),
                 font_size: Some(theme.font_size - 2.0),
                 bold: true,
                 color: Some(theme.text_dim),
@@ -774,23 +780,23 @@ pub fn gallery(
                 ..Spec::default()
             },
         );
-        for row in 0..cells.div_ceil(columns) {
+        for row in 0..group.cells.div_ceil(group.columns) {
             ui.open(
-                ("row", group, row),
+                ("row", number, row),
                 Spec {
-                    size: [fill(), px(size[1])],
+                    size: [fill(), px(group.size[1])],
                     ..Spec::default()
                 },
             );
-            for _ in 0..columns.min(cells - row * columns) {
+            for _ in 0..group.columns.min(group.cells - row * group.columns) {
                 ui.open_as(
                     cell_id(index),
                     Spec {
                         flags: Flags::CLICKABLE,
                         axis: Axis::Y,
-                        size: [px(size[0]), px(size[1])],
+                        size: [px(group.size[0]), px(group.size[1])],
                         fill: (highlight == Some(index)).then(|| theme.hover()),
-                        border: (current == Some(index)).then_some(theme.accent),
+                        border: current.contains(&index).then_some(theme.accent),
                         radius: 4.0,
                         pad: [PAD, PAD],
                         ..Spec::default()

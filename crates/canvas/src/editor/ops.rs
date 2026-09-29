@@ -173,7 +173,7 @@ fn lower(
 
 /// An empty paragraph keeping a container from emptying while its paragraphs are removed
 /// and inserted again; the lowering removes it after.
-fn anchor() -> Result<PageParagraph, EditError> {
+pub(super) fn anchor() -> Result<PageParagraph, EditError> {
     crate::document::node(
         Paragraph::new(String::new(), Format::default()),
         Format::default(),
@@ -327,6 +327,9 @@ impl CanvasEditor {
         for object in &self.objects {
             match object {
                 page::Content::Image(image) if image.id == placement.id => return picture(image),
+                page::Content::Ink(ink) if ink.id == placement.id => {
+                    return layout_ops(ink.id, &old, &moved(&ink.layout));
+                }
                 page::Content::Outline { source, .. } if source.id == placement.id => {
                     return layout_ops(source.id, &old, &moved(&source.layout));
                 }
@@ -352,29 +355,7 @@ impl CanvasEditor {
         match (old, new) {
             (None, None) => Ok(Vec::new()),
             (Some(_), None) => Ok(vec![PageOp::Delete { object: id }]),
-            (None, Some(new)) => {
-                let outline = new.snapshot();
-                let page = |objects| Page {
-                    title: String::new(),
-                    identity: None,
-                    created: None,
-                    margin_origin: [0.0; 2],
-                    color: None,
-                    objects,
-                    definitions: named(&self.definitions, &[&outline.paragraphs]),
-                };
-                let mut ops = op::lower_page(
-                    &page(Vec::new()),
-                    &page(vec![PageObject::Outline(outline.clone())]),
-                )?;
-                let successor = self.successor(id);
-                for op in &mut ops {
-                    if let PageOp::Add { before, .. } = op {
-                        *before = successor;
-                    }
-                }
-                Ok(ops)
-            }
+            (None, Some(new)) => self.added(new.snapshot()),
             (Some(old), Some(new)) => {
                 let (a, b) = (old.document.nodes(), new.document.nodes());
                 let prefix = a.iter().zip(b).take_while(|(x, y)| x == y).count();
@@ -395,6 +376,31 @@ impl CanvasEditor {
                 Ok(ops)
             }
         }
+    }
+
+    /// Ops adding `outline`, new to the stored page, in its place in paint order.
+    pub(super) fn added(&self, outline: Outline) -> Lowered {
+        let page = |objects| Page {
+            title: String::new(),
+            identity: None,
+            created: None,
+            margin_origin: [0.0; 2],
+            color: None,
+            rule_lines: None,
+            objects,
+            definitions: named(&self.definitions, &[&outline.paragraphs]),
+        };
+        let mut ops = op::lower_page(
+            &page(Vec::new()),
+            &page(vec![PageObject::Outline(outline.clone())]),
+        )?;
+        let successor = self.successor(outline.id);
+        for op in &mut ops {
+            if let PageOp::Add { before, .. } = op {
+                *before = successor;
+            }
+        }
+        Ok(ops)
     }
 
     /// The page's date as the editor shows it.

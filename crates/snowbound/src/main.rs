@@ -1,4 +1,7 @@
+#[cfg(target_os = "macos")]
+mod aqua;
 mod art;
+mod background;
 mod commands;
 #[cfg(test)]
 mod conflict_render;
@@ -12,6 +15,8 @@ mod menubar;
 mod menus;
 mod navigation;
 mod options;
+mod palette;
+mod pane;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
 mod platform;
@@ -36,7 +41,6 @@ use canvas::{
 use canvas::{
     gpu::{colorref, tag_sources},
     outline::TagIcon,
-    template::PAGE_COLORS,
 };
 use draw::Renderer;
 use library::Library;
@@ -61,8 +65,12 @@ use winit::{
     window::{CursorIcon, Window, WindowId},
 };
 
-/// Height of the title bar, which holds the window's controls.
-const TITLE: f32 = 28.0;
+/// Height of the toolbar's row, which is the title bar where the platform lets it: a
+/// unified compact toolbar's on macOS.
+const TITLE: f32 = 38.0;
+/// Space between toolbar groups, and the toolbar's margin at an edge without window controls.
+const GAP: f32 = 6.0;
+const EDGE: f32 = 8.0;
 const TAB_ROW: f32 = 28.0;
 /// Width of the section colour around the page.
 const FRAME: f32 = 6.0;
@@ -185,11 +193,13 @@ fn cursor_icon(cursor: Cursor) -> CursorIcon {
         Cursor::Default => CursorIcon::Default,
         Cursor::Text => CursorIcon::Text,
         Cursor::Pointer => CursorIcon::Pointer,
-        Cursor::Move => CursorIcon::Move,
+        Cursor::Move => platform::move_cursor(),
         Cursor::EwResize => CursorIcon::EwResize,
         Cursor::NsResize => CursorIcon::NsResize,
         Cursor::NwseResize => CursorIcon::NwseResize,
         Cursor::NeswResize => CursorIcon::NeswResize,
+        Cursor::RowResize => CursorIcon::RowResize,
+        Cursor::ColResize => CursorIcon::ColResize,
     }
 }
 
@@ -489,6 +499,7 @@ struct State {
     last_pages: HashMap<String, ExGuid>,
     /// Pages visited, for Back and Forward.
     trail: navigation::Trail,
+    swipe: navigation::Swipe,
     /// Asks for a frame when a worker thread finishes something the page shows.
     redraw: std::task::Waker,
     surface: surface::Surface,
@@ -547,8 +558,6 @@ struct State {
     recent_fonts: Vec<String>,
     /// What the toolbar's buttons apply from their menus' last picks.
     toolbar: settings::Toolbar,
-    /// The application's icon at the display's scale, for the title bar.
-    app_icon: Option<draw::RasterImage>,
     commands: Vec<Command>,
     /// The page changed during this frame, to be saved and announced after it.
     changed: bool,
@@ -567,6 +576,9 @@ struct State {
     strip_held: bool,
     /// Where a replay asked the next frame to be written.
     snapshot: Option<PathBuf>,
+    /// `SNOWBOUND_FRAMES`: a directory every frame drawn is also written to, named by
+    /// milliseconds since the window opened.
+    frames: Option<(PathBuf, Instant)>,
     initial: Vec<(onestore::ExGuid, TextDocument)>,
     initial_layouts: Vec<(onestore::ExGuid, onestore::document::Layout)>,
     initial_date: Option<u64>,
@@ -588,6 +600,10 @@ fn page() -> Id {
 /// The section's colour around the page and its tabs.
 fn frame() -> Id {
     Id::ROOT.child("frame")
+}
+
+fn sections() -> Id {
+    Id::ROOT.child("sections")
 }
 
 impl State {
@@ -624,6 +640,7 @@ impl State {
                     .with_min_inner_size(LogicalSize::new(600.0, 400.0)),
             )?,
         );
+        platform::install_title_bar(&window);
         platform::install_text_input(&window);
         // Beneath the surface's layer, which is added over it.
         let backdrop = visible && platform::install_backdrop(&window);
@@ -743,6 +760,7 @@ impl State {
         let titlebar = platform::titlebar(appearance).unwrap_or([ui.theme.strip; 2]);
         // A window shown but never focused hears no focus event; a hidden one draws as focused.
         ui.window_focused = !visible || window.has_focus();
+        ui.scrollers = platform::scrollers();
         ui.set_focus(Some(page()));
         for family in FONTS {
             for (face, _) in engine.substitute(family).map_or(&[][..], |s| &s.faces) {
@@ -806,7 +824,6 @@ impl State {
             fonts,
             recent_fonts: stored.recent_fonts,
             toolbar: stored.toolbar,
-            app_icon: platform::app_icon((16.0 * dpr).round() as u32),
             commands: Vec::new(),
             changed: false,
             moved: false,
@@ -816,6 +833,7 @@ impl State {
             strip_press: None,
             strip_held: false,
             snapshot: None,
+            frames: std::env::var_os("SNOWBOUND_FRAMES").map(|dir| (dir.into(), Instant::now())),
             initial,
             initial_date,
             initial_layouts,
@@ -829,6 +847,7 @@ impl State {
             places: HashMap::new(),
             last_pages: HashMap::new(),
             trail: navigation::Trail::default(),
+            swipe: navigation::Swipe::default(),
             access_adapter,
             accessibility: accessibility::Accessibility::default(),
         };
@@ -903,10 +922,32 @@ impl State {
         let (section, open_tab, open_page) = self.build()?;
         self.options_dialog();
         self.link_dialog()?;
+        self.palette();
         self.sync_popup()?;
         self.text_menu()?;
+        platform::resize_grip(&mut self.ui, &self.window, size);
         self.ui.end();
         self.edges(section, open_tab, open_page);
+        if platform::cuts_corners() {
+            let [width, height] = size;
+            let radius = platform::corner_radius(&self.window);
+            // Where the toolbar's row is the title bar, its corners are the window's too.
+            let top = if platform::system_titlebar(&self.window) {
+                0.0
+            } else {
+                radius
+            };
+            self.ui.round_corners(
+                &[
+                    ([0.0, 0.0], top),
+                    ([width, 0.0], top),
+                    ([width, height], radius),
+                    ([0.0, height], radius),
+                ],
+                [0.0; 4],
+                |_| [0.0; 4],
+            );
+        }
         if let Some(rect) = self.ui.rect(page()) {
             let size = [
                 ((rect[2] - rect[0]) * scale).round() as u32,
@@ -978,15 +1019,13 @@ impl State {
         // The page, and the open page's tab joined to it, take the page's colour.
         let mut theme = self.ui.theme.clone();
         theme.paper = self.paper().color;
-        if !platform::system_titlebar(&self.window) {
-            self.title_bar(&theme);
-        }
         platform::update_menu(|| self.statuses());
-        if self.session.is_none() && !self.temporary && self.sectionless.is_none() {
+        let welcome = self.session.is_none() && !self.temporary && self.sectionless.is_none();
+        self.toolbar(&theme, !welcome)?;
+        if welcome {
             self.welcome(&theme);
             return Ok((section, Id::ROOT, None));
         }
-        self.toolbar(&theme)?;
         self.ui.open(
             "body",
             Spec {
@@ -1017,7 +1056,19 @@ impl State {
                 ..Spec::default()
             },
         );
-        self.sidebar_button(&theme, sidebar);
+        if !self.temporary {
+            // Past the row's padding, the frame's corner and the first tab's shadow, the tabs'
+            // outlines start where the button's square ends; the room shrinks on the sidebar's
+            // easing, so the tabs ease with it.
+            let room = TAB_ROW - FRAME - self.rounding() - ui::SHADOW[0];
+            self.ui.leaf(
+                "rail",
+                Spec {
+                    size: [px(room * (1.0 - sidebar / sidebar::WIDTH)), px(1.0)],
+                    ..Spec::default()
+                },
+            );
+        }
         self.ui.leaf(
             "corner",
             Spec {
@@ -1025,7 +1076,7 @@ impl State {
                 ..Spec::default()
             },
         );
-        let row = self.ui.id("sections");
+        let row = sections();
         let (clicked, open_tab) = match &self.session {
             Some(session) => {
                 // A tab being renamed takes the name typed, which its field covers.
@@ -1054,13 +1105,14 @@ impl State {
                     open: open_tab,
                 } = ui::shell::section_tabs(
                     &mut self.ui,
-                    "sections",
+                    row,
                     &tabs,
                     session.tab,
                     lit,
                     dragged,
                     &section,
                     TAB_ROW,
+                    theme.strip,
                 );
                 self.drag_tabs(held, slot, settled, row);
                 let Some(session) = &self.session else {
@@ -1100,19 +1152,27 @@ impl State {
                 let shown = if self.temporary { &tabs[..] } else { &[] };
                 let open_tab = ui::shell::section_tabs(
                     &mut self.ui,
-                    "sections",
+                    row,
                     shown,
                     0,
                     None,
                     None,
                     &section,
                     TAB_ROW,
+                    theme.strip,
                 )
                 .open;
                 (None, open_tab)
             }
         };
         self.commands.extend(clicked);
+        self.ui.leaf(
+            "space",
+            Spec {
+                size: [fill(), px(1.0)],
+                ..Spec::default()
+            },
+        );
         if self.session.is_some() {
             self.page_tools(&theme);
         }
@@ -1153,6 +1213,7 @@ impl State {
             self.ui.close();
             self.ui.close();
             self.ui.close();
+            self.sidebar_button(&theme, height);
             self.ui.close();
             self.context_menu();
             return Ok((section, open_tab, None));
@@ -1195,6 +1256,8 @@ impl State {
         let open_page = self.page_list(&theme, &section, row);
         self.ui.close();
         self.ui.close();
+        self.task_pane(&theme);
+        self.sidebar_button(&theme, height);
         self.ui.close();
         self.context_menu();
         // No tab stands on the frame in Full Page View.
@@ -1291,10 +1354,16 @@ impl State {
                 |_| strip,
             );
         }
+        // The border breaks where the open tab shows, which the row may scroll it out of.
+        let [left, right] = self
+            .ui
+            .rect(sections())
+            .map_or([end; 2], |row| [row[0], row[2]]);
         let [foot, toe] = self
             .ui
             .rect(open_tab)
-            .map_or([end; 2], |tab| ui::shell::tab_base(tab, TAB_ROW));
+            .map_or([end; 2], |tab| ui::shell::tab_base(tab, TAB_ROW))
+            .map(|x| x.clamp(left, right));
         // The border runs down both sides to the window's bottom, round the bottom corner
         // beside the sidebar.
         self.ui.border(
@@ -1318,62 +1387,75 @@ impl State {
         );
     }
 
-    /// The window's title bar beside the traffic lights: the application's icon, the
-    /// notebook's name and the sync status.
-    fn title_bar(&mut self, theme: &Theme) {
-        self.ui.open_as(
-            strip(),
-            Spec {
-                flags: Flags::CLICKABLE,
-                size: [fill(), px(TITLE)],
-                fill: Some(theme.strip),
-                ..Spec::default()
+    /// The toolbar: one row of groups that fold as the window narrows. Where the platform
+    /// lets it, the row is the window's title bar, and on the welcome page, without `tools`,
+    /// that is all it is.
+    fn toolbar(&mut self, theme: &Theme, tools: bool) -> Result<(), Box<dyn Error>> {
+        let title = !platform::system_titlebar(&self.window);
+        if !tools && !title {
+            return Ok(());
+        }
+        // Over the title's gradient, the row's empty space drags the window as the title does.
+        let strip_row = title || self.surface.translucent();
+        let spec = Spec {
+            flags: if strip_row {
+                Flags::CLICKABLE
+            } else {
+                Flags::default()
             },
-        );
+            size: [fill(), px(TITLE)],
+            fill: Some(theme.strip),
+            pad: [0.0, (TITLE - ui::shell::TOOL) / 2.0],
+            gap: GAP,
+            ..Spec::default()
+        };
+        if strip_row {
+            self.ui.open_as(strip(), spec);
+        } else {
+            self.ui.open("toolbar", spec);
+        }
+        let lead = if title { platform::LEADING } else { EDGE };
         self.ui.leaf(
-            "lights",
+            "lead",
             Spec {
-                size: [px(platform::LEADING), px(1.0)],
+                size: [px(lead - GAP), px(1.0)],
                 ..Spec::default()
             },
         );
-        // AppKit centres the window's title over the strip.
-        if !cfg!(target_os = "macos") {
+        if tools {
+            self.tools(theme);
+        } else {
             self.ui.leaf(
-                "notebook",
+                "space",
                 Spec {
-                    size: [fit(), px(TITLE)],
-                    image: self.app_icon.as_ref(),
-                    text: Some(match &self.session {
-                        Some(session) => &session.library.name,
-                        None if self.temporary => "Temporary page",
-                        None => "Snowbound",
-                    }),
+                    size: [fill(), px(1.0)],
                     ..Spec::default()
                 },
             );
         }
+        if title {
+            platform::window_controls(&mut self.ui, &self.window);
+        }
         self.ui.leaf(
-            "space",
+            "trail",
             Spec {
-                size: [fill(), px(1.0)],
+                size: [px(EDGE - GAP), px(1.0)],
                 ..Spec::default()
             },
         );
-        if let Some(session) = &self.session {
-            sync::control(&mut self.ui, session, theme, TITLE);
-        }
-        platform::window_controls(&mut self.ui, &self.window);
         self.ui.close();
+        Ok(())
     }
 
-    /// Two rows of navigation, clipboard, formatting, tag, insert and view buttons, grouped
-    /// as OneNote's ribbon groups them.
-    fn toolbar(&mut self, theme: &Theme) -> Result<(), Box<dyn Error>> {
+    /// The toolbar's groups, as OneNote's ribbon groups its buttons. The groups used most in
+    /// taking notes fold last, and those with chords or a place in the menu bar first.
+    fn tools(&mut self, theme: &Theme) {
+        use Entry::{Open, Rule, Run, Soon};
         use canvas::editor::{
             Alignment, BULLET_LIBRARY, ListStyle, NUMBER_LIBRARY, NoteTag, Toggle,
         };
-        use commands::{Choice, Id as Cmd, shortcut};
+        use commands::{Choice, Id as Cmd};
+        use ui::shell::TOOL;
         // A focused picture has no text to show a format for.
         let state = self.format_state();
         let statuses: Vec<_> = commands::COMMANDS
@@ -1391,52 +1473,39 @@ impl State {
                 .find(|(listed, _)| *listed == id)
                 .map_or_else(commands::Status::default, |(_, status)| *status)
         };
+        let status_of = &status_of;
         let fonts = &self.fonts;
         let recent_fonts = &self.recent_fonts;
         let pens = &self.toolbar;
         let engine = &self.view.engine;
-        // Under the system's title bar the sync status joins the toolbar.
-        let status = platform::system_titlebar(&self.window)
-            .then_some(self.session.as_ref())
-            .flatten();
+        let session = self.session.as_ref();
+        let label = format!("{:.0}%", self.view.zoom() * 100.0);
         let ui = &mut self.ui;
         let text = theme.text;
-        let on = |toggle| state.toggles.contains(&toggle);
-        let mut choice = None;
-        ui.open(
-            "toolbar",
-            Spec {
-                size: [fill(), children()],
-                fill: Some(theme.strip),
-                pad: [8.0, 3.0],
-                gap: 6.0,
-                ..Spec::default()
+        let tags = NoteTag::ALL.map(Cmd::Tag);
+        let mut choice = group(
+            ui,
+            "navigate",
+            3,
+            |ui| {
+                let mut choice = None;
+                for id in [Cmd::Back, Cmd::Forward, Cmd::Undo, Cmd::Redo] {
+                    choice = tool(ui, id, status_of(id)).or(choice);
+                }
+                choice
+            },
+            |ui| {
+                let entries = [Run(Cmd::Redo), Rule, Run(Cmd::Back), Run(Cmd::Forward)];
+                dropdown(ui, "menu", Head::Split(Cmd::Undo), &entries, status_of)
             },
         );
-        group(ui, "navigate", |ui| {
-            for (index, buttons) in [
-                [
-                    ("back", art::BACK, Cmd::Back),
-                    ("forward", art::FORWARD, Cmd::Forward),
-                ],
-                [
-                    ("undo", art::UNDO, Cmd::Undo),
-                    ("redo", art::REDO, Cmd::Redo),
-                ],
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                row(ui, index, |ui| {
-                    for (part, icon, id) in buttons {
-                        choice = tool(ui, part, icon, text, id, status_of(id)).or(choice.take());
-                    }
-                });
-            }
-        });
-        divider(ui, "navigate", theme);
-        group(ui, "clipboard", |ui| {
-            row(ui, 0, |ui| {
+        choice = group(
+            ui,
+            "clipboard",
+            2,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = None;
                 let paste = ui.id("paste");
                 if !status_of(Cmd::Paste).enabled {
                     ui::shell::unavailable(ui, "paste", art::PASTE, text, true);
@@ -1474,138 +1543,251 @@ impl State {
                 if ui::popup::menu(ui, toolbar_popup("paste"), anchor, &items, None).is_some() {
                     choice = Some(Choice::Command(Cmd::Paste));
                 }
-                choice = tool(ui, "cut", art::CUT, text, Cmd::Cut, status_of(Cmd::Cut))
-                    .or(choice.take());
-            });
-            row(ui, 1, |ui| {
-                for (part, icon, id) in [
-                    ("copy", art::COPY, Cmd::Copy),
-                    ("painter", art::FORMAT_PAINTER, Cmd::FormatPainter),
-                ] {
-                    choice = tool(ui, part, icon, text, id, status_of(id)).or(choice.take());
+                for id in [Cmd::Cut, Cmd::Copy, Cmd::FormatPainter] {
+                    choice = tool(ui, id, status_of(id)).or(choice);
                 }
-            });
-        });
-        divider(ui, "clipboard", theme);
+                choice
+            },
+            |ui| {
+                let entries = [
+                    Run(Cmd::Cut),
+                    Run(Cmd::Copy),
+                    Run(Cmd::FormatPainter),
+                    Rule,
+                    Open("paste", Cmd::Paste),
+                ];
+                dropdown(ui, "menu", Head::Split(Cmd::Paste), &entries, status_of)
+            },
+        )
+        .or(choice);
         let font = state.font.clone().unwrap_or_default();
         let size = state
             .font_size
             .map_or(String::new(), |size| format!("{size}"));
-        group(ui, "text", |ui| {
-            row(ui, 0, |ui| {
-                let combo = ui.id("font");
-                if ui::shell::combo(ui, "font", &font, 120.0).pressed {
-                    ui.open_popup(toolbar_popup("font"));
-                }
-                // Each family is named with the substitute it shows in, and picked by its
-                // own name; a family of None heads a group. Typing searches the full list.
-                let label = |name: &str| {
-                    engine.substitute(name).map_or_else(
-                        || name.to_owned(),
-                        |substitute| format!("{} ({name})", substitute.name),
-                    )
-                };
-                let mut choices: Vec<(String, Option<&str>, bool)> = Vec::new();
-                if ui::popup::query(ui, toolbar_popup("font")).is_none_or(str::is_empty) {
-                    choices.extend(FONTS.map(|name| (label(name), Some(name), false)));
-                    if !recent_fonts.is_empty() {
-                        choices.push(("Recent".to_owned(), None, true));
-                        choices.extend(
-                            recent_fonts
+        ui.open(
+            "font",
+            Spec {
+                gap: 1.0,
+                ..Spec::default()
+            },
+        );
+        divider(ui, theme);
+        let combo = ui.id("font");
+        // It gives up room last of all, once every group has folded.
+        let width = ui::Extent {
+            size: ui::Size::Pixels(120.0),
+            strictness: 64.0 / 120.0,
+        };
+        if ui::shell::combo(ui, "font", &font, width).pressed {
+            ui.open_popup(toolbar_popup("font"));
+        }
+        // Each family is named with the substitute it shows in, and picked by its own name; a
+        // family of None heads a group. Typing searches the full list.
+        let named = |name: &str| {
+            engine.substitute(name).map_or_else(
+                || name.to_owned(),
+                |substitute| format!("{} ({name})", substitute.name),
+            )
+        };
+        let mut choices: Vec<(String, Option<&str>, bool)> = Vec::new();
+        if ui::popup::query(ui, toolbar_popup("font")).is_none_or(str::is_empty) {
+            choices.extend(FONTS.map(|name| (named(name), Some(name), false)));
+            if !recent_fonts.is_empty() {
+                choices.push(("Recent".to_owned(), None, true));
+                choices.extend(
+                    recent_fonts
+                        .iter()
+                        .map(|name| (named(name), Some(name.as_str()), false)),
+                );
+            }
+        }
+        let listed = choices.len();
+        choices.extend(
+            fonts
+                .iter()
+                .enumerate()
+                .map(|(index, name)| (named(name), Some(name.as_str()), index == 0 && listed > 0)),
+        );
+        let items: Vec<_> = choices
+            .iter()
+            .map(|(label, name, separated)| ui::popup::Item {
+                text: label,
+                font: *name,
+                current: *name == Some(font.as_str()),
+                heading: name.is_none(),
+                separated: *separated,
+                ..Default::default()
+            })
+            .collect();
+        let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
+        if let Some(index) =
+            ui::popup::menu(ui, toolbar_popup("font"), anchor, &items, Some("Font"))
+            && let Some(name) = choices[index].1
+        {
+            choice = Some(Choice::Font(name.to_owned()));
+        }
+        let combo = ui.id("size");
+        if ui::shell::combo(ui, "size", &size, 44.0).pressed {
+            ui.open_popup(toolbar_popup("size"));
+        }
+        // A size typed in the field joins the list, in half points as stored.
+        let mut sizes = SIZES.to_vec();
+        if let Some(typed) = ui::popup::query(ui, toolbar_popup("size"))
+            .and_then(|query| query.trim().parse::<f32>().ok())
+            .map(|typed| (typed * 2.0).round() / 2.0)
+            .filter(|typed| onestore::FONT_SIZES.contains(typed) && !sizes.contains(typed))
+        {
+            let at = sizes.partition_point(|size| *size < typed);
+            sizes.insert(at, typed);
+        }
+        let labels: Vec<_> = sizes.iter().map(|size| format!("{size}")).collect();
+        let items: Vec<_> = labels
+            .iter()
+            .map(|label| ui::popup::Item {
+                text: label,
+                checked: *label == size,
+                ..Default::default()
+            })
+            .collect();
+        let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
+        if let Some(index) = ui::popup::menu(ui, toolbar_popup("size"), anchor, &items, Some(&size))
+        {
+            choice = Some(Choice::Size(sizes[index]));
+        }
+        for toggle in [Toggle::Bold, Toggle::Italic, Toggle::Underline] {
+            let id = Cmd::Toggle(toggle);
+            choice = tool(ui, id, status_of(id)).or(choice);
+        }
+        ui.close();
+        choice = group(
+            ui,
+            "character",
+            6,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = None;
+                // Each button applies its menu's last pick: the highlighter shows it in its
+                // artwork, the font colour in a bar.
+                for (part, id, swatches, columns, none, bar) in [
+                    (
+                        "highlight",
+                        Cmd::Highlight,
+                        &HIGHLIGHTS.map(|(color, _)| color)[..],
+                        5,
+                        "No Color",
+                        None,
+                    ),
+                    (
+                        "color",
+                        Cmd::FontColor,
+                        &FONT_COLORS[..],
+                        10,
+                        "Automatic",
+                        Some(pens.font_color.map_or(text, colorref)),
+                    ),
+                ] {
+                    let split = ui.id(part);
+                    let icon = artwork(id).unwrap_or_default();
+                    if ui::shell::split_button(ui, part, icon, bar, false, toolbar_popup(part))
+                        .clicked
+                    {
+                        choice = Some(Choice::Command(id));
+                    }
+                    tip(ui, id);
+                    let colors: Vec<_> = swatches.iter().map(|color| colorref(*color)).collect();
+                    let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
+                    if let Some(chosen) =
+                        ui::popup::colors(ui, toolbar_popup(part), anchor, none, &colors, columns)
+                    {
+                        let color = chosen.and_then(|chosen| {
+                            swatches
                                 .iter()
-                                .map(|name| (label(name), Some(name.as_str()), false)),
-                        );
+                                .zip(&colors)
+                                .find(|(_, color)| **color == chosen)
+                                .map(|(stored, _)| *stored)
+                        });
+                        choice = Some(if id == Cmd::Highlight {
+                            Choice::Highlight(color)
+                        } else {
+                            Choice::Color(color)
+                        });
                     }
                 }
-                let listed = choices.len();
-                choices.extend(fonts.iter().enumerate().map(|(index, name)| {
-                    (label(name), Some(name.as_str()), index == 0 && listed > 0)
-                }));
-                let items: Vec<_> = choices
-                    .iter()
-                    .map(|(label, name, separated)| ui::popup::Item {
-                        text: label,
-                        font: *name,
-                        current: *name == Some(font.as_str()),
-                        heading: name.is_none(),
-                        separated: *separated,
-                        ..Default::default()
-                    })
-                    .collect();
-                let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
-                if let Some(index) =
-                    ui::popup::menu(ui, toolbar_popup("font"), anchor, &items, Some("Font"))
-                    && let Some(name) = choices[index].1
-                {
-                    choice = Some(Choice::Font(name.to_owned()));
-                }
-                let combo = ui.id("size");
-                if ui::shell::combo(ui, "size", &size, 44.0).pressed {
-                    ui.open_popup(toolbar_popup("size"));
-                }
-                // A size typed in the field joins the list, in half points as stored.
-                let mut sizes = SIZES.to_vec();
-                if let Some(typed) = ui::popup::query(ui, toolbar_popup("size"))
-                    .and_then(|query| query.trim().parse::<f32>().ok())
-                    .map(|typed| (typed * 2.0).round() / 2.0)
-                    .filter(|typed| onestore::FONT_SIZES.contains(typed) && !sizes.contains(typed))
-                {
-                    let at = sizes.partition_point(|size| *size < typed);
-                    sizes.insert(at, typed);
-                }
-                let labels: Vec<_> = sizes.iter().map(|size| format!("{size}")).collect();
-                let items: Vec<_> = labels
-                    .iter()
-                    .map(|label| ui::popup::Item {
-                        text: label,
-                        checked: *label == size,
-                        ..Default::default()
-                    })
-                    .collect();
-                let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
-                if let Some(index) =
-                    ui::popup::menu(ui, toolbar_popup("size"), anchor, &items, Some(&size))
-                {
-                    choice = Some(Choice::Size(sizes[index]));
-                }
+                dropdown(
+                    ui,
+                    "script",
+                    Head::Menu(art::STRIKETHROUGH),
+                    &[
+                        Run(Cmd::Toggle(Toggle::Strikethrough)),
+                        Run(Cmd::Toggle(Toggle::Subscript)),
+                        Run(Cmd::Toggle(Toggle::Superscript)),
+                        Rule,
+                        Run(Cmd::ClearFormatting),
+                    ],
+                    status_of,
+                )
+                .or(choice)
+            },
+            |ui| {
+                let entries = [
+                    Open("highlight", Cmd::Highlight),
+                    Run(Cmd::FontColor),
+                    Open("color", Cmd::FontColor),
+                    Rule,
+                    Run(Cmd::Toggle(Toggle::Strikethrough)),
+                    Run(Cmd::Toggle(Toggle::Subscript)),
+                    Run(Cmd::Toggle(Toggle::Superscript)),
+                    Rule,
+                    Run(Cmd::ClearFormatting),
+                ];
+                dropdown(ui, "menu", Head::Split(Cmd::Highlight), &entries, status_of)
+            },
+        )
+        .or(choice);
+        let alignments = [Alignment::Left, Alignment::Center, Alignment::Right].map(Cmd::Align);
+        let paragraph = [
+            Rule,
+            Run(alignments[0]),
+            Run(alignments[1]),
+            Run(alignments[2]),
+            Rule,
+            Run(Cmd::Outdent),
+            Run(Cmd::Indent),
+        ];
+        choice = group(
+            ui,
+            "paragraph",
+            5,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = None;
                 // The buttons apply OneNote's default bullet and number, as its own do.
-                let [bullets, numbering] = [ui.id("bullets"), ui.id("numbering")];
-                if ui::shell::split_button(
-                    ui,
-                    "bullets",
-                    art::BULLETS,
-                    None,
-                    state.bullets,
-                    toolbar_popup("bullets"),
-                )
-                .clicked
-                {
-                    choice = Some(Choice::Command(Cmd::Bullets));
+                for id in [Cmd::Bullets, Cmd::Numbering] {
+                    let part = if id == Cmd::Bullets {
+                        "bullets"
+                    } else {
+                        "numbering"
+                    };
+                    let icon = artwork(id).unwrap_or_default();
+                    let on = status_of(id).checked;
+                    if ui::shell::split_button(ui, part, icon, None, on, toolbar_popup(part))
+                        .clicked
+                    {
+                        choice = Some(Choice::Command(id));
+                    }
+                    tip(ui, id);
                 }
-                tip(ui, Cmd::Bullets);
-                if ui::shell::split_button(
-                    ui,
-                    "numbering",
-                    art::NUMBERING,
-                    None,
-                    state.numbering,
-                    toolbar_popup("numbering"),
-                )
-                .clicked
-                {
-                    choice = Some(Choice::Command(Cmd::Numbering));
-                }
-                tip(ui, Cmd::Numbering);
+                let [bullets, numbering] =
+                    ["bullets", "numbering"].map(|part| ui.rect(ui.id(part)).unwrap_or_default());
                 let current = |bullet| match state.list {
                     Some(ListStyle::Bullet(place)) if bullet => Some(place),
                     Some(ListStyle::Number(place)) if !bullet => Some(place),
                     _ => None,
                 };
-                let anchor = ui::Anchor::Below(ui.rect(bullets).unwrap_or_default());
                 if let Some(place) = list_gallery(
                     ui,
                     toolbar_popup("bullets"),
-                    anchor,
+                    ui::Anchor::Below(bullets),
                     ["Recently Used Bullets", "Bullet Library"],
                     (&pens.bullets, BULLET_LIBRARY.len()),
                     current(true),
@@ -1627,11 +1809,10 @@ impl State {
                 ) {
                     choice = Some(Choice::List(place.map(ListStyle::Bullet)));
                 }
-                let anchor = ui::Anchor::Below(ui.rect(numbering).unwrap_or_default());
                 if let Some(place) = list_gallery(
                     ui,
                     toolbar_popup("numbering"),
-                    anchor,
+                    ui::Anchor::Below(numbering),
                     ["Recently Used Number Formats", "Numbering Library"],
                     (&pens.numbering, NUMBER_LIBRARY.len()),
                     current(false),
@@ -1673,234 +1854,68 @@ impl State {
                 ) {
                     choice = Some(Choice::List(place.map(ListStyle::Number)));
                 }
-                let clear = Cmd::ClearFormatting;
-                choice = tool(
-                    ui,
-                    "clear",
-                    art::CLEAR_FORMATTING,
-                    text,
-                    clear,
-                    status_of(clear),
-                )
-                .or(choice.take());
-            });
-            row(ui, 1, |ui| {
-                for (part, icon, toggle) in [
-                    ("bold", art::BOLD, Toggle::Bold),
-                    ("italic", art::ITALIC, Toggle::Italic),
-                    ("underline", art::UNDERLINE, Toggle::Underline),
-                    ("strikethrough", art::STRIKETHROUGH, Toggle::Strikethrough),
-                ] {
-                    let id = Cmd::Toggle(toggle);
-                    choice = tool(ui, part, icon, text, id, status_of(id)).or(choice.take());
-                }
-                let script = ui.id("script");
-                let superscript = on(Toggle::Superscript);
-                let command = Cmd::Toggle(if superscript {
-                    Toggle::Superscript
-                } else {
-                    Toggle::Subscript
-                });
-                if ui::shell::split_button(
-                    ui,
-                    "script",
-                    if superscript {
-                        art::SUPERSCRIPT
-                    } else {
-                        art::SUBSCRIPT
-                    },
-                    None,
-                    on(Toggle::Subscript) || superscript,
-                    toolbar_popup("script"),
-                )
-                .clicked
-                {
-                    choice = Some(Choice::Command(command));
-                }
-                tip(ui, command);
-                let scripts = [
-                    (Toggle::Subscript, art::SUBSCRIPT),
-                    (Toggle::Superscript, art::SUPERSCRIPT),
+                let aligned = alignments
+                    .into_iter()
+                    .find(|id| status_of(*id).checked)
+                    .unwrap_or(alignments[0]);
+                let icon = artwork(aligned).unwrap_or_default();
+                dropdown(ui, "align", Head::Menu(icon), &paragraph[1..], status_of).or(choice)
+            },
+            |ui| {
+                let mut entries = vec![
+                    Open("bullets", Cmd::Bullets),
+                    Run(Cmd::Numbering),
+                    Open("numbering", Cmd::Numbering),
                 ];
-                let keys = scripts.map(|(toggle, _)| shortcut(Cmd::Toggle(toggle)));
-                let items: Vec<_> = scripts
-                    .iter()
-                    .zip(&keys)
-                    .map(|((toggle, icon), key)| ui::popup::Item {
-                        text: commands::command(Cmd::Toggle(*toggle)).title,
-                        icon: Some(icon),
-                        shortcut: key,
-                        checked: on(*toggle),
-                        ..Default::default()
-                    })
-                    .collect();
-                let anchor = ui::Anchor::Below(ui.rect(script).unwrap_or_default());
-                if let Some(index) =
-                    ui::popup::menu(ui, toolbar_popup("script"), anchor, &items, None)
-                {
-                    choice = Some(Choice::Command(Cmd::Toggle(scripts[index].0)));
+                entries.extend(paragraph);
+                dropdown(ui, "menu", Head::Split(Cmd::Bullets), &entries, status_of)
+            },
+        )
+        .or(choice);
+        // The gallery's menu: every tag, then managing them.
+        let mut all_tags: Vec<_> = tags.into_iter().map(Run).collect();
+        all_tags.extend([
+            Rule,
+            // Customize Tags awaits #8.
+            Soon("Customize Tags…", None),
+            Run(Cmd::RemoveTags),
+            Rule,
+            Run(Cmd::FindTags),
+        ]);
+        choice = group(
+            ui,
+            "tags",
+            7,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = None;
+                for id in &tags[..3] {
+                    choice = tool(ui, *id, status_of(*id)).or(choice);
                 }
-                // Each button applies its menu's last pick: the highlighter shows it in its
-                // artwork, the font colour in a bar.
-                for (part, icon, swatches, columns, none, bar) in [
-                    (
-                        "highlight",
-                        art::HIGHLIGHTER,
-                        &HIGHLIGHTS.map(|(color, _)| color)[..],
-                        5,
-                        "No Color",
-                        None,
-                    ),
-                    (
-                        "color",
-                        art::FONT_COLOR,
-                        &FONT_COLORS[..],
-                        10,
-                        "Automatic",
-                        Some(pens.font_color.map_or(text, colorref)),
-                    ),
-                ] {
-                    let split = ui.id(part);
-                    let button =
-                        ui::shell::split_button(ui, part, icon, bar, false, toolbar_popup(part));
-                    let highlight = part == "highlight";
-                    let command = if highlight {
-                        Cmd::Highlight
-                    } else {
-                        Cmd::FontColor
-                    };
-                    if button.clicked {
-                        choice = Some(Choice::Command(command));
-                    }
-                    tip(ui, command);
-                    let colors: Vec<_> = swatches.iter().map(|color| colorref(*color)).collect();
-                    let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
-                    if let Some(chosen) =
-                        ui::popup::colors(ui, toolbar_popup(part), anchor, none, &colors, columns)
-                    {
-                        let color = chosen.and_then(|chosen| {
-                            swatches
-                                .iter()
-                                .zip(&colors)
-                                .find(|(_, color)| **color == chosen)
-                                .map(|(stored, _)| *stored)
-                        });
-                        choice = Some(if highlight {
-                            Choice::Highlight(color)
-                        } else {
-                            Choice::Color(color)
-                        });
-                    }
-                }
-                for (part, icon, id) in [
-                    ("outdent", art::OUTDENT, Cmd::Outdent),
-                    ("indent", art::INDENT, Cmd::Indent),
-                ] {
-                    choice = tool(ui, part, icon, text, id, status_of(id)).or(choice.take());
-                }
-                let alignments = [
-                    (Alignment::Left, art::ALIGN_LEFT),
-                    (Alignment::Center, art::ALIGN_CENTER),
-                    (Alignment::Right, art::ALIGN_RIGHT),
-                ];
-                let keys = alignments.map(|(alignment, _)| shortcut(Cmd::Align(alignment)));
-                let current = alignments
-                    .iter()
-                    .find(|(alignment, _)| Some(*alignment) == state.alignment)
-                    .unwrap_or(&alignments[0]);
-                let anchor = ui::shell::menu_button(ui, "align", current.1, toolbar_popup("align"));
-                tip(ui, Cmd::Align(current.0));
-                // The current alignment starts highlighted, keeping its icon under the button's.
-                let items: Vec<_> = alignments
-                    .iter()
-                    .zip(&keys)
-                    .map(|((alignment, icon), key)| ui::popup::Item {
-                        text: commands::command(Cmd::Align(*alignment)).title,
-                        icon: Some(icon),
-                        shortcut: key,
-                        current: Some(*alignment) == state.alignment,
-                        ..Default::default()
-                    })
-                    .collect();
-                if let Some(index) =
-                    ui::popup::menu(ui, toolbar_popup("align"), anchor, &items, None)
-                {
-                    choice = Some(Choice::Command(Cmd::Align(alignments[index].0)));
-                }
-            });
-        });
-        divider(ui, "text", theme);
-        let tags = NoteTag::ALL.map(|tag| (tag_icon(tag), tag));
-        group(ui, "tags", |ui| {
-            // OneNote's first nine, Ctrl+1 to Ctrl+9, then the gallery's arrow.
-            for (index, shown) in tags[..9].chunks(5).enumerate() {
-                row(ui, index, |ui| {
-                    for (column, (icon, tag)) in shown.iter().enumerate() {
-                        let id = Cmd::Tag(*tag);
-                        choice =
-                            tool(ui, column, icon, [1.0; 4], id, status_of(id)).or(choice.take());
-                    }
-                    if index == 1 {
-                        let more = ui.id("more");
-                        let open = ui.popup_open(toolbar_popup("tags"));
-                        if ui::shell::tool_button(ui, "more", ui::shell::CHEVRON, text, open)
-                            .pressed
-                        {
-                            ui.open_popup(toolbar_popup("tags"));
-                        }
-                        let shortcuts: Vec<_> = tags
-                            .iter()
-                            .map(|(_, tag)| shortcut(Cmd::Tag(*tag)))
-                            .collect();
-                        let remove = shortcut(Cmd::RemoveTags);
-                        let mut items: Vec<_> = tags
-                            .iter()
-                            .zip(&shortcuts)
-                            .map(|((icon, tag), shortcut)| ui::popup::Item {
-                                text: commands::command(Cmd::Tag(*tag)).title,
-                                icon: Some(*icon),
-                                colored: true,
-                                shortcut,
-                                ..Default::default()
-                            })
-                            .collect();
-                        // Customize Tags awaits #8 and Find Tags its summary pane, #28.
-                        items.extend([
-                            ui::popup::Item {
-                                text: "Customize Tags…",
-                                separated: true,
-                                disabled: true,
-                                ..Default::default()
-                            },
-                            ui::popup::Item {
-                                text: commands::command(Cmd::RemoveTags).title,
-                                shortcut: &remove,
-                                ..Default::default()
-                            },
-                            ui::popup::Item {
-                                text: "Find Tags",
-                                icon: Some(art::FIND_TAGS),
-                                separated: true,
-                                disabled: true,
-                                ..Default::default()
-                            },
-                        ]);
-                        let anchor = ui::Anchor::Below(ui.rect(more).unwrap_or_default());
-                        if let Some(chosen) =
-                            ui::popup::menu(ui, toolbar_popup("tags"), anchor, &items, None)
-                        {
-                            choice = Some(Choice::Command(
-                                tags.get(chosen)
-                                    .map_or(Cmd::RemoveTags, |(_, tag)| Cmd::Tag(*tag)),
-                            ));
-                        }
-                    }
-                });
-            }
-        });
-        divider(ui, "tags", theme);
-        group(ui, "insert", |ui| {
-            row(ui, 0, |ui| {
+                dropdown(ui, "tags", Head::More, &all_tags, status_of).or(choice)
+            },
+            |ui| dropdown(ui, "menu", Head::Split(tags[0]), &all_tags, status_of),
+        )
+        .or(choice);
+        let inserted = [Cmd::Picture, Cmd::Link, Cmd::Date, Cmd::Equation];
+        let more = [
+            Cmd::ScreenClipping,
+            Cmd::Attachment,
+            Cmd::InsertSpace,
+            Cmd::Time,
+            Cmd::DateTime,
+            Cmd::Symbol,
+            Cmd::RecordAudio,
+            Cmd::RecordVideo,
+        ]
+        .map(Run);
+        choice = group(
+            ui,
+            "insert",
+            1,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = None;
                 if status_of(Cmd::Table).enabled {
                     let anchor =
                         ui::shell::menu_button(ui, "table", art::TABLE, toolbar_popup("table"));
@@ -1913,30 +1928,20 @@ impl State {
                 } else {
                     ui::shell::unavailable(ui, "table", art::TABLE, text, true);
                 }
-                for (part, icon, id) in [
-                    ("picture", art::PICTURE, Cmd::Picture),
-                    ("clipping", art::SCREEN_CLIPPING, Cmd::ScreenClipping),
-                    ("file", art::ATTACHMENT, Cmd::Attachment),
-                    ("link", art::LINK, Cmd::Link),
-                    ("space", art::INSERT_SPACE, Cmd::InsertSpace),
-                ] {
-                    choice = tool(ui, part, icon, text, id, status_of(id)).or(choice.take());
+                for id in inserted {
+                    choice = tool(ui, id, status_of(id)).or(choice);
                 }
-            });
-            row(ui, 1, |ui| {
-                for (part, icon, id) in [
-                    ("date", art::CALENDAR, Cmd::Date),
-                    ("time", art::CLOCK, Cmd::Time),
-                    ("date and time", art::DATE_TIME, Cmd::DateTime),
-                    ("equation", art::EQUATION, Cmd::Equation),
-                    ("symbol", art::SYMBOL, Cmd::Symbol),
-                    ("audio", art::RECORD_AUDIO, Cmd::RecordAudio),
-                    ("video", art::RECORD_VIDEO, Cmd::RecordVideo),
-                ] {
-                    choice = tool(ui, part, icon, text, id, status_of(id)).or(choice.take());
-                }
-            });
-        });
+                dropdown(ui, "more", Head::More, &more, status_of).or(choice)
+            },
+            |ui| {
+                let mut entries = vec![Open("table", Cmd::Table)];
+                entries.extend(inserted.map(Run));
+                entries.push(Rule);
+                entries.extend(more);
+                dropdown(ui, "menu", Head::Menu(art::PLUS), &entries, status_of)
+            },
+        )
+        .or(choice);
         ui.leaf(
             "space",
             Spec {
@@ -1944,13 +1949,35 @@ impl State {
                 ..Spec::default()
             },
         );
-        if let Some(session) = status {
-            sync::control(ui, session, theme, ui::shell::TOOL);
+        if let Some(session) = session {
+            ui.open(
+                "sync",
+                Spec {
+                    fold: Some(4),
+                    ..Spec::default()
+                },
+            );
+            for compact in [false, true] {
+                sync::control(ui, session, theme, compact);
+            }
+            ui.close();
         }
-        let zoom = self.view.zoom();
-        let label = format!("{:.0}%", zoom * 100.0);
-        group(ui, "view", |ui| {
-            row(ui, 0, |ui| {
+        // Spelling awaits a platform spell checker.
+        let views = [
+            Run(Cmd::Sidebar),
+            Run(Cmd::PageList),
+            Run(Cmd::DarkPages),
+            Run(Cmd::FullPageView),
+            Rule,
+            Soon("Spelling", Some(art::SPELLING)),
+        ];
+        choice = group(
+            ui,
+            "view",
+            0,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = None;
                 if status_of(Cmd::PageColor).enabled {
                     let anchor = ui::shell::menu_button(
                         ui,
@@ -1959,83 +1986,28 @@ impl State {
                         toolbar_popup("page color"),
                     );
                     tip(ui, Cmd::PageColor);
-                    let swatches: Vec<_> = PAGE_COLORS
-                        .iter()
-                        .map(|(_, color)| colorref(*color))
-                        .collect();
-                    if let Some(chosen) = ui::popup::colors(
+                    choice = background::menu(
                         ui,
                         toolbar_popup("page color"),
                         anchor,
-                        "No Color",
-                        &swatches,
-                        4,
-                    ) {
-                        let index = chosen.and_then(|chosen| {
-                            swatches.iter().position(|swatch| *swatch == chosen)
-                        });
-                        choice = Some(Choice::PageColor(index));
-                    }
+                        &mut self.thumbnails,
+                        canvas::gpu::Paper {
+                            color: theme.paper,
+                            ink: theme.paper_ink,
+                        },
+                        self.view.editor.page_color(),
+                        self.view.editor.rule_lines(),
+                    )
+                    .or(choice.take());
                 } else {
                     ui::shell::unavailable(ui, "page color", art::PAGE_COLOR, text, true);
                 }
-                // Nothing reads or writes rule lines yet.
-                ui::shell::unavailable(ui, "rule lines", art::RULE_LINES, text, true);
-                let full = Cmd::FullPageView;
-                choice = tool(
-                    ui,
-                    "full page",
-                    art::FULL_PAGE_VIEW,
-                    text,
-                    full,
-                    status_of(full),
-                )
-                .or(choice.take());
-                let more = ui.id("more");
-                let open = ui.popup_open(toolbar_popup("view"));
-                if ui::shell::tool_button(ui, "more", ui::shell::CHEVRON, text, open).pressed {
-                    ui.open_popup(toolbar_popup("view"));
-                }
-                let views = [Cmd::Sidebar, Cmd::PageList, Cmd::DarkPages];
-                let mut items: Vec<_> = views
-                    .iter()
-                    .map(|id| ui::popup::Item {
-                        text: commands::command(*id).title,
-                        checked: status_of(*id).checked,
-                        disabled: !status_of(*id).enabled,
-                        ..Default::default()
-                    })
-                    .collect();
-                // Spelling awaits a platform spell checker.
-                items.push(ui::popup::Item {
-                    text: "Spelling",
-                    icon: Some(art::SPELLING),
-                    separated: true,
-                    disabled: true,
-                    ..Default::default()
-                });
-                let anchor = ui::Anchor::Below(ui.rect(more).unwrap_or_default());
-                if let Some(chosen) =
-                    ui::popup::menu(ui, toolbar_popup("view"), anchor, &items, None)
-                {
-                    choice = Some(Choice::Command(views[chosen]));
-                }
-            });
-            row(ui, 1, |ui| {
-                choice = tool(
-                    ui,
-                    "out",
-                    art::ZOOM_OUT,
-                    text,
-                    Cmd::ZoomOut,
-                    status_of(Cmd::ZoomOut),
-                )
-                .or(choice.take());
+                choice = tool(ui, Cmd::ZoomOut, status_of(Cmd::ZoomOut)).or(choice);
                 let level = ui.leaf(
                     "level",
                     Spec {
                         flags: Flags::CLICKABLE,
-                        size: [px(44.0), px(ui::shell::TOOL)],
+                        size: [px(44.0), px(TOOL)],
                         text: Some(&label),
                         hover_fill: Some(theme.hover()),
                         radius: 4.0,
@@ -2047,51 +2019,76 @@ impl State {
                     choice = Some(Choice::Command(Cmd::ActualSize));
                 }
                 tip(ui, Cmd::ActualSize);
-                choice = tool(
-                    ui,
-                    "in",
-                    art::ZOOM_IN,
-                    text,
-                    Cmd::ZoomIn,
-                    status_of(Cmd::ZoomIn),
-                )
-                .or(choice.take());
-            });
-        });
-        ui.close();
+                choice = tool(ui, Cmd::ZoomIn, status_of(Cmd::ZoomIn)).or(choice);
+                dropdown(ui, "view", Head::More, &views, status_of).or(choice)
+            },
+            |ui| {
+                let mut entries = vec![
+                    Run(Cmd::ZoomIn),
+                    Run(Cmd::ZoomOut),
+                    Run(Cmd::ActualSize),
+                    Rule,
+                    Open("page color", Cmd::PageColor),
+                    Rule,
+                ];
+                entries.extend(views);
+                dropdown(ui, "menu", Head::Menu(art::ZOOM_IN), &entries, status_of)
+            },
+        )
+        .or(choice);
         if let Some(choice) = choice {
             self.choose(choice);
         }
-        Ok(())
     }
 
-    /// The search box and the page list's buttons, above the list.
+    /// The search box and the page list's buttons, above the list. Where the tab row lacks
+    /// room the box folds to a button, which opens the search over the row; while finding
+    /// on the page it stays.
     fn page_tools(&mut self, theme: &Theme) {
+        let finding = self.search.finding;
         self.ui.open(
             "tools",
             Spec {
-                size: [px(PAGE_LIST), px(TAB_ROW)],
-                pad: [0.0, (TAB_ROW - ui::shell::TOOL) / 2.0],
-                gap: 3.0,
+                fold: (!finding).then_some(0),
                 ..Spec::default()
             },
         );
-        if let Err(error) = self.search_box(theme) {
-            eprintln!("{error}");
+        for folded in [false, true].into_iter().take(if finding { 1 } else { 2 }) {
+            self.ui.open(
+                folded,
+                Spec {
+                    size: [if folded { children() } else { px(PAGE_LIST) }, px(TAB_ROW)],
+                    pad: [0.0, (TAB_ROW - ui::shell::TOOL) / 2.0],
+                    gap: 3.0,
+                    ..Spec::default()
+                },
+            );
+            if folded {
+                let open = self.ui.popup_open(search::results());
+                if ui::shell::tool_button(&mut self.ui, "search", art::SEARCH, theme.text, open)
+                    .pressed
+                {
+                    self.start_search();
+                }
+                tip(&mut self.ui, commands::Id::Search);
+            } else if let Err(error) = self.search_box(theme) {
+                eprintln!("{error}");
+            }
+            if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, false).clicked {
+                self.commands.push(Command::NewPage { under: None });
+            }
+            tip(&mut self.ui, commands::Id::NewPage);
+            let toggle = if self.pages_open {
+                art::SIDEBAR_COLLAPSE
+            } else {
+                art::SIDEBAR_EXPAND
+            };
+            if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text, false).clicked {
+                self.pages_open = !self.pages_open;
+            }
+            tip(&mut self.ui, commands::Id::PageList);
+            self.ui.close();
         }
-        if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, false).clicked {
-            self.commands.push(Command::NewPage { under: None });
-        }
-        tip(&mut self.ui, commands::Id::NewPage);
-        let toggle = if self.pages_open {
-            art::SIDEBAR_COLLAPSE
-        } else {
-            art::SIDEBAR_EXPAND
-        };
-        if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text, false).clicked {
-            self.pages_open = !self.pages_open;
-        }
-        tip(&mut self.ui, commands::Id::PageList);
         self.ui.close();
     }
 
@@ -2941,6 +2938,17 @@ impl State {
         if let Some(path) = self.snapshot.take() {
             self.snapshot(&path)?;
         }
+        if let Some((dir, opened)) = &self.frames {
+            let path = dir.join(format!("{:09.2}.png", opened.elapsed().as_secs_f64() * 1e3));
+            let pixels = self.capture()?;
+            let size = self.surface.size;
+            // Encoding off the frame keeps the frames at the pace they are drawn.
+            std::thread::spawn(move || {
+                if let Err(error) = write_png(&path, size, &pixels) {
+                    eprintln!("{error}");
+                }
+            });
+        }
         if self.occluded {
             return Ok(());
         }
@@ -3006,6 +3014,7 @@ impl State {
                     ],
                     clip: Some(rect.map(|value| value * scale)),
                     backdrop: Some(paper.color),
+                    round: None,
                     motion: None,
                     primitives: &page_primitives,
                 },
@@ -3022,25 +3031,48 @@ impl State {
 
     /// Writes the frame to a PNG, so a covered window can be reviewed.
     fn snapshot(&mut self, path: &Path) -> Result<(), Box<dyn Error>> {
-        let size = self.surface.size;
+        let pixels = self.capture()?;
+        write_png(path, self.surface.size, &pixels)
+    }
+
+    /// The frame's sRGB RGBA rows, drawn offscreen.
+    fn capture(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
         let offscreen = self.surface.offscreen(&self.renderer)?;
         self.paint(&offscreen.target)?;
-        let pixels = self.surface.read(&self.renderer, offscreen)?;
-        let partial = path.with_extension("partial");
-        let mut encoder = png::Encoder::new(std::fs::File::create(&partial)?, size[0], size[1]);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(&pixels)?;
-        std::fs::rename(partial, path)?;
-        Ok(())
+        self.surface.read(&self.renderer, offscreen)
     }
 
     /// Queues input for the next frame. A press on the strip moves the window: at once on
     /// macOS, while AppKit still holds the press, and elsewhere once the pointer moves, as
     /// the window manager's move would swallow a second click; a double press zooms it.
+    fn over_page(&self) -> bool {
+        let [x0, y0, x1, y1] = self.ui.rect(page()).unwrap_or_default();
+        let [x, y] = self.pointer;
+        (x0..x1).contains(&x) && (y0..y1).contains(&y)
+    }
+
+    /// Zooms the page by `factor` about the pointer, when it is over the page.
+    fn pinch(&mut self, factor: f32) -> Result<(), Box<dyn Error>> {
+        if self.over_page() {
+            let response = self.view.pinch(factor)?;
+            self.respond(response);
+        }
+        Ok(())
+    }
+
+    fn swipe_scroll(&mut self, phase: winit::event::TouchPhase, delta: [f32; 2]) {
+        let scroll = self.view.scroll();
+        let armed = scroll.max[0] <= scroll.min[0] && self.over_page();
+        if let Some(forward) = self.swipe.scroll(phase, delta, armed, Instant::now()) {
+            self.travel(forward);
+            self.window.request_redraw();
+        }
+    }
+
     fn input(&mut self, event: ui::Event) {
         if let ui::Event::PointerMoved(point) = event {
             self.pointer = point;
+            platform::set_window_drags(self.ui.box_at(point) == Some(strip()));
             if std::mem::take(&mut self.strip_held) {
                 let _ = self.window.drag_window();
             }
@@ -3658,7 +3690,14 @@ fn list_gallery(
     size: [f32; 2],
     preview: impl Fn(&mut Ui, usize),
 ) -> Option<Option<usize>> {
-    let groups = [(headings[0], recent.len()), (headings[1], count + 1)];
+    let groups = [(headings[0], recent.len()), (headings[1], count + 1)].map(|(heading, cells)| {
+        ui::popup::Group {
+            heading,
+            cells,
+            columns: 5,
+            size,
+        }
+    });
     let place = |index: usize| match index.checked_sub(recent.len()) {
         None => Some(recent[index]),
         Some(at) => at.checked_sub(1),
@@ -3668,9 +3707,7 @@ fn list_gallery(
         id,
         anchor,
         &groups[usize::from(recent.is_empty())..],
-        5,
-        size,
-        current.map(|place| recent.len() + 1 + place),
+        current.map(|place| recent.len() + 1 + place).as_slice(),
         |ui, index| match place(index) {
             Some(place) => preview(ui, place),
             None => {
@@ -3689,44 +3726,161 @@ fn list_gallery(
     Some(place(chosen))
 }
 
-/// A toolbar group's rows, stacked.
-fn group(ui: &mut Ui, part: &str, rows: impl FnOnce(&mut Ui)) {
+/// A toolbar group that folds by `priority`: `full` builds its full form, `folded` the form
+/// it folds to. Returns what either chose.
+fn group(
+    ui: &mut Ui,
+    part: &str,
+    priority: u32,
+    full: impl FnOnce(&mut Ui) -> Option<commands::Choice>,
+    folded: impl FnOnce(&mut Ui) -> Option<commands::Choice>,
+) -> Option<commands::Choice> {
     ui.open(
         part,
         Spec {
-            axis: Axis::Y,
-            gap: 2.0,
+            fold: Some(priority),
             ..Spec::default()
         },
     );
-    rows(ui);
-    ui.close();
-}
-
-fn row(ui: &mut Ui, part: usize, buttons: impl FnOnce(&mut Ui)) {
     ui.open(
-        part,
+        "full",
         Spec {
             gap: 1.0,
             ..Spec::default()
         },
     );
-    buttons(ui);
+    let shown = full(ui);
     ui.close();
+    ui.open("folded", Spec::default());
+    let choice = folded(ui).or(shown);
+    ui.close();
+    ui.close();
+    choice
 }
 
-/// A tooltip naming command `id` and its chord on the box built last. It names the command,
-/// not a dialog it opens, so it leaves off the menu's ellipsis.
+/// A row of a toolbar menu.
+#[derive(Clone, Copy)]
+enum Entry {
+    Run(commands::Id),
+    /// Opens the toolbar's popup `name`, which applies the command, under the button the
+    /// popup's own control would open it from, or where that is folded away, this menu's.
+    Open(&'static str, commands::Id),
+    /// A command not built yet, shown disabled.
+    Soon(&'static str, Option<&'static [&'static str]>),
+    /// Rules off the entries after it.
+    Rule,
+}
+
+/// What opens a toolbar menu: the arrow of a button running a command, a button showing
+/// artwork, or a bare arrow.
+enum Head {
+    Split(commands::Id),
+    Menu(&'static [&'static str]),
+    More,
+}
+
+/// A toolbar menu `part` of `entries` opened by `head`, whose command enabled and checked as
+/// `status_of` says. Returns the command chosen, or the head's when clicked.
+fn dropdown(
+    ui: &mut Ui,
+    part: &str,
+    head: Head,
+    entries: &[Entry],
+    status_of: &impl Fn(commands::Id) -> commands::Status,
+) -> Option<commands::Choice> {
+    use commands::Choice;
+    let button = ui.id(part);
+    let menu = button.child("menu");
+    let mut choice = None;
+    let anchor = match head {
+        Head::Split(id) if status_of(id).enabled => {
+            let icon = artwork(id).unwrap_or_default();
+            let on = status_of(id).checked;
+            if ui::shell::split_button(ui, part, icon, None, on, menu).clicked {
+                choice = Some(Choice::Command(id));
+            }
+            tip(ui, id);
+            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+        }
+        // Where its command does not apply, the button only opens the menu.
+        Head::Split(id) => ui::shell::menu_button(ui, part, artwork(id).unwrap_or_default(), menu),
+        Head::Menu(icon) => ui::shell::menu_button(ui, part, icon, menu),
+        Head::More => {
+            let open = ui.popup_open(menu);
+            let text = ui.theme.text;
+            if ui::shell::tool_button(ui, part, ui::shell::CHEVRON, text, open).pressed {
+                ui.open_popup(menu);
+            }
+            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+        }
+    };
+    let keys: Vec<_> = entries
+        .iter()
+        .map(|entry| match entry {
+            Entry::Run(id) => commands::shortcut(*id),
+            _ => String::new(),
+        })
+        .collect();
+    let (mut items, mut actions) = (Vec::new(), Vec::new());
+    let mut separated = false;
+    for (entry, key) in entries.iter().zip(&keys) {
+        let item = match *entry {
+            Entry::Rule => {
+                separated = true;
+                continue;
+            }
+            Entry::Run(id) => ui::popup::Item {
+                text: commands::command(id).title,
+                icon: artwork(id),
+                colored: matches!(id, commands::Id::Tag(_)),
+                shortcut: key,
+                checked: status_of(id).checked,
+                disabled: !status_of(id).enabled,
+                ..Default::default()
+            },
+            Entry::Open(_, id) => ui::popup::Item {
+                text: commands::command(id).title,
+                icon: artwork(id),
+                shortcut: "›",
+                disabled: !status_of(id).enabled,
+                ..Default::default()
+            },
+            Entry::Soon(text, icon) => ui::popup::Item {
+                text,
+                icon,
+                disabled: true,
+                ..Default::default()
+            },
+        };
+        items.push(ui::popup::Item {
+            separated: std::mem::take(&mut separated),
+            ..item
+        });
+        actions.push(*entry);
+    }
+    match ui::popup::menu(ui, menu, anchor, &items, None).map(|index| actions[index]) {
+        Some(Entry::Run(id)) => Some(Choice::Command(id)),
+        Some(Entry::Open(name, _)) => {
+            ui.open_popup(toolbar_popup(name));
+            None
+        }
+        _ => choice,
+    }
+}
+
 /// A tool button for command `id`, lit while `status` checks it and faded while it does not
 /// apply; returns the command when clicked.
-fn tool(
-    ui: &mut Ui,
-    part: impl std::hash::Hash,
-    icon: &'static [&'static str],
-    tint: [f32; 4],
-    id: commands::Id,
-    status: commands::Status,
-) -> Option<commands::Choice> {
+fn tool(ui: &mut Ui, id: commands::Id, status: commands::Status) -> Option<commands::Choice> {
+    let part = commands::COMMANDS
+        .iter()
+        .position(|command| command.id == id);
+    let icon = artwork(id).unwrap_or_default();
+    // Artwork in its own colours takes white.
+    let tint = if matches!(id, commands::Id::Tag(_)) {
+        [1.0; 4]
+    } else {
+        ui.theme.text
+    };
     if !status.enabled {
         ui::shell::unavailable(ui, part, icon, tint, false);
         return None;
@@ -3734,6 +3888,57 @@ fn tool(
     let clicked = ui::shell::tool_button(ui, part, icon, tint, status.checked).clicked;
     tip(ui, id);
     clicked.then_some(commands::Choice::Command(id))
+}
+
+/// The artwork the toolbar and its menus show for command `id`.
+fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
+    use canvas::editor::{Alignment, Toggle};
+    use commands::Id as Cmd;
+    Some(match id {
+        Cmd::Back => art::BACK,
+        Cmd::Forward => art::FORWARD,
+        Cmd::Undo => art::UNDO,
+        Cmd::Redo => art::REDO,
+        Cmd::Cut => art::CUT,
+        Cmd::Copy => art::COPY,
+        Cmd::Paste => art::PASTE,
+        Cmd::FormatPainter => art::FORMAT_PAINTER,
+        Cmd::Toggle(Toggle::Bold) => art::BOLD,
+        Cmd::Toggle(Toggle::Italic) => art::ITALIC,
+        Cmd::Toggle(Toggle::Underline) => art::UNDERLINE,
+        Cmd::Toggle(Toggle::Strikethrough) => art::STRIKETHROUGH,
+        Cmd::Toggle(Toggle::Subscript) => art::SUBSCRIPT,
+        Cmd::Toggle(Toggle::Superscript) => art::SUPERSCRIPT,
+        Cmd::ClearFormatting => art::CLEAR_FORMATTING,
+        Cmd::Highlight => art::HIGHLIGHTER,
+        Cmd::FontColor => art::FONT_COLOR,
+        Cmd::Bullets => art::BULLETS,
+        Cmd::Numbering => art::NUMBERING,
+        Cmd::Align(Alignment::Left) => art::ALIGN_LEFT,
+        Cmd::Align(Alignment::Center) => art::ALIGN_CENTER,
+        Cmd::Align(Alignment::Right) => art::ALIGN_RIGHT,
+        Cmd::Outdent => art::OUTDENT,
+        Cmd::Indent => art::INDENT,
+        Cmd::Tag(tag) => tag_icon(tag),
+        Cmd::FindTags => art::FIND_TAGS,
+        Cmd::Table => art::TABLE,
+        Cmd::Picture => art::PICTURE,
+        Cmd::ScreenClipping => art::SCREEN_CLIPPING,
+        Cmd::Attachment => art::ATTACHMENT,
+        Cmd::Link => art::LINK,
+        Cmd::InsertSpace => art::INSERT_SPACE,
+        Cmd::Date => art::CALENDAR,
+        Cmd::Time => art::CLOCK,
+        Cmd::DateTime => art::DATE_TIME,
+        Cmd::Equation => art::EQUATION,
+        Cmd::Symbol => art::SYMBOL,
+        Cmd::RecordAudio => art::RECORD_AUDIO,
+        Cmd::RecordVideo => art::RECORD_VIDEO,
+        Cmd::PageColor => art::PAGE_COLOR,
+        Cmd::ZoomIn => art::ZOOM_IN,
+        Cmd::ZoomOut => art::ZOOM_OUT,
+        _ => return None,
+    })
 }
 
 /// The artwork the toolbar shows for `tag`.
@@ -3751,18 +3956,21 @@ fn toolbar_popup(name: &str) -> Id {
     Id::ROOT.child(("popup", name))
 }
 
+/// A tooltip naming command `id` and its chord on the box built last. It names the command,
+/// not a dialog it opens, so it leaves off the menu's ellipsis.
 fn tip(ui: &mut Ui, id: commands::Id) {
     let title = commands::command(id).title.trim_end_matches('…');
     ui::popup::tooltip(ui, title, &commands::shortcut(id), None);
 }
 
-/// The line between two toolbar groups.
-fn divider(ui: &mut Ui, part: &str, theme: &Theme) {
+/// The line leading a toolbar group, as far from its buttons as the groups are apart.
+fn divider(ui: &mut Ui, theme: &Theme) {
     ui.leaf(
-        ("divider", part),
+        "divider",
         Spec {
-            size: [px(1.0), px(2.0 * ui::shell::TOOL + 2.0)],
+            size: [px(GAP), px(ui::shell::TOOL)],
             fill: Some(theme.chip),
+            inset: [0.0, 0.0, GAP - 1.0, 0.0],
             ..Spec::default()
         },
     );
@@ -4054,9 +4262,8 @@ impl ApplicationHandler<UserEvent> for App {
                     state.set_appearance(state.color_scheme.theme().unwrap_or(appearance));
                     state.window.request_redraw();
                 }
-                WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                WindowEvent::ScaleFactorChanged { .. } => {
                     state.renderer.clear_glyph_cache();
-                    state.app_icon = platform::app_icon((16.0 * scale_factor).round() as u32);
                     state.window.request_redraw();
                 }
                 WindowEvent::Focused(focused) => {
@@ -4090,7 +4297,10 @@ impl ApplicationHandler<UserEvent> for App {
                     pressed: pressed == ElementState::Pressed,
                     at: Instant::now(),
                 }),
-                WindowEvent::MouseWheel { delta, .. } => {
+                WindowEvent::MouseWheel { delta, phase, .. } => {
+                    if let MouseScrollDelta::PixelDelta(p) = delta {
+                        state.swipe_scroll(phase, [p.x as f32 / scale, p.y as f32 / scale]);
+                    }
                     state.input(ui::Event::Wheel(match delta {
                         MouseScrollDelta::LineDelta(x, y) => [x * 32.0, y * 32.0],
                         MouseScrollDelta::PixelDelta(p) => [p.x as f32 / scale, p.y as f32 / scale],
@@ -4105,6 +4315,13 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                 }
                 WindowEvent::Ime(ime) => state.input(ui::Event::Ime(ime)),
+                WindowEvent::PinchGesture { delta, .. } => state.pinch(1.0 + delta as f32)?,
+                // Smart zoom: to 200% about the fingers, or back to 100%.
+                WindowEvent::DoubleTapGesture { .. } => {
+                    let zoom = state.view.zoom();
+                    let target = if (zoom - 1.0).abs() < 0.01 { 2.0 } else { 1.0 };
+                    state.pinch(target / zoom)?
+                }
                 _ => {}
             }
             Ok(())
@@ -4135,6 +4352,16 @@ impl ApplicationHandler<UserEvent> for App {
             .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
+}
+
+fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn Error>> {
+    let partial = path.with_extension("partial");
+    let mut encoder = png::Encoder::new(std::fs::File::create(&partial)?, size[0], size[1]);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header()?.write_image_data(pixels)?;
+    std::fs::rename(partial, path)?;
+    Ok(())
 }
 
 /// Feeds a development script to the window from another thread, one command per line
@@ -4214,9 +4441,15 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                     let _ = proxy.send_event(UserEvent::Replay(replay));
                 }
                 Err(duration) => {
+                    // Ticks keep a 60 Hz display's pace, dropping those a slow frame missed.
                     let start = Instant::now();
+                    let period = std::time::Duration::from_micros(16_667);
+                    let mut tick = start;
                     while start.elapsed() < duration {
-                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        while tick <= Instant::now() {
+                            tick += period;
+                        }
+                        std::thread::sleep(tick - Instant::now());
                         let _ = proxy.send_event(UserEvent::Replay(Replay::Tick));
                     }
                 }

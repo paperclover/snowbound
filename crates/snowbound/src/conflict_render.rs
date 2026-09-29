@@ -133,6 +133,7 @@ fn paint(
                 ],
                 clip: Some(rect.map(|value| value * SCALE)),
                 backdrop: Some(ui.theme.paper),
+                round: None,
                 motion: None,
                 primitives: &primitives,
             },

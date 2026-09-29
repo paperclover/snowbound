@@ -27,6 +27,7 @@ const DIMENSION_Y: [u8; 16] = [
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Ink {
     pub id: ExGuid,
+    /// A drawing's `x` and `y` offset every stroke point, as OneNote moves ink.
     pub layout: Layout,
     pub strokes: Vec<InkStroke>,
     /// Nested ink containers, as newer OneNote versions group handwriting.
@@ -36,7 +37,7 @@ pub struct Ink {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InkStroke {
     pub id: ExGuid,
-    /// Absolute page coordinates in points.
+    /// Page coordinates in points, before the drawing's offset.
     pub points: Vec<[f32; 2]>,
     /// Pen width and height in points.
     pub width: f32,

@@ -153,7 +153,7 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
         | PageOp::Equation { text, .. }
         | PageOp::Split { text, .. } => vec![*text],
         PageOp::Date { fields, .. } => fields.iter().map(|(text, _)| *text).collect(),
-        PageOp::Color(_) => Vec::new(),
+        PageOp::Color(_) | PageOp::RuleLines(_) => Vec::new(),
         PageOp::Join { left, right } => vec![*left, *right],
         PageOp::Insert { container, .. } => vec![*container],
         PageOp::Move { object, .. }
@@ -655,8 +655,11 @@ impl Diff {
                     self.region(text)?;
                 }
             }
-            // A page's colour is the latest one set, whichever side set it.
-            PageOp::Insert { .. } | PageOp::Add { .. } | PageOp::Color(_) => {}
+            // A page's colour and rule lines are the latest set, whichever side set them.
+            PageOp::Insert { .. }
+            | PageOp::Add { .. }
+            | PageOp::Color(_)
+            | PageOp::RuleLines(_) => {}
             PageOp::Move {
                 object,
                 parent,
@@ -692,9 +695,10 @@ impl Diff {
                 // What the edit sets, as each side has it.
                 let part = |index: &Index| {
                     index.nodes.get(object).map(|node| match (&node.own, edit) {
-                        (Own::Outline { layout, .. }, OutlineEdit::Position { .. }) => {
-                            (layout.x, layout.y, None, None)
-                        }
+                        (
+                            Own::Outline { layout, .. } | Own::Ink(Ink { layout, .. }),
+                            OutlineEdit::Position { .. },
+                        ) => (layout.x, layout.y, None, None),
                         (Own::Outline { layout, .. }, OutlineEdit::Width { .. }) => (
                             layout.max_width,
                             layout.reserved_width,

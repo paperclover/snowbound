@@ -8,12 +8,16 @@ attribute vec4 color;
 attribute vec2 local;
 attribute vec4 shape;
 attribute float stroke;
+attribute vec2 clip_local;
+attribute vec3 clip;
 #endif
 varying vec2 v_uv;
 varying vec4 v_color;
 varying vec2 v_local;
 varying vec4 v_shape;
 varying float v_stroke;
+varying vec2 v_clip_local;
+varying vec3 v_clip;
 
 #ifdef VERTEX
 void main() {
@@ -22,6 +26,8 @@ void main() {
     v_local = local;
     v_shape = shape;
     v_stroke = stroke;
+    v_clip_local = clip_local;
+    v_clip = clip;
     gl_Position = vec4(position, 0.0, 1.0);
 }
 #else
@@ -96,6 +102,11 @@ void main() {
             coverage *= clamp(width + 0.5 - abs(phase - 2.0 * width), 0.0, 1.0);
         }
         color *= coverage;
+    }
+    if (v_clip.x > 0.0) {
+        vec2 q = abs(v_clip_local) - v_clip.xy + v_clip.z;
+        float distance = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - v_clip.z;
+        color *= clamp(0.5 - distance, 0.0, 1.0);
     }
     gl_FragColor = color;
 }

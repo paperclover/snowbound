@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::mem;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -48,6 +49,42 @@ use wl_typed::WlTyped;
 
 /// XXX this is not result, so `must_use` when needed.
 type SkiaResult = Option<()>;
+
+/// Whether the frame draws libadwaita's window edge in place of its own border: the
+/// radius, box shadows and outline of libadwaita 1.7's `window.csd`, round a body whose
+/// bottom corners the application cuts to match.
+pub static LIBADWAITA_EDGE: AtomicBool = AtomicBool::new(false);
+
+/// libadwaita's `--window-radius`, in logical pixels.
+pub const WINDOW_RADIUS: f32 = 15.;
+
+/// `window.csd`'s box shadows focused and not, as y offset, blur, spread and alpha of black;
+/// the last is its 1 px ring.
+const WINDOW_SHADOWS: [[[f32; 4]; 4]; 2] = [
+    [
+        [2., 8., 2., 0.13],
+        [3., 20., 10., 0.09],
+        [6., 32., 16., 0.04],
+        [0., 0., 1., 0.005],
+    ],
+    [
+        [1., 3., 3., 0.09],
+        [2., 14., 5., 0.05],
+        [4., 28., 12., 0.03],
+        [0., 0., 1., 0.02],
+    ],
+];
+
+/// The alpha of `window.csd`'s white outline, 1 px inside its edge.
+const WINDOW_OUTLINE: f32 = 0.07;
+
+/// Set once a frame is made. Its header has no height, so the application draws the title
+/// bar, and its window buttons, itself.
+pub static FRAMED: AtomicBool = AtomicBool::new(false);
+
+fn libadwaita_edge() -> bool {
+    LIBADWAITA_EDGE.load(Ordering::Relaxed)
+}
 
 /// A simple set of decorations
 #[derive(Debug)]
@@ -106,6 +143,7 @@ where
         let base_surface = WlTyped::wrap::<State>(base_surface.wl_surface().clone());
 
         let pool = SlotPool::new(1, shm)?;
+        FRAMED.store(true, Ordering::Relaxed);
 
         let decorations = Some(DecorationParts::new(
             &base_surface,
@@ -226,12 +264,16 @@ where
             true
         };
         let border_paint = colors.border_paint();
+        let libadwaita = libadwaita_edge() && !self.state.intersects(WindowState::TILED);
+        let window = (
+            decorations.header().surface_rect.width,
+            decorations.side_height(),
+        );
 
         // Draw the borders.
-        for (idx, part) in decorations
-            .parts()
-            .filter(|(idx, _)| *idx == DecorationParts::HEADER || draw_borders)
-        {
+        for (idx, part) in decorations.parts().filter(|(idx, part)| {
+            (*idx == DecorationParts::HEADER || draw_borders) && part.surface_rect.height > 0
+        }) {
             let scale = self.scale_factor;
 
             let mut rect = part.surface_rect;
@@ -240,9 +282,27 @@ where
             // start. To achieve that, we enlargen the width of the header by
             // 2 * `VISIBLE_BORDER_SIZE`, and move `x` by `VISIBLE_BORDER_SIZE`
             // to the left.
-            if idx == DecorationParts::HEADER && draw_borders {
+            if idx == DecorationParts::HEADER && draw_borders && !libadwaita {
                 rect.width += 2 * VISIBLE_BORDER_SIZE;
                 rect.x -= VISIBLE_BORDER_SIZE as i32;
+            }
+            // libadwaita's outline lies inside the body, and its bottom corners are cut from
+            // it: the sides overlap the body by the outline, the bottom by the radius.
+            let (inset, reach) = match idx {
+                _ if !libadwaita || !draw_borders => (0, 0),
+                DecorationParts::LEFT | DecorationParts::RIGHT => (1, 0),
+                DecorationParts::BOTTOM => (0, WINDOW_RADIUS as u32),
+                _ => (0, 0),
+            };
+            if idx == DecorationParts::RIGHT {
+                rect.x -= inset as i32;
+            }
+            rect.width += inset;
+            rect.y -= reach as i32;
+            rect.height += reach;
+            // Without a header the body's top corners are cut too, and the top reaches over them.
+            if libadwaita && draw_borders && idx == DecorationParts::TOP {
+                rect.height += WINDOW_RADIUS as u32;
             }
 
             rect.width *= scale;
@@ -265,7 +325,23 @@ where
             // do invisible borders to enlarge the input zone.
             pixmap.fill(Color::TRANSPARENT);
 
-            if !self.state.intersects(WindowState::TILED) {
+            let edge = libadwaita && draw_borders;
+            let origin = [rect.x, rect.y + HEADER_SIZE as i32].map(|v| (v * scale as i32) as f32);
+            let active = self.state.contains(WindowState::ACTIVATED);
+            let edge_layer = |pixmap: &mut PixmapMut, outline| {
+                draw_libadwaita_edge(
+                    pixmap,
+                    idx,
+                    origin,
+                    [window.0 * scale, window.1 * scale],
+                    scale as f32,
+                    active,
+                    outline,
+                )
+            };
+            if edge {
+                edge_layer(&mut pixmap, false);
+            } else if !self.state.intersects(WindowState::TILED) {
                 self.shadow.draw(
                     &mut pixmap,
                     scale,
@@ -292,6 +368,7 @@ where
                         self.mouse.location,
                     );
                 }
+                _ if edge => {}
                 border => {
                     // The visible border is one pt.
                     let visible_border_size = VISIBLE_BORDER_SIZE * scale;
@@ -318,8 +395,16 @@ where
                                 (rect.height - y) as f32,
                             )
                         }
-                        // We draw small visible border only bellow the window surface, no need to
-                        // handle `TOP`.
+                        // Without a header, the top has its border too.
+                        DecorationParts::TOP => {
+                            let x = (rect.x.unsigned_abs() * scale) - visible_border_size;
+                            Rect::from_xywh(
+                                x as f32,
+                                (rect.height - visible_border_size) as f32,
+                                (rect.width - 2 * x) as f32,
+                                visible_border_size as f32,
+                            )
+                        }
                         DecorationParts::BOTTOM => {
                             let x = (rect.x.unsigned_abs() * scale) - visible_border_size;
                             Rect::from_xywh(
@@ -338,6 +423,10 @@ where
                     }
                 }
             };
+
+            if edge {
+                edge_layer(&mut pixmap, true);
+            }
 
             if should_sync {
                 part.subsurface.set_sync();
@@ -359,8 +448,13 @@ where
             if let Some(input_rect) = part.input_rect {
                 let input_region = Region::new(&*self.compositor).ok()?;
                 input_region.add(
-                    input_rect.x,
-                    input_rect.y,
+                    input_rect.x
+                        + if idx == DecorationParts::RIGHT {
+                            inset as i32
+                        } else {
+                            0
+                        },
+                    input_rect.y + reach as i32,
                     input_rect.width as i32,
                     input_rect.height as i32,
                 );
@@ -685,6 +779,8 @@ fn draw_headerbar_bg(
 
     let radius = if state.intersects(WindowState::MAXIMIZED | WindowState::TILED) {
         0.
+    } else if libadwaita_edge() {
+        WINDOW_RADIUS * scale
     } else {
         CORNER_RADIUS as f32 * scale
     };
@@ -700,6 +796,99 @@ fn draw_headerbar_bg(
     );
 
     Some(())
+}
+
+/// One layer of libadwaita's window edge in part `idx`, whose pixmap's origin lies at
+/// `origin` from the header's top left in a `window` of the header and body together, all
+/// in device pixels: the box shadows outside the window, under the part's content, or the
+/// outline inside it, over the content. Each part draws only where the others do not.
+fn draw_libadwaita_edge(
+    pixmap: &mut PixmapMut,
+    idx: usize,
+    origin: [f32; 2],
+    window: [u32; 2],
+    scale: f32,
+    active: bool,
+    outline: bool,
+) {
+    let [width, height] = window.map(|v| v as f32);
+    let radius = WINDOW_RADIUS * scale;
+    // The top owns the body's top corners where no header rounds them.
+    let top = (HEADER_SIZE as f32 * scale).max(radius);
+    let owned = |x: f32, y: f32| match idx {
+        DecorationParts::LEFT => x < 0. || (y >= top && y < height - radius),
+        DecorationParts::RIGHT => x >= width || (y >= top && y < height - radius),
+        DecorationParts::BOTTOM => y >= height || (0. ..width).contains(&x),
+        _ => true,
+    };
+    // Signed distance from the window grown by `spread` and moved down by `offset`.
+    let distance = |x: f32, y: f32, offset: f32, spread: f32| {
+        let radius = radius + spread;
+        let [qx, qy] = [
+            (x - width / 2.).abs() - width / 2. - spread + radius,
+            (y - offset - height / 2.).abs() - height / 2. - spread + radius,
+        ];
+        qx.max(0.).hypot(qy.max(0.)) + qx.max(qy).min(0.) - radius
+    };
+    let shadows = &WINDOW_SHADOWS[usize::from(!active)];
+    let columns = pixmap.width() as usize;
+    for (index, pixel) in pixmap.pixels_mut().iter_mut().enumerate() {
+        let [x, y] = [
+            (index % columns) as f32 + 0.5 + origin[0],
+            (index / columns) as f32 + 0.5 + origin[1],
+        ];
+        if !owned(x, y) {
+            continue;
+        }
+        let edge = distance(x, y, 0., 0.);
+        let (color, alpha) = if outline {
+            // The share of the pixel inside the band 1 px wide inside the edge.
+            let cover = (edge + 0.5).min(0.) - (edge - 0.5).max(-scale);
+            (255., WINDOW_OUTLINE * cover.max(0.))
+        } else {
+            let clear = shadows
+                .iter()
+                .fold(1., |clear, [offset, blur, spread, alpha]| {
+                    let reach = distance(x, y, offset * scale, spread * scale);
+                    // A Gaussian blur of standard deviation half the blur radius, as GSK's.
+                    let cover = if *blur == 0. {
+                        (0.5 - reach).clamp(0., 1.)
+                    } else {
+                        0.5 * erfc(reach / (blur * scale / 2. * std::f32::consts::SQRT_2))
+                    };
+                    clear * (1. - alpha * cover)
+                });
+            // Box shadows show only outside the window.
+            (0., (1. - clear) * (edge + 0.5).clamp(0., 1.))
+        };
+        if alpha <= 0. {
+            continue;
+        }
+        let over = |channel: u8| (color * alpha + f32::from(channel) * (1. - alpha)).round() as u8;
+        let alpha_over = (alpha * 255. + f32::from(pixel.alpha()) * (1. - alpha)).round() as u8;
+        if let Some(blended) = tiny_skia::PremultipliedColorU8::from_rgba(
+            over(pixel.red()).min(alpha_over),
+            over(pixel.green()).min(alpha_over),
+            over(pixel.blue()).min(alpha_over),
+            alpha_over,
+        ) {
+            *pixel = blended;
+        }
+    }
+}
+
+/// The complementary error function, to within 1.5e-7 (Abramowitz and Stegun 7.1.26).
+fn erfc(x: f32) -> f32 {
+    let t = 1. / (1. + 0.327_591_1 * x.abs());
+    let poly = t
+        * (0.254_829_6
+            + t * (-0.284_496_74 + t * (1.421_413_7 + t * (-1.453_152_1 + t * 1.061_405_4))));
+    let erfc = poly * (-x * x).exp();
+    if x >= 0. {
+        erfc
+    } else {
+        2. - erfc
+    }
 }
 
 fn rounded_headerbar_shape(x: f32, y: f32, width: f32, height: f32, radius: f32) -> Option<Path> {
@@ -765,7 +954,7 @@ fn rounded_headerbar_shape(x: f32, y: f32, width: f32, height: f32, radius: f32)
 
 // returns horizontal margin, logical points
 fn get_margin_h_lp(state: &WindowState) -> f32 {
-    if state.intersects(WindowState::MAXIMIZED | WindowState::TILED) {
+    if state.intersects(WindowState::MAXIMIZED | WindowState::TILED) || libadwaita_edge() {
         0.
     } else {
         VISIBLE_BORDER_SIZE as f32

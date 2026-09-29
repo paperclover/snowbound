@@ -2,6 +2,8 @@
 //! 2010's Quick Access Toolbar offers them.
 
 use super::*;
+use std::time::Duration;
+use winit::event::TouchPhase;
 
 /// A page shown: its notebook's location, its section's catalog path and the page.
 #[derive(Clone, Debug, PartialEq)]
@@ -107,6 +109,50 @@ impl State {
     }
 }
 
+/// A two-finger horizontal trackpad swipe, which travels Back or Forward as macOS's
+/// "swipe between pages" does.
+#[derive(Default)]
+pub struct Swipe {
+    travelled: Option<[f32; 2]>,
+    ended: Option<Instant>,
+}
+
+impl Swipe {
+    /// Feeds one trackpad scroll in logical pixels; `armed` when the page cannot scroll
+    /// sideways. Returns whether to go forward once a swipe completes.
+    pub fn scroll(
+        &mut self,
+        phase: TouchPhase,
+        delta: [f32; 2],
+        armed: bool,
+        at: Instant,
+    ) -> Option<bool> {
+        match phase {
+            // Momentum arrives as a second gesture right after the fingers lift.
+            TouchPhase::Started => {
+                let momentum = self
+                    .ended
+                    .is_some_and(|ended| at - ended < Duration::from_millis(150));
+                self.travelled = (armed && !momentum).then_some([0.0; 2]);
+                None
+            }
+            TouchPhase::Moved => {
+                if let Some(travelled) = &mut self.travelled {
+                    travelled[0] += delta[0];
+                    travelled[1] += delta[1];
+                }
+                None
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.ended = Some(at);
+                let [x, y] = self.travelled.take()?;
+                (phase == TouchPhase::Ended && x.abs() > 120.0 && x.abs() > 2.0 * y.abs())
+                    .then_some(x < 0.0)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,6 +166,28 @@ mod tests {
                 n: page,
             },
         }
+    }
+
+    #[test]
+    fn swipe_travels_on_a_long_sideways_stroke_only() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let stroke = |swipe: &mut Swipe, dx: f32, dy: f32, armed: bool, t: u64| {
+            swipe.scroll(TouchPhase::Started, [0.0; 2], armed, at(t));
+            for _ in 0..10 {
+                swipe.scroll(TouchPhase::Moved, [dx / 10.0, dy / 10.0], armed, at(t));
+            }
+            swipe.scroll(TouchPhase::Ended, [0.0; 2], armed, at(t))
+        };
+        let mut swipe = Swipe::default();
+        // Fingers right go Back, left go Forward.
+        assert_eq!(stroke(&mut swipe, 200.0, 10.0, true, 0), Some(false));
+        assert_eq!(stroke(&mut swipe, -200.0, 10.0, true, 1000), Some(true));
+        // The momentum right after a stroke is not another.
+        assert_eq!(stroke(&mut swipe, -200.0, 0.0, true, 1050), None);
+        assert_eq!(stroke(&mut swipe, 60.0, 0.0, true, 2000), None);
+        assert_eq!(stroke(&mut swipe, 200.0, 150.0, true, 3000), None);
+        assert_eq!(stroke(&mut swipe, 200.0, 0.0, false, 4000), None);
     }
 
     #[test]

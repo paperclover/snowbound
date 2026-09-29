@@ -29,8 +29,13 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
 
 ### macOS
 
-- The title bar is transparent. The app draws its own around AppKit's traffic
-  lights, as part of the same frame as the rest of the chrome. Under the whole
+- The toolbar's row is the title bar. An empty `NSToolbar`, unified compact
+  from macOS 11, with the title hidden makes the title bar the row's height,
+  and AppKit places the traffic lights in it; a press in the row's gaps drags
+  the window. The title is still set, for the Window menu, Mission Control and
+  VoiceOver. `--screenshot` paints the lights where the hidden window's AppKit
+  put them. The app draws the row as part of the same frame as the rest of the
+  chrome. Under the whole
   window lies AppKit's title bar material, an `NSVisualEffectView`, and the
   chrome is drawn transparent over it, so the title bar, toolbar, tab row and
   sidebar take the system's desktop tint, appearance and focus state exactly.
@@ -52,9 +57,14 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
 ### Linux
 
 - X11 and Wayland. Title bars come from the window manager, or on Wayland from
-  the compositor where it offers server-side decorations and a client-side
-  frame otherwise. The app draws its own window controls only where no frame
-  could be made.
+  the compositor where it offers server-side decorations, and the toolbar's
+  row lies beneath them, as in Dolphin and Kate. Elsewhere on Wayland, as on
+  GNOME, the row is the title bar, as a GTK 4 header bar holding tools: winit's
+  Adwaita frame keeps its shadow, corners and resize edges but has no header,
+  and the row ends in the window's buttons in the order GNOME's `button-layout`
+  lists them. Under that frame on GNOME the window erases its bottom
+  corners to transparent pixels and the frame draws libadwaita's window edge
+  round it: radius, shadows and outline. KWin rounds Breeze's corners itself.
 - The toolbar and the rest of the chrome continue the title bar's fill,
   focused and not: on KDE the colour scheme's header colours from
   `kdeglobals`, as KWin paints its title bars, and on GNOME winit's Adwaita

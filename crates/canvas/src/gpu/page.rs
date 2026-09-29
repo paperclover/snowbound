@@ -733,7 +733,8 @@ impl PageScene {
                     continue;
                 }
                 Content::Ink(ink) => {
-                    append_ink(ink, offset, primitives);
+                    let [x, y] = crate::editor::page::ink_offset(ink);
+                    append_ink(ink, [offset[0] + x, offset[1] + y], primitives);
                     continue;
                 }
             };
@@ -1086,6 +1087,7 @@ mod tests {
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Title(Title {
                 date: Some(fields[1].id),
@@ -1528,6 +1530,7 @@ mod tests {
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Title(Title {
                 date: None,
@@ -1603,6 +1606,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects,
         };
@@ -1686,6 +1690,7 @@ mod tests {
                 title: String::new(),
                 margin_origin: [36.0, 14.0],
                 color: None,
+                rule_lines: None,
                 objects: vec![unsupported, PageObject::Outline(editable)],
                 definitions: BTreeMap::from([
                     (
@@ -1773,6 +1778,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![
                 PageObject::Outline(Outline {
@@ -1953,6 +1959,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![
                 outline(2.0, "first"),
@@ -2127,6 +2134,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Ink(ink.clone())],
         };
@@ -2187,6 +2195,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Image(Image {
                 size: None,
@@ -2273,6 +2282,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Image(background), PageObject::Image(picture)],
         };
@@ -2341,6 +2351,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: pictures.iter().cloned().map(PageObject::Image).collect(),
         };

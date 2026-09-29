@@ -4,7 +4,8 @@
 use draw::{PathStyle, edit::SelectionUnit};
 
 use crate::{
-    Anchor, Corner, Display, Flags, Id, Section, Shape, Signal, Spec, Ui, children, fill, mix, px,
+    Anchor, Corner, Display, Extent, Flags, Id, Section, Shape, Signal, Spec, Ui, children, fill,
+    mix, px,
 };
 use std::hash::Hash;
 
@@ -18,34 +19,34 @@ pub const TOOL: f32 = 22.0;
 const ARROW: f32 = 10.0;
 /// Where a section tab's label starts inside it.
 pub const TAB_PAD: f32 = 10.0;
+/// How far section tabs fade out at an end of their row they are cut at, and how near it a
+/// dragged tab scrolls the row on.
+const EDGE: f32 = 20.0;
 
 /// Section tabs in a row `height` tall, as OneNote draws them: each leans over the next
 /// at 45°, and the open one lies on top in `section`'s colours, rising to meet the frame
 /// below as its outline and shadow fade in. `tabs` are names and section colours; `lit`
 /// shows as hovered, as a tab something is dragged onto. A `dragged` tab follows the
 /// pointer, lifted over the others, which slide aside to open the gap it would land in;
-/// each eases to its place once let go.
+/// each eases to its place once let go, and near the row's ends the row scrolls on.
+///
+/// The row is as wide as the tabs, and gives up all of that where its own row lacks room.
+/// Then the tabs scroll sideways under the wheel, either way it turns, fading out at the
+/// ends they are cut at into the row's `fill`, and the open tab scrolls into view as it
+/// opens.
 #[allow(clippy::too_many_arguments)]
 pub fn section_tabs(
     ui: &mut Ui,
-    part: impl Hash,
+    row: Id,
     tabs: &[(&str, [f32; 4])],
     active: usize,
     lit: Option<usize>,
     dragged: Option<Dragged>,
     section: &Section,
     height: f32,
+    fill: [f32; 4],
 ) -> Tabs {
     let theme = ui.theme.clone();
-    ui.open(
-        part,
-        Spec {
-            flags: Flags::CLIP,
-            size: [fill(), px(height)],
-            ..Spec::default()
-        },
-    );
-    let [low, tallest] = [height - 6.0, height - 2.0];
     // Room for the first tab's outline and shadow, which the row would clip.
     let mut left = crate::SHADOW[0];
     let placed: Vec<_> = tabs
@@ -56,14 +57,65 @@ pub fn section_tabs(
             (left - width, width)
         })
         .collect();
+    // The last tab's slant and shadow reach past its box.
+    let wide = left + lean(height) + crate::SHADOW[0];
+    let view = ui.rect(row).map_or(wide, |rect| rect[2] - rect[0]);
+    let most = (wide - view).max(0.0);
+    let [scroll, shown] = [row.child("scroll"), row.child("shown")];
+    let held_value = |ui: &Ui, id: Id| ui.states.get(&id).and_then(|state| state.tween);
+    let mut target = held_value(ui, scroll).map_or(0.0, |[_, target]| target);
+    for event in ui.signal(row).events {
+        if let crate::Event::Wheel([x, y]) = event {
+            target -= x + y;
+        }
+    }
+    if held_value(ui, shown).is_none_or(|[_, was]| was != active as f32)
+        && let Some((x, width)) = placed.get(active)
+    {
+        target = target.min(*x).max(x + width + lean(height) - view);
+    }
+    ui.hold(shown, active as f32);
+    // A tab dragged near either end scrolls the row on, as long as it is held there.
+    let start = dragged.and_then(|dragged| {
+        let start = dragged.start?;
+        let width = placed[dragged.index].1;
+        let push = (start - EDGE).min(0.0) + (start + width - view + EDGE).max(0.0);
+        if push != 0.0 && (target > 0.0 || push > 0.0) && (target < most || push < 0.0) {
+            target += push * ui.dt * 8.0;
+            ui.animating = true;
+        }
+        Some(start)
+    });
+    let target = ui.hold(scroll, target.clamp(0.0, most));
+    let offset = ui.animate(row.child("offset"), target);
+    let fade = |cut: bool| if cut { EDGE } else { 0.0 };
+    ui.open_as(
+        row,
+        Spec {
+            flags: Flags::CLIP | Flags::SCROLL,
+            size: [
+                Extent {
+                    size: crate::Size::Pixels(wide),
+                    strictness: 0.0,
+                },
+                px(height),
+            ],
+            fill: Some(fill),
+            fade: [fade(offset > 0.5), fade(offset < most - 0.5)],
+            ..Spec::default()
+        },
+    );
+    let [low, tallest] = [height - 6.0, height - 2.0];
     let (mut clicked, mut context, mut held, mut renamed) = (None, None, None, None);
     let spans: Vec<[f32; 2]> = placed.iter().map(|(x, width)| [*x, *width]).collect();
+    // The dragged tab's place along the tabs, however far they are scrolled.
+    let start = start.map(|start| start + offset);
     let slot = dragged.and_then(|dragged| {
         let width = placed[dragged.index].1;
         Some(crate::drop_slot(
             &spans,
             dragged.index,
-            dragged.start? + width / 2.0,
+            start? + width / 2.0,
         ))
     });
     let lifted = dragged.map(|dragged| dragged.index);
@@ -79,14 +131,9 @@ pub fn section_tabs(
         let (x, width) = placed[index];
         // Keyed by name, so a tab eases from where it stood when the tabs are reordered.
         let key = ui.id(("x", name));
-        let x = match (dragged, slot) {
-            (
-                Some(Dragged {
-                    start: Some(start), ..
-                }),
-                _,
-            ) if lifted == Some(index) => ui.hold(key, start),
-            (Some(dragged), Some(slot)) => ui.animate(
+        let x = match (dragged, slot, start) {
+            (_, _, Some(start)) if lifted == Some(index) => ui.hold(key, start),
+            (Some(dragged), Some(slot), _) => ui.animate(
                 key,
                 x + crate::slide(index, dragged.index, slot, placed[dragged.index].1),
             ),
@@ -110,7 +157,7 @@ pub fn section_tabs(
             Spec {
                 flags: Flags::CLICKABLE | Flags::FLOAT,
                 size: [px(width), px(tall)],
-                position: [x, height - tall],
+                position: [x - offset, height - tall],
                 text: Some(name),
                 color: Some(mix(mix(theme.ink, fill, 0.2), theme.ink, open)),
                 fill: Some(if lit == Some(index) {
@@ -409,13 +456,13 @@ pub fn menu_button(
 }
 
 /// A drop-down box `width` wide showing `text`.
-pub fn combo(ui: &mut Ui, part: impl Hash, text: &str, width: f32) -> Signal {
+pub fn combo(ui: &mut Ui, part: impl Hash, text: &str, width: impl Into<Extent>) -> Signal {
     let theme = ui.theme.clone();
     let id = ui.open(
         part,
         Spec {
             flags: Flags::CLICKABLE,
-            size: [px(width), px(TOOL)],
+            size: [width.into(), px(TOOL)],
             fill: Some(theme.base),
             hover_border: Some(theme.accent),
             border: Some(theme.chip),

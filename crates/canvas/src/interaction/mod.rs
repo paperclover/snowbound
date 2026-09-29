@@ -6,6 +6,7 @@ pub mod accessibility;
 #[cfg(test)]
 mod profile;
 mod scroll;
+mod space;
 
 pub use scroll::Scroll;
 #[cfg(test)]
@@ -42,6 +43,10 @@ pub enum Cursor {
     NsResize,
     NwseResize,
     NeswResize,
+    /// Insert Space's line across the page.
+    RowResize,
+    /// Insert Space's line down the page.
+    ColResize,
 }
 
 /// Work only the host can do, asked for by an event.
@@ -151,6 +156,8 @@ enum Drag {
         press: [f32; 2],
         pending_press: Option<[f32; 2]>,
     },
+    /// Insert Space from a press on `line` along `axis`, 0 for x.
+    Space { axis: usize, line: f32 },
 }
 
 #[derive(Clone, Copy)]
@@ -205,6 +212,8 @@ pub struct PageView {
     pointer: [f32; 2],
     pointer_inside: bool,
     drag: Option<Drag>,
+    /// Insert Space waits for its press: its line follows the pointer.
+    space: bool,
     object_focus: Option<ObjectFocus>,
     modifiers: Modifiers,
     focused: bool,
@@ -269,6 +278,7 @@ impl PageView {
             pointer: [0.0; 2],
             pointer_inside: false,
             drag: None,
+            space: false,
             object_focus: None,
             modifiers: Modifiers::default(),
             focused: true,
@@ -287,6 +297,7 @@ impl PageView {
         self.editor = editor;
         self.scene = scene;
         self.drag = None;
+        self.space = false;
         self.object_focus = None;
         self.found.clear();
     }
@@ -347,6 +358,32 @@ impl PageView {
 
     pub fn object_focus(&self) -> Option<ObjectFocus> {
         self.object_focus
+    }
+
+    /// Starts OneNote's Insert Space: a line follows the pointer, across the page or, within
+    /// half an inch of the view's left or right edge, down it; dragging from it moves what
+    /// lies past it, and Escape cancels.
+    pub fn insert_space(&mut self) -> Response {
+        self.space = true;
+        self.drag = None;
+        Response::redraw()
+    }
+
+    /// Whether Insert Space waits for or follows a drag.
+    pub fn inserting_space(&self) -> bool {
+        self.space || matches!(self.drag, Some(Drag::Space { .. }))
+    }
+
+    /// The axis Insert Space's line moves the page along, 0 for x, while it shows.
+    fn space_axis(&self) -> Option<usize> {
+        if let Some(Drag::Space { axis, .. }) = self.drag {
+            return Some(axis);
+        }
+        let reach = 48.0 * self.display_scale;
+        let x = self.pointer[0];
+        self.space.then_some(usize::from(
+            x >= reach && x <= self.viewport.size[0] as f32 - reach,
+        ))
     }
 
     /// Text input goes to the editor unless an object holds focus.
@@ -622,6 +659,12 @@ impl PageView {
         self.moved()
     }
 
+    /// Scales the view by `factor` about the pointer, as a trackpad pinch does.
+    pub fn pinch(&mut self, factor: f32) -> Result<Response> {
+        self.zoom_about(factor, self.pointer);
+        self.moved()
+    }
+
     /// Scales the view by `factor`, keeping the document point under `anchor` in place.
     fn zoom_about(&mut self, factor: f32, anchor: [f32; 2]) {
         let point = self.viewport.document_point(anchor);
@@ -721,7 +764,7 @@ impl PageView {
                         .map(|(id, origin, size)| PointerFeedback::Image(id, origin, size))
                 })
                 .or_else(|| {
-                    if !self.pointer_inside {
+                    if !self.pointer_inside || self.space {
                         return None;
                     }
                     match page_hit_test(
@@ -737,7 +780,18 @@ impl PageView {
                     }
                 }),
         };
-        page_primitives(
+        let [left, top] = self.viewport.document_point([0.0; 2]);
+        let [right, bottom] = self
+            .viewport
+            .document_point(self.viewport.size.map(|side| side as f32));
+        let mut primitives = rule_primitives(
+            self.editor.rule_lines(),
+            self.editor.margin_origin(),
+            [left, top, right, bottom],
+            self.pixel(),
+            colors.paper,
+        );
+        primitives.extend(page_primitives(
             &self.editor,
             self.scene.as_ref(),
             preview,
@@ -746,7 +800,12 @@ impl PageView {
                 caret: if self.focused
                     && !matches!(
                         self.drag,
-                        Some(Drag::Outline { .. } | Drag::Resize { .. } | Drag::Image { .. })
+                        Some(
+                            Drag::Outline { .. }
+                                | Drag::Resize { .. }
+                                | Drag::Image { .. }
+                                | Drag::Space { .. }
+                        )
                     ) {
                     self.caret
                 } else {
@@ -760,11 +819,36 @@ impl PageView {
                 chrome: !self.touch || self.focused,
                 found: &self.found,
             },
-        )
+        )?);
+        if let Some(axis) = self
+            .space_axis()
+            .filter(|_| self.pointer_inside || self.drag.is_some())
+        {
+            let point = self.viewport.document_point(self.pointer)[axis];
+            let (line, to, moved) = match self.drag {
+                Some(Drag::Space { line, .. }) => {
+                    let delta = (point - line).max(self.editor.space_limit(axis, line));
+                    (line, line + delta, self.editor.space_preview(axis, line))
+                }
+                _ => (point, point, Vec::new()),
+            };
+            space::append(
+                axis,
+                [line, to],
+                &moved,
+                [left, top, right, bottom],
+                self.pixel(),
+                &mut primitives,
+            );
+        }
+        Ok(primitives)
     }
 
     /// The pointer shape at the pointer's position.
     pub fn cursor(&self) -> Cursor {
+        if let Some(axis) = self.space_axis() {
+            return [Cursor::ColResize, Cursor::RowResize][axis];
+        }
         let hit = self.hit_test(self.viewport.document_point(self.pointer));
         match (&self.drag, hit) {
             (Some(Drag::Image { handle, .. }), _) => handle_cursor(*handle),
@@ -816,6 +900,7 @@ impl PageView {
         self.focused = focused;
         if !focused {
             self.drag = None;
+            self.space = false;
         }
         self.changed()
     }
@@ -864,6 +949,7 @@ impl PageView {
                 }
                 self.changed()
             }
+            Some(Drag::Space { .. }) => Ok(Response::redraw()),
             Some(Drag::Resize { outline, grab }) => {
                 let point = self.viewport.document_point(self.pointer);
                 let width = (point[0] - self.editor.active_outline().origin()[0] - *grab).max(36.0);
@@ -886,6 +972,15 @@ impl PageView {
     /// A primary-button press at the pointer's position, at `now` for click counting.
     pub fn pointer_pressed(&mut self, now: Instant) -> Result<Response> {
         let point = self.viewport.document_point(self.pointer);
+        if let Some(axis) = self.space_axis().filter(|_| self.space) {
+            self.space = false;
+            self.set_object_focus(None);
+            self.drag = Some(Drag::Space {
+                axis,
+                line: point[axis],
+            });
+            return Ok(Response::redraw());
+        }
         let unit = self
             .clicks
             .press(now, self.pointer, 4.0 * self.display_scale);
@@ -987,6 +1082,13 @@ impl PageView {
     }
 
     pub fn pointer_released(&mut self) -> Result<Response> {
+        if let Some(Drag::Space { axis, line }) = self.drag {
+            self.drag = None;
+            let delta = self.viewport.document_point(self.pointer)[axis] - line;
+            self.editor
+                .insert_space(&mut self.engine, axis, line, delta)?;
+            return self.changed();
+        }
         // As in OneNote, an outline or picture dropped outside the view stays where it was.
         let inside =
             (0..2).all(|axis| (0.0..self.viewport.size[axis] as f32).contains(&self.pointer[axis]));
@@ -1302,6 +1404,18 @@ impl PageView {
         self.changed()
     }
 
+    /// Gives the page a colour (COLORREF) and rule lines, as one undo step.
+    pub fn set_paper(
+        &mut self,
+        color: Option<u32>,
+        rule_lines: Option<onestore::page::RuleLines>,
+    ) -> Result<Response> {
+        if !self.editor.set_paper(color, rule_lines) {
+            return Ok(Response::default());
+        }
+        self.changed()
+    }
+
     /// Gives keyboard focus to a read-only object, as an assistive technology asks.
     pub fn focus_read_only(&mut self, index: usize) -> Result<Response> {
         self.set_object_focus(Some(ObjectFocus::ReadOnly(index)));
@@ -1355,9 +1469,16 @@ impl PageView {
         }
         if matches!(
             self.drag,
-            Some(Drag::Outline { .. } | Drag::Resize { .. } | Drag::Image { .. })
-        ) {
+            Some(
+                Drag::Outline { .. }
+                    | Drag::Resize { .. }
+                    | Drag::Image { .. }
+                    | Drag::Space { .. }
+            )
+        ) || self.space
+        {
             self.drag = None;
+            self.space = false;
             if key == &Key::Named(NamedKey::Escape) {
                 return self.changed();
             }
@@ -1710,6 +1831,54 @@ fn page_hit(
     [Layer::Grips, Layer::Body, Layer::Below]
         .into_iter()
         .find_map(pass)
+}
+
+/// The page's rule lines over `visible`, a document rectangle, as OneNote 2010 draws them:
+/// 1/96 inch wide, or a device pixel where that is wider, horizontal lines from the margin
+/// origin down, and a grid's vertical lines through it or a margin line 1/96 inch left of it.
+fn rule_primitives(
+    lines: Option<onestore::page::RuleLines>,
+    [x, y]: [f32; 2],
+    [left, top, right, bottom]: [f32; 4],
+    pixel: f32,
+    paper: Paper,
+) -> Vec<Primitive<'static>> {
+    use onestore::page::VerticalRule;
+    let Some(lines) = lines else {
+        return Vec::new();
+    };
+    let width = pixel.max(0.75);
+    // Stored spacings are in half inches; nothing draws closer than a device pixel apart.
+    let step = |spacing: f32| (spacing * 36.0).max(pixel);
+    let color = |color| paper.tint(crate::gpu::colorref(color));
+    let horizontal = step(lines.spacing);
+    let first = ((top - y) / horizontal).ceil().max(0.0);
+    let mut primitives: Vec<_> = (first as u32..)
+        .map(|index| y + index as f32 * horizontal)
+        .take_while(|at| *at <= bottom + width)
+        .map(|at| Primitive::Rect {
+            rect: [left, at - width / 2.0, right, at + width / 2.0],
+            color: color(lines.color),
+        })
+        .collect();
+    let vertical = |at: f32, rule_color| Primitive::Rect {
+        rect: [at - width / 2.0, top, at + width / 2.0, bottom],
+        color: color(rule_color),
+    };
+    match lines.vertical {
+        VerticalRule::Margin(rule_color) => primitives.push(vertical(x - 0.75, rule_color)),
+        VerticalRule::Grid { spacing, color } => {
+            let spacing = step(spacing);
+            let first = ((left - x) / spacing).floor();
+            primitives.extend(
+                (0..)
+                    .map(|index| x + (first + index as f32) * spacing)
+                    .take_while(|at| *at <= right + width)
+                    .map(|at| vertical(at, color)),
+            );
+        }
+    }
+    primitives
 }
 
 fn page_primitives<'a>(

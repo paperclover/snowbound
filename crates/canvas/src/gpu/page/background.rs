@@ -910,6 +910,7 @@ mod tests {
             title: String::new(),
             margin_origin: [0.0; 2],
             color: None,
+            rule_lines: None,
             definitions: BTreeMap::new(),
             objects: vec![PageObject::Image(background)],
         };

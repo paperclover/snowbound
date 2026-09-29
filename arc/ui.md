@@ -23,9 +23,10 @@ quickly and never feel like they're waiting on an animation. Animated values
 ease exponentially toward their targets with a short half-life. That is
 frame-rate independent, a retargeted animation continues smoothly from where
 it is, and it settles fast. Popups open and close on short timed curves,
-slow enough to follow: a menu grows out of the pointer or its button as it
+slow enough to follow: a menu swings out of the pointer or its button as it
 fades in, a combo's field widens into its list, and a dialog swings up into
-place over a dimmed window, as Windows opens a window. On GNOME and KDE, menus instead
+place over a dimmed window, as Windows opens a window; the command palette swings
+in the same way near the window's top. On GNOME and KDE, menus instead
 look and move as the desktop's own (see [platforms](platforms.md)).
 
 ## Why not native widgets
@@ -62,7 +63,7 @@ frame N
   route input ─── against frame N-1's layout (hover, press, focus, drags, wheel)
   build ───────── app code declares boxes; each reads its Signal (clicked, dragging, events…)
   solve layout ── per axis: pixels · label size · fraction of an ancestor · sum of children
-                  overflow is shared out by each box's strictness
+                  overflow taken from space, then by folding groups, then by strictness
   paint ───────── Layers: primitives under a clip, or a Custom box the host paints
   after paint ─── work the frame asked for (page requests, saving) runs, then asks for a frame
 ```
@@ -75,8 +76,17 @@ frame N
   it is being declared. It sounds odd and is invisible in practice.
 - **Layout is solved after building**, per axis. A box can be sized in fixed
   pixels, by its label, as a fraction of an ancestor, or by its children. When
-  siblings overflow, each gives up space according to its *strictness*. That
-  one knob covers most of what flexbox is usually needed for.
+  siblings overflow, space sized from an ancestor gives way first. Then a row
+  *folds* its groups, boxes with a full and a folded form (`Spec::fold`), by
+  priority. Only then do boxes give up room by their *strictness*, the least
+  strict first. That one knob covers most of what flexbox is usually needed
+  for.
+- **The toolbar is one row that never overflows.** Both forms of every group
+  are built each frame and the solver picks, so a group folds in the frame the
+  window narrows, with no widths remembered or worked out by the app. A folded
+  group is a dropdown of the same command-table rows, and a gallery it lists
+  opens under it, since a folded-away box takes its group's rectangle. The
+  section tabs scroll sideways past the row's room, fading out where cut.
 - **Nothing runs while nothing changes.** The kit reports whether it wants
   another frame (queued input, an animation still settling) and when a timed
   change such as a caret blink is due. The app sleeps in between.
@@ -113,6 +123,11 @@ rounded or gradient rectangles, pen strokes and raster images.
   ordinary ones.
 - **Batches** merge consecutive primitives that share a texture and clip,
   without reordering paint.
+- **A popup in motion is one picture.** Layers sharing a motion draw
+  offscreen together, then fade and lean back as a whole, so nothing beneath
+  or within shows through a row. A popup's contents clip to its rounded
+  outline, and one opening over a combo lays its rows out at their final
+  width while only the outline widens.
 - **Caches are bounded.** The glyph atlas and image cache have fixed budgets.
   Eviction keeps everything the current frame needs and rebuilds after
   pressure. Images are filtered in linear light with premultiplied alpha.

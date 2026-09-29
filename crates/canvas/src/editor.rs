@@ -31,6 +31,7 @@ mod format;
 mod link;
 mod ops;
 pub(crate) mod page;
+mod space;
 mod table;
 pub use format::{
     Alignment, BULLET_LIBRARY, FormatState, Formatting, ListStyle, NUMBER_LIBRARY, NoteTag, Toggle,
@@ -126,6 +127,7 @@ struct PageHeader {
     created: Option<u64>,
     margin_origin: [f32; 2],
     color: Option<u32>,
+    rule_lines: Option<onestore::page::RuleLines>,
     areas: Vec<page::TitleArea>,
 }
 
@@ -754,6 +756,11 @@ enum RestoreFocus {
 
 enum History {
     Date(Box<PageDate>),
+    /// The page's colour and rule lines before a change to either.
+    Paper {
+        color: Option<u32>,
+        rule_lines: Option<onestore::page::RuleLines>,
+    },
     Draft {
         outlines: Box<[TextOutline; 2]>,
         index: usize,
@@ -765,9 +772,24 @@ enum History {
         outline: onestore::ExGuid,
         change: Box<TextChange>,
     },
+    /// A page object's position: an outline, picture or ink drawing.
     Position {
-        outline: onestore::ExGuid,
+        object: onestore::ExGuid,
         position: [Option<f32>; 2],
+    },
+    /// Parts `outline`'s paragraphs from root node `at` into outline `part` at `position`.
+    Split {
+        outline: ExGuid,
+        at: usize,
+        part: ExGuid,
+        position: [f32; 2],
+    },
+    /// Returns `part`'s paragraphs to the end of `outline` and removes it: each root of
+    /// `part` under the parent it had, the outline when `None`.
+    Join {
+        outline: ExGuid,
+        part: ExGuid,
+        parents: Vec<(ExGuid, Option<ExGuid>)>,
     },
     Layout {
         outline: ExGuid,
@@ -797,8 +819,12 @@ enum History {
         selection: Selection,
         focus: RestoreFocus,
     },
-    /// One undo step of edits to OneNote's page selection, undone last first.
-    Group(Vec<History>),
+    /// One undo step of several edits, undone last first; `page` when they edited OneNote's
+    /// page selection, which undoing selects again.
+    Group {
+        entries: Vec<History>,
+        page: bool,
+    },
 }
 
 impl CanvasEditor {
@@ -876,6 +902,7 @@ impl CanvasEditor {
             created: page.created,
             margin_origin: page.margin_origin,
             color: page.color,
+            rule_lines: page.rule_lines,
             areas,
         };
         let mut ids = BTreeSet::new();
@@ -1019,6 +1046,7 @@ impl CanvasEditor {
         let gone = |focus: &RestoreFocus| matches!(focus, RestoreFocus::Outline(id) if !fresh.outlines.iter().any(|o| o.id == *id));
         let reaches_one = |history: &History| match history {
             History::Date(_) => date_changed,
+            History::Paper { .. } => false,
             History::Image { .. } | History::Picture { .. } => objects_changed,
             History::Draft { outlines, .. } => changed.contains(&outlines[0].id),
             History::Text { outline, change } => {
@@ -1028,16 +1056,18 @@ impl CanvasEditor {
                         .iter()
                         .any(|placement| objects_changed || changed.contains(&placement.id))
             }
-            History::Position { outline, .. } | History::Layout { outline, .. } => {
-                changed.contains(outline)
+            History::Position { object, .. } => changed.contains(object) || objects_changed,
+            History::Layout { outline, .. } => changed.contains(outline),
+            History::Split { outline, part, .. } | History::Join { outline, part, .. } => {
+                changed.contains(outline) || changed.contains(part) || objects_changed
             }
             History::Remove { outline, focus } => changed.contains(outline) || gone(focus),
             History::Insert { outline, focus, .. } => changed.contains(&outline.id) || gone(focus),
             History::Restore { source, focus, .. } => changed.contains(&source.id) || gone(focus),
-            History::Group(_) => unreachable!("groups do not nest"),
+            History::Group { .. } => unreachable!("groups do not nest"),
         };
         let reaches = |history: &History| match history {
-            History::Group(entries) => entries.iter().any(reaches_one),
+            History::Group { entries, .. } => entries.iter().any(reaches_one),
             history => reaches_one(history),
         };
         fresh.undo = std::mem::take(&mut self.undo)
@@ -1143,6 +1173,7 @@ impl CanvasEditor {
                 .or(self.header.created),
             margin_origin: self.header.margin_origin,
             color: self.header.color,
+            rule_lines: self.header.rule_lines,
             objects,
             definitions,
         })
@@ -1213,6 +1244,11 @@ impl CanvasEditor {
     /// The page's colour (View, Page Color), COLORREF.
     pub fn page_color(&self) -> Option<u32> {
         self.header.color
+    }
+
+    /// The page's rule lines (View, Rule Lines).
+    pub fn rule_lines(&self) -> Option<onestore::page::RuleLines> {
+        self.header.rule_lines
     }
 
     /// Where the page's first body line starts, in points, under its title.
@@ -1417,6 +1453,44 @@ impl CanvasEditor {
         self.redo.clear();
         self.record(Ok(self.date_ops()));
         Ok(true)
+    }
+
+    /// Gives the page `color` (View, Page Color) and `rule_lines` (View, Rule Lines) as one
+    /// undo step; false when it had them.
+    pub fn set_paper(
+        &mut self,
+        color: Option<u32>,
+        rule_lines: Option<onestore::page::RuleLines>,
+    ) -> bool {
+        if (color, rule_lines) == (self.header.color, self.header.rule_lines) {
+            return false;
+        }
+        self.finish_composition();
+        let before = self.paper(color, rule_lines);
+        self.undo.push(before);
+        self.redo.clear();
+        true
+    }
+
+    /// Shows `color` and `rule_lines`, recording the ops that store them; the history entry
+    /// restoring what the page had.
+    fn paper(
+        &mut self,
+        color: Option<u32>,
+        rule_lines: Option<onestore::page::RuleLines>,
+    ) -> History {
+        let mut ops = Vec::new();
+        if color != self.header.color {
+            ops.push(PageOp::Color(color));
+        }
+        if rule_lines != self.header.rule_lines {
+            ops.push(PageOp::RuleLines(rule_lines));
+        }
+        self.record(Ok(ops));
+        History::Paper {
+            color: std::mem::replace(&mut self.header.color, color),
+            rule_lines: std::mem::replace(&mut self.header.rule_lines, rule_lines),
+        }
     }
 
     /// Stored content; arrow-created paragraphs appear only in `visible_outlines`.
@@ -1665,7 +1739,7 @@ impl CanvasEditor {
         let layout = &mut self.outlines[index].layout;
         let previous = [layout.x, layout.y];
         self.undo.push(History::Position {
-            outline: id,
+            object: id,
             position: previous,
         });
         self.redo.clear();
@@ -2145,7 +2219,10 @@ impl CanvasEditor {
         let result = edit(self);
         let entries = self.undo.split_off(depth);
         if !entries.is_empty() {
-            self.undo.push(History::Group(entries));
+            self.undo.push(History::Group {
+                entries,
+                page: true,
+            });
         }
         result
     }
@@ -3212,10 +3289,9 @@ impl CanvasEditor {
         };
         match self.apply_history(engine, history) {
             Ok(inverse) => {
-                let group = matches!(inverse, History::Group(_));
+                let page = matches!(inverse, History::Group { page: true, .. });
                 self.redo.push(inverse);
-                // Undoing an edit to the page selection selects the page again.
-                if group {
+                if page {
                     self.select_page()?;
                 }
                 Ok(true)
@@ -3255,6 +3331,7 @@ impl CanvasEditor {
                 .date
                 .as_ref()
                 .is_some_and(|current| current.source().id == date.source().id),
+            History::Paper { .. } => true,
             History::Draft {
                 outlines, index, ..
             } => {
@@ -3265,11 +3342,22 @@ impl CanvasEditor {
                         .position(|item| item.id == outlines[0].id)
                         .is_none_or(|found| found == *index)
             }
-            History::Text { outline, .. }
-            | History::Position { outline, .. }
-            | History::Layout { outline, .. } => {
+            History::Text { outline, .. } | History::Layout { outline, .. } => {
                 self.outlines.iter().any(|item| item.id == *outline)
             }
+            History::Position { object, .. } => self.object_layout_mut(*object).is_some(),
+            History::Split {
+                outline, at, part, ..
+            } => {
+                self.outlines
+                    .iter()
+                    .find(|item| item.id == *outline)
+                    .is_some_and(|item| (1..item.document.nodes().len()).contains(at))
+                    && !self.outlines.iter().any(|item| item.id == *part)
+            }
+            History::Join { outline, part, .. } => [outline, part]
+                .iter()
+                .all(|id| self.outlines.iter().any(|item| item.id == **id)),
             History::Image { image, .. } => self.image(*image).is_some(),
             History::Picture {
                 index,
@@ -3290,7 +3378,7 @@ impl CanvasEditor {
             History::Insert { index, .. } | History::Restore { index, .. } => {
                 *index <= self.outlines.len()
             }
-            History::Group(_) => true,
+            History::Group { .. } => true,
         };
         if !valid {
             return Err((history, EditError::InvalidRange.into()));
@@ -3301,6 +3389,7 @@ impl CanvasEditor {
                 self.record(Ok(self.date_ops()));
                 History::Date(Box::new(shown))
             }
+            History::Paper { color, rule_lines } => self.paper(color, rule_lines),
             History::Draft {
                 outlines,
                 index,
@@ -3387,25 +3476,67 @@ impl CanvasEditor {
                     change: Box::new(inverse),
                 }
             }
-            History::Position { outline, position } => {
-                let index = self
-                    .outlines
-                    .iter()
-                    .position(|item| item.id == outline)
-                    .unwrap();
-                let layout = &mut self.outlines[index].layout;
+            History::Position { object, position } => {
+                let layout = self.object_layout_mut(object).unwrap();
                 let previous = [layout.x, layout.y];
                 [layout.x, layout.y] = position;
-                self.active = Focus::Outline(index);
+                if let Some(index) = self.outlines.iter().position(|item| item.id == object) {
+                    self.active = Focus::Outline(index);
+                }
                 self.record(self.placement_ops(&Placement {
-                    id: outline,
+                    id: object,
                     position: previous,
                 }));
                 History::Position {
-                    outline,
+                    object,
                     position: previous,
                 }
             }
+            History::Split {
+                outline,
+                at,
+                part,
+                position,
+            } => match self.split_outline(engine, outline, at, part, position) {
+                Ok(parents) => History::Join {
+                    outline,
+                    part,
+                    parents,
+                },
+                Err(error) => {
+                    return Err((
+                        History::Split {
+                            outline,
+                            at,
+                            part,
+                            position,
+                        },
+                        error,
+                    ));
+                }
+            },
+            History::Join {
+                outline,
+                part,
+                parents,
+            } => match self.join_outline(engine, outline, part, &parents) {
+                Ok((at, position)) => History::Split {
+                    outline,
+                    at,
+                    part,
+                    position,
+                },
+                Err(error) => {
+                    return Err((
+                        History::Join {
+                            outline,
+                            part,
+                            parents,
+                        },
+                        error,
+                    ));
+                }
+            },
             History::Layout { outline, layout } => {
                 let index = self
                     .outlines
@@ -3554,18 +3685,21 @@ impl CanvasEditor {
                 self.active = Focus::Outline(index);
                 History::Remove { outline: id, focus }
             }
-            History::Group(mut entries) => {
+            History::Group { mut entries, page } => {
                 let mut inverses = Vec::with_capacity(entries.len());
                 while let Some(entry) = entries.pop() {
                     match self.apply_history(engine, entry) {
                         Ok(inverse) => inverses.push(inverse),
                         Err((entry, error)) => {
                             entries.push(entry);
-                            return Err((History::Group(entries), error));
+                            return Err((History::Group { entries, page }, error));
                         }
                     }
                 }
-                History::Group(inverses)
+                History::Group {
+                    entries: inverses,
+                    page,
+                }
             }
         };
         self.preferred_x = None;
@@ -5445,6 +5579,7 @@ mod tests {
                 created: None,
                 margin_origin: [36.0, 14.4],
                 color: None,
+                rule_lines: None,
                 definitions: BTreeMap::new(),
                 objects: vec![PageObject::Image(background), PageObject::Image(picture)],
             },
@@ -5569,6 +5704,7 @@ mod tests {
                 created: None,
                 margin_origin: [36.0, 14.4],
                 color: None,
+                rule_lines: None,
                 definitions: BTreeMap::new(),
                 objects,
             },
@@ -5627,6 +5763,7 @@ mod tests {
                 created: None,
                 margin_origin: [36.0, 14.4],
                 color: None,
+                rule_lines: None,
                 definitions: BTreeMap::new(),
                 objects: vec![PageObject::Outline(source)],
             },
@@ -5767,6 +5904,7 @@ mod tests {
                 created: None,
                 margin_origin: [36.0, 14.4],
                 color: None,
+                rule_lines: None,
                 definitions: BTreeMap::new(),
                 objects: vec![
                     PageObject::Outline(mixed),
@@ -5858,6 +5996,7 @@ mod tests {
                 created: None,
                 margin_origin: [36.0, 14.4],
                 color: None,
+                rule_lines: None,
                 definitions: BTreeMap::new(),
                 objects,
             },

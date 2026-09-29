@@ -45,6 +45,7 @@ fn generated(count: usize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         created: None,
         margin_origin: [0.0; 2],
         color: None,
+        rule_lines: None,
         objects: vec![PageObject::Outline(Outline {
             id: new_id()?,
             title: false,

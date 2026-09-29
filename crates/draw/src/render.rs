@@ -170,6 +170,12 @@ struct Batch {
     scissor: [u32; 4],
 }
 
+/// Batches that paint offscreen as one, then onto the target by `composite`'s vertices.
+struct Group {
+    batches: Range<usize>,
+    composite: Range<u32>,
+}
+
 /// How a batch meets what lies beneath it.
 #[derive(Clone, Copy, PartialEq)]
 enum Blend {
@@ -189,6 +195,10 @@ struct Vertex {
     local: [f32; 2],
     shape: [f32; 4],
     stroke: f32,
+    /// The position from the middle of the rounded rectangle the vertex paints within, and
+    /// that rectangle's half size and corner radius; a zero half size paints everywhere.
+    clip_local: [f32; 2],
+    clip: [f32; 3],
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -244,6 +254,10 @@ pub struct Layer<'a> {
     /// The colour behind the layer: on a dark one, text in dark colours of its own is
     /// lifted to stay legible against what lies behind it, as OneNote's dark page does.
     pub backdrop: Option<[f32; 4]>,
+    /// Device bounds and corner radius of a rounded rectangle the layer paints only inside.
+    pub round: Option<([f32; 4], f32)>,
+    /// Consecutive layers with the same motion appear as one: painted together offscreen,
+    /// then faded and leaned back as a whole, so none shows through another.
     pub motion: Option<Motion>,
     pub primitives: &'a [Primitive<'a>],
 }
@@ -260,28 +274,16 @@ pub struct Motion {
 }
 
 impl Motion {
-    fn apply(&self, vertex: &mut Vertex, size: [u32; 2], blend: Blend) {
-        match blend {
-            Blend::Image(_) => vertex.color = vertex.color.map(|v| v * self.opacity),
-            Blend::Over | Blend::Erase => vertex.color[3] *= self.opacity,
-        }
-        if self.tilt == 0.0 {
-            return;
-        }
-        let [width, height] = size.map(|v| v as f32);
+    /// Where device point `[x, y]` on a target `height` tall shows, turned.
+    fn project(&self, [x, y]: [f32; 2], height: f32) -> [f32; 2] {
         // Seen from twice the target's height away, so a small turn reads as depth.
         let distance = 2.0 * height;
-        let [x, y] = [
-            (vertex.position[0] + 1.0) * width / 2.0,
-            (1.0 - vertex.position[1]) * height / 2.0,
-        ];
         let below = y - self.pivot[1];
         let near = distance / (distance + below * self.tilt.sin());
-        let [x, y] = [
+        [
             self.pivot[0] + (x - self.pivot[0]) * near,
             self.pivot[1] + below * self.tilt.cos() * near,
-        ];
-        vertex.position = [x * 2.0 / width - 1.0, 1.0 - y * 2.0 / height];
+        ]
     }
 }
 
@@ -292,7 +294,7 @@ struct Space {
     scale: f32,
     origin: [f32; 2],
     backdrop: Option<[f32; 4]>,
-    motion: Option<Motion>,
+    round: Option<([f32; 4], f32)>,
 }
 
 impl Space {
@@ -458,6 +460,9 @@ pub struct Renderer {
     glyphs: HashMap<AtlasKey, Option<AtlasGlyph>>,
     images: HashMap<u64, CachedImage>,
     batches: Vec<Batch>,
+    groups: Vec<Group>,
+    /// Batches before this one take no more primitives.
+    barrier: usize,
     scaler: ScaleContext,
     pen: [u32; 2],
     row_height: u32,
@@ -479,6 +484,8 @@ impl Renderer {
             glyphs: HashMap::new(),
             images: HashMap::new(),
             batches: Vec::new(),
+            groups: Vec::new(),
+            barrier: 0,
             scaler: ScaleContext::with_max_entries(32),
             pen: [1, 0],
             row_height: 1,
@@ -557,7 +564,7 @@ impl Renderer {
                 scale: layer.scale,
                 origin: layer.origin,
                 backdrop: layer.backdrop,
-                motion: layer.motion,
+                round: layer.round,
             };
             for primitive in layer.primitives {
                 if let Primitive::Image { image, rect } = primitive
@@ -574,6 +581,8 @@ impl Renderer {
         for attempt in 0..2 {
             self.vertices.clear();
             self.batches.clear();
+            self.groups.clear();
+            self.barrier = 0;
             match self.prepare(size, layers, &active_images) {
                 Err(RenderError::AtlasFull) if attempt == 0 => self.clear_glyph_cache(),
                 result => {
@@ -582,7 +591,7 @@ impl Renderer {
                 }
             }
         }
-        self.submit(target, clear);
+        self.submit(target, size, clear);
         Ok(())
     }
 
@@ -592,13 +601,26 @@ impl Renderer {
         layers: &[Layer<'_>],
         active_images: &HashSet<u64>,
     ) -> Result<(), RenderError> {
+        // The motion the layers painted since `start` share, where they paint as a group.
+        let mut group: Option<(Motion, usize)> = None;
         for layer in layers {
+            let motion = layer
+                .motion
+                .filter(|motion| motion.opacity < 1.0 || motion.tilt != 0.0);
+            if motion != group.map(|(motion, _)| motion) {
+                if let Some((motion, start)) = group {
+                    self.group(motion, start, size)?;
+                }
+                // A group's batches never merge with those outside it.
+                self.barrier = self.batches.len();
+                group = motion.map(|motion| (motion, self.batches.len()));
+            }
             let space = Space {
                 size,
                 scale: layer.scale,
                 origin: layer.origin,
                 backdrop: layer.backdrop,
-                motion: layer.motion,
+                round: layer.round,
             };
             let bounds = match layer.clip {
                 Some(clip) => space.scissor(clip),
@@ -611,6 +633,67 @@ impl Renderer {
                 self.primitive(space, bounds, primitive, active_images)?;
             }
         }
+        if let Some((motion, start)) = group {
+            self.group(motion, start, size)?;
+        }
+        Ok(())
+    }
+
+    /// Makes the batches from `start` a group appearing by `motion`: the vertices that
+    /// paint its offscreen picture over the target, in strips so the turn stays in
+    /// perspective across the picture.
+    fn group(&mut self, motion: Motion, start: usize, size: [u32; 2]) -> Result<(), RenderError> {
+        let batches = start..self.batches.len();
+        if batches.is_empty() {
+            return Ok(());
+        }
+        let [width, height] = size.map(|side| side as f32);
+        let [mut left, mut top, mut right, mut bottom] = [width, height, 0.0, 0.0];
+        let first = self.batches[start].vertices.start as usize;
+        for vertex in &self.vertices[first..] {
+            let [x, y] = [
+                (vertex.position[0] + 1.0) * width / 2.0,
+                (1.0 - vertex.position[1]) * height / 2.0,
+            ];
+            [left, top] = [left.min(x), top.min(y)];
+            [right, bottom] = [right.max(x), bottom.max(y)];
+        }
+        let [left, top] = [left.max(0.0).floor(), top.max(0.0).floor()];
+        let [right, bottom] = [right.min(width).ceil(), bottom.min(height).ceil()];
+        let strips = if motion.tilt == 0.0 { 1 } else { 32 };
+        if self.vertices.len() + 6 * strips > MAX_VERTICES {
+            return Err(RenderError::FrameTooLarge);
+        }
+        let from = self.vertices.len() as u32;
+        let corner = |x: f32, y: f32| {
+            let [shown_x, shown_y] = motion.project([x, y], height);
+            let v = y / height;
+            Vertex {
+                position: [shown_x * 2.0 / width - 1.0, 1.0 - shown_y * 2.0 / height],
+                uv: [x / width, if backend::FLIPPED { 1.0 - v } else { v }],
+                color: [motion.opacity; 4],
+                local: [0.0; 2],
+                shape: [0.0; 4],
+                stroke: 0.0,
+                clip_local: [0.0; 2],
+                clip: [0.0; 3],
+            }
+        };
+        for strip in 0..strips {
+            let [y0, y1] =
+                [strip, strip + 1].map(|edge| top + (bottom - top) * edge as f32 / strips as f32);
+            let [a, b, c, d] = [
+                corner(left, y0),
+                corner(left, y1),
+                corner(right, y1),
+                corner(right, y0),
+            ];
+            self.vertices.extend([a, b, c, a, c, d]);
+        }
+        self.groups.push(Group {
+            batches,
+            composite: from..self.vertices.len() as u32,
+        });
         Ok(())
     }
 
@@ -714,13 +797,21 @@ impl Renderer {
             }
         }
         let end = self.vertices.len() as u32;
-        if let Some(motion) = space.motion {
+        if let Some((rect, radius)) = space.round {
+            let [width, height] = space.size.map(|side| side as f32);
+            let half = [(rect[2] - rect[0]) / 2.0, (rect[3] - rect[1]) / 2.0];
+            let middle = [rect[0] + half[0], rect[1] + half[1]];
             for vertex in &mut self.vertices[start as usize..] {
-                motion.apply(vertex, space.size, blend);
+                vertex.clip_local = [
+                    (vertex.position[0] + 1.0) * width / 2.0 - middle[0],
+                    (1.0 - vertex.position[1]) * height / 2.0 - middle[1],
+                ];
+                vertex.clip = [half[0], half[1], radius.min(half[0]).min(half[1])];
             }
         }
         if start != end {
-            if let Some(last) = self.batches.last_mut()
+            if self.batches.len() > self.barrier
+                && let Some(last) = self.batches.last_mut()
                 && last.blend == blend
                 && last.scissor == scissor
             {
@@ -1232,6 +1323,8 @@ impl Renderer {
                 local,
                 shape: [half[0], half[1], corner, corner],
                 stroke: 0.0,
+                clip_local: [0.0; 2],
+                clip: [0.0; 3],
             });
         }
         Ok(())
@@ -1283,6 +1376,8 @@ impl Renderer {
                 local,
                 shape: [0.0; 4],
                 stroke: 0.0,
+                clip_local: [0.0; 2],
+                clip: [0.0; 3],
             });
         }
         Ok(())
@@ -1715,9 +1810,64 @@ mod tests {
             origin: [24.0; 2],
             clip: None,
             backdrop: None,
+            round: None,
             motion: None,
             primitives,
         }]
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU adapter"]
+    fn layers_sharing_a_motion_fade_as_one_inside_their_rounded_clip() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let target = Target::new(&device);
+        let mut renderer = Renderer::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let rect = |rect, color| [Primitive::Rect { rect, color }];
+        let [blue, red, black] = [
+            rect([0.0, 0.0, 100.0, 100.0], [0.0, 0.0, 1.0, 1.0]),
+            rect([50.0, 0.0, 150.0, 100.0], [1.0, 0.0, 0.0, 1.0]),
+            rect([200.0, 0.0, 300.0, 100.0], [0.0, 0.0, 0.0, 1.0]),
+        ];
+        let half = Motion {
+            opacity: 0.5,
+            tilt: 0.0,
+            pivot: [0.0; 2],
+        };
+        let layer = |primitives, motion, round| Layer {
+            scale: 1.0,
+            origin: [0.0; 2],
+            clip: None,
+            backdrop: None,
+            round,
+            motion,
+            primitives,
+        };
+        target
+            .draw(
+                &mut renderer,
+                &[
+                    layer(&blue, Some(half), None),
+                    layer(&red, Some(half), None),
+                    layer(&black, None, Some(([200.0, 0.0, 300.0, 100.0], 30.0))),
+                ],
+            )
+            .unwrap();
+        let capture = target.capture(&renderer);
+        let pixel = |x: usize, y: usize| &capture[(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];
+        let [overlap, alone] = [pixel(75, 50), pixel(25, 50)];
+        assert!(
+            overlap[0] == 255 && overlap[1] == overlap[2] && overlap[1] < 255,
+            "the red covers the blue before both fade: {overlap:?}"
+        );
+        assert!(
+            alone[2] == 255 && alone[0] == alone[1] && alone[0] < 255,
+            "{alone:?}"
+        );
+        assert_eq!(pixel(202, 2), [255; 4], "outside the rounded corner");
+        assert_eq!(pixel(250, 50), [0, 0, 0, 255]);
     }
 
     #[test]
@@ -2119,6 +2269,7 @@ mod tests {
                     origin: [0.0; 2],
                     clip: None,
                     backdrop: None,
+                    round: None,
                     motion: None,
                     primitives: &primitives,
                 }],
@@ -2191,6 +2342,7 @@ mod tests {
                     origin: [0.0; 2],
                     clip: None,
                     backdrop: None,
+                    round: None,
                     motion: None,
                     primitives: &primitives,
                 }],
@@ -2236,6 +2388,7 @@ mod tests {
                     origin: [0.0; 2],
                     clip: None,
                     backdrop: None,
+                    round: None,
                     motion: None,
                     primitives: &primitives,
                 }],
@@ -2288,6 +2441,7 @@ mod tests {
                         origin: [0.0; 2],
                         clip: Some([100.0, 50.0, 200.5, 80.0]),
                         backdrop: None,
+                        round: None,
                         motion: None,
                         primitives: &fill,
                     },
@@ -2296,6 +2450,7 @@ mod tests {
                         origin: [300.0, 10.0],
                         clip: None,
                         backdrop: None,
+                        round: None,
                         motion: None,
                         primitives: &chrome,
                     },
@@ -2324,6 +2479,7 @@ mod tests {
                     origin: [0.0; 2],
                     clip: None,
                     backdrop: None,
+                    round: None,
                     motion: None,
                     primitives: &fill,
                 }]

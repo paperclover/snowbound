@@ -10,8 +10,7 @@ feels more like a standard text editor software as textboxes automatically
 create and resize as you would expect. In addition, Snowbound supports
 pen and drawing tools [(WIP)](https://shale.paperclover.net/snowbound/issues/21), recording audio and video
 [(WIP)](https://shale.paperclover.net/snowbound/issues/36), revision
-history[(WIP)](https://shale.paperclover.net/snowbound/issues/37), multi-machine
-live collaboration, and much more.
+history, multi-machine live collaboration, and much more.
 
 <!-- Regenerate from the sample notebook (edit it freely in OneNote or Snowbound):
 python3 tools/canvas/build_macos.py --release && d=$(mktemp -d) && cp -R docs/sample-notebook/Personal "$d" && target/Snowbound.app/Contents/MacOS/Snowbound --notebook "$d/Personal" --cache "$d/cache" --settings "$d/settings.json" --screenshot docs/screenshot
@@ -23,9 +22,7 @@ python3 tools/canvas/build_macos.py --release && d=$(mktemp -d) && cp -R docs/sa
 
 Snowbound implements the file and sync protocol used in 2010 Microsoft OneNote,
 so notebooks are fully compatible, including collaboration features. It supports
-OS X 10.6 Snow Leopard
-[(WIP)](https://shale.paperclover.net/snowbound/issues/13), all the way to
-modern macOS, Linux, Windows
+OS X 10.6 Snow Leopard, all the way to modern macOS, Linux, Windows
 [(WIP)](https://shale.paperclover.net/snowbound/issues/11), and fully capable
 iOS[(WIP)](https://shale.paperclover.net/snowbound/issues/36) and
 Android[(WIP)](https://shale.paperclover.net/snowbound/issues/24) apps.

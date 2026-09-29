@@ -29,6 +29,8 @@ pub enum Id {
     SelectAll,
     Find,
     Search,
+    SearchResults,
+    CommandPalette,
     Back,
     Forward,
     ZoomIn,
@@ -63,6 +65,7 @@ pub enum Id {
     ClearFormatting,
     Tag(NoteTag),
     RemoveTags,
+    FindTags,
     Help,
 }
 
@@ -81,6 +84,10 @@ pub enum Choice {
     Table([usize; 2]),
     /// An index into `PAGE_COLORS`, or `None` for no colour.
     PageColor(Option<usize>),
+    /// An index into `RULE_LINES`, or `None` for none.
+    RuleLines(Option<usize>),
+    /// A template whose art becomes the page's background, or `None` for none.
+    Art(Option<&'static str>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -225,6 +232,19 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::SelectAll, "Select All", &[cmd('a')], &[cmd('a')]),
     row!(Id::Find, "Find on This Page", &[cmd('f')], &[cmd('f')]),
     row!(Id::Search, "Search Notebooks", &[cmd('e')], &[cmd('e')]),
+    // OneNote for Mac searches all notebooks with Option-Command-F.
+    row!(
+        Id::SearchResults,
+        "Search Results Pane",
+        &[cmd('f').option()],
+        &[key('o').option()],
+    ),
+    row!(
+        Id::CommandPalette,
+        "Command Palette…",
+        &[cmd('p').shift()],
+        &[cmd('p').shift()]
+    ),
     // Option-Command-arrows move the caret; Xcode goes back with Control-Command.
     row!(
         Id::Back,
@@ -252,7 +272,7 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('0')],
         &[cmd('0').option()]
     ),
-    row!(Id::Sidebar, "Sidebar", &[cmd('s').control()], NONE),
+    row!(Id::Sidebar, "Notebook List", &[cmd('s').control()], NONE),
     row!(Id::PageList, "Page List", NONE, NONE),
     row!(Id::DarkPages, "Dark Pages", NONE, NONE),
     // AppKit's Enter Full Screen takes Control-Command-F.
@@ -393,6 +413,7 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('0').control()],
         &[cmd('0')]
     ),
+    row!(Id::FindTags, "Find Tags", NONE, NONE),
     row!(Id::Help, "Snowbound Help", NONE, NONE),
 ];
 
@@ -442,7 +463,12 @@ pub fn title(choice: Choice) -> String {
             .iter()
             .find(|(listed, _)| *listed == color)
             .map_or_else(String::new, |(_, name)| (*name).to_owned()),
-        Choice::Color(_) | Choice::List(_) | Choice::Table(_) | Choice::PageColor(_) => {
+        Choice::Color(_)
+        | Choice::List(_)
+        | Choice::Table(_)
+        | Choice::PageColor(_)
+        | Choice::RuleLines(_)
+        | Choice::Art(_) => {
             unreachable!("Only the toolbar offers these")
         }
     }
@@ -626,10 +652,12 @@ impl State {
             Choice::Size(size) => return checked(format.font_size == Some(*size)),
             Choice::Highlight(_) | Choice::Color(_) | Choice::List(_) => return enabled(text),
             Choice::Table(_) => Id::Table,
-            Choice::PageColor(_) => Id::PageColor,
+            Choice::PageColor(_) | Choice::RuleLines(_) | Choice::Art(_) => Id::PageColor,
         };
         match id {
-            Id::Settings | Id::NewNotebook | Id::OpenNotebook | Id::Help => enabled(!modal),
+            Id::Settings | Id::NewNotebook | Id::OpenNotebook | Id::CommandPalette | Id::Help => {
+                enabled(!modal)
+            }
             Id::CloseNotebook | Id::ShowNotebook => enabled(!modal && self.notebook().is_some()),
             Id::NewSection | Id::NewSectionGroup => enabled(
                 !modal
@@ -669,6 +697,14 @@ impl State {
                 enabled: !modal && session.is_some(),
                 checked: self.pages_open,
             },
+            Id::SearchResults => Status {
+                enabled: !modal && session.is_some(),
+                checked: matches!(self.search.pane, Some(crate::pane::Pane::Search { .. })),
+            },
+            Id::FindTags => Status {
+                enabled: !modal && session.is_some(),
+                checked: matches!(self.search.pane, Some(crate::pane::Pane::Tags { .. })),
+            },
             Id::DarkPages => Status {
                 enabled: !modal,
                 checked: !self.light_pages,
@@ -679,8 +715,12 @@ impl State {
             },
             Id::PageColor => enabled(writable && session.is_some()),
             Id::ScreenClipping => enabled(text && cfg!(target_os = "macos")),
-            // Attach File awaits #23, Record Audio and Video #36, and Insert Space a drag mode.
-            Id::Attachment | Id::RecordAudio | Id::RecordVideo | Id::InsertSpace => enabled(false),
+            // Attach File awaits #23, Record Audio and Video #36.
+            Id::Attachment | Id::RecordAudio | Id::RecordVideo => enabled(false),
+            Id::InsertSpace => Status {
+                enabled: writable,
+                checked: self.view.inserting_space(),
+            },
             Id::Table
             | Id::Picture
             | Id::Symbol
@@ -776,7 +816,14 @@ impl State {
             }
             Choice::PageColor(color) => {
                 let color = color.map(|index| canvas::template::PAGE_COLORS[index].1);
-                return self.color_page(color);
+                return self.paper_page(color, self.view.editor.rule_lines());
+            }
+            Choice::Art(name) => {
+                return self.art_page(name.and_then(canvas::template::find));
+            }
+            Choice::RuleLines(lines) => {
+                let lines = lines.map(|index| canvas::template::RULE_LINES[index].1);
+                return self.paper_page(self.view.editor.page_color(), lines);
             }
         };
         let field = self.ui.focused().filter(|focus| *focus != page());
@@ -860,6 +907,14 @@ impl State {
                 self.start_search();
                 return Ok(());
             }
+            Id::SearchResults | Id::FindTags => {
+                self.toggle_pane(id == Id::FindTags);
+                return Ok(());
+            }
+            Id::CommandPalette => {
+                self.ui.open_popup(crate::palette::id());
+                return Ok(());
+            }
             Id::Back | Id::Forward => {
                 self.travel(id == Id::Forward);
                 return Ok(());
@@ -917,7 +972,12 @@ impl State {
                 self.save_settings();
                 return Ok(());
             }
-            Id::Attachment | Id::RecordAudio | Id::RecordVideo | Id::InsertSpace => {
+            Id::Attachment | Id::RecordAudio | Id::RecordVideo => {
+                return Ok(());
+            }
+            Id::InsertSpace => {
+                let response = self.view.insert_space();
+                self.respond(response);
                 return Ok(());
             }
             Id::Link => {
@@ -1125,8 +1185,8 @@ mod tests {
     fn toolbar_buttons_run_commands() {
         let source = include_str!("main.rs");
         let start = source
-            .find("    fn toolbar(")
-            .expect("The toolbar is built in main.rs");
+            .find("    fn tools(")
+            .expect("The toolbar's groups are built in main.rs");
         let body = &source[start..];
         let body = &body[..body[1..]
             .find("\n    fn ")

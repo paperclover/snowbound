@@ -4,7 +4,7 @@ mod profile;
 
 use crate::{
     layout::{TextBrush, TextLayout},
-    outline::TagIcon,
+    outline::{BoxMark, TagIcon},
 };
 use draw::{GlyphRun, Glyphs, Layer, Primitive, RenderError};
 use parley::PositionedLayoutItem;
@@ -33,6 +33,7 @@ impl Viewport {
             origin: self.origin,
             clip: None,
             backdrop: None,
+            round: None,
             motion: None,
             primitives,
         }
@@ -70,7 +71,7 @@ impl Paper {
     /// A fill OneNote draws on white paper, moved onto this paper: as far from it in
     /// OKLab lightness as from white, in the same hue and chroma, so text keeps its
     /// contrast on it.
-    pub(crate) fn tint(&self, light: [f32; 4]) -> [f32; 4] {
+    pub fn tint(&self, light: [f32; 4]) -> [f32; 4] {
         let [lightness, a, b] = draw::oklab(light);
         let [paper, ..] = draw::oklab(self.color);
         let distance = 1.0 - lightness;
@@ -153,13 +154,82 @@ const RED_SQUARE: &str = include_str!("../../assets/tags/red-square.svg");
 const YELLOW_SQUARE: &str = include_str!("../../assets/tags/yellow-square.svg");
 const BLUE_SQUARE: &str = include_str!("../../assets/tags/blue-square.svg");
 const FLAG: &str = include_str!("../../assets/tags/flag.svg");
+const IDEA: &str = include_str!("../../assets/tags/idea.svg");
+const PASSWORD: &str = include_str!("../../assets/tags/password.svg");
+const MOVIE: &str = include_str!("../../assets/tags/movie.svg");
+const BOOK: &str = include_str!("../../assets/tags/book.svg");
+const WEB: &str = include_str!("../../assets/tags/web.svg");
+const BLOG: &str = include_str!("../../assets/tags/blog.svg");
+const EMAIL: &str = include_str!("../../assets/tags/email.svg");
+const BOX_SMALL: &str = include_str!("../../assets/tags/box-small.svg");
+const CHECK_SMALL: &str = include_str!("../../assets/tags/check-small.svg");
+const MARK_PERSON: &str = include_str!("../../assets/tags/mark-person.svg");
+const MARK_MANAGER: &str = include_str!("../../assets/tags/mark-manager.svg");
+const MARK_ARROW: &str = include_str!("../../assets/tags/mark-arrow.svg");
+const MARK_ONE: &str = include_str!("../../assets/tags/mark-one.svg");
+const MARK_TWO: &str = include_str!("../../assets/tags/mark-two.svg");
+const MARK_CLIENT: &str = include_str!("../../assets/tags/mark-client.svg");
 const TAG: &str = include_str!("../../assets/tags/tag.svg");
 
 /// The tag's artwork, drawn in order.
 pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
     match icon {
-        TagIcon::CheckBox { checked: false } => &[CHECKBOX],
-        TagIcon::CheckBox { checked: true } => &[CHECKBOX, CHECKMARK],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: None,
+        } => &[CHECKBOX],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: None,
+        } => &[CHECKBOX, CHECKMARK],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: Some(BoxMark::Person),
+        } => &[BOX_SMALL, MARK_PERSON],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: Some(BoxMark::Person),
+        } => &[BOX_SMALL, CHECK_SMALL, MARK_PERSON],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: Some(BoxMark::Manager),
+        } => &[BOX_SMALL, MARK_MANAGER],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: Some(BoxMark::Manager),
+        } => &[BOX_SMALL, CHECK_SMALL, MARK_MANAGER],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: Some(BoxMark::Arrow),
+        } => &[BOX_SMALL, MARK_ARROW],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: Some(BoxMark::Arrow),
+        } => &[BOX_SMALL, CHECK_SMALL, MARK_ARROW],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: Some(BoxMark::One),
+        } => &[BOX_SMALL, MARK_ONE],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: Some(BoxMark::One),
+        } => &[BOX_SMALL, CHECK_SMALL, MARK_ONE],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: Some(BoxMark::Two),
+        } => &[BOX_SMALL, MARK_TWO],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: Some(BoxMark::Two),
+        } => &[BOX_SMALL, CHECK_SMALL, MARK_TWO],
+        TagIcon::CheckBox {
+            checked: false,
+            mark: Some(BoxMark::Client),
+        } => &[BOX_SMALL, MARK_CLIENT],
+        TagIcon::CheckBox {
+            checked: true,
+            mark: Some(BoxMark::Client),
+        } => &[BOX_SMALL, CHECK_SMALL, MARK_CLIENT],
         TagIcon::Star => &[STAR],
         TagIcon::Question => &[QUESTION],
         TagIcon::Highlight => &[HIGHLIGHT],
@@ -172,6 +242,13 @@ pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
         TagIcon::YellowSquare => &[YELLOW_SQUARE],
         TagIcon::BlueSquare => &[BLUE_SQUARE],
         TagIcon::Flag => &[FLAG],
+        TagIcon::Idea => &[IDEA],
+        TagIcon::Password => &[PASSWORD],
+        TagIcon::Movie => &[MOVIE],
+        TagIcon::Book => &[BOOK],
+        TagIcon::Web => &[WEB],
+        TagIcon::Blog => &[BLOG],
+        TagIcon::Email => &[EMAIL],
         TagIcon::Other => &[TAG],
     }
 }
@@ -288,8 +365,14 @@ mod tests {
         });
         let mut renderer = draw::Renderer::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
         let icons = [
-            TagIcon::CheckBox { checked: false },
-            TagIcon::CheckBox { checked: true },
+            TagIcon::CheckBox {
+                checked: false,
+                mark: None,
+            },
+            TagIcon::CheckBox {
+                checked: true,
+                mark: None,
+            },
             TagIcon::Star,
             TagIcon::Question,
             TagIcon::Highlight,

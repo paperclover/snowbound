@@ -9,7 +9,8 @@
 #   remote.sh stop NAME              end what start started (a bundle by its executable)
 #   remote.sh screen LOCAL.png       wake the display and capture it (screencapture
 #                                    writes nothing from ssh)
-#   remote.sh input ARGS...          click X Y | type TEXT | key KEYCODE [command]
+#   remote.sh input ARGS...          click|double X Y | drag X Y X2 Y2 | scroll X Y LINES
+#                                    | type TEXT | key KEYCODE [command|shift|option|control]...
 #   remote.sh selectors BINARY       selector-like names BINARY holds that nothing on
 #                                    10.6 implements
 #   remote.sh mirror PATH...         copy repo paths to the same absolute paths there, so
@@ -119,7 +120,7 @@ sh)
     ssh "$host" "$@"
     ;;
 *)
-    sed -n '2,20s/^# \{0,1\}//p' "$0" >&2
+    sed -n '2,21s/^# \{0,1\}//p' "$0" >&2
     exit 2
     ;;
 esac

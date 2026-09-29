@@ -112,7 +112,6 @@ __attribute__((constructor)) static void polyfill(void) {
     add("NSWindow", 0, "setTabbingIdentifier:", ignore, "v@:@");
     add("NSWindow", 1, "setAllowsAutomaticWindowTabbing:", ignore, "v@:c");
     add("NSWindow", 0, "setTitlebarAppearsTransparent:", ignore, "v@:c");
-    add("NSWindow", 0, "setTitleVisibility:", ignore, "v@:q");
     add("NSView", 0, "setWantsBestResolutionOpenGLSurface:", ignore, "v@:c");
     add("NSView", 0, "setAccessibilityLabel:", set_accessibility_label, "v@:@");
     add("NSDatePicker", 0, "setPresentsCalendarOverlay:", ignore, "v@:c");

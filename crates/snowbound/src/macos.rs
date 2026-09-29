@@ -29,6 +29,8 @@ use winit::{
     window::{Window, WindowAttributes},
 };
 
+pub use crate::aqua::{move_cursor, resize_grip, scrollers, set_window_drags};
+
 static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 static INPUT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 static BACKDROP_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
@@ -86,8 +88,20 @@ pub const LEADING: f32 = 78.0;
 /// How far AppKit rounds a window's corners.
 pub const CORNER_RADIUS: f32 = 10.0;
 
+/// How far the window's corners round: 10.6 rounds a textured window's bottom corners
+/// by about 3.5 pixels.
 pub fn corner_radius(_: &Window) -> f32 {
-    CORNER_RADIUS
+    if crate::aqua::before_lion() {
+        3.5
+    } else {
+        CORNER_RADIUS
+    }
+}
+
+/// AppKit clips the window's corners itself, except where the OpenGL surface covers
+/// 10.6's textured window, whose rounded bottom corners the app leaves transparent.
+pub fn cuts_corners() -> bool {
+    crate::aqua::before_lion()
 }
 
 /// A transparent title bar over the content, where the window draws its own.
@@ -95,6 +109,57 @@ pub fn window_attributes() -> WindowAttributes {
     Window::default_attributes()
         .with_titlebar_transparent(true)
         .with_fullsize_content_view(true)
+}
+
+/// Makes the title bar a unified compact toolbar's, as tall as the toolbar's row, which the
+/// app draws: an empty `NSToolbar` and a hidden title. AppKit places the traffic lights in
+/// it. The title is still set, for the Window menu, Mission Control and VoiceOver.
+pub fn install_title_bar(window: &Window) {
+    MainThreadMarker::new().expect("Windows belong to the main thread");
+    let window = ns_window(window);
+    let responds =
+        |selector: Sel| -> bool { unsafe { msg_send![&window, respondsToSelector: selector] } };
+    // Before 10.10 the title bar keeps its own line above the row.
+    if !responds(sel!(setTitleVisibility:)) {
+        return;
+    }
+    unsafe {
+        let class = AnyClass::get("NSToolbar").expect("AppKit is linked");
+        let toolbar: Allocated<AnyObject> = msg_send_id![class, alloc];
+        let toolbar: Retained<AnyObject> =
+            msg_send_id![toolbar, initWithIdentifier: &*NSString::from_str("Snowbound")];
+        let _: () = msg_send![&toolbar, setShowsBaselineSeparator: false];
+        let _: () = msg_send![&window, setToolbar: &*toolbar];
+        // NSWindowTitleHidden.
+        let _: () = msg_send![&window, setTitleVisibility: 1isize];
+        if responds(sel!(setToolbarStyle:)) {
+            // NSWindowToolbarStyleUnifiedCompact and NSTitlebarSeparatorStyleNone.
+            let _: () = msg_send![&window, setToolbarStyle: 4isize];
+            let _: () = msg_send![&window, setTitlebarSeparatorStyle: 1isize];
+        }
+    }
+}
+
+/// The centres of the close, minimize and zoom buttons where AppKit placed them, in points
+/// from the content's top left corner.
+pub fn traffic_lights(window: &Window) -> [[f32; 2]; 3] {
+    let window = ns_window(window);
+    unsafe {
+        let content: Retained<AnyObject> = msg_send_id![&window, contentView];
+        let content: NSRect = msg_send![&content, frame];
+        // NSWindowCloseButton, NSWindowMiniaturizeButton and NSWindowZoomButton, in the
+        // window's coordinates, which rise from its bottom left corner.
+        [0usize, 1, 2].map(|kind| {
+            let button: Retained<AnyObject> = msg_send_id![&window, standardWindowButton: kind];
+            let bounds: NSRect = msg_send![&button, bounds];
+            let frame: NSRect =
+                msg_send![&button, convertRect: bounds, toView: std::ptr::null::<AnyObject>()];
+            [
+                (frame.origin.x + frame.size.width / 2.0) as f32,
+                (content.size.height - frame.origin.y - frame.size.height / 2.0) as f32,
+            ]
+        })
+    }
 }
 
 pub struct Clipboard(arboard::Clipboard);
@@ -189,9 +254,9 @@ unsafe extern "C" fn hit_nothing(_: &AnyObject, _: Sel, _: NSPoint) -> *mut AnyO
 /// through it to the view it lies in.
 pub fn install_backdrop(window: &Window) -> bool {
     MainThreadMarker::new().expect("Views belong to the main thread");
-    // Before 10.10 AppKit has no materials.
+    // Before 10.10 AppKit has no materials; 10.6's textured window stands in.
     let Some(effect) = AnyClass::get("NSVisualEffectView") else {
-        return false;
+        return crate::aqua::textured(window, crate::TITLE);
     };
     let RawWindowHandle::AppKit(handle) =
         window.window_handle().expect("Live AppKit window").as_raw()
@@ -228,6 +293,18 @@ pub fn install_backdrop(window: &Window) -> bool {
 /// AppKit's window frame takes resizing presses.
 pub fn resize_direction(_: &Window, _: [f32; 2]) -> Option<winit::window::ResizeDirection> {
     None
+}
+
+pub const SHOW_FILE: &str = "Show in Finder";
+
+/// Opens a Finder window with `file` selected.
+pub fn show_file(file: &std::path::Path) {
+    unsafe {
+        let url =
+            objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+        objc2_app_kit::NSWorkspace::sharedWorkspace()
+            .activateFileViewerSelectingURLs(&objc2_foundation::NSArray::from_vec(vec![url]));
+    }
 }
 
 pub fn cache_dir() -> Option<std::path::PathBuf> {
@@ -453,6 +530,12 @@ pub fn install_text_input(window: &Window) {
                 sel!(insertText:replacementRange:),
                 insert_text as unsafe extern "C" fn(_, _, _, _),
             );
+            if crate::aqua::before_lion() {
+                class.add_method(
+                    sel!(mouseDownCanMoveWindow),
+                    crate::aqua::window_drags as extern "C" fn(_, _) -> _,
+                );
+            }
             class.register()
         });
         assert_eq!(class.superclass(), Some(view.class()));
@@ -676,11 +759,6 @@ pub fn commit_presentation(window: &Window) {
     }
 }
 
-/// None: AppKit's title shows the document's icon in its place.
-pub fn app_icon(_: u32) -> Option<draw::RasterImage> {
-    None
-}
-
 /// The insertion point's colour and selected text's fill with and without keyboard focus,
 /// linear RGBA, in `window`'s appearance.
 pub fn text_colors(window: &Window) -> [[f32; 4]; 3] {
@@ -770,17 +848,29 @@ declare_class!(
             objc2::runtime::Bool::new(status.enabled)
         }
 
-        // NSAlert consumes Escape before it reaches cancelOperation:.
+        // NSAlert consumes Escape before it reaches cancelOperation:, and 10.6's date
+        // picker consumes Return before it reaches the default button.
         #[method(sendEvent:)]
         fn send_event(&self, event: &NSEvent) {
             unsafe {
-                if event.r#type() == NSEventType::KeyDown
-                    && self.modalWindow().is_some()
-                    && event.charactersIgnoringModifiers().is_some_and(|text| text.to_string() == "\u{1b}")
-                {
-                    self.stopModal();
-                } else {
-                    let _: () = msg_send![super(self), sendEvent: event];
+                let key = (event.r#type() == NSEventType::KeyDown)
+                    .then(|| event.charactersIgnoringModifiers())
+                    .flatten()
+                    .map(|text| text.to_string());
+                let modal = self.modalWindow();
+                match (key.as_deref(), &modal) {
+                    (Some("\u{1b}"), Some(_)) => self.stopModal(),
+                    (Some("\r" | "\u{3}"), Some(modal)) if {
+                        let responder: *mut AnyObject = msg_send![modal, firstResponder];
+                        !responder.is_null()
+                            && msg_send![responder, isKindOfClass: NSDatePicker::class()]
+                    } => {
+                        let cell: *mut AnyObject = msg_send![modal, defaultButtonCell];
+                        let _: () = msg_send![cell, performClick: std::ptr::null::<AnyObject>()];
+                    }
+                    _ => {
+                        let _: () = msg_send![super(self), sendEvent: event];
+                    }
                 }
             }
         }

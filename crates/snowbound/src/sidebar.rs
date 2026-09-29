@@ -139,7 +139,7 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
             ..Spec::default()
         },
     );
-    // The button's square, which floats over this place from the section tabs.
+    // The notebook button's square, which floats over this place.
     ui.leaf(
         "toggle",
         Spec {
@@ -710,26 +710,17 @@ impl crate::State {
     /// The sidebar's button in its square at the window's edge, and the room the section
     /// tabs, standing `width` from that edge, leave it; the button stays put as the sidebar
     /// eases open and shut.
-    pub(crate) fn sidebar_button(&mut self, theme: &Theme, width: f32) {
+    /// The notebook button, floating at the body's corner over the section tabs' row, `height`
+    /// tall as it eases, or over the sidebar's header while that is open.
+    pub(crate) fn sidebar_button(&mut self, theme: &Theme, height: f32) {
         if self.temporary {
             return;
         }
-        // Past the tab row's padding and the frame's corner, the tabs start where the square
-        // ends; the room shrinks on the sidebar's own easing, so the tabs ease with it.
-        let room = RAIL - crate::FRAME - self.rounding();
-        self.ui.leaf(
-            "rail",
-            Spec {
-                size: [px(room * (1.0 - width / WIDTH)), px(1.0)],
-                ..Spec::default()
-            },
-        );
         self.ui.open(
             "toggle",
             Spec {
-                flags: Flags::FLOAT,
-                size: [px(RAIL), px(RAIL)],
-                position: [-width, 0.0],
+                flags: Flags::FLOAT | Flags::CLIP,
+                size: [px(RAIL), px(height)],
                 pad: [(RAIL - ui::shell::TOOL) / 2.0; 2],
                 ..Spec::default()
             },

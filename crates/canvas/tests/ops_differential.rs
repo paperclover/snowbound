@@ -95,11 +95,14 @@ enum Kind {
     PageType,
     PageMove,
     PageBold,
+    InsertSpace,
+    RemoveSpace,
+    InsertSpaceRight,
     Undo,
     Redo,
 }
 
-const KINDS: [Kind; 52] = [
+const KINDS: [Kind; 55] = [
     Kind::Type,
     Kind::TypeEnd,
     Kind::Compose,
@@ -150,6 +153,9 @@ const KINDS: [Kind; 52] = [
     Kind::PageType,
     Kind::PageMove,
     Kind::PageBold,
+    Kind::InsertSpace,
+    Kind::RemoveSpace,
+    Kind::InsertSpaceRight,
     Kind::Undo,
     Kind::Redo,
 ];
@@ -437,6 +443,24 @@ fn perform(
                 && editor
                     .format(engine, Formatting::Toggle(Toggle::Bold))
                     .is_ok()
+        }
+        Kind::InsertSpace | Kind::RemoveSpace => {
+            // A line at a paragraph's top parts the outline there, or moves all of it.
+            let outline = editor.active_outline();
+            let paragraphs = &outline.shaped().paragraphs;
+            let line = outline.origin()[1]
+                + paragraphs[random.below(paragraphs.len())].origin[1]
+                + [0.0, 0.5][random.below(2)];
+            let delta = if kind == Kind::InsertSpace {
+                36.0
+            } else {
+                -200.0
+            };
+            editor.insert_space(engine, 1, line, delta).unwrap_or(false)
+        }
+        Kind::InsertSpaceRight => {
+            let line = editor.active_outline().origin()[0] - random.below(40) as f32;
+            editor.insert_space(engine, 0, line, 45.0).unwrap_or(false)
         }
         Kind::Undo => editor.undo(engine).unwrap_or(false),
         Kind::Redo => editor.redo(engine).unwrap_or(false),
@@ -812,4 +836,12 @@ fn editor_ops_store_the_editor_s_page() {
     println!("{report}");
     let differs = totals[4];
     assert_eq!(differs, 0, "{report}");
+    // Undoing stores what the edit it undoes stored, so storage never refuses it.
+    for kind in [Kind::Undo, Kind::Redo] {
+        assert_eq!(
+            per_kind.get(&kind).map_or(0, |counts| counts[1]),
+            0,
+            "{report}"
+        );
+    }
 }

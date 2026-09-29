@@ -79,6 +79,7 @@ const MENUS: &[Item] = &[
             S,
             C(Id::Find),
             C(Id::Search),
+            C(Id::SearchResults),
             S,
             Item::System("Start Dictation…", "startDictation:", None),
             Item::System(
@@ -92,6 +93,8 @@ const MENUS: &[Item] = &[
     Item::Menu(
         "View",
         &[
+            C(Id::CommandPalette),
+            S,
             C(Id::Back),
             C(Id::Forward),
             S,
@@ -192,6 +195,7 @@ const MENUS: &[Item] = &[
             ),
             S,
             C(Id::RemoveTags),
+            C(Id::FindTags),
         ],
     ),
     Item::Menu(

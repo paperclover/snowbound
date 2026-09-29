@@ -13,7 +13,10 @@ mod widgets;
 
 pub use list::{List, Row, Rows, list};
 pub use theme::{Menu, PopupMotion, Section, Shades, Shadow, Theme};
-pub use widgets::{button, check_box, edit_key, edit_modifiers, scrollbar, text_field};
+pub use widgets::{
+    PaintedScroller, Scroller, ScrollerPart, Scrollers, button, check_box, edit_key,
+    edit_modifiers, scrollbar, text_field,
+};
 
 use draw::{
     PathStyle, Primitive, RasterImage, Stroke,
@@ -38,7 +41,7 @@ use winit::{
 const HALF_LIFE: f32 = 0.03;
 /// How far a box's shadow spreads, in logical pixels, and how far below the box it
 /// falls; a popup's, floating higher, spreads and falls further.
-const SHADOW: [f32; 2] = [3.0, 0.0];
+pub const SHADOW: [f32; 2] = [3.0, 0.0];
 const POPUP_SHADOW: [f32; 2] = [12.0, 4.0];
 /// Logical size of a box's icon, and its distance from the label.
 const ICON: f32 = 16.0;
@@ -90,6 +93,13 @@ pub struct Extent {
 impl Default for Extent {
     fn default() -> Self {
         children()
+    }
+}
+
+/// Logical pixels, as `px`.
+impl From<f32> for Extent {
+    fn from(pixels: f32) -> Self {
+        px(pixels)
     }
 }
 
@@ -202,6 +212,9 @@ pub enum Anchor {
     Point([f32; 2]),
     /// Centred in the window over the interface, which dims, as a dialog opens.
     Dialog,
+    /// Centred across the window near its top, swinging in as a dialog does, as a command
+    /// palette opens.
+    Top,
 }
 
 impl Anchor {
@@ -215,6 +228,8 @@ impl Anchor {
             Anchor::Over(rect) => (rect, None),
             Anchor::Point([x, y]) => ([x, y, x, y], Some(1)),
             Anchor::Dialog => return ((room - size) / 2.0).max(0.0),
+            Anchor::Top if axis == 0 => return ((room - size) / 2.0).max(0.0),
+            Anchor::Top => return room / 8.0,
         };
         let [low, high] = [rect[axis], rect[axis + 2]];
         let (first, second) = if along == Some(axis) {
@@ -231,31 +246,37 @@ impl Anchor {
         }
     }
 
-    /// How a popup laid out at `rect` beside the anchor shows `open` of the way open: it
-    /// grows out of the anchor as it fades in where it `grows`, and a dialog swings up into
-    /// place.
+    /// How a popup laid out at `rect` beside the anchor shows `open` of the way open: where it
+    /// `grows`, it swings out of the anchor's edge as it grows and fades in, and a dialog swings
+    /// up into place.
     fn motion(self, rect: [f32; 4], open: f32, grows: bool) -> Motion {
         let pivot = match self {
             Anchor::Below(anchor) => [anchor[0], anchor[3]],
             Anchor::Right(anchor) => [anchor[2], anchor[1]],
             Anchor::Over(anchor) => [anchor[0], anchor[1]],
             Anchor::Point(point) => point,
-            Anchor::Dialog => [(rect[0] + rect[2]) / 2.0, rect[1]],
+            Anchor::Dialog | Anchor::Top => [(rect[0] + rect[2]) / 2.0, rect[1]],
         };
         let (from, tilt) = match self {
             _ if !grows => (1.0, 0.0),
-            Anchor::Dialog => (0.95, 0.4),
+            Anchor::Dialog | Anchor::Top => (0.95, 0.2),
             // Over a box, the popup widens out of it in layout instead of growing.
             Anchor::Over(_) => (1.0, 0.2),
-            Anchor::Point(_) => (0.94, 0.2),
-            _ => (0.94, 0.0),
+            _ => (0.94, 0.2),
+        };
+        let pivot = [
+            pivot[0].clamp(rect[0], rect[2]),
+            pivot[1].clamp(rect[1], rect[3]),
+        ];
+        // A popup flipped above its anchor swings out of its bottom edge, its top leaning away.
+        let tilt = if pivot[1] > (rect[1] + rect[3]) / 2.0 {
+            -tilt
+        } else {
+            tilt
         };
         Motion {
             zoom: from + (1.0 - from) * open,
-            pivot: [
-                pivot[0].clamp(rect[0], rect[2]),
-                pivot[1].clamp(rect[1], rect[3]),
-            ],
+            pivot,
             tilt: tilt * (1.0 - open),
             opacity: open,
         }
@@ -263,7 +284,7 @@ impl Anchor {
 
     /// Seconds the popup takes to open and to close.
     fn durations(self) -> [f32; 2] {
-        if self == Anchor::Dialog {
+        if matches!(self, Anchor::Dialog | Anchor::Top) {
             DIALOG
         } else {
             POPUP
@@ -332,6 +353,16 @@ pub struct Spec<'a> {
     /// Floats the box over all others beside a rectangle in the window, as a popup
     /// `Ui::open_popup` opened; boxes beneath take no input while one is open.
     pub anchor: Option<Anchor>,
+    /// Makes the box a group of a row in two forms, its first two children, both built every
+    /// frame: its full form, and the one it folds to where the row lacks room. The row folds
+    /// its groups by ascending priority until it fits, once the space sized by ancestors has
+    /// yielded and before any other box gives up room. The form not shown takes no room,
+    /// paint or input, and its boxes take the group's rectangle, so what opens from them
+    /// opens from the form shown.
+    pub fold: Option<u32>,
+    /// How far the children fade out into the box's fill towards its leading and trailing
+    /// edges, as a row of them cut there does.
+    pub fade: [f32; 2],
 }
 
 /// Input the host forwards; positions and wheel distances are logical pixels.
@@ -387,6 +418,8 @@ pub enum Layer<'a> {
 /// opening or closing.
 pub struct Primitives<'a> {
     pub clip: Option<[f32; 4]>,
+    /// A rounded rectangle and its corner radius the primitives paint only inside.
+    round: Option<([f32; 4], f32)>,
     motion: Option<Motion>,
     pub primitives: Vec<Primitive<'a>>,
 }
@@ -411,14 +444,18 @@ impl Primitives<'_> {
                 pivot[axis] + (point[axis] - pivot[axis]) * zoom
             }))
         };
+        let moved_rect = |[left, top, right, bottom]: [f32; 4]| {
+            let [[left, top], [right, bottom]] = [moved([left, top]), moved([right, bottom])];
+            [left, top, right, bottom]
+        };
         draw::Layer {
             scale: scale * zoom,
             origin: moved([0.0; 2]),
-            clip: self.clip.map(|[left, top, right, bottom]| {
-                let [[left, top], [right, bottom]] = [moved([left, top]), moved([right, bottom])];
-                [left, top, right, bottom]
-            }),
+            clip: self.clip.map(moved_rect),
             backdrop: None,
+            round: self
+                .round
+                .map(|(rect, radius)| (moved_rect(rect), radius * scale * zoom)),
             motion: self.motion.map(|_| draw::Motion {
                 opacity,
                 tilt,
@@ -462,6 +499,11 @@ struct Built {
     motion: Option<Motion>,
     /// Rectangles relative to the box, painted over its fill.
     marks: Vec<([f32; 4], [f32; 4], f32)>,
+    fold: Option<u32>,
+    fade: [f32; 2],
+    /// Folded away with the form it belongs to: it takes no room, paint or input, and takes
+    /// its group's rectangle.
+    hidden: bool,
     computed: [f32; 2],
     relative: [f32; 2],
     rect: [f32; 4],
@@ -486,6 +528,8 @@ struct State {
     select_all: bool,
     /// Where a dragged scrollbar thumb was taken, from its start.
     grab: f32,
+    /// A system scroller's part held down, and when a held arrow or track next repeats.
+    held: Option<(ScrollerPart, Instant)>,
     /// An animated value and its target, for `Ui::animate`.
     tween: Option<[f32; 2]>,
 }
@@ -531,6 +575,8 @@ struct Hit {
 #[derive(Clone)]
 enum Display {
     Clip(Option<[f32; 4]>),
+    /// A rounded rectangle and its corner radius, clipping what follows.
+    Round(Option<([f32; 4], f32)>),
     Motion(Option<Motion>),
     Rect {
         rect: [f32; 4],
@@ -582,6 +628,9 @@ pub struct Ui {
     /// Whether the window has keyboard focus; without it a field hides its caret and dims
     /// its selection.
     pub window_focused: bool,
+    /// The platform's scrollers, where it draws fixed ones beside the content; scrollbars
+    /// overlay the content otherwise.
+    pub scrollers: Option<Scrollers>,
     frame: u64,
     now: Instant,
     scale: f32,
@@ -608,6 +657,8 @@ pub struct Ui {
     modifiers: ModifiersState,
     clicks: Clicks,
     display: Vec<Display>,
+    /// The painting of what holds still in the popup being painted, which goes over it.
+    still: Vec<Display>,
     /// Where the popups' painting starts in `display`, for edges drawn beneath them.
     popups_painted: usize,
     /// Each popup painted, its anchor and rectangle, and its painting's place after
@@ -634,6 +685,7 @@ impl Ui {
             theme,
             icon_palette: draw::Palette::default(),
             window_focused: true,
+            scrollers: None,
             frame: 0,
             now: Instant::now(),
             scale: 1.0,
@@ -656,6 +708,7 @@ impl Ui {
             modifiers: ModifiersState::empty(),
             clicks: Clicks::new(double_click),
             display: Vec::new(),
+            still: Vec::new(),
             popups_painted: 0,
             painted: Vec::new(),
             closing: Vec::new(),
@@ -1188,6 +1241,15 @@ impl Ui {
             }
             let from = self.display.len() - self.popups_painted;
             self.paint(index, None, None);
+            if !self.still.is_empty() {
+                let still = std::mem::take(&mut self.still);
+                self.display.extend(still);
+                self.display.extend([
+                    Display::Motion(None),
+                    Display::Clip(None),
+                    Display::Round(None),
+                ]);
+            }
             painted.push((
                 id,
                 anchor,
@@ -1279,9 +1341,10 @@ impl Ui {
         })
     }
 
-    /// How popups beside `anchor` open and close; dialogs always swing as Snowbound's own.
+    /// How popups beside `anchor` open and close; dialogs and the palette always swing as
+    /// Snowbound's own.
     fn popup_motion(&self, anchor: Anchor) -> PopupMotion {
-        if anchor == Anchor::Dialog {
+        if matches!(anchor, Anchor::Dialog | Anchor::Top) {
             PopupMotion::Grow
         } else {
             self.theme.menu().motion
@@ -1311,6 +1374,18 @@ impl Ui {
     }
 
     fn paint(&mut self, index: usize, clip: Option<[f32; 4]>, motion: Option<Motion>) {
+        // Painted over the popup it holds still in, which appears as one picture beneath.
+        if self.nodes[index].flags.contains(Flags::STILL) && motion.is_some() {
+            let from = self.display.len();
+            self.paint_box(index, clip, motion);
+            let still = self.display.split_off(from);
+            self.still.extend(still);
+        } else {
+            self.paint_box(index, clip, motion);
+        }
+    }
+
+    fn paint_box(&mut self, index: usize, clip: Option<[f32; 4]>, motion: Option<Motion>) {
         let node = &self.nodes[index];
         // The motion the box and its children paint with, where it changes it.
         let own = if node.flags.contains(Flags::STILL) {
@@ -1485,7 +1560,9 @@ impl Ui {
                 });
             }
         }
-        let inner_clip = if node.flags.contains(Flags::CLIP) {
+        // A popup's contents show only inside its rounded outline.
+        let round = node.anchor.map(|_| (rect, node.radius));
+        let inner_clip = if node.flags.contains(Flags::CLIP) || round.is_some() {
             Some(visible.unwrap_or([rect[0], rect[1], rect[0], rect[1]]))
         } else {
             clip
@@ -1493,11 +1570,18 @@ impl Ui {
         if inner_clip != clip {
             self.display.push(Display::Clip(inner_clip));
         }
+        if round.is_some() {
+            self.display.push(Display::Round(round));
+        }
         for child in node.children.clone() {
-            if self.nodes[child].anchor.is_none() {
+            if self.nodes[child].anchor.is_none() && !self.nodes[child].hidden {
                 self.paint(child, inner_clip, own.unwrap_or(motion));
             }
         }
+        if round.is_some() {
+            self.display.push(Display::Round(None));
+        }
+        self.fade(index);
         if inner_clip != clip {
             self.display.push(Display::Clip(clip));
         }
@@ -1506,21 +1590,69 @@ impl Ui {
         }
     }
 
+    /// Fades box `index`'s children out towards its ends by its `fade`, in steps of a point,
+    /// into its fill however opaque that is: each step clears what lies beneath towards
+    /// transparency and lays the fill over it.
+    fn fade(&mut self, index: usize) {
+        let node = &self.nodes[index];
+        let [left, top, right, bottom] = node.rect;
+        let fill = node.fill.unwrap_or_default();
+        let mut steps = Vec::new();
+        for (side, width) in node.fade.into_iter().enumerate() {
+            let count = width.round() as usize;
+            for step in 0..count {
+                // Through the step's middle, eased so the fade leaves the children softly.
+                let alpha = 1.0 - (step as f32 + 0.5) / count as f32;
+                let alpha = alpha * alpha * (3.0 - 2.0 * alpha);
+                let x = if side == 0 {
+                    left + step as f32
+                } else {
+                    right - 1.0 - step as f32
+                };
+                steps.push(([x, top, x + 1.0, bottom], alpha));
+            }
+        }
+        let data = format!("M0 0H1V{}H0Z", bottom - top);
+        for (rect, alpha) in steps {
+            // Laid over what the erasing leaves, the fill's share makes up the rest of the
+            // children's lost opacity: all of it where the fill is opaque, none where clear.
+            let laid = alpha * fill[3];
+            if laid < 1.0 {
+                self.display.push(Display::Path {
+                    data: data.clone(),
+                    origin: [rect[0], rect[1]],
+                    style: PathStyle::Erase,
+                    colors: [[0.0, 0.0, 0.0, 1.0 - (1.0 - alpha) / (1.0 - laid)]; 2],
+                });
+            }
+            self.display.push(Display::Rect {
+                rect,
+                fill: [fill[0], fill[1], fill[2], laid],
+                shade: None,
+                border: None,
+                radius: 0.0,
+            });
+        }
+    }
+
     /// This frame's painting in order, in logical pixels.
     pub fn layers(&self) -> Vec<Layer<'_>> {
         let mut layers = Vec::new();
         let mut clip = None;
+        let mut round = None;
         let mut motion = None;
         let mut primitives = Vec::new();
         fn flush<'a>(
             layers: &mut Vec<Layer<'a>>,
             clip: Option<[f32; 4]>,
+            round: Option<([f32; 4], f32)>,
             motion: Option<Motion>,
             primitives: &mut Vec<Primitive<'a>>,
         ) {
             if !primitives.is_empty() {
                 layers.push(Layer::Primitives(Primitives {
                     clip,
+                    round,
                     motion,
                     primitives: std::mem::take(primitives),
                 }));
@@ -1529,11 +1661,15 @@ impl Ui {
         for item in &self.display {
             match item {
                 Display::Clip(next) => {
-                    flush(&mut layers, clip, motion, &mut primitives);
+                    flush(&mut layers, clip, round, motion, &mut primitives);
                     clip = *next;
                 }
+                Display::Round(next) => {
+                    flush(&mut layers, clip, round, motion, &mut primitives);
+                    round = *next;
+                }
                 Display::Motion(next) => {
-                    flush(&mut layers, clip, motion, &mut primitives);
+                    flush(&mut layers, clip, round, motion, &mut primitives);
                     motion = *next;
                 }
                 Display::Rect {
@@ -1617,7 +1753,7 @@ impl Ui {
                     ink: *color,
                 }),
                 Display::Custom { id, rect } => {
-                    flush(&mut layers, clip, motion, &mut primitives);
+                    flush(&mut layers, clip, round, motion, &mut primitives);
                     layers.push(Layer::Custom {
                         id: *id,
                         rect: *rect,
@@ -1625,7 +1761,7 @@ impl Ui {
                 }
             }
         }
-        flush(&mut layers, clip, motion, &mut primitives);
+        flush(&mut layers, clip, round, motion, &mut primitives);
         layers
     }
 
@@ -1647,6 +1783,10 @@ impl Ui {
 
     pub(crate) fn grab(&mut self, id: Id) -> &mut f32 {
         &mut self.states.entry(id).or_default().grab
+    }
+
+    pub(crate) fn held(&mut self, id: Id) -> &mut Option<(ScrollerPart, Instant)> {
+        &mut self.states.entry(id).or_default().held
     }
 }
 
@@ -1699,6 +1839,9 @@ impl Built {
             open: 1.0,
             motion: None,
             marks: Vec::new(),
+            fold: spec.fold,
+            fade: spec.fade,
+            hidden: false,
             computed: [0.0; 2],
             relative: [0.0; 2],
             rect: [0.0; 4],

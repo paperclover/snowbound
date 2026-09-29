@@ -127,6 +127,146 @@ fn children_sum_with_gaps_and_padding() {
     assert_eq!(ui.rect(second.unwrap()), Some([4.0, 18.0, 34.0, 38.0]));
 }
 
+/// A row `width` wide of a space, a box that yields all but a quarter of its 80 pixels, and
+/// groups 100 wide or 20 folded at each priority; returns the rectangles of the loose box and
+/// of each group's full and folded button.
+fn folding_row(ui: &mut Ui, width: f32, priorities: &[u32]) -> Vec<Option<[f32; 4]>> {
+    let mut ids = Vec::new();
+    frame(ui, |ui| {
+        ui.open(
+            "row",
+            Spec {
+                size: [px(width), px(20.0)],
+                ..Spec::default()
+            },
+        );
+        ui.leaf(
+            "space",
+            Spec {
+                size: [fill(), px(1.0)],
+                ..Spec::default()
+            },
+        );
+        let loose = Extent {
+            size: Size::Pixels(80.0),
+            strictness: 0.25,
+        };
+        ids.push(ui.open(
+            "loose",
+            Spec {
+                size: [loose, px(20.0)],
+                ..Spec::default()
+            },
+        ));
+        ui.close();
+        for priority in priorities {
+            let group = ui.open(
+                priority,
+                Spec {
+                    fold: Some(*priority),
+                    ..Spec::default()
+                },
+            );
+            for (form, width) in [("full", 100.0), ("folded", 20.0)] {
+                ui.open(form, Spec::default());
+                ui.leaf(
+                    "button",
+                    Spec {
+                        flags: Flags::CLICKABLE,
+                        size: [px(width), px(20.0)],
+                        ..Spec::default()
+                    },
+                );
+                ui.close();
+            }
+            ui.close();
+            for form in ["full", "folded"] {
+                ids.push(group.child(form).child("button"));
+            }
+        }
+        ui.close();
+    });
+    ids.into_iter().map(|id| ui.rect(id)).collect()
+}
+
+#[test]
+fn a_row_folds_its_lowest_priorities_first_until_it_fits() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    // 80 + 3 × 100 fits 380 with nothing folded or squeezed.
+    let rects = folding_row(&mut ui, 380.0, &[2, 0, 1]);
+    assert_eq!(rects[0], Some([0.0, 0.0, 80.0, 20.0]));
+    assert_eq!(rects[1], Some([80.0, 0.0, 180.0, 20.0]));
+    // At 300, folding priority 0 alone leaves 80 + 100 + 20 + 100; the full form's button
+    // stands where the folded one shows.
+    let rects = folding_row(&mut ui, 300.0, &[2, 0, 1]);
+    assert_eq!(rects[1], Some([80.0, 0.0, 180.0, 20.0]));
+    assert_eq!(rects[3..5], [Some([180.0, 0.0, 200.0, 20.0]); 2]);
+    assert_eq!(rects[5], Some([200.0, 0.0, 300.0, 20.0]));
+}
+
+#[test]
+fn a_row_squeezes_its_boxes_only_once_every_group_is_folded() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let rects = folding_row(&mut ui, 130.0, &[0, 1]);
+    // 80 + 20 + 20 fits 130 with 10 to spare, taken by the space.
+    assert_eq!(rects[0], Some([0.0, 0.0, 80.0, 20.0]));
+    let rects = folding_row(&mut ui, 100.0, &[0, 1]);
+    assert_eq!(rects[0], Some([0.0, 0.0, 60.0, 20.0]));
+    assert_eq!(rects[4], Some([80.0, 0.0, 100.0, 20.0]));
+}
+
+#[test]
+fn a_box_sized_by_its_children_yields_what_they_yield() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut combo = None;
+    frame(&mut ui, |ui| {
+        ui.open(
+            "row",
+            Spec {
+                size: [px(100.0), px(20.0)],
+                ..Spec::default()
+            },
+        );
+        ui.open("group", Spec::default());
+        let loose = Extent {
+            size: Size::Pixels(80.0),
+            strictness: 0.5,
+        };
+        combo = Some(ui.open(
+            "combo",
+            Spec {
+                size: [loose, px(20.0)],
+                ..Spec::default()
+            },
+        ));
+        ui.close();
+        ui.leaf(
+            "button",
+            Spec {
+                size: [px(40.0), px(20.0)],
+                ..Spec::default()
+            },
+        );
+        ui.close();
+        ui.close();
+    });
+    assert_eq!(ui.rect(combo.unwrap()), Some([0.0, 0.0, 60.0, 20.0]));
+}
+
+#[test]
+fn a_folded_away_form_takes_no_input() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    folding_row(&mut ui, 110.0, &[0]);
+    let folded = Id::ROOT
+        .child("row")
+        .child(0_u32)
+        .child("folded")
+        .child("button");
+    assert_eq!(ui.box_at([90.0, 10.0]), Some(folded));
+    // Where the full form's button would lie past the folded one.
+    assert_eq!(ui.box_at([150.0, 10.0]), None);
+}
+
 fn button_frame(ui: &mut Ui) -> Signal {
     let mut signal = Signal::default();
     frame(ui, |ui| {
@@ -709,6 +849,86 @@ fn scrollbar_thumbs_track_the_offset_and_drags_reach_both_ends() {
     assert_eq!(offset, 0.0);
 }
 
+#[test]
+fn system_scrollers_step_page_and_drag_by_the_parts_the_platform_paints() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    // Arrows together at the far end, as 10.6 places them.
+    ui.scrollers = Some(Scrollers {
+        thickness: 15.0,
+        paint: Box::new(|request: &Scroller| {
+            let slot = request.length - 30.0;
+            let knob = slot * request.proportion;
+            let start = request.value * (slot - knob);
+            PaintedScroller {
+                image: RasterImage::new(
+                    [15, request.length as u32],
+                    vec![0; 60 * request.length as usize],
+                )
+                .unwrap(),
+                knob: [start, start + knob],
+                slot: [0.0, slot],
+                decrement: [slot, slot + 15.0],
+                increment: [slot + 15.0, request.length],
+            }
+        }),
+    });
+    let mut offset = 0.0;
+    let build = |ui: &mut Ui, offset: &mut f32| {
+        frame(ui, |ui| {
+            ui.open(
+                "view",
+                Spec {
+                    flags: Flags::CUSTOM,
+                    size: [px(200.0), px(215.0)],
+                    ..Spec::default()
+                },
+            );
+            if let Some(chosen) =
+                scrollbar(ui, "bar", Axis::Y, *offset, [0.0, 1000.0], 400.0, [0.5; 4])
+            {
+                *offset = chosen;
+            }
+            ui.close();
+        });
+    };
+    build(&mut ui, &mut offset);
+    build(&mut ui, &mut offset);
+    let bar = Id::ROOT.child("view").child("bar");
+    assert_eq!(
+        ui.rect(bar).unwrap(),
+        [185.0, 0.0, 200.0, 200.0],
+        "the corner stays clear"
+    );
+    let at = Instant::now();
+    let click = |ui: &mut Ui, y: f32, pressed: bool| {
+        ui.event(Event::PointerMoved([190.0, y]));
+        ui.event(Event::Button {
+            button: MouseButton::Left,
+            pressed,
+            at,
+        });
+    };
+    click(&mut ui, 190.0, true);
+    build(&mut ui, &mut offset);
+    assert_eq!(
+        offset, 20.0,
+        "the increment arrow steps a twentieth of the view"
+    );
+    click(&mut ui, 190.0, false);
+    build(&mut ui, &mut offset);
+    // Below the knob, 170 × 400 / 1400 long, the track pages.
+    click(&mut ui, 160.0, true);
+    build(&mut ui, &mut offset);
+    assert_eq!(offset, 400.0);
+    click(&mut ui, 160.0, false);
+    build(&mut ui, &mut offset);
+    click(&mut ui, 60.0, true);
+    build(&mut ui, &mut offset);
+    ui.event(Event::PointerMoved([190.0, 500.0]));
+    build(&mut ui, &mut offset);
+    assert_eq!(offset, 1000.0, "the knob drags to the end");
+}
+
 fn items() -> Vec<popup::Item<'static>> {
     let item = |text| popup::Item {
         text,
@@ -1071,13 +1291,15 @@ fn nothing_matching_leaves_nothing_to_choose() {
 }
 
 #[test]
-fn the_palette_centres_across_the_window_and_chooses_the_best_match() {
+fn the_palette_centres_near_the_windows_top_and_chooses_the_best_match() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let palette = Id::ROOT.child("palette");
     let commands = items();
     let build = |ui: &mut Ui| {
         let mut chosen = None;
-        frame(ui, |ui| chosen = popup::palette(ui, palette, &commands));
+        frame(ui, |ui| {
+            chosen = popup::palette(ui, palette, &commands, "Search commands")
+        });
         chosen
     };
     build(&mut ui);
@@ -1087,6 +1309,7 @@ fn the_palette_centres_across_the_window_and_chooses_the_best_match() {
     }
     let rect = ui.rect(palette).unwrap();
     assert_eq!(rect[0] + rect[2], 400.0, "centred");
+    assert_eq!(rect[1], 300.0 / 8.0, "an eighth down");
     ui.event(typed("a"));
     ui.event(key(NamedKey::Enter));
     assert_eq!(
@@ -1748,7 +1971,7 @@ fn popups_ease_open_and_closed_then_stop_asking_for_frames() {
         build(ui);
     });
     let first = motion(&ui).unwrap();
-    assert!(first.opacity < 0.1 && first.zoom < 0.96 && first.tilt > 0.3);
+    assert!(first.opacity < 0.1 && first.zoom < 0.96 && first.tilt > 0.15);
     assert_eq!(
         first.pivot,
         [200.0, 125.0],
@@ -1895,7 +2118,7 @@ fn every_control_in_an_open_dialog_takes_clicks_where_it_rests() {
 }
 
 #[test]
-fn a_combo_s_field_holds_its_place_as_its_list_opens_and_its_rows_take_clicks() {
+fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_clicks() {
     let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
     let fonts = fonts();
     let combo = Id::ROOT.child("combo");
@@ -1915,25 +2138,45 @@ fn a_combo_s_field_holds_its_place_as_its_list_opens_and_its_rows_take_clicks() 
     let [box_rect, first] = [ui.rect(combo).unwrap(), ui.rect(field).unwrap()];
     assert_eq!(first[..2], box_rect[..2], "the field starts on the box");
     assert!(first[2] - first[0] < box_rect[2] - box_rect[0] + 20.0);
-    let moving: Vec<_> = ui
-        .layers()
+    let shown = ui.rect(menu_id()).unwrap();
+    let row = menu_id().child("rows").child(3_u64);
+    let opening = ui.rect(row).unwrap();
+    assert!(
+        opening[2] > shown[2],
+        "the rows lie out past the popup as it opens"
+    );
+    let layers = ui.layers();
+    let moving: Vec<_> = layers
         .iter()
         .filter_map(|layer| match layer {
-            Layer::Primitives(layer) => Some(layer.motion.is_some()),
+            Layer::Primitives(layer) => Some(layer),
             Layer::Custom { .. } => None,
         })
+        .skip_while(|layer| layer.motion.is_none())
         .collect();
-    let panel = moving.iter().position(|moving| *moving).unwrap();
+    let split = moving
+        .iter()
+        .position(|layer| layer.motion.is_none())
+        .unwrap();
     assert!(
-        moving[panel..].contains(&false),
-        "the field paints without the popup's motion"
+        moving[split..].iter().all(|layer| layer.motion.is_none()),
+        "the field paints over the popup, which appears as one"
     );
+    assert!(
+        moving[..split]
+            .iter()
+            .filter(|layer| layer.round.is_some())
+            .all(|layer| layer.round == Some((shown, ui.theme.menu().radius))),
+        "the rows show only inside the popup's outline"
+    );
+    drop(layers);
     for _ in 0..20 {
         build(&mut ui);
     }
     assert!(!ui.wants_frame());
     let [panel, last] = [ui.rect(menu_id()).unwrap(), ui.rect(field).unwrap()];
     assert_eq!(last[2], panel[2] - 4.0, "the field widens across the popup");
+    assert_eq!(ui.rect(row), Some(opening), "the rows never move");
     click_box(&mut ui, menu_id().child("rows").child(3_u64));
     assert_eq!(build(&mut ui), Some(3));
 }
@@ -1955,6 +2198,8 @@ fn a_popup_over_a_box_by_the_window_s_edge_widens_away_from_it() {
     let edges =
         |ui: &Ui| [ui.rect(field).unwrap(), ui.rect(menu_id()).unwrap()].map(|rect| rect[2]);
     let first = ui.rect(field).unwrap();
+    let row = menu_id().child("rows").child(3_u64);
+    let opening = ui.rect(row).unwrap();
     assert_eq!(
         edges(&ui),
         [390.0, 394.0],
@@ -1969,6 +2214,7 @@ fn a_popup_over_a_box_by_the_window_s_edge_widens_away_from_it() {
         ui.rect(field).unwrap()[0] < first[0] - 30.0,
         "the field widens leftward"
     );
+    assert_eq!(ui.rect(row), Some(opening), "the rows never move");
 }
 
 fn built(ui: &Ui, id: Id) -> &Built {
@@ -2113,29 +2359,25 @@ fn a_menu_button_opens_its_menu_with_the_icons_under_its_own() {
 fn galleries_choose_across_their_groups_by_keys_and_clicks() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let gallery = Id::ROOT.child("gallery");
-    let groups = [("Recent", 2), ("Library", 5)];
+    let groups = [("Recent", 2), ("Library", 5)].map(|(heading, cells)| popup::Group {
+        heading,
+        cells,
+        columns: 3,
+        size: [30.0, 30.0],
+    });
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::gallery(
-                ui,
-                gallery,
-                BELOW,
-                &groups,
-                3,
-                [30.0, 30.0],
-                Some(3),
-                |ui, index| {
-                    ui.leaf(
-                        "label",
-                        Spec {
-                            size: [fill(), fill()],
-                            text: Some(["a", "b", "c", "d", "e", "f", "g"][index]),
-                            ..Spec::default()
-                        },
-                    );
-                },
-            );
+            chosen = popup::gallery(ui, gallery, BELOW, &groups, &[3], |ui, index| {
+                ui.leaf(
+                    "label",
+                    Spec {
+                        size: [fill(), fill()],
+                        text: Some(["a", "b", "c", "d", "e", "f", "g"][index]),
+                        ..Spec::default()
+                    },
+                );
+            });
         });
         chosen
     };
@@ -2205,4 +2447,72 @@ fn desktop_menus_cut_or_fade_without_growing() {
     let closing = motion(&ui).unwrap();
     assert!((closing.opacity - (1.0 - 0.096 / 0.6_f32).powi(4)).abs() < 0.01);
     assert!(ui.wants_frame());
+}
+
+/// A row 200 wide of twelve section tabs with `active` open; returns the row's id.
+fn tab_row(ui: &mut Ui, active: usize) -> Id {
+    let names = [
+        "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven",
+        "Twelve",
+    ];
+    let tabs: Vec<_> = names
+        .iter()
+        .map(|name| (*name, [0.5, 0.6, 0.9, 1.0]))
+        .collect();
+    let section = ui.theme.section([0.5, 0.6, 0.9, 1.0]);
+    let row = Id::ROOT.child("tabs");
+    frame(ui, |ui| {
+        ui.open(
+            "tab row",
+            Spec {
+                size: [px(200.0), px(28.0)],
+                ..Spec::default()
+            },
+        );
+        shell::section_tabs(ui, row, &tabs, active, None, None, &section, 28.0, [0.0; 4]);
+        ui.close();
+    });
+    row
+}
+
+/// Frames until the tabs' easing settles.
+fn settle_tabs(ui: &mut Ui, active: usize) -> Id {
+    let mut row = tab_row(ui, active);
+    for _ in 0..60 {
+        row = tab_row(ui, active);
+    }
+    row
+}
+
+#[test]
+fn overflowing_tabs_scroll_the_open_one_into_view() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let row = settle_tabs(&mut ui, 0);
+    let view = ui.rect(row).unwrap();
+    assert_eq!(view[2] - view[0], 200.0);
+    let row = settle_tabs(&mut ui, 11);
+    let last = ui.rect(shell::tab_id(row, 11)).unwrap();
+    assert!(
+        last[0] >= view[0] && last[2] <= view[2],
+        "{last:?} in {view:?}"
+    );
+}
+
+#[test]
+fn the_wheel_scrolls_overflowing_tabs_sideways_either_way_it_turns() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let row = settle_tabs(&mut ui, 0);
+    let first = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
+    ui.event(Event::PointerMoved([100.0, 14.0]));
+    ui.event(Event::Wheel([0.0, -40.0]));
+    settle_tabs(&mut ui, 0);
+    let scrolled = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
+    assert!(
+        (first - scrolled - 40.0).abs() < 0.5,
+        "{first} to {scrolled}"
+    );
+    ui.event(Event::Wheel([30.0, 0.0]));
+    settle_tabs(&mut ui, 0);
+    let back = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
+    assert!((back - scrolled - 30.0).abs() < 0.5, "{scrolled} to {back}");
 }

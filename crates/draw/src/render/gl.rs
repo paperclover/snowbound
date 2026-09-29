@@ -38,6 +38,7 @@ const CLAMP_TO_EDGE: GLint = 0x812F;
 const TEXTURE0: GLenum = 0x84C0;
 const ARRAY_BUFFER: GLenum = 0x8892;
 const STREAM_DRAW: GLenum = 0x88E0;
+const STATIC_DRAW: GLenum = 0x88E4;
 const FRAGMENT_SHADER: GLenum = 0x8B30;
 const VERTEX_SHADER: GLenum = 0x8B31;
 const COMPILE_STATUS: GLenum = 0x8B81;
@@ -103,6 +104,7 @@ unsafe extern "C" {
     fn glBindBuffer(target: GLenum, buffer: GLuint);
     fn glBufferData(target: GLenum, size: isize, data: *const c_void, usage: GLenum);
     fn glEnableVertexAttribArray(index: GLuint);
+    fn glDisableVertexAttribArray(index: GLuint);
     fn glVertexAttribPointer(
         index: GLuint,
         size: GLint,
@@ -132,6 +134,7 @@ unsafe extern "C" {
     fn glUseProgram(program: GLuint);
     fn glGetUniformLocation(program: GLuint, name: *const c_char) -> GLint;
     fn glUniform1i(location: GLint, value: GLint);
+    fn glUniform2f(location: GLint, x: f32, y: f32);
 
     fn glGenFramebuffersEXT(n: GLsizei, framebuffers: *mut GLuint);
     fn glDeleteFramebuffersEXT(n: GLsizei, framebuffers: *const GLuint);
@@ -157,6 +160,9 @@ unsafe extern "C" {
         filter: GLenum,
     );
 }
+
+/// Blending a premultiplied picture over what lies beneath.
+const PREMULTIPLIED: [GLenum; 4] = [ONE, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA];
 
 /// An sRGB RGBA texture, deleted with its value.
 pub(super) struct Image {
@@ -283,63 +289,94 @@ impl Drop for Target {
     }
 }
 
+/// Whether an offscreen picture's rows run bottom first.
+pub(super) const FLIPPED: bool = true;
+
 pub(super) struct Gpu {
     program: GLuint,
     buffer: GLuint,
+    /// `translucent.glsl`, and the triangle it covers a window with.
+    translucent: GLuint,
+    triangle: GLuint,
     atlas: Image,
     max_texture: u32,
+    /// Offscreen pictures for groups, the target's size.
+    groups: Vec<Target>,
 }
 
 /// Each attribute's name, component count and offset, bound to its index in the shader.
-const ATTRIBUTES: [(&CStr, GLint, usize); 6] = [
+const ATTRIBUTES: [(&CStr, GLint, usize); 8] = [
     (c"position", 2, offset_of!(Vertex, position)),
     (c"uv", 2, offset_of!(Vertex, uv)),
     (c"color", 4, offset_of!(Vertex, color)),
     (c"local", 2, offset_of!(Vertex, local)),
     (c"shape", 4, offset_of!(Vertex, shape)),
     (c"stroke", 1, offset_of!(Vertex, stroke)),
+    (c"clip_local", 2, offset_of!(Vertex, clip_local)),
+    (c"clip", 3, offset_of!(Vertex, clip)),
 ];
 
 impl Renderer {
     /// Draws with the OpenGL context current on this thread, which must stay current
     /// whenever the renderer or a `Target` is used.
     pub fn new() -> Result<Self, String> {
-        let source = include_str!("../draw.glsl");
-        let program = unsafe {
-            let vertex = compile(
-                VERTEX_SHADER,
-                &format!("#version 120\n#define VERTEX\n{source}"),
-            )?;
-            let fragment = compile(FRAGMENT_SHADER, &format!("#version 120\n{source}"))?;
-            let program = glCreateProgram();
-            glAttachShader(program, vertex);
-            glAttachShader(program, fragment);
-            for (index, (name, _, _)) in ATTRIBUTES.iter().enumerate() {
-                glBindAttribLocation(program, index as GLuint, name.as_ptr());
-            }
-            glLinkProgram(program);
-            let mut linked = 0;
-            glGetProgramiv(program, LINK_STATUS, &mut linked);
-            if linked == 0 {
-                return Err(format!(
-                    "Linking the draw shader failed: {}",
-                    log(program, glGetProgramiv, glGetProgramInfoLog)
-                ));
-            }
-            program
-        };
-        let mut buffer = 0;
+        let names: Vec<_> = ATTRIBUTES.iter().map(|(name, _, _)| *name).collect();
+        let draw = unsafe { program(include_str!("../draw.glsl"), &names)? };
+        let translucent = unsafe { program(include_str!("translucent.glsl"), &[c"position"])? };
+        let [mut buffer, mut triangle] = [0; 2];
         let mut max_texture = 0;
         unsafe {
             glGenBuffers(1, &mut buffer);
+            glGenBuffers(1, &mut triangle);
+            glBindBuffer(ARRAY_BUFFER, triangle);
+            let corners: [f32; 6] = [-1.0, -1.0, 3.0, -1.0, -1.0, 3.0];
+            glBufferData(
+                ARRAY_BUFFER,
+                size_of_val(&corners) as isize,
+                corners.as_ptr().cast(),
+                STATIC_DRAW,
+            );
             glGetIntegerv(MAX_TEXTURE_SIZE, &mut max_texture);
         }
         Ok(Self::with_gpu(Gpu {
-            program,
+            program: draw,
             buffer,
+            translucent,
+            triangle,
             atlas: Image::new([ATLAS_SIZE; 2], NEAREST, None),
             max_texture: max_texture as u32,
+            groups: Vec::new(),
         }))
+    }
+
+    /// Copies `target` to the context's window, the same size, premultiplying each pixel
+    /// again in sRGB, as a window server compositing a transparent surface needs.
+    pub fn present_translucent(&self, target: &Target) {
+        let [width, height] = target.size().map(|side| side as f32);
+        let program = self.gpu.translucent;
+        unsafe {
+            glBindFramebufferEXT(FRAMEBUFFER, 0);
+            glDisable(FRAMEBUFFER_SRGB);
+            glDisable(BLEND);
+            glDisable(SCISSOR_TEST);
+            glViewport(0, 0, width as GLsizei, height as GLsizei);
+            glUseProgram(program);
+            glUniform1i(glGetUniformLocation(program, c"frame".as_ptr()), 0);
+            glUniform2f(
+                glGetUniformLocation(program, c"size".as_ptr()),
+                width,
+                height,
+            );
+            glActiveTexture(TEXTURE0);
+            glBindTexture(TEXTURE_2D, target.texture.name);
+            glBindBuffer(ARRAY_BUFFER, self.gpu.triangle);
+            for index in 1..ATTRIBUTES.len() {
+                glDisableVertexAttribArray(index as GLuint);
+            }
+            glEnableVertexAttribArray(0);
+            glVertexAttribPointer(0, 2, FLOAT, 0, 0, ptr::null());
+            glDrawArrays(TRIANGLES, 0, 3);
+        }
     }
 
     /// The widest and tallest texture the driver takes, in pixels.
@@ -368,17 +405,68 @@ impl Renderer {
         Image::new(image.size, LINEAR, Some(image.pixels()))
     }
 
-    /// Clears `target` to linear `clear` and draws the prepared batches.
-    pub(super) fn submit(&mut self, target: &Target, clear: [f32; 4]) {
-        let [width, height] = target.size().map(|side| side as GLsizei);
+    /// Clears `target`, `size` device pixels, to linear `clear` and draws the prepared
+    /// batches, each group's offscreen first.
+    pub(super) fn submit(&mut self, target: &Target, size: [u32; 2], clear: [f32; 4]) {
+        if self
+            .gpu
+            .groups
+            .first()
+            .is_some_and(|picture| picture.size() != size)
+        {
+            self.gpu.groups.clear();
+        }
+        while self.gpu.groups.len() < self.groups.len() {
+            match Target::new(size) {
+                Ok(picture) => unsafe {
+                    // Filtered, so a picture leaning back stays smooth.
+                    glBindTexture(TEXTURE_2D, picture.texture.name);
+                    glTexParameteri(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR);
+                    glTexParameteri(TEXTURE_2D, TEXTURE_MAG_FILTER, LINEAR);
+                    self.gpu.groups.push(picture);
+                },
+                Err(error) => {
+                    eprintln!("{error}");
+                    return;
+                }
+            }
+        }
+        let [width, height] = size.map(|side| side as GLsizei);
         let gpu = &self.gpu;
-        unsafe {
+        let begin = |target: &Target, clear: [f32; 4]| unsafe {
             glBindFramebufferEXT(FRAMEBUFFER, target.framebuffer);
-            glEnable(FRAMEBUFFER_SRGB);
-            glViewport(0, 0, width, height);
             glDisable(SCISSOR_TEST);
             glClearColor(clear[0], clear[1], clear[2], clear[3]);
             glClear(COLOR_BUFFER_BIT);
+            glEnable(SCISSOR_TEST);
+        };
+        let draw = |batches: &[Batch]| unsafe {
+            for batch in batches {
+                let [x, y, w, h] = batch.scissor.map(|value| value as GLint);
+                glScissor(x, height - y - h, w, h);
+                let (texture, [src_rgb, dst_rgb, src_alpha, dst_alpha]) = match batch.blend {
+                    Blend::Over => (
+                        gpu.atlas.name,
+                        [SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA],
+                    ),
+                    Blend::Image(id) => (self.images[&id].texture.name, PREMULTIPLIED),
+                    Blend::Erase => (
+                        gpu.atlas.name,
+                        [ZERO, ONE_MINUS_SRC_ALPHA, ZERO, ONE_MINUS_SRC_ALPHA],
+                    ),
+                };
+                glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
+                glBindTexture(TEXTURE_2D, texture);
+                glDrawArrays(
+                    TRIANGLES,
+                    batch.vertices.start as GLint,
+                    batch.vertices.len() as GLsizei,
+                );
+            }
+        };
+        unsafe {
+            glEnable(FRAMEBUFFER_SRGB);
+            glViewport(0, 0, width, height);
             glUseProgram(gpu.program);
             glUniform1i(glGetUniformLocation(gpu.program, c"atlas".as_ptr()), 0);
             glActiveTexture(TEXTURE0);
@@ -401,36 +489,57 @@ impl Renderer {
                 );
             }
             glEnable(BLEND);
-            glEnable(SCISSOR_TEST);
-            for batch in &self.batches {
-                let [x, y, w, h] = batch.scissor.map(|value| value as GLint);
-                glScissor(x, height - y - h, w, h);
-                let (texture, [src_rgb, dst_rgb, src_alpha, dst_alpha]) = match batch.blend {
-                    Blend::Over => (
-                        &gpu.atlas,
-                        [SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA],
-                    ),
-                    Blend::Image(id) => (
-                        &self.images[&id].texture,
-                        [ONE, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA],
-                    ),
-                    Blend::Erase => (
-                        &gpu.atlas,
-                        [ZERO, ONE_MINUS_SRC_ALPHA, ZERO, ONE_MINUS_SRC_ALPHA],
-                    ),
-                };
+            for (group, picture) in self.groups.iter().zip(&gpu.groups) {
+                begin(picture, [0.0; 4]);
+                draw(&self.batches[group.batches.clone()]);
+            }
+            begin(target, clear);
+            let mut next = 0;
+            for (group, picture) in self.groups.iter().zip(&gpu.groups) {
+                draw(&self.batches[next..group.batches.start]);
+                glScissor(0, 0, width, height);
+                let [src_rgb, dst_rgb, src_alpha, dst_alpha] = PREMULTIPLIED;
                 glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
-                glBindTexture(TEXTURE_2D, texture.name);
+                glBindTexture(TEXTURE_2D, picture.texture.name);
                 glDrawArrays(
                     TRIANGLES,
-                    batch.vertices.start as GLint,
-                    batch.vertices.len() as GLsizei,
+                    group.composite.start as GLint,
+                    group.composite.len() as GLsizei,
                 );
+                next = group.batches.end;
             }
+            draw(&self.batches[next..]);
             glDisable(SCISSOR_TEST);
             glDisable(BLEND);
             glBindFramebufferEXT(FRAMEBUFFER, 0);
         }
+    }
+}
+
+/// A program from `source`'s two stages, its attributes bound in order.
+unsafe fn program(source: &str, attributes: &[&CStr]) -> Result<GLuint, String> {
+    unsafe {
+        let vertex = compile(
+            VERTEX_SHADER,
+            &format!("#version 120\n#define VERTEX\n{source}"),
+        )?;
+        let fragment = compile(FRAGMENT_SHADER, &format!("#version 120\n{source}"))?;
+        let program = glCreateProgram();
+        glAttachShader(program, vertex);
+        glAttachShader(program, fragment);
+        for (index, name) in attributes.iter().enumerate() {
+            glBindAttribLocation(program, index as GLuint, name.as_ptr());
+        }
+        glLinkProgram(program);
+        let mut linked = 0;
+        glGetProgramiv(program, LINK_STATUS, &mut linked);
+        if linked == 0 {
+            return Err(format!(
+                "Linking a shader failed: {}",
+                log(program, glGetProgramiv, glGetProgramInfoLog)
+            ));
+        }
+        Ok(program)
     }
 }
 
@@ -444,7 +553,7 @@ unsafe fn compile(kind: GLenum, source: &str) -> Result<GLuint, String> {
         glGetShaderiv(shader, COMPILE_STATUS, &mut compiled);
         if compiled == 0 {
             return Err(format!(
-                "Compiling the draw shader failed: {}",
+                "Compiling a shader failed: {}",
                 log(shader, glGetShaderiv, glGetShaderInfoLog)
             ));
         }

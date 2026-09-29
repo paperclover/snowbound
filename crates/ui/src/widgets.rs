@@ -1,10 +1,11 @@
 use crate::{Axis, Event, Flags, Id, Signal, Spec, Ui, fit, px};
+use draw::RasterImage;
 use draw::edit::{self, Command, Movement};
 use parley::{
     Affinity,
     editing::{Cursor, Selection},
 };
-use std::hash::Hash;
+use std::{hash::Hash, time::Duration};
 use winit::{
     event::Ime,
     keyboard::{Key, ModifiersState, NamedKey},
@@ -75,9 +76,56 @@ pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Si
     signal
 }
 
-/// An overlay scrollbar along the far edge of the current box, for content whose scroll
-/// offset ranges over `range` while `view` of it shows, all in one unit. Returns the offset
-/// a drag of its thumb chose.
+/// Scrollers the platform paints, fixed along the content's edges, as Mac OS X 10.6's are.
+pub struct Scrollers {
+    /// Across a scroller, in logical pixels.
+    pub thickness: f32,
+    pub paint: Box<dyn FnMut(&Scroller) -> PaintedScroller>,
+}
+
+/// A scroller as it is to be painted, in logical pixels.
+pub struct Scroller {
+    pub axis: Axis,
+    pub length: f32,
+    pub scale: f32,
+    /// Where the offset lies in its range, from 0 to 1.
+    pub value: f32,
+    /// How much of the content shows, from 0 to 1.
+    pub proportion: f32,
+    /// The part held down.
+    pub held: Option<ScrollerPart>,
+    /// Whether the window is key, which colours the knob.
+    pub active: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollerPart {
+    Decrement,
+    Increment,
+    Knob,
+    /// The track either side of the knob, which pages.
+    Slot,
+}
+
+/// A painted scroller and where its parts lie along it, from its start in logical pixels.
+#[derive(Clone)]
+pub struct PaintedScroller {
+    /// `length` by `thickness`, at the scroller's scale.
+    pub image: RasterImage,
+    pub knob: [f32; 2],
+    pub slot: [f32; 2],
+    pub decrement: [f32; 2],
+    pub increment: [f32; 2],
+}
+
+/// How long a held arrow or track waits before repeating, and then between steps.
+const REPEAT_DELAY: Duration = Duration::from_millis(300);
+const REPEAT: Duration = Duration::from_millis(50);
+
+/// A scrollbar along the far edge of the current box, for content whose scroll offset
+/// ranges over `range` while `view` of it shows, all in one unit: the platform's scroller
+/// where `Ui::scrollers` has one, otherwise a thumb in `color` over the content. Returns
+/// the offset the scrollbar chose.
 pub fn scrollbar(
     ui: &mut Ui,
     part: impl Hash,
@@ -87,6 +135,9 @@ pub fn scrollbar(
     view: f32,
     color: [f32; 4],
 ) -> Option<f32> {
+    if ui.scrollers.is_some() {
+        return system_scrollbar(ui, part, axis, offset, range, view);
+    }
     let along = usize::from(axis == Axis::Y);
     let rect = ui.rect(ui.current())?;
     let length = rect[along + 2] - rect[along];
@@ -130,6 +181,115 @@ pub fn scrollbar(
             ..Spec::default()
         },
     );
+    chosen
+}
+
+fn system_scrollbar(
+    ui: &mut Ui,
+    part: impl Hash,
+    axis: Axis,
+    offset: f32,
+    range: [f32; 2],
+    view: f32,
+) -> Option<f32> {
+    let along = usize::from(axis == Axis::Y);
+    let rect = ui.rect(ui.current())?;
+    let span = range[1] - range[0];
+    let thickness = ui.scrollers.as_ref()?.thickness;
+    // The far end leaves the corner beside the other axis's scroller.
+    let length = rect[along + 2] - rect[along] - thickness;
+    if span <= 0.0 || length <= 0.0 {
+        return None;
+    }
+    let id = ui.id(&part);
+    let signal = ui.signal(id);
+    let pointer = ui.pointer().map(|pointer| pointer[along] - rect[along]);
+    let now = ui.now;
+    if !signal.pressed && !signal.dragging {
+        *ui.held(id) = None;
+    }
+    let request = Scroller {
+        axis,
+        length,
+        scale: ui.scale,
+        value: ((offset - range[0]) / span).clamp(0.0, 1.0),
+        proportion: (view / (view + span)).clamp(0.0, 1.0),
+        held: ui.held(id).map(|(part, _)| part),
+        active: ui.window_focused,
+    };
+    let painted = (ui.scrollers.as_mut()?.paint)(&request);
+    let within = |[start, end]: [f32; 2], at: f32| start <= at && at < end;
+    let line = (view / 20.0).max(1.0);
+    let mut chosen = None;
+    if let Some(at) = pointer
+        && (signal.pressed || signal.dragging)
+    {
+        if signal.pressed {
+            let hit = [
+                (ScrollerPart::Decrement, painted.decrement),
+                (ScrollerPart::Increment, painted.increment),
+                (ScrollerPart::Knob, painted.knob),
+                (ScrollerPart::Slot, painted.slot),
+            ]
+            .into_iter()
+            .find(|(_, extent)| within(*extent, at));
+            *ui.held(id) = hit.map(|(part, _)| (part, now));
+            *ui.grab(id) = at - painted.knob[0];
+        }
+        match *ui.held(id) {
+            Some((ScrollerPart::Knob, _)) => {
+                let travel =
+                    (painted.slot[1] - painted.slot[0]) - (painted.knob[1] - painted.knob[0]);
+                let fraction = ((at - *ui.grab(id) - painted.slot[0]) / travel.max(f32::EPSILON))
+                    .clamp(0.0, 1.0);
+                chosen = Some(range[0] + fraction * span);
+            }
+            Some((part, due)) if now >= due => {
+                let step = match part {
+                    ScrollerPart::Decrement => -line,
+                    ScrollerPart::Increment => line,
+                    // The track pages towards the pointer and stops once the knob is under it.
+                    _ if within(painted.knob, at) => 0.0,
+                    _ if at < painted.knob[0] => line - view,
+                    _ => view - line,
+                };
+                let delay = if signal.pressed { REPEAT_DELAY } else { REPEAT };
+                *ui.held(id) = Some((part, now + delay));
+                chosen = Some((offset + step).clamp(range[0], range[1]));
+            }
+            _ => {}
+        }
+        // A held part repeats on later frames.
+        ui.animating = true;
+    }
+    let mut position = [0.0; 2];
+    position[1 - along] = rect[3 - along] - rect[1 - along] - thickness;
+    let mut extent = [px(thickness); 2];
+    extent[along] = px(length);
+    ui.leaf(
+        &part,
+        Spec {
+            flags: Flags::CLICKABLE | Flags::FLOAT,
+            size: extent,
+            position,
+            image: Some(&painted.image),
+            cursor: Some(CursorIcon::Default),
+            ..Spec::default()
+        },
+    );
+    if axis == Axis::Y {
+        // The corner between the two scrollers shows the content's white, as AppKit's does.
+        ui.leaf(
+            ("corner", &part),
+            Spec {
+                flags: Flags::FLOAT,
+                size: [px(thickness); 2],
+                position: [position[0], length],
+                fill: Some([1.0; 4]),
+                ..Spec::default()
+            },
+        );
+    }
     chosen
 }
 

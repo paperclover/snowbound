@@ -189,18 +189,18 @@ pub fn list<R: Rows>(
     let scroll = state.scroll;
     ui.animating |= scroll != state.target;
 
+    // Rows fill all but a gutter for the scrollbar, from their first frame: the padding
+    // narrows what they fill, and they float from the corner.
+    let gutter = if most > 0.0 { GUTTER / 2.0 } else { 0.0 };
     ui.open_as(
         id,
         Spec {
             flags: spec.flags | Flags::SCROLL | Flags::CLIP,
+            pad: [spec.pad[0] + gutter, spec.pad[1]],
             ..spec
         },
     );
-    // Rows leave the scrollbar a gutter.
-    let width = match rect {
-        Some(rect) if most > 0.0 => px(rect[2] - rect[0] - GUTTER),
-        _ => fill(),
-    };
+    let width = fill();
     let in_view = row_at(scroll)..(row_at(scroll + view) + 1).min(len);
     let mut shown = Vec::with_capacity(in_view.len());
     for index in in_view {

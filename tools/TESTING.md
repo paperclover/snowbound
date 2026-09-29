@@ -49,6 +49,17 @@ leaves `soak/*.log` ending in the command that replays it; crash inputs stay in
 toolchains, `cargo install cargo-fuzz`, and `build-essential pkg-config
 libfontconfig-dev`; copy the checkout and run the script under `tmux`.
 
+## Motion capture
+
+`SNOWBOUND_FRAMES=DIRECTORY` writes every frame the app draws to
+`DIRECTORY/MILLISECONDS.png`, timed from when the window opened. With a
+hidden-window replay (`SNOWBOUND_REPLAY` plus `--screenshot`, see
+`tools/canvas/README.md`) this records an animation at its real pace without
+touching the screen: waits tick at 60 Hz, and the app draws as fast as it can
+while it animates. Point it at a copy of a notebook, end the script with a
+short `wait` so the last frames finish writing, and assemble strips or GIFs
+with `ffmpeg`.
+
 ## Private and native verification
 
 Private notebooks stay outside versioned fixtures. Materialize a copy before
