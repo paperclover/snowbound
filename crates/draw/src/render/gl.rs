@@ -305,7 +305,7 @@ pub(super) struct Gpu {
 }
 
 /// Each attribute's name, component count and offset, bound to its index in the shader.
-const ATTRIBUTES: [(&CStr, GLint, usize); 8] = [
+const ATTRIBUTES: [(&CStr, GLint, usize); 9] = [
     (c"position", 2, offset_of!(Vertex, position)),
     (c"uv", 2, offset_of!(Vertex, uv)),
     (c"color", 4, offset_of!(Vertex, color)),
@@ -314,6 +314,7 @@ const ATTRIBUTES: [(&CStr, GLint, usize); 8] = [
     (c"stroke", 1, offset_of!(Vertex, stroke)),
     (c"clip_local", 2, offset_of!(Vertex, clip_local)),
     (c"clip", 3, offset_of!(Vertex, clip)),
+    (c"blur", 1, offset_of!(Vertex, blur)),
 ];
 
 impl Renderer {
@@ -382,6 +383,14 @@ impl Renderer {
     /// The widest and tallest texture the driver takes, in pixels.
     pub fn max_texture_dimension(&self) -> u32 {
         self.gpu.max_texture
+    }
+
+    pub(super) fn atlas_side(&self) -> u32 {
+        self.gpu.atlas.size[0]
+    }
+
+    pub(super) fn new_atlas(&mut self, side: u32) {
+        self.gpu.atlas = Image::new([side; 2], NEAREST, None);
     }
 
     pub(super) fn write_atlas(&self, origin: [u32; 2], size: [u32; 2], rgba: &[u8]) {

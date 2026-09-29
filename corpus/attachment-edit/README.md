@@ -10,7 +10,8 @@ section's file-data store list, an embedded-file object declaring it by
 identity and extension, and an attachment object with the file name, the
 24 pt icon size and the flags every native attachment carries. `icon/` also
 embeds the native fixture's 724-byte icon PNG as the preview picture;
-`plain/` omits it, which OneNote accepts (it renders its own icon).
+`plain/` omits it, which OneNote opens but draws as a broken picture
+(`corpus/attachment-insert/without-icon.png`), so the editor always stores one.
 OneNote's integrity check refuses an attachment object without
 `0x1c001d61` (twenty bytes: 16, 1, zeros), so the writer always stores it.
 

@@ -3,11 +3,11 @@
 //! cache, which stores each edit at once and publishes it in the background.
 
 use crate::{Result, owned, report, string};
-use canvas::search::{Entry, Index, Query};
+use canvas::search::{Entry, Index, Query, Tagged};
 use notebook::{
     Remote, Replica,
     discover::{Folder, SectionState},
-    session::{self, Event, Notebook},
+    session::{self, Background, Event, Notebook, SyncStatus},
     smb::{Client, Credentials},
 };
 use onestore::{
@@ -21,8 +21,8 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicU8, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -33,6 +33,24 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const LIMIT: usize = 256 * 1024 * 1024;
 /// The tab colour OneNote gives a section that stores none, as the desktop shows it.
 const SECTION_COLOR: u32 = 0x00e4_a88a;
+/// How often sections no page shows are polled, as the desktop polls them.
+const BACKGROUND: Duration = Duration::from_secs(15);
+
+/// Called on a background thread when a notebook's sync status may have changed.
+static SYNC_WAKE: OnceLock<extern "C" fn()> = OnceLock::new();
+
+/// Has the host call `wake` whenever a notebook's closed sections report; set once, before
+/// any library opens.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_set_sync_wake(wake: extern "C" fn()) {
+    let _ = SYNC_WAKE.set(wake);
+}
+
+fn sync_woken() {
+    if let Some(wake) = SYNC_WAKE.get() {
+        wake();
+    }
+}
 
 /// Runs `body(context)` within the host's coordinated reading or writing of `path`, as
 /// `NSFileCoordinator` has other processes (file providers) wait for it, or not at all when
@@ -183,6 +201,12 @@ pub struct Library {
     place: Place,
     cache: PathBuf,
     index: Mutex<(HashMap<String, Checked>, Index)>,
+    /// Syncs the sections no session holds; none for a lone section.
+    background: Option<Background>,
+    /// The sections open for editing, by catalog path, whose sessions sync them.
+    open: Mutex<Vec<(String, Weak<Shared>)>>,
+    /// Work Offline, which sections opened later follow too.
+    offline: AtomicBool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -244,12 +268,20 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
 
 impl Library {
     pub(crate) fn open(path: &Path, cache: &Path) -> Result<Self> {
-        let (notebook, place) = if path.is_file() {
-            (None, Place::File(path.to_owned()))
+        let (notebook, place, background) = if path.is_file() {
+            (None, Place::File(path.to_owned()), None)
         } else {
+            let notebook = Notebook::open(path, cache)?;
+            let background = notebook.background_with(
+                BACKGROUND,
+                |file| Coordinated(file.to_owned()),
+                sync_woken,
+            )?;
+            background.watch(notebook.replicas());
             (
-                Some(Notebook::open(path, cache)?),
+                Some(notebook),
                 Place::Folder(path.to_owned()),
+                Some(background),
             )
         };
         Ok(Self {
@@ -257,28 +289,59 @@ impl Library {
             place,
             cache: cache.to_owned(),
             index: Mutex::default(),
+            background,
+            open: Mutex::default(),
+            offline: AtomicBool::new(false),
         })
     }
 
     /// The notebook folder `root` on `server`; while the server cannot be reached, its sections
     /// as last listed, if it was listed before.
     pub(crate) fn server(server: Server, root: &str, cache: &Path) -> Result<Self> {
+        let server = Arc::new(server);
+        let connect = Arc::clone(&server);
+        let background = Background::smb(
+            root,
+            LIMIT,
+            BACKGROUND,
+            move || connect.connect(),
+            sync_woken,
+        )?;
         let library = Self {
             notebook: Mutex::default(),
             place: Place::Share {
-                server: Arc::new(server),
+                server,
                 client: Mutex::default(),
                 root: root.to_owned(),
             },
             cache: cache.to_owned(),
             index: Mutex::default(),
+            background: Some(background),
+            open: Mutex::default(),
+            offline: AtomicBool::new(false),
         };
-        if let Err(error) = library.with_notebook(false, |_| Ok(()))
-            && library.listed().is_none()
-        {
-            return Err(error);
+        let reached = library.with_notebook(false, |_| Ok(()));
+        match library.listed() {
+            Some(listed) => library.watch(&listed.files),
+            None => reached?,
         }
         Ok(library)
+    }
+
+    /// Has the background sync a share notebook's sections, `files` as `Listed` keeps them.
+    fn watch(&self, files: &BTreeMap<String, String>) {
+        let Some(background) = &self.background else {
+            return;
+        };
+        let smb = self.cache.join("smb");
+        background.watch(
+            files
+                .iter()
+                .map(|(path, identity)| {
+                    (path.clone(), Some(smb.join(format!("{identity}.sqlite"))))
+                })
+                .collect(),
+        );
     }
 
     /// Where a share notebook's last listing is kept.
@@ -366,6 +429,9 @@ impl Library {
             };
             tabs(notebook.catalog(), &mut listed.tabs);
             files(notebook.catalog(), &mut listed.files);
+            if let (Place::Folder(_), Some(background)) = (&self.place, &self.background) {
+                background.watch(notebook.replicas());
+            }
             Ok(listed)
         });
         let Some(listing) = self.listing() else {
@@ -375,14 +441,42 @@ impl Library {
             Ok(listed) => {
                 std::fs::create_dir_all(listing.parent().ok_or("No cache")?)?;
                 std::fs::write(&listing, serde_json::to_vec(&listed)?)?;
+                self.watch(&listed.files);
                 Ok(listed.tabs)
             }
             Err(error) => Ok(self.listed().ok_or(error)?.tabs),
         }
     }
 
-    /// The section at catalog `path`, through a replica in the cache.
+    /// The section at catalog `path`, through a replica in the cache, following Work
+    /// Offline. The background may hold the replica for a step, which takes a network round
+    /// trip, so a busy replica is tried again for a while.
     pub(crate) fn section(
+        &self,
+        path: &str,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Result<session::Section> {
+        let deadline = Instant::now() + TIMEOUT * 3;
+        let notify = Arc::new(notify);
+        let section = loop {
+            let notify = Arc::clone(&notify);
+            match self.section_once(path, move || notify()) {
+                Err(error)
+                    if Instant::now() < deadline
+                        && error
+                            .downcast_ref::<notebook::Error>()
+                            .is_some_and(notebook::Error::busy) =>
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                opened => break opened?,
+            }
+        };
+        section.set_offline(self.offline.load(Ordering::Relaxed));
+        Ok(section)
+    }
+
+    fn section_once(
         &self,
         path: &str,
         notify: impl Fn() + Send + 'static,
@@ -518,6 +612,27 @@ fn dated(author: &str, date: &str, time: &str) -> Result<PageCreation> {
 }
 
 impl Section {
+    /// The section at catalog `path` of `library`, its edits naming `author`.
+    pub(crate) fn open(
+        library: Arc<Library>,
+        path: &str,
+        author: String,
+        notify: impl Fn() + Send + Sync + 'static,
+    ) -> Result<Self> {
+        let shared = Arc::new(Shared {
+            section: library.section(path, notify)?,
+            author,
+            status: AtomicU8::new(0),
+        });
+        let mut open = library
+            .open
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        open.push((path.to_owned(), Arc::downgrade(&shared)));
+        drop(open);
+        Ok(Self { shared, library })
+    }
+
     pub(crate) fn rows(&self) -> Result<Vec<Row>> {
         let section = &self.shared.section;
         let conflicts = section.conflicts()?;
@@ -684,9 +799,50 @@ pub(crate) struct Found {
 
 impl Library {
     /// Pages of the notebook holding every word of `query` in their title or text, as the
-    /// desktop searches: the open section as its edits leave it, others as stored, read
-    /// again when their file changed.
+    /// desktop searches.
     pub(crate) fn search(&self, open: Option<(&str, &Section)>, query: &str) -> Result<Vec<Found>> {
+        self.indexed(open, |index| {
+            index
+                .search(&Query::new(query), |_| true)
+                .into_iter()
+                .map(|found| Found {
+                    section: found.section,
+                    page: found.space.to_string(),
+                    title: found.title.replace(|char: char| char.is_control(), " "),
+                    snippet: found.snippet,
+                })
+                .collect()
+        })
+    }
+
+    /// The notebook's tagged paragraphs in page order, as OneNote's Tags Summary lists
+    /// them: once for each of their tags.
+    pub(crate) fn tagged(&self, open: Option<(&str, &Section)>) -> Result<Vec<Tag>> {
+        self.indexed(open, |index| {
+            index
+                .tagged(|_| true)
+                .into_iter()
+                .map(|tagged: Tagged| Tag {
+                    section: tagged.section,
+                    page: tagged.space.to_string(),
+                    title: tagged.title.replace(|char: char| char.is_control(), " "),
+                    paragraph: tagged.paragraph.to_string(),
+                    name: tagged.name,
+                    shape: tagged.shape,
+                    checked: tagged.checked,
+                    text: tagged.text,
+                })
+                .collect()
+        })
+    }
+
+    /// `read` over the notebook's pages: the open section as its edits leave it, others as
+    /// stored, read again when their file changed.
+    fn indexed<T>(
+        &self,
+        open: Option<(&str, &Section)>,
+        read: impl FnOnce(&Index) -> T,
+    ) -> Result<T> {
         let tabs: Vec<String> = self
             .tabs()?
             .into_iter()
@@ -714,18 +870,73 @@ impl Library {
             }
         }
         index.retain(|entry| tabs.contains(&entry.section));
-        Ok(index
-            .search(&Query::new(query), |_| true)
-            .into_iter()
-            .map(|found| Found {
-                section: found.section,
-                page: found.space.to_string(),
-                title: found.title.replace(|char: char| char.is_control(), " "),
-                snippet: found.snippet,
-            })
-            .collect())
+        Ok(read(index))
     }
 
+    /// Each section's sync status in the notebook's order: an open section's from its
+    /// session, the others' from the background.
+    pub(crate) fn sync_status(&self) -> Vec<Synced> {
+        let mut sections = self
+            .background
+            .as_ref()
+            .map(Background::status)
+            .unwrap_or_default();
+        for (path, shared) in self.open_sections() {
+            let Some(status) = report(shared.section.sync_status().map_err(Into::into)) else {
+                continue;
+            };
+            match sections.iter_mut().find(|(listed, _)| *listed == path) {
+                Some((_, listed)) => *listed = status,
+                None => sections.push((path, status)),
+            }
+        }
+        sections
+            .into_iter()
+            .map(|(path, status): (String, SyncStatus)| Synced {
+                state: status.state() as u8,
+                synced: status.synced.map(unix),
+                queued: status.queued,
+                error: status.error.map(|error| error.to_string()),
+                path,
+            })
+            .collect()
+    }
+
+    fn open_sections(&self) -> Vec<(String, Arc<Shared>)> {
+        let mut open = self.open.lock().unwrap_or_else(|error| error.into_inner());
+        open.retain(|(_, shared)| shared.strong_count() > 0);
+        open.iter()
+            .filter_map(|(path, shared)| Some((path.clone(), shared.upgrade()?)))
+            .collect()
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct Synced {
+    pub(crate) path: String,
+    /// `SyncState` by its place in the enum, best first.
+    pub(crate) state: u8,
+    /// When the section file was last reached, in seconds since 1970.
+    pub(crate) synced: Option<i64>,
+    /// Changes the file does not hold yet.
+    pub(crate) queued: u64,
+    pub(crate) error: Option<String>,
+}
+
+/// A tagged paragraph, from `sb_library_tagged`.
+#[derive(serde::Serialize)]
+pub(crate) struct Tag {
+    pub(crate) section: String,
+    pub(crate) page: String,
+    pub(crate) title: String,
+    pub(crate) paragraph: String,
+    pub(crate) name: String,
+    pub(crate) shape: u16,
+    pub(crate) checked: bool,
+    pub(crate) text: String,
+}
+
+impl Library {
     /// Reads the section at catalog `path` into `index` again when its file changed, and
     /// checks at most every 30 seconds.
     fn reindex(
@@ -814,12 +1025,12 @@ fn boxed<T>(result: Result<T>, error: *mut *mut c_char) -> *mut T {
     }
 }
 
-fn json(value: Result<impl serde::Serialize>) -> *mut c_char {
+pub(crate) fn json(value: Result<impl serde::Serialize>) -> *mut c_char {
     report(value.and_then(|value| Ok(serde_json::to_string(&value)?)))
         .map_or(std::ptr::null_mut(), owned)
 }
 
-fn optional(text: *const c_char) -> Option<String> {
+pub(crate) fn optional(text: *const c_char) -> Option<String> {
     (!text.is_null()).then(|| string(text))
 }
 
@@ -923,6 +1134,55 @@ pub unsafe extern "C" fn sb_library_search(
 ) -> *mut c_char {
     let path = optional(path).unwrap_or_default();
     json(library.search(open.map(|section| (path.as_str(), section)), &string(query)))
+}
+
+/// The notebook's tagged paragraphs in page order as JSON, once for each of their tags:
+/// each with `section`, `page`, `title`, `paragraph`, `name`, `shape` (the tag's symbol, 0
+/// for a highlighting tag), `checked` and `text`. `open` and `path` as `sb_library_search`
+/// takes them; reads the notebook's sections, so call it off the main thread.
+///
+/// # Safety
+/// A non-null `path` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_library_tagged(
+    library: &Library,
+    open: Option<&Section>,
+    path: *const c_char,
+) -> *mut c_char {
+    let path = optional(path).unwrap_or_default();
+    json(library.tagged(open.map(|section| (path.as_str(), section))))
+}
+
+/// Each section's sync status as JSON, in the notebook's order: `path`, `state` (0 up to
+/// date, 1 syncing, 2 in use elsewhere, 3 not connected, 4 read-only, 5 failed), `synced`
+/// (seconds since 1970, or null before the file was reached), `queued` changes and `error`.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_library_sync_status(library: &Library) -> *mut c_char {
+    json(Ok(library.sync_status()))
+}
+
+/// Works offline, or online again: edits wait in the cache until then or until
+/// `sb_library_sync_now`. Sections opened later follow.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_library_set_offline(library: &Library, offline: bool) {
+    library.offline.store(offline, Ordering::Relaxed);
+    if let Some(background) = &library.background {
+        background.set_offline(offline);
+    }
+    for (_, shared) in library.open_sections() {
+        shared.section.set_offline(offline);
+    }
+}
+
+/// Syncs every section of the notebook now, working offline included.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_library_sync_now(library: &Library) {
+    if let Some(background) = &library.background {
+        background.wake();
+    }
+    for (_, shared) in library.open_sections() {
+        shared.section.wake();
+    }
 }
 
 /// # Safety
@@ -1050,16 +1310,7 @@ pub unsafe extern "C" fn sb_section_open(
         Arc::from_raw(library as *const Library)
     };
     boxed(
-        library
-            .section(&string(path), move || wake(token))
-            .map(|section| Section {
-                shared: Arc::new(Shared {
-                    section,
-                    author: string(author),
-                    status: AtomicU8::new(0),
-                }),
-                library,
-            }),
+        Section::open(library, &string(path), string(author), move || wake(token)),
         error,
     )
 }

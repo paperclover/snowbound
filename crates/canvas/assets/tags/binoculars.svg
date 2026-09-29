@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x1="0" y1="5.6" x2="0" y2="14.6" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#d4dcf0"/><stop offset="1" stop-color="#6a78b0"/></linearGradient>
+    <linearGradient id="g1" x1="0" y1="1.4" x2="0" y2="6" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e4eaf8"/><stop offset="1" stop-color="#7a88bc"/></linearGradient>
+    <linearGradient id="g2" x1="0" y1="6.2" x2="0" y2="10" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#b4c0e0"/><stop offset="1" stop-color="#6a78b0"/></linearGradient>
+  </defs>
+  <path d="M2.2 5.6H5.8A1.2 1.2 0 0 1 7 6.8V13.4A1.2 1.2 0 0 1 5.8 14.6H2.2A1.2 1.2 0 0 1 1 13.4V6.8A1.2 1.2 0 0 1 2.2 5.6Z" fill="url(#g0)"/>
+  <path d="M2.8 1.4H5.2A0.8 0.8 0 0 1 6 2.2V5.2A0.8 0.8 0 0 1 5.2 6H2.8A0.8 0.8 0 0 1 2 5.2V2.2A0.8 0.8 0 0 1 2.8 1.4Z" fill="url(#g1)"/>
+  <path d="M1.6 12.4H6.4V14H1.6Z" fill="#2a3470" fill-opacity="0.6"/>
+  <path d="M10.2 5.6H13.8A1.2 1.2 0 0 1 15 6.8V13.4A1.2 1.2 0 0 1 13.8 14.6H10.2A1.2 1.2 0 0 1 9 13.4V6.8A1.2 1.2 0 0 1 10.2 5.6Z" fill="url(#g0)"/>
+  <path d="M10.8 1.4H13.2A0.8 0.8 0 0 1 14 2.2V5.2A0.8 0.8 0 0 1 13.2 6H10.8A0.8 0.8 0 0 1 10 5.2V2.2A0.8 0.8 0 0 1 10.8 1.4Z" fill="url(#g1)"/>
+  <path d="M9.6 12.4H14.4V14H9.6Z" fill="#2a3470" fill-opacity="0.6"/>
+  <path d="M6.6 6.2H9.4V10H6.6Z" fill="url(#g2)"/>
+</svg>

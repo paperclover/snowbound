@@ -1090,25 +1090,7 @@ impl<'a> Writer<'_, 'a> {
                 self.picture(image, Some(paragraph.id))
             }
             ParagraphContent::Attachment(attachment) => {
-                let Some(bytes) = &attachment.bytes else {
-                    return Err(OpError::Unsupported("A new attachment needs its payload").into());
-                };
-                let ids = AttachmentIds {
-                    object: attachment.id,
-                    file: fresh()?,
-                    payload: crate::write::fresh_guid()?,
-                    preview: match &attachment.preview {
-                        Some(_) => Some((crate::write::fresh_guid()?, fresh()?)),
-                        None => None,
-                    },
-                };
-                let mut payloads: Vec<([u8; 16], &[u8])> = vec![(ids.payload, bytes)];
-                if let (Some((payload, _)), Some(icon)) = (ids.preview, &attachment.preview) {
-                    payloads.push((payload, icon));
-                }
-                self.write_with(&payloads, |page| {
-                    content::attachment_changes(page, attachment, &ids, paragraph.id)
-                })
+                self.attachment(attachment, Some(paragraph.id))
             }
             ParagraphContent::Ink(ink) => self.ink(ink, Some(paragraph.id)),
             ParagraphContent::Unsupported(_) => {
@@ -1133,6 +1115,32 @@ impl<'a> Writer<'_, 'a> {
         let bytes: &[u8] = bytes;
         self.write_with(&[(payload, bytes)], |page| {
             content::picture_changes(page, image, image.id, file, payload, holder)
+        })
+    }
+
+    fn attachment(
+        &mut self,
+        attachment: &Attachment,
+        holder: Option<ExGuid>,
+    ) -> Result<(), Failure> {
+        let Some(bytes) = &attachment.bytes else {
+            return Err(OpError::Unsupported("A new attachment needs its payload").into());
+        };
+        let ids = AttachmentIds {
+            object: attachment.id,
+            file: fresh()?,
+            payload: crate::write::fresh_guid()?,
+            preview: match &attachment.preview {
+                Some(_) => Some((crate::write::fresh_guid()?, fresh()?)),
+                None => None,
+            },
+        };
+        let mut payloads: Vec<([u8; 16], &[u8])> = vec![(ids.payload, bytes)];
+        if let (Some((payload, _)), Some(icon)) = (ids.preview, &attachment.preview) {
+            payloads.push((payload, icon));
+        }
+        self.write_with(&payloads, |page| {
+            content::attachment_changes(page, attachment, &ids, holder)
         })
     }
 
@@ -1166,13 +1174,14 @@ impl<'a> Writer<'_, 'a> {
                         self.free(id)?;
                     }
                 }
-                if first.parent.is_some() || first.level != 1 {
-                    return Err(OpError::Unsupported("An outline starts at its first level").into());
+                if first.parent.is_some() {
+                    return Err(OpError::Unsupported("An outline's first paragraph has no parent").into());
                 }
                 self.paragraph(outline.id, None, first, Some((outline.id, x, y)))?;
-                // Later paragraphs follow the first, their levels as the outline gives them.
-                if !rest.is_empty() {
-                    let mut targets = vec![(first.id, 1)];
+                // Later paragraphs follow the first, their levels as the outline gives them; a
+                // deeper first paragraph goes in a group, as OneNote stores a tabbed one.
+                if !rest.is_empty() || first.level != 1 {
+                    let mut targets = vec![(first.id, first.level)];
                     for paragraph in rest {
                         let parent = paragraph.parent.unwrap_or(outline.id);
                         let parent_level = rest
@@ -1226,6 +1235,7 @@ impl<'a> Writer<'_, 'a> {
                 }
                 self.picture(image, None)?;
             }
+            PageObject::Attachment(attachment) => self.attachment(attachment, None)?,
             PageObject::Ink(ink) => self.ink(ink, None)?,
             PageObject::Title(_) | PageObject::Unsupported(_) => {
                 return Err(

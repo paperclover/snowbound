@@ -91,13 +91,9 @@ fn open(engine: &mut TextEngine, summary: &str) -> CanvasEditor {
                 Some(label) => (label, true),
                 None => (tag, false),
             };
-            let tag = NoteTag::ALL
-                .into_iter()
-                .find(|tag| {
-                    matches!(&tag.definition().kind, Kind::TagDefinition { label: Some(name), .. } if name == label)
-                })
-                .unwrap();
-            let definition = define(label.into(), tag.definition());
+            let defaults = NoteTag::defaults();
+            let place = defaults.iter().position(|tag| tag.label == label).unwrap();
+            let definition = define(label.into(), defaults[place].definition(place as u16));
             node.text_mut().unwrap().tags.push(Tag {
                 definition: Some(definition),
                 action_type: None,
@@ -146,9 +142,12 @@ fn render(editor: &CanvasEditor) -> String {
                 };
                 let checked = if tag.status & 1 == 1 { "[x]" } else { "" };
                 (
-                    NoteTag::ALL
-                        .iter()
-                        .position(|known| known.definition().kind == *kind),
+                    NoteTag::of(kind).and_then(|(tag, action_type)| {
+                        NoteTag::defaults()
+                            .iter()
+                            .position(|known| *known == tag)
+                            .filter(|place| *place == usize::from(action_type))
+                    }),
                     format!("{}{checked}", label.as_deref().unwrap()),
                 )
             })

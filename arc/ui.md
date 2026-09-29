@@ -116,7 +116,8 @@ rounded or gradient rectangles, pen strokes and raster images.
 - **Glyphs** are rasterized with Swash into an atlas, at quarter-pixel phases,
   so text placed at fractional positions stays crisp and doesn't shimmer as it
   moves. Icons and paths rasterize once per size and phase into the same
-  atlas.
+  atlas. A rounded box's soft shadow is worked out in the shader instead, so
+  popups of any size, widening or not, cost the atlas nothing.
 - **The renderer never measures text.** Text reaches it through a trait that
   visits positioned glyph runs. Line metrics stay with whoever laid the text
   out, which is how the page keeps its Windows metrics while the chrome uses
@@ -128,9 +129,10 @@ rounded or gradient rectangles, pen strokes and raster images.
   or within shows through a row. A popup's contents clip to its rounded
   outline, and one opening over a combo lays its rows out at their final
   width while only the outline widens.
-- **Caches are bounded.** The glyph atlas and image cache have fixed budgets.
-  Eviction keeps everything the current frame needs and rebuilds after
-  pressure. Images are filtered in linear light with premultiplied alpha.
+- **Caches are bounded.** The image cache has a fixed budget. A full glyph
+  atlas is cleared and rebuilt with only what the current frame needs; where
+  one frame alone needs more than half of it, it doubles, up to what the GPU
+  allows. Images are filtered in linear light with premultiplied alpha.
 
 GPU readback tests pin the rasterization down: successive quarter-pixel
 translations have to move the ink's centroid in quarter-pixel steps, and

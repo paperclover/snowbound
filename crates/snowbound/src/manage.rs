@@ -7,7 +7,7 @@ use notebook::session::Notebook;
 use onestore::{
     ExGuid, PageCreation, PageEdit,
     op::{Edit, Op, PageOp, SectionOp},
-    page::{Image, Page, PageObject},
+    page::{Page, PageObject},
 };
 use std::{error::Error, sync::Arc};
 
@@ -134,26 +134,19 @@ impl State {
         self.edit_page(ops)
     }
 
-    /// Gives the open page `template`'s art, or none, in place of the art it had; its colour
-    /// and rule lines stay.
-    pub(crate) fn art_page(
-        &mut self,
-        template: Option<&'static Template>,
-    ) -> Result<(), Box<dyn Error>> {
-        self.persist()?;
-        let session = self.session.as_ref().ok_or("No section is open")?;
-        let ops = art_ops(&session.section.page(session.space)?, template)?;
-        self.edit_page(ops)
-    }
-
-    /// View, Page Color and Rule Lines: gives the open page `color`, a COLORREF, and
-    /// `rule_lines` as one undo step; its art stays.
+    /// View, Page Color and Rule Lines: gives the open page `color`, a COLORREF,
+    /// `rule_lines` and, when given, `template`'s art or none in place of the art it had, as
+    /// one undo step.
     pub(crate) fn paper_page(
         &mut self,
         color: Option<u32>,
         rule_lines: Option<onestore::page::RuleLines>,
+        art: Option<Option<&Template>>,
     ) -> Result<(), Box<dyn Error>> {
-        let response = self.view.set_paper(color, rule_lines)?;
+        let art = art
+            .map(|template| template.map_or(Ok(Vec::new()), Template::pictures))
+            .transpose()?;
+        let response = self.view.set_paper(color, rule_lines, art)?;
         self.respond(response);
         Ok(())
     }
@@ -177,7 +170,7 @@ impl State {
 
     /// Asks where to create a notebook and creates it, as File, New does in OneNote.
     pub(crate) fn new_notebook(&mut self) -> Result<(), Box<dyn Error>> {
-        let Some(root) = platform::pick_new("New Notebook", "My Notebook") else {
+        let Some(root) = platform::pick_new("New Notebook", "My Notebook", "Create") else {
             return Ok(());
         };
         let page = self.dated_page(None)?;
@@ -503,25 +496,9 @@ pub fn art_ops(page: &Page, template: Option<&Template>) -> Result<Vec<PageOp>, 
             _ => true,
         })
         .map(PageObject::id);
-    for art in template.map_or(&[][..], |template| template.art) {
-        let bytes =
-            canvas::gpu::page::template_picture(art.art).ok_or("That template's art is missing")?;
+    for image in template.map_or(Ok(Vec::new()), Template::pictures)? {
         ops.push(PageOp::Add {
-            object: PageObject::Image(Image {
-                id: onestore::page::text::new_id()?,
-                layout: onestore::document::Layout {
-                    x: Some(art.position[0]),
-                    y: Some(art.position[1]),
-                    max_width: art.size.map(|size| size[0]),
-                    max_height: art.size.map(|size| size[1]),
-                    width_set_by_user: art.size.map(|_| true),
-                    ..Default::default()
-                },
-                size: art.size,
-                bytes: Some(bytes.into()),
-                alt: None,
-                background: true,
-            }),
+            object: PageObject::Image(image),
             before: under,
         });
     }
@@ -873,9 +850,10 @@ mod tests {
     }
 
     /// Backgrounds the Page Color menu gives OneNote's ruled pages
-    /// (`corpus/rule-lines/native`): art on a page with rule lines, keeping them, art taken
-    /// away, and a colour outside OneNote's menu. `SNOWBOUND_BACKGROUND_EXPORT` names a new
-    /// directory that receives the notebook for a cold reopen in OneNote 2010.
+    /// (`corpus/rule-lines/native`) through the editor, each step one edit: art on a page
+    /// with rule lines, keeping them; art taken away, undone, redone and replaced; a colour
+    /// outside OneNote's menu; and art on a coloured page. `SNOWBOUND_BACKGROUND_EXPORT`
+    /// names a new directory that receives the notebook for a cold reopen in OneNote 2010.
     #[test]
     fn backgrounds_go_on_and_off_pages_that_have_content() {
         let temporary =
@@ -896,38 +874,73 @@ mod tests {
                 .unwrap()
                 .0
         };
-        let on_page = |space, ops: Vec<PageOp>| {
-            edit(
-                &file,
-                ops.into_iter().map(|op| Op::Page { space, op }).collect(),
-            )
+        enum Step {
+            Art(Option<&'static str>),
+            Color(u32),
+            Undo,
+            Redo,
+        }
+        use Step::*;
+        let mut engine = canvas::layout::TextEngine::default();
+        let mut run = |title: &str, steps: &[Step]| {
+            let space = titled(title);
+            let mut editor =
+                canvas::editor::CanvasEditor::from_page(page(&file, space), &mut engine).unwrap();
+            for step in steps {
+                let (color, lines) = (editor.page_color(), editor.rule_lines());
+                let changed = match step {
+                    Art(name) => {
+                        let art = name.map_or(Ok(Vec::new()), |name| {
+                            canvas::template::find(name).unwrap().pictures()
+                        });
+                        editor.set_paper(color, lines, Some(art.unwrap()))
+                    }
+                    Color(color) => editor.set_paper(Some(*color), lines, None),
+                    Undo => editor.undo(&mut engine).unwrap(),
+                    Redo => editor.redo(&mut engine).unwrap(),
+                };
+                assert!(changed);
+                let ops = editor.take_ops().unwrap();
+                assert!(!ops.is_empty());
+                edit(
+                    &file,
+                    ops.into_iter().map(|op| Op::Page { space, op }).collect(),
+                );
+            }
+            page(&file, space)
         };
-        let ivy = canvas::template::find("Ivy");
-        let (standard, wide, grid) = (titled("Standard"), titled("Wide"), titled("SmallGrid"));
-        on_page(standard, art_ops(&page(&file, standard), ivy).unwrap());
-        on_page(wide, art_ops(&page(&file, wide), ivy).unwrap());
-        on_page(wide, art_ops(&page(&file, wide), None).unwrap());
-        // A warm grey no menu offers.
-        on_page(grid, vec![PageOp::Color(Some(0x00c8d8e8))]);
-
-        let standard = page(&file, standard);
-        assert!(standard.rule_lines.is_some());
-        assert_eq!(
-            standard
-                .objects
+        let lemon = canvas::template::PAGE_COLORS[2];
+        assert_eq!(lemon.0, "Lemon");
+        let pages = [
+            run("Standard", &[Art(Some("Ivy"))]),
+            run("Wide", &[Art(Some("Ivy")), Art(None)]),
+            // A warm grey no menu offers.
+            run("SmallGrid", &[Color(0x00c8d8e8)]),
+            run("College", &[Art(Some("Ivy")), Undo]),
+            run("MediumGrid", &[Art(Some("Ivy")), Undo, Redo]),
+            run("LargeGrid", &[Art(Some("Ivy")), Art(Some("Tulips")), Undo]),
+            run("VeryLargeGrid", &[Color(lemon.1), Art(Some("Sparks"))]),
+        ];
+        let art = |page: &Page| -> Vec<f32> {
+            page.objects
                 .iter()
-                .filter(|object| matches!(object, PageObject::Image(image) if image.background))
-                .count(),
-            ivy.unwrap().art.len()
-        );
-        let wide = page(&file, wide);
-        assert!(
-            !wide
-                .objects
-                .iter()
-                .any(|object| matches!(object, PageObject::Image(_)))
-        );
-        assert_eq!(page(&file, grid).color, Some(0x00c8d8e8));
+                .filter_map(|object| match object {
+                    PageObject::Image(image) if image.background => image.layout.max_width,
+                    _ => None,
+                })
+                .collect()
+        };
+        let [standard, wide, grid, college, medium, large, very_large] = &pages;
+        let [ivy, sparks] = ["Ivy", "Sparks"]
+            .map(|name| canvas::template::find(name).unwrap().art[0].size.unwrap()[0]);
+        assert_eq!(art(standard), [ivy]);
+        assert!(pages.iter().all(|page| page.rule_lines.is_some()));
+        assert!(art(wide).is_empty() && art(college).is_empty());
+        assert_eq!(grid.color, Some(0x00c8d8e8));
+        assert_eq!(art(medium), [ivy]);
+        assert_eq!(art(large), [ivy]);
+        assert_eq!(art(very_large), [sparks]);
+        assert_eq!(very_large.color, Some(lemon.1));
         if let Some(directory) = std::env::var_os("SNOWBOUND_BACKGROUND_EXPORT") {
             copy(&temporary, Path::new(&directory));
         }

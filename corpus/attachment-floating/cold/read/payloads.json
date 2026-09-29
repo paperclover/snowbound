@@ -1,0 +1,18 @@
+﻿[
+    {
+        "sha256":  "1dec2d4ce43ad4fb609d5ec604ed9cc5a602f5930c9726e553dbcf5b4d51ee3a",
+        "name":  "large.bin",
+        "object":  "{01634379-E6DF-0FE9-1F9E-D863E5BCE12A}{4}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{6A838D53-0497-0161-3E0F-95FC73741A4D}{1}{B0}",
+        "bytes":  2097152
+    },
+    {
+        "sha256":  "78b7cac526a295294b0a4f001cfdc3a8a30ea5dad8d18cc53022a6a5285ca58f",
+        "name":  "float 🦀.txt",
+        "object":  "{01634379-E6DF-0FE9-1F9E-D863E5BCE12A}{2}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{6A838D53-0497-0161-3E0F-95FC73741A4D}{1}{B0}",
+        "bytes":  37
+    }
+]

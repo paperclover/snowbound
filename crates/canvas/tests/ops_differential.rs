@@ -13,11 +13,20 @@ use canvas::{
 use draw::edit::Movement;
 use onestore::{
     Arena, ExGuid, RevisionIndex, Section, Store,
-    document::{Document, Kind as Node},
+    document::{Document, Kind as Node, Layout},
     op::{Edit, Op, PageOp},
-    page::Page,
+    page::{Image, Page},
 };
 use std::{collections::BTreeMap, path::Path};
+
+/// A one-pixel PNG standing in for template art's bytes.
+const ART: [u8; 67] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
 
 #[path = "../../onestore/tests/support/sweep.rs"]
 mod sweep;
@@ -98,11 +107,22 @@ enum Kind {
     InsertSpace,
     RemoveSpace,
     InsertSpaceRight,
+    Paper,
+    Art,
+    Attach,
+    /// A click on blank page, then Attach File: a file on the page.
+    AttachPage,
+    MoveFile,
+    RemoveFile,
+    /// Typing, backspaces and a word backspace at one caret: one undo step.
+    TypeRun,
+    /// More typing where the caret is, joining the run before it.
+    TypeOn,
     Undo,
     Redo,
 }
 
-const KINDS: [Kind; 55] = [
+const KINDS: [Kind; 57] = [
     Kind::Type,
     Kind::TypeEnd,
     Kind::Compose,
@@ -156,8 +176,59 @@ const KINDS: [Kind; 55] = [
     Kind::InsertSpace,
     Kind::RemoveSpace,
     Kind::InsertSpaceRight,
+    Kind::Paper,
+    Kind::Art,
     Kind::Undo,
     Kind::Redo,
+];
+
+/// Typing runs, in plans of their own so the random edits' sequences stay as they were.
+const TYPING_PLANS: [&[Kind]; 3] = [
+    &[Kind::TypeRun, Kind::Undo, Kind::Redo],
+    &[
+        Kind::TypeRun,
+        Kind::TypeOn,
+        Kind::Undo,
+        Kind::Redo,
+        Kind::Undo,
+    ],
+    &[Kind::PageType, Kind::TypeOn, Kind::Undo, Kind::Redo],
+];
+
+/// Files attached at a random caret, in plans of their own so the random edits' sequences
+/// stay as they were.
+const ATTACH_PLANS: [&[Kind]; 2] = [
+    &[Kind::Attach, Kind::Undo, Kind::Redo],
+    &[Kind::Attach, Kind::Type, Kind::Attach, Kind::Undo],
+];
+
+/// Files attached on blank page, moved, spaced and removed, in plans of their own so the
+/// random edits' sequences stay as they were.
+const FLOATING_PLANS: [&[Kind]; 4] = [
+    &[Kind::AttachPage, Kind::Undo, Kind::Redo],
+    &[
+        Kind::AttachPage,
+        Kind::MoveFile,
+        Kind::Undo,
+        Kind::Redo,
+        Kind::RemoveFile,
+        Kind::Undo,
+    ],
+    &[Kind::AttachPage, Kind::InsertSpace, Kind::Undo, Kind::Redo],
+    &[
+        Kind::AttachPage,
+        Kind::AttachPage,
+        Kind::MoveFile,
+        Kind::Undo,
+        Kind::Undo,
+    ],
+];
+
+/// Page colour, rule lines and art undone and redone across each other.
+const PAPER_PLANS: [&[Kind]; 3] = [
+    &[Kind::Art, Kind::Art, Kind::Undo, Kind::Undo, Kind::Redo],
+    &[Kind::Art, Kind::Paper, Kind::Art, Kind::Undo, Kind::Undo],
+    &[Kind::Paper, Kind::Art, Kind::Undo, Kind::Paper, Kind::Redo],
 ];
 
 struct Random(u64);
@@ -212,10 +283,13 @@ fn perform(
         kind,
         Kind::Undo
             | Kind::Redo
+            | Kind::TypeOn
             | Kind::PlaceImage
             | Kind::RemoveImage
             | Kind::CreateOutline
             | Kind::Date
+            | Kind::Paper
+            | Kind::Art
     ) {
         if outlines.is_empty() {
             return false;
@@ -328,18 +402,9 @@ fn perform(
         Kind::Bullets => format(editor, engine, random, Formatting::Bullets),
         Kind::Numbering => format(editor, engine, random, Formatting::Numbering),
         Kind::Tag => {
-            let tag = [
-                NoteTag::ToDo,
-                NoteTag::Important,
-                NoteTag::Question,
-                NoteTag::RememberForLater,
-                NoteTag::Definition,
-                NoteTag::Highlight,
-                NoteTag::Contact,
-                NoteTag::Address,
-                NoteTag::PhoneNumber,
-            ][random.below(9)];
-            format(editor, engine, random, Formatting::Tag(tag))
+            let place = random.below(9);
+            let tag = NoteTag::defaults().swap_remove(place);
+            format(editor, engine, random, Formatting::Tag(tag, place as u16))
         }
         Kind::Check => format(editor, engine, random, Formatting::Check),
         Kind::ClickCheck => {
@@ -461,6 +526,106 @@ fn perform(
         Kind::InsertSpaceRight => {
             let line = editor.active_outline().origin()[0] - random.below(40) as f32;
             editor.insert_space(engine, 0, line, 45.0).unwrap_or(false)
+        }
+        // Lemon paper with college rules, or none.
+        Kind::Paper => {
+            let (color, lines) = match editor.page_color() {
+                None => (Some(0x00dd_fdfd), Some(canvas::template::RULE_LINES[1].1)),
+                Some(_) => (None, None),
+            };
+            editor.set_paper(color, lines, None)
+        }
+        // Template art in two pieces, as the Page Color menu gives it, or none after art.
+        Kind::Art => {
+            let piece = |x: f32| Image {
+                id: onestore::page::text::new_id().unwrap(),
+                layout: Layout {
+                    x: Some(x),
+                    y: Some(-3.6),
+                    max_width: Some(174.5),
+                    max_height: Some(640.0),
+                    width_set_by_user: Some(true),
+                    ..Default::default()
+                },
+                size: Some([174.5, 640.0]),
+                bytes: Some(std::sync::Arc::from(ART.as_slice())),
+                alt: None,
+                background: true,
+            };
+            let shown = editor.page().unwrap().objects.iter().any(|object| {
+                matches!(object, onestore::page::PageObject::Image(image) if image.background)
+            });
+            let art = match shown {
+                true => Vec::new(),
+                false => vec![piece(-27.0), piece(400.0)],
+            };
+            editor.set_paper(editor.page_color(), editor.rule_lines(), Some(art))
+        }
+        Kind::Attach => {
+            let file = onestore::page::Attachment {
+                id: onestore::page::text::new_id().unwrap(),
+                filename: "notes.txt".into(),
+                source_path: None,
+                size: Some([24.0, 24.0]),
+                layout: Default::default(),
+                bytes: Some(std::sync::Arc::from(b"notes".as_slice())),
+                preview: Some(std::sync::Arc::from(ART.as_slice())),
+                recording: None,
+            };
+            place(editor, middle) && editor.insert_attachment(engine, file).is_ok()
+        }
+        Kind::AttachPage => {
+            let file = onestore::page::Attachment {
+                id: onestore::page::text::new_id().unwrap(),
+                filename: "float.txt".into(),
+                source_path: None,
+                size: Some([24.0, 24.0]),
+                layout: Default::default(),
+                bytes: Some(std::sync::Arc::from(b"float".as_slice())),
+                preview: Some(std::sync::Arc::from(ART.as_slice())),
+                recording: None,
+            };
+            let x = 36.0 + 18.0 * random.below(20) as f32;
+            editor.place_caret(engine, [x, 1440.0], 240.0).is_ok()
+                && editor.insert_attachment(engine, file).is_ok()
+        }
+        Kind::MoveFile | Kind::RemoveFile => {
+            let Some(file) = editor
+                .page()
+                .unwrap()
+                .objects
+                .into_iter()
+                .find_map(|object| match object {
+                    onestore::page::PageObject::Attachment(file) => Some(file),
+                    _ => None,
+                })
+            else {
+                return false;
+            };
+            if kind == Kind::RemoveFile {
+                return editor.remove_image(engine, file.id).is_ok();
+            }
+            let (origin, size) = editor.image_placement(file.id).unwrap();
+            let delta = [18.0, -36.0].map(|step| step * (1 + random.below(3)) as f32);
+            editor
+                .place_image(
+                    engine,
+                    file.id,
+                    [origin[0] + delta[0], origin[1] + delta[1]],
+                    size,
+                )
+                .is_ok()
+        }
+        Kind::TypeRun => {
+            place(editor, middle)
+                && editor.insert(engine, "ab").is_ok()
+                && editor.delete(engine, true).is_ok()
+                && editor.insert(engine, " cd").is_ok()
+                && editor.delete_to(engine, Movement::WordLeft).is_ok()
+                && editor.commit_text(engine, "ef".into()).is_ok()
+        }
+        Kind::TypeOn => {
+            editor.insert(engine, "gh").is_ok() && editor.delete(engine, true).is_ok()
         }
         Kind::Undo => editor.undo(engine).unwrap_or(false),
         Kind::Redo => editor.redo(engine).unwrap_or(false),
@@ -749,6 +914,10 @@ fn sweep(
                     .map(|_| KINDS[random.below(KINDS.len())])
                     .collect()
             }))
+            .chain(PAPER_PLANS.map(<[Kind]>::to_vec))
+            .chain(ATTACH_PLANS.map(<[Kind]>::to_vec))
+            .chain(FLOATING_PLANS.map(<[Kind]>::to_vec))
+            .chain(TYPING_PLANS.map(<[Kind]>::to_vec))
             .collect::<Vec<Vec<Kind>>>();
         for plan in plans {
             let arena = Arena::default();

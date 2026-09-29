@@ -58,6 +58,13 @@ replayed and the open batch applied, rebuilt on open. The database runs in WAL
 mode with full synchronous commits, and every setting is read back to check it
 took.
 
+An attached file is a payload like a picture: its bytes ride in the edit that
+inserts it and publish inside that edit's revision. No other file is written,
+so nothing needs to reach the share before the revision that names it. That
+ordering would matter only for `_onefiles` payloads, which OneNote 2010 never
+writes ([file format](file-format.md)). A large file makes a publication as
+large as itself.
+
 A keystroke that publishes immediately costs three commits: the edit, the seal
 (which also records the publication attempt), and the receipt. Each one is
 ordered against something outside the cache. The edit must be durable before

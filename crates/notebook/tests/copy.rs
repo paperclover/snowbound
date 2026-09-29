@@ -11,11 +11,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Pages the writer authored for other rows: text with an attachment and its icon, a
-/// table, nested tables with cell subtrees, an inserted picture, a page-level ink drawing, tags, lists, equations
-/// and paragraph formatting.
+/// Pages the writer authored for other rows: text with an attachment and its icon, files on
+/// the page, a table, nested tables with cell subtrees, an inserted picture, a page-level ink
+/// drawing, tags, lists, equations and paragraph formatting.
 const SOURCES: &[&str] = &[
     "attachment-edit/icon/candidate/files.one",
+    "attachment-floating/candidate/files.one",
     "table-edit/created/candidate/tables.one",
     "table-edit/nested/candidate/synthetic.one",
     "picture-edit/inserted/candidate/pictures.one",

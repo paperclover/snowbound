@@ -5,7 +5,7 @@ use super::*;
 
 /// Something Insert Space moves.
 enum Piece {
-    /// A body outline, picture or ink drawing, placed anew.
+    /// A body outline, picture, file or ink drawing, placed anew.
     Object(ExGuid),
     /// The root nodes of a body outline from `at` on.
     Tail { outline: ExGuid, at: usize },
@@ -81,6 +81,7 @@ impl CanvasEditor {
                     ];
                     (image.id, rect)
                 }
+                page::Content::File { source, .. } => (source.id, content.file().unwrap().1),
                 page::Content::Ink(ink) => match page::ink_bounds(ink) {
                     Some(rect) => (ink.id, rect),
                     None => continue,

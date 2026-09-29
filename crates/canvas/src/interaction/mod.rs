@@ -60,6 +60,8 @@ pub enum Request {
     Paste,
     /// Open a link's address, as a click on a link does.
     OpenLink(String),
+    /// Open a copy of a file with the system's application for it, as a double click does.
+    OpenAttachment(onestore::page::Attachment),
 }
 
 /// What a secondary press lands on, which its context menu offers commands for.
@@ -72,6 +74,8 @@ pub struct Context {
     pub selected: bool,
     /// The paragraph at the caret, which Copy Link to Paragraph names.
     pub paragraph: Option<onestore::ExGuid>,
+    /// The file the press selected, which Open and Save As take.
+    pub attachment: Option<onestore::page::Attachment>,
 }
 
 /// What an event did: `changed` means the page or selection changed (the host saves,
@@ -175,13 +179,15 @@ enum PointerFeedback<'a> {
 pub enum ObjectFocus {
     ReadOnly(usize),
     Image(onestore::ExGuid),
+    /// A file in an outline's flow or on the page.
+    File(onestore::ExGuid),
 }
 
 impl ObjectFocus {
     pub fn read_only(self) -> Option<usize> {
         match self {
             Self::ReadOnly(index) => Some(index),
-            Self::Image(_) => None,
+            Self::Image(_) | Self::File(_) => None,
         }
     }
 }
@@ -519,6 +525,7 @@ impl PageView {
                 let (origin, size) = self.editor.image_placement(id).unwrap();
                 image_rect(origin, size)
             }
+            ObjectFocus::File(id) => self.editor.attachment_rect(id).unwrap(),
         };
         [
             x0 + offset[0],
@@ -861,7 +868,7 @@ impl PageView {
             {
                 Cursor::Pointer
             }
-            (None, Some(Hit::ReadOnly(_) | Hit::Check { .. })) => Cursor::Default,
+            (None, Some(Hit::ReadOnly(_) | Hit::Check { .. } | Hit::File(_))) => Cursor::Default,
             _ => Cursor::Text,
         }
     }
@@ -998,6 +1005,24 @@ impl PageView {
                     .click_check(&mut self.engine, outline, paragraph)?;
                 return self.changed();
             }
+            Some(Hit::File(id)) => {
+                self.set_object_focus(Some(ObjectFocus::File(id)));
+                self.drag = None;
+                if unit != SelectionUnit::Grapheme
+                    && let Some(file) = self.editor.attachment(id)
+                {
+                    return Ok(Response::request(Request::OpenAttachment(file.clone())));
+                }
+                // A file on the page drags as a picture does.
+                if !self.editor.image_in_outline(id) {
+                    self.drag = Some(Drag::Image {
+                        id,
+                        handle: [0, 0],
+                        press: point,
+                        pending_press: Some(self.pointer),
+                    });
+                }
+            }
             Some(Hit::Image { id, handle }) => {
                 self.set_object_focus(Some(ObjectFocus::Image(id)));
                 self.drag = Some(Drag::Image {
@@ -1062,15 +1087,7 @@ impl PageView {
                 });
             }
             None => {
-                // A fresh click places text 7 px above the pointer, on the grid.
-                let position = [point[0], point[1] - 7.0 * self.pixel()];
-                let position = if self.modifiers.option {
-                    position
-                } else {
-                    snap_to_grid(position, self.editor.margin_origin())
-                };
-                self.editor
-                    .place_caret(&mut self.engine, position, DEFAULT_OUTLINE_WIDTH)?;
+                self.place_caret(point)?;
                 self.set_object_focus(None);
                 self.drag = Some(Drag::Text {
                     anchor: self.editor.selection(),
@@ -1079,6 +1096,19 @@ impl PageView {
             }
         }
         self.changed()
+    }
+
+    /// A fresh click places text 7 px above the pointer, on the grid.
+    fn place_caret(&mut self, point: [f32; 2]) -> Result<()> {
+        let position = [point[0], point[1] - 7.0 * self.pixel()];
+        let position = if self.modifiers.option {
+            position
+        } else {
+            snap_to_grid(position, self.editor.margin_origin())
+        };
+        self.editor
+            .place_caret(&mut self.engine, position, DEFAULT_OUTLINE_WIDTH)?;
+        Ok(())
     }
 
     pub fn pointer_released(&mut self) -> Result<Response> {
@@ -1261,11 +1291,22 @@ impl PageView {
     }
 
     /// A secondary press at the pointer: text there takes the caret unless it lies in the
-    /// selection, as OneNote's context menu acts where it opens. `None` off text.
+    /// selection, and a file is selected, as OneNote's context menu acts where it opens.
+    /// `None` off text and files.
     pub fn context(&mut self) -> Result<Option<(Response, Context)>> {
         let point = self.viewport.document_point(self.pointer);
-        let Some(Hit::Text { id, point }) = self.hit_test(point) else {
-            return Ok(None);
+        let (id, point) = match self.hit_test(point) {
+            Some(Hit::Text { id, point }) => (id, point),
+            Some(Hit::File(id)) => {
+                let attachment = self.editor.attachment(id).cloned();
+                self.set_object_focus(Some(ObjectFocus::File(id)));
+                let context = Context {
+                    attachment,
+                    ..Context::default()
+                };
+                return Ok(Some((self.changed()?, context)));
+            }
+            _ => return Ok(None),
         };
         if self.object_focus.is_some() || !self.accepts_text() {
             return Ok(None);
@@ -1296,6 +1337,7 @@ impl PageView {
                 .document()
                 .leaf(anchor.min(focus).paragraph)
                 .map(|(_, _, node)| node.id),
+            attachment: None,
         };
         Ok(Some((self.changed()?, context)))
     }
@@ -1363,6 +1405,44 @@ impl PageView {
         self.edited()
     }
 
+    /// Insert, Attach File: see [`CanvasEditor::insert_attachment`]. A file without an icon
+    /// takes the page's blank one.
+    pub fn insert_attachment(&mut self, mut file: onestore::page::Attachment) -> Result<Response> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok(Response::default());
+        }
+        file.preview
+            .get_or_insert_with(|| crate::gpu::page::file_icon().into());
+        self.editor.insert_attachment(&mut self.engine, file)?;
+        self.follow_pictures()?;
+        self.edited()
+    }
+
+    /// A file dropped at view point `position`, in device pixels: text or blank page there
+    /// takes the caret as a click would, then the file is attached at the caret, on the page
+    /// where the caret is on blank page.
+    pub fn drop_attachment(
+        &mut self,
+        position: [f32; 2],
+        file: onestore::page::Attachment,
+    ) -> Result<Response> {
+        let point = self.viewport.document_point(position);
+        self.set_object_focus(None);
+        match self.hit_test(point) {
+            Some(Hit::Text { id, point }) => {
+                self.editor.focus_outline(id)?;
+                self.editor.select_below(&mut self.engine, id, point)?;
+                let at = self
+                    .editor
+                    .selection_at(point[0], point[1], SelectionUnit::Grapheme)?;
+                self.editor.select(at)?;
+            }
+            None => self.place_caret(point)?,
+            _ => {}
+        }
+        self.insert_attachment(file)
+    }
+
     /// Professional, or Linear with `linear`, on the equation at the caret.
     pub fn switch_equation(&mut self, linear: bool) -> Result<Response> {
         if linear {
@@ -1380,7 +1460,8 @@ impl PageView {
         } else {
             self.editor.undo(&mut self.engine)?;
         }
-        if let Some(ObjectFocus::Image(id)) = self.object_focus
+        self.follow_pictures()?;
+        if let Some(ObjectFocus::Image(id) | ObjectFocus::File(id)) = self.object_focus
             && self.editor.image_placement(id).is_none()
         {
             self.set_object_focus(None);
@@ -1404,16 +1485,27 @@ impl PageView {
         self.changed()
     }
 
-    /// Gives the page a colour (COLORREF) and rule lines, as one undo step.
+    /// Gives the page a colour (COLORREF), rule lines and, when given, `art` in place of its
+    /// background pictures, as one undo step: see [`CanvasEditor::set_paper`].
     pub fn set_paper(
         &mut self,
         color: Option<u32>,
         rule_lines: Option<onestore::page::RuleLines>,
+        art: Option<Vec<onestore::page::Image>>,
     ) -> Result<Response> {
-        if !self.editor.set_paper(color, rule_lines) {
+        if !self.editor.set_paper(color, rule_lines, art) {
             return Ok(Response::default());
         }
+        self.follow_pictures()?;
         self.changed()
+    }
+
+    /// Draws page-level pictures an edit or undo brought to the page.
+    fn follow_pictures(&mut self) -> Result<()> {
+        if let Some((scene, _)) = &mut self.scene {
+            scene.follow(&mut self.editor, &mut self.engine)?;
+        }
+        Ok(())
     }
 
     /// Gives keyboard focus to a read-only object, as an assistive technology asks.
@@ -1439,14 +1531,14 @@ impl PageView {
         if key == &Key::Named(NamedKey::Modifier) {
             return Ok(Response::default());
         }
-        if let Some(ObjectFocus::Image(id)) = self.object_focus
+        if let Some(ObjectFocus::Image(id) | ObjectFocus::File(id)) = self.object_focus
             && matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete))
         {
             self.editor.remove_image(&mut self.engine, id)?;
             self.set_object_focus(None);
             return self.changed();
         }
-        if let Some(ObjectFocus::Image(id)) = self.object_focus
+        if let Some(ObjectFocus::Image(id) | ObjectFocus::File(id)) = self.object_focus
             && !(shift || command || option || control)
             && let Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) = key
             && self.editor.step_from_image(
@@ -1671,6 +1763,8 @@ pub enum Hit {
         id: onestore::ExGuid,
         handle: [i8; 2],
     },
+    /// A file in an outline's flow or on the page, its icon or name.
+    File(onestore::ExGuid),
 }
 
 /// What a document point lands on; `pixel` is document points per device pixel.
@@ -1762,7 +1856,7 @@ fn page_hit(
                 paragraph.tags.iter().any(|tag| {
                     let tag_x = left + shaped.tag_column_offset() + tag.origin[0];
                     let tag_y = top + paragraph.origin[1] + tag.origin[1];
-                    matches!(tag.icon, crate::outline::TagIcon::CheckBox { .. })
+                    tag.icon.checkable()
                         && (tag_x..=tag_x + tag.size).contains(&x)
                         && (tag_y..=tag_y + tag.size).contains(&y)
                 })
@@ -1790,6 +1884,14 @@ fn page_hit(
                 id: picture.id,
                 handle: [0, 0],
             });
+        }
+        if let Some(file) = outline.shaped().objects.iter().find(|object| {
+            let [x0, y0, x1, y1] = object.bounds();
+            matches!(object.kind, crate::outline::ObjectKind::File(_))
+                && (x0..=x1).contains(&inner[0])
+                && (y0..=y1).contains(&inner[1])
+        }) {
+            return Some(Hit::File(file.id));
         }
         if x >= bounds[0] && x <= bounds[2] && y >= body_top && y <= bounds[3] {
             return Some(Hit::Text {
@@ -1826,6 +1928,7 @@ fn page_hit(
             crate::gpu::page::SceneHit::Date(field) => Some(Hit::Date(field)),
             crate::gpu::page::SceneHit::ReadOnly(index) => Some(Hit::ReadOnly(index)),
             crate::gpu::page::SceneHit::Image(id) => Some(Hit::Image { id, handle: [0, 0] }),
+            crate::gpu::page::SceneHit::File(id) => Some(Hit::File(id)),
         }
     };
     [Layer::Grips, Layer::Body, Layer::Below]
@@ -2009,6 +2112,29 @@ fn page_primitives<'a>(
                 .ok_or("The selected picture is missing.")?,
         };
         append_image_chrome(image_rect(origin, size), paint.pixel, &mut primitives);
+    }
+    // OneNote shades a selected file's column and frames it with dashes.
+    if let Some(ObjectFocus::File(id)) = object_focus {
+        let rect = match preview {
+            Some(PointerFeedback::Image(moving, origin, size)) if moving == id => {
+                image_rect(origin, size)
+            }
+            _ => editor
+                .attachment_rect(id)
+                .ok_or("The selected file is missing.")?,
+        };
+        primitives.extend([
+            Primitive::Rect {
+                rect,
+                color: [0.0, 0.0, 0.0, 0.08],
+            },
+            Primitive::RoundedRect {
+                rect,
+                radius: [0.0; 2],
+                stroke: Some(Stroke::Dashed(paint.pixel)),
+                color: [0.25, 0.45, 0.7, 1.0],
+            },
+        ]);
     }
     if let Some(ObjectFocus::ReadOnly(index)) = object_focus {
         let (scene, offset) = scene.unwrap();

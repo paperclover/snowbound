@@ -194,7 +194,9 @@ pub(crate) fn holds(page: &Page, id: ExGuid) -> bool {
                     .iter()
                     .any(|o| o.id == id || identities(&o.paragraphs).contains(&id)),
                 PageObject::Ink(ink) => ink.strokes.iter().any(|s| s.id == id),
-                PageObject::Image(_) | PageObject::Unsupported(_) => false,
+                PageObject::Image(_) | PageObject::Attachment(_) | PageObject::Unsupported(_) => {
+                    false
+                }
             }
     })
 }
@@ -926,6 +928,7 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             OutlineEdit::Position { x, y } => {
                 let layout = match page.objects.iter_mut().find(|o| o.id() == *object) {
                     Some(PageObject::Ink(ink)) => &mut ink.layout,
+                    Some(PageObject::Attachment(file)) => &mut file.layout,
                     _ => &mut outline_mut(page, *object)?.layout,
                 };
                 layout.x = Some(stored(*x));
@@ -1090,12 +1093,29 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                     PageObject::Outline(outline)
                 }
                 PageObject::Ink(ink) => PageObject::Ink(inked(ink)),
+                PageObject::Attachment(file) => {
+                    let mut file = file.clone();
+                    let layout = &mut file.layout;
+                    for value in [
+                        &mut layout.x,
+                        &mut layout.y,
+                        &mut layout.max_width,
+                        &mut layout.max_height,
+                    ] {
+                        *value = value.map(stored);
+                    }
+                    layout.width_set_by_user = layout
+                        .max_width
+                        .map(|_| layout.width_set_by_user == Some(true));
+                    PageObject::Attachment(file)
+                }
                 object => object.clone(),
             };
             let outline = matches!(object, PageObject::Outline(_));
             let at = page_position(page, *before)?;
             page.objects.insert(at, object);
-            if outline {
+            // Placing an object before another moves it there, which retitles as a move does.
+            if outline || before.is_some() {
                 retitle(page, None);
             }
         }
@@ -1123,19 +1143,7 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             source_path,
             size,
         } => {
-            let (path, index) = lists(page)
-                .into_iter()
-                .find_map(|(path, _, list)| {
-                    list.iter()
-                        .position(|p| matches!(&p.content, ParagraphContent::Attachment(a) if a.id == *attachment))
-                        .map(|index| (path, index))
-                })
-                .ok_or_else(|| invalid("The attachment is not on the page"))?;
-            let ParagraphContent::Attachment(stored_attachment) =
-                &mut list_at(page, &path)[index].content
-            else {
-                unreachable!()
-            };
+            let stored_attachment = attachment_mut(page, *attachment)?;
             stored_attachment.filename = filename.clone();
             stored_attachment.source_path = source_path.clone();
             stored_attachment.size = size.map(|[w, h]| [stored(w), stored(h)]);
@@ -1303,6 +1311,27 @@ fn image_mut(page: &mut Page, id: ExGuid) -> Result<&mut crate::page::Image, Err
         unreachable!()
     };
     Ok(image)
+}
+
+fn attachment_mut(page: &mut Page, id: ExGuid) -> Result<&mut crate::page::Attachment, Error> {
+    if let Some(at) = page.objects.iter().position(|o| o.id() == id) {
+        let PageObject::Attachment(file) = &mut page.objects[at] else {
+            return Err(invalid("Select an attachment"));
+        };
+        return Ok(file);
+    }
+    let (path, index) = lists(page)
+        .into_iter()
+        .find_map(|(path, _, list)| {
+            list.iter()
+                .position(|p| matches!(&p.content, ParagraphContent::Attachment(a) if a.id == id))
+                .map(|index| (path, index))
+        })
+        .ok_or_else(|| invalid("The attachment is not on the page"))?;
+    let ParagraphContent::Attachment(file) = &mut list_at(page, &path)[index].content else {
+        unreachable!()
+    };
+    Ok(file)
 }
 
 fn ink_mut(page: &mut Page, id: ExGuid) -> Result<&mut crate::page::Ink, Error> {

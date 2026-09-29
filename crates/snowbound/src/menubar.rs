@@ -156,48 +156,8 @@ const MENUS: &[Item] = &[
             C(Id::ClearFormatting),
         ],
     ),
-    Item::Menu(
-        "Tags",
-        &[
-            C(Id::Tag(NoteTag::ToDo)),
-            C(Id::Tag(NoteTag::Important)),
-            C(Id::Tag(NoteTag::Question)),
-            C(Id::Tag(NoteTag::RememberForLater)),
-            C(Id::Tag(NoteTag::Definition)),
-            C(Id::Tag(NoteTag::Highlight)),
-            C(Id::Tag(NoteTag::Contact)),
-            C(Id::Tag(NoteTag::Address)),
-            C(Id::Tag(NoteTag::PhoneNumber)),
-            Item::Menu(
-                "More Tags",
-                &[
-                    C(Id::Tag(NoteTag::WebSiteToVisit)),
-                    C(Id::Tag(NoteTag::Idea)),
-                    C(Id::Tag(NoteTag::Password)),
-                    C(Id::Tag(NoteTag::Critical)),
-                    C(Id::Tag(NoteTag::ProjectA)),
-                    C(Id::Tag(NoteTag::ProjectB)),
-                    C(Id::Tag(NoteTag::MovieToSee)),
-                    C(Id::Tag(NoteTag::BookToRead)),
-                    C(Id::Tag(NoteTag::MusicToListenTo)),
-                    C(Id::Tag(NoteTag::SourceForArticle)),
-                    C(Id::Tag(NoteTag::RememberForBlog)),
-                    C(Id::Tag(NoteTag::DiscussWithPersonA)),
-                    C(Id::Tag(NoteTag::DiscussWithPersonB)),
-                    C(Id::Tag(NoteTag::DiscussWithManager)),
-                    C(Id::Tag(NoteTag::SendInEmail)),
-                    C(Id::Tag(NoteTag::ScheduleMeeting)),
-                    C(Id::Tag(NoteTag::CallBack)),
-                    C(Id::Tag(NoteTag::ToDoPriority1)),
-                    C(Id::Tag(NoteTag::ToDoPriority2)),
-                    C(Id::Tag(NoteTag::ClientRequest)),
-                ],
-            ),
-            S,
-            C(Id::RemoveTags),
-            C(Id::FindTags),
-        ],
-    ),
+    // Filled from the tag list by `tags`.
+    Item::Menu("Tags", &[]),
     Item::Menu(
         "Window",
         &[
@@ -216,6 +176,7 @@ pub struct Menus {
     pub services: Retained<NSMenu>,
     pub window: Retained<NSMenu>,
     pub help: Retained<NSMenu>,
+    pub tags: Retained<NSMenu>,
 }
 
 /// Builds the bar; the table's items send `choose:` to `target`, which validates them.
@@ -241,6 +202,7 @@ pub fn build(mtm: MainThreadMarker, target: &AnyObject) -> Menus {
             .expect("The bar has the menus AppKit fills")
     };
     Menus {
+        tags: named("Tags"),
         window: named("Window"),
         help: named("Help"),
         services,
@@ -300,6 +262,38 @@ fn menu(
         }
     }
     menu
+}
+
+/// Fills the Tags menu from the user's tag list, as OneNote's gallery lists it: the first
+/// nine with their chords, the rest under More Tags, then managing them.
+pub fn tags(mtm: MainThreadMarker, target: &AnyObject, menu: &NSMenu, tags: &[NoteTag]) {
+    unsafe { menu.removeAllItems() };
+    let choose = |menu: &NSMenu, id: Id, title: &str, chord: Option<Chord>| {
+        let item = entry(mtm, title, Some(objc2::sel!(choose:)), chord);
+        unsafe {
+            item.setTarget(Some(target));
+            item.setTag(commands::index(&Choice::Command(id)) as isize);
+        }
+        menu.addItem(&item);
+    };
+    let more = unsafe { NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str("More Tags")) };
+    for (place, tag) in tags.iter().enumerate().take(commands::TAGS) {
+        let chord = commands::tag_chord(place);
+        let shown = if chord.is_some() { menu } else { &*more };
+        choose(shown, Id::Tag(place), &tag.label, chord);
+    }
+    if tags.len() > 9 {
+        let holder = entry(mtm, "More Tags", None, None);
+        holder.setSubmenu(Some(&more));
+        menu.addItem(&holder);
+    }
+    if !tags.is_empty() {
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    }
+    for id in [Id::CustomizeTags, Id::RemoveTags, Id::FindTags] {
+        let command = commands::command(id);
+        choose(menu, id, command.title, command.mac.first().copied());
+    }
 }
 
 fn entry(
@@ -418,6 +412,7 @@ mod tests {
         let target: Retained<AnyObject> =
             unsafe { objc2::msg_send_id![objc2::class!(NSObject), new] };
         let menus = build(mtm, &target);
+        tags(mtm, &target, &menus.tags, &NoteTag::defaults());
         let (mut tree, mut chords) = (String::new(), Vec::new());
         dump(&menus.bar, 0, &mut tree, &mut chords);
         println!("{tree}");

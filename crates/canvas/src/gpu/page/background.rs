@@ -402,6 +402,10 @@ const MARKER: &str = "Snowbound template";
 /// device pixels per point.
 const MAX_RASTER_BYTES: f32 = 16.0 * 1024.0 * 1024.0;
 
+/// Art an edit brings draws in its first frame in at most this many pixels, a few
+/// milliseconds' work, then sharpens.
+const INLINE_PIXELS: f32 = 1024.0 * 1024.0;
+
 /// Template art standing in for a page's background picture.
 pub(super) struct Background {
     svg: &'static str,
@@ -409,14 +413,19 @@ pub(super) struct Background {
     pub size: [f32; 2],
     /// For light and for dark paper.
     variants: [Variant; 2],
+    /// Whether the first raster is made on the frame's thread rather than awaited.
+    pub inline: bool,
 }
+
+/// A raster's device pixels per point, and the dark paper it was recoloured for.
+type Made = (f32, Option<[f32; 4]>);
 
 #[derive(Default)]
 struct Variant {
-    /// The raster painted and its device pixels per point.
-    shown: Option<(RasterImage, f32)>,
-    /// The one raster being made and its device pixels per point; replacing it abandons it.
-    pending: Option<(Slot<RasterImage>, f32)>,
+    /// The raster painted and what it was made for.
+    shown: Option<(RasterImage, Made)>,
+    /// The one raster being made and what for; replacing it abandons it.
+    pending: Option<(Slot<RasterImage>, Made)>,
 }
 
 impl Background {
@@ -451,6 +460,7 @@ impl Background {
             svg,
             size,
             variants: Default::default(),
+            inline: false,
         })
     }
 
@@ -469,38 +479,44 @@ impl Background {
         let density = density(scale)
             .min((MAX_RASTER_BYTES / (4.0 * width * height)).sqrt())
             .min(4096.0 / width.max(height));
+        let made = (density, dark.then_some(paper.color));
+        let svg = self.svg;
+        let paper = dark.then_some(paper);
+        let raster = move |density: f32| {
+            let size = [width, height].map(|side| (side * density).round().max(1.0) as u32);
+            move || rasterize(svg, paper, size)
+        };
         let variant = &mut self.variants[usize::from(dark)];
         let landed = variant
             .pending
             .as_ref()
             .and_then(|(slot, made)| Some((slot.lock().unwrap().take()?, *made)));
-        if let Some((image, made)) = landed {
-            if made == density || variant.shown.is_none() {
-                variant.shown = Some((image, made));
+        if let Some((image, landed)) = landed {
+            if landed == made || variant.shown.is_none() {
+                variant.shown = Some((image, landed));
             }
             variant.pending = None;
         }
+        if variant.shown.is_none() && std::mem::take(&mut self.inline) {
+            let quick = density.min((INLINE_PIXELS / (width * height)).sqrt());
+            variant.shown = Some((raster(quick)(), (quick, made.1)));
+        }
         let shown = variant.shown.as_ref().map(|(_, made)| *made);
-        if shown != Some(density)
-            && variant.pending.as_ref().map(|(_, made)| *made) != Some(density)
-        {
-            let svg = self.svg;
-            let paper = dark.then_some(paper);
-            let size = [width, height].map(|side| (side * density).round().max(1.0) as u32);
+        if shown != Some(made) && variant.pending.as_ref().map(|(_, made)| *made) != Some(made) {
             let start = Instant::now()
                 + if shown.is_some() {
                     SETTLE
                 } else {
                     Duration::ZERO
                 };
-            let slot = queue(start, waker, move || rasterize(svg, paper, size));
-            variant.pending = Some((slot, density));
+            let slot = queue(start, waker, raster(density));
+            variant.pending = Some((slot, made));
         }
-        shown == Some(density)
+        shown == Some(made)
     }
 }
 
-fn dark(paper: Paper) -> bool {
+pub(super) fn dark(paper: Paper) -> bool {
     let [lightness, ..] = draw::oklab(paper.color);
     let [ink, ..] = draw::oklab(paper.ink);
     ink > lightness
@@ -512,6 +528,19 @@ fn rasterize(svg: &str, dark: Option<Paper>, size: [u32; 2]) -> RasterImage {
         None => render(svg, size),
     };
     RasterImage::new(size, pixels).expect("Art is within the image budget")
+}
+
+/// `svg` as a PNG `side` pixels square.
+pub(super) fn png(svg: &str, side: u32) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    let mut encoder = png::Encoder::new(&mut encoded, side, side);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .and_then(|mut writer| writer.write_image_data(&render(svg, [side; 2])))
+        .expect("A PNG encodes into memory");
+    encoded
 }
 
 /// Straight-alpha RGBA rows of `svg` stretched to `width` by `height` pixels.
@@ -747,6 +776,7 @@ mod tests {
             svg: TEMPLATES.iter().find(|t| t.name == "ivy").unwrap().svg,
             size: [64.0, 48.0],
             variants: Default::default(),
+            inline: false,
         }
     }
 
@@ -802,6 +832,13 @@ mod tests {
             for svg in [template.svg.to_string(), onto(template.svg, DARK)] {
                 usvg::Tree::from_str(&svg, &usvg::Options::default()).unwrap();
             }
+        }
+    }
+
+    #[test]
+    fn every_template_s_art_is_recreated() {
+        for art in crate::template::TEMPLATES.iter().flat_map(|t| t.art) {
+            assert!(TEMPLATES.iter().any(|t| t.name == art.art), "{}", art.art);
         }
     }
 

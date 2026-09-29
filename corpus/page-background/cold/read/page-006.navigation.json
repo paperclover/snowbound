@@ -6,7 +6,7 @@
   "h": 600,
   "error": null,
   "win": {
-    "title": "Standard - Microsoft OneNote",
+    "title": "MediumGrid - Microsoft OneNote",
     "class": "Framework::CFrame",
     "dialog": false
   }

@@ -24,19 +24,29 @@ class PageBackgroundTest(unittest.TestCase):
             pages[page.get('name')] = page
 
         def art(title):
-            return [image.get('backgroundImage') for image in pages[title].findall('one:Image', ns)]
+            return [(image.get('backgroundImage'), image.find('one:Size', ns).get('width'))
+                    for image in pages[title].findall('one:Image', ns)]
 
         def rules(title):
             return pages[title].find('one:PageSettings/one:RuleLines', ns).get('visible')
 
-        # Art joins a ruled page, which keeps its lines; art taken away leaves none.
-        self.assertEqual(art('Standard'), ['true'])
-        self.assertEqual(rules('Standard'), 'true')
-        self.assertEqual(art('Wide'), [])
-        self.assertEqual(rules('Wide'), 'true')
-        # A colour no menu offers reads back as written.
-        self.assertEqual(pages['SmallGrid'].find('one:PageSettings', ns).get('color'), '#E8D8C8')
+        def color(title):
+            return pages[title].find('one:PageSettings', ns).get('color')
 
+        ivy, sparks = [('true', '174.5')], [('true', '611.4000244140625')]
+        # Art joins a ruled page, which keeps its lines; art taken away or undone leaves none;
+        # redone, or undone after other art replaced it, the art is back.
+        self.assertEqual(art('Standard'), ivy)
+        self.assertEqual(art('Wide'), [])
+        self.assertEqual(art('College'), [])
+        self.assertEqual(art('MediumGrid'), ivy)
+        self.assertEqual(art('LargeGrid'), ivy)
+        for title in ('Standard', 'Wide', 'College', 'MediumGrid', 'LargeGrid', 'VeryLargeGrid'):
+            self.assertEqual(rules(title), 'true', title)
+        # A colour no menu offers reads back as written; art over a colour keeps it.
+        self.assertEqual(color('SmallGrid'), '#E8D8C8')
+        self.assertEqual(art('VeryLargeGrid'), sparks)
+        self.assertEqual(color('VeryLargeGrid'), '#FDFDDD')
 
 if __name__ == '__main__':
     unittest.main()

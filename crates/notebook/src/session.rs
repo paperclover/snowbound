@@ -920,6 +920,17 @@ impl Notebook {
         interval: Duration,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Background> {
+        self.background_with(interval, |file| FileRemote(file.to_owned()), notify)
+    }
+
+    /// `background`, reaching each section file through the remote `remote` makes for it
+    /// (`section_with`).
+    pub fn background_with<R: Remote + 'static>(
+        &self,
+        interval: Duration,
+        remote: impl Fn(&Path) -> R + Clone + Send + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Background> {
         let Some(root) = self.root.clone() else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -930,8 +941,8 @@ impl Notebook {
         Background::start(
             interval,
             move || {
-                let root = root.clone();
-                Ok(move |path: &str| FileRemote(root.join(path)))
+                let (root, remote) = (root.clone(), remote.clone());
+                Ok(move |path: &str| remote(&root.join(path)))
             },
             notify,
         )
@@ -1108,6 +1119,39 @@ pub struct SyncStatus {
     pub error: Option<io::Error>,
     /// Edits the section file does not hold yet, uncertain attempts included.
     pub queued: u64,
+}
+
+/// What a `SyncStatus` comes to for the reader, from the best to the worst.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SyncState {
+    UpToDate,
+    /// Not reached yet, or edits wait.
+    Syncing,
+    /// Another client holds the section file.
+    InUse,
+    /// The file or its server cannot be reached; edits wait until it can.
+    NotConnected,
+    /// The file cannot be written where it is stored.
+    ReadOnly,
+    Failed,
+}
+
+impl SyncStatus {
+    pub fn state(&self) -> SyncState {
+        use io::ErrorKind::*;
+        match self.error.as_ref().map(io::Error::kind) {
+            Some(PermissionDenied | ReadOnlyFilesystem) => SyncState::ReadOnly,
+            Some(WouldBlock | ResourceBusy) => SyncState::InUse,
+            Some(
+                NotFound | ConnectionRefused | ConnectionReset | ConnectionAborted | NotConnected
+                | TimedOut | HostUnreachable | NetworkUnreachable | NetworkDown | BrokenPipe
+                | AddrNotAvailable,
+            ) => SyncState::NotConnected,
+            Some(_) => SyncState::Failed,
+            None if self.synced.is_none() || self.queued > 0 => SyncState::Syncing,
+            None => SyncState::UpToDate,
+        }
+    }
 }
 
 /// The last attempt's outcome; `None` before the first.

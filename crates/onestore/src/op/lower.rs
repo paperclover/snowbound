@@ -103,7 +103,10 @@ impl<'a> View<'a> {
                         view.outline(outline)?;
                     }
                 }
-                PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {}
+                PageObject::Image(_)
+                | PageObject::Attachment(_)
+                | PageObject::Ink(_)
+                | PageObject::Unsupported(_) => {}
             }
         }
         Ok(view)
@@ -191,9 +194,10 @@ impl<'a> View<'a> {
             let outlines: Vec<&Outline> = match object {
                 PageObject::Outline(outline) => vec![outline],
                 PageObject::Title(title) => title.outlines.iter().collect(),
-                PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {
-                    Vec::new()
-                }
+                PageObject::Image(_)
+                | PageObject::Attachment(_)
+                | PageObject::Ink(_)
+                | PageObject::Unsupported(_) => Vec::new(),
             };
             for outline in outlines {
                 containers.push(outline.id);
@@ -262,7 +266,10 @@ pub(crate) fn validate(
                     title.layout,
                     title.outlines.iter().map(|o| o.id).collect::<Vec<_>>()
                 )),
-                PageObject::Outline(_) | PageObject::Image(_) | PageObject::Ink(_) => None,
+                PageObject::Outline(_)
+                | PageObject::Image(_)
+                | PageObject::Attachment(_)
+                | PageObject::Ink(_) => None,
             })
             .collect();
         fixed.sort();
@@ -667,7 +674,18 @@ pub(crate) fn paragraph_fields(
         space_before: field!(space_before),
         space_after: field!(space_after),
         line_spacing: field!(line_spacing),
-        language: field!(language),
+        // An unset language is the writer's default, not LCID 0, which OneNote never stores
+        // on a text object and which runs without their own language would then read.
+        language: first.language.filter(|value| {
+            target
+                .spans()
+                .iter()
+                .all(|span| span.format.language == Some(*value))
+                && stored
+                    .spans()
+                    .iter()
+                    .any(|span| span.format.language != Some(*value))
+        }),
     })
 }
 
@@ -986,6 +1004,54 @@ impl Lowering {
                 })?;
             }
         }
+        let files = |page: &Page| -> BTreeMap<ExGuid, crate::page::Attachment> {
+            page.objects
+                .iter()
+                .filter_map(|object| match object {
+                    PageObject::Attachment(file) => Some((file.id, file.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let stored = files(old.page);
+        for (id, file) in files(new.page) {
+            let Some(previous) = stored.get(&id) else {
+                continue;
+            };
+            let (from, to) = (&previous.layout, &file.layout);
+            if (
+                from.max_width,
+                from.max_height,
+                from.width_set_by_user,
+                from.reserved_width,
+            ) != (
+                to.max_width,
+                to.max_height,
+                to.width_set_by_user,
+                to.reserved_width,
+            ) {
+                return Err(invalid("A file on the page keeps its extent"));
+            }
+            if (from.x, from.y) != (to.x, to.y) {
+                let (Some(x), Some(y)) = (to.x, to.y) else {
+                    return Err(invalid("A file position needs both coordinates"));
+                };
+                self.emit(PageOp::Outline {
+                    object: id,
+                    edit: crate::OutlineEdit::Position { x, y },
+                })?;
+            }
+            if (&previous.filename, &previous.source_path, previous.size)
+                != (&file.filename, &file.source_path, file.size)
+            {
+                self.emit(PageOp::Attachment {
+                    attachment: id,
+                    filename: file.filename.clone(),
+                    source_path: file.source_path.clone(),
+                    size: file.size,
+                })?;
+            }
+        }
         let inks = |page: &Page| -> BTreeMap<ExGuid, crate::page::Ink> {
             page.objects
                 .iter()
@@ -1051,7 +1117,9 @@ impl Lowering {
                             ..(*outline).clone()
                         })
                     }
-                    PageObject::Image(_) | PageObject::Ink(_) => (*object).clone(),
+                    PageObject::Image(_) | PageObject::Attachment(_) | PageObject::Ink(_) => {
+                        (*object).clone()
+                    }
                     PageObject::Title(_) | PageObject::Unsupported(_) => {
                         return Err(invalid(
                             "Titles and unsupported objects cannot be edited through the page model",
@@ -1513,8 +1581,10 @@ impl Lowering {
         }
         let kept: BTreeSet<ExGuid> = new.page.objects.iter().map(PageObject::id).collect();
         for object in &old.page.objects {
-            if matches!(object, PageObject::Image(_) | PageObject::Ink(_))
-                && !kept.contains(&object.id())
+            if matches!(
+                object,
+                PageObject::Image(_) | PageObject::Attachment(_) | PageObject::Ink(_)
+            ) && !kept.contains(&object.id())
             {
                 self.emit(PageOp::Delete {
                     object: object.id(),

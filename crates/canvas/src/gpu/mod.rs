@@ -4,7 +4,7 @@ mod profile;
 
 use crate::{
     layout::{TextBrush, TextLayout},
-    outline::{BoxMark, TagIcon},
+    outline::TagIcon,
 };
 use draw::{GlyphRun, Glyphs, Layer, Primitive, RenderError};
 use parley::PositionedLayoutItem;
@@ -140,116 +140,199 @@ pub(crate) fn painted_layout(text: &dyn Glyphs) -> &TextLayout {
         .expect("Page text is a TextLayout")
 }
 
-const CHECKBOX: &str = include_str!("../../assets/tags/checkbox.svg");
 const CHECKMARK: &str = include_str!("../../assets/tags/checkmark.svg");
-const STAR: &str = include_str!("../../assets/tags/star.svg");
-const QUESTION: &str = include_str!("../../assets/tags/question.svg");
-const HIGHLIGHT: &str = include_str!("../../assets/tags/highlight.svg");
-const CONTACT: &str = include_str!("../../assets/tags/contact.svg");
-const ADDRESS: &str = include_str!("../../assets/tags/address.svg");
-const PHONE: &str = include_str!("../../assets/tags/phone.svg");
-const MUSIC: &str = include_str!("../../assets/tags/music.svg");
-const EXCLAMATION: &str = include_str!("../../assets/tags/exclamation.svg");
-const RED_SQUARE: &str = include_str!("../../assets/tags/red-square.svg");
-const YELLOW_SQUARE: &str = include_str!("../../assets/tags/yellow-square.svg");
-const BLUE_SQUARE: &str = include_str!("../../assets/tags/blue-square.svg");
 const FLAG: &str = include_str!("../../assets/tags/flag.svg");
-const IDEA: &str = include_str!("../../assets/tags/idea.svg");
-const PASSWORD: &str = include_str!("../../assets/tags/password.svg");
-const MOVIE: &str = include_str!("../../assets/tags/movie.svg");
-const BOOK: &str = include_str!("../../assets/tags/book.svg");
-const WEB: &str = include_str!("../../assets/tags/web.svg");
-const BLOG: &str = include_str!("../../assets/tags/blog.svg");
-const EMAIL: &str = include_str!("../../assets/tags/email.svg");
 const BOX_SMALL: &str = include_str!("../../assets/tags/box-small.svg");
 const CHECK_SMALL: &str = include_str!("../../assets/tags/check-small.svg");
-const MARK_PERSON: &str = include_str!("../../assets/tags/mark-person.svg");
-const MARK_MANAGER: &str = include_str!("../../assets/tags/mark-manager.svg");
-const MARK_ARROW: &str = include_str!("../../assets/tags/mark-arrow.svg");
-const MARK_ONE: &str = include_str!("../../assets/tags/mark-one.svg");
-const MARK_TWO: &str = include_str!("../../assets/tags/mark-two.svg");
-const MARK_CLIENT: &str = include_str!("../../assets/tags/mark-client.svg");
 const TAG: &str = include_str!("../../assets/tags/tag.svg");
+
+/// How a tag symbol's artwork takes a check: a large box under it, a small box with the
+/// check between the box and its badge, or art that shows none.
+enum Art {
+    Box(&'static str),
+    Badged(&'static str),
+    Plain(&'static str),
+}
+
+/// The artwork of symbol `shape` of MS-ONE's NoteTagShape, as OneNote 2010 draws it on the
+/// page: it draws 54, Green 8-Point Star, blue there. A shape MS-ONE does not list shows a
+/// plain tag.
+fn art(shape: u16) -> Art {
+    use Art::{Badged, Box, Plain};
+    macro_rules! tag {
+        ($name:literal) => {
+            include_str!(concat!("../../assets/tags/", $name, ".svg"))
+        };
+    }
+    match shape {
+        1 => Box(tag!("checkbox-green")),
+        2 => Box(tag!("checkbox-yellow")),
+        3 => Box(tag!("checkbox")),
+        4 => Badged(tag!("mark-star-green")),
+        5 => Badged(tag!("mark-star-yellow")),
+        6 => Badged(tag!("mark-star-blue")),
+        7 => Badged(tag!("mark-exclamation-green")),
+        8 => Badged(tag!("mark-exclamation-yellow")),
+        9 => Badged(tag!("mark-exclamation-blue")),
+        10 => Badged(tag!("mark-arrow-green")),
+        11 => Badged(tag!("mark-arrow-yellow")),
+        12 => Badged(tag!("mark-arrow-blue")),
+        13 => Plain(tag!("star")),
+        14 => Plain(tag!("follow-up")),
+        15 => Plain(tag!("question")),
+        16 => Plain(tag!("arrow-right-blue")),
+        17 => Plain(tag!("exclamation")),
+        18 => Plain(tag!("phone")),
+        19 => Plain(tag!("calendar")),
+        20 => Plain(tag!("clock")),
+        21 => Plain(tag!("idea")),
+        22 => Plain(tag!("pushpin")),
+        23 => Plain(tag!("address")),
+        24 => Plain(tag!("blog")),
+        25 => Plain(tag!("smiley")),
+        26 => Plain(tag!("ribbon")),
+        27 => Plain(tag!("key")),
+        28 => Badged(tag!("mark-one-blue")),
+        29 => Plain(tag!("circle-1-blue")),
+        30 => Badged(tag!("mark-two-blue")),
+        31 => Plain(tag!("circle-2-blue")),
+        32 => Badged(tag!("mark-three-blue")),
+        33 => Plain(tag!("circle-3-blue")),
+        34 => Plain(tag!("star8-blue")),
+        35 => Plain(tag!("tick-blue")),
+        36 => Plain(tag!("circle-blue")),
+        37 => Plain(tag!("arrow-down-blue")),
+        38 => Plain(tag!("arrow-left-blue")),
+        39 => Plain(tag!("solid-target-blue")),
+        40 => Plain(tag!("star-blue")),
+        41 => Plain(tag!("sun-blue")),
+        42 => Plain(tag!("target-blue")),
+        43 => Plain(tag!("triangle-blue")),
+        44 => Plain(tag!("umbrella-blue")),
+        45 => Plain(tag!("arrow-up-blue")),
+        46 => Plain(tag!("x-dots-blue")),
+        47 => Plain(tag!("x-blue")),
+        48 => Badged(tag!("mark-one-green")),
+        49 => Plain(tag!("circle-1-green")),
+        50 => Badged(tag!("mark-two-green")),
+        51 => Plain(tag!("circle-2-green")),
+        52 => Badged(tag!("mark-three-green")),
+        53 => Plain(tag!("circle-3-green")),
+        54 => Plain(tag!("star8-blue")),
+        55 => Plain(tag!("tick-green")),
+        56 => Plain(tag!("circle-green")),
+        57 => Plain(tag!("arrow-down-green")),
+        58 => Plain(tag!("arrow-left-green")),
+        59 => Plain(tag!("arrow-right-green")),
+        60 => Plain(tag!("solid-target-green")),
+        61 => Plain(tag!("star-green")),
+        62 => Plain(tag!("sun-green")),
+        63 => Plain(tag!("target-green")),
+        64 => Plain(tag!("triangle-green")),
+        65 => Plain(tag!("umbrella-green")),
+        66 => Plain(tag!("arrow-up-green")),
+        67 => Plain(tag!("x-dots-green")),
+        68 => Plain(tag!("x-green")),
+        69 => Badged(tag!("mark-one-yellow")),
+        70 => Plain(tag!("circle-1-yellow")),
+        71 => Badged(tag!("mark-two-yellow")),
+        72 => Plain(tag!("circle-2-yellow")),
+        73 => Badged(tag!("mark-three-yellow")),
+        74 => Plain(tag!("circle-3-yellow")),
+        75 => Plain(tag!("star8-yellow")),
+        76 => Plain(tag!("tick-yellow")),
+        77 => Plain(tag!("circle-yellow")),
+        78 => Plain(tag!("arrow-down-yellow")),
+        79 => Plain(tag!("arrow-left-yellow")),
+        80 => Plain(tag!("arrow-right-yellow")),
+        81 => Plain(tag!("solid-target-yellow")),
+        82 => Plain(tag!("sun-yellow")),
+        83 => Plain(tag!("target-yellow")),
+        84 => Plain(tag!("triangle-yellow")),
+        85 => Plain(tag!("umbrella-yellow")),
+        86 => Plain(tag!("arrow-up-yellow")),
+        87 => Plain(tag!("x-dots-yellow")),
+        88 => Plain(tag!("x-yellow")),
+        89 => Plain(tag!("flag-today")),
+        90 => Plain(tag!("flag-tomorrow")),
+        91 => Plain(tag!("flag-this-week")),
+        92 => Plain(tag!("flag-next-week")),
+        93 => Plain(tag!("flag-no-date")),
+        94 => Badged(tag!("mark-person-blue")),
+        95 => Badged(tag!("mark-person-yellow")),
+        96 => Badged(tag!("mark-person-green")),
+        97 => Badged(tag!("mark-flag-blue")),
+        98 => Badged(tag!("mark-flag-yellow")),
+        99 => Badged(tag!("mark-flag-green")),
+        100 => Plain(tag!("red-square")),
+        101 => Plain(tag!("yellow-square")),
+        102 => Plain(tag!("blue-square")),
+        103 => Plain(tag!("green-square")),
+        104 => Plain(tag!("orange-square")),
+        105 => Plain(tag!("pink-square")),
+        106 => Plain(tag!("email")),
+        107 => Plain(tag!("envelope")),
+        108 => Plain(tag!("envelope-open")),
+        109 => Plain(tag!("mobile")),
+        110 => Plain(tag!("phone-clock")),
+        111 => Plain(tag!("question-balloon")),
+        112 => Plain(tag!("paperclip")),
+        113 => Plain(tag!("frown")),
+        114 => Plain(tag!("im-contact")),
+        115 => Plain(tag!("person")),
+        116 => Plain(tag!("people")),
+        117 => Plain(tag!("bell")),
+        118 => Plain(tag!("contact")),
+        119 => Plain(tag!("rose")),
+        120 => Plain(tag!("date")),
+        121 => Plain(tag!("music")),
+        122 => Plain(tag!("movie")),
+        123 => Plain(tag!("quote")),
+        124 => Plain(tag!("globe")),
+        125 => Plain(tag!("web")),
+        126 => Plain(tag!("laptop")),
+        127 => Plain(tag!("plane")),
+        128 => Plain(tag!("car")),
+        129 => Plain(tag!("binoculars")),
+        130 => Plain(tag!("presentation")),
+        131 => Plain(tag!("password")),
+        132 => Plain(tag!("book")),
+        133 => Plain(tag!("notebook")),
+        134 => Plain(tag!("paper")),
+        135 => Plain(tag!("research")),
+        136 => Plain(tag!("highlight")),
+        137 => Plain(tag!("dollar")),
+        138 => Plain(tag!("coins")),
+        139 => Plain(tag!("schedule")),
+        140 => Plain(tag!("lightning")),
+        141 => Plain(tag!("cloud")),
+        142 => Plain(tag!("heart")),
+        143 => Plain(tag!("sunflower")),
+        _ => Plain(TAG),
+    }
+}
+
+/// Symbols MS-ONE lists.
+const SYMBOLS: u16 = 143;
 
 /// The tag's artwork, drawn in order.
 pub fn tag_sources(icon: TagIcon) -> &'static [&'static str] {
-    match icon {
-        TagIcon::CheckBox {
-            checked: false,
-            mark: None,
-        } => &[CHECKBOX],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: None,
-        } => &[CHECKBOX, CHECKMARK],
-        TagIcon::CheckBox {
-            checked: false,
-            mark: Some(BoxMark::Person),
-        } => &[BOX_SMALL, MARK_PERSON],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: Some(BoxMark::Person),
-        } => &[BOX_SMALL, CHECK_SMALL, MARK_PERSON],
-        TagIcon::CheckBox {
-            checked: false,
-            mark: Some(BoxMark::Manager),
-        } => &[BOX_SMALL, MARK_MANAGER],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: Some(BoxMark::Manager),
-        } => &[BOX_SMALL, CHECK_SMALL, MARK_MANAGER],
-        TagIcon::CheckBox {
-            checked: false,
-            mark: Some(BoxMark::Arrow),
-        } => &[BOX_SMALL, MARK_ARROW],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: Some(BoxMark::Arrow),
-        } => &[BOX_SMALL, CHECK_SMALL, MARK_ARROW],
-        TagIcon::CheckBox {
-            checked: false,
-            mark: Some(BoxMark::One),
-        } => &[BOX_SMALL, MARK_ONE],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: Some(BoxMark::One),
-        } => &[BOX_SMALL, CHECK_SMALL, MARK_ONE],
-        TagIcon::CheckBox {
-            checked: false,
-            mark: Some(BoxMark::Two),
-        } => &[BOX_SMALL, MARK_TWO],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: Some(BoxMark::Two),
-        } => &[BOX_SMALL, CHECK_SMALL, MARK_TWO],
-        TagIcon::CheckBox {
-            checked: false,
-            mark: Some(BoxMark::Client),
-        } => &[BOX_SMALL, MARK_CLIENT],
-        TagIcon::CheckBox {
-            checked: true,
-            mark: Some(BoxMark::Client),
-        } => &[BOX_SMALL, CHECK_SMALL, MARK_CLIENT],
-        TagIcon::Star => &[STAR],
-        TagIcon::Question => &[QUESTION],
-        TagIcon::Highlight => &[HIGHLIGHT],
-        TagIcon::Contact => &[CONTACT],
-        TagIcon::Address => &[ADDRESS],
-        TagIcon::Phone => &[PHONE],
-        TagIcon::Music => &[MUSIC],
-        TagIcon::Exclamation => &[EXCLAMATION],
-        TagIcon::RedSquare => &[RED_SQUARE],
-        TagIcon::YellowSquare => &[YELLOW_SQUARE],
-        TagIcon::BlueSquare => &[BLUE_SQUARE],
-        TagIcon::Flag => &[FLAG],
-        TagIcon::Idea => &[IDEA],
-        TagIcon::Password => &[PASSWORD],
-        TagIcon::Movie => &[MOVIE],
-        TagIcon::Book => &[BOOK],
-        TagIcon::Web => &[WEB],
-        TagIcon::Blog => &[BLOG],
-        TagIcon::Email => &[EMAIL],
-        TagIcon::Other => &[TAG],
+    static SOURCES: std::sync::OnceLock<Vec<[Vec<&'static str>; 2]>> = std::sync::OnceLock::new();
+    let TagIcon::Symbol { shape, checked } = icon else {
+        return &[FLAG];
+    };
+    let sources = SOURCES.get_or_init(|| {
+        (0..=SYMBOLS)
+            .map(|shape| match art(shape) {
+                Art::Box(art) => [vec![art], vec![art, CHECKMARK]],
+                Art::Badged(badge) => [vec![BOX_SMALL, badge], vec![BOX_SMALL, CHECK_SMALL, badge]],
+                Art::Plain(art) => [vec![art], vec![art]],
+            })
+            .collect()
+    });
+    match sources.get(usize::from(shape)) {
+        Some(sources) => &sources[usize::from(checked)],
+        None => &[TAG],
     }
 }
 
@@ -364,29 +447,26 @@ mod tests {
             mapped_at_creation: false,
         });
         let mut renderer = draw::Renderer::new(device, queue, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let icons = [
-            TagIcon::CheckBox {
-                checked: false,
-                mark: None,
-            },
-            TagIcon::CheckBox {
-                checked: true,
-                mark: None,
-            },
-            TagIcon::Star,
-            TagIcon::Question,
-            TagIcon::Highlight,
-            TagIcon::Contact,
-            TagIcon::Address,
-            TagIcon::Phone,
-            TagIcon::Music,
-            TagIcon::Exclamation,
-            TagIcon::RedSquare,
-            TagIcon::YellowSquare,
-            TagIcon::BlueSquare,
-            TagIcon::Flag,
-            TagIcon::Other,
-        ];
+        let icons: Vec<_> = [
+            (3, false),
+            (3, true),
+            (13, false),
+            (15, false),
+            (136, false),
+            (118, false),
+            (23, false),
+            (18, false),
+            (121, false),
+            (17, false),
+            (100, false),
+            (101, false),
+            (102, false),
+            (999, false),
+        ]
+        .into_iter()
+        .map(|(shape, checked)| TagIcon::of(shape, checked).unwrap())
+        .chain([TagIcon::Task])
+        .collect();
         let text = TextEngine::default()
             .layout(
                 &Paragraph::from_runs([

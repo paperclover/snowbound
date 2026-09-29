@@ -114,7 +114,7 @@ pub enum PageOp {
         right: ExGuid,
     },
     /// Moves a subtree before a direct child of `parent`, or last; `None` names the page,
-    /// whose children are outlines, pictures and ink. A paragraph keeps its level where it
+    /// whose children are outlines, pictures, files and ink. A paragraph keeps its level where it
     /// lies deeper than its new parent.
     Move {
         object: ExGuid,
@@ -163,8 +163,8 @@ pub enum PageOp {
         tags: Vec<Tag>,
         definitions: Vec<(ExGuid, Definition)>,
     },
-    /// Adds an outline with its paragraphs, a picture with its payload, or ink, before a
-    /// page child or on top.
+    /// Adds an outline with its paragraphs, a picture or file with its payloads, or ink,
+    /// before a page child or on top.
     Add {
         object: PageObject,
         before: Option<ExGuid>,

@@ -175,6 +175,7 @@ fn a_protected_page_edit_is_stored_under_the_section_key() {
                     filename: "sealed.txt".into(),
                     source_path: None,
                     size: Some([24.0, 24.0]),
+                    layout: Default::default(),
                     bytes: Some(std::sync::Arc::from(&b"A payload that stays sealed"[..])),
                     preview: None,
                     recording: None,

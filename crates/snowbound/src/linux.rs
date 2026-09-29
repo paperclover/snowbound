@@ -593,6 +593,8 @@ pub fn install_menu() {}
 /// The toolbar and keyboard stand in for a menu bar.
 pub fn update_menu(_: impl FnOnce() -> Vec<crate::commands::Status>) {}
 
+pub fn update_tag_menu(_: &[canvas::editor::NoteTag]) {}
+
 pub fn clear_marked_text(_: &Window) {}
 
 #[cfg(feature = "wgpu")]
@@ -1056,24 +1058,23 @@ fn dialog<const Z: usize, const K: usize>(
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
-/// Asks for a picture to insert.
-pub fn pick_picture() -> Option<PathBuf> {
-    let patterns = crate::PICTURE_TYPES
-        .map(|kind| format!("*.{kind}"))
-        .join(" ");
+/// Asks for a file to insert, one of `types` (extensions) unless empty, titled `title`.
+pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
+    let patterns = match types {
+        [] => "*".to_owned(),
+        types => types
+            .iter()
+            .map(|kind| format!("*.{kind}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
     let asked = dialog(
         [
             "--file-selection",
-            "--title=Insert Picture",
-            &format!("--file-filter=Pictures | {patterns}"),
+            &format!("--title={title}"),
+            &format!("--file-filter={patterns}"),
         ],
-        [
-            "--getopenfilename",
-            ".",
-            &patterns,
-            "--title",
-            "Insert Picture",
-        ],
+        ["--getopenfilename", ".", &patterns, "--title", title],
     );
     asked
         .unwrap_or_else(|error| {
@@ -1082,6 +1083,21 @@ pub fn pick_picture() -> Option<PathBuf> {
         })
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
+}
+
+/// No icon theme lookup; the page draws a blank page for the file.
+pub fn file_icon(_: &std::path::Path) -> Option<Vec<u8>> {
+    None
+}
+
+/// winit reports drops without a position; the file goes to the caret.
+pub fn drop_point(_: &Window) -> Option<[f32; 2]> {
+    None
+}
+
+/// Opens a copy of an attachment with the desktop's application for it.
+pub fn open_file(path: &std::path::Path) {
+    reveal(path);
 }
 
 /// Opens GNOME's character map, whose picks the user copies in.
@@ -1151,8 +1167,8 @@ pub fn pick_notebook(title: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Asks where to create something named `name` by default.
-pub fn pick_new(title: &str, name: &str) -> Option<PathBuf> {
+/// Asks where to put something named `name` by default; the dialog names its own button.
+pub fn pick_new(title: &str, name: &str, _action: &str) -> Option<PathBuf> {
     let asked = dialog(
         [
             "--file-selection",

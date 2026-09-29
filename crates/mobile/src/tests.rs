@@ -1,4 +1,6 @@
 use super::*;
+use library::{sb_library_set_offline, sb_library_sync_now};
+use notebook::session::SyncState;
 use std::path::{Path, PathBuf};
 
 const CORPUS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../corpus");
@@ -24,15 +26,7 @@ fn copy(path: &str) -> (tempfile::TempDir, PathBuf) {
 }
 
 fn open(library: &Arc<Library>, path: &str) -> Section {
-    let section = library.section(path, || {}).unwrap();
-    Section {
-        shared: Arc::new(Shared {
-            section,
-            author: "Clover Test".into(),
-            status: Default::default(),
-        }),
-        library: Arc::clone(library),
-    }
+    Section::open(Arc::clone(library), path, "Clover Test".into(), || {}).unwrap()
 }
 
 fn space(section: &Section, title: &str) -> ExGuid {
@@ -230,7 +224,20 @@ fn undo_restores_typing() {
     let mut canvas = canvas(&section, "Paragraph controls");
     focus(&mut canvas, "Collapsed parent");
     let before = canvas.active().shown_text();
-    canvas.insert("hi".into()).unwrap();
+    // UIKit's keystrokes, one call each, with the selection set again where it is: one run.
+    for text in ["h", "i", "x"] {
+        canvas.insert(text.into()).unwrap();
+        let selection = canvas.selection().unwrap();
+        canvas.select(selection).unwrap();
+    }
+    assert!(
+        canvas
+            .page
+            .key(&Key::Named(NamedKey::Backspace), None)
+            .unwrap()
+            .changed
+    );
+    canvas.insert("!".into()).unwrap();
     assert_ne!(canvas.active().shown_text(), before);
     assert!(moved(canvas.page.undo(false).unwrap()));
     assert_eq!(canvas.active().shown_text(), before);
@@ -628,4 +635,193 @@ fn tapping_the_date_asks_for_it_and_a_new_date_is_stored() {
     let stored = section.shared.page(canvas.space).unwrap().0.date_text();
     assert_eq!(stored.unwrap()[0], "Friday, January 2, 2026");
     assert_ne!(canvas.page.editor.date().unwrap().timestamp(), before);
+}
+
+/// A notebook copy with its library, and a section of it open for editing.
+fn notebook_open(path: &str) -> (tempfile::TempDir, PathBuf, Arc<Library>, Section) {
+    let (directory, root) = copy("m6/native-features-01/notebook");
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let section = open(&library, path);
+    (directory, root, library, section)
+}
+
+/// Waits up to ten seconds for `ready`.
+fn eventually(mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if ready() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn sync_status_lists_every_section_and_work_offline_holds_edits_until_sync_now() {
+    let (_directory, root, library, section) = notebook_open("Features.one");
+    // Every readable section, the open one's from its session.
+    assert!(eventually(|| {
+        let status = library.sync_status();
+        status.len()
+            == library
+                .tabs()
+                .unwrap()
+                .iter()
+                .filter(|tab| tab.readable)
+                .count()
+            && status
+                .iter()
+                .all(|sync| sync.state == SyncState::UpToDate as u8)
+    }));
+    sb_library_set_offline(&library, true);
+    let mut canvas = canvas(&section, "Paragraph controls");
+    focus(&mut canvas, "Collapsed parent");
+    canvas.insert("Offline ".into()).unwrap();
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+    let file = root.join("Features.one");
+    let queued = |library: &Library| {
+        library
+            .sync_status()
+            .into_iter()
+            .find(|sync| sync.path == "Features.one")
+            .unwrap()
+            .queued
+    };
+    assert!(eventually(|| queued(&library) == 1));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!stored_text(&file, canvas.space).contains("Offline "));
+    sb_library_sync_now(&library);
+    assert!(eventually(|| queued(&library) == 0));
+    assert!(stored_text(&file, canvas.space).contains("Offline "));
+    sb_library_set_offline(&library, false);
+}
+
+#[test]
+fn sections_open_the_first_time_while_the_background_syncs() {
+    let (directory, root) = copy("m6/native-features-01/notebook");
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let rounds = {
+        let library = Arc::clone(&library);
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                sb_library_sync_now(&library);
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    for tab in library
+        .tabs()
+        .unwrap()
+        .into_iter()
+        .filter(|tab| tab.readable)
+    {
+        open(&library, &tab.path);
+    }
+    rounds.join().unwrap();
+    for tab in library
+        .tabs()
+        .unwrap()
+        .into_iter()
+        .filter(|tab| tab.readable)
+    {
+        open(&library, &tab.path);
+    }
+}
+
+#[test]
+fn the_tags_summary_lists_tagged_paragraphs_and_opens_on_them() {
+    let (directory, file) = copy("structural-probe/tag-gallery.one");
+    let library = Arc::new(Library::open(&file, &directory.path().join("cache")).unwrap());
+    let path = file.to_string_lossy().into_owned();
+    let section = open(&library, &path);
+    let tagged = library.tagged(Some((&path, &section))).unwrap();
+    assert!(tagged.len() >= 9, "{}", tagged.len());
+    assert!(
+        tagged
+            .iter()
+            .any(|tag| tag.name == "To Do" && tag.shape == 3)
+    );
+    let first = &tagged[0];
+    let space = first.page.parse().unwrap();
+    let (page, _) = section.shared.page(space).unwrap();
+    let mut canvas = Canvas::new(space, page, [1206, 2622], 3.0).unwrap();
+    assert!(
+        canvas
+            .select_paragraph(first.paragraph.parse().unwrap())
+            .unwrap()
+    );
+    let [start, end] = canvas.selection().unwrap();
+    assert!(canvas.text([start, end]).contains(first.text.trim()));
+}
+
+#[test]
+fn every_tag_applies_and_reports_and_remove_tag_clears_them() {
+    let (_directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    focus(&mut canvas, "Collapsed parent");
+    for index in [0, 12, 28] {
+        assert!(canvas.format(16 + index).unwrap());
+        assert_ne!(canvas.format_bits().unwrap() & 1 << (16 + index), 0);
+    }
+    assert!(canvas.format(8).unwrap());
+    assert_eq!(canvas.format_bits().unwrap() >> 16, 0);
+    assert!(canvas.format(16 + NoteTag::defaults().len() as u8).is_err());
+}
+
+#[test]
+fn tag_icons_draw_their_art_and_highlighting_tags_have_none() {
+    let mut rgba = vec![0; 32 * 32 * 4];
+    for tag in NoteTag::defaults() {
+        let drawn = unsafe { sb_tag_icon(tag.shape, true, 32, rgba.as_mut_ptr()) };
+        assert_eq!(drawn, tag.shape != 0, "{tag:?}");
+        if drawn {
+            assert!(rgba.chunks_exact(4).any(|pixel| pixel[3] > 0), "{tag:?}");
+        }
+    }
+}
+
+#[test]
+fn page_colour_rule_lines_and_art_are_stored_and_undo() {
+    let (_directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    assert!(canvas.set_paper(Some(0xfef5ed), Some(1)).unwrap());
+    assert!(canvas.set_art(Some("Bamboo")).unwrap());
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+    let art = |page: &Page| {
+        page.objects
+            .iter()
+            .filter(|object| {
+                matches!(object, onestore::page::PageObject::Image(image) if image.background)
+            })
+            .count()
+    };
+    let stored = section.shared.page(canvas.space).unwrap().0;
+    assert_eq!(stored.color, Some(0xfef5ed));
+    assert_eq!(stored.rule_lines, Some(canvas::template::RULE_LINES[1].1));
+    assert_eq!(art(&stored), 1);
+    assert!(canvas.set_art(None).unwrap());
+    assert!(moved(canvas.page.undo(false).unwrap()));
+    assert!(moved(canvas.page.undo(false).unwrap()));
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+    let stored = section.shared.page(canvas.space).unwrap().0;
+    assert_eq!((stored.color, art(&stored)), (Some(0xfef5ed), 0));
+}
+
+#[test]
+fn insert_space_turns_the_next_touch_into_a_drag() {
+    let (_directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    assert_eq!(canvas.target([300.0, 1500.0]), Target::Page);
+    let _ = canvas.page.insert_space();
+    assert_eq!(canvas.target([300.0, 1500.0]), Target::Grip);
 }

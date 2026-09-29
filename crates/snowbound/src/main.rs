@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 mod aqua;
 mod art;
+mod attachment;
 mod background;
 mod commands;
 #[cfg(test)]
@@ -28,6 +29,7 @@ mod sidebar;
 #[cfg_attr(not(feature = "wgpu"), path = "surface_gl.rs")]
 mod surface;
 mod sync;
+mod tags;
 mod templates;
 
 use canvas::gpu::page::PageScene;
@@ -524,6 +526,10 @@ struct State {
     options: Option<options::Options>,
     /// The Link dialog's fields while it is open.
     link: Option<link::LinkDialog>,
+    /// The user's tag list, which the toolbar, menus and Ctrl+1 to Ctrl+9 apply.
+    tags: Vec<canvas::editor::NoteTag>,
+    /// The Customize Tags dialog's list while it is open.
+    tag_list: Option<tags::TagList>,
     /// The page's context menu while it is open: what it was opened on, and where.
     text_menu: Option<(canvas::interaction::Context, [f32; 2])>,
     color_scheme: settings::ColorScheme,
@@ -815,6 +821,10 @@ impl State {
             title_focus: None,
             menu: None,
             link: None,
+            tags: stored
+                .tags
+                .unwrap_or_else(canvas::editor::NoteTag::defaults),
+            tag_list: None,
             text_menu: None,
             options: None,
             color_scheme: stored.color_scheme,
@@ -860,6 +870,7 @@ impl State {
             accessibility: accessibility::Accessibility::default(),
         };
         state.title();
+        platform::update_tag_menu(&state.tags);
         Ok(state)
     }
 
@@ -930,6 +941,7 @@ impl State {
         let (section, open_tab, open_page) = self.build()?;
         self.options_dialog();
         self.link_dialog()?;
+        self.customize_tags();
         self.palette();
         self.sync_popup()?;
         self.text_menu()?;
@@ -1468,21 +1480,16 @@ impl State {
     /// taking notes fold last, and those with chords or a place in the menu bar first.
     fn tools(&mut self, theme: &Theme) {
         use Entry::{Open, Rule, Run, Soon};
-        use canvas::editor::{
-            Alignment, BULLET_LIBRARY, ListStyle, NUMBER_LIBRARY, NoteTag, Toggle,
-        };
+        use canvas::editor::{Alignment, BULLET_LIBRARY, ListStyle, NUMBER_LIBRARY, Toggle};
         use commands::{Choice, Id as Cmd};
         use ui::shell::TOOL;
         // A focused picture has no text to show a format for.
         let state = self.format_state();
         let statuses: Vec<_> = commands::COMMANDS
             .iter()
-            .map(|command| {
-                (
-                    command.id,
-                    self.status(&Choice::Command(command.id), &state),
-                )
-            })
+            .map(|command| command.id)
+            .chain((0..self.tags.len()).map(Cmd::Tag))
+            .map(|id| (id, self.status(&Choice::Command(id), &state)))
             .collect();
         let status_of = |id| {
             statuses
@@ -1499,7 +1506,7 @@ impl State {
         let label = format!("{:.0}%", self.view.zoom() * 100.0);
         let ui = &mut self.ui;
         let text = theme.text;
-        let tags = NoteTag::ALL.map(Cmd::Tag);
+        let tags: Vec<_> = self.tags.iter().enumerate().collect();
         let mut choice = group(
             ui,
             "navigate",
@@ -1890,11 +1897,13 @@ impl State {
         )
         .or(choice);
         // The gallery's menu: every tag, then managing them.
-        let mut all_tags: Vec<_> = tags.into_iter().map(Run).collect();
+        let mut all_tags: Vec<_> = tags
+            .iter()
+            .map(|&(place, tag)| Entry::Tag(place, tag))
+            .collect();
         all_tags.extend([
             Rule,
-            // Customize Tags awaits #8.
-            Soon("Customize Tags…", None),
+            Run(Cmd::CustomizeTags),
             Run(Cmd::RemoveTags),
             Rule,
             Run(Cmd::FindTags),
@@ -1906,12 +1915,18 @@ impl State {
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
-                for id in &tags[..3] {
-                    choice = tool(ui, *id, status_of(*id)).or(choice);
+                for &(place, tag) in tags.iter().take(3) {
+                    choice = tag_tool(ui, place, tag, status_of(Cmd::Tag(place))).or(choice);
                 }
                 dropdown(ui, "tags", Head::More, &all_tags, status_of).or(choice)
             },
-            |ui| dropdown(ui, "menu", Head::Split(tags[0]), &all_tags, status_of),
+            |ui| {
+                let head = match tags.first() {
+                    Some(&(place, tag)) => Head::Tag(place, tag),
+                    None => Head::More,
+                };
+                dropdown(ui, "menu", head, &all_tags, status_of)
+            },
         )
         .or(choice);
         let inserted = [Cmd::Picture, Cmd::Link, Cmd::Date, Cmd::Equation];
@@ -2342,6 +2357,7 @@ impl State {
                 self.respond(response);
             }
             Command::Page(Request::OpenLink(address)) => self.open_link(&address)?,
+            Command::Page(Request::OpenAttachment(file)) => self.open_attachment(&file)?,
             Command::Choose(choice) => self.run(choice)?,
         }
         Ok(())
@@ -3789,8 +3805,10 @@ fn group(
 
 /// A row of a toolbar menu.
 #[derive(Clone, Copy)]
-enum Entry {
+enum Entry<'a> {
     Run(commands::Id),
+    /// Applies the tag at this place in the tag list.
+    Tag(usize, &'a canvas::editor::NoteTag),
     /// Opens the toolbar's popup `name`, which applies the command, under the button the
     /// popup's own control would open it from, or where that is folded away, this menu's.
     Open(&'static str, commands::Id),
@@ -3802,8 +3820,10 @@ enum Entry {
 
 /// What opens a toolbar menu: the arrow of a button running a command, a button showing
 /// artwork, or a bare arrow.
-enum Head {
+enum Head<'a> {
     Split(commands::Id),
+    /// A button applying the tag at this place in the tag list.
+    Tag(usize, &'a canvas::editor::NoteTag),
     Menu(&'static [&'static str]),
     More,
 }
@@ -3831,8 +3851,17 @@ fn dropdown(
             tip(ui, id);
             ui::Anchor::Below(ui.rect(button).unwrap_or_default())
         }
+        Head::Tag(place, tag) if status_of(commands::Id::Tag(place)).enabled => {
+            let on = status_of(commands::Id::Tag(place)).checked;
+            if ui::shell::split_button(ui, part, tag_art(tag), None, on, menu).clicked {
+                choice = Some(Choice::Command(commands::Id::Tag(place)));
+            }
+            tag_tip(ui, place, tag);
+            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+        }
         // Where its command does not apply, the button only opens the menu.
         Head::Split(id) => ui::shell::menu_button(ui, part, artwork(id).unwrap_or_default(), menu),
+        Head::Tag(_, tag) => ui::shell::menu_button(ui, part, tag_art(tag), menu),
         Head::Menu(icon) => ui::shell::menu_button(ui, part, icon, menu),
         Head::More => {
             let open = ui.popup_open(menu);
@@ -3847,6 +3876,7 @@ fn dropdown(
         .iter()
         .map(|entry| match entry {
             Entry::Run(id) => commands::shortcut(*id),
+            Entry::Tag(place, _) => commands::shortcut(commands::Id::Tag(*place)),
             _ => String::new(),
         })
         .collect();
@@ -3861,10 +3891,20 @@ fn dropdown(
             Entry::Run(id) => ui::popup::Item {
                 text: commands::command(id).title,
                 icon: artwork(id),
-                colored: matches!(id, commands::Id::Tag(_)),
                 shortcut: key,
                 checked: status_of(id).checked,
                 disabled: !status_of(id).enabled,
+                ..Default::default()
+            },
+            Entry::Tag(place, tag) => ui::popup::Item {
+                text: &tag.label,
+                icon: TagIcon::of(tag.shape, false).map(tag_sources),
+                ink: tag.color.map(colorref),
+                highlight: tag.highlight.map(colorref),
+                colored: true,
+                shortcut: key,
+                checked: status_of(commands::Id::Tag(place)).checked,
+                disabled: !status_of(commands::Id::Tag(place)).enabled,
                 ..Default::default()
             },
             Entry::Open(_, id) => ui::popup::Item {
@@ -3889,6 +3929,7 @@ fn dropdown(
     }
     match ui::popup::menu(ui, menu, anchor, &items, None).map(|index| actions[index]) {
         Some(Entry::Run(id)) => Some(Choice::Command(id)),
+        Some(Entry::Tag(place, _)) => Some(Choice::Command(commands::Id::Tag(place))),
         Some(Entry::Open(name, _)) => {
             ui.open_popup(toolbar_popup(name));
             None
@@ -3904,12 +3945,7 @@ fn tool(ui: &mut Ui, id: commands::Id, status: commands::Status) -> Option<comma
         .iter()
         .position(|command| command.id == id);
     let icon = artwork(id).unwrap_or_default();
-    // Artwork in its own colours takes white.
-    let tint = if matches!(id, commands::Id::Tag(_)) {
-        [1.0; 4]
-    } else {
-        ui.theme.text
-    };
+    let tint = ui.theme.text;
     if !status.enabled {
         ui::shell::unavailable(ui, part, icon, tint, false);
         return None;
@@ -3917,6 +3953,25 @@ fn tool(ui: &mut Ui, id: commands::Id, status: commands::Status) -> Option<comma
     let clicked = ui::shell::tool_button(ui, part, icon, tint, status.checked).clicked;
     tip(ui, id);
     clicked.then_some(commands::Choice::Command(id))
+}
+
+/// A tool button applying the tag at `place` in the tag list, as `tool` builds a command's.
+fn tag_tool(
+    ui: &mut Ui,
+    place: usize,
+    tag: &canvas::editor::NoteTag,
+    status: commands::Status,
+) -> Option<commands::Choice> {
+    let part = ("tag", place);
+    // Artwork in its own colours takes white.
+    let tint = [1.0; 4];
+    if !status.enabled {
+        ui::shell::unavailable(ui, part, tag_art(tag), tint, false);
+        return None;
+    }
+    let clicked = ui::shell::tool_button(ui, part, tag_art(tag), tint, status.checked).clicked;
+    tag_tip(ui, place, tag);
+    clicked.then_some(commands::Choice::Command(commands::Id::Tag(place)))
 }
 
 /// The artwork the toolbar and its menus show for command `id`.
@@ -3948,7 +4003,6 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
         Cmd::Align(Alignment::Right) => art::ALIGN_RIGHT,
         Cmd::Outdent => art::OUTDENT,
         Cmd::Indent => art::INDENT,
-        Cmd::Tag(tag) => tag_icon(tag),
         Cmd::FindTags => art::FIND_TAGS,
         Cmd::Table => art::TABLE,
         Cmd::Picture => art::PICTURE,
@@ -3970,19 +4024,47 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
     })
 }
 
-/// The artwork the toolbar shows for `tag`.
-fn tag_icon(tag: canvas::editor::NoteTag) -> &'static [&'static str] {
-    use canvas::editor::NoteTag;
-    match tag {
-        NoteTag::RememberForLater => art::TAG_REMEMBER,
-        NoteTag::Definition => art::TAG_DEFINITION,
-        tag => tag_sources(TagIcon::of(tag.shape(), false).unwrap_or(TagIcon::Other)),
+/// The artwork the toolbar shows for `tag`: its symbol, or for a tag that only colours
+/// text, a chip of lines in its font colour on its highlight.
+fn tag_art(tag: &canvas::editor::NoteTag) -> &'static [&'static str] {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+    // Artwork is borrowed for the program's life, so each colour pair is made once.
+    type Chips = BTreeMap<(Option<u32>, Option<u32>), &'static [&'static str]>;
+    static CHIPS: Mutex<Chips> = Mutex::new(BTreeMap::new());
+    if let Some(icon) = TagIcon::of(tag.shape, false) {
+        return tag_sources(icon);
     }
+    let hex = |colorref: u32| {
+        let [red, green, blue, _] = colorref.to_le_bytes();
+        format!("#{red:02x}{green:02x}{blue:02x}")
+    };
+    let mut chips = CHIPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    chips.entry((tag.color, tag.highlight)).or_insert_with(|| {
+        let ink = tag.color.map_or_else(|| "#000000".into(), hex);
+        let fill = tag.highlight.map_or_else(|| "#ffffff".into(), hex);
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <path d="M2 3H14A1 1 0 0 1 15 4V12A1 1 0 0 1 14 13H2A1 1 0 0 1 1 12V4A1 1 0 0 1 2 3Z" fill="#000000" fill-opacity="0.35"/>
+  <path d="M2.25 4H13.75A0.25 0.25 0 0 1 14 4.25V11.75A0.25 0.25 0 0 1 13.75 12H2.25A0.25 0.25 0 0 1 2 11.75V4.25A0.25 0.25 0 0 1 2.25 4Z" fill="{fill}"/>
+  <path d="M3.5 6H12.5V7.25H3.5ZM3.5 8.75H10V10H3.5Z" fill="{ink}"/>
+</svg>"##
+        );
+        Box::leak(Box::new([&*svg.leak()]))
+    })
 }
 
 /// The toolbar's popup `name`, which the menu bar opens too.
 fn toolbar_popup(name: &str) -> Id {
     Id::ROOT.child(("popup", name))
+}
+
+/// A tooltip naming the tag at `place` and its chord on the box built last.
+fn tag_tip(ui: &mut Ui, place: usize, tag: &canvas::editor::NoteTag) {
+    let key = commands::shortcut(commands::Id::Tag(place));
+    ui::popup::tooltip(ui, &tag.label, &key, None);
 }
 
 /// A tooltip naming command `id` and its chord on the box built last. It names the command,
@@ -4344,6 +4426,11 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                 }
                 WindowEvent::Ime(ime) => state.input(ui::Event::Ime(ime)),
+                WindowEvent::DroppedFile(path) => {
+                    let at = platform::drop_point(&state.window);
+                    state.attach(&path, at)?;
+                    state.window.request_redraw();
+                }
                 WindowEvent::PinchGesture { delta, .. } => state.pinch(1.0 + delta as f32)?,
                 // Smart zoom: to 200% about the fingers, or back to 100%.
                 WindowEvent::DoubleTapGesture { .. } => {

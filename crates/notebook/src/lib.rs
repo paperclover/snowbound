@@ -14,7 +14,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::{
     fs::OpenOptions,
     io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, mpsc},
     time::Duration,
 };
@@ -106,6 +106,25 @@ impl Replica {
     /// An initialization error preserves the created file for inspection.
     pub fn create(path: impl AsRef<Path>, source: &[u8]) -> Result<Self> {
         validate(source)?;
+        let path = path.as_ref();
+        // Built under another name and linked into place whole, so that a cache that exists
+        // is complete: a background step or a failed creation never leaves one half made.
+        let mut building = path.as_os_str().to_owned();
+        building.push(".creating");
+        let building = PathBuf::from(building);
+        for stale in ["", "-wal", "-shm"] {
+            let mut file = building.as_os_str().to_owned();
+            file.push(stale);
+            let _ = std::fs::remove_file(file);
+        }
+        let built = Self::build(&building, source);
+        let linked = built.and_then(|()| Ok(std::fs::hard_link(&building, path)?));
+        let _ = std::fs::remove_file(&building);
+        linked?;
+        Self::start(cache_connection(path)?)
+    }
+
+    fn build(path: &Path, source: &[u8]) -> Result<()> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create_new(true);
         #[cfg(unix)]
@@ -113,8 +132,8 @@ impl Replica {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        drop(options.open(path.as_ref())?);
-        let mut connection = cache_connection(path.as_ref())?;
+        drop(options.open(path)?);
+        let mut connection = cache_connection(path)?;
         write_ahead(&connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Exclusive)?;
         let tables: i64 =
@@ -133,7 +152,7 @@ impl Replica {
         schema::create(&transaction)?;
         base::write(&transaction, base::Image::Base, source)?;
         transaction.commit()?;
-        Self::start(connection)
+        Ok(connection.close().map_err(|(_, error)| error)?)
     }
 
     /// Reopens an existing cache and its durable pending edits without network access.

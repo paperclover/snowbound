@@ -44,6 +44,15 @@ impl State {
                 target: Some(Target::Command(command.id)),
             })
             .collect();
+        rows.extend(self.tags.iter().enumerate().map(|(place, tag)| {
+            let id = commands::Id::Tag(place);
+            Row {
+                text: tag.label.clone(),
+                after: commands::shortcut(id),
+                disabled: !self.status(&Choice::Command(id), &format).enabled,
+                target: Some(Target::Command(id)),
+            }
+        }));
         let heading = |text: &str| Row {
             text: text.to_owned(),
             after: String::new(),

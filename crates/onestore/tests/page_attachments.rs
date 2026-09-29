@@ -112,6 +112,7 @@ fn insert_attachment(section: &str, preview: Option<Arc<[u8]>>) -> Vec<u8> {
         filename: "notes 🦀.txt".into(),
         source_path: None,
         size: Some([24.0, 24.0]),
+        layout: Default::default(),
         bytes: Some(Arc::from(PAYLOAD)),
         preview: preview.clone(),
         recording: None,
@@ -182,6 +183,7 @@ fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
         filename: "sub/dir.txt".into(),
         source_path: None,
         size: None,
+        layout: Default::default(),
         bytes: Some(Arc::from(PAYLOAD)),
         preview: None,
         recording: None,
@@ -229,4 +231,140 @@ fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
         )
         .unwrap();
     }
+}
+
+const FLOATING: &[u8] = include_bytes!("../../../corpus/attachment-floating/native/files.one");
+
+fn floating(page: &Page) -> Vec<&Attachment> {
+    page.objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Attachment(file) => Some(file),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn files_onenote_places_on_the_page_read_as_page_objects_sharing_one_payload() {
+    let store = Store::parse(FLOATING).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let (space, _) = document.pages().unwrap()[1];
+    let page = Page::from_space(&document, space).unwrap();
+    let files = floating(&page);
+    let [moved, attached] = files.as_slice() else {
+        panic!("{page:?}");
+    };
+    // Inserted through COM then dragged, and attached at a click on blank page.
+    assert_eq!(
+        [moved.layout.x, moved.layout.y],
+        [Some(288.0), Some(140.40001)]
+    );
+    assert_eq!(moved.layout.max_width, None);
+    assert_eq!(
+        [attached.layout.x, attached.layout.y],
+        [Some(342.0), Some(284.4)]
+    );
+    assert_eq!(
+        [attached.layout.max_width, attached.layout.max_height],
+        [Some(54.0), Some(62.999985)]
+    );
+    for file in files {
+        assert_eq!(file.filename, "float.txt");
+        assert_eq!(
+            file.bytes.as_deref(),
+            Some(b"Floating file, stored at page level.\r\n".as_slice())
+        );
+        assert_eq!(file.size, Some([24.0, 24.0]));
+    }
+}
+
+/// `ONESTORE_FLOATING_EXPORT` names a directory receiving the section for a cold reopen.
+#[test]
+fn a_file_on_the_page_is_attached_moved_renamed_and_removed_as_ops() {
+    let source = onestore::create_section("files.one", "Floating", "Author").unwrap();
+    let (space, before) = first_page(&source);
+    let (_, native) = first_page(NATIVE);
+    let file = Attachment {
+        id: new_id().unwrap(),
+        filename: "float 🦀.txt".into(),
+        source_path: Some(r"C:\inputs\float 🦀.txt".into()),
+        size: Some([24.0, 24.0]),
+        layout: onestore::document::Layout {
+            x: Some(342.0),
+            y: Some(284.4),
+            max_width: Some(54.0),
+            max_height: Some(63.0),
+            width_set_by_user: Some(false),
+            reserved_width: None,
+        },
+        bytes: Some(Arc::from(PAYLOAD)),
+        preview: attachments(&native)[0].preview.clone(),
+        recording: None,
+    };
+    let steps: [&dyn Fn(&mut Page); 4] = [
+        &|page| page.objects.push(PageObject::Attachment(file.clone())),
+        &|page| {
+            let PageObject::Attachment(file) = page.objects.last_mut().unwrap() else {
+                panic!()
+            };
+            [file.layout.x, file.layout.y] = [Some(126.0), Some(410.4)];
+        },
+        &|page| {
+            let PageObject::Attachment(file) = page.objects.last_mut().unwrap() else {
+                panic!()
+            };
+            file.filename = "renamed.txt".into();
+        },
+        &|page| {
+            page.objects.pop();
+        },
+    ];
+    let mut image = source.clone();
+    let mut expected = before.clone();
+    for (step, edit) in steps.iter().enumerate() {
+        edit(&mut expected);
+        let arena = onestore::Arena::default();
+        let section = onestore::Section::open(&arena, image.clone()).unwrap();
+        let stored = section.page(space).unwrap();
+        let lowered = onestore::op::lower_page(&stored, &expected).unwrap();
+        let mut predicted = stored.clone();
+        for op in &lowered {
+            onestore::op::predict(&mut predicted, op).unwrap();
+        }
+        image = ops::page_edited(&image, space, lowered).unwrap();
+        let read = page_in(&image, space);
+        assert_eq!(read, predicted, "step {step}");
+        assert_eq!(read, expected, "step {step}");
+        if let [file] = floating(&read)[..] {
+            assert_eq!(file.bytes.as_deref(), Some(PAYLOAD));
+            assert_eq!(file.preview, attachments(&native)[0].preview);
+        }
+        if step == 1
+            && let Some(directory) = std::env::var_os("ONESTORE_FLOATING_EXPORT")
+        {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("files.one"), &image).unwrap();
+            let file_id = Store::parse(&image).unwrap().header.file_id;
+            std::fs::write(
+                directory.join("Open Notebook.onetoc2"),
+                onestore::create_table_of_contents(
+                    "Open Notebook.onetoc2",
+                    &[("files.one", file_id)],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    assert!(floating(&page_in(&image, space)).is_empty());
+    // A file on the page has a position; one in a paragraph has none.
+    let mut unplaced = before.clone();
+    unplaced.objects.push(PageObject::Attachment(Attachment {
+        layout: Default::default(),
+        ..file.clone()
+    }));
+    assert!(ops::saved(&source, space, &unplaced).is_err());
 }

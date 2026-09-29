@@ -218,7 +218,9 @@ pub(crate) fn picture_changes(
         [0xff, 0xd8, 0xff, ..] => ".jpg",
         [b'G', b'I', b'F', b'8', ..] => ".gif",
         [b'B', b'M', ..] => ".bmp",
-        _ => return Err(invalid("Choose a PNG, JPEG, GIF or BMP picture")),
+        // OneNote keeps an imported TIFF as it is (`corpus/m6/native-features-01`).
+        [b'I', b'I', 0x2a, 0x00, ..] | [b'M', b'M', 0x00, 0x2a, ..] => ".tif",
+        _ => return Err(invalid("Choose a PNG, JPEG, GIF, BMP or TIFF picture")),
     };
     let modified = crate::create::current_timestamps()?.0.to_le_bytes();
     let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
@@ -303,12 +305,13 @@ pub(crate) struct AttachmentIds {
 
 /// What OneNote stores for an inserted file: an embedded-file container declaring the
 /// payload and an attachment object naming the file, which paragraph `holder` holds as
-/// content. The caller embeds the payloads.
+/// content or the page lists as a child at the attachment's position
+/// (`corpus/attachment-floating`). The caller embeds the payloads.
 pub(crate) fn attachment_changes(
     active: &ActivePage<'_>,
     attachment: &Attachment,
     ids: &AttachmentIds,
-    holder: ExGuid,
+    holder: Option<ExGuid>,
 ) -> Result<Changes, Error> {
     let name = attachment.filename.as_str();
     if name.is_empty() || name.contains(['\0', '/', '\\']) {
@@ -351,13 +354,27 @@ pub(crate) fn attachment_changes(
             .flat_map(|v| v.to_le_bytes())
             .collect(),
     ));
-    values.push((0x14001c3e, 1u32.to_le_bytes().to_vec()));
-    values.push((0x14001c84, 1u32.to_le_bytes().to_vec()));
+    let positioned = attachment.layout.x.is_some() || attachment.layout.y.is_some();
+    if holder.is_some() == positioned {
+        return Err(invalid(
+            "A file on the page has a position and a paragraph's file has none",
+        ));
+    }
+    // LayoutAlignmentInParent and LayoutAlignmentSelf: a paragraph's file is left-aligned in
+    // its paragraph; one on the page is aligned by its left margin (9), as OneNote stores.
+    match holder {
+        Some(_) => {
+            values.push((0x14001c3e, 1u32.to_le_bytes().to_vec()));
+            values.push((0x14001c84, 1u32.to_le_bytes().to_vec()));
+        }
+        None => values.push((0x14001c84, 9u32.to_le_bytes().to_vec())),
+    }
     values.push((0x1c001c22, crate::create::string(name)));
     values.push((0x1c001d9c, crate::create::string(name)));
     if let Some(path) = &attachment.source_path {
         values.push((0x1c001d9d, crate::create::string(path)));
     }
+    values.extend(layout_values(&Default::default(), &attachment.layout)?.0);
     let mut changed = BTreeMap::new();
     let mut file = PropertyObject::file(ids.file, &payload_reference(ids.payload), extension)?;
     file.jcid = crate::write::EMBEDDED_FILE_JCID;
@@ -379,7 +396,7 @@ pub(crate) fn attachment_changes(
         node.set(&[(0x20001c3f, &reference)])?;
     }
     changed.insert(ids.object, node);
-    hold(active, &mut changed, ids.object, Some(holder), &modified)?;
+    hold(active, &mut changed, ids.object, holder, &modified)?;
     Ok(changed)
 }
 

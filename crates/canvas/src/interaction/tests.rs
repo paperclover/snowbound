@@ -1805,7 +1805,7 @@ fn outline_chrome_grows_left_to_contain_its_tag_column() {
                 assert!(frame[1] < y && y + size < frame[3], "{frame:?} {y}");
                 // OneNote 2010 shows an arrow over a check box, which a click toggles.
                 let hit = page_hit_test(editor, None, [x + 1.0, y + 1.0], pixel);
-                if matches!(tag.icon, crate::outline::TagIcon::CheckBox { .. }) {
+                if tag.icon.checkable() {
                     assert_eq!(
                         hit,
                         Some(Hit::Check {
@@ -1821,18 +1821,30 @@ fn outline_chrome_grows_left_to_contain_its_tag_column() {
     };
     check(&editor, 0.0);
     editor
-        .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+        .format(
+            &mut engine,
+            Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+        )
         .unwrap();
     check(&editor, 1.0);
     editor
-        .format(&mut engine, Formatting::Tag(NoteTag::Question))
+        .format(
+            &mut engine,
+            Formatting::Tag(NoteTag::defaults()[2].clone(), 2),
+        )
         .unwrap();
     check(&editor, 2.0);
     editor
-        .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+        .format(
+            &mut engine,
+            Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+        )
         .unwrap();
     editor
-        .format(&mut engine, Formatting::Tag(NoteTag::Question))
+        .format(
+            &mut engine,
+            Formatting::Tag(NoteTag::defaults()[2].clone(), 2),
+        )
         .unwrap();
     check(&editor, 0.0);
 }
@@ -1851,7 +1863,10 @@ fn a_click_on_a_check_box_toggles_it_under_an_arrow() {
     let mut editor =
         CanvasEditor::from_text_outlines(vec![outline], Default::default(), None).unwrap();
     editor
-        .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+        .format(
+            &mut engine,
+            Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+        )
         .unwrap();
     let outline = editor.active_outline();
     let (_, paragraph) = outline.layouts().next().unwrap();
@@ -1923,7 +1938,10 @@ fn a_page_opens_where_onenote_places_the_view() {
             CanvasEditor::from_text_outlines(vec![outline], Default::default(), None).unwrap();
         if tag {
             editor
-                .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+                .format(
+                    &mut engine,
+                    Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+                )
                 .unwrap();
         }
         let reached = reach(editor.active_outline());
@@ -2624,4 +2642,243 @@ fn rule_lines_start_at_the_margin_origin() {
         vertical,
         [0.0, 12.0, 24.0, 36.0, 48.0, 60.0, 72.0, 84.0, 96.0]
     );
+}
+
+/// Template art the Page Color menu gives draws in the frame after, over the rule lines as
+/// OneNote's opaque pictures hide them, and follows undo and redo without a reload.
+#[test]
+fn art_draws_at_once_over_the_rule_lines_and_follows_undo() {
+    let mut engine = TextEngine::default();
+    let outline = TextOutline::new(
+        &mut engine,
+        TextDocument::new(vec![Paragraph::new("Notes".into(), Format::default())]).unwrap(),
+        300.0,
+        [300.0, 100.0],
+    )
+    .unwrap()
+    .snapshot();
+    let page = Page {
+        identity: None,
+        title: String::new(),
+        created: None,
+        margin_origin: [36.0, 14.4],
+        color: None,
+        rule_lines: Some(crate::template::RULE_LINES[2].1),
+        definitions: Default::default(),
+        objects: vec![onestore::page::PageObject::Outline(outline)],
+    };
+    let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        Some((scene, [0.0; 2])),
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    let ivy = crate::template::find("Ivy").unwrap();
+    let art = ivy.pictures().unwrap();
+    let [x, y] = ivy.art[0].position;
+    let [width, height] = ivy.art[0].size.unwrap();
+    let drawn = |view: &mut PageView, paper: Paper| {
+        view.update_pictures(paper, std::task::Waker::noop());
+        let primitives = view.primitives(TextColors { paper, ..COLORS }).unwrap();
+        let backing = primitives.iter().position(|primitive| {
+            matches!(primitive, Primitive::Rect { rect, color }
+                if *rect == [x, y, x + width, y + height] && *color == paper.color)
+        });
+        let image = primitives
+            .iter()
+            .position(|primitive| matches!(primitive, Primitive::Image { .. }));
+        let lines = primitives.iter().rposition(
+            |primitive| matches!(primitive, Primitive::Rect { rect, .. } if rect[0] < x),
+        );
+        (backing, image, lines)
+    };
+    let _ = view
+        .set_paper(None, view.editor.rule_lines(), Some(art))
+        .unwrap();
+    let (backing, image, lines) = drawn(&mut view, Paper::WHITE);
+    assert!(
+        lines < backing && backing < image,
+        "{lines:?} {backing:?} {image:?}"
+    );
+    let dark = Paper {
+        color: [0.0137, 0.0144, 0.0159, 1.0],
+        ink: [0.791, 0.791, 0.791, 1.0],
+    };
+    // Dark paper hides the lines in its own colour while its recolouring is made.
+    assert!(matches!(drawn(&mut view, dark), (Some(_), None, _)));
+    let _ = view.undo(false).unwrap();
+    assert!(matches!(drawn(&mut view, Paper::WHITE), (None, None, _)));
+    let _ = view.undo(true).unwrap();
+    assert!(matches!(
+        drawn(&mut view, Paper::WHITE),
+        (Some(_), Some(_), _)
+    ));
+}
+
+#[test]
+fn an_attached_file_selects_opens_on_a_double_click_and_deletes() {
+    let (mut view, _) = picture_view();
+    let now = Instant::now();
+    let file = onestore::page::Attachment {
+        id: onestore::page::text::new_id().unwrap(),
+        filename: "notes.txt".into(),
+        source_path: None,
+        size: Some([24.0, 24.0]),
+        layout: Default::default(),
+        bytes: Some(Arc::from(b"notes".as_slice())),
+        preview: None,
+        recording: None,
+    };
+    view.editor
+        .move_selection(&mut view.engine, Movement::DocumentEnd, false)
+        .unwrap();
+    assert!(view.insert_attachment(file.clone()).unwrap().changed);
+    let stored = view.editor.attachment(file.id).unwrap().clone();
+    // OneNote draws a broken picture for a file stored without its icon.
+    assert!(stored.preview.as_ref().unwrap().starts_with(b"\x89PNG"));
+    view.primitives(COLORS).unwrap();
+
+    let [x0, y0, x1, y1] = view.editor.attachment_rect(file.id).unwrap();
+    let center = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+    click(&mut view, center, now);
+    assert_eq!(view.object_focus(), Some(ObjectFocus::File(file.id)));
+    assert!(!view.accepts_text());
+    view.primitives(COLORS).unwrap();
+    let _ = view.pointer_moved(center).unwrap();
+    assert_eq!(
+        view.pointer_pressed(now + Duration::from_millis(100))
+            .unwrap()
+            .request,
+        Some(Request::OpenAttachment(stored.clone()))
+    );
+    let _ = view.pointer_released().unwrap();
+    let (_, context) = view.context().unwrap().unwrap();
+    assert_eq!(context.attachment, Some(stored));
+
+    assert!(
+        view.key(&Key::Named(NamedKey::Delete), None)
+            .unwrap()
+            .changed
+    );
+    assert!(view.editor.attachment(file.id).is_none());
+    assert!(view.accepts_text());
+}
+
+/// OneNote 2010 puts a file attached or dropped on blank page on the page there, where it
+/// selects, drags on the grid, opens and deletes as one (`corpus/attachment-floating`).
+#[test]
+fn a_file_dropped_on_blank_page_lies_on_the_page_and_drags() {
+    use onestore::op::PageOp;
+    let mut engine = TextEngine::default();
+    let document =
+        TextDocument::new(vec![Paragraph::new("Text".into(), Default::default())]).unwrap();
+    let outline = TextOutline::new(&mut engine, document, 240.0, [36.0, 36.0]).unwrap();
+    let page = Page {
+        title: String::new(),
+        identity: None,
+        created: None,
+        margin_origin: [36.0, 14.4],
+        color: None,
+        rule_lines: None,
+        definitions: Default::default(),
+        objects: vec![onestore::page::PageObject::Outline(outline.snapshot())],
+    };
+    let (scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        Some((scene, [0.0; 2])),
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    view.viewport.scale = 1.0;
+    view.viewport.origin = [0.0; 2];
+    let _ = view.editor.take_ops().unwrap();
+    let file = onestore::page::Attachment {
+        id: onestore::page::text::new_id().unwrap(),
+        filename: "float.txt".into(),
+        source_path: None,
+        size: Some([24.0, 24.0]),
+        layout: Default::default(),
+        bytes: Some(Arc::from(b"float".as_slice())),
+        preview: None,
+        recording: None,
+    };
+    let _ = view.drop_attachment([400.0, 400.0], file.clone()).unwrap();
+    assert_eq!(view.editor.outlines().len(), 1);
+    let placed = |view: &PageView| {
+        view.editor
+            .page()
+            .unwrap()
+            .objects
+            .into_iter()
+            .find_map(|object| match object {
+                onestore::page::PageObject::Attachment(file) => Some(file),
+                _ => None,
+            })
+    };
+    // At the caret a click there places, on the 18 pt grid from the margin origin.
+    let stored = placed(&view).unwrap();
+    assert_eq!(
+        [stored.layout.x, stored.layout.y],
+        [Some(396.0), Some(392.4)]
+    );
+    assert_eq!(stored.layout.max_width, Some(54.0));
+    assert!(matches!(
+        &view.editor.take_ops().unwrap()[..],
+        [PageOp::Add { object: onestore::page::PageObject::Attachment(added), before: None }]
+            if added.id == file.id
+    ));
+    assert!(
+        view.primitives(COLORS)
+            .unwrap()
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::Text { .. }))
+    );
+
+    let [x0, y0, x1, y1] = view.editor.attachment_rect(file.id).unwrap();
+    let center = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+    let now = Instant::now();
+    let _ = view.pointer_moved(center).unwrap();
+    let _ = view.pointer_pressed(now).unwrap();
+    assert_eq!(view.object_focus(), Some(ObjectFocus::File(file.id)));
+    let _ = view
+        .pointer_moved([center[0] + 100.0, center[1] + 50.0])
+        .unwrap();
+    view.primitives(COLORS).unwrap();
+    let _ = view.pointer_released().unwrap();
+    let moved = placed(&view).unwrap();
+    assert_eq!([moved.layout.x, moved.layout.y], [Some(504.0), Some(446.4)]);
+    assert!(matches!(
+        &view.editor.take_ops().unwrap()[..],
+        [PageOp::Outline { object, .. }] if *object == file.id
+    ));
+    let (_, context) = view.context().unwrap().unwrap();
+    assert_eq!(context.attachment.map(|found| found.id), Some(file.id));
+
+    let _ = view.undo(false).unwrap();
+    assert_eq!(placed(&view).unwrap().layout.x, Some(396.0));
+    let _ = view.undo(true).unwrap();
+    assert_eq!(placed(&view).unwrap().layout.x, Some(504.0));
+    let _ = view.editor.take_ops().unwrap();
+
+    let [x0, y0, x1, y1] = view.editor.attachment_rect(file.id).unwrap();
+    click(
+        &mut view,
+        [(x0 + x1) / 2.0, (y0 + y1) / 2.0],
+        now + Duration::from_secs(1),
+    );
+    let _ = view.key(&Key::Named(NamedKey::Delete), None).unwrap();
+    assert!(placed(&view).is_none());
+    assert!(matches!(
+        &view.editor.take_ops().unwrap()[..],
+        [PageOp::Delete { object }] if *object == file.id
+    ));
+    let _ = view.undo(false).unwrap();
+    assert_eq!(placed(&view).unwrap().layout.x, Some(504.0));
+    view.primitives(COLORS).unwrap();
 }

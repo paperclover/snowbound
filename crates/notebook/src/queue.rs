@@ -47,6 +47,10 @@ fn object(object: &mut PageObject, visit: &mut impl FnMut(&mut Payload)) {
             }
         }
         PageObject::Image(image) => visit(&mut image.bytes),
+        PageObject::Attachment(attachment) => {
+            visit(&mut attachment.bytes);
+            visit(&mut attachment.preview);
+        }
         PageObject::Ink(_) | PageObject::Unsupported(_) => {}
     }
 }

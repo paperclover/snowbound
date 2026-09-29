@@ -5,6 +5,7 @@ use crate::layout::{DEFAULT_FONT, DEFAULT_FONT_SIZE};
 use onestore::document::{Format, Kind, Tag};
 use onestore::page::ParagraphContent;
 use onestore::page::text::new_id;
+use serde::{Deserialize, Serialize};
 
 /// The COLORREF OneNote stores for automatic colour, which overrides a style's colour.
 const AUTOMATIC: u32 = 0xff00_0000;
@@ -32,7 +33,9 @@ pub enum Formatting {
     Indent,
     Outdent,
     Align(Alignment),
-    Tag(NoteTag),
+    /// A tag of the user's list and its place there, which the page stores as its action
+    /// type.
+    Tag(NoteTag, u16),
     /// Removes every note tag from the selected paragraphs.
     RemoveTags,
     /// Checks the selected paragraphs' check boxes, or clears them when all are checked.
@@ -161,40 +164,102 @@ impl ListStyle {
     }
 }
 
-/// OneNote 2010's default tags, the first nine on Ctrl+1 to Ctrl+9, as it stores their
-/// definitions (`corpus/structural-probe/tag-gallery.one`); declared in gallery order, their
-/// action types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoteTag {
-    ToDo,
-    Important,
-    Question,
-    RememberForLater,
-    Definition,
-    Highlight,
-    Contact,
-    Address,
-    PhoneNumber,
-    WebSiteToVisit,
-    Idea,
-    Password,
-    Critical,
-    ProjectA,
-    ProjectB,
-    MovieToSee,
-    BookToRead,
-    MusicToListenTo,
-    SourceForArticle,
-    RememberForBlog,
-    DiscussWithPersonA,
-    DiscussWithPersonB,
-    DiscussWithManager,
-    SendInEmail,
-    ScheduleMeeting,
-    CallBack,
-    ToDoPriority1,
-    ToDoPriority2,
-    ClientRequest,
+/// A tag of the user's list as the Customize Tags dialog edits it: what its definition
+/// stores besides its place in the list, which the page stores as its action type.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NoteTag {
+    pub label: String,
+    /// MS-ONE's NoteTagShape; 0 has no symbol.
+    pub shape: u16,
+    /// COLORREFs; none leaves the text's own.
+    pub color: Option<u32>,
+    pub highlight: Option<u32>,
+}
+
+/// OneNote 2010's tag list before it is customized, the first nine on Ctrl+1 to Ctrl+9
+/// (`corpus/structural-probe/tag-gallery.one`): names, symbols and highlights.
+const DEFAULT_TAGS: [(&str, u16, Option<u32>); 29] = [
+    ("To Do", CHECKBOX, None),
+    ("Important", 13, None),
+    ("Question", 15, None),
+    ("Remember for later", 0, Some(0x0000_ffff)),
+    ("Definition", 0, Some(0x0000_ff00)),
+    ("Highlight", 136, None),
+    ("Contact", 118, None),
+    ("Address", 23, None),
+    ("Phone number", 18, None),
+    ("Web site to visit", 125, None),
+    ("Idea", 21, None),
+    ("Password", 131, None),
+    ("Critical", 17, None),
+    ("Project A", 100, None),
+    ("Project B", 101, None),
+    ("Movie to see", 122, None),
+    ("Book to read", 132, None),
+    ("Music to listen to", 121, None),
+    ("Source for article", 125, None),
+    ("Remember for blog", 24, None),
+    ("Discuss with <Person A>", 94, None),
+    ("Discuss with <Person B>", 94, None),
+    ("Discuss with manager", 95, None),
+    ("Send in e-mail", 106, None),
+    ("Schedule meeting", 12, None),
+    ("Call back", 12, None),
+    ("To Do priority 1", 28, None),
+    ("To Do priority 2", 71, None),
+    ("Client request", 8, None),
+];
+
+impl NoteTag {
+    pub fn defaults() -> Vec<Self> {
+        DEFAULT_TAGS
+            .iter()
+            .map(|&(label, shape, highlight)| Self {
+                label: label.into(),
+                shape,
+                // The highlighting tags also set black text.
+                color: highlight.map(|_| 0),
+                highlight,
+            })
+            .collect()
+    }
+
+    /// The definition OneNote stores for the tag at place `action_type` in the list.
+    pub fn definition(&self, action_type: u16) -> Definition {
+        Definition {
+            kind: Kind::TagDefinition {
+                label: Some(self.label.clone()),
+                action_type: Some(action_type),
+                shape: Some(self.shape),
+                color: self.color,
+                highlight: self.highlight,
+            },
+            format: Format::default(),
+        }
+    }
+
+    /// The tag a stored definition describes, and its action type.
+    pub fn of(kind: &Kind) -> Option<(Self, u16)> {
+        let Kind::TagDefinition {
+            label,
+            action_type,
+            shape,
+            color,
+            highlight,
+        } = kind
+        else {
+            return None;
+        };
+        Some((
+            Self {
+                label: label.clone().unwrap_or_default(),
+                shape: shape.unwrap_or(0),
+                color: *color,
+                highlight: *highlight,
+            },
+            action_type.unwrap_or(0),
+        ))
+    }
 }
 
 /// What the selection shows on the toolbar.
@@ -212,8 +277,8 @@ pub struct FormatState {
     pub numbering: bool,
     /// The library style every selected paragraph's list shares.
     pub list: Option<ListStyle>,
-    /// Tags every selected paragraph has.
-    pub tags: Vec<NoteTag>,
+    /// Tags every selected paragraph has, with their action types.
+    pub tags: Vec<(NoteTag, u16)>,
 }
 
 impl Toggle {
@@ -247,133 +312,6 @@ impl Toggle {
             Self::Superscript => &mut format.superscript,
         }
     }
-}
-
-impl NoteTag {
-    pub const ALL: [Self; 29] = [
-        Self::ToDo,
-        Self::Important,
-        Self::Question,
-        Self::RememberForLater,
-        Self::Definition,
-        Self::Highlight,
-        Self::Contact,
-        Self::Address,
-        Self::PhoneNumber,
-        Self::WebSiteToVisit,
-        Self::Idea,
-        Self::Password,
-        Self::Critical,
-        Self::ProjectA,
-        Self::ProjectB,
-        Self::MovieToSee,
-        Self::BookToRead,
-        Self::MusicToListenTo,
-        Self::SourceForArticle,
-        Self::RememberForBlog,
-        Self::DiscussWithPersonA,
-        Self::DiscussWithPersonB,
-        Self::DiscussWithManager,
-        Self::SendInEmail,
-        Self::ScheduleMeeting,
-        Self::CallBack,
-        Self::ToDoPriority1,
-        Self::ToDoPriority2,
-        Self::ClientRequest,
-    ];
-
-    /// The tag's name, as OneNote stores and lists it.
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::ToDo => "To Do",
-            Self::Important => "Important",
-            Self::Question => "Question",
-            Self::RememberForLater => "Remember for later",
-            Self::Definition => "Definition",
-            Self::Highlight => "Highlight",
-            Self::Contact => "Contact",
-            Self::Address => "Address",
-            Self::PhoneNumber => "Phone number",
-            Self::WebSiteToVisit => "Web site to visit",
-            Self::Idea => "Idea",
-            Self::Password => "Password",
-            Self::Critical => "Critical",
-            Self::ProjectA => "Project A",
-            Self::ProjectB => "Project B",
-            Self::MovieToSee => "Movie to see",
-            Self::BookToRead => "Book to read",
-            Self::MusicToListenTo => "Music to listen to",
-            Self::SourceForArticle => "Source for article",
-            Self::RememberForBlog => "Remember for blog",
-            Self::DiscussWithPersonA => "Discuss with <Person A>",
-            Self::DiscussWithPersonB => "Discuss with <Person B>",
-            Self::DiscussWithManager => "Discuss with manager",
-            Self::SendInEmail => "Send in e-mail",
-            Self::ScheduleMeeting => "Schedule meeting",
-            Self::CallBack => "Call back",
-            Self::ToDoPriority1 => "To Do priority 1",
-            Self::ToDoPriority2 => "To Do priority 2",
-            Self::ClientRequest => "Client request",
-        }
-    }
-
-    /// The symbol OneNote draws for the tag; 0 draws none.
-    pub const fn shape(self) -> u16 {
-        match self {
-            Self::ToDo => CHECKBOX,
-            Self::Important => 13,
-            Self::Question => 15,
-            Self::RememberForLater | Self::Definition => 0,
-            Self::Highlight => 136,
-            Self::Contact => 118,
-            Self::Address => 23,
-            Self::PhoneNumber => 18,
-            Self::WebSiteToVisit | Self::SourceForArticle => 125,
-            Self::Idea => 21,
-            Self::Password => 131,
-            Self::Critical => 17,
-            Self::ProjectA => 100,
-            Self::ProjectB => 101,
-            Self::MovieToSee => 122,
-            Self::BookToRead => 132,
-            Self::MusicToListenTo => 121,
-            Self::RememberForBlog => 24,
-            Self::DiscussWithPersonA | Self::DiscussWithPersonB => 94,
-            Self::DiscussWithManager => 95,
-            Self::SendInEmail => 106,
-            Self::ScheduleMeeting | Self::CallBack => 12,
-            Self::ToDoPriority1 => 28,
-            Self::ToDoPriority2 => 71,
-            Self::ClientRequest => 8,
-        }
-    }
-
-    pub(super) fn definition(self) -> Definition {
-        let highlight = match self {
-            Self::RememberForLater => Some(0x0000_ffff),
-            Self::Definition => Some(0x0000_ff00),
-            _ => None,
-        };
-        Definition {
-            kind: Kind::TagDefinition {
-                label: Some(self.label().into()),
-                action_type: Some(self as u16),
-                shape: Some(self.shape()),
-                // The highlighting tags also set black text.
-                color: highlight.map(|_| 0),
-                highlight,
-            },
-            format: Format::default(),
-        }
-    }
-}
-
-/// Whether tag symbol `shape` is a check box, which OneNote stores unchecked when applied.
-fn checkable(shape: Option<u16>) -> bool {
-    matches!(
-        shape.and_then(|shape| crate::outline::TagIcon::of(shape, false)),
-        Some(crate::outline::TagIcon::CheckBox { .. })
-    )
 }
 
 /// Where a selection starts and ends, as text leaf identity and byte offset.
@@ -664,15 +602,19 @@ impl CanvasEditor {
             bullets: list(Formatting::Bullets),
             numbering: list(Formatting::Numbering),
             list: common(paragraphs.iter().map(|node| self.list_style(node))),
-            tags: NoteTag::ALL
-                .into_iter()
-                .filter(|tag| {
-                    let kind = tag.definition().kind;
-                    paragraphs
-                        .iter()
-                        .all(|node| tags(node).any(|tag| self.tag_kind(tag) == Some(&kind)))
-                })
-                .collect(),
+            tags: paragraphs.first().map_or_else(Vec::new, |first| {
+                let mut shared: Vec<_> = tags(first)
+                    .filter_map(|tag| NoteTag::of(self.tag_kind(tag)?))
+                    .filter(|(tag, action_type)| {
+                        let kind = tag.definition(*action_type).kind;
+                        paragraphs
+                            .iter()
+                            .all(|node| tags(node).any(|tag| self.tag_kind(tag) == Some(&kind)))
+                    })
+                    .collect();
+                shared.sort_by_key(|(_, action_type)| *action_type);
+                shared
+            }),
         })
     }
 
@@ -702,7 +644,7 @@ impl CanvasEditor {
             | Formatting::Bullets
             | Formatting::Numbering
             | Formatting::List(_)
-            | Formatting::Tag(_)
+            | Formatting::Tag(..)
             | Formatting::RemoveTags
             | Formatting::Check
                 if title =>
@@ -783,14 +725,8 @@ impl CanvasEditor {
                     }
                 });
             }
-            Formatting::Tag(tag) => {
-                let definition = tag.definition();
-                let Kind::TagDefinition {
-                    action_type, shape, ..
-                } = definition.kind
-                else {
-                    unreachable!()
-                };
+            Formatting::Tag(tag, action_type) => {
+                let definition = tag.definition(*action_type);
                 let existing = self
                     .definitions
                     .iter()
@@ -821,12 +757,12 @@ impl CanvasEditor {
                             Some(kind) if remove => *kind != definition.kind,
                             Some(Kind::TagDefinition {
                                 action_type: other, ..
-                            }) => *other != action_type,
+                            }) => *other != Some(*action_type),
                             _ => true,
                         });
                     }
                     if !remove {
-                        let checkable = checkable(shape);
+                        let checkable = crate::outline::checkable(tag.shape);
                         // Stored newest first.
                         text.tags.insert(
                             0,
@@ -967,7 +903,7 @@ impl CanvasEditor {
             Formatting::Toggle(toggle) => state.toggles.contains(toggle),
             Formatting::Bullets => state.bullets,
             Formatting::Numbering => state.numbering,
-            Formatting::Tag(tag) => state.tags.contains(tag),
+            Formatting::Tag(tag, action_type) => state.tags.contains(&(tag.clone(), *action_type)),
             _ => false,
         };
         let mut outlines = Vec::new();
@@ -1038,7 +974,8 @@ impl CanvasEditor {
         let checkable = |tag: &Tag| {
             matches!(
                 self.tag_kind(tag),
-                Some(Kind::TagDefinition { shape, .. }) if checkable(*shape)
+                Some(Kind::TagDefinition { shape: Some(shape), .. })
+                    if crate::outline::checkable(*shape)
             )
         };
         let checked = self::covered(replacement, ends)
@@ -1823,7 +1760,10 @@ mod tests {
         let mut editor = plain(&mut engine, &["task", "other"]);
         editor.select([at(0, 0), at(1, 5)].into()).unwrap();
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+            )
             .unwrap();
         editor.select([at(1, 2); 2].into()).unwrap();
         let outline = editor.active_outline().id;
@@ -1886,27 +1826,33 @@ mod tests {
         let original = editor.active_outline().document.clone();
         editor.select([at(0, 1), at(1, 2)].into()).unwrap();
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+            )
             .unwrap();
         assert_eq!(text_tags(&editor, 0), [("To Do".into(), 0, true)]);
         assert_eq!(text_tags(&editor, 1), [("To Do".into(), 0, true)]);
-        assert_eq!(editor.format_state().unwrap().tags, [NoteTag::ToDo]);
+        assert_eq!(
+            editor.format_state().unwrap().tags,
+            [(NoteTag::defaults()[0].clone(), 0)]
+        );
         let icon =
             |editor: &CanvasEditor| editor.active_outline().shaped.paragraphs[1].tags[0].icon;
         assert_eq!(
             icon(&editor),
-            crate::outline::TagIcon::CheckBox {
-                checked: false,
-                mark: None
+            crate::outline::TagIcon::Symbol {
+                shape: 3,
+                checked: false
             }
         );
         editor.format(&mut engine, Formatting::Check).unwrap();
         assert_eq!(text_tags(&editor, 1), [("To Do".into(), 1, true)]);
         assert_eq!(
             icon(&editor),
-            crate::outline::TagIcon::CheckBox {
-                checked: true,
-                mark: None
+            crate::outline::TagIcon::Symbol {
+                shape: 3,
+                checked: true
             }
         );
         editor.select([at(1, 0); 2].into()).unwrap();
@@ -1918,27 +1864,39 @@ mod tests {
 
         editor.select([at(1, 0), at(2, 5)].into()).unwrap();
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::Question))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[2].clone(), 2),
+            )
             .unwrap();
         assert_eq!(
             text_tags(&editor, 1),
             [("Question".into(), 1, true), ("To Do".into(), 1, true)]
         );
         assert_eq!(text_tags(&editor, 2), [("Question".into(), 1, true)]);
-        assert_eq!(editor.format_state().unwrap().tags, [NoteTag::Question]);
+        assert_eq!(
+            editor.format_state().unwrap().tags,
+            [(NoteTag::defaults()[2].clone(), 2)]
+        );
         let questions = editor
             .definitions
             .values()
-            .filter(|definition| **definition == NoteTag::Question.definition())
+            .filter(|definition| **definition == NoteTag::defaults()[2].definition(2))
             .count();
         assert_eq!(questions, 1);
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::Question))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[2].clone(), 2),
+            )
             .unwrap();
         assert_eq!(text_tags(&editor, 2), []);
         editor.select([at(0, 0); 2].into()).unwrap();
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+            )
             .unwrap();
         assert_eq!(text_tags(&editor, 0), []);
         for _ in 0..7 {
@@ -1961,44 +1919,35 @@ mod tests {
             .values()
             .filter(|definition| matches!(definition.kind, Kind::TagDefinition { .. }))
             .collect::<Vec<_>>();
-        assert_eq!(stored.len(), NoteTag::ALL.len());
-        for tag in NoteTag::ALL {
-            assert!(stored.contains(&&tag.definition()), "{tag:?}");
+        let defaults = NoteTag::defaults();
+        assert_eq!(stored.len(), defaults.len());
+        for (place, tag) in defaults.iter().enumerate() {
+            assert!(stored.contains(&&tag.definition(place as u16)), "{tag:?}");
         }
         let mut engine = TextEngine::default();
         let mut editor = plain(&mut engine, &["tagged"]);
-        for tag in NoteTag::ALL {
-            editor.format(&mut engine, Formatting::Tag(tag)).unwrap();
+        for (place, tag) in defaults.iter().enumerate() {
+            editor
+                .format(&mut engine, Formatting::Tag(tag.clone(), place as u16))
+                .unwrap();
         }
-        assert_eq!(editor.format_state().unwrap().tags, NoteTag::ALL);
+        assert_eq!(editor.format_state().unwrap().tags.len(), defaults.len());
         let paragraph = &editor.active_outline().shaped.paragraphs[0];
-        use crate::outline::TagIcon;
-        let icons = paragraph
+        let shapes = paragraph
             .tags
             .iter()
-            .map(|tag| tag.icon)
+            .map(|tag| match tag.icon {
+                crate::outline::TagIcon::Symbol { shape, .. } => shape,
+                crate::outline::TagIcon::Task => unreachable!(),
+            })
             .collect::<Vec<_>>();
-        assert_eq!(icons.len(), NoteTag::ALL.len() - 2);
-        assert_eq!(
-            icons[..7],
-            [
-                TagIcon::CheckBox {
-                    checked: false,
-                    mark: None
-                },
-                TagIcon::Star,
-                TagIcon::Question,
-                TagIcon::Highlight,
-                TagIcon::Contact,
-                TagIcon::Address,
-                TagIcon::Phone,
-            ]
-        );
+        assert_eq!(shapes.len(), defaults.len() - 2);
+        assert_eq!(shapes[..7], [3, 13, 15, 136, 118, 23, 18]);
         // As OneNote stores them unchecked: To Do, Discuss with, Schedule meeting, Call back,
         // the priorities and Client request.
-        let checkable = NoteTag::ALL
-            .into_iter()
-            .filter(|tag| checkable(Some(tag.shape())))
+        let checkable = defaults
+            .iter()
+            .filter(|tag| crate::outline::checkable(tag.shape))
             .count();
         assert_eq!(checkable, 9);
         // Remember for later and Definition draw no symbol; the newer one's green marks the text.
@@ -2007,6 +1956,46 @@ mod tests {
                 .text
                 .backgrounds()
                 .all(|(_, color)| color == 0x0000_ff00)
+        );
+        assert!(paragraph.text.backgrounds().next().is_some());
+    }
+
+    /// A customized tag stores its name, symbol and colours with its place in the list as
+    /// its action type; applied from another place it takes a definition of its own, as
+    /// OneNote 2010's does (`corpus/custom-tags`).
+    #[test]
+    fn custom_tags_store_their_look_and_place() {
+        let mut engine = TextEngine::default();
+        let mut editor = plain(&mut engine, &["one", "two"]);
+        let tag = NoteTag {
+            label: "Snow check".into(),
+            shape: 61,
+            color: Some(0x0000_0080),
+            highlight: Some(0x00ff_cc00),
+        };
+        editor
+            .format(&mut engine, Formatting::Tag(tag.clone(), 0))
+            .unwrap();
+        assert_eq!(editor.format_state().unwrap().tags, [(tag.clone(), 0)]);
+        assert_eq!(text_tags(&editor, 0), [("Snow check".into(), 1, true)]);
+        editor.select([at(1, 0); 2].into()).unwrap();
+        editor
+            .format(&mut engine, Formatting::Tag(tag.clone(), 1))
+            .unwrap();
+        assert_eq!(editor.format_state().unwrap().tags, [(tag.clone(), 1)]);
+        let mut stored: Vec<_> = editor
+            .definitions
+            .values()
+            .filter_map(|definition| NoteTag::of(&definition.kind))
+            .collect();
+        stored.sort_by_key(|(_, action_type)| *action_type);
+        assert_eq!(stored, [(tag.clone(), 0), (tag, 1)]);
+        let paragraph = &editor.active_outline().shaped.paragraphs[0];
+        assert!(
+            paragraph
+                .text
+                .backgrounds()
+                .all(|(_, color)| color == 0x00ff_cc00)
         );
         assert!(paragraph.text.backgrounds().next().is_some());
     }
@@ -2049,7 +2038,10 @@ mod tests {
         editor.format(&mut engine, Formatting::Numbering).unwrap();
         assert_eq!(numbers(&mut engine, &editor), [None, Some(1)]);
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::ToDo))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+            )
             .unwrap();
         assert_eq!(editor.active_outline().shaped.paragraphs[1].tags.len(), 1);
         assert_eq!(editor.selection(), Selection::from([at(1, 0); 2]));
@@ -2110,8 +2102,8 @@ mod tests {
             Formatting::Highlight(Some(0x0000_ffff)),
             Formatting::Align(Alignment::Center),
             Formatting::Numbering,
-            Formatting::Tag(NoteTag::ToDo),
-            Formatting::Tag(NoteTag::Question),
+            Formatting::Tag(NoteTag::defaults()[0].clone(), 0),
+            Formatting::Tag(NoteTag::defaults()[2].clone(), 2),
             Formatting::Check,
         ] {
             editor.format(&mut engine, command).unwrap();
@@ -2136,7 +2128,10 @@ mod tests {
                 bullets: false,
                 numbering: true,
                 list: Some(ListStyle::NUMBER),
-                tags: vec![NoteTag::ToDo, NoteTag::Question],
+                tags: vec![
+                    (NoteTag::defaults()[0].clone(), 0),
+                    (NoteTag::defaults()[2].clone(), 2)
+                ],
             }
         );
         // Format Painter, a gallery tag and an inserted table write as well.
@@ -2155,7 +2150,10 @@ mod tests {
             )
         );
         editor
-            .format(&mut engine, Formatting::Tag(NoteTag::CallBack))
+            .format(
+                &mut engine,
+                Formatting::Tag(NoteTag::defaults()[25].clone(), 25),
+            )
             .unwrap();
         editor.select([at(0, 1); 2].into()).unwrap();
         editor.insert_table(&mut engine, 2, 3).unwrap();

@@ -60,7 +60,10 @@ fn identities(page: &Page) -> Vec<onestore::ExGuid> {
                     ids.extend(outline.unsupported.iter().map(|u| u.id));
                 }
             }
-            PageObject::Image(_) | PageObject::Ink(_) | PageObject::Unsupported(_) => {}
+            PageObject::Image(_)
+            | PageObject::Attachment(_)
+            | PageObject::Ink(_)
+            | PageObject::Unsupported(_) => {}
         }
     }
     ids

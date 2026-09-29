@@ -330,6 +330,9 @@ impl CanvasEditor {
                 page::Content::Ink(ink) if ink.id == placement.id => {
                     return layout_ops(ink.id, &old, &moved(&ink.layout));
                 }
+                page::Content::File { source, .. } if source.id == placement.id => {
+                    return layout_ops(source.id, &old, &moved(&source.layout));
+                }
                 page::Content::Outline { source, .. } if source.id == placement.id => {
                     return layout_ops(source.id, &old, &moved(&source.layout));
                 }
@@ -434,6 +437,7 @@ impl CanvasEditor {
                 page::Content::Outline { source, .. } => source.id,
                 page::Content::Date { .. } => continue,
                 page::Content::Image(image) => image.id,
+                page::Content::File { source, .. } => source.id,
                 page::Content::Ink(ink) => ink.id,
                 page::Content::ReadOnly(object)
                     if matches!(object.source, PageObject::Title(_)) =>

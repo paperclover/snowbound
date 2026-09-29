@@ -21,6 +21,36 @@ pub struct Template {
     pub art: &'static [Art],
 }
 
+impl Template {
+    /// The background pictures a page stores for this template: OneNote's places, our
+    /// recreations' bytes.
+    #[cfg(feature = "gpu")]
+    pub fn pictures(&self) -> Result<Vec<onestore::page::Image>, onestore::page::text::EditError> {
+        self.art
+            .iter()
+            .map(|art| {
+                let bytes = crate::gpu::page::template_picture(art.art)
+                    .expect("Every template's art is recreated");
+                Ok(onestore::page::Image {
+                    id: onestore::page::text::new_id()?,
+                    layout: onestore::document::Layout {
+                        x: Some(art.position[0]),
+                        y: Some(art.position[1]),
+                        max_width: art.size.map(|size| size[0]),
+                        max_height: art.size.map(|size| size[1]),
+                        width_set_by_user: art.size.map(|_| true),
+                        ..Default::default()
+                    },
+                    size: art.size,
+                    bytes: Some(bytes.into()),
+                    alt: None,
+                    background: true,
+                })
+            })
+            .collect()
+    }
+}
+
 /// OneNote 2010's Decorative templates and Informal Meeting Notes (resources/onenote-templates.md),
 /// in the order the gallery lists them.
 pub const TEMPLATES: &[Template] = &[

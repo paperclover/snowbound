@@ -1888,6 +1888,7 @@ dependencies = [
  "onestore",
  "parley",
  "pollster",
+ "resvg",
  "serde",
  "serde_json",
  "tempfile",

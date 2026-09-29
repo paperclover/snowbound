@@ -2,7 +2,7 @@
 //! chords on each platform, when it applies and what it does.
 
 use crate::{Command as Work, FONTS, HIGHLIGHTS, SIZES, State, page, platform, search};
-use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, NoteTag, Toggle};
+use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, Toggle};
 use canvas::interaction::Request;
 use draw::edit::{Key, Modifiers, NamedKey, Platform};
 use std::{error::Error, sync::Arc};
@@ -63,7 +63,9 @@ pub enum Id {
     Indent,
     Outdent,
     ClearFormatting,
-    Tag(NoteTag),
+    /// The tag at this place in the user's tag list.
+    Tag(usize),
+    CustomizeTags,
     RemoveTags,
     FindTags,
     Help,
@@ -173,15 +175,6 @@ macro_rules! row {
             mac: $mac,
             pc: $pc,
         }
-    };
-}
-
-macro_rules! tag {
-    ($tag:expr, $digit:literal) => {
-        row!(Id::Tag($tag), $tag.label(), &[cmd($digit)], &[cmd($digit)])
-    };
-    ($tag:expr) => {
-        row!(Id::Tag($tag), $tag.label(), NONE, NONE)
     };
 }
 
@@ -378,35 +371,7 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('n').shift()],
         &[cmd('n').shift()]
     ),
-    tag!(NoteTag::ToDo, '1'),
-    tag!(NoteTag::Important, '2'),
-    tag!(NoteTag::Question, '3'),
-    tag!(NoteTag::RememberForLater, '4'),
-    tag!(NoteTag::Definition, '5'),
-    tag!(NoteTag::Highlight, '6'),
-    tag!(NoteTag::Contact, '7'),
-    tag!(NoteTag::Address, '8'),
-    tag!(NoteTag::PhoneNumber, '9'),
-    tag!(NoteTag::WebSiteToVisit),
-    tag!(NoteTag::Idea),
-    tag!(NoteTag::Password),
-    tag!(NoteTag::Critical),
-    tag!(NoteTag::ProjectA),
-    tag!(NoteTag::ProjectB),
-    tag!(NoteTag::MovieToSee),
-    tag!(NoteTag::BookToRead),
-    tag!(NoteTag::MusicToListenTo),
-    tag!(NoteTag::SourceForArticle),
-    tag!(NoteTag::RememberForBlog),
-    tag!(NoteTag::DiscussWithPersonA),
-    tag!(NoteTag::DiscussWithPersonB),
-    tag!(NoteTag::DiscussWithManager),
-    tag!(NoteTag::SendInEmail),
-    tag!(NoteTag::ScheduleMeeting),
-    tag!(NoteTag::CallBack),
-    tag!(NoteTag::ToDoPriority1),
-    tag!(NoteTag::ToDoPriority2),
-    tag!(NoteTag::ClientRequest),
+    row!(Id::CustomizeTags, "Customize Tags…", NONE, NONE),
     row!(
         Id::RemoveTags,
         "Remove Tag",
@@ -416,6 +381,9 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::FindTags, "Find Tags", NONE, NONE),
     row!(Id::Help, "Snowbound Help", NONE, NONE),
 ];
+
+/// The most tags a list holds: MS-ONE's action types 0 to 99 number them.
+pub const TAGS: usize = 100;
 
 /// Where Snowbound Help leads.
 const HELP: &str = "https://shale.paperclover.net/snowbound";
@@ -443,6 +411,7 @@ pub fn choices() -> impl Iterator<Item = Choice> {
         .map(|command| Choice::Command(command.id))
         .chain(FONTS.map(|name| Choice::Font(name.to_owned())))
         .chain(SIZES.into_iter().map(Choice::Size))
+        .chain((0..TAGS).map(|place| Choice::Command(Id::Tag(place))))
         .chain(std::iter::once(Choice::Highlight(None)))
         .chain(
             HIGHLIGHTS
@@ -455,6 +424,7 @@ pub fn choices() -> impl Iterator<Item = Choice> {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn title(choice: Choice) -> String {
     match choice {
+        Choice::Command(Id::Tag(_)) => unreachable!("The tag list names its tags"),
         Choice::Command(id) => command(id).title.to_owned(),
         Choice::Font(name) => name,
         Choice::Size(size) => format!("{size}"),
@@ -483,11 +453,30 @@ pub fn index(choice: &Choice) -> usize {
 
 /// The command `key` with `modifiers` runs here.
 pub fn find(key: &Key, modifiers: Modifiers) -> Option<Id> {
-    let pressed = pressed(key, modifiers, Platform::CURRENT)?;
+    ran(
+        pressed(key, modifiers, Platform::CURRENT)?,
+        Platform::CURRENT,
+    )
+}
+
+/// The command `chord` runs on `platform`.
+fn ran(chord: Chord, platform: Platform) -> Option<Id> {
     COMMANDS
         .iter()
-        .find(|command| command.chords(Platform::CURRENT).contains(&pressed))
+        .find(|command| command.chords(platform).contains(&chord))
         .map(|command| command.id)
+        .or_else(|| {
+            (0..9)
+                .find(|&place| tag_chord(place) == Some(chord))
+                .map(Id::Tag)
+        })
+}
+
+/// The chord applying the tag at `place` in the list: the first nine take Ctrl+1 to Ctrl+9,
+/// as OneNote's do.
+pub fn tag_chord(place: usize) -> Option<Chord> {
+    let digit = u8::try_from(place).ok().filter(|place| *place < 9)?;
+    Some(cmd(char::from(b'1' + digit)))
 }
 
 fn pressed(key: &Key, modifiers: Modifiers, platform: Platform) -> Option<Chord> {
@@ -599,10 +588,11 @@ impl Chord {
 
 /// The chord a menu or hint shows for `id` here, empty where it has none.
 pub fn shortcut(id: Id) -> String {
-    command(id)
-        .chords(Platform::CURRENT)
-        .first()
-        .map_or_else(String::new, |chord| chord.label(Platform::CURRENT))
+    let chord = match id {
+        Id::Tag(place) => tag_chord(place),
+        id => command(id).chords(Platform::CURRENT).first().copied(),
+    };
+    chord.map_or_else(String::new, |chord| chord.label(Platform::CURRENT))
 }
 
 impl State {
@@ -627,7 +617,7 @@ impl State {
     pub(crate) fn status(&self, choice: &Choice, format: &FormatState) -> Status {
         let session = self.session.as_ref();
         let welcome = session.is_none() && !self.temporary && self.sectionless.is_none();
-        let modal = self.options.is_some() || self.link.is_some();
+        let modal = self.options.is_some() || self.link.is_some() || self.tag_list.is_some();
         let page = (session.is_some() || self.temporary) && !modal;
         let writable = page && !session.is_some_and(|session| session.read_only());
         let text = writable && self.view.accepts_text();
@@ -655,9 +645,12 @@ impl State {
             Choice::PageColor(_) | Choice::RuleLines(_) | Choice::Art(_) => Id::PageColor,
         };
         match id {
-            Id::Settings | Id::NewNotebook | Id::OpenNotebook | Id::CommandPalette | Id::Help => {
-                enabled(!modal)
-            }
+            Id::Settings
+            | Id::NewNotebook
+            | Id::OpenNotebook
+            | Id::CommandPalette
+            | Id::CustomizeTags
+            | Id::Help => enabled(!modal),
             Id::CloseNotebook | Id::ShowNotebook => enabled(!modal && self.notebook().is_some()),
             Id::NewSection | Id::NewSectionGroup => enabled(
                 !modal
@@ -715,14 +708,15 @@ impl State {
             },
             Id::PageColor => enabled(writable && session.is_some()),
             Id::ScreenClipping => enabled(text && cfg!(target_os = "macos")),
-            // Attach File awaits #23, Record Audio and Video #36.
-            Id::Attachment | Id::RecordAudio | Id::RecordVideo => enabled(false),
+            // Record Audio and Video await #36.
+            Id::RecordAudio | Id::RecordVideo => enabled(false),
             Id::InsertSpace => Status {
                 enabled: writable,
                 checked: self.view.inserting_space(),
             },
             Id::Table
             | Id::Picture
+            | Id::Attachment
             | Id::Symbol
             | Id::Link
             | Id::Equation
@@ -739,7 +733,10 @@ impl State {
             Id::Bullets => checked(format.bullets),
             Id::Numbering => checked(format.numbering),
             Id::Align(alignment) => checked(format.alignment == Some(alignment)),
-            Id::Tag(tag) => checked(format.tags.contains(&tag)),
+            Id::Tag(place) => match self.tags.get(place) {
+                Some(tag) => checked(format.tags.contains(&(tag.clone(), place as u16))),
+                None => Status::default(),
+            },
         }
     }
 
@@ -815,14 +812,19 @@ impl State {
                 return Ok(());
             }
             Choice::PageColor(color) => {
-                return self.paper_page(color, self.view.editor.rule_lines());
+                return self.paper_page(color, self.view.editor.rule_lines(), None);
             }
             Choice::Art(name) => {
-                return self.art_page(name.and_then(canvas::template::find));
+                let editor = &self.view.editor;
+                return self.paper_page(
+                    editor.page_color(),
+                    editor.rule_lines(),
+                    Some(name.and_then(canvas::template::find)),
+                );
             }
             Choice::RuleLines(lines) => {
                 let lines = lines.map(|index| canvas::template::RULE_LINES[index].1);
-                return self.paper_page(self.view.editor.page_color(), lines);
+                return self.paper_page(self.view.editor.page_color(), lines, None);
             }
         };
         let field = self.ui.focused().filter(|focus| *focus != page());
@@ -951,10 +953,17 @@ impl State {
                 return Ok(());
             }
             Id::Picture => {
-                let Some(path) = platform::pick_picture() else {
+                let Some(path) = platform::pick_file("Insert Picture", &crate::PICTURE_TYPES)
+                else {
                     return Ok(());
                 };
                 return self.insert_picture(std::fs::read(path)?);
+            }
+            Id::Attachment => {
+                let Some(path) = platform::pick_file("Attach File", &[]) else {
+                    return Ok(());
+                };
+                return self.attach(&path, None);
             }
             Id::ScreenClipping => {
                 #[cfg(target_os = "macos")]
@@ -971,7 +980,7 @@ impl State {
                 self.save_settings();
                 return Ok(());
             }
-            Id::Attachment | Id::RecordAudio | Id::RecordVideo => {
+            Id::RecordAudio | Id::RecordVideo => {
                 return Ok(());
             }
             Id::InsertSpace => {
@@ -1016,7 +1025,14 @@ impl State {
             Id::Indent => return format(self, Formatting::Indent),
             Id::Outdent => return format(self, Formatting::Outdent),
             Id::ClearFormatting => return format(self, Formatting::Clear),
-            Id::Tag(tag) => return format(self, Formatting::Tag(tag)),
+            Id::Tag(place) => {
+                let tag = self.tags[place].clone();
+                return format(self, Formatting::Tag(tag, place as u16));
+            }
+            Id::CustomizeTags => {
+                self.open_customize_tags();
+                return Ok(());
+            }
             Id::RemoveTags => return format(self, Formatting::RemoveTags),
         };
         self.commands.push(response);
@@ -1039,8 +1055,9 @@ mod tests {
                     command
                         .chords(platform)
                         .iter()
-                        .map(move |chord| (chord, command.title))
+                        .map(move |chord| (*chord, command.title))
                 })
+                .chain((0..9).filter_map(|place| Some((tag_chord(place)?, "a tag"))))
                 .collect();
             for (at, (chord, title)) in chords.iter().enumerate() {
                 if let Some((_, other)) =
@@ -1081,11 +1098,10 @@ mod tests {
                 control,
                 command,
             };
-            let pressed = pressed(&Key::Character(key.into()), modifiers, platform)?;
-            COMMANDS
-                .iter()
-                .find(|listed| listed.chords(platform).contains(&pressed))
-                .map(|listed| listed.id)
+            ran(
+                pressed(&Key::Character(key.into()), modifiers, platform)?,
+                platform,
+            )
         };
         let mac = Platform::MacOs;
         assert_eq!(
@@ -1110,10 +1126,7 @@ mod tests {
             find(mac, "0", false, false, true, true),
             Some(Id::RemoveTags)
         );
-        assert_eq!(
-            find(mac, "7", false, false, false, true),
-            Some(Id::Tag(NoteTag::Contact))
-        );
+        assert_eq!(find(mac, "7", false, false, false, true), Some(Id::Tag(6)));
         assert_eq!(find(mac, "q", false, false, false, true), None);
         // The highlighter's chord runs the command that applies its last pick.
         assert_eq!(

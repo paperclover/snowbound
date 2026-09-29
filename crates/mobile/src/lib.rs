@@ -78,9 +78,9 @@ enum Target {
     Grip = 3,
 }
 
-/// Formatting the toolbar shows and applies, by bit in `sb_view_format` and by number in
-/// `sb_view_apply`: toggles, lists, indentation, then OneNote's nine default tags from 16.
-const FORMATS: [Formatting; 8] = [
+/// Formatting the host shows and applies, by bit in `sb_view_format` and by number in
+/// `sb_view_apply`; OneNote's default tags follow from 16, in their list's order.
+const FORMATS: [Formatting; 11] = [
     Formatting::Toggle(Toggle::Bold),
     Formatting::Toggle(Toggle::Italic),
     Formatting::Toggle(Toggle::Underline),
@@ -89,17 +89,10 @@ const FORMATS: [Formatting; 8] = [
     Formatting::Numbering,
     Formatting::Indent,
     Formatting::Outdent,
-];
-const TAGS: [NoteTag; 9] = [
-    NoteTag::ToDo,
-    NoteTag::Important,
-    NoteTag::Question,
-    NoteTag::RememberForLater,
-    NoteTag::Definition,
-    NoteTag::Highlight,
-    NoteTag::Contact,
-    NoteTag::Address,
-    NoteTag::PhoneNumber,
+    Formatting::RemoveTags,
+    Formatting::Clear,
+    // OneNote's first highlighter colour, yellow.
+    Formatting::Highlight(Some(0x0000_ffff)),
 ];
 
 /// The page and its text model, apart from the surface it is drawn on.
@@ -217,6 +210,9 @@ impl Canvas {
     }
 
     fn target(&self, point: [f32; 2]) -> Target {
+        if self.page.inserting_space() {
+            return Target::Grip;
+        }
         match self.page.hit(self.device(point)) {
             Some(Hit::Handle { .. } | Hit::Resize { .. }) => Target::Grip,
             Some(Hit::Image { id, .. })
@@ -363,8 +359,8 @@ impl Canvas {
         }))
     }
 
-    /// The formatting the selection has, as `FORMATS` and `TAGS` bits.
-    fn format_bits(&self) -> Result<u32> {
+    /// The formatting the selection has, as `FORMATS` and default tag bits.
+    fn format_bits(&self) -> Result<u64> {
         let state = self.page.editor.format_state()?;
         let mut bits = 0;
         for (bit, format) in FORMATS.iter().enumerate() {
@@ -374,17 +370,25 @@ impl Canvas {
                 Formatting::Numbering => state.numbering,
                 _ => false,
             };
-            bits |= u32::from(on) << bit;
+            bits |= u64::from(on) << bit;
         }
-        for (bit, tag) in TAGS.iter().enumerate() {
-            bits |= u32::from(state.tags.contains(tag)) << (16 + bit);
+        for (place, tag) in NoteTag::defaults().into_iter().enumerate() {
+            let tagged = state.tags.contains(&(tag, place as u16));
+            bits |= u64::from(tagged) << (16 + place);
         }
         Ok(bits)
     }
 
     fn format(&mut self, command: u8) -> Result<bool> {
         let command = match command {
-            16.. => Formatting::Tag(*TAGS.get(usize::from(command - 16)).ok_or("No such tag")?),
+            16.. => {
+                let place = command - 16;
+                let tag = NoteTag::defaults()
+                    .into_iter()
+                    .nth(usize::from(place))
+                    .ok_or("No such tag")?;
+                Formatting::Tag(tag, place.into())
+            }
             _ => FORMATS
                 .get(usize::from(command))
                 .ok_or("No such formatting")?
@@ -426,6 +430,17 @@ impl Canvas {
         Ok(true)
     }
 
+    /// Selects paragraph `id`, as a Tags Summary entry shows it.
+    fn select_paragraph(&mut self, id: ExGuid) -> Result<bool> {
+        let Some((outline, selection)) = canvas::search::paragraph_match(&self.page.editor, id)
+        else {
+            return Ok(false);
+        };
+        self.page.editor.focus_outline(outline)?;
+        self.page.editor.select(selection)?;
+        Ok(true)
+    }
+
     /// The page's text, outline by outline, as the desktop puts a refused edit's on the
     /// clipboard.
     fn page_text(&self) -> String {
@@ -444,6 +459,27 @@ impl Canvas {
             .filter(|text| !text.trim().is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    /// Gives the page `color`, a COLORREF, and rule lines `ruled` of `RULE_LINES`, or none.
+    fn set_paper(&mut self, color: Option<u32>, ruled: Option<usize>) -> Result<bool> {
+        let rules = ruled
+            .and_then(|index| canvas::template::RULE_LINES.get(index))
+            .map(|(_, lines)| *lines);
+        Ok(moved(self.page.set_paper(color, rules, None)?))
+    }
+
+    /// Puts template `name`'s art behind the page in place of any it had, or none.
+    fn set_art(&mut self, name: Option<&str>) -> Result<bool> {
+        let art = match name {
+            Some(name) => canvas::template::find(name)
+                .ok_or("No such template")?
+                .pictures()?,
+            None => Vec::new(),
+        };
+        let editor = &self.page.editor;
+        let (color, rules) = (editor.page_color(), editor.rule_lines());
+        Ok(moved(self.page.set_paper(color, rules, Some(art))?))
     }
 
     /// Puts a picture of `size` points after the caret's paragraph.
@@ -855,15 +891,15 @@ pub extern "C" fn sb_view_can_undo(view: &View, redo: bool) -> bool {
 }
 
 /// The selection's formatting as bits: 0 bold, 1 italic, 2 underline, 3 strikethrough, 4
-/// bulleted, 5 numbered, and from 16 OneNote's default tags in order, To Do first.
+/// bulleted, 5 numbered, and from 16 OneNote's tags in `sb_tags` order, To Do first.
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_view_format(view: &View) -> u32 {
+pub extern "C" fn sb_view_format(view: &View) -> u64 {
     report(view.canvas.format_bits()).unwrap_or(0)
 }
 
 /// Applies formatting to the selection: 0 bold, 1 italic, 2 underline, 3 strikethrough, 4
-/// bullets, 5 numbering, 6 indent, 7 outdent, each toggling where it can; from 16 toggles
-/// OneNote's default tag `command - 16`, To Do first.
+/// bullets, 5 numbering, 6 indent, 7 outdent, 8 remove tags, 9 clear formatting, 10 yellow
+/// highlight, each toggling where it can; from 16 toggles tag `command - 16` of `sb_tags`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_apply(view: &mut View, command: u8) -> bool {
     let result = view.canvas.format(command);
@@ -891,6 +927,156 @@ pub extern "C" fn sb_view_focus_title(view: &mut View) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sb_view_find(view: &mut View, query: *const c_char) -> bool {
     report(view.canvas.find(&string(query))).unwrap_or(false)
+}
+
+/// Selects paragraph `id` of the page; false where the page has none.
+///
+/// # Safety
+/// `id` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_view_select_paragraph(view: &mut View, id: *const c_char) -> bool {
+    let result = string(id)
+        .parse()
+        .map_err(Into::into)
+        .and_then(|id| view.canvas.select_paragraph(id));
+    report(result).unwrap_or(false)
+}
+
+/// Copy, or Cut with `cut`: the selected text for the clipboard, a page selection's
+/// outlines with a blank line between; null with nothing selected.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_copy(view: &mut View, cut: bool) -> *mut c_char {
+    let mut copied = None;
+    let result = view.canvas.page.copy(cut).map(|response| {
+        if let Some(Request::Copy(text)) = &response.request {
+            copied = Some(text.clone());
+        }
+        moved(response)
+    });
+    view.stored(result);
+    copied.map_or(std::ptr::null_mut(), owned)
+}
+
+/// Insert Space: the next drag on the page moves what lies below or right of where it
+/// starts, as far as it goes.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_insert_space(view: &mut View) {
+    let _ = view.canvas.page.insert_space();
+}
+
+#[derive(serde::Serialize)]
+struct Choices {
+    /// The page colour as sRGB, or null.
+    color: Option<[u8; 3]>,
+    /// Index into `rules` of the page's rule lines, or null for none or others.
+    ruled: Option<usize>,
+    /// OneNote's page colours, rule lines and templates, by name; colours with their sRGB.
+    colors: Vec<(&'static str, [u8; 3])>,
+    rules: Vec<&'static str>,
+    templates: Vec<&'static str>,
+}
+
+fn srgb(colorref: u32) -> [u8; 3] {
+    let [red, green, blue, _] = colorref.to_le_bytes();
+    [red, green, blue]
+}
+
+/// The page's paper and what it can take, as JSON: `color`, `ruled`, and the choices
+/// `colors` (each `[name, [r, g, b]]`), `rules` and `templates`, by name.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_paper(view: &View) -> *mut c_char {
+    use canvas::template::{PAGE_COLORS, RULE_LINES, TEMPLATES};
+    let editor = &view.canvas.page.editor;
+    let rules = editor.rule_lines();
+    library::json(Ok(Choices {
+        color: editor.page_color().map(srgb),
+        ruled: RULE_LINES
+            .iter()
+            .position(|(_, lines)| Some(*lines) == rules),
+        colors: PAGE_COLORS
+            .iter()
+            .map(|(name, color)| (*name, srgb(*color)))
+            .collect(),
+        rules: RULE_LINES.iter().map(|(name, _)| *name).collect(),
+        templates: TEMPLATES.iter().map(|template| template.name).collect(),
+    }))
+}
+
+/// Gives the page the colour `red`, `green`, `blue`, or none when `red` is negative, and
+/// rule lines `ruled` of `sb_view_paper`'s `rules`, or none when negative, as one undo step.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_set_paper(
+    view: &mut View,
+    red: i16,
+    green: u8,
+    blue: u8,
+    ruled: i8,
+) -> bool {
+    let color = u8::try_from(red)
+        .ok()
+        .map(|red| u32::from_le_bytes([red, green, blue, 0]));
+    let result = view.canvas.set_paper(color, usize::try_from(ruled).ok());
+    view.stored(result)
+}
+
+/// Puts template `name`'s art behind the page in place of any it had, or none when `name`
+/// is null, as one undo step; its colour and rule lines stay.
+///
+/// # Safety
+/// A non-null `name` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_view_set_art(view: &mut View, name: *const c_char) -> bool {
+    let result = view.canvas.set_art(library::optional(name).as_deref());
+    view.stored(result)
+}
+
+/// OneNote's default tags as JSON, in `sb_view_apply`'s order from 16: each `[name, shape,
+/// highlight]`, the shape being the symbol `sb_tag_icon` draws and the highlight sRGB or
+/// null.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_tags() -> *mut c_char {
+    library::json(Ok(NoteTag::defaults()
+        .into_iter()
+        .map(|tag| (tag.label, tag.shape, tag.highlight.map(srgb)))
+        .collect::<Vec<_>>()))
+}
+
+/// Draws tag symbol `shape`, a check box `checked`, into `rgba`, `pixels` square of
+/// premultiplied RGBA; false for shape 0, a highlighting tag, which has none.
+///
+/// # Safety
+/// `rgba` has room for `pixels * pixels * 4` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_tag_icon(
+    shape: u16,
+    checked: bool,
+    pixels: u32,
+    rgba: *mut u8,
+) -> bool {
+    use resvg::{tiny_skia, usvg};
+    let Some(icon) = canvas::outline::TagIcon::of(shape, checked) else {
+        return false;
+    };
+    let Some(mut pixmap) = tiny_skia::Pixmap::new(pixels, pixels) else {
+        return false;
+    };
+    for source in canvas::gpu::tag_sources(icon) {
+        let Some(tree) =
+            report(usvg::Tree::from_str(source, &usvg::Options::default()).map_err(Into::into))
+        else {
+            return false;
+        };
+        let size = tree.size();
+        let scale = pixels as f32 / size.width().max(size.height());
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(scale, scale),
+            &mut pixmap.as_mut(),
+        );
+    }
+    // SAFETY: the caller's contract.
+    unsafe { std::ptr::copy_nonoverlapping(pixmap.data().as_ptr(), rgba, pixmap.data().len()) };
+    true
 }
 
 /// The page's text, for the clipboard when an edit is refused; freed with `sb_string_free`.

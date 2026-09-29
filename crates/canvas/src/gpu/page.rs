@@ -79,6 +79,7 @@ pub enum SceneHit<T> {
     Date(DateField),
     ReadOnly(usize),
     Image(onestore::ExGuid),
+    File(onestore::ExGuid),
 }
 
 fn outline_origin(
@@ -137,6 +138,14 @@ fn append_ink(ink: &onestore::page::Ink, offset: [f32; 2], primitives: &mut Vec<
     for group in &ink.groups {
         append_ink(group, offset, primitives);
     }
+}
+
+const FILE_ICON: &str = include_str!("../../assets/file.svg");
+
+/// The blank page for a file without an icon of its own, as the 32 pixel PNG OneNote 2010
+/// stores with every attachment; it draws a broken picture for one stored without.
+pub fn file_icon() -> Vec<u8> {
+    background::png(FILE_ICON, 32)
 }
 
 fn append_placeholder(rect: [f32; 4], paper: Paper, primitives: &mut Vec<Primitive<'_>>) {
@@ -230,15 +239,36 @@ impl PageScene {
             }
         }
         for (id, art) in &mut scene.backgrounds {
-            if let Some(shown) = self.backgrounds.remove(id)
-                && shown.same(art)
-            {
-                *art = shown;
+            match self.backgrounds.remove(id) {
+                Some(shown) if shown.same(art) => *art = shown,
+                _ => art.inline = true,
             }
         }
         scene.mark_unavailable(&mut editor.objects, engine)?;
         *self = scene;
         Ok(())
+    }
+
+    /// Follows `editor` after an edit or undo brought page-level pictures the scene has not
+    /// seen, as `refresh` does.
+    pub fn follow(
+        &mut self,
+        editor: &mut CanvasEditor,
+        engine: &mut TextEngine,
+    ) -> Result<(), SceneError> {
+        let known = |object: &Content| match object {
+            Content::Image(source) => {
+                self.pictures.contains_key(&source.id) || self.backgrounds.contains_key(&source.id)
+            }
+            Content::File { source, .. } => {
+                source.preview.is_none() || self.pictures.contains_key(&source.id)
+            }
+            _ => true,
+        };
+        if editor.objects.iter().all(known) {
+            return Ok(());
+        }
+        self.refresh(editor, engine)
     }
 
     /// Turns page pictures the renderer cannot decode into placeholders; their stored data
@@ -275,7 +305,6 @@ impl PageScene {
                     onestore::page::ParagraphContent::Image(image) => {
                         payloads.push((image.id, image.bytes.as_ref()))
                     }
-                    // A file without the icon OneNote rendered for it keeps an empty slot.
                     onestore::page::ParagraphContent::Attachment(file) => {
                         if let Some(icon) = file.preview.as_ref() {
                             payloads.push((file.id, Some(icon)))
@@ -301,6 +330,11 @@ impl PageScene {
                         backgrounds.insert(source.id, art);
                     } else {
                         payloads.push((source.id, source.bytes.as_ref()))
+                    }
+                }
+                Content::File { source, .. } => {
+                    if let Some(icon) = source.preview.as_ref() {
+                        payloads.push((source.id, Some(icon)))
                     }
                 }
                 Content::Outline { source, .. } => nested(&source.paragraphs, &mut payloads),
@@ -396,6 +430,11 @@ impl PageScene {
                         rects.push((source.id, [x, y, x + width, y + height]));
                     }
                 }
+                Content::File { source, layout } => {
+                    let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
+                    let [x0, y0, x1, y1] = layout.rect;
+                    rects.push((source.id, [x + x0, y + y0, x + x1, y + y1]));
+                }
                 Content::Outline {
                     source,
                     layout,
@@ -433,40 +472,61 @@ impl PageScene {
         primitives: &mut Vec<Primitive<'a>>,
     ) {
         for object in &outline.objects {
-            let [x0, y0, x1, y1] = object.rect;
-            let rect = match moving {
-                Some((id, rect)) if id == object.id => rect,
-                _ => [
-                    x0 + origin[0],
-                    y0 + origin[1],
-                    x1 + origin[0],
-                    y1 + origin[1],
-                ],
-            };
-            let picture = self.pictures.get(&object.id);
-            if let Some(image) = picture.and_then(Picture::image) {
-                primitives.push(Primitive::Image { image, rect });
+            self.append_object(object, origin, moving, paper, primitives);
+        }
+    }
+
+    /// One picture, file, drawing or placeholder laid out from `origin`; `moving` as for
+    /// `append_outline_objects`.
+    fn append_object<'a>(
+        &'a self,
+        object: &'a crate::outline::ObjectLayout,
+        origin: [f32; 2],
+        moving: Option<(onestore::ExGuid, [f32; 4])>,
+        paper: Paper,
+        primitives: &mut Vec<Primitive<'a>>,
+    ) {
+        let [x0, y0, x1, y1] = object.rect;
+        let rect = match moving {
+            Some((id, rect)) if id == object.id => rect,
+            _ => [
+                x0 + origin[0],
+                y0 + origin[1],
+                x1 + origin[0],
+                y1 + origin[1],
+            ],
+        };
+        let picture = self.pictures.get(&object.id);
+        if let Some(image) = picture.and_then(Picture::image) {
+            primitives.push(Primitive::Image { image, rect });
+        }
+        match &object.kind {
+            crate::outline::ObjectKind::Ink(ink) => append_ink(ink, [rect[0], rect[1]], primitives),
+            crate::outline::ObjectKind::Unsupported(_) => {
+                append_placeholder(rect, paper, primitives)
             }
-            match &object.kind {
-                crate::outline::ObjectKind::Ink(ink) => {
-                    append_ink(ink, [rect[0], rect[1]], primitives)
-                }
-                crate::outline::ObjectKind::Unsupported(_) => {
-                    append_placeholder(rect, paper, primitives)
-                }
-                crate::outline::ObjectKind::Picture if picture.is_none_or(Picture::failed) => {
-                    append_placeholder(rect, paper, primitives)
-                }
-                crate::outline::ObjectKind::Picture | crate::outline::ObjectKind::File(_) => {}
+            crate::outline::ObjectKind::Picture if picture.is_none_or(Picture::failed) => {
+                append_placeholder(rect, paper, primitives)
             }
-            if let Some(label) = object.label() {
-                primitives.push(Primitive::Text {
-                    text: &label.text,
-                    origin: [origin[0] + label.origin[0], origin[1] + label.origin[1]],
-                    clip: None,
-                    ink: paper.ink,
-                });
+            // A file stored without the icon OneNote rendered for it shows a blank page.
+            crate::outline::ObjectKind::File(_) if picture.is_none() => {
+                primitives.push(Primitive::Icon {
+                    sources: &[FILE_ICON],
+                    origin: [rect[0], rect[1]],
+                    size: rect[2] - rect[0],
+                    tint: [1.0; 4],
+                    palette: draw::Palette::default(),
+                })
             }
+            crate::outline::ObjectKind::Picture | crate::outline::ObjectKind::File(_) => {}
+        }
+        if let Some(label) = object.label() {
+            primitives.push(Primitive::Text {
+                text: &label.text,
+                origin: [origin[0] + label.origin[0], origin[1] + label.origin[1]],
+                clip: None,
+                ink: paper.ink,
+            });
         }
     }
 
@@ -558,6 +618,7 @@ impl PageScene {
                     ],
                     false,
                 )),
+                Content::File { .. } => Some((object.file()?.1, true)),
                 Content::Ink(ink) => Some((crate::editor::page::ink_bounds(ink)?, true)),
                 Content::ReadOnly(object) => Some((object.rect(), true)),
                 Content::Editable(_) => None,
@@ -652,6 +713,12 @@ impl PageScene {
                         return Some(SceneHit::Image(source.id));
                     }
                 }
+                Content::File { .. } => {
+                    let (file, [x0, y0, x1, y1]) = object.file()?;
+                    if (x0..=x1).contains(&point[0]) && (y0..=y1).contains(&point[1]) {
+                        return Some(SceneHit::File(file.id));
+                    }
+                }
                 Content::Outline { .. } | Content::Image(_) | Content::Ink(_) => {}
             }
         }
@@ -737,13 +804,43 @@ impl PageScene {
                     append_ink(ink, [offset[0] + x, offset[1] + y], primitives);
                     continue;
                 }
+                Content::File { source, layout } => {
+                    // A dragged file draws where its column would land.
+                    let [x, y] = match moving {
+                        Some((id, [x0, y0, ..])) if id == source.id => [x0, y0],
+                        _ => [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0)),
+                    };
+                    self.append_object(
+                        layout,
+                        [x + offset[0], y + offset[1]],
+                        None,
+                        paper,
+                        primitives,
+                    );
+                    continue;
+                }
             };
             let object_origin = [origin[0] + offset[0], origin[1] + offset[1]];
             match content {
                 Content::Image(source) => {
-                    // The paper shows until the worker's raster lands.
                     let (image, [width, height]) = match self.backgrounds.get(&source.id) {
-                        Some(art) => (art.image(paper), art.size),
+                        Some(art) => {
+                            // OneNote's art is opaque, over white, and hides the rule lines.
+                            primitives.push(Primitive::Rect {
+                                rect: [
+                                    object_origin[0],
+                                    object_origin[1],
+                                    object_origin[0] + art.size[0],
+                                    object_origin[1] + art.size[1],
+                                ],
+                                color: if background::dark(paper) {
+                                    paper.color
+                                } else {
+                                    Paper::WHITE.color
+                                },
+                            });
+                            (art.image(paper), art.size)
+                        }
                         None => {
                             let picture = self
                                 .pictures
@@ -816,7 +913,10 @@ impl PageScene {
                         );
                     }
                 }
-                Content::Editable(_) | Content::ReadOnly(_) | Content::Ink(_) => unreachable!(),
+                Content::Editable(_)
+                | Content::ReadOnly(_)
+                | Content::Ink(_)
+                | Content::File { .. } => unreachable!(),
             }
         }
         Ok(())

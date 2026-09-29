@@ -1,7 +1,7 @@
 import UIKit
 
-/// Formatting above the keyboard, as Notes offers it: tags and lists first, then text
-/// styles, indentation, tags and pictures, the keyboard's dismissal at the end.
+/// Formatting above the keyboard, as Notes offers it: To Do first, then text styles, lists,
+/// indentation, tags and pictures, the keyboard's dismissal at the end.
 final class FormatBar: UIInputView {
     /// `sb_view_apply` commands and `sb_view_format` bits.
     private static let buttons: [(symbol: String, label: String, command: UInt8)] = [
@@ -10,18 +10,14 @@ final class FormatBar: UIInputView {
         ("italic", "Italic", 1),
         ("underline", "Underline", 2),
         ("strikethrough", "Strikethrough", 3),
+        ("highlighter", "Highlight", 10),
         ("list.bullet", "Bullets", 4),
         ("list.number", "Numbering", 5),
         ("decrease.indent", "Decrease Indent", 7),
         ("increase.indent", "Increase Indent", 6),
     ]
-    /// OneNote 2010's default tags in their order, Ctrl+1 to Ctrl+9.
-    static let tags = [
-        "To Do", "Important", "Question", "Remember for Later", "Definition", "Highlight", "Contact", "Address",
-        "Phone Number",
-    ]
-
     private var toggles: [(UIButton, UInt8)] = []
+    private var bits: UInt64 = 0
     var onApply: ((UInt8) -> Void)?
     /// Asks for a picture from the camera (true) or the photo library.
     var onPicture: ((Bool) -> Void)?
@@ -44,9 +40,11 @@ final class FormatBar: UIInputView {
             row.addArrangedSubview(button)
         }
         let tag = Self.button("tag", "Tags")
-        tag.menu = UIMenu(children: Self.tags.enumerated().map { index, name in
-            UIAction(title: name) { [weak self] _ in self?.onApply?(16 + UInt8(index)) }
-        })
+        tag.menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] done in
+                done(Tags.menu(bits: self?.bits ?? 0) { self?.onApply?($0) })
+            }
+        ])
         tag.showsMenuAsPrimaryAction = true
         row.addArrangedSubview(tag)
         let picture = Self.button("photo", "Insert Picture")
@@ -105,9 +103,10 @@ final class FormatBar: UIInputView {
     }
 
     /// Marks what the selection has, from `sb_view_format`.
-    func show(_ bits: UInt32) {
+    func show(_ bits: UInt64) {
+        self.bits = bits
         for (button, command) in toggles {
-            button.isSelected = bits & (1 << UInt32(command)) != 0
+            button.isSelected = bits & (1 << UInt64(command)) != 0
         }
     }
 }

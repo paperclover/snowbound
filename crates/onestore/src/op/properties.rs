@@ -141,11 +141,17 @@ fn tag_definition_values(definition: &Definition) -> Result<Values, Error> {
     else {
         return Err(invalid("A note tag must reference a tag definition"));
     };
+    // NoteTagPropertyStatus: hasLabel, hasFontColor, hasHighlightColor and hasIcon, as
+    // OneNote's Customize Tags writes them.
+    let status = u32::from(label.is_some())
+        | u32::from(color.is_some()) << 1
+        | u32::from(highlight.is_some()) << 2
+        | u32::from(shape.is_some_and(|shape| shape != 0)) << 3;
     let mut values: Values = vec![
         (0x0c003473, vec![0]),
         (0x10003463, action_type.unwrap_or(0).to_le_bytes().to_vec()),
         (0x10003464, shape.unwrap_or(0).to_le_bytes().to_vec()),
-        (0x14003467, 0u32.to_le_bytes().to_vec()),
+        (0x14003467, status.to_le_bytes().to_vec()),
     ];
     if let Some(label) = label {
         values.push((0x1c003468, crate::create::string(label)));

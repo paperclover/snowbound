@@ -87,6 +87,19 @@ impl ObjectLayout {
         }
     }
 
+    /// The whole object, a file's column with its name included.
+    pub fn bounds(&self) -> [f32; 4] {
+        match &self.kind {
+            ObjectKind::File(label) => [
+                label.origin[0],
+                self.rect[1] - 6.0,
+                label.origin[0] + ATTACHMENT_WIDTH,
+                self.bottom,
+            ],
+            _ => [self.rect[0], self.rect[1], self.rect[2], self.bottom],
+        }
+    }
+
     /// The rect's top and bottom, the object's bottom and its label's top once the object
     /// starts at `y`, given its own height, and the height it takes in the flow.
     fn at(&self, y: f32, height: f32) -> ([f32; 4], f32) {
@@ -209,92 +222,191 @@ pub struct ParagraphLayout {
     pub band: Option<u32>,
 }
 
+/// How the page draws a note tag.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum TagIcon {
-    CheckBox {
-        checked: bool,
-        /// The badge on the small box of OneNote's check box variants.
-        mark: Option<BoxMark>,
-    },
-    Star,
-    Question,
-    Highlight,
-    Contact,
-    Address,
-    Phone,
-    Music,
-    Exclamation,
-    RedSquare,
-    YellowSquare,
-    BlueSquare,
-    /// An Outlook task flag.
-    Flag,
-    Idea,
-    Password,
-    Movie,
-    Book,
-    Web,
-    Blog,
-    Email,
-    /// A tag symbol without artwork of its own.
-    Other,
-}
-
-/// What OneNote draws on a check box variant's small box.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub enum BoxMark {
-    Person,
-    Manager,
-    Arrow,
-    One,
-    Two,
-    Client,
+    /// Symbol `shape` of MS-ONE's NoteTagShape, `checked` only where it is a check box.
+    Symbol { shape: u16, checked: bool },
+    /// An Outlook task, which OneNote 2010 flags.
+    Task,
 }
 
 impl TagIcon {
     /// How the page draws tag symbol `shape`, `checked` where it is a check box; none for
     /// shape 0, which marks the text instead.
     pub fn of(shape: u16, checked: bool) -> Option<Self> {
-        Some(match shape {
-            0 => return None,
-            // OneNote's check boxes, plain and with a person, arrow, number or bulb.
-            3 => Self::CheckBox {
-                checked,
-                mark: None,
-            },
-            8 | 12 | 28 | 71 | 94 | 95 => Self::CheckBox {
-                checked,
-                mark: Some(match shape {
-                    8 => BoxMark::Client,
-                    12 => BoxMark::Arrow,
-                    28 => BoxMark::One,
-                    71 => BoxMark::Two,
-                    94 => BoxMark::Person,
-                    _ => BoxMark::Manager,
-                }),
-            },
-            13 => Self::Star,
-            15 => Self::Question,
-            17 => Self::Exclamation,
-            18 => Self::Phone,
-            23 => Self::Address,
-            118 => Self::Contact,
-            136 => Self::Highlight,
-            100 => Self::RedSquare,
-            101 => Self::YellowSquare,
-            102 => Self::BlueSquare,
-            121 => Self::Music,
-            21 => Self::Idea,
-            131 => Self::Password,
-            122 => Self::Movie,
-            132 => Self::Book,
-            125 => Self::Web,
-            24 => Self::Blog,
-            106 => Self::Email,
-            _ => Self::Other,
+        (shape != 0).then_some(Self::Symbol {
+            shape,
+            checked: checked && checkable(shape),
         })
     }
+
+    pub fn checkable(self) -> bool {
+        matches!(self, Self::Symbol { shape, .. } if checkable(shape))
+    }
 }
+
+/// Whether tag symbol `shape` is a check box, as MS-ONE's NoteTagShape marks them.
+pub fn checkable(shape: u16) -> bool {
+    matches!(
+        shape,
+        1..=12 | 28 | 30 | 32 | 48 | 50 | 52 | 69 | 71 | 73 | 89..=99
+    )
+}
+
+/// OneNote 2010's name for tag symbol `shape`, as its symbol gallery's tooltips give it; the
+/// follow-up flags it keeps for Outlook tasks take MS-ONE's descriptions.
+pub fn symbol_name(shape: u16) -> Option<&'static str> {
+    SYMBOL_NAMES
+        .get(usize::from(shape).checked_sub(1)?)
+        .copied()
+}
+
+const SYMBOL_NAMES: [&str; 143] = [
+    "Green Check Box",
+    "Yellow Check Box",
+    "Blue Check Box",
+    "Green Star Check Box",
+    "Yellow Star Check Box",
+    "Blue Star Check Box",
+    "Green Exclamation Check Box",
+    "Yellow Exclamation Check Box",
+    "Blue Exclamation Check Box",
+    "Green Arrow Check Box",
+    "Yellow Arrow Check Box",
+    "Blue Arrow Check Box",
+    "Yellow Star",
+    "Follow-up Flag",
+    "Question",
+    "Blue Right Arrow",
+    "High Priority",
+    "Telephone",
+    "Calendar",
+    "Clock",
+    "Light Bulb",
+    "Pushpin",
+    "Home",
+    "Comment",
+    "Smiley",
+    "Award Ribbon",
+    "Key",
+    "Blue Check Box 1",
+    "Blue Circle 1",
+    "Blue Check Box 2",
+    "Blue Circle 2",
+    "Blue Check Box 3",
+    "Blue Circle 3",
+    "Blue 8-Point Star",
+    "Blue Check Mark",
+    "Blue Circle",
+    "Blue Down Arrow",
+    "Blue Left Arrow",
+    "Blue Solid Target",
+    "Blue Star",
+    "Blue Sun",
+    "Blue Target",
+    "Blue Triangle",
+    "Blue Umbrella",
+    "Blue Up Arrow",
+    "Blue X with Dots",
+    "Blue X",
+    "Green Check Box 1",
+    "Green Circle 1",
+    "Green Check Box 2",
+    "Green Circle 2",
+    "Green Check Box 3",
+    "Green Circle 3",
+    "Green 8-Point Star",
+    "Green Check Mark",
+    "Green Circle",
+    "Green Down Arrow",
+    "Green Left Arrow",
+    "Green Right Arrow",
+    "Green Solid Target",
+    "Green Star",
+    "Green Sun",
+    "Green Target",
+    "Green Triangle",
+    "Green Umbrella",
+    "Green Up Arrow",
+    "Green X with Dots",
+    "Green X",
+    "Yellow Check Box 1",
+    "Yellow Circle 1",
+    "Yellow Check Box 2",
+    "Yellow Circle 2",
+    "Yellow Check Box 3",
+    "Yellow Circle 3",
+    "Yellow 8-Point Star",
+    "Yellow Check Mark",
+    "Yellow Circle",
+    "Yellow Down Arrow",
+    "Yellow Left Arrow",
+    "Yellow Right Arrow",
+    "Yellow Solid Target",
+    "Yellow Sun",
+    "Yellow Target",
+    "Yellow Triangle",
+    "Yellow Umbrella",
+    "Yellow Up Arrow",
+    "Yellow X with Dots",
+    "Yellow X",
+    "Follow Up Today Flag",
+    "Follow Up Tomorrow Flag",
+    "Follow Up This Week Flag",
+    "Follow Up Next Week Flag",
+    "No Follow Up Date Flag",
+    "To Do Blue Person",
+    "To Do Yellow Person",
+    "To Do Green Person",
+    "To Do Blue Flag",
+    "To Do Yellow Flag",
+    "To Do Green Flag",
+    "Red Square (Project A)",
+    "Yellow Square (Project B)",
+    "Blue Square (Project C)",
+    "Green Square",
+    "Orange Square",
+    "Pink Square",
+    "E-mail",
+    "Envelope (Closed)",
+    "Envelope (Opened)",
+    "Mobile phone",
+    "Telephone with Clock",
+    "Question Balloon",
+    "Paperclip",
+    "Frowning",
+    "IM contact",
+    "Person",
+    "Two People",
+    "Reminder Bell",
+    "Contact (like Outlook's)",
+    "Flowers Bouquet",
+    "Date",
+    "Music Note",
+    "Movie Clip",
+    "Quote Mark",
+    "Globe",
+    "Link Globe",
+    "Laptop",
+    "Plane",
+    "Car",
+    "Binoculars",
+    "Presentation",
+    "Padlock",
+    "Book (Open)",
+    "Notebook Icon",
+    "Paper (blank with lines)",
+    "Research Icon",
+    "Marker",
+    "Dollar sign $",
+    "Coins with window behind it",
+    "Schedule Task",
+    "Lighting Bolt",
+    "Cloud",
+    "Heart",
+    "Flower",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphTag {
@@ -365,6 +477,72 @@ fn caption(id: ExGuid, text_id: ExGuid, text: &str, format: Format) -> PageParag
         media: Default::default(),
         collapsed: false,
     }
+}
+
+/// A file's column at `x`, before it is placed: its icon centred over its name, which OneNote
+/// shows without the extension; and the icon's height.
+fn file_column(
+    file: &onestore::page::Attachment,
+    paragraph: ExGuid,
+    format: &Format,
+    x: f32,
+    shape: &mut impl FnMut(
+        &PageParagraph,
+        Option<&Count>,
+        f32,
+        &[f32],
+    ) -> Result<ParagraphLayout, LayoutError>,
+) -> Result<(ObjectLayout, f32), LayoutError> {
+    let [w, h] = file.size.unwrap_or([24.0, 24.0]);
+    let left = x + (ATTACHMENT_WIDTH - w) / 2.0;
+    let name = std::path::Path::new(&file.filename)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(&file.filename);
+    let format = Format {
+        alignment: Some(1),
+        ..format.clone()
+    };
+    let mut label = shape(
+        &caption(paragraph, file.id, name, format),
+        None,
+        ATTACHMENT_WIDTH,
+        &[0.0, 0.0],
+    )?;
+    label.reset_origin(x);
+    let object = ObjectLayout {
+        id: file.id,
+        rect: [left, 0.0, left + w, 0.0],
+        kind: ObjectKind::File(label),
+        bottom: 0.0,
+    };
+    Ok((object, h))
+}
+
+/// A file on the page as OneNote draws one, relative to its position: the column a
+/// paragraph's file takes, with its text in the page's default format.
+pub(crate) fn page_file(
+    engine: &mut TextEngine,
+    file: &onestore::page::Attachment,
+) -> Result<ObjectLayout, LayoutError> {
+    let (mut object, height) = file_column(
+        file,
+        file.id,
+        &Format::default(),
+        0.0,
+        &mut |paragraph, previous, width, indents| {
+            ParagraphLayout::shape(
+                engine,
+                paragraph,
+                previous,
+                width,
+                indents,
+                &BTreeMap::new(),
+            )
+        },
+    )?;
+    object.place(0.0, height);
+    Ok(object)
 }
 
 /// A picture's displayed size: the user-set layout size, else its intrinsic size.
@@ -887,7 +1065,7 @@ impl ParagraphLayout {
         for tag in &tag_definitions {
             let (tag, shape, label) = (tag.0, tag.1, tag.2);
             let icon = match shape {
-                None => TagIcon::Flag,
+                None => TagIcon::Task,
                 Some(shape) => match TagIcon::of(shape.unwrap_or(0), tag.status & 1 != 0) {
                     Some(icon) => icon,
                     None => continue,
@@ -1149,30 +1327,8 @@ impl OutlineLayout {
                                 (object, h, x + w)
                             }
                             ParagraphContent::Attachment(file) => {
-                                let [w, h] = file.size.unwrap_or([24.0, 24.0]);
-                                let left = x + (ATTACHMENT_WIDTH - w) / 2.0;
-                                // OneNote shows the name without its extension.
-                                let name = std::path::Path::new(&file.filename)
-                                    .file_stem()
-                                    .and_then(|stem| stem.to_str())
-                                    .unwrap_or(&file.filename);
-                                let format = Format {
-                                    alignment: Some(1),
-                                    ..node.format.clone()
-                                };
-                                let mut label = shape(
-                                    &caption(node.id, file.id, name, format),
-                                    None,
-                                    ATTACHMENT_WIDTH,
-                                    &[0.0, 0.0],
-                                )?;
-                                label.reset_origin(x);
-                                let object = ObjectLayout {
-                                    id: file.id,
-                                    rect: [left, 0.0, left + w, 0.0],
-                                    kind: ObjectKind::File(label),
-                                    bottom: 0.0,
-                                };
+                                let (object, h) =
+                                    file_column(file, node.id, &node.format, x, shape)?;
                                 (object, h, x + ATTACHMENT_WIDTH)
                             }
                             ParagraphContent::Ink(ink) => {
@@ -2092,26 +2248,7 @@ mod tests {
             task_id: None,
             extra_set: 0,
         });
-        for (shape, expected) in [
-            (
-                3,
-                TagIcon::CheckBox {
-                    checked: true,
-                    mark: None,
-                },
-            ),
-            (13, TagIcon::Star),
-            (15, TagIcon::Question),
-            (17, TagIcon::Exclamation),
-            (18, TagIcon::Phone),
-            (23, TagIcon::Address),
-            (118, TagIcon::Contact),
-            (136, TagIcon::Highlight),
-            (100, TagIcon::RedSquare),
-            (101, TagIcon::YellowSquare),
-            (102, TagIcon::BlueSquare),
-            (121, TagIcon::Music),
-        ] {
+        for shape in [3, 13, 15, 17, 18, 23, 118, 136, 100, 101, 102, 121] {
             definitions.insert(
                 id,
                 Definition {
@@ -2134,7 +2271,13 @@ mod tests {
                 &definitions,
             )
             .unwrap();
-            assert_eq!(tagged.tags[0].icon, expected);
+            assert_eq!(
+                tagged.tags[0].icon,
+                TagIcon::Symbol {
+                    shape,
+                    checked: shape == 3
+                }
+            );
             let baseline = tagged.text.lines().next().unwrap().1.baseline;
             assert_eq!(
                 tagged.tags[0].origin,
@@ -2203,12 +2346,18 @@ mod tests {
             )
             .unwrap()
         };
-        // A symbol without artwork shows as a plain tag, an Outlook task as its flag, and a
-        // tag whose definition is missing as nothing.
-        assert_eq!(shaped(&node, &definitions).tags[0].icon, TagIcon::Other);
+        // A symbol MS-ONE does not list keeps its number, an Outlook task shows its flag, and
+        // a tag whose definition is missing shows nothing.
+        assert_eq!(
+            shaped(&node, &definitions).tags[0].icon,
+            TagIcon::Symbol {
+                shape: 999,
+                checked: false
+            }
+        );
         let mut task = node.clone();
         task.text_mut().unwrap().tags[0].status |= 4;
-        assert_eq!(shaped(&task, &definitions).tags[0].icon, TagIcon::Flag);
+        assert_eq!(shaped(&task, &definitions).tags[0].icon, TagIcon::Task);
         let mut untagged = definitions.clone();
         untagged.remove(&id);
         assert!(shaped(&node, &untagged).tags.is_empty());
@@ -2431,6 +2580,7 @@ mod tests {
             filename: "notes 🦀.txt".into(),
             source_path: None,
             size: Some([24.0, 24.0]),
+            layout: Default::default(),
             bytes: None,
             preview: None,
             recording: None,
@@ -2542,7 +2692,10 @@ mod tests {
                 .iter()
                 .map(|tag| (tag.icon, tag.origin[0]))
                 .collect::<Vec<_>>(),
-            [(TagIcon::RedSquare, -20.25), (TagIcon::Question, -8.25)]
+            [
+                (TagIcon::of(100, false).unwrap(), -20.25),
+                (TagIcon::of(15, false).unwrap(), -8.25)
+            ]
         );
         let colors: Vec<_> = shaped
             .text

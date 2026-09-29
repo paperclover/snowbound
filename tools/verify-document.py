@@ -178,7 +178,8 @@ def compare_objects(space, roots, page, native_roots, assets, native_payloads, a
                         frame_size = stored_size + (1.44 if kind['printout'] else 0)
                         assert abs(frame_size - native_size) < .002, ('Image display dimension differs', axis, frame_size, native_size)
             else:
-                expected = [p for p in native_payloads if p['page'] == page.get('ID') and p['object'] == parents[native].get('objectID')]
+                owner = native if parents[native] is page else parents[native]
+                expected = [p for p in native_payloads if p['page'] == page.get('ID') and p['object'] == owner.get('objectID')]
                 assert len(expected) == 1, 'Native attachment association is ambiguous'
                 assert hashlib.sha256(data).hexdigest() == expected[0]['sha256'], 'Associated attachment bytes differ'
                 assert kind['filename'] == expected[0]['name'], 'Attachment filename differs'

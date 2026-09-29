@@ -32,7 +32,11 @@ use swash::{
     zeno::{Angle, Cap, Format, Join, Mask, Transform, Vector},
 };
 
+/// The atlas's side at first; it doubles, up to `MAX_ATLAS_SIZE`, when one frame needs
+/// more than half of it.
 const ATLAS_SIZE: u32 = 2048;
+const MAX_ATLAS_SIZE: u32 = 8192;
+/// Atlas entries per `ATLAS_SIZE` square of atlas.
 const MAX_GLYPHS: usize = 8192;
 const MAX_VERTICES: usize = 65_536;
 const VERTEX_BUFFER_BYTES: u64 = (MAX_VERTICES * size_of::<Vertex>()) as u64;
@@ -199,6 +203,8 @@ struct Vertex {
     /// that rectangle's half size and corner radius; a zero half size paints everywhere.
     clip_local: [f32; 2],
     clip: [f32; 3],
+    /// The standard deviation, in device pixels, of the blur that makes `shape` a shadow.
+    blur: f32,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -401,6 +407,14 @@ pub enum Primitive<'a> {
         radius: [f32; 2],
         colors: [[f32; 4]; 2],
     },
+    /// The soft shadow a rounded rectangle casts, blurred `blur` units wide as CSS's
+    /// `box-shadow` takes it.
+    Shadow {
+        rect: [f32; 4],
+        radius: f32,
+        blur: f32,
+        color: [f32; 4],
+    },
     Image {
         image: &'a RasterImage,
         rect: [f32; 4],
@@ -490,9 +504,34 @@ impl Renderer {
             pen: [1, 0],
             row_height: 1,
         };
-        // The atlas's first texel is the white that solid fills sample.
         renderer.write_atlas([0, 0], [1, 1], &[255; 4]);
         renderer
+    }
+
+    /// Replaces the atlas with an empty one twice as wide and tall.
+    fn grow_atlas(&mut self) {
+        self.new_atlas(self.atlas_side() * 2);
+        self.clear_glyph_cache();
+        self.write_atlas([0, 0], [1, 1], &[255; 4]);
+    }
+
+    fn glyph_limit(&self) -> usize {
+        MAX_GLYPHS * (self.atlas_side() / ATLAS_SIZE).pow(2) as usize
+    }
+
+    fn uv(&self, glyph: AtlasGlyph) -> [f32; 4] {
+        let side = self.atlas_side() as f32;
+        [
+            glyph.x as f32 / side,
+            glyph.y as f32 / side,
+            (glyph.x + glyph.width) as f32 / side,
+            (glyph.y + glyph.height) as f32 / side,
+        ]
+    }
+
+    /// The atlas's first texel, the white that solid fills sample.
+    fn white(&self) -> [f32; 4] {
+        [0.5 / self.atlas_side() as f32; 4]
     }
 
     pub fn clear_glyph_cache(&mut self) {
@@ -524,9 +563,9 @@ impl Renderer {
             batch_capacity_bytes: self.batches.capacity() * size_of::<Batch>(),
             glyph_capacity: self.glyphs.capacity(),
             image_capacity: self.images.capacity(),
-            atlas_bytes: u64::from(ATLAS_SIZE) * u64::from(ATLAS_SIZE) * 4,
+            atlas_bytes: u64::from(self.atlas_side()).pow(2) * 4,
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
-            within_budget: self.glyphs.len() <= MAX_GLYPHS
+            within_budget: self.glyphs.len() <= self.glyph_limit()
                 && self.images.len() <= MAX_IMAGES
                 && image_bytes <= MAX_IMAGE_BYTES
                 && self.vertices.len() <= MAX_VERTICES,
@@ -578,17 +617,35 @@ impl Renderer {
                 }
             }
         }
-        for attempt in 0..2 {
+        let limit = self.max_texture_dimension().min(MAX_ATLAS_SIZE);
+        let mut cleared = false;
+        loop {
             self.vertices.clear();
             self.batches.clear();
             self.groups.clear();
             self.barrier = 0;
-            match self.prepare(size, layers, &active_images) {
-                Err(RenderError::AtlasFull) if attempt == 0 => self.clear_glyph_cache(),
+            let full = match self.prepare(size, layers, &active_images) {
+                Err(RenderError::AtlasFull) => true,
                 result => {
                     result?;
-                    break;
+                    false
                 }
+            };
+            // Once cleared, the atlas holds only this frame's entries; past half full, the
+            // next frames would clear it again and again.
+            let crowded = full || (cleared && 2 * self.pen[1] > self.atlas_side());
+            if !crowded {
+                break;
+            }
+            if !cleared {
+                self.clear_glyph_cache();
+                cleared = true;
+            } else if self.atlas_side() * 2 <= limit {
+                self.grow_atlas();
+            } else if full {
+                return Err(RenderError::AtlasFull);
+            } else {
+                break;
             }
         }
         self.submit(target, size, clear);
@@ -677,6 +734,7 @@ impl Renderer {
                 stroke: 0.0,
                 clip_local: [0.0; 2],
                 clip: [0.0; 3],
+                blur: 0.0,
             }
         };
         for strip in 0..strips {
@@ -766,7 +824,7 @@ impl Renderer {
                         rect[2] * space.scale + space.origin[0],
                         rect[3] * space.scale + space.origin[1],
                     ],
-                    [0.5 / ATLAS_SIZE as f32; 4],
+                    self.white(),
                     *color,
                 )?;
             }
@@ -781,6 +839,12 @@ impl Renderer {
                 radius,
                 colors,
             } => self.rounded_rect(space, *rect, *radius, None, *colors)?,
+            Primitive::Shadow {
+                rect,
+                radius,
+                blur,
+                color,
+            } => self.shadow(space, *rect, *radius, *blur, *color)?,
             Primitive::Segment {
                 from,
                 to,
@@ -871,7 +935,7 @@ impl Renderer {
             return Ok(());
         }
         let size = run.size * scale;
-        if !size.is_finite() || size > ATLAS_SIZE as f32 {
+        if !size.is_finite() || size > self.atlas_side() as f32 {
             return Err(RenderError::AtlasFull);
         }
         let color = run
@@ -905,7 +969,7 @@ impl Renderer {
             let cached = if let Some(cached) = self.glyphs.get(&key) {
                 *cached
             } else {
-                if self.glyphs.len() >= MAX_GLYPHS {
+                if self.glyphs.len() >= self.glyph_limit() {
                     return Err(RenderError::AtlasFull);
                 }
                 let font = FontRef::from_index(run.font.as_ref(), run.index as usize)
@@ -967,16 +1031,10 @@ impl Renderer {
                     height *= ratio;
                     top = top.clamp(line_top, (line_top + line_height - height).max(line_top));
                 }
-                let atlas_size = ATLAS_SIZE as f32;
                 self.quad(
                     space,
                     [left, top, left + width, top + height],
-                    [
-                        glyph.x as f32 / atlas_size,
-                        glyph.y as f32 / atlas_size,
-                        (glyph.x + glyph.width) as f32 / atlas_size,
-                        (glyph.y + glyph.height) as f32 / atlas_size,
-                    ],
+                    self.uv(glyph),
                     if glyph.color { [1.0; 4] } else { color },
                 )?;
             }
@@ -992,7 +1050,7 @@ impl Renderer {
                     x + decoration.width * scale,
                     y + (decoration.thickness * scale).max(1.0),
                 ],
-                [0.5 / ATLAS_SIZE as f32; 4],
+                self.white(),
                 decoration
                     .color
                     .map_or(ink, |color| legible(color, space.backdrop, run.backdrop)),
@@ -1003,15 +1061,16 @@ impl Renderer {
 
     fn upload(&mut self, image: swash::scale::image::Image) -> Result<AtlasGlyph, RenderError> {
         let p = image.placement;
-        if p.width + 2 > ATLAS_SIZE || p.height + 2 > ATLAS_SIZE {
+        let side = self.atlas_side();
+        if p.width + 2 > side || p.height + 2 > side {
             return Err(RenderError::AtlasFull);
         }
-        if self.pen[0] + p.width + 1 > ATLAS_SIZE {
+        if self.pen[0] + p.width + 1 > side {
             self.pen[0] = 0;
             self.pen[1] += self.row_height + 1;
             self.row_height = 0;
         }
-        if self.pen[1] + p.height + 1 > ATLAS_SIZE {
+        if self.pen[1] + p.height + 1 > side {
             return Err(RenderError::AtlasFull);
         }
         let cached = AtlasGlyph {
@@ -1057,7 +1116,7 @@ impl Renderer {
         {
             return Ok(());
         }
-        if size + 3.0 > ATLAS_SIZE as f32 {
+        if size + 3.0 > self.atlas_side() as f32 {
             return Err(RenderError::AtlasFull);
         }
         let phase = [((x - x.floor()) * 4.0) as u8, ((y - y.floor()) * 4.0) as u8];
@@ -1072,7 +1131,7 @@ impl Renderer {
         let glyph = if let Some(Some(glyph)) = self.glyphs.get(&key) {
             *glyph
         } else {
-            if self.glyphs.len() >= MAX_GLYPHS {
+            if self.glyphs.len() >= self.glyph_limit() {
                 return Err(RenderError::AtlasFull);
             }
             let glyph = self.upload(icon::rasterize(sources, size, phase, ink, palette))?;
@@ -1081,7 +1140,6 @@ impl Renderer {
         };
         let left = x.floor();
         let top = y.floor();
-        let atlas = ATLAS_SIZE as f32;
         self.quad(
             space,
             [
@@ -1090,12 +1148,7 @@ impl Renderer {
                 left + glyph.width as f32,
                 top + glyph.height as f32,
             ],
-            [
-                glyph.x as f32 / atlas,
-                glyph.y as f32 / atlas,
-                (glyph.x + glyph.width) as f32 / atlas,
-                (glyph.y + glyph.height) as f32 / atlas,
-            ],
+            self.uv(glyph),
             [1.0, 1.0, 1.0, tint[3]],
         )
     }
@@ -1133,7 +1186,7 @@ impl Renderer {
         let start = self.vertices.len();
         // A pixel of margin holds the antialiased fringe outside the edge.
         let fringe = [rect[0] - 1.0, rect[1] - 1.0, rect[2] + 1.0, rect[3] + 1.0];
-        self.quad(space, fringe, [0.5 / ATLAS_SIZE as f32; 4], colors[0])?;
+        self.quad(space, fringe, self.white(), colors[0])?;
         let half = [(rect[2] - rect[0]) * 0.5, (rect[3] - rect[1]) * 0.5];
         if !(4.0 * (half[0] + half[1])).is_finite() || !colors[1].iter().all(|v| v.is_finite()) {
             return Err(RenderError::InvalidPrimitive);
@@ -1156,6 +1209,41 @@ impl Renderer {
             if vertex.local[1] > 0.0 {
                 vertex.color = colors[1];
             }
+        }
+        Ok(())
+    }
+
+    fn shadow(
+        &mut self,
+        space: Space,
+        rect: [f32; 4],
+        radius: f32,
+        blur: f32,
+        color: [f32; 4],
+    ) -> Result<(), RenderError> {
+        if !radius.is_finite() || radius < 0.0 || !blur.is_finite() || blur <= 0.0 {
+            return Err(RenderError::InvalidPrimitive);
+        }
+        let rect = [0, 1, 2, 3].map(|i| rect[i] * space.scale + space.origin[i % 2]);
+        let sigma = blur * space.scale / 2.0;
+        let reach = 3.0 * sigma;
+        let start = self.vertices.len();
+        self.quad(
+            space,
+            [
+                rect[0] - reach,
+                rect[1] - reach,
+                rect[2] + reach,
+                rect[3] + reach,
+            ],
+            self.white(),
+            color,
+        )?;
+        let half = [(rect[2] - rect[0]) * 0.5, (rect[3] - rect[1]) * 0.5];
+        let radius = (radius * space.scale).min(half[0]).min(half[1]).max(0.0);
+        for vertex in &mut self.vertices[start..] {
+            vertex.shape = [half[0], half[1], radius, radius];
+            vertex.blur = sigma;
         }
         Ok(())
     }
@@ -1195,7 +1283,7 @@ impl Renderer {
         let glyph = match self.glyphs.get(&key) {
             Some(glyph) => *glyph,
             None => {
-                if self.glyphs.len() >= MAX_GLYPHS {
+                if self.glyphs.len() >= self.glyph_limit() {
                     return Err(RenderError::AtlasFull);
                 }
                 let mut mask = Mask::new(data);
@@ -1232,7 +1320,6 @@ impl Renderer {
         };
         let left = x.floor() + glyph.left as f32;
         let top = y.floor() + glyph.top as f32;
-        let atlas = ATLAS_SIZE as f32;
         let start = self.vertices.len();
         self.quad(
             space,
@@ -1242,12 +1329,7 @@ impl Renderer {
                 left + glyph.width as f32,
                 top + glyph.height as f32,
             ],
-            [
-                glyph.x as f32 / atlas,
-                glyph.y as f32 / atlas,
-                (glyph.x + glyph.width) as f32 / atlas,
-                (glyph.y + glyph.height) as f32 / atlas,
-            ],
+            self.uv(glyph),
             colors[0],
         )?;
         for vertex in &mut self.vertices[start..] {
@@ -1318,13 +1400,14 @@ impl Renderer {
                     x * 2.0 / space.size[0] as f32 - 1.0,
                     1.0 - y * 2.0 / space.size[1] as f32,
                 ],
-                uv: [0.5 / ATLAS_SIZE as f32; 2],
+                uv: [0.5 / self.atlas_side() as f32; 2],
                 color,
                 local,
                 shape: [half[0], half[1], corner, corner],
                 stroke: 0.0,
                 clip_local: [0.0; 2],
                 clip: [0.0; 3],
+                blur: 0.0,
             });
         }
         Ok(())
@@ -1378,6 +1461,7 @@ impl Renderer {
                 stroke: 0.0,
                 clip_local: [0.0; 2],
                 clip: [0.0; 3],
+                blur: 0.0,
             });
         }
         Ok(())
@@ -2031,7 +2115,7 @@ mod tests {
             );
         }
         assert!(!renderer.glyphs.is_empty());
-        assert!(renderer.glyphs.len() <= MAX_GLYPHS);
+        assert!(renderer.glyphs.len() <= renderer.glyph_limit());
         assert_eq!(
             renderer
                 .glyphs
@@ -2255,6 +2339,12 @@ mod tests {
                 style: PathStyle::Shadow(6.0),
                 colors: [[0.0, 0.0, 0.0, 1.0]; 2],
             },
+            Primitive::Shadow {
+                rect: [170.0, 90.0, 190.0, 110.0],
+                radius: 4.0,
+                blur: 6.0,
+                color: [0.0, 0.0, 0.0, 1.0],
+            },
             Primitive::Gradient {
                 rect: [100.0, 10.0, 120.0, 110.0],
                 radius: [0.0; 2],
@@ -2305,6 +2395,59 @@ mod tests {
             "and fades at its edge: {fading:?}"
         );
         assert_eq!(beyond, [255; 4]);
+        let [inside, fading, beyond] = [pixel(360, 200), pixel(340, 200), pixel(310, 200)];
+        assert!(
+            inside[0] < 40,
+            "a rectangle's shadow is dark inside: {inside:?}"
+        );
+        assert!(
+            fading[0] > 40 && fading[0] < 230,
+            "and fades at its edge: {fading:?}"
+        );
+        assert_eq!(beyond, [255; 4]);
+        assert_eq!(renderer.glyphs.len(), 3, "and takes no room in the atlas");
+    }
+
+    #[test]
+    #[ignore = "requires a native GPU adapter"]
+    fn icons_past_one_atlas_never_fail_a_frame() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let target = Target::new(&device);
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer = Renderer::new(device, queue, format);
+        // Each tint is an entry of its own, 64 device pixels square.
+        let icons = |tints: Range<usize>| -> Vec<Primitive<'static>> {
+            tints
+                .map(|tint| Primitive::Icon {
+                    sources: &[CHECKBOX],
+                    origin: [0.0; 2],
+                    size: 32.0,
+                    tint: [tint as f32 / 65_536.0, 0.0, 0.0, 1.0],
+                    palette: Palette::default(),
+                })
+                .collect()
+        };
+        let one_atlas = (ATLAS_SIZE as usize / 65).pow(2);
+        for frame in 0..8 {
+            let start = frame * one_atlas / 3;
+            let primitives = icons(start..start + one_atlas / 3);
+            target.draw(&mut renderer, &page(&primitives)).unwrap();
+        }
+        assert_eq!(
+            renderer.atlas_side(),
+            ATLAS_SIZE,
+            "frames each needing a third of the atlas evict, never grow it"
+        );
+        let primitives = icons(0..3 * one_atlas);
+        target.draw(&mut renderer, &page(&primitives)).unwrap();
+        assert!(renderer.atlas_side() > ATLAS_SIZE);
+        assert!(renderer.glyphs.len() >= 3 * one_atlas);
+        let capture = target.capture(&renderer);
+        let pixel = |x: usize, y: usize| &capture[(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];
+        assert_ne!(pixel(24 + 12, 24 + 32), [255; 4], "the icons paint");
     }
 
     #[test]

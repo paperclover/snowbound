@@ -209,7 +209,24 @@ final class Notebook {
             if let handle { sb_library_free(handle) }
             handle = library
             self.problem = library == nil ? (problem ?? "The notebook can’t be read.") : nil
+            follow()
             reload(done: done)
+        }
+    }
+
+    /// Works offline or online, as Work Offline stands.
+    func follow() {
+        if let handle { sb_library_set_offline(handle, Sync.offline) }
+    }
+
+    /// Where the notebook is kept, as the sync sheet names it.
+    var location: String {
+        switch source {
+        case .files: "In Files"
+        case .documents: "On this \(UIDevice.current.model), in Snowbound’s folder"
+        case .server(let server):
+            "smb://\(server.host)/\([server.share, server.root].filter { !$0.isEmpty }.joined(separator: "/"))"
+        case .path(let path): path
         }
     }
 

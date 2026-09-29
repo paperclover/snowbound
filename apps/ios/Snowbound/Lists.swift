@@ -39,11 +39,14 @@ final class NotebooksViewController: UITableViewController, UIDocumentPickerDele
         ])
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             title: "Add Notebook", image: UIImage(systemName: "plus"), menu: add)
+        navigationItem.searchController = SearchViewController.controller()
+        toolbarItems = [.flexibleSpace(), UIBarButtonItem(customView: SyncIndicator()), .flexibleSpace()]
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         navigationController?.navigationBar.prefersLargeTitles = true
+        navigationController?.setToolbarHidden(false, animated: false)
     }
 
     func reload() {
@@ -170,6 +173,10 @@ final class NotebooksViewController: UITableViewController, UIDocumentPickerDele
             UIAction(title: "New Section…", image: UIImage(systemName: "plus.rectangle.portrait")) {
                 [weak self] _ in self?.newSection(in: notebook)
             },
+            UIAction(title: "Tags Summary", image: UIImage(systemName: "tag")) { [weak self] _ in
+                guard let self else { return }
+                (view.window?.windowScene?.delegate as? SceneDelegate)?.showTags(of: notebook, from: self)
+            },
             UIAction(title: "Close Notebook", image: UIImage(systemName: "xmark.circle"), attributes: .destructive) {
                 [weak self] _ in
                 Notebooks.remove(notebook)
@@ -250,7 +257,7 @@ extension UIFont {
 }
 
 /// A section's pages, subpages indented, each page's conflict pages beneath it.
-final class PagesViewController: UITableViewController, UISearchResultsUpdating {
+final class PagesViewController: UITableViewController {
     private struct Item {
         let row: Row
         let version: Row.Version?
@@ -260,13 +267,9 @@ final class PagesViewController: UITableViewController, UISearchResultsUpdating 
     private(set) var section: Section?
     private var items: [Item] = []
     private var selected: String?
-    private let results = SearchViewController()
-    private lazy var search = UISearchController(searchResultsController: results)
-    private var searching: DispatchWorkItem?
+    private let search = SearchViewController.controller()
     /// Opens a page of the section.
-    var onOpen: ((Section, String, String?) -> Void)?
-    /// Opens a page of another section of the notebook, found by search.
-    var onOpenSection: ((Notebook, String, String, String?) -> Void)?
+    var onOpen: ((Section, String) -> Void)?
 
     init() {
         super.init(style: .plain)
@@ -277,22 +280,14 @@ final class PagesViewController: UITableViewController, UISearchResultsUpdating 
     override func viewDidLoad() {
         super.viewDidLoad()
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "page")
-        search.searchResultsUpdater = self
-        search.searchBar.placeholder = "Search Notebook"
         navigationItem.searchController = search
         navigationItem.hidesSearchBarWhenScrolling = false
-        results.onOpen = { [weak self] found, query in
-            guard let self, let section, let notebook = Optional(section.notebook) else { return }
-            if found.section == section.tab.path {
-                onOpen?(section, found.page, query)
-            } else {
-                onOpenSection?(notebook, found.section, found.page, query)
-            }
-        }
         let compose = UIBarButtonItem(
             title: "New Page", image: UIImage(systemName: "square.and.pencil"),
             primaryAction: UIAction { [weak self] _ in self?.newPage(under: nil) })
-        toolbarItems = [.flexibleSpace(), compose]
+        toolbarItems = [
+            .flexibleSpace(), UIBarButtonItem(customView: SyncIndicator()), .flexibleSpace(), compose,
+        ]
         NotificationCenter.default.addObserver(
             self, selector: #selector(changed), name: Section.changed, object: nil)
     }
@@ -398,7 +393,7 @@ final class PagesViewController: UITableViewController, UISearchResultsUpdating 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         guard let section else { return }
         selected = items[indexPath.row].id
-        onOpen?(section, items[indexPath.row].id, nil)
+        onOpen?(section, items[indexPath.row].id)
     }
 
     override func tableView(
@@ -432,34 +427,6 @@ final class PagesViewController: UITableViewController, UISearchResultsUpdating 
             return UIMenu(children: actions)
         })
     }
-
-    func updateSearchResults(for controller: UISearchController) {
-        searching?.cancel()
-        let query = controller.searchBar.text?.trimmingCharacters(in: .whitespaces) ?? ""
-        guard let section, let library = section.notebook.handle, !query.isEmpty else {
-            results.show([], query: query)
-            return
-        }
-        // Each keystroke waits for the next before the notebook is read.
-        let work = DispatchWorkItem { [weak self] in
-            let (library, open, path) = (Int(bitPattern: library), Int(bitPattern: section.handle), section.tab.path)
-            self?.results.searching(query)
-            background({
-                decode(
-                    [Found].self,
-                    sb_library_search(
-                        OpaquePointer(bitPattern: library), OpaquePointer(bitPattern: open), path, query)) ?? []
-            }) { [weak self] found in
-                guard controller.searchBar.text?.trimmingCharacters(in: .whitespaces) == query else { return }
-                self?.results.show(
-                    found, query: query,
-                    sections: Dictionary(
-                        section.notebook.tabs.map { ($0.path, $0.name) }, uniquingKeysWith: { first, _ in first }))
-            }
-        }
-        searching = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
-    }
 }
 
 /// A page `sb_library_search` found.
@@ -470,42 +437,90 @@ struct Found: Decodable {
     let snippet: String
 }
 
-final class SearchViewController: UITableViewController {
-    private var found: [Found] = []
-    private var sections: [String: String] = [:]
+/// Every open notebook's pages holding a query, grouped by notebook, as Notes searches
+/// every folder.
+final class SearchViewController: UITableViewController, UISearchResultsUpdating {
+    private var found: [(notebook: Notebook, pages: [Found])] = []
     private var query = ""
-    var onOpen: ((Found, String) -> Void)?
+    private var searching: DispatchWorkItem?
+
+    /// A search bar whose results this shows.
+    static func controller() -> UISearchController {
+        let results = SearchViewController(style: .insetGrouped)
+        let search = UISearchController(searchResultsController: results)
+        search.searchResultsUpdater = results
+        search.searchBar.placeholder = "Search Notebooks"
+        return search
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "found")
     }
 
-    func searching(_ query: String) {
-        guard found.isEmpty else { return }
-        var loading = UIContentUnavailableConfiguration.loading()
-        loading.text = "Searching…"
-        contentUnavailableConfiguration = loading
+    func updateSearchResults(for controller: UISearchController) {
+        searching?.cancel()
+        let query = controller.searchBar.text?.trimmingCharacters(in: .whitespaces) ?? ""
+        guard !query.isEmpty else { return show([], query: query) }
+        // Each keystroke waits for the next before the notebooks are read.
+        let work = DispatchWorkItem { [weak self] in
+            if self?.found.isEmpty == true {
+                var loading = UIContentUnavailableConfiguration.loading()
+                loading.text = "Searching…"
+                self?.contentUnavailableConfiguration = loading
+            }
+            let notebooks = Notebooks.all.compactMap { notebook -> (Notebook, Int, Int, String?)? in
+                guard let library = notebook.handle else { return nil }
+                // Open sections are searched as their edits leave them.
+                let open = Section.all.first { $0.notebook === notebook }
+                return (notebook, Int(bitPattern: library), open.map { Int(bitPattern: $0.handle) } ?? 0, open?.tab.path)
+            }
+            background({
+                notebooks.map { notebook, library, open, path in
+                    let found = decode(
+                        [Found].self,
+                        sb_library_search(
+                            OpaquePointer(bitPattern: library), OpaquePointer(bitPattern: open), path, query))
+                    return (notebook: notebook, pages: found ?? [])
+                }
+            }) { [weak self] found in
+                guard controller.searchBar.text?.trimmingCharacters(in: .whitespaces) == query else { return }
+                self?.show(found.filter { !$0.pages.isEmpty }, query: query)
+            }
+        }
+        searching = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
-    func show(_ found: [Found], query: String, sections: [String: String] = [:]) {
+    private func show(_ found: [(notebook: Notebook, pages: [Found])], query: String) {
         self.found = found
         self.query = query
-        self.sections = sections
         tableView.reloadData()
-        contentUnavailableConfiguration = found.isEmpty && !query.isEmpty ? UIContentUnavailableConfiguration.search() : nil
+        contentUnavailableConfiguration =
+            found.isEmpty && !query.isEmpty ? UIContentUnavailableConfiguration.search() : nil
     }
 
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { found.count }
+    override func numberOfSections(in tableView: UITableView) -> Int { found.count }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        found[section].notebook.name
+    }
+
+    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+        found[section].pages.count
+    }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let found = found[indexPath.row]
+        let (notebook, pages) = found[indexPath.section]
+        let page = pages[indexPath.row]
         let cell = tableView.dequeueReusableCell(withIdentifier: "found", for: indexPath)
         var content = UIListContentConfiguration.subtitleCell()
-        content.text = found.title.isEmpty ? "Untitled Page" : found.title
-        let section = sections[found.section] ?? ""
+        content.text = page.title.isEmpty ? "Untitled Page" : page.title
+        let tab = notebook.tabs.first { $0.path == page.section }
+        content.image = UIImage(systemName: "rectangle.portrait.fill")
+        content.imageProperties.tintColor = tab?.uiColor ?? .systemGray
         content.secondaryAttributedText = highlighted(
-            [section, found.snippet].filter { !$0.isEmpty }.joined(separator: " · "))
+            [tab?.name ?? "", page.snippet].filter { !$0.isEmpty }.joined(separator: " · "))
         content.secondaryTextProperties.numberOfLines = 2
         cell.contentConfiguration = content
         return cell
@@ -526,6 +541,9 @@ final class SearchViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        onOpen?(found[indexPath.row], query)
+        let (notebook, pages) = found[indexPath.section]
+        let page = pages[indexPath.row]
+        (view.window?.windowScene?.delegate as? SceneDelegate)?
+            .open(page.section, of: notebook, page: page.page, reveal: .text(query))
     }
 }

@@ -275,7 +275,7 @@ impl State {
         Ok(())
     }
 
-    /// A secondary press on the page's text opens its context menu there.
+    /// A secondary press on the page's text or a file opens its context menu there.
     pub(crate) fn open_text_menu(&mut self) -> Result<(), Box<dyn Error>> {
         let Some((response, context)) = self.view.context()? else {
             return Ok(());
@@ -288,7 +288,7 @@ impl State {
     }
 
     /// The page's context menu while it is open, with OneNote 2010's commands for text,
-    /// links and equations.
+    /// links, equations and files.
     pub(crate) fn text_menu(&mut self) -> Result<(), Box<dyn Error>> {
         let Some((context, point)) = &self.text_menu else {
             return Ok(());
@@ -301,48 +301,54 @@ impl State {
             text,
             ..Item::default()
         };
-        let mut items = vec![
-            Item {
-                disabled: !context.selected,
-                ..item("Cut")
-            },
-            Item {
-                disabled: !context.selected,
-                ..item("Copy")
-            },
-            item("Paste"),
-        ];
-        match &context.link {
-            Some(_) => items.extend([
+        let items = if context.attachment.is_some() {
+            // OneNote 2010's commands for the file itself; its clipboard holds text alone.
+            vec![item("Open"), item("Save As…")]
+        } else {
+            let mut items = vec![
                 Item {
-                    separated: true,
-                    ..item("Edit Link…")
+                    disabled: !context.selected,
+                    ..item("Cut")
                 },
-                item("Copy Link to Paragraph"),
                 Item {
-                    separated: true,
-                    ..item("Copy Link")
+                    disabled: !context.selected,
+                    ..item("Copy")
                 },
-                item("Select Link"),
-                item("Remove Link"),
-            ]),
-            None => items.extend([
-                Item {
-                    separated: true,
-                    ..item("Link…")
-                },
-                item("Copy Link to Paragraph"),
-            ]),
-        }
-        if context.equation {
-            items.extend([
-                Item {
-                    separated: true,
-                    ..item("Professional")
-                },
-                item("Linear"),
-            ]);
-        }
+                item("Paste"),
+            ];
+            match &context.link {
+                Some(_) => items.extend([
+                    Item {
+                        separated: true,
+                        ..item("Edit Link…")
+                    },
+                    item("Copy Link to Paragraph"),
+                    Item {
+                        separated: true,
+                        ..item("Copy Link")
+                    },
+                    item("Select Link"),
+                    item("Remove Link"),
+                ]),
+                None => items.extend([
+                    Item {
+                        separated: true,
+                        ..item("Link…")
+                    },
+                    item("Copy Link to Paragraph"),
+                ]),
+            }
+            if context.equation {
+                items.extend([
+                    Item {
+                        separated: true,
+                        ..item("Professional")
+                    },
+                    item("Linear"),
+                ]);
+            }
+            items
+        };
         let Some(chosen) =
             ui::popup::menu(&mut self.ui, menu(), Anchor::Point(*point), &items, None)
         else {
@@ -352,6 +358,8 @@ impl State {
             return Ok(());
         };
         let response = match items[chosen].text {
+            "Open" => return self.open_attachment(&context.attachment.unwrap()),
+            "Save As…" => return self.save_attachment(&context.attachment.unwrap()),
             "Cut" => self.view.copy(true)?,
             "Copy" => self.view.copy(false)?,
             "Paste" => {

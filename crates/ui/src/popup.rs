@@ -27,6 +27,8 @@ const PALETTE: f32 = 560.0;
 const TIP_WIDTH: f32 = 280.0;
 /// A colour grid's cell, around its swatch.
 const CELL: f32 = 22.0;
+/// Inset of an item's text from the highlight it previews.
+const SAMPLE_PAD: f32 = 2.0;
 /// Seconds a popup takes to ease to the height of its results.
 const RESIZE: f32 = 0.15;
 thread_local! {
@@ -50,6 +52,10 @@ pub struct Item<'a> {
     pub text: &'a str,
     /// The family the text previews, as in a font menu.
     pub font: Option<&'a str>,
+    /// The colour and highlight the text previews, as a tag without a symbol shows in
+    /// OneNote's Tags menu.
+    pub ink: Option<[f32; 4]>,
+    pub highlight: Option<[f32; 4]>,
     pub icon: Option<&'static [&'static str]>,
     /// The icon has colours of its own, so the text's colour does not tint it.
     pub colored: bool,
@@ -87,7 +93,14 @@ pub fn menu(
     };
     let [text, shortcut] = items.iter().fold([0.0_f32; 2], |[text, shortcut], item| {
         [
-            text.max(measure(item.text)),
+            text.max(
+                measure(item.text)
+                    + if item.highlight.is_some() {
+                        2.0 * SAMPLE_PAD
+                    } else {
+                        0.0
+                    },
+            ),
             shortcut.max(measure(item.shortcut)),
         ]
     });
@@ -414,18 +427,49 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, row: Row) {
             },
         );
     }
-    ui.leaf(
-        "text",
-        Spec {
-            size: [fill(), fill()],
-            text: Some(item.text),
-            font: item.font,
-            font_size: Some(style.font_size - if item.heading { 2.0 } else { 0.0 }),
-            bold: item.heading,
-            color: Some(color),
-            ..Spec::default()
-        },
-    );
+    let text = Spec {
+        size: [fill(), fill()],
+        text: Some(item.text),
+        font: item.font,
+        font_size: Some(style.font_size - if item.heading { 2.0 } else { 0.0 }),
+        bold: item.heading,
+        color: Some(match (item.ink, item.highlight) {
+            (None, None) => color,
+            // Automatic text on a highlight is black, as on OneNote's page.
+            (ink, highlight) => {
+                let ink = ink.unwrap_or([0.0, 0.0, 0.0, 1.0]);
+                if item.disabled {
+                    mix(ink, highlight.unwrap_or(style.fill), 0.5)
+                } else {
+                    ink
+                }
+            }
+        }),
+        ..Spec::default()
+    };
+    match item.highlight {
+        Some(highlight) => {
+            ui.leaf(
+                "text",
+                Spec {
+                    size: [fit(), px(style.row - 4.0)],
+                    fill: Some(highlight),
+                    pad: [SAMPLE_PAD, 0.0],
+                    ..text
+                },
+            );
+            ui.leaf(
+                "rest",
+                Spec {
+                    size: [fill(), fill()],
+                    ..Spec::default()
+                },
+            );
+        }
+        None => {
+            ui.leaf("text", text);
+        }
+    }
     if !item.shortcut.is_empty() {
         ui.leaf(
             "shortcut",

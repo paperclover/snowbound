@@ -24,6 +24,8 @@ pub struct Settings {
     pub light_pages: bool,
     /// Where searches look first, as "Set This Scope as Default" chose.
     pub search_scope: crate::search::Scope,
+    /// The tag list Customize Tags edits; none keeps OneNote's.
+    pub tags: Option<Vec<canvas::editor::NoteTag>>,
 }
 
 /// What the toolbar's buttons apply from their menus' last picks.
@@ -128,6 +130,7 @@ impl crate::State {
             color_scheme: self.color_scheme,
             light_pages: self.light_pages,
             search_scope: self.search.default,
+            tags: (self.tags != canvas::editor::NoteTag::defaults()).then(|| self.tags.clone()),
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -177,6 +180,12 @@ mod tests {
             color_scheme: ColorScheme::Dark,
             light_pages: true,
             search_scope: crate::search::Scope::Notebook,
+            tags: Some(vec![canvas::editor::NoteTag {
+                label: "Snow check".into(),
+                shape: 61,
+                color: Some(0x0000_0080),
+                highlight: Some(0x00ff_cc00),
+            }]),
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

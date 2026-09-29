@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x1="0" y1="0.6" x2="0" y2="15.4" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9aa4b4"/><stop offset="1" stop-color="#5a6474"/></linearGradient>
+    <linearGradient id="g1" x1="0" y1="1.2" x2="0" y2="14.8" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#f0f2f6"/><stop offset="1" stop-color="#c4cad4"/></linearGradient>
+    <linearGradient id="g2" x1="0" y1="2.2" x2="0" y2="7" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#8ab4ff"/><stop offset="1" stop-color="#2e62d0"/></linearGradient>
+  </defs>
+  <path d="M5.4 0.6H10.6A1.4 1.4 0 0 1 12 2V14A1.4 1.4 0 0 1 10.6 15.4H5.4A1.4 1.4 0 0 1 4 14V2A1.4 1.4 0 0 1 5.4 0.6Z" fill="url(#g0)"/>
+  <path d="M5.6 1.2H10.4A1 1 0 0 1 11.4 2.2V13.8A1 1 0 0 1 10.4 14.8H5.6A1 1 0 0 1 4.6 13.8V2.2A1 1 0 0 1 5.6 1.2Z" fill="url(#g1)"/>
+  <path d="M5.4 2.2H10.6V7H5.4Z" fill="url(#g2)"/>
+  <path d="M5.6 8.4H6.8V9.4H5.6Z" fill="#7a8494"/>
+  <path d="M7.4 8.4H8.6V9.4H7.4Z" fill="#7a8494"/>
+  <path d="M9.2 8.4H10.4V9.4H9.2Z" fill="#7a8494"/>
+  <path d="M5.6 10.3H6.8V11.3H5.6Z" fill="#7a8494"/>
+  <path d="M7.4 10.3H8.6V11.3H7.4Z" fill="#7a8494"/>
+  <path d="M9.2 10.3H10.4V11.3H9.2Z" fill="#7a8494"/>
+  <path d="M5.6 12.2H6.8V13.2H5.6Z" fill="#7a8494"/>
+  <path d="M7.4 12.2H8.6V13.2H7.4Z" fill="#7a8494"/>
+  <path d="M9.2 12.2H10.4V13.2H9.2Z" fill="#7a8494"/>
+</svg>

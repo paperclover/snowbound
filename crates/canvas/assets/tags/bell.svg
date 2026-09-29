@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x1="0" y1="2.4" x2="0" y2="12.4" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fff0a0"/><stop offset="1" stop-color="#d8a010"/></linearGradient>
+  </defs>
+  <path d="M1 2.5L4 5" fill="none" stroke="#f0c020" stroke-width="0.7"/>
+  <path d="M15 2.5L12 5" fill="none" stroke="#f0c020" stroke-width="0.7"/>
+  <path d="M0.6 10L3.4 10" fill="none" stroke="#f0c020" stroke-width="0.7"/>
+  <path d="M15.4 10L12.6 10" fill="none" stroke="#f0c020" stroke-width="0.7"/>
+  <path d="M2 15L4.4 13" fill="none" stroke="#f0c020" stroke-width="0.7"/>
+  <path d="M14 15L11.6 13" fill="none" stroke="#f0c020" stroke-width="0.7"/>
+  <path d="M8 2.4C10.4 2.4 11.2 4.4 11.4 6.8C11.6 9.2 12.4 10.4 13.6 11.2V12.4H2.4V11.2C3.6 10.4 4.4 9.2 4.6 6.8C4.8 4.4 5.6 2.4 8 2.4Z" fill="url(#g0)"/>
+  <path d="M8 2.4C10.4 2.4 11.2 4.4 11.4 6.8C11.6 9.2 12.4 10.4 13.6 11.2V12.4H2.4V11.2C3.6 10.4 4.4 9.2 4.6 6.8C4.8 4.4 5.6 2.4 8 2.4Z" fill="none" stroke="#a87810" stroke-width="0.5"/>
+  <path d="M6.8 13.4A1.2 1.2 0 1 1 9.2 13.4A1.2 1.2 0 1 1 6.8 13.4Z" fill="#a87810"/>
+  <path d="M7.2 1.8A0.8 0.8 0 1 1 8.8 1.8A0.8 0.8 0 1 1 7.2 1.8Z" fill="#a87810"/>
+</svg>

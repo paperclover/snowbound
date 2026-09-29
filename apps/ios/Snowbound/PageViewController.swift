@@ -1,6 +1,14 @@
 import PhotosUI
 import UIKit
 
+/// What a page shows selected as it opens.
+enum Reveal {
+    /// The first match of a search.
+    case text(String)
+    /// A paragraph the Tags Summary lists, by id.
+    case paragraph(String)
+}
+
 final class PageViewController: UIViewController, PHPickerViewControllerDelegate,
     UIImagePickerControllerDelegate, UINavigationControllerDelegate
 {
@@ -9,7 +17,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
 
     private let section: Section
     private let page: String
-    private let find: String?
+    private let reveal: Reveal?
     private let titleFocus: Bool
     private lazy var canvas = CanvasView(section: section, page: page)
     private let bar = ConflictBar()
@@ -21,14 +29,18 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         systemItem: .undo, primaryAction: UIAction { [weak self] _ in self?.canvas.undo(redo: false) })
     private lazy var redo = UIBarButtonItem(
         systemItem: .redo, primaryAction: UIAction { [weak self] _ in self?.canvas.undo(redo: true) })
+    private lazy var more = UIBarButtonItem(
+        title: "Page", image: UIImage(systemName: "ellipsis.circle"),
+        menu: UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.pageMenu() ?? []) }]))
 
-    init(section: Section, page: String, find: String? = nil, titleFocus: Bool = false) {
+    init(section: Section, page: String, reveal: Reveal? = nil, titleFocus: Bool = false) {
         self.section = section
         self.page = page
-        self.find = find
+        self.reveal = reveal
         self.titleFocus = titleFocus
         super.init(nibName: nil, bundle: nil)
         navigationItem.largeTitleDisplayMode = .never
+        navigationItem.rightBarButtonItems = [more]
         showTitle(section.row(of: page)?.row.title ?? "")
     }
 
@@ -60,13 +72,21 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
             self, selector: #selector(sectionChanged), name: Section.changed, object: section)
         NotificationCenter.default.addObserver(self, selector: #selector(leaving), name: Self.leaving, object: nil)
         conflictChanged()
+        registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (controller: PageViewController, _) in
+            controller.fitTitle()
+        }
     }
 
-    /// The page is on screen: a found word is selected, a new page's title takes the caret.
+    /// The page is on screen: a found word or tagged paragraph is selected, a new page's
+    /// title takes the caret.
     private func opened() {
-        if let find, canvas.find(find) {
-            _ = canvas.becomeFirstResponder()
-        } else if titleFocus, canvas.focusTitle() {
+        let revealed =
+            switch reveal {
+            case .text(let query): canvas.find(query)
+            case .paragraph(let id): canvas.selectParagraph(id)
+            case nil: false
+            }
+        if revealed || titleFocus && canvas.focusTitle() {
             _ = canvas.becomeFirstResponder()
         }
     }
@@ -75,21 +95,90 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         self.title = title.isEmpty ? "Untitled Page" : title
     }
 
+    /// A phone's bar has no room for the title beside the editing buttons, and the page
+    /// shows it anyway, as Notes leaves it out.
+    private func fitTitle() {
+        let crowded = canvas.isFirstResponder && traitCollection.horizontalSizeClass == .compact
+        navigationItem.titleView = crowded ? UIView() : nil
+    }
+
     /// Notes' checkmark ends editing and puts the keyboard away; undo and redo sit beside it.
     private func editingChanged() {
         if !canvas.readOnly, let title = canvas.pageTitle {
             showTitle(title)
             section.retitle(page, title)
         }
+        fitTitle()
         guard canvas.isFirstResponder else {
-            navigationItem.rightBarButtonItems = nil
+            if navigationItem.rightBarButtonItems?.first !== more { navigationItem.rightBarButtonItems = [more] }
             return
         }
         undo.isEnabled = canvas.canUndo(redo: false)
         redo.isEnabled = canvas.canUndo(redo: true)
         if navigationItem.rightBarButtonItems?.first !== done {
-            navigationItem.rightBarButtonItems = [done, redo, undo]
+            navigationItem.rightBarButtonItems = [done, more, redo, undo]
         }
+    }
+
+    // MARK: Page menu
+
+    /// The desktop's page and insert commands that suit a touch screen.
+    private func pageMenu() -> [UIMenuElement] {
+        let editable: UIMenuElement.Attributes = canvas.readOnly ? .disabled : []
+        let scene = view.window?.windowScene?.delegate as? SceneDelegate
+        let insert = UIMenu(
+            title: "Insert", image: UIImage(systemName: "plus.circle"),
+            children: [
+                UIAction(title: "Photo Library", image: UIImage(systemName: "photo.on.rectangle"), attributes: editable) {
+                    [weak self] _ in self?.pickPicture(camera: false)
+                },
+                UIAction(
+                    title: "Take Photo", image: UIImage(systemName: "camera"),
+                    attributes: UIImagePickerController.isSourceTypeAvailable(.camera) ? editable : .disabled
+                ) { [weak self] _ in self?.pickPicture(camera: true) },
+                UIMenu(options: .displayInline, children: [
+                    UIAction(title: "Date", image: UIImage(systemName: "calendar"), attributes: editable) {
+                        [weak self] _ in self?.canvas.insertDate(true, time: false)
+                    },
+                    UIAction(title: "Time", image: UIImage(systemName: "clock"), attributes: editable) {
+                        [weak self] _ in self?.canvas.insertDate(false, time: true)
+                    },
+                    UIAction(title: "Date & Time", image: UIImage(systemName: "calendar.badge.clock"), attributes: editable) {
+                        [weak self] _ in self?.canvas.insertDate(true, time: true)
+                    },
+                ]),
+                UIAction(
+                    title: "Space", image: UIImage(systemName: "arrow.up.and.down.text.horizontal"), attributes: editable
+                ) { [weak self] _ in self?.canvas.insertSpace() },
+            ])
+        return [
+            insert,
+            UIAction(title: "Page Background…", image: UIImage(systemName: "paintpalette"), attributes: editable) {
+                [weak self] _ in self?.showPaper()
+            },
+            UIAction(title: "Tags Summary", image: UIImage(systemName: "tag")) { [weak self] _ in
+                guard let self else { return }
+                scene?.showTags(of: section.notebook, from: self)
+            },
+            UIMenu(options: .displayInline, children: [
+                UIAction(title: "New Subpage", image: UIImage(systemName: "text.badge.plus")) { _ in
+                    scene?.newPage(subpage: true)
+                },
+                UIAction(title: "Delete Page", image: UIImage(systemName: "trash"), attributes: .destructive) {
+                    [weak self] _ in
+                    guard let self else { return }
+                    section.delete(page) { _ in }
+                },
+            ]),
+        ]
+    }
+
+    private func showPaper() {
+        let navigation = UINavigationController(rootViewController: PaperViewController(canvas: canvas))
+        navigation.sheetPresentationController?.detents = [.medium(), .large()]
+        navigation.sheetPresentationController?.prefersGrabberVisible = true
+        navigation.sheetPresentationController?.largestUndimmedDetentIdentifier = .medium
+        present(navigation, animated: true)
     }
 
     @objc private func leaving() { canvas.commitComposition() }

@@ -54,9 +54,14 @@ the file grows):
   file mean nothing until the header's transaction count says a transaction
   holding them has committed.
 
-External payloads (large pictures, attachments, recordings) can live beside
-the section as `.onebin` files in a `_onefiles` folder. The section refers to
-them by name.
+The format lets payloads (pictures, attachments, recordings) live beside the
+section as `.onebin` files in a `_onefiles` folder, referred to by name. OneNote
+2010 never writes them: every attachment it stores, 300 MiB ones included and
+on a share too, goes into the section's own file data store, with a 32-pixel
+PNG of the file's icon beside it. Snowbound writes the same. OneNote also
+stores identical bytes once per section, so two attachments of one file (or
+one icon) share a payload; Snowbound stores each anew, which OneNote reads the
+same.
 
 ## What "append one revision" means
 

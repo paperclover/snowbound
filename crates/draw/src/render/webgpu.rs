@@ -63,7 +63,7 @@ impl Renderer {
                     buffers: &[Some(wgpu::VertexBufferLayout {
                         array_stride: size_of::<Vertex>() as u64,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4, 5 => Float32, 6 => Float32x2, 7 => Float32x3],
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x2, 4 => Float32x4, 5 => Float32, 6 => Float32x2, 7 => Float32x3, 8 => Float32],
                     })],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -98,40 +98,7 @@ impl Renderer {
             color: erase,
             alpha: erase,
         });
-        let atlas = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Glyph atlas"),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let view = atlas.create_view(&Default::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Glyph atlas"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
+        let (atlas, bind_group) = atlas(&device, &pipeline, ATLAS_SIZE);
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Draw vertices"),
             size: VERTEX_BUFFER_BYTES,
@@ -165,6 +132,14 @@ impl Renderer {
     /// The widest and tallest texture the device takes, in pixels.
     pub fn max_texture_dimension(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
+    }
+
+    pub(super) fn atlas_side(&self) -> u32 {
+        self.gpu.atlas.width()
+    }
+
+    pub(super) fn new_atlas(&mut self, side: u32) {
+        (self.gpu.atlas, self.gpu.bind_group) = atlas(&self.device, &self.gpu.pipeline, side);
     }
 
     pub(super) fn write_atlas(&self, origin: [u32; 2], size: [u32; 2], rgba: &[u8]) {
@@ -335,4 +310,47 @@ impl Renderer {
         drop(pass);
         self.queue.submit([encoder.finish()]);
     }
+}
+
+/// An empty atlas `side` texels square, and how the pipeline samples it.
+fn atlas(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    side: u32,
+) -> (wgpu::Texture, wgpu::BindGroup) {
+    let atlas = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Glyph atlas"),
+        size: wgpu::Extent3d {
+            width: side,
+            height: side,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = atlas.create_view(&Default::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Glyph atlas"),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    (atlas, bind_group)
 }

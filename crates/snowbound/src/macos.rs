@@ -11,7 +11,7 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSColor,
     NSColorSpace, NSDatePicker, NSDatePickerElementFlags, NSDatePickerStyle, NSEvent, NSEventType,
-    NSMenuItem,
+    NSMenu, NSMenuItem,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
@@ -38,6 +38,7 @@ static DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 thread_local! {
     static IN_KEY_DOWN: Cell<bool> = const { Cell::new(false) };
     static STATUSES: RefCell<Vec<commands::Status>> = const { RefCell::new(Vec::new()) };
+    static TAGS_MENU: RefCell<Option<Retained<NSMenu>>> = const { RefCell::new(None) };
 }
 
 unsafe extern "C" fn key_down(view: &AnyObject, _: Sel, event: &NSEvent) {
@@ -427,14 +428,14 @@ pub fn pick_notebook(title: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Asks where to create something named `name` by default, with the system's save panel.
-pub fn pick_new(title: &str, name: &str) -> Option<std::path::PathBuf> {
+/// Asks where to `action` something named `name` by default, with the system's save panel.
+pub fn pick_new(title: &str, name: &str, action: &str) -> Option<std::path::PathBuf> {
     let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
     unsafe {
         let panel = objc2_app_kit::NSSavePanel::savePanel(mtm);
         panel.setCanCreateDirectories(true);
         panel.setTitle(Some(&NSString::from_str(title)));
-        panel.setPrompt(Some(&NSString::from_str("Create")));
+        panel.setPrompt(Some(&NSString::from_str(action)));
         panel.setNameFieldStringValue(&NSString::from_str(name));
         if panel.runModal() != objc2_app_kit::NSModalResponseOK {
             return None;
@@ -443,14 +444,18 @@ pub fn pick_new(title: &str, name: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Asks for a picture to insert, with the system's open panel.
-pub fn pick_picture() -> Option<std::path::PathBuf> {
+/// Asks for a file to insert, one of `types` (extensions) unless empty, with the system's
+/// open panel titled `title`.
+pub fn pick_file(title: &str, types: &[&str]) -> Option<std::path::PathBuf> {
     let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
     unsafe {
         let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
-        let types = crate::PICTURE_TYPES.map(NSString::from_str);
-        #[allow(deprecated, reason = "Allowed content types need macOS 11")]
-        panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_vec(types.into())));
+        if !types.is_empty() {
+            let types = types.iter().map(|kind| NSString::from_str(kind)).collect();
+            #[allow(deprecated, reason = "Allowed content types need macOS 11")]
+            panel.setAllowedFileTypes(Some(&objc2_foundation::NSArray::from_vec(types)));
+        }
+        panel.setTitle(Some(&NSString::from_str(title)));
         panel.setPrompt(Some(&NSString::from_str("Insert")));
         if panel.runModal() != objc2_app_kit::NSModalResponseOK {
             return None;
@@ -458,6 +463,88 @@ pub fn pick_picture() -> Option<std::path::PathBuf> {
         let path = panel.URLs().firstObject()?.path()?;
         Some(path.to_string().into())
     }
+}
+
+/// The icon Finder shows for the file at `path`, as a 32 pixel PNG like the one OneNote
+/// 2010 stores with an attachment.
+pub fn file_icon(path: &std::path::Path) -> Option<Vec<u8>> {
+    MainThreadMarker::new().expect("AppKit draws on the main thread");
+    let class = |name| AnyClass::get(name).expect("AppKit is linked");
+    unsafe {
+        let workspace: Retained<AnyObject> = msg_send_id![class("NSWorkspace"), sharedWorkspace];
+        let icon: Retained<AnyObject> =
+            msg_send_id![&workspace, iconForFile: &*NSString::from_str(path.to_str()?)];
+        let bitmap: Allocated<AnyObject> = msg_send_id![class("NSBitmapImageRep"), alloc];
+        let bitmap: Option<Retained<AnyObject>> = msg_send_id![
+            bitmap,
+            initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>(),
+            pixelsWide: 32isize,
+            pixelsHigh: 32isize,
+            bitsPerSample: 8isize,
+            samplesPerPixel: 4isize,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: &*NSString::from_str("NSDeviceRGBColorSpace"),
+            bytesPerRow: 0isize,
+            bitsPerPixel: 0isize
+        ];
+        let bitmap = bitmap?;
+        let graphics = class("NSGraphicsContext");
+        let context: Option<Retained<AnyObject>> =
+            msg_send_id![graphics, graphicsContextWithBitmapImageRep: &*bitmap];
+        let _: () = msg_send![graphics, saveGraphicsState];
+        let _: () = msg_send![graphics, setCurrentContext: context.as_deref()];
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            objc2_foundation::NSSize::new(32.0, 32.0),
+        );
+        // NSCompositingOperationSourceOver.
+        let _: () = msg_send![&icon, drawInRect: rect, fromRect: NSRect::ZERO, operation: 2usize, fraction: 1.0f64];
+        let _: () = msg_send![graphics, restoreGraphicsState];
+        let properties: Retained<AnyObject> = msg_send_id![class("NSDictionary"), dictionary];
+        // NSBitmapImageFileTypePNG.
+        let data: Option<Retained<AnyObject>> =
+            msg_send_id![&bitmap, representationUsingType: 4usize, properties: &*properties];
+        let data = data?;
+        let length: usize = msg_send![&data, length];
+        let bytes: *const std::ffi::c_void = msg_send![&data, bytes];
+        Some(std::slice::from_raw_parts(bytes.cast::<u8>(), length).to_vec())
+    }
+}
+
+/// Where the pointer is in the window, in points from the content's top left corner, for a
+/// drop, which AppKit reports without a position.
+pub fn drop_point(window: &Window) -> Option<[f32; 2]> {
+    let window = ns_window(window);
+    unsafe {
+        let point: NSPoint = msg_send![&window, mouseLocationOutsideOfEventStream];
+        let content: Retained<AnyObject> = msg_send_id![&window, contentView];
+        let frame: NSRect = msg_send![&content, frame];
+        Some([point.x as f32, (frame.size.height - point.y) as f32])
+    }
+}
+
+/// Opens a copy of an attachment with its application, quarantined as a download is, so
+/// Gatekeeper checks it where OneNote 2010 warns before opening one.
+pub fn open_file(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let value = format!("0081;{seconds:08x};Snowbound;");
+    if let Ok(file) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+        unsafe {
+            libc::setxattr(
+                file.as_ptr(),
+                c"com.apple.quarantine".as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            );
+        }
+    }
+    reveal(path);
 }
 
 /// Lets the user drag out part of the screen, then sends it as a PNG.
@@ -910,6 +997,18 @@ pub fn install_menu() {
         app.setWindowsMenu(Some(&menus.window));
         app.setHelpMenu(Some(&menus.help));
     }
+    TAGS_MENU.set(Some(menus.tags));
+}
+
+/// Lists `tags` in the menu bar's Tags menu.
+pub fn update_tag_menu(tags: &[canvas::editor::NoteTag]) {
+    let mtm = MainThreadMarker::new().expect("Menus belong to the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    TAGS_MENU.with_borrow(|menu| {
+        if let Some(menu) = menu {
+            crate::menubar::tags(mtm, &app, menu, tags);
+        }
+    });
 }
 
 /// The table's statuses, in `commands::choices` order, which the menu bar's items show.

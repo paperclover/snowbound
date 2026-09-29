@@ -10,6 +10,7 @@ attribute vec4 shape;
 attribute float stroke;
 attribute vec2 clip_local;
 attribute vec3 clip;
+attribute float blur;
 #endif
 varying vec2 v_uv;
 varying vec4 v_color;
@@ -18,6 +19,7 @@ varying vec4 v_shape;
 varying float v_stroke;
 varying vec2 v_clip_local;
 varying vec3 v_clip;
+varying float v_blur;
 
 #ifdef VERTEX
 void main() {
@@ -28,6 +30,7 @@ void main() {
     v_stroke = stroke;
     v_clip_local = clip_local;
     v_clip = clip;
+    v_blur = blur;
     gl_Position = vec4(position, 0.0, 1.0);
 }
 #else
@@ -54,10 +57,37 @@ float ellipse_arc(float angle, vec2 radius) {
     return half_angle * sum * scale;
 }
 
+vec2 erf(vec2 x) {
+    vec2 s = sign(x);
+    vec2 a = abs(x);
+    vec2 y = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+    y *= y;
+    return s - s / (y * y);
+}
+
+float shadow(vec2 p, vec2 half_size, float corner, float sigma) {
+    float start = clamp(-3.0 * sigma, p.y - half_size.y, p.y + half_size.y);
+    float end = clamp(3.0 * sigma, p.y - half_size.y, p.y + half_size.y);
+    float stride = (end - start) / 4.0;
+    float y = start + stride * 0.5;
+    float value = 0.0;
+    for (int i = 0; i < 4; i++) {
+        float delta = min(half_size.y - corner - abs(p.y - y), 0.0);
+        float curved = half_size.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+        vec2 integral = 0.5 + 0.5 * erf((p.x + vec2(-curved, curved)) * (0.70710678 / sigma));
+        float weight = exp(-y * y / (2.0 * sigma * sigma)) / (2.50662827 * sigma);
+        value += (integral.y - integral.x) * weight * stride;
+        y += stride;
+    }
+    return value;
+}
+
 void main() {
     vec4 color = texture2D(atlas, v_uv) * v_color;
     vec4 shape = v_shape;
-    if (shape.x > 0.0 && shape.y > 0.0) {
+    if (v_blur > 1e-6) {
+        color *= shadow(v_local, shape.xy, shape.z, v_blur);
+    } else if (shape.x > 0.0 && shape.y > 0.0) {
         vec2 q = abs(v_local) - shape.xy + shape.zw;
         float distance;
         if (same(shape.z, shape.w)) {

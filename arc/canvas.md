@@ -41,7 +41,10 @@ the size of the edit, not the size of the page.
 
 Undo lives in the editor, not in storage. Each history entry keeps the inverse
 of the change it made. Undoing applies that inverse and emits its ops as a new
-edit, so the file only ever moves forward, like OneNote's. Undoing a deletion
+edit, so the file only ever moves forward, like OneNote's. Undo steps are
+OneNote 2010's too: typing and backspaces at one caret are a single step until
+the caret moves or another kind of edit comes between, though each keystroke's
+ops still reach storage as it is typed. Undoing a deletion
 brings back the original identities, so internal links to those paragraphs
 survive an undo.
 
@@ -86,6 +89,22 @@ the label, and a click or Enter opens a link. URL text shows as a link, as
 OneNote links it when it opens a page, without being stored as one. Ink draws stroke by stroke in page
 coordinates. Page templates' background art is recreated as vector art and
 recognised by the stored picture's hash. OneNote's bitmaps aren't shipped.
+
+## Attached files
+
+A file sits in an outline's flow as OneNote draws it: its icon over its name,
+extension hidden, in a 54-point column. Attaching splits the caret's paragraph
+around the file, and the text after the caret follows it with the caret, as
+OneNote 2010 attaches and drops files. Every new file stores the icon OneNote
+stores beside it, because OneNote draws a broken picture for a file without
+one: the host's system icon where it has one, the canvas's blank page
+otherwise. A double click or the context menu's Open asks the host to open a
+copy; Save As writes the bytes where the user chooses.
+
+Attached or dropped where a click on blank page left the caret, the file goes
+on the page itself, as OneNote 2010 places it: the same column at the caret's
+grid point, outside any outline. It selects, drags on the grid, deletes and
+moves with Insert Space as a picture does, and opens and saves as above.
 
 ## Content the editor doesn't understand
 

@@ -179,6 +179,8 @@ pub enum PageObject {
     Outline(Outline),
     Title(Title),
     Image(Image),
+    /// A file on a blank part of the page, as OneNote places one attached or dropped there.
+    Attachment(Attachment),
     Ink(Ink),
     Unsupported(Unsupported),
 }
@@ -189,6 +191,7 @@ impl PageObject {
             Self::Outline(value) => value.id,
             Self::Title(value) => value.id,
             Self::Image(value) => value.id,
+            Self::Attachment(value) => value.id,
             Self::Ink(value) => value.id,
             Self::Unsupported(value) => value.id,
         }
@@ -198,6 +201,7 @@ impl PageObject {
             Self::Outline(value) => &value.layout,
             Self::Title(value) => &value.layout,
             Self::Image(value) => &value.layout,
+            Self::Attachment(value) => &value.layout,
             Self::Ink(value) => &value.layout,
             Self::Unsupported(value) => &value.layout,
         }
@@ -208,6 +212,7 @@ impl PageObject {
             Self::Outline(value) => &mut value.layout,
             Self::Title(value) => &mut value.layout,
             Self::Image(value) => &mut value.layout,
+            Self::Attachment(value) => &mut value.layout,
             Self::Ink(value) => &mut value.layout,
             Self::Unsupported(value) => &mut value.layout,
         }
@@ -268,8 +273,11 @@ pub struct Attachment {
     pub filename: String,
     /// Where the file was inserted from, when recorded.
     pub source_path: Option<String>,
-    /// The icon OneNote rendered for the file, when present.
+    /// The icon's size in points.
     pub size: Option<[f32; 2]>,
+    /// On the page, where the file's column sits and its extent; a paragraph's file has none.
+    #[serde(default)]
+    pub layout: Layout,
     #[serde(with = "payload")]
     pub bytes: Option<Arc<[u8]>>,
     #[serde(with = "payload")]
@@ -301,6 +309,7 @@ impl PartialEq for Attachment {
             && self.filename == other.filename
             && self.source_path == other.source_path
             && self.size == other.size
+            && self.layout == other.layout
             && self.recording == other.recording
     }
 }
@@ -343,6 +352,7 @@ impl Attachment {
             filename: filename.clone().unwrap_or_default(),
             source_path: source_path.clone(),
             size: icon_width.zip(*icon_height).map(|(w, h)| [w, h]),
+            layout: node.layout.clone(),
             bytes: payload(container)?,
             preview: payload(preview)?,
             recording: recording_id.map(|id| Recording {
@@ -817,6 +827,11 @@ impl Page {
                 Kind::Image { .. } => {
                     page.objects
                         .push(PageObject::Image(Image::read(revision, id, node)?));
+                }
+                Kind::Attachment { .. } => {
+                    page.objects.push(PageObject::Attachment(Attachment::read(
+                        revision, id, node,
+                    )?));
                 }
                 Kind::Ink { .. } => {
                     page.objects

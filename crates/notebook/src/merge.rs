@@ -696,7 +696,9 @@ impl Diff {
                 let part = |index: &Index| {
                     index.nodes.get(object).map(|node| match (&node.own, edit) {
                         (
-                            Own::Outline { layout, .. } | Own::Ink(Ink { layout, .. }),
+                            Own::Outline { layout, .. }
+                            | Own::Ink(Ink { layout, .. })
+                            | Own::Attachment(Attachment { layout, .. }),
                             OutlineEdit::Position { .. },
                         ) => (layout.x, layout.y, None, None),
                         (Own::Outline { layout, .. }, OutlineEdit::Width { .. }) => (
@@ -1072,6 +1074,9 @@ impl Index {
                 }
                 PageObject::Image(image) => {
                     index.add(image.id, PAGE, Own::Image(image.clone()), Vec::new())
+                }
+                PageObject::Attachment(file) => {
+                    index.add(file.id, PAGE, Own::Attachment(file.clone()), Vec::new())
                 }
                 PageObject::Ink(ink) => index.add(ink.id, PAGE, Own::Ink(ink.clone()), Vec::new()),
                 PageObject::Unsupported(object) => index.add(

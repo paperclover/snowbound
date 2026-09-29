@@ -1,0 +1,45 @@
+from pathlib import Path
+import re
+import runpy
+import shutil
+from tempfile import TemporaryDirectory
+import unittest
+import xml.etree.ElementTree as ET
+
+from native_xml import ns
+
+ROOT = Path(__file__).resolve().parent.parent
+FIXTURE = ROOT / 'corpus/custom-tags'
+compare = runpy.run_path(str(ROOT / 'tools/verify-document.py'))['compare']
+
+
+class CustomTagsTest(unittest.TestCase):
+    def test_customized_tags_render_natively_with_their_names_symbols_and_colours(self):
+        with TemporaryDirectory() as temporary:
+            read = Path(temporary) / 'read'
+            shutil.copytree(FIXTURE / 'cold/read', read)
+            compare(FIXTURE / 'candidate', read)
+        page, = (ET.parse(path).getroot() for path in sorted((FIXTURE / 'cold/read').glob('page-*.xml')))
+        definitions = [(d.get('type'), d.get('symbol'), d.get('name'), d.get('fontColor'), d.get('highlightColor'))
+                       for d in page.findall('one:TagDef', ns)]
+        self.assertEqual(definitions, [
+            ('0', '61', 'Snow check', '#800000', '#00CCFF'),
+            ('1', '48', 'Snow task', 'automatic', 'none'),
+            ('2', '31', 'Snow circle', 'automatic', 'none'),
+            ('3', '0', 'Snow ink', '#0000FF', 'none'),
+        ])
+        types = {d.get('index'): d.get('type') for d in page.findall('one:TagDef', ns)}
+        tagged = [(sorted((types[t.get('index')], t.get('completed')) for t in oe.findall('one:Tag', ns)),
+                   re.sub(r'<[^>]*>', '', oe.find('one:T', ns).text or ''))
+                  for oe in page.iter('{%s}OE' % ns['one']) if oe.find('one:T', ns) is not None]
+        self.assertEqual(tagged, [
+            ([('0', 'true')], 'Custom symbol and colours'),
+            ([('1', 'false')], 'Custom check box'),
+            ([('1', 'true')], 'Custom check box, checked'),
+            ([('2', 'true'), ('3', 'true')], 'Two custom tags'),
+            ([], 'Untagged'),
+        ])
+
+
+if __name__ == '__main__':
+    unittest.main()

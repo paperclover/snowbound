@@ -7,6 +7,7 @@ struct Vertex {
     @location(4) @interpolate(flat) stroke: f32,
     @location(5) clip_local: vec2<f32>,
     @location(6) @interpolate(flat) clip: vec3<f32>,
+    @location(7) @interpolate(flat) blur: f32,
 }
 
 @group(0) @binding(0) var atlas: texture_2d<f32>;
@@ -16,8 +17,9 @@ struct Vertex {
 fn vertex(@location(0) position: vec2<f32>, @location(1) uv: vec2<f32>,
           @location(2) color: vec4<f32>, @location(3) local: vec2<f32>,
           @location(4) shape: vec4<f32>, @location(5) stroke: f32,
-          @location(6) clip_local: vec2<f32>, @location(7) clip: vec3<f32>) -> Vertex {
-    return Vertex(vec4<f32>(position, 0.0, 1.0), uv, color, local, shape, stroke, clip_local, clip);
+          @location(6) clip_local: vec2<f32>, @location(7) clip: vec3<f32>,
+          @location(8) blur: f32) -> Vertex {
+    return Vertex(vec4<f32>(position, 0.0, 1.0), uv, color, local, shape, stroke, clip_local, clip, blur);
 }
 
 fn ellipse_arc(angle: f32, radius: vec2<f32>) -> f32 {
@@ -37,10 +39,40 @@ fn ellipse_arc(angle: f32, radius: vec2<f32>) -> f32 {
     return half * sum * scale;
 }
 
+fn erf(x: vec2<f32>) -> vec2<f32> {
+    let s = sign(x);
+    let a = abs(x);
+    var y = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+    y *= y;
+    return s - s / (y * y);
+}
+
+// Coverage at `p` of a rectangle `half` about the origin with round corners `corner`,
+// blurred by a Gaussian of deviation `sigma`: exact across, sampled four times along
+// (Evan Wallace, "Fast Rounded Rectangle Shadows").
+fn shadow(p: vec2<f32>, half: vec2<f32>, corner: f32, sigma: f32) -> f32 {
+    let start = clamp(-3.0 * sigma, p.y - half.y, p.y + half.y);
+    let end = clamp(3.0 * sigma, p.y - half.y, p.y + half.y);
+    let stride = (end - start) / 4.0;
+    var y = start + stride * 0.5;
+    var value = 0.0;
+    for (var i = 0; i < 4; i += 1) {
+        let delta = min(half.y - corner - abs(p.y - y), 0.0);
+        let curved = half.x - corner + sqrt(max(0.0, corner * corner - delta * delta));
+        let integral = 0.5 + 0.5 * erf((p.x + vec2<f32>(-curved, curved)) * (0.70710678 / sigma));
+        let weight = exp(-y * y / (2.0 * sigma * sigma)) / (2.50662827 * sigma);
+        value += (integral.y - integral.x) * weight * stride;
+        y += stride;
+    }
+    return value;
+}
+
 @fragment
 fn fragment(input: Vertex) -> @location(0) vec4<f32> {
     var color = textureSample(atlas, atlas_sampler, input.uv) * input.color;
-    if input.shape.x > 0.0 && input.shape.y > 0.0 {
+    if input.blur > 0.0 {
+        color *= shadow(input.local, input.shape.xy, input.shape.z, input.blur);
+    } else if input.shape.x > 0.0 && input.shape.y > 0.0 {
         let q = abs(input.local) - input.shape.xy + input.shape.zw;
         var distance: f32;
         if input.shape.z == input.shape.w {

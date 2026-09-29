@@ -594,38 +594,15 @@ fn runs_of(shaped: &ParagraphLayout, breaks: bool) -> Result<Vec<(Node, Vec<u32>
             .tags
             .iter()
             .map(|tag| {
-                use crate::outline::TagIcon;
-                let fallback = match tag.icon {
-                    TagIcon::CheckBox { .. } => "To do",
-                    TagIcon::Star => "Important",
-                    TagIcon::Question => "Question",
-                    TagIcon::Highlight => "Highlight",
-                    TagIcon::Contact => "Contact",
-                    TagIcon::Address => "Address",
-                    TagIcon::Phone => "Phone number",
-                    TagIcon::Music => "Music",
-                    TagIcon::Exclamation => "Critical",
-                    TagIcon::RedSquare => "Project A",
-                    TagIcon::YellowSquare => "Project B",
-                    TagIcon::BlueSquare => "Project C",
-                    TagIcon::Flag => "Outlook task",
-                    TagIcon::Idea => "Idea",
-                    TagIcon::Password => "Password",
-                    TagIcon::Movie => "Movie to see",
-                    TagIcon::Book => "Book to read",
-                    TagIcon::Web => "Web site to visit",
-                    TagIcon::Blog => "Remember for blog",
-                    TagIcon::Email => "Send in email",
-                    TagIcon::Other => "Tag",
-                };
-                let label = if tag.label.is_empty() {
-                    fallback
-                } else {
-                    &tag.label
+                use crate::outline::{TagIcon, symbol_name};
+                let label = match tag.icon {
+                    _ if !tag.label.is_empty() => &tag.label,
+                    TagIcon::Symbol { shape, .. } => symbol_name(shape).unwrap_or("Tag"),
+                    TagIcon::Task => "Outlook task",
                 };
                 let state = match tag.icon {
-                    TagIcon::CheckBox { checked: true, .. } => ", completed",
-                    TagIcon::CheckBox { checked: false, .. } => ", incomplete",
+                    TagIcon::Symbol { checked: true, .. } => ", completed",
+                    icon if icon.checkable() => ", incomplete",
                     _ => "",
                 };
                 format!(
@@ -1026,7 +1003,7 @@ pub(super) mod tests {
                     "Rehearsal, incomplete",
                     "Rehearsal, completed",
                     "Question",
-                    "Music, disabled"
+                    "Music Note, disabled"
                 ]
             );
             let text = state.focus().unwrap().document_range().text();

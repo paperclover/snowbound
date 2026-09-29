@@ -10,7 +10,7 @@ extension CanvasView {
     /// `tap` and `doubletap` take points from the view's corner, `select` text offsets,
     /// `scroll` a content offset; `format:N` applies `sb_view_apply` formatting, `find:word`
     /// selects a match, `title` edits the title, `picture` inserts a drawn picture, `selectall`
-    /// is the Select All command; `done`
+    /// is the Select All command; `rotate:landscape` or `rotate:portrait` turns the device; `done`
     /// ends editing, `tree` saves the view hierarchy to
     /// Documents/tree.txt, and `shot:a` the window to Documents/a.png, as a device has no
     /// screenshot command.
@@ -54,6 +54,9 @@ extension CanvasView {
         case "doubletap":
             let values = argument.split(separator: ",").compactMap { Double($0) }
             zoom(at: CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y))
+        case "rotate":
+            let orientation: UIInterfaceOrientationMask = argument == "portrait" ? .portrait : .landscapeRight
+            window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
         case "done": _ = resignFirstResponder()
         case "selectall": selectAll(nil)
         case "format": apply(UInt8(argument) ?? 0)

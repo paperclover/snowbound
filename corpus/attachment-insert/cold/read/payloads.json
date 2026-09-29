@@ -1,0 +1,18 @@
+﻿[
+    {
+        "sha256":  "6762b4d4a7d68d79ade02f878b9c64dbce0b0d4830d7ef6dd36d932339bb8ed3",
+        "name":  "notes 🦀.txt",
+        "object":  "{0E43FDD7-2BBF-0D36-2F38-3F49329E11AD}{5}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{7AC920BC-0677-0C27-1640-BEFF46EEC119}{1}{B0}",
+        "bytes":  30
+    },
+    {
+        "sha256":  "1dec2d4ce43ad4fb609d5ec604ed9cc5a602f5930c9726e553dbcf5b4d51ee3a",
+        "name":  "large.bin",
+        "object":  "{0E43FDD7-2BBF-0D36-2F38-3F49329E11AD}{8}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{7AC920BC-0677-0C27-1640-BEFF46EEC119}{1}{B0}",
+        "bytes":  2097152
+    }
+]

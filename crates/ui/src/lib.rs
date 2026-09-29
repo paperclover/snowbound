@@ -606,6 +606,12 @@ enum Display {
         /// Top and bottom.
         colors: [[f32; 4]; 2],
     },
+    Shadow {
+        rect: [f32; 4],
+        radius: f32,
+        blur: f32,
+        color: [f32; 4],
+    },
     Icon {
         sources: &'static [&'static str],
         origin: [f32; 2],
@@ -1452,12 +1458,26 @@ impl Ui {
                 spread,
             } in shadows
             {
+                let origin = [painted[0] - spread, painted[1] + drop - spread];
                 let grown = size.map(|side| side + 2.0 * spread);
-                self.display.push(Display::Path {
-                    data: outline(node.shape, grown, node.radius + spread),
-                    origin: [painted[0] - spread, painted[1] + drop - spread],
-                    style: PathStyle::Shadow(blur),
-                    colors: [color; 2],
+                self.display.push(match node.shape {
+                    Shape::Rounded => Display::Shadow {
+                        rect: [
+                            origin[0],
+                            origin[1],
+                            origin[0] + grown[0],
+                            origin[1] + grown[1],
+                        ],
+                        radius: node.radius + spread,
+                        blur,
+                        color,
+                    },
+                    Shape::Tab { .. } => Display::Path {
+                        data: outline(node.shape, grown, node.radius + spread),
+                        origin,
+                        style: PathStyle::Shadow(blur),
+                        colors: [color; 2],
+                    },
                 });
             }
         }
@@ -1722,6 +1742,17 @@ impl Ui {
                     origin: *origin,
                     style: *style,
                     colors: *colors,
+                }),
+                &Display::Shadow {
+                    rect,
+                    radius,
+                    blur,
+                    color,
+                } => primitives.push(Primitive::Shadow {
+                    rect,
+                    radius,
+                    blur,
+                    color,
                 }),
                 Display::Segment { from, to, color } => primitives.push(Primitive::Segment {
                     from: *from,

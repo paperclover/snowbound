@@ -2,8 +2,8 @@
 //! Synchronization for the open section's notebook and each of its sections.
 
 use crate::{Session, State, art, filetime, library, platform};
-use notebook::session::SyncStatus;
-use std::{error::Error, io::ErrorKind};
+use notebook::session::{SyncState, SyncStatus};
+use std::error::Error;
 use ui::{
     Anchor, Axis, Flags, Id, Overflow, Spec, Theme, Ui, children, fill, fit, px, shell::TOOL,
 };
@@ -20,7 +20,6 @@ fn button() -> Id {
 
 /// The status's label and icon, and what the reader can do about an error.
 fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option<&'static str>) {
-    use ErrorKind::*;
     if library::offline() {
         return (
             "Working offline",
@@ -28,46 +27,28 @@ fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option
             Some("Changes stay on this computer until you sync."),
         );
     }
-    match sync.error.as_ref().map(std::io::Error::kind) {
-        Some(PermissionDenied | ReadOnlyFilesystem) => (
+    match sync.state() {
+        SyncState::ReadOnly => (
             "Unable to sync",
             art::SYNC_ERROR,
             Some(
                 "You can’t change this notebook where it’s stored. Changes stay on this computer.",
             ),
         ),
-        Some(WouldBlock | ResourceBusy) => (
+        SyncState::InUse => (
             "Section in use",
             art::SYNC_BUSY,
             Some("Someone else is saving this section. Sync continues when they finish."),
         ),
-        Some(
-            NotFound | ConnectionRefused | ConnectionReset | ConnectionAborted | NotConnected
-            | TimedOut | HostUnreachable | NetworkUnreachable | NetworkDown | BrokenPipe
-            | AddrNotAvailable,
-        ) => (
+        SyncState::NotConnected => (
             "Not connected",
             art::SYNC_OFFLINE,
             Some("Changes stay on this computer and sync when the notebook is back."),
         ),
-        Some(_) => ("Unable to sync", art::SYNC_ERROR, None),
-        None if sync.synced.is_none() || sync.queued > 0 => ("Syncing…", art::SYNC_BUSY, None),
-        None => ("Up to date", art::SYNC_DONE, None),
+        SyncState::Failed => ("Unable to sync", art::SYNC_ERROR, None),
+        SyncState::Syncing => ("Syncing…", art::SYNC_BUSY, None),
+        SyncState::UpToDate => ("Up to date", art::SYNC_DONE, None),
     }
-}
-
-/// Labels from the best state to the worst, which a notebook's status shows.
-const ORDER: [&str; 5] = [
-    "Up to date",
-    "Syncing…",
-    "Section in use",
-    "Not connected",
-    "Unable to sync",
-];
-
-fn rank(sync: &SyncStatus) -> usize {
-    let label = describe(sync).0;
-    ORDER.iter().position(|shown| *shown == label).unwrap_or(0)
 }
 
 /// Every section of the open section's notebook with its status, in catalog order: the
@@ -102,7 +83,7 @@ fn overall(sections: &[(String, SyncStatus)]) -> SyncStatus {
         .iter()
         .map(|(_, sync)| sync)
         .filter(|sync| sync.error.is_some())
-        .max_by_key(|sync| rank(sync));
+        .max_by_key(|sync| sync.state());
     SyncStatus {
         synced: sections
             .iter()

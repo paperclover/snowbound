@@ -106,6 +106,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// gestures move; the canvas paints neither.
     private lazy var display = UITextSelectionDisplayInteraction(textInput: self, delegate: self)
     private let history = CanvasUndoManager()
+    private let spaceHint = Hint()
 
     weak var inputDelegate: UITextInputDelegate?
     lazy var tokenizer: UITextInputTokenizer = LineTokenizer(canvas: self)
@@ -134,6 +135,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         minimumZoomScale = 0.25
         maximumZoomScale = 4
         keyboardDismissMode = .interactive
+        // A phone on its side keeps the page clear of the sensor housing, as it keeps the top.
+        contentInsetAdjustmentBehavior = .always
         addSubview(content)
         insertSubview(metal, at: 0)
         // Touches land on the scroll view itself, where the text interaction looks for them.
@@ -487,6 +490,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         default:
             display.isActivated = isFirstResponder
             edit(external: true) { sb_view_release(handle) }
+            spaceHint.hide()
         }
     }
 
@@ -512,7 +516,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
 
     /// Tells the bar buttons and the format bar what the selection now has.
     private func changedSelection() {
-        if let handle { formatBar.show(sb_view_format(handle)) }
+        formatBar.show(format)
         onChange?()
     }
 
@@ -576,14 +580,20 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         }
     }
 
+    /// A page selection copies every outline, as OneNote 2010 copies it.
     override func copy(_ sender: Any?) {
-        guard let range = selectedTextRange, let text = text(in: range) else { return }
+        guard let handle, let text = take(sb_view_copy(handle, false)) else { return }
         UIPasteboard.general.string = text
     }
 
     override func cut(_ sender: Any?) {
-        copy(sender)
-        delete(sender)
+        guard let handle else { return }
+        var text: String?
+        edit(external: true) {
+            text = take(sb_view_copy(handle, true))
+            return text != nil
+        }
+        if let text { UIPasteboard.general.string = text }
     }
 
     override func delete(_ sender: Any?) {
@@ -614,6 +624,23 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     override func toggleItalics(_ sender: Any?) { apply(1) }
     override func toggleUnderline(_ sender: Any?) { apply(2) }
 
+    /// Tags and the highlighter join the system's text actions.
+    func editMenu(for textRange: UITextRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard let handle else { return nil }
+        let bits = sb_view_format(handle)
+        let tag = UIMenu(
+            title: "Tag", image: UIImage(systemName: "tag"),
+            children: Tags.menu(bits: bits) { [weak self] in self?.apply($0) })
+        var extra: [UIMenuElement] = [tag]
+        if !textRange.isEmpty {
+            extra.insert(
+                UIAction(title: "Highlight", image: UIImage(systemName: "highlighter")) { [weak self] _ in
+                    self?.apply(10)
+                }, at: 0)
+        }
+        return UIMenu(children: suggestedActions + [UIMenu(options: .displayInline, children: extra)])
+    }
+
     // MARK: Page
 
     /// A conflict page, which shows what is stored and takes no edits.
@@ -623,6 +650,55 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     var pageTitle: String? { handle.flatMap { take(sb_view_title($0)) } }
 
     var pageText: String { handle.flatMap { take(sb_view_page_text($0)) } ?? "" }
+
+    /// The selection's formatting, from `sb_view_format`.
+    var format: UInt64 { handle.map(sb_view_format) ?? 0 }
+
+    var pagePaper: Paper? { handle.flatMap { decode(Paper.self, sb_view_paper($0)) } }
+
+    /// Gives the page colour `color` and rule lines `ruled` of `paper.rules`, or none.
+    func setPaper(color: [UInt8]?, ruled: Int?) {
+        guard let handle else { return }
+        edit(external: true) {
+            sb_view_set_paper(
+                handle, color.map { Int16($0[0]) } ?? -1, color?[1] ?? 0, color?[2] ?? 0, Int8(ruled ?? -1))
+        }
+    }
+
+    /// Puts template `name`'s art behind the page, or none.
+    func setArt(_ name: String?) {
+        guard let handle else { return }
+        edit(external: true) { sb_view_set_art(handle, name) }
+    }
+
+    /// Insert Space: the next drag moves what lies below or right of where it starts.
+    func insertSpace() {
+        guard let handle else { return }
+        sb_view_insert_space(handle)
+        spaceHint.show("Drag down or right to add space", in: self)
+    }
+
+    /// Types the date, time or both as the system writes them short, and a space, as
+    /// OneNote's Insert Date and Time do.
+    func insertDate(_ date: Bool, time: Bool) {
+        let now = Date()
+        let text = DateFormatter.localizedString(
+            from: now, dateStyle: date ? .short : .none, timeStyle: time ? .short : .none)
+        if !isFirstResponder { _ = becomeFirstResponder() }
+        insertText(text + " ")
+    }
+
+    /// Selects paragraph `id` and brings it into view.
+    func selectParagraph(_ id: String) -> Bool {
+        guard let handle else { return false }
+        var found = false
+        edit(external: true) {
+            found = sb_view_select_paragraph(handle, id)
+            return found
+        }
+        if found { reveal(selectedTextRange.map { firstRect(for: $0) } ?? .zero) }
+        return found
+    }
 
     /// Applies `sb_view_apply` formatting to the selection.
     func apply(_ command: UInt8) {
@@ -682,26 +758,38 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     override var keyCommands: [UIKeyCommand]? {
         guard isFirstResponder else { return nil }
         // Ctrl+1 to Ctrl+9 in OneNote, where the Mac's Command stands for Control.
-        let tags = FormatBar.tags.enumerated().map { index, name in
-            let command = UIKeyCommand(
-                title: name, action: #selector(tagged), input: "\(index + 1)", modifierFlags: .command,
-                propertyList: index)
-            command.wantsPriorityOverSystemBehavior = true
-            return command
+        let tags = Tags.all.prefix(Tags.keyed).enumerated().map { index, tag in
+            UIKeyCommand(
+                title: tag.name, action: #selector(formatted), input: "\(index + 1)", modifierFlags: .command,
+                propertyList: 16 + index)
         }
-        let outdent = UIKeyCommand(
-            title: "Decrease Indent", action: #selector(outdented), input: "\t", modifierFlags: .shift)
-        outdent.wantsPriorityOverSystemBehavior = true
+        // The desktop's chords, as OneNote for Mac's.
+        let formats: [(String, String, UIKeyModifierFlags, Int)] = [
+            ("Strikethrough", "x", [.command, .shift], 3),
+            ("Bullets", ".", .command, 4),
+            ("Numbering", "/", .command, 5),
+            ("Increase Indent", "]", .command, 6),
+            ("Decrease Indent", "[", .command, 7),
+            ("Remove Tag", "0", [.command, .control], 8),
+            ("Clear Formatting", "n", [.command, .shift], 9),
+            ("Highlight", "h", [.command, .control], 10),
+            ("Decrease Indent", "\t", .shift, 7),
+        ]
+        let commands = tags + formats.map { title, input, modifiers, command in
+            UIKeyCommand(
+                title: title, action: #selector(formatted), input: input, modifierFlags: modifiers,
+                propertyList: command)
+        }
+        for command in commands { command.wantsPriorityOverSystemBehavior = true }
         let done = UIKeyCommand(title: "Done", action: #selector(finished), input: UIKeyCommand.inputEscape)
-        return tags + [outdent, done]
+        return commands + [done]
     }
 
-    @objc private func tagged(_ command: UIKeyCommand) {
-        guard let index = command.propertyList as? Int else { return }
-        apply(16 + UInt8(index))
+    @objc private func formatted(_ command: UIKeyCommand) {
+        guard let command = command.propertyList as? Int else { return }
+        apply(UInt8(command))
     }
 
-    @objc private func outdented() { apply(7) }
     @objc private func finished() { _ = resignFirstResponder() }
 
     // MARK: Coordinates
@@ -946,5 +1034,49 @@ private final class LineTokenizer: UITextInputStringTokenizer {
         _ position: UITextPosition, withinTextUnit granularity: UITextGranularity, inDirection direction: UITextDirection
     ) -> Bool {
         granularity == .line || super.isPosition(position, withinTextUnit: granularity, inDirection: direction)
+    }
+}
+
+/// A short instruction floating at the bottom of the page until the gesture it asks for.
+private final class Hint: UIVisualEffectView {
+    private let label = UILabel()
+
+    init() {
+        super.init(effect: UIBlurEffect(style: .systemThickMaterial))
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.textAlignment = .center
+        label.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            label.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+        ])
+        layer.cornerRadius = 18
+        clipsToBounds = true
+        isUserInteractionEnabled = false
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// Shows `text` over the bottom of `view`'s visible area, and says it.
+    func show(_ text: String, in view: UIScrollView) {
+        label.text = text
+        guard let host = view.superview else { return }
+        translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(self)
+        NSLayoutConstraint.activate([
+            centerXAnchor.constraint(equalTo: host.centerXAnchor),
+            bottomAnchor.constraint(equalTo: host.keyboardLayoutGuide.topAnchor, constant: -16),
+        ])
+        alpha = 0
+        UIView.animate(withDuration: 0.2) { self.alpha = 1 }
+        UIAccessibility.post(notification: .announcement, argument: text)
+    }
+
+    func hide() {
+        guard superview != nil else { return }
+        UIView.animate(withDuration: 0.2, animations: { self.alpha = 0 }) { _ in self.removeFromSuperview() }
     }
 }

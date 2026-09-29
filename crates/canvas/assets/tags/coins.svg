@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x1="0" y1="1" x2="0" y2="12" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e4eaf4"/></linearGradient>
+    <linearGradient id="g1" x1="0" y1="1" x2="0" y2="3.2" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#8fb1ec"/><stop offset="1" stop-color="#4d78c8"/></linearGradient>
+    <linearGradient id="g2" x1="0" y1="13" x2="0" y2="14.8" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffe070"/><stop offset="1" stop-color="#d09a18"/></linearGradient>
+    <linearGradient id="g3" x1="0" y1="11.4" x2="0" y2="13.2" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffe070"/><stop offset="1" stop-color="#d09a18"/></linearGradient>
+    <linearGradient id="g4" x1="0" y1="9.8" x2="0" y2="11.6" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffe070"/><stop offset="1" stop-color="#d09a18"/></linearGradient>
+    <linearGradient id="g5" x1="0" y1="8.2" x2="0" y2="10" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffe070"/><stop offset="1" stop-color="#d09a18"/></linearGradient>
+    <linearGradient id="g6" x1="0" y1="6.6" x2="0" y2="8.4" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffe070"/><stop offset="1" stop-color="#d09a18"/></linearGradient>
+  </defs>
+  <path d="M0.6 1H11.6V12H0.6Z" fill="#7a8aac"/>
+  <path d="M1.1 1.5H11.1V11.5H1.1Z" fill="url(#g0)"/>
+  <path d="M1.1 1.5H11.1V3.2H1.1Z" fill="url(#g1)"/>
+  <path d="M2.2 4.1H3.2V5.1H2.2Z" fill="#6a7a9a"/>
+  <path d="M4.2 4.6H9.6" fill="none" stroke="#9aa8c4" stroke-width="0.6"/>
+  <path d="M2.2 6.5H3.2V7.5H2.2Z" fill="#6a7a9a"/>
+  <path d="M4.2 7H9.6" fill="none" stroke="#9aa8c4" stroke-width="0.6"/>
+  <path d="M2.2 8.9H3.2V9.9H2.2Z" fill="#6a7a9a"/>
+  <path d="M4.2 9.4H9.6" fill="none" stroke="#9aa8c4" stroke-width="0.6"/>
+  <path d="M8.2 14.2A3.6 1.2 0 1 1 15.4 14.2A3.6 1.2 0 1 1 8.2 14.2Z" fill="#8a6010"/>
+  <path d="M8.5 13.9A3.3 0.9 0 1 1 15.1 13.9A3.3 0.9 0 1 1 8.5 13.9Z" fill="url(#g2)"/>
+  <path d="M8.2 12.6A3.6 1.2 0 1 1 15.4 12.6A3.6 1.2 0 1 1 8.2 12.6Z" fill="#8a6010"/>
+  <path d="M8.5 12.3A3.3 0.9 0 1 1 15.1 12.3A3.3 0.9 0 1 1 8.5 12.3Z" fill="url(#g3)"/>
+  <path d="M8.2 11A3.6 1.2 0 1 1 15.4 11A3.6 1.2 0 1 1 8.2 11Z" fill="#8a6010"/>
+  <path d="M8.5 10.7A3.3 0.9 0 1 1 15.1 10.7A3.3 0.9 0 1 1 8.5 10.7Z" fill="url(#g4)"/>
+  <path d="M8.2 9.4A3.6 1.2 0 1 1 15.4 9.4A3.6 1.2 0 1 1 8.2 9.4Z" fill="#8a6010"/>
+  <path d="M8.5 9.1A3.3 0.9 0 1 1 15.1 9.1A3.3 0.9 0 1 1 8.5 9.1Z" fill="url(#g5)"/>
+  <path d="M8.2 7.8A3.6 1.2 0 1 1 15.4 7.8A3.6 1.2 0 1 1 8.2 7.8Z" fill="#8a6010"/>
+  <path d="M8.5 7.5A3.3 0.9 0 1 1 15.1 7.5A3.3 0.9 0 1 1 8.5 7.5Z" fill="url(#g6)"/>
+</svg>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x1="0" y1="1.6" x2="0" y2="7.4" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#e4e8ee"/><stop offset="1" stop-color="#8c94a0"/></linearGradient>
+    <linearGradient id="g1" x1="0" y1="5.8" x2="0" y2="10" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#d8dce4"/><stop offset="1" stop-color="#8c94a0"/></linearGradient>
+    <linearGradient id="g2" x1="0" y1="5.4" x2="0" y2="15.8" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#c8ccd4"/><stop offset="1" stop-color="#7a808c"/></linearGradient>
+    <linearGradient id="g3" x1="0" y1="5.4" x2="0" y2="15.8" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e8ecf2"/></linearGradient>
+  </defs>
+  <path d="M2 7.4C1.4 5 2.6 3 5.4 2.2C8 1.4 11.4 1.6 13.4 2.8C14.8 3.6 15 5 14.4 6L12.6 6.4L11.8 4.8C10 4.2 7.6 4.4 6 5L5.6 6.8Z" fill="url(#g0)"/>
+  <path d="M2 7.4C1.4 5 2.6 3 5.4 2.2C8 1.4 11.4 1.6 13.4 2.8C14.8 3.6 15 5 14.4 6L12.6 6.4L11.8 4.8C10 4.2 7.6 4.4 6 5L5.6 6.8Z" fill="none" stroke="#5a6270" stroke-width="0.5"/>
+  <path d="M3.6 7.4L6 5.8H10L12.4 7.4V10H3.6Z" fill="url(#g1)"/>
+  <path d="M5 10.6A5.2 5.2 0 1 1 15.4 10.6A5.2 5.2 0 1 1 5 10.6Z" fill="url(#g2)"/>
+  <path d="M5.9 10.6A4.3 4.3 0 1 1 14.5 10.6A4.3 4.3 0 1 1 5.9 10.6Z" fill="url(#g3)"/>
+  <path d="M13.3 10.6A0.5 0.5 0 1 1 14.3 10.6A0.5 0.5 0 1 1 13.3 10.6Z" fill="#4a5060"/>
+  <path d="M12.97 12.4A0.35 0.35 0 1 1 13.67 12.4A0.35 0.35 0 1 1 12.97 12.4Z" fill="#4a5060"/>
+  <path d="M11.65 13.72A0.35 0.35 0 1 1 12.35 13.72A0.35 0.35 0 1 1 11.65 13.72Z" fill="#4a5060"/>
+  <path d="M9.7 14.2A0.5 0.5 0 1 1 10.7 14.2A0.5 0.5 0 1 1 9.7 14.2Z" fill="#4a5060"/>
+  <path d="M8.05 13.72A0.35 0.35 0 1 1 8.75 13.72A0.35 0.35 0 1 1 8.05 13.72Z" fill="#4a5060"/>
+  <path d="M6.73 12.4A0.35 0.35 0 1 1 7.43 12.4A0.35 0.35 0 1 1 6.73 12.4Z" fill="#4a5060"/>
+  <path d="M6.1 10.6A0.5 0.5 0 1 1 7.1 10.6A0.5 0.5 0 1 1 6.1 10.6Z" fill="#4a5060"/>
+  <path d="M6.73 8.8A0.35 0.35 0 1 1 7.43 8.8A0.35 0.35 0 1 1 6.73 8.8Z" fill="#4a5060"/>
+  <path d="M8.05 7.48A0.35 0.35 0 1 1 8.75 7.48A0.35 0.35 0 1 1 8.05 7.48Z" fill="#4a5060"/>
+  <path d="M9.7 7A0.5 0.5 0 1 1 10.7 7A0.5 0.5 0 1 1 9.7 7Z" fill="#4a5060"/>
+  <path d="M11.65 7.48A0.35 0.35 0 1 1 12.35 7.48A0.35 0.35 0 1 1 11.65 7.48Z" fill="#4a5060"/>
+  <path d="M12.97 8.8A0.35 0.35 0 1 1 13.67 8.8A0.35 0.35 0 1 1 12.97 8.8Z" fill="#4a5060"/>
+  <path d="M10.2 7.48V10.6L12.38 9.3" fill="none" stroke="#20242c" stroke-width="0.62"/>
+</svg>

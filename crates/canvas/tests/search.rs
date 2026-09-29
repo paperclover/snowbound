@@ -235,7 +235,8 @@ fn tags_summary_lists_each_tagged_paragraph() {
     // The probe's T24 and T25 also carry Call back, one entry under each tag.
     assert_eq!(tagged.len(), names.len());
     names.dedup();
-    let mut labels = canvas::editor::NoteTag::ALL.map(|tag| tag.label());
+    let defaults = canvas::editor::NoteTag::defaults();
+    let mut labels: Vec<&str> = defaults.iter().map(|tag| tag.label.as_str()).collect();
     labels.sort_unstable();
     assert_eq!(names, labels);
     assert!(tagged.iter().all(|tagged| tagged.space == space));

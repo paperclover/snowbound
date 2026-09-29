@@ -117,6 +117,9 @@ pub struct CanvasEditor {
     /// What Select All widened to, holding until the selection is moved or set, and while the
     /// focused outline and its selection stay as they were then.
     whole: Option<(Whole, ExGuid, Selection)>,
+    /// The outline, caret and undo depth a run of typing left, which typing there joins as
+    /// OneNote 2010 does until the caret moves or another kind of edit comes between.
+    typing: Option<(ExGuid, TextPosition, usize)>,
 }
 
 /// Imported page state the editable content does not carry.
@@ -804,6 +807,12 @@ enum History {
         index: usize,
         image: Option<Box<onestore::page::Image>>,
     },
+    /// Restores the file on the page at `index` in paint order, or removes the one there
+    /// when `None`.
+    File {
+        index: usize,
+        file: Option<Box<page::Content>>,
+    },
     Remove {
         outline: onestore::ExGuid,
         focus: RestoreFocus,
@@ -860,6 +869,7 @@ impl CanvasEditor {
             ops: Ok(Vec::new()),
             stored: None,
             whole: None,
+            typing: None,
         })
     }
 
@@ -877,6 +887,7 @@ impl CanvasEditor {
                 .iter()
                 .filter_map(|object| match object {
                     page::Content::ReadOnly(object) => Some(object.rect()[2]),
+                    page::Content::File { .. } => object.file().map(|(_, rect)| rect[2]),
                     page::Content::Ink(ink) => page::ink_bounds(ink).map(|b| b[2]),
                     _ => None,
                 })
@@ -1047,7 +1058,9 @@ impl CanvasEditor {
         let reaches_one = |history: &History| match history {
             History::Date(_) => date_changed,
             History::Paper { .. } => false,
-            History::Image { .. } | History::Picture { .. } => objects_changed,
+            History::Image { .. } | History::Picture { .. } | History::File { .. } => {
+                objects_changed
+            }
             History::Draft { outlines, .. } => changed.contains(&outlines[0].id),
             History::Text { outline, change } => {
                 changed.contains(outline)
@@ -1070,10 +1083,15 @@ impl CanvasEditor {
             History::Group { entries, .. } => entries.iter().any(reaches_one),
             history => reaches_one(history),
         };
+        // A typing run goes on while the change leaves its undo step alone.
+        let run = self
+            .typing
+            .filter(|_| self.undo.last().is_some_and(|last| !reaches(last)));
         fresh.undo = std::mem::take(&mut self.undo)
             .into_iter()
             .filter(|history| !reaches(history))
             .collect();
+        fresh.typing = run.map(|(outline, caret, _)| (outline, caret, fresh.undo.len()));
         fresh.redo = std::mem::take(&mut self.redo)
             .into_iter()
             .filter(|history| !reaches(history))
@@ -1106,6 +1124,10 @@ impl CanvasEditor {
                     .clone(),
                 page::Content::Image(image) => {
                     objects.push(PageObject::Image(image.clone()));
+                    continue;
+                }
+                page::Content::File { source, .. } => {
+                    objects.push(PageObject::Attachment(source.clone()));
                     continue;
                 }
                 page::Content::Ink(ink) => {
@@ -1423,6 +1445,7 @@ impl CanvasEditor {
             ops: Ok(Vec::new()),
             stored: None,
             whole: None,
+            typing: None,
         })
     }
 
@@ -1455,21 +1478,97 @@ impl CanvasEditor {
         Ok(true)
     }
 
-    /// Gives the page `color` (View, Page Color) and `rule_lines` (View, Rule Lines) as one
-    /// undo step; false when it had them.
+    /// Gives the page `color` (View, Page Color), `rule_lines` (View, Rule Lines) and, when
+    /// given, `art` in place of its background pictures, as one undo step; false when it had
+    /// them.
     pub fn set_paper(
         &mut self,
         color: Option<u32>,
         rule_lines: Option<onestore::page::RuleLines>,
+        art: Option<Vec<onestore::page::Image>>,
     ) -> bool {
-        if (color, rule_lines) == (self.header.color, self.header.rule_lines) {
+        let backgrounds: Vec<usize> = (0..self.objects.len())
+            .filter(|&index| {
+                self.objects[index]
+                    .picture()
+                    .is_some_and(|image| image.background)
+            })
+            .collect();
+        let art = art.filter(|art| {
+            art.len() != backgrounds.len()
+                || art.iter().zip(&backgrounds).any(|(new, &index)| {
+                    let shown = self.objects[index].picture().unwrap();
+                    (&new.layout, new.size, &new.bytes) != (&shown.layout, shown.size, &shown.bytes)
+                })
+        });
+        let paper = (color, rule_lines) != (self.header.color, self.header.rule_lines);
+        if !paper && art.is_none() {
             return false;
         }
         self.finish_composition();
-        let before = self.paper(color, rule_lines);
-        self.undo.push(before);
+        let mut entries = Vec::new();
+        if paper {
+            entries.push(self.paper(color, rule_lines));
+        }
+        if let Some(art) = art {
+            for index in backgrounds.into_iter().rev() {
+                let image = self.remove_picture(index);
+                entries.push(History::Picture {
+                    index,
+                    image: Some(Box::new(image)),
+                });
+            }
+            // Art lies under everything else on the page.
+            for image in art.into_iter().rev() {
+                self.add_picture(0, image);
+                entries.push(History::Picture {
+                    index: 0,
+                    image: None,
+                });
+            }
+        }
+        self.undo.push(match entries.len() {
+            1 => entries.pop().unwrap(),
+            _ => History::Group {
+                entries,
+                page: false,
+            },
+        });
         self.redo.clear();
         true
+    }
+
+    /// Puts page-level picture `image` at `index` in paint order, recording its op.
+    fn add_picture(&mut self, index: usize, image: onestore::page::Image) {
+        let object = PageObject::Image(image.clone());
+        self.objects.insert(index, page::Content::Image(image));
+        let before = self.successor(object.id());
+        self.record(Ok(vec![PageOp::Add { object, before }]));
+    }
+
+    /// Takes the page-level picture at `index` in paint order off the page, recording its op.
+    fn remove_picture(&mut self, index: usize) -> onestore::page::Image {
+        let image = self.objects[index].picture().unwrap().clone();
+        self.objects.remove(index);
+        self.record(Ok(vec![PageOp::Delete { object: image.id }]));
+        image
+    }
+
+    /// Puts a file on the page, `file` being its `Content::File`, at `index` in paint order,
+    /// recording its op.
+    fn add_file(&mut self, index: usize, file: page::Content) {
+        let object = PageObject::Attachment(file.file().unwrap().0.clone());
+        self.objects.insert(index, file);
+        let before = self.successor(object.id());
+        self.record(Ok(vec![PageOp::Add { object, before }]));
+    }
+
+    /// Takes the file at `index` in paint order off the page, recording its op.
+    fn remove_file(&mut self, index: usize) -> page::Content {
+        let file = self.objects.remove(index);
+        let object = file.file().unwrap().0.id;
+        self.record(Ok(vec![PageOp::Delete { object }]));
+        file
     }
 
     /// Shows `color` and `rule_lines`, recording the ops that store them; the history entry
@@ -1754,9 +1853,12 @@ impl CanvasEditor {
         Ok(())
     }
 
-    /// Origin and size of a picture the user can select; OneNote passes clicks through
-    /// backgrounds.
+    /// Origin and size of a picture or file on the page the user can select; OneNote passes
+    /// clicks through backgrounds.
     pub fn image_placement(&self, id: ExGuid) -> Option<([f32; 2], [f32; 2])> {
+        if let Some((_, [x0, y0, x1, y1])) = self.page_file(id) {
+            return Some(([x0, y0], [x1 - x0, y1 - y0]));
+        }
         if let Some(image) = self.image(id) {
             let layout = &image.layout;
             return Some((
@@ -1776,18 +1878,48 @@ impl CanvasEditor {
         self.outline_picture(id).is_some()
     }
 
-    /// A picture held as a paragraph: its outline, the paragraph's container and index there,
-    /// and the paragraph.
+    /// A picture or file held as a paragraph: its outline, the paragraph's container and index
+    /// there, and the paragraph.
     fn outline_picture(
         &self,
         id: ExGuid,
     ) -> Option<(ExGuid, Option<ExGuid>, usize, &PageParagraph)> {
         self.outlines.iter().find_map(|outline| {
             descendants(outline.document.nodes(), None).find_map(|(container, index, node)| {
-                matches!(&node.content, onestore::page::ParagraphContent::Image(image) if image.id == id)
-                    .then_some((outline.id, container, index, node))
+                holds(&node.content, id).then_some((outline.id, container, index, node))
             })
         })
+    }
+
+    /// The file a paragraph holds or the page shows, which the host opens and saves.
+    pub fn attachment(&self, id: ExGuid) -> Option<&onestore::page::Attachment> {
+        if let Some((file, _)) = self.page_file(id) {
+            return Some(file);
+        }
+        match &self.outline_picture(id)?.3.content {
+            ParagraphContent::Attachment(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    /// A file on the page and where its column lies, in page coordinates.
+    fn page_file(&self, id: ExGuid) -> Option<(&onestore::page::Attachment, [f32; 4])> {
+        self.objects
+            .iter()
+            .filter_map(page::Content::file)
+            .find(|(file, _)| file.id == id)
+    }
+
+    /// Where a file draws with its name, in page coordinates.
+    pub fn attachment_rect(&self, id: ExGuid) -> Option<[f32; 4]> {
+        if let Some((_, rect)) = self.page_file(id) {
+            return Some(rect);
+        }
+        let (outline, ..) = self.outline_picture(id)?;
+        let outline = self.outlines.iter().find(|item| item.id == outline)?;
+        let [x0, y0, x1, y1] = outline.shaped.objects.iter().find(|o| o.id == id)?.bounds();
+        let [x, y] = outline.origin();
+        Some([x + x0, y + y0, x + x1, y + y1])
     }
 
     /// Replaces a picture paragraph through the outline's text history.
@@ -1827,8 +1959,8 @@ impl CanvasEditor {
         })
     }
 
-    /// Moves a picture, and resizes it when `size` differs from the stored size. A picture in
-    /// an outline's flow keeps its place.
+    /// Moves a picture or a file on the page, and resizes a picture when `size` differs from
+    /// the stored size. A picture in an outline's flow keeps its place.
     pub fn place_image(
         &mut self,
         engine: &mut TextEngine,
@@ -1844,7 +1976,7 @@ impl CanvasEditor {
         if let Some((.., node)) = self.outline_picture(id) {
             let mut node = node.clone();
             let onestore::page::ParagraphContent::Image(image) = &mut node.content else {
-                unreachable!()
+                return Ok(());
             };
             if crate::outline::image_size(image) == Some(size) {
                 return Ok(());
@@ -1852,6 +1984,25 @@ impl CanvasEditor {
             [image.layout.max_width, image.layout.max_height] = size.map(Some);
             image.layout.width_set_by_user = Some(true);
             return self.edit_outline_picture(engine, id, Some(node));
+        }
+        if let Some((file, _)) = self.page_file(id) {
+            let previous = [file.layout.x, file.layout.y];
+            if previous == origin.map(Some) {
+                return Ok(());
+            }
+            self.finish_composition();
+            let layout = self.object_layout_mut(id).unwrap();
+            [layout.x, layout.y] = origin.map(Some);
+            self.undo.push(History::Position {
+                object: id,
+                position: previous,
+            });
+            self.redo.clear();
+            self.record(self.placement_ops(&Placement {
+                id,
+                position: previous,
+            }));
+            return Ok(());
         }
         let image = self.image(id).ok_or(EditError::InvalidRange)?;
         let mut layout = image.layout.clone();
@@ -1897,9 +2048,7 @@ impl CanvasEditor {
             let mut passed = false;
             for (_, _, node) in descendants(source.document.nodes(), None) {
                 match &node.content {
-                    onestore::page::ParagraphContent::Image(image) if image.id == id => {
-                        passed = true
-                    }
+                    content if holds(content, id) => passed = true,
                     onestore::page::ParagraphContent::Text(text) => {
                         let end = text.text.utf16_offset(text.text.text().len())?;
                         if passed {
@@ -1925,7 +2074,10 @@ impl CanvasEditor {
         let index = self
             .objects
             .iter()
-            .position(|object| matches!(object, page::Content::Image(image) if image.id == id))
+            .position(|object| {
+                matches!(object, page::Content::Image(image) if image.id == id)
+                    || object.file().is_some_and(|(file, _)| file.id == id)
+            })
             .ok_or(EditError::InvalidRange)?;
         // An emptied outline keeps its slot for undo after leaving `outlines`.
         let editable = |object: &page::Content| match object {
@@ -1989,9 +2141,94 @@ impl CanvasEditor {
         )
     }
 
+    /// Attaches `file` at the caret as OneNote 2010 does (`corpus/attachment-insert`): the
+    /// caret's paragraph splits there, the file takes the place of an empty first half, and the
+    /// caret starts the second. A caret on blank page puts the file on the page there
+    /// (`corpus/attachment-floating`).
+    pub fn insert_attachment(
+        &mut self,
+        engine: &mut TextEngine,
+        mut file: onestore::page::Attachment,
+    ) -> Result<(), EditorError> {
+        if let Focus::Caret { outline, .. } = &self.active {
+            [file.layout.x, file.layout.y] = outline.origin().map(Some);
+            let layout = Box::new(crate::outline::page_file(engine, &file)?);
+            let [x0, y0, x1, y1] = layout.bounds();
+            [file.layout.max_width, file.layout.max_height] = [Some(x1 - x0), Some(y1 - y0)];
+            file.layout.width_set_by_user = Some(false);
+            self.finish_composition();
+            let index = self.objects.len();
+            self.add_file(
+                index,
+                page::Content::File {
+                    source: file,
+                    layout,
+                },
+            );
+            self.undo.push(History::File { index, file: None });
+            self.redo.clear();
+            return Ok(());
+        }
+        let [anchor, focus] = self.selection().positions;
+        let (start, end) = (anchor.min(focus), anchor.max(focus));
+        let mut format = self.typing_format(start)?;
+        link::unlinked(&mut format);
+        let mut edit = self
+            .active_outline()
+            .document
+            .replace(start..end, vec![Paragraph::new(String::new(), format); 2])?;
+        let [head, tail, ..] = &mut edit.replacement[..] else {
+            unreachable!("a split holds both halves")
+        };
+        let node = PageParagraph {
+            id: onestore::page::text::new_id()?,
+            content: ParagraphContent::Attachment(file),
+            style: None,
+            lists: Vec::new(),
+            tags: Vec::new(),
+            collapsed: false,
+            ..head.clone()
+        };
+        let empty = head.text().unwrap().text.text().is_empty();
+        if empty {
+            tail.tags = std::mem::take(&mut head.tags);
+            tail.text_mut().unwrap().tags = std::mem::take(&mut head.text_mut().unwrap().tags);
+        }
+        edit.replacement.insert(1, node);
+        if empty {
+            edit.replacement.remove(0);
+        }
+        let caret = TextPosition {
+            paragraph: start.paragraph + usize::from(!empty),
+            offset: 0,
+        };
+        self.commit(
+            engine,
+            edit,
+            Selection {
+                positions: [caret; 2],
+                affinities: [Affinity::Upstream; 2],
+            },
+        )
+    }
+
     pub fn remove_image(&mut self, engine: &mut TextEngine, id: ExGuid) -> Result<(), EditorError> {
         if self.outline_picture(id).is_some() {
             return self.edit_outline_picture(engine, id, None);
+        }
+        if let Some(index) = self
+            .objects
+            .iter()
+            .position(|object| object.file().is_some_and(|(file, _)| file.id == id))
+        {
+            self.finish_composition();
+            let file = self.remove_file(index);
+            self.undo.push(History::File {
+                index,
+                file: Some(Box::new(file)),
+            });
+            self.redo.clear();
+            return Ok(());
         }
         let index = self
             .objects
@@ -2001,15 +2238,12 @@ impl CanvasEditor {
             })
             .ok_or(EditError::InvalidRange)?;
         self.finish_composition();
-        let page::Content::Image(image) = self.objects.remove(index) else {
-            unreachable!()
-        };
+        let image = self.remove_picture(index);
         self.undo.push(History::Picture {
             index,
             image: Some(Box::new(image)),
         });
         self.redo.clear();
-        self.record(Ok(vec![PageOp::Delete { object: id }]));
         Ok(())
     }
 
@@ -2227,6 +2461,55 @@ impl CanvasEditor {
         result
     }
 
+    /// Runs `edit`, typing or a backspace at a caret, as part of the typing run the last undo
+    /// step holds if the caret is where that run left it and nothing came between; OneNote 2010
+    /// undoes a run whole however long it pauses.
+    fn typed<T>(
+        &mut self,
+        edit: impl FnOnce(&mut Self) -> Result<T, EditorError>,
+    ) -> Result<T, EditorError> {
+        let [anchor, focus] = self.selection().positions;
+        let caret = match self.marked_range() {
+            Some(marked) => Some(marked.start),
+            None => (anchor == focus).then_some(focus),
+        };
+        let joins = self.typing.take().is_some_and(|(outline, at, depth)| {
+            outline == self.active_outline().id
+                && caret == Some(at)
+                && depth == self.undo.len()
+                && self.pending.is_none()
+        });
+        let depth = self.undo.len() - usize::from(joins);
+        let result = edit(self);
+        let (mut run, mut page) = (Vec::new(), false);
+        for entry in self.undo.split_off(depth) {
+            match entry {
+                History::Group {
+                    entries,
+                    page: selected,
+                } => {
+                    page |= selected;
+                    if run.is_empty() {
+                        run = entries;
+                    } else {
+                        run.extend(entries);
+                    }
+                }
+                entry => run.push(entry),
+            }
+        }
+        match run.len() {
+            0 => return result,
+            1 if !page => self.undo.extend(run),
+            _ => self.undo.push(History::Group { entries: run, page }),
+        }
+        if result.is_ok() {
+            let caret = self.selection().positions[1];
+            self.typing = Some((self.active_outline().id, caret, self.undo.len()));
+        }
+        result
+    }
+
     /// Removes the page selection's outlines, last first, but its last when `keep`, whose
     /// text stays selected to be replaced. Deleting the page selection leaves a caret where
     /// its first outline began, as OneNote 2010's does.
@@ -2375,6 +2658,7 @@ impl CanvasEditor {
     ) -> Result<(), EditorError> {
         self.finish_composition();
         self.whole = None;
+        self.typing = None;
         if !extend && movement == Movement::Right && self.leave_equation()? {
             return Ok(());
         }
@@ -2842,12 +3126,21 @@ impl CanvasEditor {
         )
     }
 
-    /// Types `text` at the selection; a space ends a typed URL, which becomes a link.
+    /// Types `text` at the selection; a space ends a typed URL, which becomes a link. A line
+    /// of text joins the typing run before it.
     pub fn insert(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
+        if text.is_empty() || text.contains('\n') {
+            self.insert_text(engine, text)
+        } else {
+            self.typed(|editor| editor.insert_text(engine, text))
+        }
+    }
+
+    fn insert_text(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
         if self.page_selected() {
             return self.grouped(|editor| {
                 editor.remove_page(engine, true)?;
-                editor.insert(engine, text)
+                editor.insert_text(engine, text)
             });
         }
         self.leave_link_code()?;
@@ -3137,7 +3430,8 @@ impl CanvasEditor {
         let selection = self.active_outline().selection;
         let [anchor, focus] = selection.positions;
         let mut range = anchor.min(focus)..anchor.max(focus);
-        if range.is_empty() {
+        let at_caret = range.is_empty();
+        if at_caret {
             let outline = self.active_outline();
             let paragraph = outline.paragraph_layout(focus.paragraph)?;
             let cursor = paragraph.cursor(focus.offset, selection.affinities[1])?;
@@ -3213,7 +3507,11 @@ impl CanvasEditor {
                 onestore::page::text::Affinity::Upstream,
             )?;
         }
-        self.delete_range(engine, range)
+        if backward && at_caret {
+            self.typed(|editor| editor.delete_range(engine, range))
+        } else {
+            self.delete_range(engine, range)
+        }
     }
 
     pub fn delete_to(
@@ -3226,19 +3524,26 @@ impl CanvasEditor {
         }
         self.finish_composition();
         let original = self.selection();
-        let preferred_x = self.preferred_x;
-        if original.positions[0] == original.positions[1] {
+        let (preferred_x, typing) = (self.preferred_x, self.typing);
+        let [caret, focus] = original.positions;
+        let collapsed = caret == focus;
+        if collapsed {
             let result = self.move_selection(engine, movement, true);
             if let Err(error) = result {
                 self.active_outline_mut().selection = original;
-                self.preferred_x = preferred_x;
+                (self.preferred_x, self.typing) = (preferred_x, typing);
                 return Err(error);
             }
         }
         let [anchor, focus] = self.selection().positions;
         self.active_outline_mut().selection = original;
-        self.preferred_x = preferred_x;
-        self.delete_range(engine, anchor.min(focus)..anchor.max(focus))
+        (self.preferred_x, self.typing) = (preferred_x, typing);
+        let range = anchor.min(focus)..anchor.max(focus);
+        if collapsed && range.end == caret && range.start.paragraph == caret.paragraph {
+            self.typed(|editor| editor.delete_range(engine, range))
+        } else {
+            self.delete_range(engine, range)
+        }
     }
 
     fn delete_range(
@@ -3326,6 +3631,7 @@ impl CanvasEditor {
         history: History,
     ) -> Result<History, (History, EditorError)> {
         self.pending = None;
+        self.typing = None;
         let valid = match &history {
             History::Date(date) => self
                 .date
@@ -3363,9 +3669,20 @@ impl CanvasEditor {
                 index,
                 image: Some(_),
             } => *index <= self.objects.len(),
-            History::Picture { index, image: None } => {
-                matches!(self.objects.get(*index), Some(page::Content::Image(_)))
-            }
+            History::Picture { index, image: None } => self
+                .objects
+                .get(*index)
+                .and_then(page::Content::picture)
+                .is_some(),
+            History::File {
+                index,
+                file: Some(_),
+            } => *index <= self.objects.len(),
+            History::File { index, file: None } => self
+                .objects
+                .get(*index)
+                .and_then(page::Content::file)
+                .is_some(),
             History::Remove { outline, focus } => {
                 self.outlines.iter().any(|item| item.id == *outline)
                     && match focus {
@@ -3584,24 +3901,20 @@ impl CanvasEditor {
                 index,
                 image: match image {
                     Some(image) => {
-                        self.objects.insert(index, page::Content::Image(*image));
-                        let page::Content::Image(image) = &self.objects[index] else {
-                            unreachable!()
-                        };
-                        let ops = vec![PageOp::Add {
-                            object: PageObject::Image(image.clone()),
-                            before: self.successor(image.id),
-                        }];
-                        self.record(Ok(ops));
+                        self.add_picture(index, *image);
                         None
                     }
-                    None => match self.objects.remove(index) {
-                        page::Content::Image(image) => {
-                            self.record(Ok(vec![PageOp::Delete { object: image.id }]));
-                            Some(Box::new(image))
-                        }
-                        _ => unreachable!(),
-                    },
+                    None => Some(Box::new(self.remove_picture(index))),
+                },
+            },
+            History::File { index, file } => History::File {
+                index,
+                file: match file {
+                    Some(file) => {
+                        self.add_file(index, *file);
+                        None
+                    }
+                    None => Some(Box::new(self.remove_file(index))),
                 },
             },
             History::Remove { outline, focus } => {
@@ -3827,9 +4140,17 @@ impl CanvasEditor {
                 .count()
                 .try_into()
                 .map_err(|_| EditError::TextTooLong)?;
-            self.compose(engine, text, end..end)?;
-            self.finish_composition();
-            Ok(())
+            let lines = text.contains('\n');
+            let commit = |editor: &mut Self| {
+                editor.compose(engine, text, end..end)?;
+                editor.finish_composition();
+                Ok(())
+            };
+            if lines {
+                commit(self)
+            } else {
+                self.typed(commit)
+            }
         } else {
             self.insert(engine, &text)
         }
@@ -4128,6 +4449,15 @@ impl CanvasEditor {
 /// Where `position` in `old` lies in `new`, the same outline changed elsewhere: in the same
 /// paragraph, past what changed in its text when it lies after it; at the start of the
 /// paragraph now at its place when that one is gone.
+/// Whether `content` is picture or file `id`.
+fn holds(content: &ParagraphContent, id: ExGuid) -> bool {
+    match content {
+        ParagraphContent::Image(image) => image.id == id,
+        ParagraphContent::Attachment(file) => file.id == id,
+        _ => false,
+    }
+}
+
 fn follow(old: &TextDocument, new: &TextDocument, position: TextPosition) -> TextPosition {
     let found = old.leaf(position.paragraph).and_then(|(_, _, node)| {
         let paragraph = new
@@ -5065,20 +5395,72 @@ mod tests {
             editor.active_outline().shaped.paragraphs.len(),
             fresh.paragraphs.len()
         );
-        editor.undo(&mut engine).unwrap();
-        assert_eq!(
-            editor
-                .active_outline()
-                .document
-                .paragraphs()
-                .last()
-                .unwrap()
-                .text(),
-            "Lasta"
-        );
+        // The committed composition and the typing after it are one run.
         editor.undo(&mut engine).unwrap();
         assert_eq!(editor.outlines()[0].document, source);
         assert_eq!(editor.active_outline().document, draft);
+    }
+
+    /// OneNote 2010's undo steps (Windows 7 lab, 2026-09-29): typing, backspaces and word
+    /// backspaces within a paragraph are one step however long the pauses; a caret move, Enter,
+    /// a backspace joining paragraphs, Delete, paste and a format chosen at the caret each end it.
+    #[test]
+    fn typing_runs_undo_whole_until_the_caret_moves_or_another_edit() {
+        let mut engine = TextEngine::default();
+        let source =
+            TextDocument::new(vec![Paragraph::new("Base".into(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source, 240.0).unwrap();
+        let at = |paragraph, offset| [TextPosition { paragraph, offset }; 2].into();
+        let text = |editor: &CanvasEditor| editor.active_outline().shown_text();
+        editor.select(at(0, 4)).unwrap();
+        editor.insert(&mut engine, " quick").unwrap();
+        editor.insert(&mut engine, " brown").unwrap();
+        editor.delete(&mut engine, true).unwrap();
+        editor.delete_to(&mut engine, Movement::WordLeft).unwrap();
+        editor.commit_text(&mut engine, "fox".into()).unwrap();
+        editor.select(editor.selection()).unwrap();
+        editor.insert(&mut engine, " jumps").unwrap();
+        assert_eq!(text(&editor), "Base quick fox jumps");
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(text(&editor), "Base");
+        assert_eq!(editor.selection().positions, [at(0, 4).positions[0]; 2]);
+        assert!(!editor.can_undo());
+        assert!(editor.redo(&mut engine).unwrap());
+        assert_eq!(text(&editor), "Base quick fox jumps");
+
+        let mut shown = vec!["Base".to_owned(), text(&editor)];
+        for movement in [Movement::Left, Movement::Right] {
+            editor.move_selection(&mut engine, movement, false).unwrap();
+        }
+        editor.insert(&mut engine, "!").unwrap();
+        editor.insert(&mut engine, "?").unwrap();
+        shown.push(text(&editor));
+        editor.enter(&mut engine, false).unwrap();
+        shown.push(text(&editor));
+        editor.insert(&mut engine, "ab").unwrap();
+        shown.push(text(&editor));
+        editor
+            .move_selection(&mut engine, Movement::Left, false)
+            .unwrap();
+        editor.delete(&mut engine, false).unwrap();
+        shown.push(text(&editor));
+        editor.insert(&mut engine, "c").unwrap();
+        shown.push(text(&editor));
+        editor
+            .format(&mut engine, Formatting::Toggle(Toggle::Bold))
+            .unwrap();
+        editor.insert(&mut engine, "d").unwrap();
+        editor.insert(&mut engine, "e").unwrap();
+        shown.push(text(&editor));
+        editor.select(at(1, 0)).unwrap();
+        editor.delete(&mut engine, true).unwrap();
+        shown.push(text(&editor));
+        editor.insert(&mut engine, "f").unwrap();
+        assert_eq!(text(&editor), "Base quick fox jumps!?facde");
+        while editor.undo(&mut engine).unwrap() {
+            assert_eq!(text(&editor), shown.pop().unwrap());
+        }
+        assert!(shown.is_empty());
     }
 
     #[test]
@@ -5660,6 +6042,80 @@ mod tests {
     }
 
     #[test]
+    fn art_and_paper_change_together_as_one_step_under_the_page() {
+        use onestore::page::{Image, Page, PageObject};
+        let mut engine = TextEngine::default();
+        let image = |background, bytes: &[u8]| Image {
+            size: None,
+            id: onestore::page::text::new_id().unwrap(),
+            layout: onestore::document::Layout {
+                x: Some(-27.0),
+                y: Some(-3.6),
+                max_width: Some(174.5),
+                max_height: Some(640.0),
+                ..Default::default()
+            },
+            bytes: Some(std::sync::Arc::from(bytes)),
+            alt: None,
+            background,
+        };
+        let [old, picture] = [image(true, b"old art"), image(false, b"picture")];
+        let mut editor = CanvasEditor::from_page(
+            Page {
+                title: String::new(),
+                identity: None,
+                created: None,
+                margin_origin: [36.0, 14.4],
+                color: None,
+                rule_lines: None,
+                definitions: BTreeMap::new(),
+                objects: vec![
+                    PageObject::Image(old.clone()),
+                    PageObject::Image(picture.clone()),
+                ],
+            },
+            &mut engine,
+        )
+        .unwrap();
+        let ids = |editor: &CanvasEditor| {
+            let page = editor.page().unwrap();
+            let ids: Vec<_> = page.objects.iter().map(PageObject::id).collect();
+            (ids, page.color)
+        };
+        let art = || [image(true, b"art one"), image(true, b"art two")];
+        let [one, two] = art();
+        let blue = Some(0x00fef5ed);
+        assert!(editor.set_paper(blue, None, Some(vec![one.clone(), two.clone()])));
+        let applied = (vec![one.id, two.id, picture.id], blue);
+        assert_eq!(ids(&editor), applied);
+        assert_eq!(
+            editor.take_ops().unwrap(),
+            [
+                PageOp::Color(blue),
+                PageOp::Delete { object: old.id },
+                PageOp::Add {
+                    object: PageObject::Image(two.clone()),
+                    before: Some(picture.id),
+                },
+                PageOp::Add {
+                    object: PageObject::Image(one.clone()),
+                    before: Some(two.id),
+                },
+            ]
+        );
+        // The same art again, under fresh identities, changes nothing.
+        assert!(!editor.set_paper(blue, None, Some(art().into())));
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(ids(&editor), (vec![old.id, picture.id], None));
+        assert_eq!(editor.take_ops().unwrap().len(), 4);
+        assert!(!editor.can_undo());
+        assert!(editor.redo(&mut engine).unwrap());
+        assert_eq!(ids(&editor), applied);
+        assert!(editor.set_paper(blue, None, Some(Vec::new())));
+        assert_eq!(ids(&editor), (vec![picture.id], blue));
+    }
+
+    #[test]
     fn arrows_leave_a_picture_for_the_neighbouring_outlines_in_page_order() {
         use onestore::page::{Image, Page, PageObject};
         let mut engine = TextEngine::default();
@@ -5856,6 +6312,94 @@ mod tests {
             editor.image_placement(image.id),
             Some((origin, [40.0, 30.0]))
         );
+    }
+
+    /// OneNote 2010 attaches at the caret (`corpus/attachment-insert`): the text after it
+    /// follows the file and keeps the caret, and an empty first half gives way to the file.
+    #[test]
+    fn a_file_attaches_at_the_caret_as_onenote_splits_around_it() {
+        use onestore::page::{Attachment, Page, PageObject, ParagraphContent};
+        let mut engine = TextEngine::default();
+        let source = TextOutline::new(
+            &mut engine,
+            TextDocument::new(vec![
+                Paragraph::new("Before".into(), Default::default()),
+                Paragraph::new(String::new(), Default::default()),
+            ])
+            .unwrap(),
+            240.0,
+            [36.0, 36.0],
+        )
+        .unwrap()
+        .snapshot();
+        let mut editor = CanvasEditor::from_page(
+            Page {
+                title: String::new(),
+                identity: None,
+                created: None,
+                margin_origin: [36.0, 14.4],
+                color: None,
+                rule_lines: None,
+                definitions: BTreeMap::new(),
+                objects: vec![PageObject::Outline(source)],
+            },
+            &mut engine,
+        )
+        .unwrap();
+        editor.take_ops().unwrap();
+        let file = |name: &str| Attachment {
+            id: onestore::page::text::new_id().unwrap(),
+            filename: name.into(),
+            source_path: None,
+            size: Some([24.0, 24.0]),
+            layout: Default::default(),
+            bytes: Some(std::sync::Arc::from(b"payload".as_slice())),
+            preview: None,
+            recording: None,
+        };
+        let at = |paragraph, offset| Selection {
+            positions: [TextPosition { paragraph, offset }; 2],
+            affinities: [Affinity::Downstream; 2],
+        };
+        let shown = |editor: &CanvasEditor| {
+            let page = editor.page().unwrap();
+            let PageObject::Outline(outline) = &page.objects[0] else {
+                panic!()
+            };
+            outline
+                .paragraphs
+                .iter()
+                .map(|node| match &node.content {
+                    ParagraphContent::Text(text) => text.text.text().to_owned(),
+                    ParagraphContent::Attachment(file) => format!("[{}]", file.filename),
+                    _ => panic!(),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        editor.select(at(0, 3)).unwrap();
+        let middle = file("middle.txt");
+        editor.insert_attachment(&mut engine, middle.clone()).unwrap();
+        assert_eq!(shown(&editor), ["Bef", "[middle.txt]", "ore", ""]);
+        // A file is no text position: the caret starts "ore", the second text.
+        assert_eq!(editor.selection().positions, at(1, 0).positions);
+        assert_eq!(editor.attachment(middle.id), Some(&middle));
+        let ops = editor.take_ops().unwrap();
+        assert!(ops.iter().any(|op| matches!(op, PageOp::Insert { paragraphs, .. }
+            if paragraphs.iter().any(|p| matches!(&p.content, ParagraphContent::Attachment(a) if *a == middle)))));
+
+        editor.select(at(2, 0)).unwrap();
+        editor.insert_attachment(&mut engine, file("empty.bin")).unwrap();
+        assert_eq!(
+            shown(&editor),
+            ["Bef", "[middle.txt]", "ore", "[empty.bin]", ""]
+        );
+        assert_eq!(editor.selection().positions[0].paragraph, 2);
+
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(shown(&editor), ["Bef", "[middle.txt]", "ore", ""]);
+        editor.remove_image(&mut engine, middle.id).unwrap();
+        assert_eq!(shown(&editor), ["Bef", "ore", ""]);
     }
 
     #[test]
@@ -6404,17 +6948,6 @@ mod tests {
         .unwrap();
         assert_eq!(editor.active_outline().shaped.size, expected.shaped.size);
         assert_eq!(editor.active_outline().document.nodes().len(), 2);
-        editor.undo(&mut engine).unwrap();
-        assert_eq!(
-            editor
-                .active_outline()
-                .document
-                .paragraphs()
-                .last()
-                .unwrap()
-                .text(),
-            "a"
-        );
         editor.undo(&mut engine).unwrap();
         assert_eq!(editor.outlines[0].document, source);
         assert_eq!(editor.active_outline().document.nodes().len(), 4);
@@ -7152,6 +7685,10 @@ mod tests {
         let selection = editor.selection();
         editor.insert(&mut engine, "x").unwrap();
         assert_eq!(editor.outlines.len(), 1);
+        // A caret move ends the typing run, so the backspace is its own step.
+        for movement in [Movement::Left, Movement::Right] {
+            editor.move_selection(&mut engine, movement, false).unwrap();
+        }
         editor.delete(&mut engine, true).unwrap();
         assert!(editor.outlines.is_empty());
         assert_eq!(editor.active_outline().document, spaces);
@@ -7368,6 +7905,9 @@ mod tests {
         )
         .unwrap();
         editor.insert(&mut engine, "One").unwrap();
+        for movement in [Movement::Left, Movement::Right] {
+            editor.move_selection(&mut engine, movement, false).unwrap();
+        }
         let source = editor.active_outline().snapshot();
         let selection = editor.selection();
         editor.insert(&mut engine, "!").unwrap();

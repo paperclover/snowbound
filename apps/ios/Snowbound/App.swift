@@ -19,6 +19,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         sb_set_coordinator(coordinate)
+        sb_set_sync_wake { DispatchQueue.main.async { NotificationCenter.default.post(name: Sync.changed, object: nil) } }
         #if DEBUG
         Presenter.watch()
         #endif
@@ -77,11 +78,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         split.setViewController(pages, for: .supplementary)
         split.setViewController(UIViewController(), for: .secondary)
         notebooks.onOpen = { [weak self] tab, notebook in self?.open(tab, of: notebook) }
-        pages.onOpen = { [weak self] section, id, find in self?.show(section: section, page: id, find: find) }
-        pages.onOpenSection = { [weak self] notebook, path, id, find in
-            guard let tab = notebook.tabs.first(where: { $0.path == path }) else { return }
-            self?.open(tab, of: notebook, page: id, find: find)
-        }
+        pages.onOpen = { [weak self] section, id in self?.show(section: section, page: id) }
         window.rootViewController = split
         window.makeKeyAndVisible()
         self.window = window
@@ -116,11 +113,13 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
     }
 
     func open(
-        _ tab: Tab, of notebook: Notebook, page: String? = nil, find: String? = nil,
+        _ tab: Tab, of notebook: Notebook, page: String? = nil, reveal: Reveal? = nil,
         then: ((Section) -> Void)? = nil
     ) {
         guard Author.name != nil else {
-            return Author.ask(from: split) { [weak self] in self?.open(tab, of: notebook, page: page, find: find, then: then) }
+            return Author.ask(from: split) { [weak self] in
+                self?.open(tab, of: notebook, page: page, reveal: reveal, then: then)
+            }
         }
         pages.loading(tab)
         split.show(.supplementary)
@@ -134,15 +133,37 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
             notebooks.select(tab, of: notebook)
             Place.saved = Place(notebook: notebook.id, section: tab.path, page: page)
             if let page, section.row(of: page) != nil {
-                show(section: section, page: page, find: find)
+                show(section: section, page: page, reveal: reveal)
             }
             then?(section)
         }
     }
 
-    func show(section: Section, page: String, find: String? = nil, titleFocus: Bool = false) {
+    /// Opens `page` of the section at catalog `path` in `notebook`, as a search result or
+    /// the Tags Summary leads there.
+    func open(_ path: String, of notebook: Notebook, page: String, reveal: Reveal) {
+        if let section = pages.section, section.notebook === notebook, section.tab.path == path {
+            return show(section: section, page: page, reveal: reveal)
+        }
+        guard let tab = notebook.tabs.first(where: { $0.path == path }) else { return }
+        open(tab, of: notebook, page: page, reveal: reveal)
+    }
+
+    /// OneNote's Tags Summary for `notebook`, as a sheet over `controller`.
+    func showTags(of notebook: Notebook, from controller: UIViewController) {
+        let tags = TagsViewController(notebook: notebook)
+        tags.onOpen = { [weak self] notebook, path, page, paragraph in
+            self?.open(path, of: notebook, page: page, reveal: .paragraph(paragraph))
+        }
+        let navigation = UINavigationController(rootViewController: tags)
+        navigation.sheetPresentationController?.detents = [.medium(), .large()]
+        navigation.sheetPresentationController?.prefersGrabberVisible = true
+        controller.present(navigation, animated: true)
+    }
+
+    func show(section: Section, page: String, reveal: Reveal? = nil, titleFocus: Bool = false) {
         showingPage = true
-        let controller = PageViewController(section: section, page: page, find: find, titleFocus: titleFocus)
+        let controller = PageViewController(section: section, page: page, reveal: reveal, titleFocus: titleFocus)
         controller.onOpen = { [weak self] id in self?.show(section: section, page: id) }
         split.setViewController(UINavigationController(rootViewController: controller), for: .secondary)
         split.show(.secondary)
@@ -204,7 +225,8 @@ final class RootViewController: UISplitViewController {
         [
             UIKeyCommand(title: "New Page", action: #selector(newPage), input: "n", modifierFlags: .command),
             UIKeyCommand(
-                title: "New Subpage", action: #selector(newSubpage), input: "n", modifierFlags: [.command, .shift]),
+                title: "New Subpage", action: #selector(newSubpage), input: "n",
+                modifierFlags: [.command, .shift, .alternate]),
             UIKeyCommand(title: "Search", action: #selector(search), input: "f", modifierFlags: [.command, .alternate]),
         ]
     }

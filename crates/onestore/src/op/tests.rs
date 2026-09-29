@@ -1105,6 +1105,7 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     filename: "notes.txt".into(),
                     source_path: Some(r"C:\notes.txt".into()),
                     size: None,
+                    layout: Layout::default(),
                     bytes: Some(b"attached bytes".as_slice().into()),
                     preview: None,
                     recording: None,
@@ -2956,4 +2957,21 @@ fn rule_lines_store_what_onenote_stores() {
         )
         .unwrap();
     }
+}
+
+/// Text added without a language stores the writer's, and lowering it back must not write
+/// LCID 0 on the text object, which runs later written without a language would read.
+#[test]
+fn an_unset_language_is_not_paragraph_formatting() {
+    let language = |language| Format {
+        language,
+        ..Default::default()
+    };
+    let stored = Paragraph::new(String::new(), language(Some(0x409)));
+    let fields = |target| lower::paragraph_fields(&stored, &target).unwrap().language;
+    assert_eq!(fields(Paragraph::new("Fresh".into(), language(None))), None);
+    assert_eq!(
+        fields(Paragraph::new("Frais".into(), language(Some(0x40c)))),
+        Some(0x40c)
+    );
 }

@@ -5,7 +5,7 @@ use crate::{
     outline::{Arrange, OutlineLayout},
 };
 use onestore::page::text::Paragraph;
-use onestore::page::{Image, Ink, Outline, Page, PageObject};
+use onestore::page::{Attachment, Image, Ink, Outline, Page, PageObject};
 use std::collections::BTreeMap;
 
 /// A title object's own state, plus the child origins `build` replaces with page coordinates.
@@ -33,6 +33,11 @@ pub(crate) enum Content {
         below_title: Option<onestore::ExGuid>,
     },
     Image(Image),
+    /// A file on the page, laid out relative to its position.
+    File {
+        source: Attachment,
+        layout: Box<crate::outline::ObjectLayout>,
+    },
     Ink(Ink),
     Editable(onestore::ExGuid),
     ReadOnly(Box<ReadOnlyObject>),
@@ -60,14 +65,37 @@ impl Content {
         )?))
     }
 
+    /// The page-level picture shown, drawn or as a placeholder.
+    pub(super) fn picture(&self) -> Option<&Image> {
+        match self {
+            Self::Image(image) => Some(image),
+            Self::ReadOnly(object) => match &object.source {
+                PageObject::Image(image) => Some(image),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub(super) fn layout(&self) -> Option<(onestore::ExGuid, &onestore::document::Layout)> {
         match self {
             Self::Outline { source, .. } => Some((source.id, &source.layout)),
             Self::Image(source) => Some((source.id, &source.layout)),
+            Self::File { source, .. } => Some((source.id, &source.layout)),
             Self::Ink(source) => Some((source.id, &source.layout)),
             Self::ReadOnly(object) => Some((object.source.id(), object.source.layout())),
             Self::Date { .. } | Self::Editable(_) => None,
         }
+    }
+
+    /// A file on the page, where its column's `[x0, y0, x1, y1]` lie in page points.
+    pub(crate) fn file(&self) -> Option<(&Attachment, [f32; 4])> {
+        let Self::File { source, layout } = self else {
+            return None;
+        };
+        let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
+        let [x0, y0, x1, y1] = layout.bounds();
+        Some((source, [x + x0, y + y0, x + x1, y + y1]))
     }
 
     pub(super) fn layout_mut(
@@ -76,6 +104,7 @@ impl Content {
         match self {
             Self::Outline { source, .. } => Some((source.id, &mut source.layout)),
             Self::Image(source) => Some((source.id, &mut source.layout)),
+            Self::File { source, .. } => Some((source.id, &mut source.layout)),
             Self::Ink(source) => Some((source.id, &mut source.layout)),
             Self::ReadOnly(object) => Some((object.source.id(), object.source.layout_mut())),
             Self::Date { .. } | Self::Editable(_) => None,
@@ -331,6 +360,19 @@ pub(crate) fn build(
                     unreachable!()
                 };
                 objects.push(Content::Image(source));
+            }
+            PageObject::Attachment(source) => {
+                if [source.layout.x, source.layout.y]
+                    .iter()
+                    .any(|v| !v.unwrap_or(0.0).is_finite())
+                {
+                    return Err(EditorError::InvalidGeometry);
+                }
+                let layout = Box::new(crate::outline::page_file(engine, source)?);
+                let PageObject::Attachment(source) = object else {
+                    unreachable!()
+                };
+                objects.push(Content::File { source, layout });
             }
             PageObject::Ink(ink) => {
                 if ink_bounds(ink).is_some_and(|b| b.iter().any(|v| !v.is_finite())) {

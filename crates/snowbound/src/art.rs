@@ -66,6 +66,3 @@ pub const SYNC_BUSY: &[&str] = art!("icons/sync-busy");
 pub const SYNC_DONE: &[&str] = art!("icons/sync-done");
 pub const SYNC_ERROR: &[&str] = art!("icons/sync-error");
 pub const SYNC_OFFLINE: &[&str] = art!("icons/sync-offline");
-
-pub const TAG_REMEMBER: &[&str] = art!("tags/remember");
-pub const TAG_DEFINITION: &[&str] = art!("tags/definition");

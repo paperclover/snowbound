@@ -614,3 +614,93 @@ fn a_new_native_wrap_reservation_keeps_the_local_width_on_a_conflict_page() {
     assert_eq!(layout.max_width, Some(144.0));
     assert!(layout.reserved_width.is_none());
 }
+
+/// `source` with a file on its page, and the file's identity.
+fn with_file(source: &[u8], space: ExGuid) -> (Vec<u8>, ExGuid) {
+    let id = onestore::page::text::new_id().unwrap();
+    let file = onestore::page::Attachment {
+        id,
+        filename: "float.txt".into(),
+        source_path: None,
+        size: Some([24.0, 24.0]),
+        layout: onestore::document::Layout {
+            x: Some(342.0),
+            y: Some(284.4),
+            max_width: Some(54.0),
+            max_height: Some(63.0),
+            width_set_by_user: Some(false),
+            reserved_width: None,
+        },
+        bytes: Some(std::sync::Arc::from(&b"Floating bytes"[..])),
+        preview: None,
+        recording: None,
+    };
+    let image = remote_with(source, space, |page| {
+        page.objects.push(PageObject::Attachment(file))
+    });
+    (image, id)
+}
+
+fn file_mut(page: &mut Page, id: ExGuid) -> &mut onestore::page::Attachment {
+    page.objects
+        .iter_mut()
+        .find_map(|object| match object {
+            PageObject::Attachment(file) if file.id == id => Some(file),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// A file on the page merges as an outline's position does: a local move and a remote rename
+/// both land, and competing moves keep the local one on a conflict page.
+#[test]
+fn files_on_the_page_move_through_sync_and_competing_moves_conflict() {
+    let (source, space, _, text_id) = fixture();
+    let (source, file) = with_file(&source, space);
+    let place = |x, y| {
+        move |page: &mut Page| {
+            let layout = &mut file_mut(page, file).layout;
+            [layout.x, layout.y] = [Some(x), Some(y)];
+        }
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
+    let id = save(&cache, text_id, place(126.0, 410.4)).unwrap().unwrap();
+    let mut server = Server::new(&remote_with(&source, space, |page| {
+        file_mut(page, file).filename = "renamed.txt".into();
+    }));
+    published(&cache, &mut server, id);
+    let mut durable = page_of(&server.durable, space);
+    let merged = file_mut(&mut durable, file);
+    assert_eq!(
+        (merged.layout.x, merged.layout.y, merged.filename.as_str()),
+        (Some(126.0), Some(410.4), "renamed.txt")
+    );
+    assert_eq!(merged.bytes.as_deref(), Some(&b"Floating bytes"[..]));
+
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Replica::create(directory.path().join("cache.sqlite"), &source).unwrap();
+    save(&cache, text_id, place(126.0, 410.4)).unwrap().unwrap();
+    let remote = remote_with(&source, space, place(36.0, 50.4));
+    let mut server = Server::new(&remote);
+    assert!(conflicted(&cache, &mut server, space));
+    let mut durable = page_of(&server.durable, space);
+    assert_eq!(file_mut(&mut durable, file).layout.x, Some(36.0));
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, server.durable.clone()).unwrap();
+    let conflict = section.conflicts().unwrap()[0].1[0].space;
+    let kept = section.page(conflict).unwrap();
+    let copies: Vec<_> = kept
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Attachment(file) => Some(file),
+            _ => None,
+        })
+        .collect();
+    let [copy] = copies.as_slice() else {
+        panic!("{kept:?}")
+    };
+    assert_eq!((copy.layout.x, copy.layout.y), (Some(126.0), Some(410.4)));
+    assert_eq!(copy.bytes.as_deref(), Some(&b"Floating bytes"[..]));
+}
