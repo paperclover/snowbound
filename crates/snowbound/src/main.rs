@@ -3072,7 +3072,6 @@ impl State {
     fn input(&mut self, event: ui::Event) {
         if let ui::Event::PointerMoved(point) = event {
             self.pointer = point;
-            platform::set_window_drags(self.ui.box_at(point) == Some(strip()));
             if std::mem::take(&mut self.strip_held) {
                 let _ = self.window.drag_window();
             }

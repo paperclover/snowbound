@@ -579,9 +579,6 @@ pub fn move_cursor() -> winit::window::CursorIcon {
     winit::window::CursorIcon::Move
 }
 
-/// Window drags are the app's own.
-pub fn set_window_drags(_: bool) {}
-
 /// Scrollbars overlay the content.
 pub fn scrollers() -> Option<ui::Scrollers> {
     None

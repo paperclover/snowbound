@@ -12,7 +12,7 @@ use objc2::{
     sel,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
-use std::{cell::Cell, collections::HashMap};
+use std::collections::HashMap;
 use ui::{Axis, PaintedScroller, Scroller, ScrollerPart};
 use winit::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
@@ -57,19 +57,11 @@ pub fn textured(window: &Window, row: f32) -> bool {
     true
 }
 
-thread_local! {
-    static DRAGS: Cell<bool> = const { Cell::new(false) };
-}
-
-/// Whether a press where the pointer is drags the window, which a textured window asks
-/// its content of: presses on empty toolbar space do, and nowhere else.
-pub fn set_window_drags(drags: bool) {
-    DRAGS.set(drags);
-}
-
-/// `-mouseDownCanMoveWindow` for the content view of a textured window.
-pub extern "C" fn window_drags(_: &AnyObject, _: Sel) -> Bool {
-    Bool::new(DRAGS.get())
+/// `-mouseDownCanMoveWindow` for the content view: a textured window drags from any press
+/// on a view that allows it, asking once. The app drags from its toolbar's empty space
+/// itself, through `-performWindowDragWithEvent:`.
+pub extern "C" fn no_window_drags(_: &AnyObject, _: Sel) -> Bool {
+    Bool::NO
 }
 
 /// The cursor for moving something: winit loads its move cursor from a folder of cursors

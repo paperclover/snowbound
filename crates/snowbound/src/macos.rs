@@ -29,7 +29,7 @@ use winit::{
     window::{Window, WindowAttributes},
 };
 
-pub use crate::aqua::{move_cursor, resize_grip, scrollers, set_window_drags};
+pub use crate::aqua::{move_cursor, resize_grip, scrollers};
 
 static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 static INPUT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
@@ -533,7 +533,7 @@ pub fn install_text_input(window: &Window) {
             if crate::aqua::before_lion() {
                 class.add_method(
                     sel!(mouseDownCanMoveWindow),
-                    crate::aqua::window_drags as extern "C" fn(_, _) -> _,
+                    crate::aqua::no_window_drags as extern "C" fn(_, _) -> _,
                 );
             }
             class.register()

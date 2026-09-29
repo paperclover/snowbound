@@ -1,7 +1,8 @@
 // AppKit that winit, AccessKit and the app call and 10.6 lacks, added at load time with
 // the neutral answer: scale 1, no precise scrolling, no appearances, no tabbing, no full
-// screen. `remote.sh selectors` lists what a binary names that 10.6 lacks. Linked from
-// the archive by the appearance name winit imports, so only AppKit binaries carry it.
+// screen; window drags are done here. `remote.sh selectors` lists what a binary names
+// that 10.6 lacks. Linked from the archive by the appearance name winit imports, so only
+// AppKit binaries carry it.
 // class_addMethod adds nothing where the system already has the method.
 #include <ApplicationServices/ApplicationServices.h>
 #include <objc/message.h>
@@ -51,6 +52,37 @@ static CGRect rect_to_screen(id self, SEL _cmd, CGRect rect) {
 static CGPoint point_from_screen(id self, SEL _cmd, CGPoint point) {
     CGRect frame = ((CGRect(*)(id, SEL))objc_msgSend_stret)(self, sel_registerName("frame"));
     return CGPointMake(point.x - frame.origin.x, point.y - frame.origin.y);
+}
+
+// 10.11: the window follows the pointer until the button comes up, as a press on its
+// title does.
+static void window_drag(id self, SEL _cmd, id event) {
+    typedef CGPoint (*SendPoint)(id, SEL);
+    typedef CGRect (*SendRect)(id, SEL);
+    id event_class = (id)objc_getClass("NSEvent");
+    CGPoint start = ((SendPoint)objc_msgSend)(event_class, sel_registerName("mouseLocation"));
+    CGRect frame = ((SendRect)objc_msgSend_stret)(self, sel_registerName("frame"));
+    id app = SEND(objc_getClass("NSApplication"), "sharedApplication");
+    id forever = SEND(objc_getClass("NSDate"), "distantFuture");
+    for (;;) {
+        // NSLeftMouseDraggedMask | NSLeftMouseUpMask.
+        id next = ((id (*)(id, SEL, unsigned long long, id, CFStringRef, BOOL))objc_msgSend)(
+            app, sel_registerName("nextEventMatchingMask:untilDate:inMode:dequeue:"),
+            1 << 6 | 1 << 2, forever, CFSTR("NSEventTrackingRunLoopMode"), YES);
+        // NSLeftMouseUp.
+        if (((unsigned long (*)(id, SEL))objc_msgSend)(next, sel_registerName("type")) == 2) {
+            // The button's release stays in the queue for whoever asked for the drag.
+            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(app, sel_registerName("postEvent:atStart:"), next, YES);
+            return;
+        }
+        CGPoint now = ((SendPoint)objc_msgSend)(event_class, sel_registerName("mouseLocation"));
+        CGRect moved = frame;
+        moved.origin.x += now.x - start.x;
+        moved.origin.y += now.y - start.y;
+        moved = ((CGRect (*)(id, SEL, CGRect, id))objc_msgSend_stret)(
+            self, sel_registerName("constrainFrameRect:toScreen:"), moved, SEND(self, "screen"));
+        ((void (*)(id, SEL, CGPoint))objc_msgSend)(self, sel_registerName("setFrameOrigin:"), moved.origin);
+    }
 }
 
 static id srgb_color(id self, SEL _cmd, CGFloat red, CGFloat green, CGFloat blue, CGFloat alpha) {
@@ -106,7 +138,7 @@ __attribute__((constructor)) static void polyfill(void) {
     add("NSWindow", 0, "backingScaleFactor", one, "d@:");
     add("NSWindow", 0, "convertRectToScreen:", rect_to_screen, RECT "@:" RECT);
     add("NSWindow", 0, "convertPointFromScreen:", point_from_screen, "{CGPoint=dd}@:{CGPoint=dd}");
-    add("NSWindow", 0, "performWindowDragWithEvent:", ignore, "v@:@");
+    add("NSWindow", 0, "performWindowDragWithEvent:", window_drag, "v@:@");
     add("NSWindow", 0, "toggleFullScreen:", ignore, "v@:@");
     add("NSWindow", 0, "setTabbingMode:", ignore, "v@:q");
     add("NSWindow", 0, "setTabbingIdentifier:", ignore, "v@:@");
