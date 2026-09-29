@@ -64,6 +64,17 @@ edit names is the host's: the app passes the account's full name.
 and how many edits wait for it. `set_offline(true)` works offline as OneNote does: the
 worker stops connecting and edits queue until `wake()` (Sync Now) or `set_offline(false)`.
 
+`session::Background` keeps the sections no session holds in sync, as OneNote 2010 keeps
+every section of an open notebook: `Notebook::background(interval, notify)` for a mounted
+notebook, `Background::smb(root, limit, interval, connect, notify)` on a share, then
+`watch(notebook.replicas())`. Each round reads every watched file's stamp; a section whose
+replica has edits waiting, or whose file moved past the replica's base, has the replica
+opened for the synchronization steps that publish or rebase it and closed again. A replica
+a session holds is skipped (`Error::busy`), so opening a section may wait out one step.
+`status()` gives each section's `SyncStatus`, `changed()` the sections another client
+changed, and `wake` and `set_offline` follow Sync Now and Work Offline.
+`Notebook::replica_path(path)` names a section's replica for either kind of notebook.
+
 `Section::resume(file, replica, notify)` starts from an owned `Replica` without
 consulting the remote file; with the `smb` feature, `Section::resume_smb(path,
 replica, limit, connect, notify)` binds a share-relative path, `connect` running on

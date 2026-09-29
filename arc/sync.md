@@ -167,6 +167,16 @@ Working offline on purpose, as OneNote's Work Offline does, is the same state
 chosen: the sync thread stops stepping until Sync Now or until the user works
 online again.
 
+## Sections that aren't open
+
+OneNote keeps every section of an open notebook in sync, not just the one on screen: it
+reads a section another client changed within seconds and publishes a closed section's
+offline edits the moment the share is back. Snowbound's `session::Background` does the
+same with one thread per notebook. Each round reads every section file's stamp. Only a
+section whose replica has edits waiting, or whose file moved past the replica's base,
+has its replica opened for the usual sync steps, and it is closed again afterwards. The
+open section is left to its own session.
+
 ## Notebook structure
 
 Sections, groups and the notebook's own colour live in the `.onetoc2` files,

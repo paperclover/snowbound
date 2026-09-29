@@ -999,3 +999,129 @@ fn a_missing_section_file_reports_its_error_until_it_returns() {
     assert!(notified.load(Ordering::SeqCst) > before);
     section.close().unwrap();
 }
+
+/// A notebook folder holding `First.one` and `Second.one`, and a cache beside it.
+fn two_sections(directory: &Path) -> Notebook {
+    let root = directory.join("Shared");
+    std::fs::create_dir(&root).unwrap();
+    for name in ["First", "Second"] {
+        let file = format!("{name}.one");
+        std::fs::write(
+            root.join(&file),
+            onestore::create_section(&file, name, "Author").unwrap(),
+        )
+        .unwrap();
+    }
+    Notebook::open(&root, directory.join("cache")).unwrap()
+}
+
+fn until(what: &str, mut accept: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !accept() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_closed_sections_queued_edits_publish_in_the_background_when_online() {
+    let directory = tempfile::tempdir().unwrap();
+    let notebook = two_sections(directory.path());
+    let file = directory.path().join("Shared/Second.one");
+    let background = notebook
+        .background(Duration::from_millis(20), || {})
+        .unwrap();
+    background.set_offline(true);
+    background.watch(notebook.replicas());
+    // The round started with the background ends before the edit exists.
+    std::thread::sleep(Duration::from_millis(200));
+    let section = notebook.section("Second.one", || {}).unwrap();
+    section.set_offline(true);
+    let space = section.pages().unwrap()[0].0;
+    let before = section.page(space).unwrap();
+    typed(&section, space, &before, 0..0, "Closed ");
+    section.close().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        stored_page(&file, space),
+        before,
+        "working offline publishes nothing"
+    );
+    background.set_offline(false);
+    let mut after = edited(&before, "Closed ");
+    until("the closed section published", || {
+        let stored = stored_page(&file, space);
+        after.title = stored.title.clone();
+        stored == after
+    });
+    until("the status shows nothing waiting", || {
+        background.status().iter().any(|(path, status)| {
+            path == "Second.one" && status.synced.is_some() && status.queued == 0
+        })
+    });
+    drop(background);
+    let mut reopened = None;
+    until("the background released the replica", || {
+        reopened = notebook.section("Second.one", || {}).ok();
+        reopened.is_some()
+    });
+    let reopened = reopened.unwrap();
+    assert!(reopened.pending().unwrap().is_empty());
+    reopened.close().unwrap();
+}
+
+#[test]
+fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
+    let directory = tempfile::tempdir().unwrap();
+    let notebook = two_sections(directory.path());
+    // Second has a replica from being opened once; First has never been opened.
+    notebook
+        .section("Second.one", || {})
+        .unwrap()
+        .close()
+        .unwrap();
+    let notified = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&notified);
+    let background = notebook
+        .background(Duration::from_millis(20), move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    background.watch(notebook.replicas());
+    until("both sections were reached", || {
+        background
+            .status()
+            .iter()
+            .all(|(_, status)| status.synced.is_some() && status.error.is_none())
+    });
+    assert!(background.changed().is_empty());
+    let mut changed = Vec::new();
+    for name in ["First.one", "Second.one"] {
+        let file = directory.path().join("Shared").join(name);
+        let bytes = onestore::read_file(&file).unwrap();
+        let space = notebook::session::stored_pages(&bytes).unwrap()[0].space;
+        let native = edited(&model_ops::page_of(&bytes, space), "Native ");
+        ops::save(&bytes, space, &native)
+            .unwrap()
+            .commit_file(&file)
+            .unwrap();
+        changed.push((name, space, native));
+    }
+    let mut noticed = Vec::new();
+    until("both changes were noticed", || {
+        noticed.extend(background.changed());
+        changed
+            .iter()
+            .all(|(name, ..)| noticed.iter().any(|path| path == name))
+    });
+    assert!(notified.load(Ordering::SeqCst) > 0);
+    drop(background);
+    let (_, space, native) = &changed[1];
+    let replica = notebook.replica_path("Second.one").unwrap();
+    let mut opened = None;
+    until("the background released the replica", || {
+        opened = notebook::Replica::open(&replica).ok();
+        opened.is_some()
+    });
+    assert_same(opened.unwrap().page(*space).unwrap(), native);
+}

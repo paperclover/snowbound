@@ -1,5 +1,5 @@
 //! The sync status at the top right, and the popup it opens: OneNote's Shared Notebook
-//! Synchronization for the open section.
+//! Synchronization for the open section's notebook and each of its sections.
 
 use crate::{Session, State, art, filetime, library, platform};
 use notebook::session::SyncStatus;
@@ -56,8 +56,71 @@ fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option
     }
 }
 
-pub(crate) fn label(sync: &SyncStatus) -> &'static str {
-    describe(sync).0
+/// Labels from the best state to the worst, which a notebook's status shows.
+const ORDER: [&str; 5] = [
+    "Up to date",
+    "Syncing…",
+    "Section in use",
+    "Not connected",
+    "Unable to sync",
+];
+
+fn rank(sync: &SyncStatus) -> usize {
+    let label = describe(sync).0;
+    ORDER.iter().position(|shown| *shown == label).unwrap_or(0)
+}
+
+/// Every section of the open section's notebook with its status, in catalog order: the
+/// open one's from its session, the others' from the notebook's background sync.
+fn sections(session: &Session) -> Vec<(String, SyncStatus)> {
+    let open = &session.tabs[session.tab].path;
+    let copy = |sync: &SyncStatus| SyncStatus {
+        synced: sync.synced,
+        error: sync
+            .error
+            .as_ref()
+            .map(|error| std::io::Error::new(error.kind(), error.to_string())),
+        queued: sync.queued,
+    };
+    let mut sections = session
+        .library
+        .background
+        .as_ref()
+        .map(|background| background.status())
+        .unwrap_or_default();
+    match sections.iter_mut().find(|(path, _)| path == open) {
+        Some((_, sync)) => *sync = copy(&session.sync),
+        None => sections.insert(0, (open.clone(), copy(&session.sync))),
+    }
+    sections
+}
+
+/// The notebook as a whole: the worst section's error, every waiting change, and the
+/// oldest last sync.
+fn overall(sections: &[(String, SyncStatus)]) -> SyncStatus {
+    let worst = sections
+        .iter()
+        .map(|(_, sync)| sync)
+        .filter(|sync| sync.error.is_some())
+        .max_by_key(|sync| rank(sync));
+    SyncStatus {
+        synced: sections
+            .iter()
+            .map(|(_, sync)| sync.synced)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|times| times.into_iter().min()),
+        error: worst
+            .and_then(|sync| sync.error.as_ref())
+            .map(|error| std::io::Error::new(error.kind(), error.to_string())),
+        queued: sections.iter().map(|(_, sync)| sync.queued).sum(),
+    }
+}
+
+fn changes(count: u64) -> String {
+    match count {
+        1 => "1 change".to_owned(),
+        count => format!("{count} changes"),
+    }
 }
 
 /// A FILETIME as OneNote's "Last sync": the time, and the date too before today.
@@ -73,8 +136,9 @@ fn when(time: u64) -> String {
 
 /// The status's icon in the toolbar, named in its tooltip, which opens the popup.
 pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme) {
-    let strong = ui.popup_open(id()) || session.sync.error.is_some() && !library::offline();
-    let (label, icon, _) = describe(&session.sync);
+    let sync = overall(&sections(session));
+    let strong = ui.popup_open(id()) || sync.error.is_some() && !library::offline();
+    let (label, icon, _) = describe(&sync);
     ui.open_as(
         button(),
         Spec {
@@ -102,7 +166,7 @@ pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme) {
 impl State {
     /// Builds the sync status popup while it is open.
     pub(crate) fn sync_popup(&mut self) -> Result<(), Box<dyn Error>> {
-        let ui = &mut self.ui;
+        let (ui, notebooks) = (&mut self.ui, &self.notebooks);
         let Some(session) = &mut self.session else {
             ui.close_popup(id());
             return Ok(());
@@ -114,7 +178,9 @@ impl State {
         session.sync = session.section.sync_status()?;
         let theme = ui.theme.clone();
         let offline = library::offline();
-        let (progress, _, advice) = describe(&session.sync);
+        let sections = sections(session);
+        let sync = overall(&sections);
+        let (progress, _, advice) = describe(&sync);
         ui.open_as(
             id(),
             Spec {
@@ -177,23 +243,54 @@ impl State {
         row(ui, "Notebook", &session.library.name);
         row(ui, "Location", &session.library.location);
         row(ui, "Connection", &session.library.transport());
-        row(ui, "Section", &session.tabs[session.tab].name);
         row(ui, "Progress", progress);
-        if let Some(synced) = session.sync.synced {
+        if let Some(synced) = sync.synced {
             row(ui, "Last sync", &when(synced));
         }
-        if session.sync.queued > 0 {
-            let queued = match session.sync.queued {
-                1 => "1 change".to_owned(),
-                count => format!("{count} changes"),
-            };
-            row(ui, "Not yet synced", &queued);
+        if sync.queued > 0 {
+            row(ui, "Not yet synced", &changes(sync.queued));
         }
         if let Some(advice) = advice {
             text(ui, "advice", advice, theme.text, false);
         }
-        if let Some(error) = &session.sync.error {
-            text(ui, "error", &error.to_string(), theme.text_dim, false);
+        text(ui, "sections", "Sections", theme.text, true);
+        for (index, (path, sync)) in sections.iter().enumerate() {
+            ui.open(
+                format!("section-{index}"),
+                Spec {
+                    size: [fill(), children()],
+                    gap: 8.0,
+                    ..Spec::default()
+                },
+            );
+            let name = path.strip_suffix(".one").unwrap_or(path);
+            ui.leaf(
+                "name",
+                Spec {
+                    size: [fill(), px(theme.font_size * 1.6)],
+                    text: Some(name),
+                    overflow: Overflow::Ellipsis,
+                    ..Spec::default()
+                },
+            );
+            let status = match sync.queued {
+                0 => describe(sync).0.to_owned(),
+                queued => format!("{}, {}", describe(sync).0, changes(queued)),
+            };
+            ui.leaf(
+                "status",
+                Spec {
+                    size: [fit(), px(theme.font_size * 1.6)],
+                    text: Some(&status),
+                    color: Some(theme.text_dim),
+                    ..Spec::default()
+                },
+            );
+            ui.close();
+            if let Some(error) = &sync.error {
+                let part = format!("section-{index}-error");
+                text(ui, &part, &error.to_string(), theme.text_dim, false);
+            }
         }
         if let Some(notice) = &session.library.notice {
             let notice = format!("Snowbound’s SMB client couldn’t sign in: {notice}");
@@ -239,12 +336,16 @@ impl State {
         let now = ui::button(ui, "sync-now", "Sync Now").clicked;
         ui.close();
         ui.close();
+        let backgrounds = notebooks
+            .iter()
+            .filter_map(|library| library.background.as_ref());
         if toggled {
             library::set_offline(!offline);
             session.section.set_offline(!offline);
-        }
-        if now {
+            backgrounds.for_each(|background| background.set_offline(!offline));
+        } else if now {
             session.section.wake();
+            backgrounds.for_each(|background| background.wake());
         }
         if let Some(file) = file.filter(|_| show) {
             platform::show_file(&file);

@@ -1,20 +1,21 @@
 use super::Client;
 use crate::Remote;
 use onestore::{CommitError, Stamp, Transaction};
-use std::io;
+use std::{io, sync::Arc};
 
 /// Binds every reconciliation operation to one share-relative file and read limit.
 /// Connection loss retires the client; reconnect before subsequent sync attempts.
 pub struct SmbRemote {
-    client: Client,
+    client: Arc<Client>,
     path: String,
     limit: usize,
 }
 
 impl SmbRemote {
-    pub fn new(client: Client, path: impl Into<String>, limit: usize) -> Self {
+    /// A client shared between remotes serves each of their files over one connection.
+    pub fn new(client: impl Into<Arc<Client>>, path: impl Into<String>, limit: usize) -> Self {
         Self {
-            client,
+            client: client.into(),
             path: path.into(),
             limit,
         }

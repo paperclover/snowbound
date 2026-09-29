@@ -1,17 +1,17 @@
 //! Open notebooks: where each lives and the sections its tabs offer.
 
 use notebook::discover::{Folder, SectionState};
-use notebook::session::{Notebook, Section};
+use notebook::session::{Background, Notebook, Section};
 use notebook::smb::{Client, Credentials};
 use std::{
     error::Error,
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// OneNote's Work Offline, which like OneNote's holds for every notebook.
@@ -24,6 +24,23 @@ pub fn offline() -> bool {
 /// Works offline or online again; sections opened from now on follow.
 pub fn set_offline(offline: bool) {
     OFFLINE.store(offline, Ordering::Relaxed);
+}
+
+/// Wakes the app when a notebook's closed sections report, once set.
+static NOTIFY: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+pub fn on_background(notify: impl Fn() + Send + Sync + 'static) {
+    let _ = NOTIFY.set(Box::new(notify));
+}
+
+/// How often the sections no tab shows are polled; OneNote 2010 read a closed section
+/// fifteen seconds after another client changed it.
+const BACKGROUND: Duration = Duration::from_secs(15);
+
+fn notify_background() {
+    if let Some(notify) = NOTIFY.get() {
+        notify();
+    }
 }
 
 /// How long an SMB request may take before the share counts as unreachable.
@@ -151,6 +168,9 @@ pub struct Library {
     /// Why a notebook on a mounted SMB share opened through the mount instead.
     pub notice: Option<String>,
     cache: PathBuf,
+    /// Syncs the notebook's sections while no tab shows them, as OneNote syncs every
+    /// section of an open notebook.
+    pub background: Option<Arc<Background>>,
 }
 
 impl Library {
@@ -171,12 +191,12 @@ impl Library {
                 }
             }
         }
+        let notebook = Notebook::open(location, cache);
         Self {
             location: location.to_owned(),
             name: file_name(Path::new(location)),
-            notebook: Notebook::open(location, cache)
-                .map(Some)
-                .map_err(|error| error.to_string()),
+            background: notebook.as_ref().ok().and_then(local_background),
+            notebook: notebook.map(Some).map_err(|error| error.to_string()),
             server: None,
             notice,
             cache: cache.to_owned(),
@@ -195,6 +215,17 @@ impl Library {
         let client = server.connect().map_err(|error| error.to_string())?;
         let notebook = Notebook::open_smb(Arc::new(client), &server.mount.root, cache)
             .map_err(|error| error.to_string())?;
+        let connect = Arc::clone(&server);
+        let background = Background::smb(
+            &server.mount.root,
+            LIMIT,
+            BACKGROUND,
+            move || connect.connect(),
+            notify_background,
+        )
+        .map_err(|error| error.to_string())?;
+        background.set_offline(offline());
+        background.watch(notebook.replicas());
         Ok(Self {
             location: location.to_owned(),
             name: file_name(Path::new(location)),
@@ -202,6 +233,7 @@ impl Library {
             server: Some(server),
             notice: None,
             cache: cache.to_owned(),
+            background: Some(Arc::new(background)),
         })
     }
 
@@ -217,6 +249,9 @@ impl Library {
 
     /// This notebook as `notebook`, read again after a change.
     pub fn with(&self, notebook: Notebook) -> Self {
+        if let Some(background) = &self.background {
+            background.watch(notebook.replicas());
+        }
         Self {
             location: self.location.clone(),
             name: self.name.clone(),
@@ -224,6 +259,7 @@ impl Library {
             server: self.server.clone(),
             notice: self.notice.clone(),
             cache: self.cache.clone(),
+            background: self.background.clone(),
         }
     }
 
@@ -232,6 +268,7 @@ impl Library {
         Self {
             location: location.to_owned(),
             name: file_name(Path::new(location)),
+            background: local_background(&notebook),
             notebook: Ok(Some(notebook)),
             server: None,
             notice: None,
@@ -248,6 +285,7 @@ impl Library {
             server: None,
             notice: None,
             cache: cache.to_owned(),
+            background: None,
         }
     }
 
@@ -258,31 +296,50 @@ impl Library {
         path: &str,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Section, Box<dyn Error>> {
-        let section = match (&self.notebook, &self.server) {
-            (Ok(Some(notebook)), Some(server)) => {
-                let identity = self
-                    .catalog_section(notebook.catalog(), path)
-                    .ok_or("The notebook doesn’t list this section")?;
-                let file = match server.mount.root.as_str() {
-                    "" => path.to_owned(),
-                    root => format!("{root}/{path}"),
-                };
-                let cache = self.cache.join("smb").join(format!("{identity}.sqlite"));
-                std::fs::create_dir_all(self.cache.join("smb"))?;
-                let replica = if cache.exists() {
-                    notebook::Replica::open(&cache)?
-                } else {
-                    notebook::Replica::create(
-                        &cache,
-                        &server.connect()?.read_storage(&file, LIMIT)?,
-                    )?
-                };
-                let server = Arc::clone(server);
-                Section::resume_smb(file, replica, LIMIT, move || server.connect(), notify)?
+        // The background may hold the replica for a step, which takes a network round trip.
+        let deadline = Instant::now() + TIMEOUT * 3;
+        let notify = Arc::new(Mutex::new(notify));
+        let notifier = || {
+            let notify = Arc::clone(&notify);
+            move || {
+                if let Ok(notify) = notify.lock() {
+                    notify();
+                }
             }
-            (Ok(Some(notebook)), None) => notebook.section(path, notify)?,
-            (Ok(None), _) => Section::open(path, &self.cache, notify)?,
-            (Err(error), _) => return Err(error.clone().into()),
+        };
+        let section = loop {
+            let opened = match (&self.notebook, &self.server) {
+                (Ok(Some(notebook)), Some(server)) => {
+                    let file = match server.mount.root.as_str() {
+                        "" => path.to_owned(),
+                        root => format!("{root}/{path}"),
+                    };
+                    let cache = notebook.replica_path(path)?;
+                    std::fs::create_dir_all(self.cache.join("smb"))?;
+                    let replica = if cache.exists() {
+                        notebook::Replica::open(&cache)
+                    } else {
+                        notebook::Replica::create(
+                            &cache,
+                            &server.connect()?.read_storage(&file, LIMIT)?,
+                        )
+                    };
+                    replica.and_then(|replica| {
+                        let server = Arc::clone(server);
+                        let connect = move || server.connect();
+                        Section::resume_smb(file, replica, LIMIT, connect, notifier())
+                    })
+                }
+                (Ok(Some(notebook)), None) => notebook.section(path, notifier()),
+                (Ok(None), _) => Section::open(path, &self.cache, notifier()),
+                (Err(error), _) => return Err(error.clone().into()),
+            };
+            match opened {
+                Err(error) if error.busy() && Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                opened => break opened?,
+            }
         };
         section.set_offline(offline());
         Ok(section)
@@ -309,24 +366,6 @@ impl Library {
             (None, Some(_)) => "The system’s mount of the share".to_owned(),
             (None, None) => "Folder on this computer".to_owned(),
         }
-    }
-
-    /// The file identity, in hex, of the section at catalog `path`.
-    fn catalog_section(&self, catalog: &Folder, path: &str) -> Option<String> {
-        let mut folders = vec![catalog];
-        while let Some(folder) = folders.pop() {
-            if let Some(section) = folder.sections.iter().find(|section| section.path == path) {
-                return Some(
-                    section
-                        .file_id
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                );
-            }
-            folders.extend(&folder.groups);
-        }
-        None
     }
 
     /// Names the section at catalog `path` across every open notebook, for remembering
@@ -405,6 +444,17 @@ impl Library {
 /// Whether the folder at `path` is the notebook's recycle bin, which OneNote keeps out of its lists.
 pub fn recycle_bin(path: &str) -> bool {
     path.rsplit('/').next() == Some("OneNote_RecycleBin")
+}
+
+/// A mounted notebook's background sync, following Work Offline.
+fn local_background(notebook: &Notebook) -> Option<Arc<Background>> {
+    let background = notebook
+        .background(BACKGROUND, notify_background)
+        .inspect_err(|error| eprintln!("Background sync did not start: {error}"))
+        .ok()?;
+    background.set_offline(offline());
+    background.watch(notebook.replicas());
+    Some(Arc::new(background))
 }
 
 pub fn file_name(path: &Path) -> String {
@@ -617,6 +667,7 @@ mod tests {
             })),
             notice: None,
             cache: PathBuf::new(),
+            background: None,
         };
         let shown = |root, file| library(root).local(Path::new(file));
         let under = Some(PathBuf::from("/Volumes/agent/lab/Group/New Section 1.one"));

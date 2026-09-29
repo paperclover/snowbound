@@ -662,6 +662,10 @@ impl State {
         }
         let layouts = Arc::new(Mutex::new(engine.clone()));
         let temporary = matches!(input, Input::Notes { .. } | Input::Page(_));
+        let background = proxy.clone();
+        library::on_background(move || {
+            let _ = background.send_event(UserEvent::Sync);
+        });
         let mut notebooks = Vec::new();
         let mut session = None;
         let mut sectionless = None;
@@ -2429,7 +2433,19 @@ impl State {
                     Some(library) => *library = Arc::clone(&session.library),
                     None => self.notebooks.push(Arc::clone(&session.library)),
                 }
-                self.session = Some(*session);
+                // The notebook's background sync takes the section over once it is closed.
+                if let Some(previous) = self.session.replace(*session) {
+                    let background = previous.library.background.clone();
+                    let section = previous.section;
+                    std::thread::spawn(move || {
+                        if let Err(error) = section.close() {
+                            eprintln!("Synchronization stopped: {error}");
+                        }
+                        if let Some(background) = background {
+                            background.wake();
+                        }
+                    });
+                }
                 self.sectionless = None;
                 if other_notebook {
                     self.save_settings();
@@ -2769,12 +2785,24 @@ impl State {
         Ok(())
     }
 
-    /// Applies what the section reported since the last poll.
+    /// Applies what the section, and each notebook's closed sections, reported since the
+    /// last poll.
     fn synced(&mut self) -> Result<(), Box<dyn Error>> {
+        // Every notebook's changes are taken, so none is reported again.
+        let noticed = self
+            .notebooks
+            .iter()
+            .filter_map(|library| library.background.as_ref())
+            .filter(|background| !background.changed().is_empty())
+            .count();
+        if noticed > 0 {
+            self.sync_index(true);
+        }
+        // Reports are rare: a status changed, or a section did.
+        self.window.request_redraw();
         let Some(session) = &mut self.session else {
             return Ok(());
         };
-        let shown = sync::label(&session.sync);
         let mut listed = false;
         let mut changed = false;
         let mut rejected = None;
@@ -2802,9 +2830,6 @@ impl State {
             }
         }
         session.sync = session.section.sync_status()?;
-        if listed || changed || shown != sync::label(&session.sync) {
-            self.window.request_redraw();
-        }
         if listed {
             let back = session.shown;
             session.pages = session.section.pages()?;

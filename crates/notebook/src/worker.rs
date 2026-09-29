@@ -12,16 +12,28 @@ use std::{
 };
 
 pub(super) struct Signal {
-    stopped: AtomicBool,
-    offline: AtomicBool,
+    pub(crate) stopped: AtomicBool,
+    pub(crate) offline: AtomicBool,
     /// FILETIME of the last step or poll that reached the remote; 0 before one has.
     synced: AtomicU64,
-    /// Asked for by `SyncWorker::wake`: steps run while offline until one leaves nothing to do.
-    requested: AtomicBool,
+    /// Asked for by `wake`: steps run while offline until one leaves nothing to do.
+    pub(crate) requested: AtomicBool,
     sender: SyncSender<()>,
 }
 
 impl Signal {
+    pub(crate) fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let signal = Self {
+            stopped: AtomicBool::new(false),
+            offline: AtomicBool::new(false),
+            synced: AtomicU64::new(0),
+            requested: AtomicBool::new(false),
+            sender,
+        };
+        (Arc::new(signal), receiver)
+    }
+
     pub(super) fn wake(&self) {
         // One retained notification covers edits that arrive during network I/O.
         let _ = self.sender.try_send(());
@@ -110,14 +122,7 @@ impl Replica {
         if owner.upgrade().is_some() {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let signal = Arc::new(Signal {
-            stopped: AtomicBool::new(false),
-            offline: AtomicBool::new(false),
-            synced: AtomicU64::new(0),
-            requested: AtomicBool::new(false),
-            sender,
-        });
+        let (signal, receiver) = Signal::new();
         let replica = Arc::clone(self);
         let worker_signal = Arc::clone(&signal);
         let thread = thread::Builder::new()

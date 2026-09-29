@@ -20,6 +20,7 @@ use std::{
 };
 
 mod assets;
+mod background;
 mod base;
 mod merge;
 mod migrate;
@@ -58,6 +59,14 @@ pub enum Error {
     #[cfg(feature = "protected")]
     #[error(transparent)]
     Protected(#[from] onestore::protected::Error),
+}
+
+impl Error {
+    /// Whether the replica is open elsewhere, as in another section session of this process.
+    pub fn busy(&self) -> bool {
+        matches!(self, Self::Database(rusqlite::Error::SqliteFailure(error, _))
+            if error.code == rusqlite::ErrorCode::DatabaseBusy)
+    }
 }
 
 type Result<T> = std::result::Result<T, Error>;
@@ -305,6 +314,21 @@ fn wake(worker: &Mutex<std::sync::Weak<worker::Signal>>) {
 fn validate(source: &[u8]) -> Result<ExGuid> {
     let arena = onestore::Arena::default();
     Ok(onestore::Section::open(&arena, source.to_vec())?.root())
+}
+
+/// A closed cache's base stamp and how many edits wait, without opening the replica.
+fn peek(path: &Path) -> Result<(onestore::Stamp, u64)> {
+    let connection = cache_connection(path)?;
+    let application: u32 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if application != APPLICATION_ID || version != schema::VERSION {
+        return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+    }
+    let base = base::stamp(&connection, base::Image::Base)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
+    let queued: i64 = connection.query_row("SELECT count(*) FROM edits", [], |row| row.get(0))?;
+    Ok((base, unsigned(queued)?))
 }
 
 fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {

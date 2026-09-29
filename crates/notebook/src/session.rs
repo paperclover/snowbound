@@ -1,6 +1,7 @@
 //! The application's view of a notebook: sections opened through a local replica that
 //! publishes their edits to the section file in the background.
 
+pub use crate::background::Background;
 use crate::{
     EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover,
 };
@@ -881,6 +882,61 @@ impl Notebook {
         Ok(())
     }
 
+    /// Where the replica of the section at catalog `path` lives: named by the section's
+    /// document identity in a mounted notebook (`Section::open`), by its file identity under
+    /// `smb` on a share. It exists once the section has been opened.
+    pub fn replica_path(&self, path: &str) -> Result<PathBuf> {
+        let section = self.section_path(path)?;
+        Ok(match &self.root {
+            Some(_) => {
+                let image = self.storage.read(&section.path)?;
+                let root = RevisionIndex::parse(&Store::parse(&image)?)?.root;
+                replica_file(&self.cache, &root.guid)
+            }
+            None => replica_file(&self.cache.join("smb"), &section.file_id),
+        })
+    }
+
+    /// Every readable section's catalog path and replica, for `Background::watch`.
+    pub fn replicas(&self) -> Vec<(String, Option<PathBuf>)> {
+        let mut sections = Vec::new();
+        let mut folders = vec![&self.catalog];
+        while let Some(folder) = folders.pop() {
+            for section in &folder.sections {
+                if matches!(section.state, discover::SectionState::Readable { .. }) {
+                    let replica = self.replica_path(&section.path).ok();
+                    sections.push((section.path.clone(), replica));
+                }
+            }
+            folders.extend(folder.groups.iter().rev());
+        }
+        sections
+    }
+
+    /// Keeps the sections of a mounted notebook in sync while they are not open
+    /// (`Background`), polling each file every `interval` once watched.
+    pub fn background(
+        &self,
+        interval: Duration,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Background> {
+        let Some(root) = self.root.clone() else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Sections on a share sync through Background::smb",
+            )
+            .into());
+        };
+        Background::start(
+            interval,
+            move || {
+                let root = root.clone();
+                Ok(move |path: &str| FileRemote(root.join(path)))
+            },
+            notify,
+        )
+    }
+
     /// Opens a section of a mounted notebook by its catalog path.
     pub fn section(&self, path: &str, notify: impl Fn() + Send + 'static) -> Result<Section> {
         self.section_with(path, |file| Ok(FileRemote(file.to_owned())), notify)
@@ -1010,6 +1066,21 @@ fn catalog_path(folder: &str, name: &str) -> String {
     }
 }
 
+/// The replica in `cache` of the section `identity` names.
+fn replica_file(cache: &Path, identity: &[u8; 16]) -> PathBuf {
+    let name: String = identity.iter().map(|byte| format!("{byte:02x}")).collect();
+    cache.join(format!("{name}.sqlite"))
+}
+
+/// Why a synchronization step did not reach the section file, as the host shows it.
+pub(crate) fn reached(error: &Error) -> io::Error {
+    match error {
+        Error::RemoteIo(error) => io::Error::new(error.kind(), error.to_string()),
+        Error::Remote(error) => io::Error::new(error.error.kind(), error.to_string()),
+        error => io::Error::other(error.to_string()),
+    }
+}
+
 /// What happened to the section since the last poll.
 #[derive(Debug)]
 pub enum Event {
@@ -1079,13 +1150,8 @@ impl Section {
         let source = connect(&file)?.read()?;
         let store = Store::parse(&source)?;
         let identity = RevisionIndex::parse(&store)?.root;
-        let name: String = identity
-            .guid
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
         std::fs::create_dir_all(&cache)?;
-        let cache = cache.as_ref().join(format!("{name}.sqlite"));
+        let cache = replica_file(cache.as_ref(), &identity.guid);
         let replica = if cache.exists() {
             Replica::open(&cache)?
         } else {
@@ -1149,11 +1215,7 @@ impl Section {
             let (sender, notify) = (sender.clone(), Arc::clone(&notify));
             let observed = Arc::clone(&observed);
             replica.start_sync(Duration::from_secs(2), connect, move |result| {
-                let error = result.as_ref().err().map(|error| match error {
-                    Error::RemoteIo(error) => io::Error::new(error.kind(), error.to_string()),
-                    Error::Remote(error) => io::Error::new(error.error.kind(), error.to_string()),
-                    error => io::Error::other(error.to_string()),
-                });
+                let error = result.as_ref().err().map(reached);
                 // Reaching the file as the last attempt did is no news to the host.
                 let mut changed = false;
                 if let Ok(mut observed) = observed.lock() {
