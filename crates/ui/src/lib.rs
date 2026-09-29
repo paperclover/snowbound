@@ -542,6 +542,8 @@ struct Popup {
     /// Its filter field's text, and the key of the row the keyboard or pointer last chose.
     query: String,
     highlight: Option<u64>,
+    /// A colour picker's hue in degrees, saturation and lightness, once it has one.
+    picked: Option<[f32; 3]>,
     /// The height its results ease from and to, and the seconds since they set out.
     height: Option<[f32; 3]>,
     opened: Instant,
@@ -1000,6 +1002,7 @@ impl Ui {
             focus: self.focus,
             query: String::new(),
             highlight: None,
+            picked: None,
             height: None,
             opened: self.now,
         });

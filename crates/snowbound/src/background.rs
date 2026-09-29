@@ -2,8 +2,9 @@
 //! lines.
 
 use crate::{
+    art,
     commands::Choice,
-    templates::{TILE, Thumbnails},
+    templates::{TILE, Thumbnails, View},
 };
 use canvas::{
     gpu::{Paper, colorref},
@@ -17,38 +18,84 @@ const SWATCH: [f32; 2] = [40.0, 32.0];
 const RULES: f32 = 40.0;
 /// Points of page per point of a rule-line thumbnail.
 const SHRINK: f32 = 4.0;
-/// The art offered after None.
-const ART: [&str; 5] = ["Ivy", "Purple Clouds", "Notebook", "Bamboo", "Blue Clouds"];
+/// The art offered between None and Show All.
+const ART: [&str; 7] = [
+    "Ivy",
+    "Purple Clouds",
+    "Notebook",
+    "Blue Clouds",
+    "Tulips",
+    "Bamboo",
+    "Sparks",
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum Cell {
+    /// A COLORREF, or none.
+    Color(Option<u32>),
+    Custom,
+    Art(Option<&'static str>),
+    ShowAll,
+    /// An index into `RULE_LINES`, or none.
+    Rules(Option<usize>),
+}
 
 /// Builds popup `id` beside `anchor` while it is open, for a page on `paper` (its own colour
-/// aside) coloured `color` and ruled with `rule_lines`. Returns the choice made.
+/// aside) coloured `color` and ruled with `rule_lines`, and the custom colour picker it
+/// opens. Show All opens every template's art over the page through `view`. Returns the
+/// choice made.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
     ui: &mut Ui,
     id: Id,
     anchor: Anchor,
     thumbnails: &mut Thumbnails,
+    view: &mut View,
     paper: Paper,
     color: Option<u32>,
     rule_lines: Option<RuleLines>,
 ) -> Option<Choice> {
-    let cells: Vec<Choice> = std::iter::once(Choice::PageColor(None))
-        .chain((0..PAGE_COLORS.len()).map(|index| Choice::PageColor(Some(index))))
-        .chain(std::iter::once(Choice::Art(None)))
-        .chain(ART.map(|name| Choice::Art(Some(name))))
-        .chain(std::iter::once(Choice::RuleLines(None)))
-        .chain((0..RULE_LINES.len()).map(|index| Choice::RuleLines(Some(index))))
+    let picker = id.child("custom");
+    // A pale blue to start from on a page without a colour.
+    let [red, green, blue, _] = color.unwrap_or(0x00f8eedd).to_le_bytes();
+    if let Some([red, green, blue]) = ui::popup::color_picker(
+        ui,
+        picker,
+        anchor,
+        "Custom Color",
+        [red, green, blue],
+        |[red, green, blue]| {
+            paper
+                .colored(Some(u32::from_le_bytes([red, green, blue, 0])))
+                .color
+        },
+    ) {
+        return Some(Choice::PageColor(Some(u32::from_le_bytes([
+            red, green, blue, 0,
+        ]))));
+    }
+    let custom = color.filter(|color| !PAGE_COLORS.iter().any(|(_, listed)| listed == color));
+    let cells: Vec<Cell> = std::iter::once(Cell::Color(None))
+        .chain(
+            PAGE_COLORS
+                .iter()
+                .map(|(_, color)| Cell::Color(Some(*color))),
+        )
+        .chain([Cell::Custom, Cell::Art(None)])
+        .chain(ART.map(|name| Cell::Art(Some(name))))
+        .chain([Cell::ShowAll, Cell::Rules(None)])
+        .chain((0..RULE_LINES.len()).map(|index| Cell::Rules(Some(index))))
         .collect();
     let groups = [
         ui::popup::Group {
             heading: "Page Color",
-            cells: 1 + PAGE_COLORS.len(),
+            cells: 2 + PAGE_COLORS.len(),
             columns: COLUMNS,
             size: SWATCH,
         },
         ui::popup::Group {
             heading: "Background",
-            cells: 1 + ART.len(),
+            cells: 2 + ART.len(),
             columns: 3,
             size: [TILE[0] + 8.0, TILE[1] + 8.0],
         },
@@ -60,13 +107,12 @@ pub fn menu(
         },
     ];
     let shown = [
-        Choice::PageColor(color.map(|color| {
-            PAGE_COLORS
-                .iter()
-                .position(|(_, listed)| *listed == color)
-                .unwrap_or(usize::MAX)
-        })),
-        Choice::RuleLines(rule_lines.map(|lines| {
+        if custom.is_some() {
+            Cell::Custom
+        } else {
+            Cell::Color(color)
+        },
+        Cell::Rules(rule_lines.map(|lines| {
             RULE_LINES
                 .iter()
                 .position(|(_, listed)| {
@@ -79,32 +125,33 @@ pub fn menu(
     ];
     let current: Vec<usize> = shown
         .iter()
-        .filter_map(|choice| cells.iter().position(|cell| cell == choice))
+        .filter_map(|shown| cells.iter().position(|cell| cell == shown))
         .collect();
     let theme = ui.theme.clone();
     let scale = ui.scale();
     let dark = paper.ink[0] > paper.color[0];
+    let label = |ui: &mut Ui, text: &str| {
+        ui.leaf(
+            "label",
+            Spec {
+                size: [fill(), fill()],
+                text: Some(text),
+                font_size: Some(theme.font_size - 2.0),
+                fill: Some(paper.color),
+                border: Some(theme.chip),
+                radius: 2.0,
+                center: true,
+                ..Spec::default()
+            },
+        );
+    };
     let chosen = ui::popup::gallery(ui, id, anchor, &groups, &current, |ui, index| {
         match cells[index] {
-            Choice::PageColor(None) | Choice::Art(None) | Choice::RuleLines(None) => {
+            Cell::Color(None) | Cell::Art(None) | Cell::Rules(None) => label(ui, "None"),
+            Cell::ShowAll => label(ui, "Show All…"),
+            Cell::Color(Some(color)) => {
                 ui.leaf(
-                    "none",
-                    Spec {
-                        size: [fill(), fill()],
-                        text: Some("None"),
-                        font_size: Some(theme.font_size - 2.0),
-                        fill: Some(paper.color),
-                        border: Some(theme.chip),
-                        radius: 2.0,
-                        center: true,
-                        ..Spec::default()
-                    },
-                );
-            }
-            Choice::PageColor(Some(index)) => {
-                let (name, color) = PAGE_COLORS[index];
-                ui.leaf(
-                    name,
+                    "swatch",
                     Spec {
                         size: [fill(), fill()],
                         fill: Some(paper.colored(Some(color)).color),
@@ -114,7 +161,35 @@ pub fn menu(
                     },
                 );
             }
-            Choice::Art(Some(name)) => {
+            // The rainbow, or the page's custom colour with the rainbow in its corner.
+            Cell::Custom => {
+                ui.open(
+                    "custom",
+                    Spec {
+                        size: [fill(), fill()],
+                        fill: custom.map(|color| paper.colored(Some(color)).color),
+                        border: custom.map(|_| theme.chip),
+                        radius: 2.0,
+                        icon: custom.is_none().then_some(art::CUSTOM_COLOR),
+                        center: true,
+                        ..Spec::default()
+                    },
+                );
+                if custom.is_some() {
+                    ui.leaf(
+                        "rainbow",
+                        Spec {
+                            flags: Flags::FLOAT,
+                            size: [px(12.0), px(12.0)],
+                            position: [SWATCH[0] - 22.0, SWATCH[1] - 22.0],
+                            icon: Some(art::CUSTOM_COLOR),
+                            ..Spec::default()
+                        },
+                    );
+                }
+                ui.close();
+            }
+            Cell::Art(Some(name)) => {
                 ui.open(
                     name,
                     Spec {
@@ -143,11 +218,22 @@ pub fn menu(
                 }
                 ui.close();
             }
-            Choice::RuleLines(Some(index)) => rule_thumbnail(ui, paper, RULE_LINES[index]),
-            _ => unreachable!("The menu offers colours, art and rule lines"),
+            Cell::Rules(Some(index)) => rule_thumbnail(ui, paper, RULE_LINES[index]),
         }
     })?;
-    Some(cells[chosen].clone())
+    match cells[chosen] {
+        Cell::Color(color) => Some(Choice::PageColor(color)),
+        Cell::Custom => {
+            ui.open_popup(picker);
+            None
+        }
+        Cell::Art(name) => Some(Choice::Art(name)),
+        Cell::ShowAll => {
+            *view = View::Art;
+            None
+        }
+        Cell::Rules(index) => Some(Choice::RuleLines(index)),
+    }
 }
 
 /// A corner of a page ruled with `lines`, drawn a quarter size.

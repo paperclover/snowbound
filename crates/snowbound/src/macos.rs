@@ -254,9 +254,10 @@ unsafe extern "C" fn hit_nothing(_: &AnyObject, _: Sel, _: NSPoint) -> *mut AnyO
 /// through it to the view it lies in.
 pub fn install_backdrop(window: &Window) -> bool {
     MainThreadMarker::new().expect("Views belong to the main thread");
-    // Before 10.10 AppKit has no materials; 10.6's textured window stands in.
+    // Before 10.10 AppKit has no materials; 10.6's textured window stands in, its gradient
+    // running through the toolbar and the tab row to the notebook's frame.
     let Some(effect) = AnyClass::get("NSVisualEffectView") else {
-        return crate::aqua::textured(window, crate::TITLE);
+        return crate::aqua::textured(window, crate::TITLE + crate::TAB_ROW);
     };
     let RawWindowHandle::AppKit(handle) =
         window.window_handle().expect("Live AppKit window").as_raw()

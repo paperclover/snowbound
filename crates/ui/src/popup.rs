@@ -814,6 +814,227 @@ pub fn gallery(
     None
 }
 
+/// A colour picker's hue and lightness field, and its saturation bar beneath.
+const FIELD: [f32; 2] = [256.0, 128.0];
+const BAR: f32 = 14.0;
+/// Columns the field is drawn in, each a gradient from white to the hue and to black.
+const HUES: usize = 64;
+
+/// Builds popup `id` beside `anchor` while it is open as a colour picker titled `title`,
+/// starting from `initial`, sRGB: hue across a field drawn fully saturated, lightness down
+/// it, saturation along a bar, and a preview of the colour as `preview` shows it, linear
+/// RGBA. Returns the colour applied.
+pub fn color_picker(
+    ui: &mut Ui,
+    id: Id,
+    anchor: Anchor,
+    title: &str,
+    initial: [u8; 3],
+    preview: impl Fn([u8; 3]) -> [f32; 4],
+) -> Option<[u8; 3]> {
+    if !ui.popup_open(id) {
+        return None;
+    }
+    let [field, bar] = ["field", "saturation"].map(|part| id.child(part));
+    let apply = id.child("footer").child("apply");
+    let mut picked = state(ui, id).picked.unwrap_or_else(|| to_hsl(initial));
+    let pointer = ui.pointer();
+    let along = |ui: &Ui, part: Id| {
+        let [left, top, right, bottom] = ui.rect(part)?;
+        let [x, y] = pointer?;
+        Some([
+            ((x - left) / (right - left)).clamp(0.0, 1.0),
+            ((y - top) / (bottom - top)).clamp(0.0, 1.0),
+        ])
+    };
+    let held = |ui: &mut Ui, part: Id| {
+        let signal = ui.signal(part);
+        signal.pressed || signal.dragging
+    };
+    if held(ui, field)
+        && let Some([x, y]) = along(ui, field)
+    {
+        picked[0] = x * 360.0;
+        picked[2] = 1.0 - y;
+    }
+    if held(ui, bar)
+        && let Some([x, _]) = along(ui, bar)
+    {
+        picked[1] = x;
+    }
+    let keys = navigation(ui, &[id], &[NamedKey::Enter]);
+    state(ui, id).picked = Some(picked);
+    let rgb = from_hsl(picked);
+    if ui.signal(apply).clicked || !keys.is_empty() {
+        ui.close_popup(id);
+        return Some(rgb);
+    }
+
+    let theme = ui.theme.clone();
+    surface(ui, id, anchor, FIELD[0] + 2.0 * ui.theme.menu().pad);
+    let color = |hsl| {
+        let [red, green, blue] = from_hsl(hsl);
+        draw::srgb(red, green, blue)
+    };
+    let [hue, saturation, lightness] = picked;
+    ui.leaf(
+        "heading",
+        Spec {
+            size: [fill(), px(MENU_ROW)],
+            text: Some(title),
+            font_size: Some(theme.font_size - 2.0),
+            bold: true,
+            color: Some(theme.text_dim),
+            pad: [PAD, 0.0],
+            ..Spec::default()
+        },
+    );
+    ui.open_as(
+        field,
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [px(FIELD[0]), px(FIELD[1])],
+            ..Spec::default()
+        },
+    );
+    let column = FIELD[0] / HUES as f32;
+    for index in 0..HUES {
+        let shade = (index as f32 + 0.5) / HUES as f32 * 360.0;
+        for (half, [top, bottom]) in [[1.0, 0.5], [0.5, 0.0]].into_iter().enumerate() {
+            ui.leaf(
+                (index, half),
+                Spec {
+                    flags: Flags::FLOAT,
+                    position: [index as f32 * column, half as f32 * FIELD[1] / 2.0],
+                    size: [px(column + 0.5), px(FIELD[1] / 2.0)],
+                    fill: Some(color([shade, 1.0, top])),
+                    gradient: Some(color([shade, 1.0, bottom])),
+                    ..Spec::default()
+                },
+            );
+        }
+    }
+    // A white ring inside a dark one, seen on any colour.
+    let ring = |ui: &mut Ui, part: &str, at: [f32; 2]| {
+        for (index, (radius, color)) in [(6.0, [0.0, 0.0, 0.0, 0.6]), (5.0, [1.0; 4])]
+            .into_iter()
+            .enumerate()
+        {
+            ui.leaf(
+                (part, index),
+                Spec {
+                    flags: Flags::FLOAT,
+                    position: [at[0] - radius, at[1] - radius],
+                    size: [px(2.0 * radius), px(2.0 * radius)],
+                    border: Some(color),
+                    radius,
+                    ..Spec::default()
+                },
+            );
+        }
+    };
+    ring(
+        ui,
+        "ring",
+        [hue / 360.0 * FIELD[0], (1.0 - lightness) * FIELD[1]],
+    );
+    ui.close();
+    ui.open_as(
+        bar,
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [px(FIELD[0]), px(BAR)],
+            radius: 2.0,
+            ..Spec::default()
+        },
+    );
+    let steps = 32;
+    let step = FIELD[0] / steps as f32;
+    for index in 0..steps {
+        ui.leaf(
+            index,
+            Spec {
+                flags: Flags::FLOAT,
+                position: [index as f32 * step, 0.0],
+                size: [px(step + 0.5), px(BAR)],
+                fill: Some(color([hue, index as f32 / (steps - 1) as f32, lightness])),
+                ..Spec::default()
+            },
+        );
+    }
+    ring(ui, "ring", [saturation * FIELD[0], BAR / 2.0]);
+    ui.close();
+    ui.open(
+        "footer",
+        Spec {
+            size: [fill(), px(ROW)],
+            gap: 8.0,
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "preview",
+        Spec {
+            size: [px(2.0 * ROW), px(ROW)],
+            fill: Some(preview(rgb)),
+            border: Some(theme.chip),
+            radius: 4.0,
+            ..Spec::default()
+        },
+    );
+    let [red, green, blue] = rgb;
+    let hex = format!("#{red:02X}{green:02X}{blue:02X}");
+    ui.leaf(
+        "hex",
+        Spec {
+            size: [fill(), px(ROW)],
+            text: Some(&hex),
+            color: Some(theme.text_dim),
+            ..Spec::default()
+        },
+    );
+    crate::button(ui, "apply", "Apply");
+    ui.close();
+    ui.close();
+    None
+}
+
+/// Hue in degrees, saturation and lightness of an sRGB colour.
+fn to_hsl(rgb: [u8; 3]) -> [f32; 3] {
+    let [red, green, blue] = rgb.map(|channel| f32::from(channel) / 255.0);
+    let (most, least) = (red.max(green).max(blue), red.min(green).min(blue));
+    let lightness = (most + least) / 2.0;
+    let chroma = most - least;
+    if chroma == 0.0 {
+        return [0.0, 0.0, lightness];
+    }
+    let saturation = chroma / (1.0 - (2.0 * lightness - 1.0).abs());
+    let sector = if most == red {
+        ((green - blue) / chroma).rem_euclid(6.0)
+    } else if most == green {
+        (blue - red) / chroma + 2.0
+    } else {
+        (red - green) / chroma + 4.0
+    };
+    [sector * 60.0, saturation, lightness]
+}
+
+fn from_hsl([hue, saturation, lightness]: [f32; 3]) -> [u8; 3] {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = (hue / 60.0).rem_euclid(6.0);
+    let second = chroma * (1.0 - (sector % 2.0 - 1.0).abs());
+    let [red, green, blue] = match sector as u32 {
+        0 => [chroma, second, 0.0],
+        1 => [second, chroma, 0.0],
+        2 => [0.0, chroma, second],
+        3 => [0.0, second, chroma],
+        4 => [second, 0.0, chroma],
+        _ => [chroma, 0.0, second],
+    };
+    let base = lightness - chroma / 2.0;
+    [red, green, blue].map(|channel| ((channel + base) * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
 /// Opens popup `id`'s panel `width` wide beside `anchor`; the caller closes it.
 fn surface(ui: &mut Ui, id: Id, anchor: Anchor, width: f32) {
     let style = ui.theme.menu();

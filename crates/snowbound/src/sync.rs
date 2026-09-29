@@ -71,47 +71,26 @@ fn when(time: u64) -> String {
     }
 }
 
-/// The status in the toolbar, which opens the popup: its label, or where `compact` its icon,
-/// naming it in a tooltip.
-pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme, compact: bool) {
+/// The status's icon in the toolbar, named in its tooltip, which opens the popup.
+pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme) {
     let strong = ui.popup_open(id()) || session.sync.error.is_some() && !library::offline();
     let (label, icon, _) = describe(&session.sync);
-    let spec = Spec {
-        flags: Flags::CLICKABLE,
-        color: Some(if strong { theme.text } else { theme.text_dim }),
-        hover_fill: Some(theme.hover()),
-        radius: 4.0,
-        center: true,
-        ..Spec::default()
-    };
-    // The popup opens from the label's box, which stands where the icon shows.
-    let shown = if compact {
-        button().child("icon")
-    } else {
-        button()
-    };
     ui.open_as(
-        shown,
-        if compact {
-            Spec {
-                size: [px(TOOL), px(TOOL)],
-                icon: Some(icon),
-                ..spec
-            }
-        } else {
-            Spec {
-                size: [fit(), px(TOOL)],
-                text: Some(label),
-                pad: [8.0, 0.0],
-                ..spec
-            }
+        button(),
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [px(TOOL), px(TOOL)],
+            icon: Some(icon),
+            color: Some(if strong { theme.text } else { theme.text_dim }),
+            hover_fill: Some(theme.hover()),
+            radius: 4.0,
+            center: true,
+            ..Spec::default()
         },
     );
     ui.close();
-    if compact {
-        ui::popup::tooltip(ui, label, "", None);
-    }
-    if ui.signal(shown).clicked {
+    ui::popup::tooltip(ui, label, "", None);
+    if ui.signal(button()).clicked {
         if ui.popup_open(id()) {
             ui.close_popup(id());
         } else {

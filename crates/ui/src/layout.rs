@@ -3,8 +3,8 @@ use std::collections::HashMap;
 
 /// Sizes each box on both axes, then places it: standalone sizes, sizes taken from
 /// ancestors (pre-order), sizes summed from children (post-order), overflow taken back
-/// (from space sized by ancestors, then by folding a row's groups, then from the least
-/// strict boxes first), and positions along each parent's flow. Labels too wide for their
+/// (by folding a row's groups for what space sized by ancestors can't give, then from that
+/// space, then from the least strict boxes first), and positions along each parent's flow. Labels too wide for their
 /// solved width wrap or shorten before heights are solved. Boxes are in build order, so
 /// index order is pre-order.
 pub(crate) fn solve(
@@ -75,10 +75,12 @@ pub(crate) fn solve(
             if along(node, axis) {
                 let space =
                     |child: &&usize| matches!(nodes[**child].size[axis].size, Size::Fraction(_));
-                let (space, sized): (Vec<_>, Vec<_>) = children.iter().partition(space);
+                let (space, sized): (Vec<usize>, Vec<_>) = children.iter().partition(space);
                 let mut excess = flow(nodes, index, axis) - room;
-                excess = give_back(nodes, &space, axis, excess);
-                while excess > 0.0 && axis == 0 {
+                // Groups fold only for what the space can't give, so the room a fold frees
+                // goes back to the space.
+                let spare: f32 = space.iter().map(|child| nodes[*child].computed[axis]).sum();
+                while excess > spare && axis == 0 {
                     let Some(group) = children
                         .iter()
                         .copied()
@@ -96,6 +98,7 @@ pub(crate) fn solve(
                     excess -= nodes[group].computed[0] - width;
                     nodes[group].computed[0] = width;
                 }
+                excess = give_back(nodes, &space, axis, excess);
                 let mut tiers: Vec<f32> = sized
                     .iter()
                     .map(|child| strictness(nodes, *child, axis))

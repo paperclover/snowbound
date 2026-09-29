@@ -68,11 +68,10 @@ use winit::{
 /// Height of the toolbar's row, which is the title bar where the platform lets it: a
 /// unified compact toolbar's on macOS.
 const TITLE: f32 = 38.0;
-/// Space between toolbar groups, and the toolbar's margin at an edge without window controls.
+/// Space between toolbar groups.
 const GAP: f32 = 6.0;
-const EDGE: f32 = 8.0;
 const TAB_ROW: f32 = 28.0;
-/// Width of the section colour around the page.
+/// Width of the section colour around the page, and the rows' margin at the window's sides.
 const FRAME: f32 = 6.0;
 const PAGE_LIST: f32 = 240.0;
 /// Extensions of the pictures Insert, Picture offers: those the page both stores and draws.
@@ -593,6 +592,11 @@ fn strip() -> Id {
     Id::ROOT.child("strip")
 }
 
+/// The section tabs' row, whose empty space drags the window as the strip's does.
+fn tab_row() -> Id {
+    Id::ROOT.child("tab row")
+}
+
 fn page() -> Id {
     Id::ROOT.child("page")
 }
@@ -1042,14 +1046,18 @@ impl State {
                 ..Spec::default()
             },
         );
-        let tabs = self.ui.id("tabs");
         let height = self
             .ui
-            .animate(tabs, if self.full_page { 0.0 } else { TAB_ROW });
-        let tab_row = self.ui.open(
-            "tabs",
+            .animate(tab_row(), if self.full_page { 0.0 } else { TAB_ROW });
+        let drags = self.chrome_drags();
+        let tab_row = self.ui.open_as(
+            tab_row(),
             Spec {
-                flags: Flags::CLIP,
+                flags: if drags {
+                    Flags::CLIP | Flags::CLICKABLE
+                } else {
+                    Flags::CLIP
+                },
                 size: [fill(), px(height)],
                 fill: Some(theme.strip),
                 pad: [FRAME, 0.0],
@@ -1387,6 +1395,12 @@ impl State {
         );
     }
 
+    /// Whether the chrome's empty space drags the window: where it is the title bar, or
+    /// over the title's gradient.
+    fn chrome_drags(&self) -> bool {
+        !platform::system_titlebar(&self.window) || self.surface.translucent()
+    }
+
     /// The toolbar: one row of groups that fold as the window narrows. Where the platform
     /// lets it, the row is the window's title bar, and on the welcome page, without `tools`,
     /// that is all it is.
@@ -1395,8 +1409,7 @@ impl State {
         if !tools && !title {
             return Ok(());
         }
-        // Over the title's gradient, the row's empty space drags the window as the title does.
-        let strip_row = title || self.surface.translucent();
+        let strip_row = self.chrome_drags();
         let spec = Spec {
             flags: if strip_row {
                 Flags::CLICKABLE
@@ -1414,7 +1427,7 @@ impl State {
         } else {
             self.ui.open("toolbar", spec);
         }
-        let lead = if title { platform::LEADING } else { EDGE };
+        let lead = if title { platform::LEADING } else { FRAME };
         self.ui.leaf(
             "lead",
             Spec {
@@ -1439,7 +1452,7 @@ impl State {
         self.ui.leaf(
             "trail",
             Spec {
-                size: [px(EDGE - GAP), px(1.0)],
+                size: [px(FRAME - GAP), px(1.0)],
                 ..Spec::default()
             },
         );
@@ -1662,7 +1675,7 @@ impl State {
         choice = group(
             ui,
             "character",
-            6,
+            5,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1757,7 +1770,7 @@ impl State {
         choice = group(
             ui,
             "paragraph",
-            5,
+            4,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1885,7 +1898,7 @@ impl State {
         choice = group(
             ui,
             "tags",
-            7,
+            6,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1950,17 +1963,7 @@ impl State {
             },
         );
         if let Some(session) = session {
-            ui.open(
-                "sync",
-                Spec {
-                    fold: Some(4),
-                    ..Spec::default()
-                },
-            );
-            for compact in [false, true] {
-                sync::control(ui, session, theme, compact);
-            }
-            ui.close();
+            sync::control(ui, session, theme);
         }
         // Spelling awaits a platform spell checker.
         let views = [
@@ -1991,9 +1994,11 @@ impl State {
                         toolbar_popup("page color"),
                         anchor,
                         &mut self.thumbnails,
+                        &mut self.templates,
+                        // The page's own colour aside.
                         canvas::gpu::Paper {
-                            color: theme.paper,
-                            ink: theme.paper_ink,
+                            color: ui.theme.paper,
+                            ink: ui.theme.paper_ink,
                         },
                         self.view.editor.page_color(),
                         self.view.editor.rule_lines(),
@@ -3111,7 +3116,7 @@ impl State {
             pressed: true,
             at,
         } = event
-            && self.ui.box_at(self.pointer) == Some(strip())
+            && matches!(self.ui.box_at(self.pointer), Some(id) if id == strip() || id == tab_row())
         {
             let double = self.strip_press.is_some_and(|last| {
                 at.saturating_duration_since(last) <= platform::double_click_interval()

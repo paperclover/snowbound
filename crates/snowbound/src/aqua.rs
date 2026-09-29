@@ -29,7 +29,7 @@ pub(crate) fn before_lion() -> bool {
 }
 
 /// Makes the window textured, AppKit's gradient running from the title through `row` points
-/// of content below it, as 10.6's unified toolbars do. Where frames are transparent it
+/// of content below it, as 10.6's unified toolbars run theirs. Where frames are transparent it
 /// shows through. Returns whether the system draws windows so, which only 10.6 does here.
 pub fn textured(window: &Window, row: f32) -> bool {
     if !before_lion() {

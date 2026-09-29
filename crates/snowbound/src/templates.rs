@@ -48,6 +48,8 @@ pub enum View {
     /// The strip with the page colours beneath it.
     Colors,
     Gallery,
+    /// Every template's art, from the Page Color menu, to lie behind the open page.
+    Art,
 }
 
 /// A thumbnail's art: each raster and where it lies in the tile.
@@ -199,7 +201,8 @@ fn strip(
     chosen
 }
 
-/// Every template, as a scrolling grid over the page box `size` big.
+/// Every template, or with `art` only their art, as a scrolling grid over the page box
+/// `size` big.
 fn gallery(
     ui: &mut Ui,
     theme: &Theme,
@@ -207,6 +210,7 @@ fn gallery(
     paper: Paper,
     dark: bool,
     size: [f32; 2],
+    art: bool,
 ) -> Option<Choice> {
     let mut chosen = None;
     let margin = 24.0;
@@ -236,7 +240,7 @@ fn gallery(
         "title",
         Spec {
             size: [fill(), px(24.0)],
-            text: Some("Page Templates"),
+            text: Some(if art { "Backgrounds" } else { "Page Templates" }),
             ..Spec::default()
         },
     );
@@ -264,7 +268,8 @@ fn gallery(
             PAGE_COLORS
                 .iter()
                 .enumerate()
-                .map(|(index, (name, _))| (Choice::Color(index), *name)),
+                .map(|(index, (name, _))| (Choice::Color(index), *name))
+                .filter(|_| !art),
         )
         .collect();
     for (row, choices) in choices.chunks(columns).enumerate() {
@@ -411,6 +416,9 @@ impl crate::State {
         let Some(session) = &self.session else {
             return;
         };
+        if self.templates == View::Art {
+            return self.art_gallery(theme);
+        }
         let space = session.space;
         let editor = &self.view.editor;
         let blank = editor
@@ -440,8 +448,17 @@ impl crate::State {
         let chosen = match self.templates {
             View::Gallery => {
                 let size = [rect[2] - rect[0], rect[3] - rect[1]];
-                gallery(&mut self.ui, theme, &mut self.thumbnails, paper, dark, size)
+                gallery(
+                    &mut self.ui,
+                    theme,
+                    &mut self.thumbnails,
+                    paper,
+                    dark,
+                    size,
+                    false,
+                )
             }
+            View::Art => unreachable!("The art gallery is built alone"),
             view => strip(
                 &mut self.ui,
                 theme,
@@ -473,6 +490,36 @@ impl crate::State {
                 self.commands.push(crate::Command::Template(choice));
             }
             None => {}
+        }
+    }
+
+    /// The Page Color menu's Show All: every template's art, one of which goes behind the
+    /// open page.
+    fn art_gallery(&mut self, theme: &Theme) {
+        let Some(rect) = self.ui.rect(crate::page()) else {
+            return;
+        };
+        let paper = Paper {
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
+        };
+        let dark = paper.ink[0] > paper.color[0];
+        let size = [rect[2] - rect[0], rect[3] - rect[1]];
+        match gallery(
+            &mut self.ui,
+            theme,
+            &mut self.thumbnails,
+            paper,
+            dark,
+            size,
+            true,
+        ) {
+            Some(Choice::Template(name)) => {
+                self.templates = View::Strip;
+                self.choose(crate::commands::Choice::Art(Some(name)));
+            }
+            Some(Choice::Dismiss) => self.templates = View::Strip,
+            _ => {}
         }
     }
 }

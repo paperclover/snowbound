@@ -55,6 +55,7 @@ pub const FORMAT_PAINTER: &[&str] = art!("icons/format-painter");
 pub const FORWARD: &[&str] = art!("icons/forward");
 pub const INSERT_SPACE: &[&str] = art!("icons/insert-space");
 pub const PAGE_COLOR: &[&str] = art!("icons/page-color");
+pub const CUSTOM_COLOR: &[&str] = art!("icons/custom-color");
 pub const PASTE: &[&str] = art!("icons/paste");
 pub const RECORD_AUDIO: &[&str] = art!("icons/record-audio");
 pub const RECORD_VIDEO: &[&str] = art!("icons/record-video");

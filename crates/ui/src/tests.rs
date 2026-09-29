@@ -209,7 +209,8 @@ fn a_row_squeezes_its_boxes_only_once_every_group_is_folded() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let rects = folding_row(&mut ui, 130.0, &[0, 1]);
     // 80 + 20 + 20 fits 130 with 10 to spare, taken by the space.
-    assert_eq!(rects[0], Some([0.0, 0.0, 80.0, 20.0]));
+    assert_eq!(rects[0], Some([10.0, 0.0, 90.0, 20.0]));
+    assert_eq!(rects[4], Some([110.0, 0.0, 130.0, 20.0]));
     let rects = folding_row(&mut ui, 100.0, &[0, 1]);
     assert_eq!(rects[0], Some([0.0, 0.0, 60.0, 20.0]));
     assert_eq!(rects[4], Some([80.0, 0.0, 100.0, 20.0]));
@@ -2515,4 +2516,30 @@ fn the_wheel_scrolls_overflowing_tabs_sideways_either_way_it_turns() {
     settle_tabs(&mut ui, 0);
     let back = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
     assert!((back - scrolled - 30.0).abs() < 0.5, "{scrolled} to {back}");
+}
+
+#[test]
+fn a_colour_picker_applies_its_colour_and_keeps_it_through_hsl() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let picker = Id::ROOT.child("picker");
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            chosen = popup::color_picker(
+                ui,
+                picker,
+                BELOW,
+                "Custom Color",
+                [0xd4, 0xf9, 0xf2],
+                |_| [1.0; 4],
+            );
+        });
+        chosen
+    };
+    build(&mut ui);
+    ui.open_popup(picker);
+    assert_eq!(build(&mut ui), None);
+    ui.event(key(NamedKey::Enter));
+    assert_eq!(build(&mut ui), Some([0xd4, 0xf9, 0xf2]));
+    assert!(!ui.popup_open(picker));
 }

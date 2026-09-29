@@ -82,8 +82,8 @@ pub enum Choice {
     List(Option<ListStyle>),
     /// An empty table of rows by columns.
     Table([usize; 2]),
-    /// An index into `PAGE_COLORS`, or `None` for no colour.
-    PageColor(Option<usize>),
+    /// A page colour, COLORREF, or `None` for no colour.
+    PageColor(Option<u32>),
     /// An index into `RULE_LINES`, or `None` for none.
     RuleLines(Option<usize>),
     /// A template whose art becomes the page's background, or `None` for none.
@@ -815,7 +815,6 @@ impl State {
                 return Ok(());
             }
             Choice::PageColor(color) => {
-                let color = color.map(|index| canvas::template::PAGE_COLORS[index].1);
                 return self.paper_page(color, self.view.editor.rule_lines());
             }
             Choice::Art(name) => {
