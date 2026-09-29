@@ -694,7 +694,11 @@ pub(crate) fn equation_changes(
     let all_math = text.spans().iter().all(|s| s.format.math == Some(true));
     for span in text.spans() {
         ends.extend(text.utf16_offset(span.end)?.to_le_bytes());
-        styles.push(style_values(&span.format));
+        // A run style states its language (MS-ONE 2.2.43), so the text object's never shows
+        // through; an unset one is the writer's insertion language.
+        let mut format = span.format.clone();
+        format.language.get_or_insert(0x409);
+        styles.push(style_values(&format));
         sets.push(match &span.format.math_object {
             Some(object) => {
                 let mut set = vec![(0x1400344f, object.kind.to_le_bytes().to_vec())];

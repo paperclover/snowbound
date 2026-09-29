@@ -2982,6 +2982,11 @@ impl State {
     fn draw(&mut self) -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
         if let Some(path) = self.snapshot.take() {
+            // A hidden window never paints, so nothing polls the pictures between snapshots.
+            let paper = self.paper();
+            if let Some((scene, _)) = &mut self.view.scene {
+                scene.settle(Some(&self.view.editor), self.view.viewport.scale, paper);
+            }
             self.snapshot(&path)?;
         }
         if let Some((dir, opened)) = &self.frames {

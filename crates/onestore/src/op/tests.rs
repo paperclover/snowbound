@@ -1561,7 +1561,7 @@ fn random_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
             space_before: Some(4.5),
             space_after: None,
             line_spacing: None,
-            language: None,
+            language: rng.coin().then_some(0x40c),
         },
         10 => {
             let right = texts
@@ -2974,4 +2974,130 @@ fn an_unset_language_is_not_paragraph_formatting() {
         fields(Paragraph::new("Frais".into(), language(Some(0x40c)))),
         Some(0x40c)
     );
+}
+
+/// A paragraph given a language, then an equation whose runs name none: the model predicts
+/// what the section stores.
+#[test]
+fn runs_written_after_a_paragraph_language_read_as_predicted() {
+    let (_, source) = SOURCES[1];
+    let space = pages(source)[0];
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.to_vec()).unwrap();
+    let before = section.page(space).unwrap();
+    let paragraph = model::lists(&before)
+        .into_iter()
+        .flat_map(|(_, _, list)| list.iter())
+        .find(|paragraph| {
+            paragraph
+                .text()
+                .is_some_and(|text| !text.text.text().is_empty())
+        })
+        .unwrap()
+        .clone();
+    let text = paragraph.text().unwrap().id;
+    let math = Format {
+        math: Some(true),
+        ..Default::default()
+    };
+    let ops = [
+        PageOp::Paragraph {
+            paragraph: paragraph.id,
+            alignment: None,
+            rtl: None,
+            space_before: None,
+            space_after: None,
+            line_spacing: None,
+            language: Some(0x40c),
+        },
+        PageOp::Equation {
+            text,
+            math: Paragraph::new("x".into(), math),
+        },
+    ];
+    let mut predicted = before;
+    for op in ops {
+        model::apply(&mut predicted, &op).unwrap();
+        section
+            .apply(
+                "Author",
+                &Edit {
+                    at: AT,
+                    ops: vec![Op::Page { space, op }],
+                },
+            )
+            .unwrap();
+        let stored = section.page(space).unwrap();
+        assert_eq!(
+            normalize(&predicted),
+            normalize(&stored),
+            "{}",
+            first_difference(&normalize(&stored), &normalize(&predicted))
+        );
+    }
+}
+
+/// Undoing a deletion adds the object back whole: an outline whose first paragraph OneNote
+/// tabbed into a group, and a TIFF picture OneNote imported, store as they were.
+#[test]
+fn deleted_objects_added_back_store_as_they_were() {
+    let tree = SOURCES[2].1;
+    let features = SOURCES[3].1;
+    for (source, title) in [
+        (tree, "Outdent first group"),
+        (tree, "Delete unindented sibling after group"),
+        (features, "Image tiff"),
+    ] {
+        let space = *pages(source)
+            .iter()
+            .find(|space| read(source, **space).title == title)
+            .unwrap();
+        let arena = Arena::default();
+        let mut section = Section::open(&arena, source.to_vec()).unwrap();
+        let before = section.page(space).unwrap();
+        let shape = |section: &mut Section, id: ExGuid| {
+            let view = &section.active(space).unwrap().view;
+            let mut shape = Vec::new();
+            let mut pending = vec![(id, 0)];
+            while let Some((id, depth)) = pending.pop() {
+                let node = &view.nodes[&id];
+                shape.push((
+                    depth,
+                    node.child_level,
+                    matches!(node.kind, Kind::OutlineGroup),
+                ));
+                pending.extend(node.children.iter().rev().map(|child| (*child, depth + 1)));
+            }
+            shape
+        };
+        let at = before
+            .objects
+            .iter()
+            .position(|object| matches!(object, PageObject::Outline(_) | PageObject::Image(_)))
+            .unwrap();
+        let object = before.objects[at].id();
+        let stored = shape(&mut section, object);
+        let edit = |ops| Edit { at: AT, ops };
+        section
+            .apply(
+                "Author",
+                &edit(vec![Op::Page {
+                    space,
+                    op: PageOp::Delete { object },
+                }]),
+            )
+            .unwrap();
+        let gone = section.page(space).unwrap();
+        let ops = lower_page(&gone, &before)
+            .unwrap()
+            .into_iter()
+            .map(|op| Op::Page { space, op })
+            .collect();
+        section
+            .apply("Author", &edit(ops))
+            .unwrap_or_else(|error| panic!("{title}: {error:?}"));
+        let after = section.page(space).unwrap();
+        assert_eq!(normalize(&after), normalize(&before), "{title}");
+        assert_eq!(shape(&mut section, object), stored, "{title}");
+    }
 }

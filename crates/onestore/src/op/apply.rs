@@ -1175,7 +1175,9 @@ impl<'a> Writer<'_, 'a> {
                     }
                 }
                 if first.parent.is_some() {
-                    return Err(OpError::Unsupported("An outline's first paragraph has no parent").into());
+                    return Err(
+                        OpError::Unsupported("An outline's first paragraph has no parent").into(),
+                    );
                 }
                 self.paragraph(outline.id, None, first, Some((outline.id, x, y)))?;
                 // Later paragraphs follow the first, their levels as the outline gives them; a

@@ -676,9 +676,11 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             let object = paragraph.text_mut().unwrap();
             let previous = object.text.spans()[0].format.clone();
             let math = Paragraph::from_runs(math.spans().iter().scan(0, |start, span| {
+                let mut format = span.format.clone();
+                format.language.get_or_insert(0x409);
                 let run = (
                     math.text()[*start..span.end].to_owned(),
-                    span.format.inherit(&inherited),
+                    format.inherit(&inherited),
                 );
                 *start = span.end;
                 Some(run)
