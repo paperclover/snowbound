@@ -234,6 +234,17 @@ def main():
         partial.write_text(json.dumps(moved, indent=2, sort_keys=True) + '\n')
         os.replace(partial, latest_file)
     print(f'{latest_file}: {json.dumps(moved, sort_keys=True)}')
+    # Stable names for the readme's download links, always the newest build of each platform.
+    downloads = published / 'download'
+    downloads.mkdir(exist_ok=True)
+    for platform, newest_name in moved.items():
+        if newest_name != name(version):
+            continue
+        file = build['archives'][platform]['file']
+        stable = downloads / file.replace(f'-{name(version)}', '')
+        partial = stable.with_name(f'.{stable.name}.partial')
+        shutil.copy(target / file, partial)
+        os.replace(partial, stable)
     if not args.dry_run:
         print(f'{URL}{folder(version)}/')
 
