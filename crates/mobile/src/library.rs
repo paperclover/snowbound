@@ -290,9 +290,6 @@ pub(crate) struct Tab {
     /// Not on this device yet, as iCloud Drive keeps it elsewhere; the host downloads it.
     #[serde(default)]
     pub(crate) downloading: bool,
-    /// The name of the section this file copies, which opens instead.
-    #[serde(default)]
-    pub(crate) copy: Option<String>,
     /// Why the file could not be read, where retrying or repair may help.
     #[serde(default)]
     pub(crate) problem: Option<String>,
@@ -325,7 +322,6 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
             color: rgb(color.unwrap_or(SECTION_COLOR)),
             readable,
             downloading: false,
-            copy: None,
             problem: None,
         });
     }
@@ -337,10 +333,6 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
             color: rgb(SECTION_COLOR),
             readable: false,
             downloading: entry.reason == Reason::Evicted,
-            copy: match &entry.reason {
-                Reason::Copy { of } => Some(stem(of)),
-                _ => None,
-            },
             problem: match entry.reason {
                 Reason::InUse => Some("Section in use".into()),
                 Reason::Unreadable => Some("Can’t read this section".into()),
@@ -520,7 +512,6 @@ impl Library {
                 color: rgb(SECTION_COLOR),
                 readable: true,
                 downloading: false,
-                copy: None,
                 problem: None,
             }]);
         }
@@ -1311,7 +1302,7 @@ pub unsafe extern "C" fn sb_notebook_moved(
 }
 
 /// The notebook's sections read again, as JSON: each with `name`, `path`, `group`,
-/// `color` as sRGB bytes, `readable`, `downloading` and `copy`, in the notebook's order; null
+/// `color` as sRGB bytes, `readable`, `downloading` and `problem`, in the notebook's order; null
 /// if it cannot be read.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_library_sections(library: &Library) -> *mut c_char {

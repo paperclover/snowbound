@@ -53,9 +53,10 @@ thread rereads the queue.
 the files its folders list otherwise than when last opened (`discover::Cache`, kept under
 `cache_dir/listings`), and
 `session::Section::open(file, cache_dir, notify)` opens one section file through
-a replica named by the section's document identity, so the same file reopens the
-same queue after a relaunch. A section is `Send + Sync`: `apply(author, edit)`
-returns at once and reports a refusal as `Event::Rejected`; `events()` drains
+a replica named by the file's location and the section's document identity, so the same
+file reopens the same queue after a relaunch and a copy of it elsewhere has its own
+(`notebook::location`: `folder`, `local`, `smb`, and `moved` for a notebook the app moves).
+A section is `Send + Sync`: `apply(author, edit)` returns at once and reports a refusal as `Event::Rejected`; `events()` drains
 remote changes (`Changed(spaces)`), publication outcomes, unreachable files and
 failures; `notify` runs on a background thread whenever an event waits.
 `conflicts()` lists each page's conflict pages, which `page` reads and `delete_pages`
@@ -287,8 +288,12 @@ cache as it was.
 Each file read must be a consistent, bounded snapshot. The result is an
 observation across multiple files, not an atomic notebook transaction or
 authorization to publish an edit. Refresh rejects observed topology changes. Of
-several files with one identity (a `Name 2.one` copy), the one its folder's TOC names,
-else the newest, lists; the others list in `unavailable` as `Reason::Copy`. iOS's
+several section files with one identity (a `Name 2.one` copy), each lists, as OneNote opens
+each; all but the one its folder's TOC names (else the one with the shortest path) are
+marked `copy`, have replicas of their own, and are never placed or listed anew by structure
+operations, which touch only a TOC entry OneNote gave the copy's name. Of several groups
+with one TOC identity, the one its parent's TOC names, else the newest, lists; the others
+list in `unavailable` as `Reason::Copy`. iOS's
 `.Name.one.icloud` placeholders list there under their real names as `Reason::Evicted`.
 Retain the last accepted catalog if discovery fails; a connection failure does not mean
 files were deleted.

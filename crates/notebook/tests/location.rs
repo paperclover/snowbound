@@ -226,28 +226,72 @@ fn a_replica_named_by_identity_alone_moves_to_the_first_location_that_opens_it()
 }
 
 #[test]
-#[ignore = "expects copies set aside; duplicates now open as sections"]
-fn a_section_copy_beside_its_original_opens_only_as_a_lone_file_with_its_own_replica() {
+fn a_section_copy_beside_its_original_opens_with_its_own_replica() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("cache");
     let root = notebook(directory.path(), "Notebook");
     std::fs::copy(root.join("First.one"), root.join("First 2.one")).unwrap();
     let mut notebook = Notebook::open(&root, &cache).unwrap();
-    // Discovery lists the copy as unavailable, so one replica serves the section.
-    assert!(notebook.section("First 2.one", || {}).is_err());
+    assert_ne!(
+        notebook.replica_path("First.one").unwrap(),
+        notebook.replica_path("First 2.one").unwrap()
+    );
     assert_eq!(
         notebook
             .replicas()
             .iter()
             .filter(|known| known.path.starts_with("First"))
             .count(),
-        1
+        2
     );
-    let original = Section::open(root.join("First.one"), &cache, || {}).unwrap();
-    let copy = Section::open(root.join("First 2.one"), &cache, || {}).unwrap();
+    let original = notebook.section("First.one", || {}).unwrap();
+    let copy = notebook.section("First 2.one", || {}).unwrap();
     original.set_offline(true);
-    typed(&original, "Mine ");
+    let space = typed(&original, "Mine ");
     assert!(copy.pending().unwrap().is_empty());
+    original.set_offline(false);
+    until("the original published", || {
+        stored(&root.join("First.one"), space).starts_with("Mine ")
+    });
+    assert_eq!(stored(&root.join("First 2.one"), space), "First");
     original.close().unwrap();
     copy.close().unwrap();
+}
+
+/// Whether the catalog marks the section at `path` a copy.
+fn copy(notebook: &Notebook, path: &str) -> bool {
+    notebook
+        .catalog()
+        .sections
+        .iter()
+        .find(|section| section.path == path)
+        .unwrap()
+        .copy
+}
+
+#[test]
+fn renaming_reordering_or_deleting_a_copy_leaves_the_originals_toc_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = notebook(directory.path(), "Notebook");
+    // `F.one` would be the original by its shorter path were the TOC not to list `First.one`.
+    for copy in ["F.one", "First 2.one"] {
+        std::fs::copy(root.join("First.one"), root.join(copy)).unwrap();
+    }
+    let original = std::fs::read(root.join("First.one")).unwrap();
+    let identity = onestore::Store::parse(&original).unwrap().header.file_id;
+    std::fs::write(
+        root.join("Open Notebook.onetoc2"),
+        onestore::create_table_of_contents("Open Notebook.onetoc2", &[("First.one", identity)])
+            .unwrap(),
+    )
+    .unwrap();
+    let mut notebook = Notebook::open(&root, directory.path().join("cache")).unwrap();
+    assert!(!copy(&notebook, "First.one") && copy(&notebook, "F.one"));
+    notebook.delete("First 2.one").unwrap();
+    assert_eq!(notebook.rename("F.one", "G").unwrap(), "G.one");
+    notebook.reorder("", &["G.one", "First.one"]).unwrap();
+    assert!(!copy(&notebook, "First.one") && copy(&notebook, "G.one"));
+    // A copy keeps its header as it was, as OneNote leaves one.
+    assert_eq!(std::fs::read(root.join("G.one")).unwrap(), original);
+    assert_eq!(std::fs::read(root.join("First.one")).unwrap(), original);
 }

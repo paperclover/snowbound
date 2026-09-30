@@ -233,7 +233,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 systemName: tab.readable ? "rectangle.portrait.fill" : tab.downloading ? "icloud.and.arrow.down" : "lock.fill")
             content.imageProperties.tintColor = tab.uiColor
             if !tab.readable {
-                content.secondaryText = tab.downloading ? "Downloading…" : tab.copy.map { "Copy of “\($0)”" } ?? tab.problem ?? "Can’t be opened here"
+                content.secondaryText = tab.downloading ? "Downloading…" : tab.problem ?? "Can’t be opened here"
                 content.textProperties.color = .secondaryLabel
             }
         case .status(let id):

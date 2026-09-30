@@ -663,7 +663,11 @@ impl Notebook {
     /// Renames a section or section group: the file or folder and its TOC entry.
     pub fn rename(&mut self, path: &str, name: &str) -> Result<String> {
         let (folder, entry) = split(path);
-        let (filename, identity) = self.entry(folder, entry)?;
+        let Entry {
+            filename,
+            identity,
+            copy,
+        } = self.entry(folder, entry)?;
         let target = if filename.to_ascii_lowercase().ends_with(".one") {
             format!("{name}.one")
         } else {
@@ -675,20 +679,24 @@ impl Notebook {
         }
         self.storage
             .rename(&catalog_path(folder, &filename), &renamed)?;
-        let (_, ancestor) = self.toc(folder)?;
-        let placed = if target.ends_with(".one") {
-            renamed.clone()
-        } else {
-            catalog_path(&renamed, TOC)
-        };
-        self.storage.place(&placed, ancestor, &target)?;
-        self.edit_toc(
-            folder,
-            &[onestore::TocEdit::Rename {
-                identity,
-                filename: target,
-            }],
-        )?;
+        if !copy {
+            let (_, ancestor) = self.toc(folder)?;
+            let placed = if target.ends_with(".one") {
+                renamed.clone()
+            } else {
+                catalog_path(&renamed, TOC)
+            };
+            self.storage.place(&placed, ancestor, &target)?;
+        }
+        if let Some(identity) = identity {
+            self.edit_toc(
+                folder,
+                &[onestore::TocEdit::Rename {
+                    identity,
+                    filename: target,
+                }],
+            )?;
+        }
         self.refresh()?;
         Ok(renamed)
     }
@@ -718,7 +726,7 @@ impl Notebook {
             if parent != folder {
                 return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
             }
-            identities.push(self.entry(folder, entry)?.1);
+            identities.extend(self.entry(folder, entry)?.identity);
         }
         self.edit_toc(folder, &[onestore::TocEdit::Order(identities)])?;
         self.refresh().map(drop)
@@ -730,12 +738,12 @@ impl Notebook {
     /// there the same way, then its folders go. Either way its folder's TOC entry goes.
     pub fn delete(&mut self, path: &str) -> Result<()> {
         let (folder, entry) = split(path);
-        let (filename, identity) = self.entry(folder, entry)?;
+        let deleted = self.entry(folder, entry)?;
         if path == RECYCLE_BIN {
             return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
         }
-        if filename.to_ascii_lowercase().ends_with(".one") {
-            self.bin_section(path, &filename, identity)?;
+        if deleted.filename.to_ascii_lowercase().ends_with(".one") {
+            self.bin_section(path, &deleted)?;
         } else {
             // Sections first, then each folder once it is empty, deepest first.
             let mut sections = Vec::new();
@@ -754,7 +762,7 @@ impl Notebook {
                     group
                         .sections
                         .iter()
-                        .map(|section| (section.path.clone(), section.file_id)),
+                        .map(|section| (section.path.clone(), Entry::of(group, section))),
                 );
                 folders.push((
                     group.path.clone(),
@@ -762,9 +770,8 @@ impl Notebook {
                 ));
                 pending.extend(&group.groups);
             }
-            for (section, identity) in sections {
-                let (_, name) = split(&section);
-                self.bin_section(&section, name, identity)?;
+            for (section, entry) in sections {
+                self.bin_section(&section, &entry)?;
             }
             for (group, toc) in folders.into_iter().rev() {
                 if let Some(toc) = toc {
@@ -773,7 +780,9 @@ impl Notebook {
                 self.storage.delete(&group)?;
             }
         }
-        self.edit_toc(folder, &[onestore::TocEdit::Remove { identity }])?;
+        if let Some(identity) = deleted.identity {
+            self.edit_toc(folder, &[onestore::TocEdit::Remove { identity }])?;
+        }
         self.refresh().map(drop)
     }
 
@@ -824,9 +833,10 @@ impl Notebook {
         Ok((bin_toc, identity))
     }
 
-    /// Moves the section file at `path` into the recycle bin, under a name no binned
-    /// section has, and lists it there; its own folder's TOC is the caller's.
-    fn bin_section(&self, path: &str, filename: &str, identity: [u8; 16]) -> Result<()> {
+    /// Moves the section file at `path`, its folder's `entry`, into the recycle bin, under a
+    /// name no binned section has, and lists it there; its own folder's TOC is the caller's.
+    fn bin_section(&self, path: &str, entry: &Entry) -> Result<()> {
+        let filename = &entry.filename;
         let (bin_toc, bin_identity) = self.bin()?;
         let mut target = filename.to_owned();
         let mut attempt = 1;
@@ -837,6 +847,9 @@ impl Notebook {
         }
         let binned = catalog_path(RECYCLE_BIN, &target);
         self.storage.rename(path, &binned)?;
+        let (false, Some(identity)) = (entry.copy, entry.identity) else {
+            return Ok(());
+        };
         self.storage.place(&binned, bin_identity, &target)?;
         self.commit_toc(
             &bin_toc,
@@ -900,7 +913,11 @@ impl Notebook {
     /// entry follows it. Returns its new catalog path.
     pub fn move_entry(&mut self, path: &str, folder: &str) -> Result<String> {
         let (from, entry) = split(path);
-        let (filename, identity) = self.entry(from, entry)?;
+        let Entry {
+            filename,
+            identity,
+            copy,
+        } = self.entry(from, entry)?;
         self.folder(folder)?;
         let group = !filename.to_ascii_lowercase().ends_with(".one");
         let target = catalog_path(folder, &filename);
@@ -913,34 +930,40 @@ impl Notebook {
         }
         let (_, ancestor) = self.toc(folder)?;
         self.storage.rename(path, &target)?;
-        let placed = if group {
-            catalog_path(&target, TOC)
-        } else {
-            target.clone()
-        };
-        self.storage.place(&placed, ancestor, &filename)?;
-        self.edit_toc(
-            folder,
-            &[onestore::TocEdit::Add {
-                filename,
-                identity,
-                group,
-            }],
-        )?;
-        self.edit_toc(from, &[onestore::TocEdit::Remove { identity }])?;
+        if !copy {
+            let placed = if group {
+                catalog_path(&target, TOC)
+            } else {
+                target.clone()
+            };
+            self.storage.place(&placed, ancestor, &filename)?;
+            if let Some(identity) = identity {
+                self.edit_toc(
+                    folder,
+                    &[onestore::TocEdit::Add {
+                        filename,
+                        identity,
+                        group,
+                    }],
+                )?;
+            }
+        }
+        if let Some(identity) = identity {
+            self.edit_toc(from, &[onestore::TocEdit::Remove { identity }])?;
+        }
         self.refresh()?;
         Ok(target)
     }
 
     /// The stored filename and TOC identity of a folder's section or group.
-    fn entry(&self, folder: &str, name: &str) -> Result<(String, [u8; 16])> {
+    fn entry(&self, folder: &str, name: &str) -> Result<Entry> {
         let parent = self.folder(folder)?;
         if let Some(section) = parent
             .sections
             .iter()
             .find(|section| split(&section.path).1 == name)
         {
-            return Ok((name.to_owned(), section.file_id));
+            return Ok(Entry::of(parent, section));
         }
         if let Some(group) = parent
             .groups
@@ -951,7 +974,11 @@ impl Notebook {
                 .toc
                 .as_ref()
                 .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
-            return Ok((name.to_owned(), toc.file_id));
+            return Ok(Entry {
+                filename: name.to_owned(),
+                identity: Some(toc.file_id),
+                copy: false,
+            });
         }
         Err(io::Error::from(io::ErrorKind::NotFound).into())
     }
@@ -1176,6 +1203,45 @@ impl Notebook {
             Ok(replica_file(&replicas, identity))
         };
         Section::open_in(file, replica, connect, notify)
+    }
+}
+
+/// A section or group as its folder holds it, for the structure operations.
+struct Entry {
+    filename: String,
+    /// What its folder's TOC lists it under, if anything.
+    identity: Option<[u8; 16]>,
+    /// A copy of another section of the notebook (`discover::Section::copy`). Its header names
+    /// the other's file, so it is never placed or listed anew: OneNote lists a copy it finds
+    /// under an identity of its own, leaving the file as it is.
+    copy: bool,
+}
+
+impl Entry {
+    /// `section` of the folder `parent`: a copy has only the entry its folder's TOC lists
+    /// under its name.
+    fn of(parent: &discover::Folder, section: &discover::Section) -> Self {
+        let filename = split(&section.path).1.to_owned();
+        let identity = if section.copy {
+            parent
+                .toc
+                .iter()
+                .flat_map(|toc| &toc.unresolved)
+                .find(|entry| {
+                    entry
+                        .filename
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&filename))
+                })
+                .map(|entry| entry.file)
+        } else {
+            Some(section.file_id)
+        };
+        Self {
+            filename,
+            identity,
+            copy: section.copy,
+        }
     }
 }
 

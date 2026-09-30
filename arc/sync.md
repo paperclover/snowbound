@@ -43,9 +43,9 @@ pages. Both desktop and iOS use exactly this surface.
 
 ## The replica
 
-Each open section has a replica: a SQLite database in the app's cache,
-identified by the section's logical identity, so the same file reopens the
-same queue after a relaunch. It holds:
+Each open section has a replica: a SQLite database in the app's cache, named by
+where the notebook is and the section's logical identity, so the same file
+reopens the same queue after a relaunch. It holds:
 
 - **the base**: the last remote image the queue applies to, stored in chunks so
   that acknowledging a publication rewrites only the chunks the transaction
@@ -58,6 +58,29 @@ The working state is never stored. It is the base with each sealed batch
 replayed and the open batch applied, rebuilt on open. The database runs in WAL
 mode with full synchronous commits, and every setting is read back to check it
 took.
+
+The location matters because OneNote lets a notebook folder be copied whole, a
+Finder duplicate or an iCloud `Name 2` conflict copy, and every section in the
+copy keeps its identity. Keyed by identity alone, the copy would open the
+original's queue and publish its edits into the wrong file. So replicas live in
+`cache/replicas/<hash of location>/<identity>.sqlite` (`notebook::location`),
+where a location is a canonical local path or `smb://server/share/root`, and a
+`location` file in each folder names it. A section renamed or moved inside its
+notebook keeps its replica; a copy of a section inside one notebook (`Cross
+2.one` beside `Cross.one`, which OneNote opens as a section of its own) is keyed
+by its own path instead, the original being the one the folder's TOC lists.
+
+When a notebook moves, its queue follows by one of three roads:
+
+- **the app moved it** (iOS Rename): `location::moved` moves the folder's
+  replicas to the new location;
+- **something else moved it** (Finder): on open, a section with no replica takes
+  one from the folder of a local location that no longer exists, if the file
+  stands as that replica's base or has moved on from it (a higher header
+  generation). A replica whose base is newer than the file, or a different state
+  of the same generation, belongs to another copy and stays;
+- **an older install** named replicas by identity alone in the cache's top or
+  its `smb` folder: the first location to open the section takes it.
 
 An attached file is a payload like a picture: its bytes ride in the edit that
 inserts it and publish inside that edit's revision. No other file is written,

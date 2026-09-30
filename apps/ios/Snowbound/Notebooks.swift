@@ -128,8 +128,6 @@ struct Tab: Decodable, Equatable {
     let readable: Bool
     /// Not on this device yet; `Notebook` asks iCloud Drive for it.
     let downloading: Bool
-    /// The section this file copies, which opens instead.
-    let copy: String?
     /// Why the file could not be read, where retrying or repair may help.
     let problem: String?
 

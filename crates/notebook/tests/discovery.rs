@@ -83,41 +83,39 @@ fn copy_of(unavailable: &notebook::discover::Unavailable) -> Option<&str> {
     }
 }
 
-/// OneNote 2010 lists a copied section file beside its original
-/// (`Cross 2.one`, 2026-09-29 lab run); one replica cannot hold both, so the copy the TOC
-/// does not name lists as unavailable.
+/// Which of the folder's sections are copies of another, by path.
+fn copies(folder: &notebook::discover::Folder) -> Vec<(&str, bool)> {
+    folder
+        .sections
+        .iter()
+        .map(|section| (section.path.as_str(), section.copy))
+        .collect()
+}
+
+/// OneNote 2010 opens a copied section file beside its original as a section of its own
+/// (`Cross 2.one`, 2026-09-29 lab run); the one the TOC names is the original, however
+/// short the copy's path.
 #[test]
-#[ignore = "expects copies set aside; duplicates now open as sections"]
-fn a_copied_section_lists_as_a_copy_of_the_one_the_toc_names() {
+fn a_copied_section_lists_beside_the_one_the_toc_names() {
     let root = tempfile::tempdir().unwrap();
     fixture(root.path());
     fs::create_dir(root.path().join("group")).unwrap();
-    for copy in ["one 2.one", "group/other.one"] {
+    for copy in ["o.one", "group/other.one"] {
         fs::copy(root.path().join("one.one"), root.path().join(copy)).unwrap();
         touch(&root.path().join(copy), 2_000_000_000);
     }
     let catalog = discover(&mut Local::open(root.path()).unwrap(), limits()).unwrap();
-    let paths = |folder: &notebook::discover::Folder| {
-        folder
-            .sections
-            .iter()
-            .map(|section| section.path.clone())
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(paths(&catalog), ["one.one"]);
-    assert_eq!(catalog.unavailable.len(), 1);
-    assert_eq!(catalog.unavailable[0].path, "one 2.one");
-    assert_eq!(copy_of(&catalog.unavailable[0]), Some("one.one"));
-    assert!(catalog.unavailable[0].error.contains("\u{201c}one\u{201d}"));
-    let group = &catalog.groups[0];
-    assert!(paths(group).is_empty());
-    assert_eq!(group.unavailable[0].path, "group/other.one");
-    assert_eq!(copy_of(&group.unavailable[0]), Some("one.one"));
+    assert!(catalog.unavailable.is_empty());
+    let mut listed = copies(&catalog);
+    listed.sort();
+    assert_eq!(listed, [("o.one", true), ("one.one", false)]);
+    assert_eq!(copies(&catalog.groups[0]), [("group/other.one", true)]);
 }
 
+/// Without a TOC, the original is the copy with the shortest path, however new the others:
+/// a choice that stands while the files keep their names.
 #[test]
-#[ignore = "expects copies set aside; duplicates now open as sections"]
-fn without_a_toc_the_newest_copy_lists() {
+fn without_a_toc_the_shortest_path_is_the_original() {
     let root = tempfile::tempdir().unwrap();
     fixture(root.path());
     fs::remove_file(root.path().join("Open Notebook.onetoc2")).unwrap();
@@ -125,10 +123,9 @@ fn without_a_toc_the_newest_copy_lists() {
     touch(&root.path().join("one.one"), 1_000_000_000);
     touch(&root.path().join("one 2.one"), 2_000_000_000);
     let catalog = discover(&mut Local::open(root.path()).unwrap(), limits()).unwrap();
-    assert_eq!(catalog.sections.len(), 1);
-    assert_eq!(catalog.sections[0].path, "one 2.one");
-    assert_eq!(catalog.unavailable[0].path, "one.one");
-    assert_eq!(copy_of(&catalog.unavailable[0]), Some("one 2.one"));
+    let mut listed = copies(&catalog);
+    listed.sort();
+    assert_eq!(listed, [("one 2.one", true), ("one.one", false)]);
 }
 
 #[test]
