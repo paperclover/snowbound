@@ -2613,8 +2613,10 @@ mod tests {
                 color: None,
                 transparency: None,
                 pen_tip: None,
+                raster_operation: None,
             }],
             groups: Vec::new(),
+            shape: None,
         });
         let after = paragraph(4, "After", 1, None);
         let mut engine = TextEngine::default();

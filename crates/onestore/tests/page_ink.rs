@@ -323,7 +323,12 @@ fn native_pens_highlighters_and_shapes_read_as_drawn() {
                 .all(|(a, b)| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05)
     };
     for (native, kind, from, to) in [
-        (rectangle, ShapeKind::Rectangle, [252.0, 86.4], [324.0, 122.4]),
+        (
+            rectangle,
+            ShapeKind::Rectangle,
+            [252.0, 86.4],
+            [324.0, 122.4],
+        ),
         (line, ShapeKind::Line, [342.0, 86.4], [414.0, 122.4]),
         (arrow, ShapeKind::Arrow, [252.0, 158.4], [324.0, 194.4]),
         (ellipse, ShapeKind::Ellipse, [342.0, 158.4], [414.0, 194.4]),
@@ -368,8 +373,11 @@ fn native_pens_highlighters_and_shapes_read_as_drawn() {
         .map(|ink| (ink.layout.x, ink.layout.y))
         .collect();
     assert_eq!(moved.len(), 2);
-    assert!(moved.iter().any(|&(x, y)| x == Some(45.0)
-        && y.is_some_and(|y| (y - 15.0).abs() < 1e-4)));
+    assert!(
+        moved
+            .iter()
+            .any(|&(x, y)| x == Some(45.0) && y.is_some_and(|y| (y - 15.0).abs() < 1e-4))
+    );
 }
 
 fn tool_page(source: &[u8]) -> (ExGuid, Page, Vec<Ink>) {
@@ -418,8 +426,20 @@ fn tool_page(source: &[u8]) -> (ExGuid, Page, Vec<Ink>) {
     let inks = vec![
         free(&marker, vec![[60.0, 190.0], [220.0, 190.0]]),
         free(&accent, wave),
-        Ink::drawn(ShapeKind::Rectangle, [252.0, 140.4], [324.0, 194.4], &shape_pen).unwrap(),
-        Ink::drawn(ShapeKind::Ellipse, [342.0, 140.4], [432.0, 194.4], &shape_pen).unwrap(),
+        Ink::drawn(
+            ShapeKind::Rectangle,
+            [252.0, 140.4],
+            [324.0, 194.4],
+            &shape_pen,
+        )
+        .unwrap(),
+        Ink::drawn(
+            ShapeKind::Ellipse,
+            [342.0, 140.4],
+            [432.0, 194.4],
+            &shape_pen,
+        )
+        .unwrap(),
         Ink::drawn(ShapeKind::Arrow, [252.0, 230.4], [360.0, 266.4], &shape_pen).unwrap(),
         Ink::drawn(ShapeKind::Line, [378.0, 230.4], [450.0, 230.4], &shape_pen).unwrap(),
     ];
@@ -528,8 +548,14 @@ fn pens_highlighters_and_shapes_are_written_as_onenote_draws_them() {
             other => panic!("{other:?}"),
         }
     }
-    assert_eq!(extra(wave.id, 0x14001d4e), Some(1u32.to_le_bytes().to_vec()));
-    assert_eq!(extra(rectangle.id, 0x14001d4e), Some(2u32.to_le_bytes().to_vec()));
+    assert_eq!(
+        extra(wave.id, 0x14001d4e),
+        Some(1u32.to_le_bytes().to_vec())
+    );
+    assert_eq!(
+        extra(rectangle.id, 0x14001d4e),
+        Some(2u32.to_le_bytes().to_vec())
+    );
     match &node(rectangle.id).kind {
         Kind::Ink {
             shape_kind: Some(12),
@@ -576,7 +602,9 @@ fn onenote_drawings_take_erasing_moving_and_more_strokes() {
             }
             if let Some(shape) = &mut ink.shape {
                 *shape = match shape {
-                    InkShape::Line([a, b]) => InkShape::Line([[a[0], a[1] + 200.0], [b[0], b[1] + 200.0]]),
+                    InkShape::Line([a, b]) => {
+                        InkShape::Line([[a[0], a[1] + 200.0], [b[0], b[1] + 200.0]])
+                    }
                     InkShape::Closed { transform, anchors } => InkShape::Closed {
                         transform: {
                             let mut t = *transform;

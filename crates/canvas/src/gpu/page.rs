@@ -96,12 +96,46 @@ fn outline_origin(
     Ok(origin)
 }
 
-fn append_ink(ink: &onestore::page::Ink, offset: [f32; 2], primitives: &mut Vec<Primitive<'_>>) {
+/// Draws `ink` moved by `offset`, strokes without a colour in the paper's `automatic` ink. A
+/// highlighter's rectangular tip sweeps a band as wide as the tip reaches across each
+/// segment, its colour multiplying what lies beneath as OneNote's MaskPen does.
+pub(crate) fn append_ink(
+    ink: &onestore::page::Ink,
+    offset: [f32; 2],
+    automatic: [f32; 4],
+    primitives: &mut Vec<Primitive<'_>>,
+) {
     for stroke in &ink.strokes {
-        let mut color = colorref(stroke.color.unwrap_or(0));
-        color[3] = 1.0 - f32::from(stroke.transparency.unwrap_or(0)) / 255.0;
-        let width = stroke.width.max(stroke.height);
+        let highlighter = stroke.raster_operation == Some(9);
+        let mut color = stroke.color.map_or(automatic, colorref);
+        if !highlighter {
+            color[3] = 1.0 - f32::from(stroke.transparency.unwrap_or(0)) / 255.0;
+        }
         let round = stroke.pen_tip != Some(1);
+        let segment = |from: [f32; 2], to: [f32; 2]| {
+            if !highlighter {
+                return Primitive::Segment {
+                    from,
+                    to,
+                    width: stroke.width.max(stroke.height),
+                    round,
+                    color,
+                };
+            }
+            let [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+            let length = dx.hypot(dy);
+            let [along, across] = if length > 0.0 {
+                [dx.abs() / length, dy.abs() / length]
+            } else {
+                [1.0, 0.0]
+            };
+            Primitive::Highlight {
+                from,
+                to,
+                width: stroke.width * across + stroke.height * along,
+                color,
+            }
+        };
         let mut points = stroke
             .points
             .iter()
@@ -109,35 +143,33 @@ fn append_ink(ink: &onestore::page::Ink, offset: [f32; 2], primitives: &mut Vec<
         let Some(mut from) = points.next() else {
             continue;
         };
-        let mut drawn = false;
+        // Samples along a straight run make one segment, since each joint paints its overlap
+        // twice.
+        let mut end = from;
         for to in points {
-            // Pen samples far closer than a pixel add vertices without changing the stroke.
-            if (to[0] - from[0]).hypot(to[1] - from[1]) < 0.2 {
-                continue;
+            if !between(from, end, to) {
+                primitives.push(segment(from, end));
+                from = end;
             }
-            primitives.push(Primitive::Segment {
-                from,
-                to,
-                width,
-                round,
-                color,
-            });
-            from = to;
-            drawn = true;
+            end = to;
         }
-        if !drawn {
-            primitives.push(Primitive::Segment {
-                from,
-                to: from,
-                width,
-                round,
-                color,
-            });
-        }
+        primitives.push(segment(from, end));
     }
     for group in &ink.groups {
-        append_ink(group, offset, primitives);
+        append_ink(group, offset, automatic, primitives);
     }
+}
+
+/// Whether `middle` lies within a tenth of a point of the segment from `from` to `to`.
+fn between(from: [f32; 2], middle: [f32; 2], to: [f32; 2]) -> bool {
+    let [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+    let [mx, my] = [middle[0] - from[0], middle[1] - from[1]];
+    let length = dx * dx + dy * dy;
+    if length == 0.0 {
+        return mx.hypot(my) <= 0.1;
+    }
+    let along = (mx * dx + my * dy) / length;
+    (0.0..=1.0).contains(&along) && (mx * dy - my * dx).abs() / length.sqrt() <= 0.1
 }
 
 const FILE_ICON: &str = include_str!("../../assets/file.svg");
@@ -501,7 +533,9 @@ impl PageScene {
             primitives.push(Primitive::Image { image, rect });
         }
         match &object.kind {
-            crate::outline::ObjectKind::Ink(ink) => append_ink(ink, [rect[0], rect[1]], primitives),
+            crate::outline::ObjectKind::Ink(ink) => {
+                append_ink(ink, [rect[0], rect[1]], paper.ink, primitives)
+            }
             crate::outline::ObjectKind::Unsupported(_) => {
                 append_placeholder(rect, paper, primitives)
             }
@@ -801,7 +835,9 @@ impl PageScene {
                 }
                 Content::Ink(ink) => {
                     let [x, y] = crate::editor::page::ink_offset(ink);
-                    append_ink(ink, [offset[0] + x, offset[1] + y], primitives);
+                    let [dx, dy] = editor.map_or([0.0; 2], |editor| editor.ink_drag_offset(ink.id));
+                    let offset = [offset[0] + x + dx, offset[1] + y + dy];
+                    append_ink(ink, offset, paper.ink, primitives);
                     continue;
                 }
                 Content::File { source, layout } => {
@@ -2217,6 +2253,7 @@ mod tests {
             color,
             transparency: Some(51),
             pen_tip: None,
+            raster_operation: None,
         };
         let ink = Ink {
             id: ExGuid::default(),
@@ -2228,7 +2265,9 @@ mod tests {
                 layout: Layout::default(),
                 strokes: vec![stroke(vec![[40.0, 30.0]], Some(0x0000ff))],
                 groups: Vec::new(),
+                shape: None,
             }],
+            shape: None,
         };
         let page = Page {
             identity: None,

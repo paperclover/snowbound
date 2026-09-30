@@ -15,9 +15,9 @@ pub use library::{Library, Section, Share};
 use canvas::{
     date::DateField,
     document::TextPosition,
-    editor::{Formatting, NoteTag, Selection, TextOutline, Toggle},
+    editor::{FAVORITES, Formatting, NoteTag, Selection, TextOutline, Toggle},
     gpu::{Paper, Viewport, page::PageScene},
-    interaction::{Hit, ObjectFocus, PageView, Request, Response, TextColors},
+    interaction::{Hit, ObjectFocus, PageView, Request, Response, TextColors, ink::Tool},
     layout::TextEngine,
 };
 use draw::edit::{Key, NamedKey, SelectionUnit};
@@ -74,7 +74,8 @@ enum Target {
     /// Another outline's text, which a touch focuses before the platform's text interaction
     /// takes over.
     Text = 2,
-    /// The focused outline's move or width grip, or the selected picture and its handles.
+    /// The focused outline's move or width grip, the selected picture and its handles, or
+    /// picked drawings.
     Grip = 3,
 }
 
@@ -210,10 +211,17 @@ impl Canvas {
     }
 
     fn target(&self, point: [f32; 2]) -> Target {
-        if self.page.inserting_space() {
+        let device = self.device(point);
+        let [x, y] = self.page.viewport.document_point(device);
+        let on_ink = self
+            .page
+            .editor
+            .ink_extent(self.page.ink_selection())
+            .is_some_and(|[x0, y0, x1, y1]| (x0..=x1).contains(&x) && (y0..=y1).contains(&y));
+        if self.page.inserting_space() || on_ink {
             return Target::Grip;
         }
-        match self.page.hit(self.device(point)) {
+        match self.page.hit(device) {
             Some(Hit::Handle { .. } | Hit::Resize { .. }) => Target::Grip,
             Some(Hit::Image { id, .. })
                 if self.page.object_focus() == Some(ObjectFocus::Image(id)) =>
@@ -512,17 +520,43 @@ impl Canvas {
         Ok(moved(self.page.change_date(timestamp, text)?))
     }
 
+    /// Picks what touches on the page do; see `sb_view_set_tool`.
+    fn set_tool(&mut self, tool: u8, pen: u8) -> Result<()> {
+        let tool = match tool {
+            0 => Tool::Select,
+            1 => Tool::Pen(*FAVORITES.get(usize::from(pen)).ok_or("No such pen")?),
+            2 => Tool::Eraser,
+            3 => Tool::Lasso,
+            _ => return Err("No such tool".into()),
+        };
+        let _ = self.page.set_tool(tool);
+        Ok(())
+    }
+
+    /// The frame of the drawings the lasso or a tap picked.
+    fn ink_selection(&self) -> Option<[f32; 4]> {
+        self.page
+            .editor
+            .ink_extent(self.page.ink_selection())
+            .map(|rect| self.document_rect(rect))
+    }
+
     /// A rectangle in the active outline's coordinates, in the view's points as `[x, y,
     /// width, height]`.
     fn view_rect(&self, rect: BoundingBox) -> [f32; 4] {
+        let [x, y] = self.active().origin();
+        let [x0, y0, x1, y1] = [rect.x0, rect.y0, rect.x1, rect.y1].map(|value| value as f32);
+        self.document_rect([x0 + x, y0 + y, x1 + x, y1 + y])
+    }
+
+    /// Page rectangle `[x0, y0, x1, y1]` in the view's points as `[x, y, width, height]`.
+    fn document_rect(&self, [x0, y0, x1, y1]: [f32; 4]) -> [f32; 4] {
         let viewport = self.page.viewport;
-        let origin = self.active().origin();
-        let [x, y] = [rect.x0 as f32 + origin[0], rect.y0 as f32 + origin[1]];
         [
-            (x * viewport.scale + viewport.origin[0]) / self.scale,
-            (y * viewport.scale + viewport.origin[1]) / self.scale,
-            rect.width() as f32 * viewport.scale / self.scale,
-            rect.height() as f32 * viewport.scale / self.scale,
+            (x0 * viewport.scale + viewport.origin[0]) / self.scale,
+            (y0 * viewport.scale + viewport.origin[1]) / self.scale,
+            (x1 - x0) * viewport.scale / self.scale,
+            (y1 - y0) * viewport.scale / self.scale,
         ]
     }
 
@@ -848,7 +882,7 @@ pub extern "C" fn sb_view_set_transform(view: &mut View, zoom: f32, x: f32, y: f
 
 /// What the view point `x`, `y` lands on: 0 for the page, where the canvas takes a tap; 1
 /// for the text taking input; 2 for another outline's text; 3 for the focused outline's
-/// move or width grip, or the selected picture and its handles.
+/// move or width grip, the selected picture and its handles, or picked drawings.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_target(view: &View, x: f32, y: f32) -> u8 {
     view.canvas.target([x, y]) as u8
@@ -955,6 +989,36 @@ pub extern "C" fn sb_view_copy(view: &mut View, cut: bool) -> *mut c_char {
     });
     view.stored(result);
     copied.map_or(std::ptr::null_mut(), owned)
+}
+
+/// Picks what touches do, as OneNote's Draw tab does: 0 Select & Type, where a tap on a
+/// drawing picks it; 1 pen `pen` of `sb_pens`, a stroke per press, drag and release; 2 the
+/// stroke eraser; 3 the lasso. Picked drawings move with a drag and go with
+/// `sb_delete_backward`. Setting a tool, even the same one, drops a stroke under way and
+/// lets picked drawings go.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_set_tool(view: &mut View, tool: u8, pen: u8) {
+    let _ = report(view.canvas.set_tool(tool, pen));
+}
+
+/// The frame of the drawings the lasso or a tap picked, as `[x, y, width, height]` in the
+/// view's points; false with none picked.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_ink_selection(view: &View, rect: &mut [f32; 4]) -> bool {
+    view.canvas
+        .ink_selection()
+        .map(|frame| *rect = frame)
+        .is_some()
+}
+
+/// OneNote 2010's favourite pens as JSON, in its gallery's order: each `[color, width,
+/// highlighter]`, the colour sRGB or null for the paper's ink and the width in HIMETRIC.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_pens() -> *mut c_char {
+    library::json(Ok(FAVORITES
+        .iter()
+        .map(|pen| (pen.color.map(srgb), pen.width, pen.highlighter))
+        .collect::<Vec<_>>()))
 }
 
 /// Insert Space: the next drag on the page moves what lies below or right of where it

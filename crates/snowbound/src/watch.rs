@@ -1,8 +1,8 @@
-//! Changes below a notebook folder on this computer, as the system reports them: FSEvents on
-//! macOS, inotify on Linux. A notebook on a share learns of its changes from the server
-//! instead (`notebook::session::Background::smb`).
+//! Changes below a notebook folder, as the system reports them: FSEvents on macOS, inotify on
+//! Linux. A notebook on a share learns of its changes from the server instead
+//! (`notebook::session::Background::smb`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Reports until dropped.
 pub struct Watch {
@@ -10,12 +10,33 @@ pub struct Watch {
 }
 
 /// Watches the folder at `root`: `changed` hears the paths that changed below it, relative to
-/// it and `/`-separated, or `""` when the system can only say something did. `None` where the
-/// system cannot watch it.
+/// it and `/`-separated, or a folder's path when the system can only say something in it did.
+/// `None` where the system does not report every change: on a network volume other than a
+/// Mac's SMB mount, another computer's changes go unreported.
 pub fn watch(root: &Path, changed: impl Fn(Vec<String>) + Send + Sync + 'static) -> Option<Watch> {
     let root = root.canonicalize().ok()?;
+    let volume = statfs(&root)?;
+    let folders = if local(&volume) {
+        vec![root.clone()]
+    } else if smbfs(&volume) {
+        // smbfs reports another client's change only in a folder watched for itself, and
+        // names just that folder.
+        let mut folders = vec![root.clone()];
+        let mut at = 0;
+        while let Some(folder) = folders.get(at).cloned() {
+            at += 1;
+            for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    folders.push(entry.path());
+                }
+            }
+        }
+        folders
+    } else {
+        return None;
+    };
     let folder = root.clone();
-    let relative = move |paths: Vec<std::path::PathBuf>| {
+    let relative = move |paths: Vec<PathBuf>| {
         changed(
             paths
                 .iter()
@@ -26,28 +47,34 @@ pub fn watch(root: &Path, changed: impl Fn(Vec<String>) + Send + Sync + 'static)
                 .collect(),
         )
     };
-    platform::Stream::start(&root, Box::new(relative))
+    platform::Stream::start(&folders, Box::new(relative))
         .inspect_err(|error| eprintln!("{}: changes go unwatched: {error}", root.display()))
         .ok()
         .map(|stream| Watch { _stream: stream })
 }
 
-/// Whether the folder at `path` is on this computer's own disks, where every change to it is
-/// one the system reports, rather than on a network volume.
+/// Whether the folder at `path` is on this computer's own disks rather than on a network
+/// volume.
 pub fn on_this_computer(path: &Path) -> bool {
+    statfs(path).is_none_or(|volume| local(&volume))
+}
+
+fn statfs(path: &Path) -> Option<libc::statfs> {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return true;
-    };
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut volume: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(name.as_ptr(), &mut volume) } != 0 {
-        return true;
-    }
-    #[cfg(target_os = "macos")]
-    return volume.f_flags & libc::MNT_LOCAL as u32 != 0;
-    // NFS, SMB, CIFS, SMB2, FUSE (sshfs and the like), 9P, Ceph, AFS.
-    #[cfg(target_os = "linux")]
-    return ![
+    (unsafe { libc::statfs(name.as_ptr(), &mut volume) } == 0).then_some(volume)
+}
+
+#[cfg(target_os = "macos")]
+fn local(volume: &libc::statfs) -> bool {
+    volume.f_flags & libc::MNT_LOCAL as u32 != 0
+}
+
+// NFS, SMB, CIFS, SMB2, FUSE (sshfs and the like), 9P, Ceph, AFS.
+#[cfg(target_os = "linux")]
+fn local(volume: &libc::statfs) -> bool {
+    ![
         0x6969,
         0x517b,
         0xff53_4d42,
@@ -57,7 +84,19 @@ pub fn on_this_computer(path: &Path) -> bool {
         0x00c3_6400,
         0x5346_414f,
     ]
-    .contains(&(volume.f_type as u64));
+    .contains(&(volume.f_type as u64))
+}
+
+#[cfg(target_os = "macos")]
+fn smbfs(volume: &libc::statfs) -> bool {
+    let name = unsafe { std::ffi::CStr::from_ptr(volume.f_fstypename.as_ptr()) };
+    name.to_bytes() == b"smbfs"
+}
+
+/// A Linux SMB mount reports only this computer's own changes.
+#[cfg(target_os = "linux")]
+fn smbfs(_: &libc::statfs) -> bool {
+    false
 }
 
 type Changed = Box<dyn Fn(Vec<std::path::PathBuf>) + Send + Sync>;
@@ -69,7 +108,7 @@ mod platform {
         ffi::{CStr, c_char, c_void},
         io,
         os::unix::ffi::OsStrExt,
-        path::{Path, PathBuf},
+        path::PathBuf,
     };
 
     type Stream_ = *mut c_void;
@@ -188,19 +227,31 @@ mod platform {
     }
 
     impl Stream {
-        pub fn start(root: &Path, changed: Changed) -> io::Result<Self> {
-            let root = root.as_os_str().as_bytes();
+        pub fn start(folders: &[PathBuf], changed: Changed) -> io::Result<Self> {
             let flags = NO_DEFER | WATCH_ROOT | if file_events() { FILE_EVENTS } else { 0 };
             unsafe {
-                let path = CFStringCreateWithBytes(
+                let folders: Vec<_> = folders
+                    .iter()
+                    .map(|folder| {
+                        let folder = folder.as_os_str().as_bytes();
+                        CFStringCreateWithBytes(
+                            std::ptr::null(),
+                            folder.as_ptr(),
+                            folder.len() as isize,
+                            UTF8,
+                            0,
+                        )
+                    })
+                    .collect();
+                let paths = CFArrayCreate(
                     std::ptr::null(),
-                    root.as_ptr(),
-                    root.len() as isize,
-                    UTF8,
-                    0,
+                    folders.as_ptr(),
+                    folders.len() as isize,
+                    &kCFTypeArrayCallBacks,
                 );
-                let paths = CFArrayCreate(std::ptr::null(), &path, 1, &kCFTypeArrayCallBacks);
-                CFRelease(path);
+                for folder in folders {
+                    CFRelease(folder);
+                }
                 let context = Context {
                     version: 0,
                     info: Box::into_raw(Box::new(changed)).cast(),
@@ -299,7 +350,7 @@ mod platform {
     }
 
     impl Stream {
-        pub fn start(root: &Path, changed: Changed) -> io::Result<Self> {
+        pub fn start(folders: &[PathBuf], changed: Changed) -> io::Result<Self> {
             let inotify = check(unsafe { libc::inotify_init1(libc::IN_CLOEXEC) })?;
             let stop = match check(unsafe { libc::eventfd(0, libc::EFD_CLOEXEC) }) {
                 Ok(stop) => stop,
@@ -308,9 +359,9 @@ mod platform {
                     return Err(error);
                 }
             };
+            let root = folders[0].clone();
             let mut folders = HashMap::new();
-            add(inotify, root, &mut folders);
-            let root = root.to_owned();
+            add(inotify, &root, &mut folders);
             let thread = std::thread::Builder::new()
                 .name("snowbound-watch".into())
                 .spawn(move || {

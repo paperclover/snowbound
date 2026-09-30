@@ -159,6 +159,8 @@ final class Notebook {
     private(set) var problem: String?
     /// The Files location being read, held open while the notebook is.
     private var accessed: URL?
+    /// Reports other apps' changes to a folder on this device to the library.
+    private var presenter: FolderPresenter?
 
     init(id: UUID = UUID(), name: String, source: Source) {
         self.id = id
@@ -167,6 +169,7 @@ final class Notebook {
     }
 
     deinit {
+        presenter?.stop()
         if let handle { sb_library_free(handle) }
         accessed?.stopAccessingSecurityScopedResource()
     }
@@ -175,39 +178,46 @@ final class Notebook {
     /// thread either way.
     func open(done: @escaping () -> Void) {
         let source = source
-        background({ () -> (OpaquePointer?, URL?, String?) in
+        // The library, the Files location held open, why it failed, and a local folder to watch.
+        background({ () -> (OpaquePointer?, URL?, String?, URL?) in
             var error: UnsafeMutablePointer<CChar>?
             switch source {
             case .server(let server):
                 let library = sb_library_server(
                     server.host, server.share, server.user, Keychain.password(server) ?? "", "", server.root,
                     cacheDirectory.path, &error)
-                return (library, nil, take(error))
+                return (library, nil, take(error), nil)
             case .files(let bookmark):
                 var stale = false
                 guard let url = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale) else {
-                    return (nil, nil, "The notebook was moved or deleted.")
+                    return (nil, nil, "The notebook was moved or deleted.", nil)
                 }
                 let accessed = url.startAccessingSecurityScopedResource() ? url : nil
+                let local = onThisDevice(url)
                 var library: OpaquePointer?
                 // A coordinated read brings a cloud folder's files down before they are read.
                 var coordination: NSError?
                 NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordination) { url in
-                    library = sb_library_open(url.path, cacheDirectory.path, &error)
+                    library = sb_library_open(url.path, cacheDirectory.path, local, &error)
                 }
-                return (library, accessed, take(error) ?? coordination?.localizedDescription)
+                return (library, accessed, take(error) ?? coordination?.localizedDescription, local ? url : nil)
             case .documents(let path):
-                let library = sb_library_open(
-                    documentsDirectory.appendingPathComponent(path).path, cacheDirectory.path, &error)
-                return (library, nil, take(error))
+                let url = documentsDirectory.appendingPathComponent(path)
+                let library = sb_library_open(url.path, cacheDirectory.path, true, &error)
+                return (library, nil, take(error), url)
             case .path(let path):
-                return (sb_library_open(path, cacheDirectory.path, &error), nil, take(error))
+                let url = URL(fileURLWithPath: path)
+                let local = onThisDevice(url)
+                return (sb_library_open(path, cacheDirectory.path, local, &error), nil, take(error), local ? url : nil)
             }
-        }) { [self] (library, accessed, problem) in
+        }) { [self] (library, accessed, problem, watched) in
             self.accessed?.stopAccessingSecurityScopedResource()
             self.accessed = accessed
+            presenter?.stop()
+            presenter = nil
             if let handle { sb_library_free(handle) }
             handle = library
+            if let library, let watched { presenter = FolderPresenter(watching: watched, for: library) }
             self.problem = library == nil ? (problem ?? "The notebook can’t be read.") : nil
             follow()
             reload(done: done)
@@ -241,6 +251,61 @@ final class Notebook {
             if let tabs { self.tabs = tabs }
             done()
         }
+    }
+}
+
+/// Whether `url` is kept on this device, rather than by a file provider that keeps it elsewhere
+/// too, as iCloud Drive does.
+private func onThisDevice(_ url: URL) -> Bool {
+    let values = try? url.resourceValues(forKeys: [.volumeIsLocalKey, .isUbiquitousItemKey])
+    return values?.volumeIsLocal == true && values?.isUbiquitousItem != true
+}
+
+/// Tells a library which files of its folder on this device changed, as file coordination
+/// reports other apps' writes; the library checks just those sections.
+final class FolderPresenter: NSObject, NSFilePresenter {
+    let presentedItemURL: URL?
+    let presentedItemOperationQueue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        return queue
+    }()
+    private let root: String
+    private let library: OpaquePointer
+
+    init(watching url: URL, for library: OpaquePointer) {
+        presentedItemURL = url
+        root = url.standardizedFileURL.resolvingSymlinksInPath().path
+        self.library = library
+        super.init()
+        NSFileCoordinator.addFilePresenter(self)
+    }
+
+    /// Stops reporting, before the library goes.
+    func stop() {
+        NSFileCoordinator.removeFilePresenter(self)
+        presentedItemOperationQueue.waitUntilAllOperationsAreFinished()
+    }
+
+    func presentedItemDidChange() { touched("") }
+    func presentedSubitemDidChange(at url: URL) { touched(url) }
+    func presentedSubitemDidAppear(at url: URL) { touched(url) }
+    func presentedSubitem(at oldURL: URL, didMoveTo newURL: URL) {
+        touched(oldURL)
+        touched(newURL)
+    }
+    func accommodatePresentedSubitemDeletion(at url: URL, completionHandler: @escaping (Error?) -> Void) {
+        touched(url)
+        completionHandler(nil)
+    }
+
+    private func touched(_ url: URL) {
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        touched(path.hasPrefix(root + "/") ? String(path.dropFirst(root.count + 1)) : "")
+    }
+
+    private func touched(_ path: String) {
+        sb_library_touched(library, path)
     }
 }
 

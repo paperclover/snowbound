@@ -329,8 +329,10 @@ impl InkShape {
         match (kind?, line, anchors) {
             (11, Some(line), _) if line.len() == 16 => {
                 let v = floats(line);
-                Some(Self::Line([[v[0], v[1]], [v[2], v[3]]].map(|end| end.map(|v| v * 36.0))))
-                    .filter(Self::finite)
+                Some(Self::Line(
+                    [[v[0], v[1]], [v[2], v[3]]].map(|end| end.map(|v| v * 36.0)),
+                ))
+                .filter(Self::finite)
             }
             (12, _, Some(bytes)) if bytes.len() >= 24 && (bytes.len() - 24) % 8 == 0 => {
                 let v = floats(bytes);
@@ -358,7 +360,11 @@ impl InkShape {
     pub(crate) fn stored(&self) -> (u8, u32, Vec<u8>) {
         let half = |v: &f32| (v / 36.0).to_le_bytes();
         match self {
-            Self::Line(ends) => (11, 0x1c001dac, ends.iter().flatten().flat_map(half).collect()),
+            Self::Line(ends) => (
+                11,
+                0x1c001dac,
+                ends.iter().flatten().flat_map(half).collect(),
+            ),
             Self::Closed { transform, anchors } => (
                 12,
                 0x1c001daa,

@@ -8,7 +8,8 @@
 annotated a paragraph with the moment 500 ms. The recording attachment
 (`page::Attachment::recording`) and the annotation
 (`PageParagraph::media`) are read from the page and kept through the edit;
-a model that adds an annotation or drops the recording refuses to write.
+a model that drops the recording refuses to write. `corpus/recording` covers
+writing recordings and links.
 
 `cold/` is a fresh OneNote 2010 read: `MediaFile`, `MediaReference` and
 `MediaIndex` name the same recording and moment as before the edit, next to

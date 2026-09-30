@@ -7,7 +7,7 @@
 
 use canvas::{
     document::TextPosition,
-    editor::{Alignment, CanvasEditor, Formatting, NoteTag, Toggle, Whole},
+    editor::{Alignment, CanvasEditor, FAVORITES, Formatting, NoteTag, Pen, Toggle, Whole},
     layout::TextEngine,
 };
 use draw::edit::Movement;
@@ -31,7 +31,7 @@ const ART: [u8; 67] = [
 #[path = "../../onestore/tests/support/sweep.rs"]
 mod sweep;
 
-const SECTIONS: [&str; 18] = [
+const SECTIONS: [&str; 19] = [
     "corpus/outline-edit/before/notebook/synthetic.one",
     "corpus/paragraph-edit/before/notebook/synthetic.one",
     "corpus/outline-edit/tree/before/notebook/synthetic.one",
@@ -43,6 +43,7 @@ const SECTIONS: [&str; 18] = [
     "corpus/picture-edit/native-page-level/notebook/pictures.one",
     "corpus/attachment-edit/plain/cold/notebook/files.one",
     "corpus/ink-edit/drawing/cold/notebook/ink.one",
+    "corpus/ink-tools/native-ui/notebook/ink.one",
     "corpus/math-edit/native-editor/notebook/links.one",
     "corpus/link-edit/native-links/notebook/links.one",
     "corpus/link-edit/native-typed/notebook/links.one",
@@ -110,6 +111,8 @@ enum Kind {
     Paper,
     Art,
     Attach,
+    /// Record Audio at a random caret, a note taken meanwhile, then Stop.
+    Record,
     /// A click on blank page, then Attach File: a file on the page.
     AttachPage,
     MoveFile,
@@ -118,6 +121,15 @@ enum Kind {
     TypeRun,
     /// More typing where the caret is, joining the run before it.
     TypeOn,
+    /// A pen stroke, a highlighter stroke or a shape: a drawing of its own.
+    Pen,
+    Marker,
+    Shape,
+    /// The stroke eraser touching a drawing's first point.
+    Erase,
+    /// Lassoed drawings moved or deleted.
+    LassoMove,
+    LassoDelete,
     Undo,
     Redo,
 }
@@ -202,6 +214,13 @@ const ATTACH_PLANS: [&[Kind]; 2] = [
     &[Kind::Attach, Kind::Type, Kind::Attach, Kind::Undo],
 ];
 
+/// Recordings at a random caret, in plans of their own so the random edits' sequences stay
+/// as they were.
+const RECORD_PLANS: [&[Kind]; 2] = [
+    &[Kind::Record, Kind::Undo, Kind::Redo],
+    &[Kind::Record, Kind::PageDelete, Kind::Undo],
+];
+
 /// Files attached on blank page, moved, spaced and removed, in plans of their own so the
 /// random edits' sequences stay as they were.
 const FLOATING_PLANS: [&[Kind]; 4] = [
@@ -222,6 +241,30 @@ const FLOATING_PLANS: [&[Kind]; 4] = [
         Kind::Undo,
         Kind::Undo,
     ],
+];
+
+/// The Draw tab's tools, in plans of their own so the random edits' sequences stay as they
+/// were.
+const INK_PLANS: [&[Kind]; 6] = [
+    &[Kind::Pen, Kind::Undo, Kind::Redo],
+    &[
+        Kind::Marker,
+        Kind::Shape,
+        Kind::Undo,
+        Kind::Undo,
+        Kind::Redo,
+    ],
+    &[Kind::Pen, Kind::Pen, Kind::Erase, Kind::Undo, Kind::Redo],
+    &[
+        Kind::Shape,
+        Kind::LassoMove,
+        Kind::Undo,
+        Kind::Redo,
+        Kind::LassoDelete,
+        Kind::Undo,
+    ],
+    &[Kind::Erase, Kind::Undo, Kind::Redo],
+    &[Kind::LassoMove, Kind::LassoDelete, Kind::Undo, Kind::Undo],
 ];
 
 /// Page colour, rule lines and art undone and redone across each other.
@@ -290,6 +333,12 @@ fn perform(
             | Kind::Date
             | Kind::Paper
             | Kind::Art
+            | Kind::Pen
+            | Kind::Marker
+            | Kind::Shape
+            | Kind::Erase
+            | Kind::LassoMove
+            | Kind::LassoDelete
     ) {
         if outlines.is_empty() {
             return false;
@@ -561,6 +610,29 @@ fn perform(
             };
             editor.set_paper(editor.page_color(), editor.rule_lines(), Some(art))
         }
+        Kind::Record => {
+            place(editor, middle)
+                && editor
+                    .start_recording(engine, "Audio recording started")
+                    .is_ok_and(|id| {
+                        let file = onestore::page::Attachment {
+                            id: onestore::page::text::new_id().unwrap(),
+                            filename: "Recorded.wav".into(),
+                            source_path: None,
+                            size: Some([24.0, 24.0]),
+                            layout: Default::default(),
+                            bytes: Some(std::sync::Arc::from(b"RIFF".as_slice())),
+                            preview: Some(std::sync::Arc::from(ART.as_slice())),
+                            recording: Some(onestore::page::Recording {
+                                id,
+                                kind: 1,
+                                duration_ms: Some(1000),
+                            }),
+                        };
+                        editor.insert(engine, "noted").is_ok()
+                            && editor.finish_recording(engine, file).is_ok()
+                    })
+        }
         Kind::Attach => {
             let file = onestore::page::Attachment {
                 id: onestore::page::text::new_id().unwrap(),
@@ -624,8 +696,79 @@ fn perform(
                 && editor.delete_to(engine, Movement::WordLeft).is_ok()
                 && editor.commit_text(engine, "ef".into()).is_ok()
         }
-        Kind::TypeOn => {
-            editor.insert(engine, "gh").is_ok() && editor.delete(engine, true).is_ok()
+        Kind::TypeOn => editor.insert(engine, "gh").is_ok() && editor.delete(engine, true).is_ok(),
+        Kind::Pen | Kind::Marker => {
+            let pen = if kind == Kind::Pen {
+                Pen::new(35.0, Some(0x7a9a1f))
+            } else {
+                FAVORITES[5]
+            };
+            let [x, y] = [
+                60.0 + 18.0 * random.below(20) as f32,
+                400.0 + 18.0 * random.below(10) as f32,
+            ];
+            let points: Vec<[f32; 2]> = (0..12)
+                .map(|step| [x + 6.0 * step as f32, y + 9.0 * (step as f32 / 2.0).sin()])
+                .collect();
+            let ink = onestore::page::Ink {
+                id: onestore::page::text::new_id().unwrap(),
+                layout: Default::default(),
+                strokes: vec![pen.stroke(&points).unwrap()],
+                groups: Vec::new(),
+                shape: None,
+            };
+            editor.draw(ink).is_ok()
+        }
+        Kind::Shape => {
+            use onestore::page::ink::ShapeKind;
+            let kinds = [
+                ShapeKind::Line,
+                ShapeKind::Arrow,
+                ShapeKind::Rectangle,
+                ShapeKind::Ellipse,
+            ];
+            let from = [
+                36.0 + 18.0 * random.below(20) as f32,
+                14.4 + 18.0 * random.below(30) as f32,
+            ];
+            let to = [
+                from[0] + 18.0 * (1 + random.below(6)) as f32,
+                from[1] + 18.0 * (1 + random.below(4)) as f32,
+            ];
+            let pen = Pen::new(50.0, Some(0x7a9a1f)).stroke(&[]).unwrap();
+            let ink = onestore::page::Ink::drawn(kinds[random.below(4)], from, to, &pen).unwrap();
+            editor.draw(ink).is_ok()
+        }
+        Kind::Erase | Kind::LassoMove | Kind::LassoDelete => {
+            let drawings: Vec<onestore::page::Ink> = editor
+                .page()
+                .unwrap()
+                .objects
+                .into_iter()
+                .filter_map(|object| match object {
+                    onestore::page::PageObject::Ink(ink) => Some(ink),
+                    _ => None,
+                })
+                .collect();
+            if drawings.is_empty() {
+                return false;
+            }
+            let ink = &drawings[random.below(drawings.len())];
+            match kind {
+                Kind::Erase => {
+                    let Some([x, y]) = ink.strokes.first().map(|stroke| stroke.points[0]) else {
+                        return false;
+                    };
+                    let [dx, dy] = [ink.layout.x, ink.layout.y].map(|v| v.unwrap_or(0.0));
+                    let point = [x + dx, y + dy];
+                    editor.erase(point, point, 1.0, false).unwrap_or(false)
+                }
+                Kind::LassoMove => {
+                    let delta = [18.0, -9.0].map(|step| step * (1 + random.below(3)) as f32);
+                    editor.move_ink(&[ink.id], delta).is_ok()
+                }
+                _ => editor.delete_ink(&[ink.id]).is_ok(),
+            }
         }
         Kind::Undo => editor.undo(engine).unwrap_or(false),
         Kind::Redo => editor.redo(engine).unwrap_or(false),
@@ -915,7 +1058,9 @@ fn sweep(
                     .collect()
             }))
             .chain(PAPER_PLANS.map(<[Kind]>::to_vec))
+            .chain(INK_PLANS.map(<[Kind]>::to_vec))
             .chain(ATTACH_PLANS.map(<[Kind]>::to_vec))
+            .chain(RECORD_PLANS.map(<[Kind]>::to_vec))
             .chain(FLOATING_PLANS.map(<[Kind]>::to_vec))
             .chain(TYPING_PLANS.map(<[Kind]>::to_vec))
             .collect::<Vec<Vec<Kind>>>();

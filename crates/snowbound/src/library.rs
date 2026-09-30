@@ -167,7 +167,7 @@ pub struct Library {
     /// Syncs the notebook's sections while no tab shows them, as OneNote syncs every
     /// section of an open notebook.
     pub background: Option<Arc<Background>>,
-    /// Reports the changes to a folder on this computer to `background`.
+    /// Reports the changes to a mounted notebook's folder to `background`.
     watch: Option<Arc<crate::watch::Watch>>,
 }
 
@@ -255,6 +255,16 @@ impl Library {
         if let Some(background) = &self.background {
             background.watch(notebook.replicas());
         }
+        // A network volume's watch covers each folder by name, so a new one needs a new watch.
+        let watch = match (&self.watch, &self.background) {
+            (Some(_), Some(background))
+                if !crate::watch::on_this_computer(Path::new(&self.location)) =>
+            {
+                let reports = OnceLock::from(Arc::downgrade(background));
+                watcher(&self.location, Arc::new(reports)).or_else(|| self.watch.clone())
+            }
+            _ => self.watch.clone(),
+        };
         Self {
             location: self.location.clone(),
             name: self.name.clone(),
@@ -263,7 +273,7 @@ impl Library {
             notice: self.notice.clone(),
             cache: self.cache.clone(),
             background: self.background.clone(),
-            watch: self.watch.clone(),
+            watch,
         }
     }
 
@@ -355,6 +365,9 @@ impl Library {
             }
         };
         section.set_offline(offline());
+        if let Some(background) = &self.background {
+            background.hold(path, &section);
+        }
         Ok(section)
     }
 
@@ -460,26 +473,17 @@ pub fn recycle_bin(path: &str) -> bool {
 }
 
 /// A mounted notebook's background sync, following Work Offline, and the watch that reports
-/// the folder's changes to it. Only a folder on this computer reports every change; one on a
-/// network volume is checked more often and kept in offline copies, as on a share.
+/// the folder's changes to it. A folder on a network volume is kept in offline copies, as on a
+/// share, and where the system does not report its server's changes, checked more often.
 fn local_background(
     notebook: &Notebook,
     location: &str,
 ) -> (Option<Arc<Background>>, Option<Arc<crate::watch::Watch>>) {
-    let reports = Arc::new(OnceLock::<std::sync::Weak<Background>>::new());
-    let report = Arc::clone(&reports);
-    let watch = crate::watch::watch(Path::new(location), move |paths| {
-        if let Some(background) = report.get().and_then(std::sync::Weak::upgrade) {
-            background.touched(&paths);
-        }
-    });
-    let remote = !crate::watch::on_this_computer(Path::new(location));
-    let interval = match watch {
-        Some(_) if !remote => Background::BACKSTOP,
-        _ => Background::UNWATCHED,
-    };
+    let reports = Arc::new(OnceLock::new());
+    let watch = watcher(location, Arc::clone(&reports));
+    let copies = !crate::watch::on_this_computer(Path::new(location));
     let Some(background) = notebook
-        .background(interval, remote, notify_background)
+        .background(watch.is_some(), copies, notify_background)
         .inspect_err(|error| eprintln!("Background sync did not start: {error}"))
         .ok()
     else {
@@ -489,7 +493,21 @@ fn local_background(
     background.watch(notebook.replicas());
     let background = Arc::new(background);
     let _ = reports.set(Arc::downgrade(&background));
-    (Some(background), watch.map(Arc::new))
+    (Some(background), watch)
+}
+
+/// Reports the changes to the folder at `location` to the background `reports` names, once
+/// set.
+fn watcher(
+    location: &str,
+    reports: Arc<OnceLock<std::sync::Weak<Background>>>,
+) -> Option<Arc<crate::watch::Watch>> {
+    crate::watch::watch(Path::new(location), move |paths| {
+        if let Some(background) = reports.get().and_then(std::sync::Weak::upgrade) {
+            background.touched(&paths);
+        }
+    })
+    .map(Arc::new)
 }
 
 pub fn file_name(path: &Path) -> String {

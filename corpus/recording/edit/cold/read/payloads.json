@@ -1,0 +1,18 @@
+﻿[
+    {
+        "sha256":  "c41bd6bd61277bdc4bf3557b5572be5c08451ba5b4665aba662ac1280d907ca3",
+        "name":  "Recorded.wma",
+        "object":  "{831B7C66-D79E-4364-BC87-04D01F7A5187}{46}{B0}",
+        "kind":  "MediaFile",
+        "page":  "{0D60127D-BED1-425E-8EA7-E0DE4C091A0E}{1}{B0}",
+        "bytes":  24827
+    },
+    {
+        "sha256":  "b20a14e044e33eac39b4665e7d79813b8a3672dbbd27ed9d2e4ac866c13ec4b6",
+        "name":  "notes 🦀.txt",
+        "object":  "{DC10E2AC-49AB-0DF4-26AE-2E8215DF4D70}{0}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{D383DAE3-517B-02EB-0821-2990092E3DE9}{1}{B0}",
+        "bytes":  28
+    }
+]

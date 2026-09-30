@@ -5,11 +5,12 @@ use onestore::page::Attachment;
 use std::{error::Error, path::Path};
 
 /// The size OneNote 2010 shows a file's icon at, in points.
-const ICON_SIZE: [f32; 2] = [24.0, 24.0];
+pub(crate) const ICON_SIZE: [f32; 2] = [24.0, 24.0];
 
 impl State {
     /// Attach File, or a file dropped at `at`, a window point: a copy of the file's bytes
-    /// at the caret or at `at`, with the icon the system shows for it.
+    /// at the caret or at `at`, with the icon the system shows for it; audio and video are
+    /// recordings, as OneNote attaches them.
     pub(crate) fn attach(
         &mut self,
         path: &Path,
@@ -31,9 +32,9 @@ impl State {
             source_path: path.to_str().map(str::to_owned),
             size: Some(ICON_SIZE),
             layout: Default::default(),
-            bytes: Some(bytes.into()),
             preview: platform::file_icon(path).map(Into::into),
-            recording: None,
+            recording: crate::recording::attached(name, &bytes),
+            bytes: Some(bytes.into()),
         };
         let response = match at {
             Some(point) => {
@@ -53,11 +54,27 @@ impl State {
         Ok(())
     }
 
-    /// Open: a copy of the file, in a folder of its own, with the system's application for it.
-    pub(crate) fn open_attachment(&self, file: &Attachment) -> Result<(), Box<dyn Error>> {
+    /// Open: a recording plays; another file opens as a copy, in a folder of its own, with
+    /// the system's application for it.
+    pub(crate) fn open_attachment(&mut self, file: &Attachment) -> Result<(), Box<dyn Error>> {
+        if file.recording.is_some() {
+            return self.play(file, 0);
+        }
+        if let Some(path) = self.copy_attachment(file)? {
+            platform::open_file(&path);
+        }
+        Ok(())
+    }
+
+    /// A copy of the file, in a folder of its own; none, once said, where it is not stored
+    /// in the section.
+    pub(crate) fn copy_attachment(
+        &self,
+        file: &Attachment,
+    ) -> Result<Option<std::path::PathBuf>, Box<dyn Error>> {
         let Some(bytes) = &file.bytes else {
             unstored();
-            return Ok(());
+            return Ok(None);
         };
         let root = std::env::temp_dir().join("Snowbound Attachments");
         std::fs::create_dir_all(&root)?;
@@ -68,8 +85,7 @@ impl State {
             .ok_or("No folder is free for a copy of the file")?;
         let path = folder.join(&file.filename);
         std::fs::write(&path, bytes)?;
-        platform::open_file(&path);
-        Ok(())
+        Ok(Some(path))
     }
 
     /// Save As: the file's bytes where the user chooses, under its name by default.

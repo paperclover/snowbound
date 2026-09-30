@@ -165,11 +165,14 @@ MS-ONESTORE and MS-ONE are good, but they are not the whole truth:
   stores beside every author name. Snowbound writes them too.
 - Some things the spec requires aren't needed by OneNote to open a file.
   Snowbound writes them anyway, because other readers exist.
-- Ink, equations and media recordings are absent from MS-ONE entirely. Ink and
-  math were reverse-engineered, each against an independent oracle. For ink,
-  the stroke extents from OneNote's own export. For math, the MathML it exports,
-  matched byte for byte. Recordings and embedded objects are read and kept, but
-  never authored.
+- Ink and equations are absent from MS-ONE entirely, and so is the link from a
+  note to a moment in a recording. Ink and math were reverse-engineered, each
+  against an independent oracle. For ink, the stroke extents from OneNote's own
+  export, and for the Draw tab's pens, highlighters and shapes, the objects
+  OneNote stored while drawing them in the lab (`corpus/ink-tools`). For math, the MathML it exports, matched byte for byte. Recordings
+  and their links follow what OneNote stored while recording in the lab, read
+  back through its XML export (`corpus/recording`). Embedded objects are read
+  and kept, but never authored.
 
 Readers stay tolerant (files in the wild are older, odder, or written by other
 tools), while the writer stays strict.

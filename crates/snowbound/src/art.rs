@@ -66,3 +66,13 @@ pub const SYNC_BUSY: &[&str] = art!("icons/sync-busy");
 pub const SYNC_DONE: &[&str] = art!("icons/sync-done");
 pub const SYNC_ERROR: &[&str] = art!("icons/sync-error");
 pub const SYNC_OFFLINE: &[&str] = art!("icons/sync-offline");
+
+pub const ERASER: &[&str] = art!("icons/eraser");
+pub const LASSO: &[&str] = art!("icons/lasso");
+pub const PEN: &[&str] = art!("icons/pen");
+pub const SELECT: &[&str] = art!("icons/select");
+pub const SHAPES: &[&str] = art!("icons/shapes");
+pub const SHAPE_ARROW: &[&str] = art!("icons/shape-arrow");
+pub const SHAPE_LINE: &[&str] = art!("icons/shape-line");
+pub const SHAPE_OVAL: &[&str] = art!("icons/shape-oval");
+pub const SHAPE_RECTANGLE: &[&str] = art!("icons/shape-rectangle");

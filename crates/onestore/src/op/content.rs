@@ -642,7 +642,11 @@ fn stroke_values(stroke: &InkStroke, index: u32, filetime: u64) -> Result<Values
     });
     let mut origin = ((left - stroke.width / 2.0) / 36.0).to_le_bytes().to_vec();
     origin.extend_from_slice(&((top - stroke.height / 2.0) / 36.0).to_le_bytes());
-    let bias = if stroke.raster_operation == Some(9) { 2 } else { 0 };
+    let bias = if stroke.raster_operation == Some(9) {
+        2
+    } else {
+        0
+    };
     values.extend([
         (0x14003419, index.to_le_bytes().to_vec()),
         (0x1000341b, 0x409_u16.to_le_bytes().to_vec()),
@@ -671,8 +675,13 @@ pub(crate) fn ink_changes(
     if ink.strokes.is_empty() {
         return Err(invalid("New ink needs at least one stroke"));
     }
-    if ink.layout != Default::default() {
-        return Err(invalid("Ink positions come from its strokes"));
+    let placed = crate::document::Layout {
+        x: None,
+        y: None,
+        ..ink.layout.clone()
+    };
+    if placed != Default::default() {
+        return Err(invalid("Ink sizes come from its strokes"));
     }
     let (modified, filetime) = crate::create::current_timestamps()?;
     let modified = modified.to_le_bytes();
@@ -700,7 +709,10 @@ pub(crate) fn ink_changes(
         let (kind, property, bytes) = shape.stored();
         values.extend([(0x0c001d4f, vec![kind]), (property, bytes)]);
     }
-    values.push((0x14001d4e, (1 + u32::from(ink.shape.is_some())).to_le_bytes().to_vec()));
+    values.push((
+        0x14001d4e,
+        (1 + u32::from(ink.shape.is_some())).to_le_bytes().to_vec(),
+    ));
     let mut object = PropertyObject {
         jcid: 0x60014,
         bytes: crate::create::properties(&values)?,

@@ -386,6 +386,14 @@ fn a_notebook_directory_lists_its_sections_and_opens_them() {
     section.close().unwrap();
 }
 
+/// The replicas in `cache`, beside the folder of catalog listings.
+fn replicas(cache: &Path) -> usize {
+    std::fs::read_dir(cache)
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().path().is_file())
+        .count()
+}
+
 #[test]
 fn a_notebook_only_opens_discovered_section_paths() {
     let directory = tempfile::tempdir().unwrap();
@@ -404,7 +412,7 @@ fn a_notebook_only_opens_discovered_section_paths() {
             Err(notebook::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
         ));
     }
-    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+    assert_eq!(replicas(&cache), 0);
     assert_eq!(std::fs::read(&outside).unwrap(), source);
 }
 
@@ -427,7 +435,7 @@ fn a_catalog_section_replaced_by_an_outside_symlink_is_rejected() {
         notebook.section("notes.one", || {}),
         Err(notebook::Error::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
     ));
-    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+    assert_eq!(replicas(&cache), 0);
     assert_eq!(std::fs::read(&outside).unwrap(), source);
 }
 
@@ -1028,9 +1036,7 @@ fn a_closed_sections_queued_edits_publish_in_the_background_when_online() {
     let directory = tempfile::tempdir().unwrap();
     let notebook = two_sections(directory.path());
     let file = directory.path().join("Shared/Second.one");
-    let background = notebook
-        .background(Duration::from_millis(20), false, || {})
-        .unwrap();
+    let background = notebook.background(false, false, || {}).unwrap();
     background.set_offline(true);
     background.watch(notebook.replicas());
     // The round started with the background ends before the edit exists.
@@ -1083,7 +1089,7 @@ fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
     let notified = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&notified);
     let background = notebook
-        .background(Duration::from_millis(20), false, move || {
+        .background(true, false, move || {
             counter.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
@@ -1107,6 +1113,8 @@ fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
             .unwrap();
         changed.push((name, space, native));
     }
+    // As a watch reports a folder when it cannot name the file.
+    background.touched(&[String::new()]);
     let mut noticed = Vec::new();
     until("both changes were noticed", || {
         noticed.extend(background.changed());
@@ -1130,9 +1138,7 @@ fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
 fn a_reported_change_wakes_its_section_without_polling() {
     let directory = tempfile::tempdir().unwrap();
     let notebook = two_sections(directory.path());
-    let background = notebook
-        .background(Duration::from_secs(3600), false, || {})
-        .unwrap();
+    let background = notebook.background(true, false, || {}).unwrap();
     background.watch(notebook.replicas());
     until("both sections were reached", || {
         background
@@ -1169,12 +1175,10 @@ fn every_section_gets_an_offline_copy_that_closing_the_notebook_discards() {
     let replicas: Vec<_> = notebook
         .replicas()
         .into_iter()
-        .map(|(_, replica)| replica.unwrap())
+        .map(|known| known.replica.unwrap())
         .collect();
     assert!(replicas.iter().all(|replica| !replica.exists()));
-    let background = notebook
-        .background(Duration::from_secs(3600), true, || {})
-        .unwrap();
+    let background = notebook.background(true, true, || {}).unwrap();
     background.watch(notebook.replicas());
     until("both sections have offline copies", || {
         replicas.iter().all(|replica| replica.exists())
@@ -1198,4 +1202,98 @@ fn every_section_gets_an_offline_copy_that_closing_the_notebook_discards() {
     assert!(second.exists(), "a copy with edits waiting stays");
     let kept = notebook::Replica::open(&second).unwrap();
     assert_eq!(kept.pending().unwrap().len(), 1);
+}
+
+/// A section file whose stamp reads are counted.
+struct Counted(std::path::PathBuf, Arc<AtomicUsize>);
+
+impl notebook::Remote for Counted {
+    fn read(&mut self) -> std::io::Result<Vec<u8>> {
+        onestore::read_file(&self.0)
+    }
+
+    fn stamp(&mut self) -> std::io::Result<onestore::Stamp> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        onestore::Stamp::of(&self.read()?).map_err(std::io::Error::other)
+    }
+
+    fn publish(
+        &mut self,
+        transaction: &onestore::Transaction,
+    ) -> Result<(), onestore::CommitError> {
+        transaction.commit_file(&self.0)
+    }
+
+    fn confirm(&mut self, base: &onestore::Stamp) -> Result<(), onestore::CommitError> {
+        onestore::confirm_file(&self.0, base)
+    }
+}
+
+#[test]
+fn an_open_section_the_background_holds_checks_its_file_when_the_watch_reports_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let notebook = two_sections(directory.path());
+    let background = notebook.background(true, false, || {}).unwrap();
+    background.watch(notebook.replicas());
+    until("both sections were reached", || {
+        background
+            .status()
+            .iter()
+            .all(|(_, status)| status.synced.is_some())
+    });
+    let stamps = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&stamps);
+    let section = notebook
+        .section_with(
+            "Second.one",
+            move |file| Ok(Counted(file.to_owned(), Arc::clone(&counter))),
+            || {},
+        )
+        .unwrap();
+    background.hold("Second.one", &section);
+    std::thread::sleep(Duration::from_secs(3));
+    let before = stamps.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_secs(5));
+    assert_eq!(
+        stamps.load(Ordering::SeqCst),
+        before,
+        "an idle held section reads nothing"
+    );
+
+    let file = directory.path().join("Shared/Second.one");
+    let bytes = onestore::read_file(&file).unwrap();
+    let space = notebook::session::stored_pages(&bytes).unwrap()[0].space;
+    let native = edited(&model_ops::page_of(&bytes, space), "Native ");
+    ops::save(&bytes, space, &native)
+        .unwrap()
+        .commit_file(&file)
+        .unwrap();
+    background.touched(&["Second.one".to_owned()]);
+    let mut changed = Vec::new();
+    until("the session heard of the change", || {
+        changed.extend(
+            section
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Changed(spaces) => Some(spaces),
+                    _ => None,
+                }),
+        );
+        !changed.is_empty()
+    });
+    assert!(changed.concat().contains(&space));
+    assert!(background.changed().is_empty(), "the session reports it");
+
+    // Once the session stops, the background takes the section over at once.
+    section.set_offline(true);
+    let before = section.page(space).unwrap();
+    typed(&section, space, &before, 0..0, "Closed ");
+    section.close().unwrap();
+    let mut after = edited(&before, "Closed ");
+    until("the background published the closed section's edit", || {
+        let stored = stored_page(&file, space);
+        after.title = stored.title.clone();
+        stored == after
+    });
 }

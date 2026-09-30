@@ -82,11 +82,14 @@ pub fn takes_text(focus: Option<Id>) -> bool {
 
 /// Work for the index thread.
 enum Job {
-    /// Brings the index to these notebooks: sections whose files changed are read again and
-    /// those no longer listed dropped. The open section, by key, is read through its replica.
+    /// Brings the index to these notebooks: sections not read yet are read, and those no
+    /// longer listed dropped. Of those read before, a notebook's background sync names the
+    /// changed ones, by key, in `changed`; a section on its own is read again when its file
+    /// changed. The open section, by key, is read through its replica.
     Notebooks {
         libraries: Vec<Arc<Library>>,
         open: Option<(String, Weak<Replica>)>,
+        changed: Vec<String>,
     },
     /// Reads pages of the open section again, with its page list.
     Pages {
@@ -217,10 +220,18 @@ fn run(
             std::thread::sleep(SETTLE);
         }
         let mut notebooks = None;
+        let mut changed = HashSet::new();
         let mut pages: HashMap<String, (Weak<Replica>, HashSet<ExGuid>)> = HashMap::new();
         for job in std::iter::once(first).chain(jobs.try_iter()) {
             match job {
-                Job::Notebooks { libraries, open } => notebooks = Some((libraries, open)),
+                Job::Notebooks {
+                    libraries,
+                    open,
+                    changed: keys,
+                } => {
+                    notebooks = Some((libraries, open));
+                    changed.extend(keys);
+                }
                 Job::Pages {
                     key,
                     replica,
@@ -234,7 +245,14 @@ fn run(
         }
         let start = Instant::now();
         if let Some((libraries, open)) = notebooks {
-            sync(&index, &version, &mut stamps, &libraries, open.as_ref());
+            sync(
+                &index,
+                &version,
+                &mut stamps,
+                &libraries,
+                open.as_ref(),
+                &changed,
+            );
             lap("index notebooks", start);
         }
         for (key, (replica, spaces)) in pages {
@@ -288,6 +306,7 @@ fn sync(
     stamps: &mut HashMap<String, Stamp>,
     libraries: &[Arc<Library>],
     open: Option<&(String, Weak<Replica>)>,
+    changed: &HashSet<String>,
 ) {
     let mut listed = HashSet::new();
     for library in libraries {
@@ -299,12 +318,16 @@ fn sync(
                 Some(_) => Path::new(&library.location).join(&path),
                 None => PathBuf::from(&library.location),
             };
-            let stamp = stamp(&file);
-            // A file with no stamp, as on a share not mounted, is read once.
-            if stamps
-                .get(&key)
-                .is_some_and(|known| known == &stamp || stamp.is_none())
-            {
+            // A notebook's background sync names its changed sections, so none is checked here.
+            let reported = library.background.is_some();
+            let stamp = if reported { None } else { stamp(&file) };
+            let fresh = match stamps.get(&key) {
+                None => false,
+                Some(_) if reported => !changed.contains(&key),
+                // A file with no stamp, as on a share not mounted, is read once.
+                Some(known) => known == &stamp || stamp.is_none(),
+            };
+            if fresh {
                 continue;
             }
             let replica = open
@@ -458,9 +481,9 @@ fn place(notebooks: &[Arc<Library>], key: &str) -> String {
 }
 
 impl State {
-    /// Brings the index to the open notebooks and section when they changed, and to
-    /// section files changed since, when `always`.
-    pub(crate) fn sync_index(&mut self, always: bool) {
+    /// Brings the index to the open notebooks and section when they changed, and when
+    /// `always` or sections `changed` names, by key, to the section files changed since.
+    pub(crate) fn sync_index(&mut self, always: bool, changed: Vec<String>) {
         let open = self.session.as_ref().map(|session| {
             (
                 session.library.key(&session.tabs[session.tab].path),
@@ -473,13 +496,14 @@ impl State {
             .map(|library| Arc::as_ptr(library) as usize)
             .chain(open.as_ref().map(|(_, replica)| replica.as_ptr() as usize))
             .collect();
-        if !always && identity == self.search.synced {
+        if !always && changed.is_empty() && identity == self.search.synced {
             return;
         }
         self.search.synced = identity;
         let _ = self.search.jobs.send(Job::Notebooks {
             libraries: self.notebooks.clone(),
             open,
+            changed,
         });
     }
 
@@ -596,7 +620,7 @@ impl State {
     pub(crate) fn start_search(&mut self) {
         self.search.finding = false;
         if !self.ui.popup_open(results()) {
-            self.sync_index(true);
+            self.sync_index(true, Vec::new());
             self.ui.open_popup(results());
             self.search.open = true;
         }

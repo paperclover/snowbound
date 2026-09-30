@@ -10,6 +10,9 @@ mod history;
 mod library;
 mod link;
 mod manage;
+#[cfg_attr(target_os = "linux", path = "media_linux.rs")]
+#[cfg_attr(target_os = "macos", path = "media_macos.rs")]
+mod media;
 mod meeting;
 #[cfg(target_os = "macos")]
 mod menubar;
@@ -21,6 +24,7 @@ mod pane;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
 mod platform;
+mod recording;
 mod rename;
 mod screenshot;
 mod search;
@@ -50,6 +54,7 @@ use library::Library;
 use onestore::ExGuid;
 use onestore::document::Format;
 use onestore::page::Page;
+use onestore::page::ink::ShapeKind;
 use onestore::page::text::Paragraph;
 use std::{
     collections::{HashMap, HashSet},
@@ -202,6 +207,7 @@ fn cursor_icon(cursor: Cursor) -> CursorIcon {
         Cursor::NeswResize => CursorIcon::NeswResize,
         Cursor::RowResize => CursorIcon::RowResize,
         Cursor::ColResize => CursorIcon::ColResize,
+        Cursor::Crosshair => CursorIcon::Crosshair,
     }
 }
 
@@ -550,6 +556,7 @@ struct State {
     title_focus: Option<ExGuid>,
     /// What the template strip shows over a blank page.
     templates: templates::View,
+    media: recording::Media,
     thumbnails: templates::Thumbnails,
     search: search::Search,
     /// Whether the page list is shown beside the page.
@@ -835,6 +842,7 @@ impl State {
             sectionless,
             drag: None,
             templates: templates::View::Strip,
+            media: Default::default(),
             thumbnails: templates::Thumbnails::default(),
             search,
             pages_open: true,
@@ -912,7 +920,7 @@ impl State {
         }
         self.draw()?;
         lap("drawn", start);
-        self.sync_index(false);
+        self.sync_index(false, Vec::new());
         let commands = std::mem::take(&mut self.commands);
         let follow = !commands.is_empty() || self.ui.wants_frame() || self.opening.is_some();
         for command in commands {
@@ -1260,6 +1268,9 @@ impl State {
             },
         );
         self.template_strip(&theme);
+        if let Some(rect) = self.ui.rect(page()) {
+            self.transport(&theme, rect)?;
+        }
         let scroll = self.view.scroll();
         for (index, axis) in [Axis::X, Axis::Y].into_iter().enumerate() {
             if let Some(offset) = ui::scrollbar(
@@ -1539,13 +1550,14 @@ impl State {
         let engine = &self.view.engine;
         let session = self.session.as_ref();
         let label = format!("{:.0}%", self.view.zoom() * 100.0);
+        let drawing_pens = self.pens();
         let ui = &mut self.ui;
         let text = theme.text;
         let tags: Vec<_> = self.tags.iter().enumerate().collect();
         let mut choice = group(
             ui,
             "navigate",
-            3,
+            4,
             |ui| {
                 let mut choice = None;
                 for id in [Cmd::Back, Cmd::Forward, Cmd::Undo, Cmd::Redo] {
@@ -1561,7 +1573,7 @@ impl State {
         choice = group(
             ui,
             "clipboard",
-            2,
+            3,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1721,7 +1733,7 @@ impl State {
         choice = group(
             ui,
             "character",
-            5,
+            6,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1816,7 +1828,7 @@ impl State {
         choice = group(
             ui,
             "paragraph",
-            4,
+            5,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1946,7 +1958,7 @@ impl State {
         choice = group(
             ui,
             "tags",
-            6,
+            7,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1964,6 +1976,23 @@ impl State {
             },
         )
         .or(choice);
+        // The Draw tab's tools, which Insert's menus list for when they fold, before Insert.
+        let shapes = [
+            ShapeKind::Line,
+            ShapeKind::Arrow,
+            ShapeKind::Rectangle,
+            ShapeKind::Ellipse,
+        ]
+        .map(|kind| Run(Cmd::Shape(kind)));
+        let drawing = [
+            Run(Cmd::SelectType),
+            Open("pen", Cmd::Pen),
+            Run(Cmd::Eraser),
+            Run(Cmd::Lasso),
+            Rule,
+        ]
+        .into_iter()
+        .chain(shapes);
         let inserted = [Cmd::Picture, Cmd::Link, Cmd::Date, Cmd::Equation];
         let more = [
             Cmd::ScreenClipping,
@@ -1979,7 +2008,7 @@ impl State {
         choice = group(
             ui,
             "insert",
-            1,
+            2,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1998,15 +2027,62 @@ impl State {
                 for id in inserted {
                     choice = tool(ui, id, status_of(id)).or(choice);
                 }
-                dropdown(ui, "more", Head::More, &more, status_of).or(choice)
+                let mut entries = more.to_vec();
+                entries.push(Rule);
+                entries.extend(drawing.clone());
+                dropdown(ui, "more", Head::More, &entries, status_of).or(choice)
             },
             |ui| {
                 let mut entries = vec![Open("table", Cmd::Table)];
                 entries.extend(inserted.map(Run));
                 entries.push(Rule);
                 entries.extend(more);
+                entries.push(Rule);
+                entries.extend(drawing.clone());
                 dropdown(ui, "menu", Head::Menu(art::PLUS), &entries, status_of)
             },
+        )
+        .or(choice);
+        // Pen draws with the gallery's last pick. Folded, the group leaves its tools to
+        // Insert's menus, so the narrowest row keeps its width.
+        choice = group(
+            ui,
+            "draw",
+            1,
+            |ui| {
+                divider(ui, theme);
+                let mut choice = tool(ui, Cmd::SelectType, status_of(Cmd::SelectType));
+                let status = status_of(Cmd::Pen);
+                if status.enabled {
+                    let pen = drawing_pens[pens.pen.min(drawing_pens.len() - 1)];
+                    let bar = Some(pen.color.map_or(ui.theme.paper_ink, colorref));
+                    let split = ui.id("pen");
+                    if ui::shell::split_button(
+                        ui,
+                        "pen",
+                        art::PEN,
+                        bar,
+                        status.checked,
+                        toolbar_popup("pen"),
+                    )
+                    .clicked
+                    {
+                        choice = Some(Choice::Command(Cmd::Pen));
+                    }
+                    tip(ui, Cmd::Pen);
+                    let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
+                    if let Some(place) = pen_gallery(ui, anchor, &drawing_pens, pens.pen) {
+                        choice = Some(Choice::Pen(place));
+                    }
+                } else {
+                    ui::shell::unavailable(ui, "pen", art::PEN, text, true);
+                }
+                for id in [Cmd::Eraser, Cmd::Lasso] {
+                    choice = tool(ui, id, status_of(id)).or(choice);
+                }
+                dropdown(ui, "shapes", Head::Menu(art::SHAPES), &shapes, status_of).or(choice)
+            },
+            |_| None,
         )
         .or(choice);
         ui.leaf(
@@ -2393,6 +2469,7 @@ impl State {
             }
             Command::Page(Request::OpenLink(address)) => self.open_link(&address)?,
             Command::Page(Request::OpenAttachment(file)) => self.open_attachment(&file)?,
+            Command::Page(Request::Play { file, at_ms }) => self.play(&file, at_ms)?,
             Command::Choose(choice) => self.run(choice)?,
         }
         Ok(())
@@ -2459,6 +2536,8 @@ impl State {
             self.opening = Some(opening);
             return Ok(());
         }
+        // A recording goes on the page it started on.
+        self.stop_recording()?;
         // The page shown so far keeps what was typed while the next one loaded.
         self.persist()?;
         if let Some(session) = &self.session {
@@ -2486,14 +2565,10 @@ impl State {
                 }
                 // The notebook's background sync takes the section over once it is closed.
                 if let Some(previous) = self.session.replace(*session) {
-                    let background = previous.library.background.clone();
                     let section = previous.section;
                     std::thread::spawn(move || {
                         if let Err(error) = section.close() {
                             eprintln!("Synchronization stopped: {error}");
-                        }
-                        if let Some(background) = background {
-                            background.wake();
                         }
                     });
                 }
@@ -2840,14 +2915,19 @@ impl State {
     /// last poll.
     fn synced(&mut self) -> Result<(), Box<dyn Error>> {
         // Every notebook's changes are taken, so none is reported again.
-        let noticed = self
+        let changed: Vec<String> = self
             .notebooks
             .iter()
-            .filter_map(|library| library.background.as_ref())
-            .filter(|background| !background.changed().is_empty())
-            .count();
-        if noticed > 0 {
-            self.sync_index(true);
+            .filter_map(|library| Some((library, library.background.as_ref()?)))
+            .flat_map(|(library, background)| {
+                background
+                    .changed()
+                    .into_iter()
+                    .map(|path| library.key(&path))
+            })
+            .collect();
+        if !changed.is_empty() {
+            self.sync_index(false, changed);
         }
         // Reports are rare: a status changed, or a section did.
         self.window.request_redraw();
@@ -3811,6 +3891,50 @@ fn list_gallery(
     Some(place(chosen))
 }
 
+/// The pen gallery below `anchor` while open: each pen's stroke in its colour, as thick as it
+/// draws, `current` outlined. Returns the place chosen.
+fn pen_gallery(
+    ui: &mut Ui,
+    anchor: ui::Anchor,
+    pens: &[canvas::editor::Pen],
+    current: usize,
+) -> Option<usize> {
+    const CELL: [f32; 2] = [40.0, 24.0];
+    let groups = [ui::popup::Group {
+        heading: "Pens",
+        cells: pens.len(),
+        columns: 5,
+        size: CELL,
+    }];
+    let ink = ui.theme.paper_ink;
+    ui::popup::gallery(
+        ui,
+        toolbar_popup("pen"),
+        anchor,
+        &groups,
+        &[current],
+        |ui, place| {
+            let pen = pens[place];
+            let tall = if pen.highlighter {
+                10.0
+            } else {
+                (pen.width / 25.0).clamp(1.5, 4.0)
+            };
+            let across = (CELL[1] - tall) / 2.0;
+            ui.leaf(
+                "stroke",
+                Spec {
+                    size: [fill(), fill()],
+                    fill: Some(pen.color.map_or(ink, colorref)),
+                    inset: [6.0, across, 6.0, across],
+                    radius: tall / 2.0,
+                    ..Spec::default()
+                },
+            );
+        },
+    )
+}
+
 /// A toolbar group that folds by `priority`: `full` builds its full form, `folded` the form
 /// it folds to. Returns what either chose.
 fn group(
@@ -4057,6 +4181,14 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
         Cmd::Symbol => art::SYMBOL,
         Cmd::RecordAudio => art::RECORD_AUDIO,
         Cmd::RecordVideo => art::RECORD_VIDEO,
+        Cmd::SelectType => art::SELECT,
+        Cmd::Pen => art::PEN,
+        Cmd::Eraser => art::ERASER,
+        Cmd::Lasso => art::LASSO,
+        Cmd::Shape(ShapeKind::Line) => art::SHAPE_LINE,
+        Cmd::Shape(ShapeKind::Arrow) => art::SHAPE_ARROW,
+        Cmd::Shape(ShapeKind::Rectangle) => art::SHAPE_RECTANGLE,
+        Cmd::Shape(ShapeKind::Ellipse) => art::SHAPE_OVAL,
         Cmd::PageColor => art::PAGE_COLOR,
         Cmd::ZoomIn => art::ZOOM_IN,
         Cmd::ZoomOut => art::ZOOM_OUT,
@@ -4388,6 +4520,11 @@ impl ApplicationHandler<UserEvent> for App {
             state.access_adapter.process_event(&state.window, &event);
         }
         if matches!(event, WindowEvent::CloseRequested) {
+            if let Some(state) = &mut self.state
+                && let Err(error) = state.stop_recording().and_then(|()| state.persist())
+            {
+                eprintln!("{error}");
+            }
             self.close(event_loop);
             return;
         }
@@ -4502,10 +4639,14 @@ impl ApplicationHandler<UserEvent> for App {
         if repaint || wake.is_some_and(|wake| wake <= now) {
             state.window.request_redraw();
         }
-        let next = [blink, wake.filter(|wake| *wake > now)]
-            .into_iter()
-            .flatten()
-            .min();
+        let next = [
+            blink,
+            wake.filter(|wake| *wake > now),
+            state.media_wake(now),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }

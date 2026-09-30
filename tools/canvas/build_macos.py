@@ -64,6 +64,7 @@ else:
     'NSHighResolutionCapable': True,
     'NSPrincipalClass': 'NSApplication',
     'CFBundleIconFile': 'Snowbound',
+    'NSMicrophoneUsageDescription': 'Snowbound records audio into your notes when you choose Record Audio.',
 } | ({'LSMinimumSystemVersion': '10.6'} if args.snow_leopard else {})))
 # 10.6 runs the bundle unsigned.
 if not args.snow_leopard:

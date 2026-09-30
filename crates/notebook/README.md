@@ -49,7 +49,9 @@ thread rereads the queue.
 
 ## Sessions
 
-`session::Notebook::open(root, cache_dir)` discovers a notebook directory and
+`session::Notebook::open(root, cache_dir)` discovers a notebook directory, reading only
+the files its folders list otherwise than when last opened (`discover::Cache`, kept under
+`cache_dir/listings`), and
 `session::Section::open(file, cache_dir, notify)` opens one section file through
 a replica named by the section's document identity, so the same file reopens the
 same queue after a relaunch. A section is `Send + Sync`: `apply(author, edit)`
@@ -66,20 +68,25 @@ worker stops connecting and edits queue until `wake()` (Sync Now) or `set_offlin
 
 `session::Background` keeps the sections no session holds in sync, as OneNote 2010 keeps
 every section of an open notebook: `Background::smb(root, limit, connect, notify)` on a
-share, `Notebook::background(interval, copies, notify)` for a mounted notebook, then
+share, `Notebook::background(watched, copies, notify)` for a mounted notebook, then
 `watch(notebook.replicas())`. On a share, one CHANGE_NOTIFY on the notebook's folder
 (`smb::Client::watch`) reports what changed; a host watching a mounted folder passes the
-changed paths to `touched`. A reported section is checked a second later, a failing one
-every 31 seconds, and any other every `interval` (`Background::BACKSTOP` while a watch
-reports). Newly watched sections, and every section after a reconnect, are checked one at a
-time 100 ms apart. A check reads the file's stamp; a section whose replica has edits waiting,
-or whose file moved past the replica's base, has the replica opened for the synchronization
-steps that publish or rebase it and closed again, and a section without a replica gets one
-from the file, its offline copy, on a share or with `copies`. A replica a session holds is
-skipped (`Error::busy`), so opening a section may wait out one step. `status()` gives each
-section's `SyncStatus`, `changed()` the sections another client changed, `wake` and
-`set_offline` follow Sync Now and Work Offline, and `discard` stops the thread and deletes the
-replicas holding nothing unpublished, as when the notebook closes.
+changed paths to `touched`, and says whether it reports every change as `watched`. A
+reported section is checked a second later; a reported folder is listed a second later and
+only its sections listed otherwise are checked. A failing section is tried every 31 seconds,
+and any other every `Background::BACKSTOP` while a watch reports, `UNWATCHED` otherwise. On
+connecting, and on working online again, every folder is listed: a section whose file lists as
+discovery or the last check found it needs no reading, the others are checked one at a time
+100 ms apart. A check reads the file's stamp; a section whose replica has edits waiting, or
+whose file moved past the replica's base, has the replica opened for the synchronization steps
+that publish or rebase it and closed again, and a section without a replica gets one from the
+file, its offline copy, on a share or with `copies`. `hold(path, section)` leaves an open
+section to its session: its worker no longer polls while a watch reports, the watch wakes it
+instead, and once its replica is released the background checks the file at once. A replica
+a session holds is otherwise skipped (`Error::busy`), so opening a section may wait out one
+step. `status()` gives each section's `SyncStatus`, `changed()` the sections another client
+changed, `wake` and `set_offline` follow Sync Now and Work Offline, and `discard` stops the
+thread and deletes the replicas holding nothing unpublished, as when the notebook closes.
 `Notebook::replica_path(path)` names a section's replica for either kind of notebook.
 
 `Section::resume(file, replica, notify)` starts from an owned `Replica` without
@@ -130,7 +137,8 @@ An `Arc<Replica>` can own one background worker. Supply a connection factory, po
 interval and observer; successful publications drain immediately, durable local
 edits wake the worker, and `wake()` requests an immediate reachability retry.
 While nothing is queued, or the queue waits on a remote that has not changed since,
-a remote whose `Remote::stamp` holds is not read again.
+a remote whose `Remote::stamp` holds is not read again; a worker a `Background` holds reads
+the stamp only when the notebook's watch wakes it.
 Transport failures discard the old connection and retry through the factory;
 Read contention and `NotCommitted` operations with `WouldBlock` or `ResourceBusy`
 reuse the connection. Contended `NotCommitted` operations use randomized backoff,
@@ -251,6 +259,12 @@ A child folder or section file that is denied or gone while listing (a folder
 another client holds delete-pending reads as denied) is kept as `unavailable` and
 tried again on the next discovery; the root itself, malformed storage, other failed
 reads and ambiguous identities reject the discovery.
+
+`Cache::discover` keeps each file's listing (size and last write time), stamp and what
+discovery took from it; the next discovery reads only the files listed otherwise, taking one
+from a copy where `Source::copy` has it as it stands (on a share, a replica whose base has the
+file's stamp), and `found(path)` gives a section's listing and stamp for `Background::watch`. A file written
+during discovery is read again next time; a failed discovery leaves the cache as it was.
 
 Each file read must be a consistent, bounded snapshot. The result is an
 observation across multiple files, not an atomic notebook transaction or
@@ -374,8 +388,8 @@ before retrying it. The transport does not automatically replay requests.
 `Client::read_dir(path, entry_limit)` enumerates a directory, including the share
 root with an empty path. It follows every response page and returns no partial
 list on interruption, entry-limit overflow or close failure. Entries retain exact
-Unicode names, observed sizes and MS-FSCC attributes, including directory/reparse
-flags. Concurrent directory changes are not an atomic snapshot; repeated names
+Unicode names, observed sizes, last write times and MS-FSCC attributes, including
+directory/reparse flags. Concurrent directory changes are not an atomic snapshot; repeated names
 are rejected with `ResourceBusy`. Notebook identities come from the files, not
 directory names or sizes. Missing paths, denied access and non-directory paths
 have distinct I/O error kinds.

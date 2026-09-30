@@ -99,6 +99,20 @@ pub struct Replica {
     worker: Arc<Mutex<std::sync::Weak<worker::Signal>>>,
     /// The section's root object space, which names the document.
     root: ExGuid,
+    /// Last, so that it runs once the fields above have closed the cache.
+    released: Released,
+}
+
+/// Runs once the replica is released and its cache closed, as `Background::hold` asks.
+#[derive(Default)]
+struct Released(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+impl Drop for Released {
+    fn drop(&mut self) {
+        if let Some(released) = self.0.get_mut().ok().and_then(Option::take) {
+            released();
+        }
+    }
 }
 
 impl Replica {
@@ -210,6 +224,7 @@ impl Replica {
             synchronization: Mutex::new(()),
             worker,
             root,
+            released: Released::default(),
         })
     }
 
@@ -340,8 +355,8 @@ fn validate(source: &[u8]) -> Result<ExGuid> {
     Ok(onestore::Section::open(&arena, source.to_vec())?.root())
 }
 
-/// A closed cache's base stamp and how many edits wait, without opening the replica.
-fn peek(path: &Path) -> Result<(onestore::Stamp, u64)> {
+/// A closed cache, without opening the replica.
+fn closed(path: &Path) -> Result<Connection> {
     let connection = cache_connection(path)?;
     let application: u32 =
         connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
@@ -349,10 +364,25 @@ fn peek(path: &Path) -> Result<(onestore::Stamp, u64)> {
     if application != APPLICATION_ID || version != schema::VERSION {
         return Err(io::Error::from(io::ErrorKind::InvalidData).into());
     }
+    Ok(connection)
+}
+
+/// A closed cache's base stamp and how many edits wait.
+fn peek(path: &Path) -> Result<(onestore::Stamp, u64)> {
+    let connection = closed(path)?;
     let base = base::stamp(&connection, base::Image::Base)?
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
     let queued: i64 = connection.query_row("SELECT count(*) FROM edits", [], |row| row.get(0))?;
     Ok((base, unsigned(queued)?))
+}
+
+/// A closed cache's base image, if its stamp is `stamp`: the section file as it stands.
+fn copied(path: &Path, stamp: &onestore::Stamp) -> Result<Option<Vec<u8>>> {
+    let connection = closed(path)?;
+    if base::stamp(&connection, base::Image::Base)?.as_ref() != Some(stamp) {
+        return Ok(None);
+    }
+    base::read(&connection, base::Image::Base)
 }
 
 fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {

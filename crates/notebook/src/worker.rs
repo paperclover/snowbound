@@ -18,6 +18,9 @@ pub(super) struct Signal {
     synced: AtomicU64,
     /// Asked for by `wake`: steps run while offline until one leaves nothing to do.
     pub(crate) requested: AtomicBool,
+    /// A watch on the file's folder wakes the worker when the file changes, so an idle worker
+    /// waits for that instead of checking the file on its own (`Background::hold`).
+    pub(crate) watched: AtomicBool,
     sender: SyncSender<()>,
 }
 
@@ -29,6 +32,7 @@ impl Signal {
             offline: AtomicBool::new(false),
             synced: AtomicU64::new(0),
             requested: AtomicBool::new(false),
+            watched: AtomicBool::new(false),
             sender,
         };
         (Arc::new(signal), receiver)
@@ -91,7 +95,8 @@ impl Drop for SyncWorker {
 
 impl Replica {
     /// Starts one worker, reconnecting through `connect` after transport failures.
-    /// Local edits wake it; `interval` controls idle polling and transport retries. While
+    /// Local edits wake it; `interval` controls idle polling, unless a watch wakes it
+    /// (`Background::hold`), and transport retries. While
     /// nothing is queued, or the queue waits on a remote that has not changed since, a
     /// remote whose `stamp` holds is not read again.
     /// Contended operations returning `NotCommitted` also back off by up to one second.
@@ -134,6 +139,15 @@ impl Replica {
                 // The first step, and the first after a failure, always runs, so `observe`
                 // hears that the remote is reachable and what state the queue is in.
                 let mut reported = false;
+                // With nothing to do: a watched worker waits for the watch, any other looks
+                // again after `interval`.
+                let rest = || {
+                    if worker_signal.watched.load(Ordering::Acquire) {
+                        let _ = receiver.recv();
+                    } else {
+                        let _ = receiver.recv_timeout(interval);
+                    }
+                };
                 while !worker_signal.stopped.load(Ordering::Acquire) {
                     if worker_signal.offline.load(Ordering::Acquire)
                         && !worker_signal.requested.load(Ordering::Acquire)
@@ -148,7 +162,7 @@ impl Replica {
                             if reported && replica.settled(remote).unwrap_or(false) {
                                 worker_signal.requested.store(false, Ordering::Release);
                                 worker_signal.synced.store(crate::now(), Ordering::Release);
-                                let _ = receiver.recv_timeout(interval);
+                                rest();
                                 continue;
                             }
                             let result = replica.sync_once(remote);
@@ -167,6 +181,7 @@ impl Replica {
                         worker_signal.synced.store(crate::now(), Ordering::Release);
                     }
                     observe(&result);
+                    let idle = matches!(result, Ok(Synced { edit: None, .. }));
                     match result {
                         Ok(Synced {
                             edit: Some((_, EditStatus::Published { .. })),
@@ -209,7 +224,9 @@ impl Replica {
                         Err(error) => return Err(error),
                     }
                     worker_signal.requested.store(false, Ordering::Release);
-                    if !worker_signal.stopped.load(Ordering::Acquire) {
+                    if idle {
+                        rest();
+                    } else if !worker_signal.stopped.load(Ordering::Acquire) {
                         let _ = receiver.recv_timeout(interval);
                     }
                 }

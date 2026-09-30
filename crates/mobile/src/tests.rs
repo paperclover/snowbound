@@ -53,7 +53,7 @@ fn canvas(section: &Section, title: &str) -> Canvas {
 
 fn features() -> (tempfile::TempDir, Section) {
     let (directory, file) = copy("media-edit/candidate/Features.one");
-    let library = Arc::new(Library::open(&file, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&file, &directory.path().join("cache"), true).unwrap());
     let section = open(&library, &file.to_string_lossy());
     (directory, section)
 }
@@ -82,8 +82,12 @@ fn focus(canvas: &mut Canvas, text: &str) {
 #[test]
 fn a_notebook_folder_lists_sections_in_order_with_groups_and_colours() {
     let directory = tempfile::tempdir().unwrap();
-    let library =
-        Library::open(&corpus("m6/native-features-01/notebook"), directory.path()).unwrap();
+    let library = Library::open(
+        &corpus("m6/native-features-01/notebook"),
+        directory.path(),
+        true,
+    )
+    .unwrap();
     let tabs = library.tabs().unwrap();
     let names: Vec<_> = tabs
         .iter()
@@ -94,6 +98,7 @@ fn a_notebook_folder_lists_sections_in_order_with_groups_and_colours() {
     let lone = Library::open(
         &corpus("media-edit/candidate/Features.one"),
         directory.path(),
+        true,
     )
     .unwrap();
     assert_eq!(lone.tabs().unwrap().len(), 1);
@@ -255,7 +260,7 @@ fn stored_text(file: &Path, space: ExGuid) -> String {
 fn typing_is_stored_in_the_cache_and_published_to_the_file() {
     let (directory, file) = copy("media-edit/candidate/Features.one");
     let cache = directory.path().join("cache");
-    let library = Arc::new(Library::open(&file, &cache).unwrap());
+    let library = Arc::new(Library::open(&file, &cache, true).unwrap());
     let section = open(&library, &file.to_string_lossy());
     let mut canvas = canvas(&section, "Paragraph controls");
     focus(&mut canvas, "Collapsed parent");
@@ -285,7 +290,7 @@ fn typing_is_stored_in_the_cache_and_published_to_the_file() {
 #[test]
 fn a_new_page_and_subpage_list_after_their_parent_and_delete_to_the_recycle_bin() {
     let (directory, root) = copy("m6/native-features-01/notebook");
-    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache"), true).unwrap());
     let section = open(&library, "Features.one");
     let first = section.rows().unwrap()[0].id.parse().unwrap();
     let page = section
@@ -338,7 +343,7 @@ fn a_new_page_and_subpage_list_after_their_parent_and_delete_to_the_recycle_bin(
 #[test]
 fn conflict_pages_list_under_their_page_and_take_no_edits() {
     let (directory, root) = copy("conflict-page/candidate");
-    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache"), true).unwrap());
     let section = open(&library, "synthetic.one");
     let rows = section.rows().unwrap();
     let version = rows
@@ -362,8 +367,12 @@ fn conflict_pages_list_under_their_page_and_take_no_edits() {
 #[test]
 fn search_finds_pages_by_title_and_text_across_sections() {
     let directory = tempfile::tempdir().unwrap();
-    let library =
-        Library::open(&corpus("m6/native-features-01/notebook"), directory.path()).unwrap();
+    let library = Library::open(
+        &corpus("m6/native-features-01/notebook"),
+        directory.path(),
+        true,
+    )
+    .unwrap();
     let found = library.search(None, "collapsed PARENT").unwrap();
     assert!(!found.is_empty());
     assert!(found[0].snippet.to_lowercase().contains("collapsed parent"));
@@ -446,7 +455,7 @@ fn a_picture_goes_after_the_caret_paragraph_and_undoes() {
 #[test]
 fn to_do_marks_a_new_pages_body() {
     let (directory, root) = copy("m6/native-features-01/notebook");
-    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache"), true).unwrap());
     let section = open(&library, "Features.one");
     let page = section
         .new_page(None, "Sunday, September 27, 2026", "3:04 AM")
@@ -571,7 +580,7 @@ extern "C" fn coordinator(
 fn a_local_sections_reads_and_publications_go_through_the_hosts_coordination() {
     library::sb_set_coordinator(coordinator);
     let (directory, root) = copy("m6/native-features-01/notebook");
-    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache"), true).unwrap());
     let section = open(&library, "Features.one");
     let mut canvas = canvas(&section, "Paragraph controls");
     focus(&mut canvas, "Collapsed parent");
@@ -640,7 +649,7 @@ fn tapping_the_date_asks_for_it_and_a_new_date_is_stored() {
 /// A notebook copy with its library, and a section of it open for editing.
 fn notebook_open(path: &str) -> (tempfile::TempDir, PathBuf, Arc<Library>, Section) {
     let (directory, root) = copy("m6/native-features-01/notebook");
-    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache"), true).unwrap());
     let section = open(&library, path);
     (directory, root, library, section)
 }
@@ -703,7 +712,7 @@ fn sync_status_lists_every_section_and_work_offline_holds_edits_until_sync_now()
 #[test]
 fn sections_open_the_first_time_while_the_background_syncs() {
     let (directory, root) = copy("m6/native-features-01/notebook");
-    let library = Arc::new(Library::open(&root, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&root, &directory.path().join("cache"), true).unwrap());
     let rounds = {
         let library = Arc::clone(&library);
         std::thread::spawn(move || {
@@ -735,7 +744,7 @@ fn sections_open_the_first_time_while_the_background_syncs() {
 #[test]
 fn the_tags_summary_lists_tagged_paragraphs_and_opens_on_them() {
     let (directory, file) = copy("structural-probe/tag-gallery.one");
-    let library = Arc::new(Library::open(&file, &directory.path().join("cache")).unwrap());
+    let library = Arc::new(Library::open(&file, &directory.path().join("cache"), true).unwrap());
     let path = file.to_string_lossy().into_owned();
     let section = open(&library, &path);
     let tagged = library.tagged(Some((&path, &section))).unwrap();
@@ -824,4 +833,98 @@ fn insert_space_turns_the_next_touch_into_a_drag() {
     assert_eq!(canvas.target([300.0, 1500.0]), Target::Page);
     let _ = canvas.page.insert_space();
     assert_eq!(canvas.target([300.0, 1500.0]), Target::Grip);
+}
+
+/// The page's drawings as the section stores them.
+fn stored_ink(section: &Section, space: ExGuid) -> Vec<onestore::page::Ink> {
+    let (page, _) = section.shared.page(space).unwrap();
+    page.objects
+        .into_iter()
+        .filter_map(|object| match object {
+            onestore::page::PageObject::Ink(ink) => Some(ink),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A press, drags through `points` and a release, and the edit it made stored.
+fn trace(canvas: &mut Canvas, section: &Section, points: &[[f32; 2]]) {
+    canvas.press(points[0]).unwrap();
+    for &point in &points[1..] {
+        canvas.drag(point).unwrap();
+    }
+    canvas.release().unwrap();
+    if let Some(edit) = canvas.edit().unwrap() {
+        section.shared.apply(edit).unwrap();
+    }
+}
+
+fn line(from: [f32; 2], to: [f32; 2]) -> Vec<[f32; 2]> {
+    (0..=20)
+        .map(|step| {
+            let t = step as f32 / 20.0;
+            [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t]
+        })
+        .collect()
+}
+
+#[test]
+fn pencil_tools_draw_pick_move_delete_and_erase_drawings_as_edits() {
+    let (_directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    let space = canvas.space;
+    let before = stored_ink(&section, space).len();
+    // The red pen, second in OneNote's gallery.
+    canvas.set_tool(1, 1).unwrap();
+    trace(&mut canvas, &section, &line([100.0, 600.0], [300.0, 660.0]));
+    let drawn = stored_ink(&section, space);
+    assert_eq!(drawn.len(), before + 1);
+    let stroke = &drawn.last().unwrap().strokes[0];
+    assert_eq!(stroke.color, Some(0x241ced));
+    assert!(stroke.points.len() > 2);
+    // A highlighter stroke is a drawing of its own.
+    canvas.set_tool(1, 5).unwrap();
+    trace(&mut canvas, &section, &line([100.0, 760.0], [300.0, 760.0]));
+    assert_eq!(stored_ink(&section, space).len(), before + 2);
+    assert!(stored_ink(&section, space).last().unwrap().strokes[0].raster_operation == Some(9));
+
+    // The lasso picks the pen stroke; a touch on it then drags it.
+    canvas.set_tool(3, 0).unwrap();
+    let lasso = [
+        [80.0, 580.0],
+        [320.0, 580.0],
+        [320.0, 700.0],
+        [80.0, 700.0],
+        [80.0, 582.0],
+    ];
+    trace(&mut canvas, &section, &lasso);
+    let frame = canvas.ink_selection().unwrap();
+    assert!(frame[2] > 150.0 && frame[3] > 40.0, "{frame:?}");
+    let on = [200.0, 630.0];
+    assert_eq!(canvas.target(on), Target::Grip);
+    trace(&mut canvas, &section, &[on, [230.0, 645.0], [260.0, 660.0]]);
+    let moved = stored_ink(&section, space);
+    let layout = &moved[before].layout;
+    assert!(layout.x.is_some_and(|x| x > 0.0), "{layout:?}");
+    let _ = canvas
+        .page
+        .key(&Key::Named(NamedKey::Backspace), None)
+        .unwrap();
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+    assert_eq!(stored_ink(&section, space).len(), before + 1);
+    assert!(canvas.ink_selection().is_none());
+
+    // The eraser takes the highlighter's stroke it crosses; undo brings it back.
+    canvas.set_tool(2, 0).unwrap();
+    trace(&mut canvas, &section, &line([200.0, 720.0], [200.0, 800.0]));
+    assert_eq!(stored_ink(&section, space).len(), before);
+    let _ = canvas.page.undo(false).unwrap();
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+    assert_eq!(stored_ink(&section, space).len(), before + 1);
 }

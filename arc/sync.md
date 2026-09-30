@@ -16,7 +16,7 @@ happens when the share is busy, changed or gone.
 ```text
 UI thread (winit, UIKit)      section thread                    sync thread
 ────────────────────────      ──────────────────────────────    ──────────────────────────────
-editor emits Edit (ops) ───►  apply to the parsed Section       poll the stamp (header + length)
+editor emits Edit (ops) ───►  apply to the parsed Section       read the stamp (header + length)
   and returns at once         write each burst to SQLite          unchanged: ask for a seal,
 page reads ◄────────────────  answered from the Section                      publish it
 events ◄────────────────────  Changed, Rejected, published        changed:   read once, ask
@@ -33,8 +33,9 @@ events ◄────────────────────  Changed,
   fresh thread that builds its own section while the old one keeps answering
   reads, so opening a page never waits on the network.
 - **The sync thread** (`notebook::worker`, stepping `notebook::sync`) does all
-  network I/O. It polls, publishes and rereads. When the queue is idle it
-  reads nothing but the header.
+  network I/O. It reads the stamp when a local edit waits or the notebook's watch
+  reports the file (every two seconds where nothing watches), then publishes or
+  rereads. Idle, it reads nothing.
 
 `notebook::session` wraps this up for apps. `Notebook` covers discovery and
 structure, `Section` covers one section's pages, edits, events and conflict
@@ -88,7 +89,7 @@ else:
 ```
 
 A batch stays open while the sync thread is busy, so keystrokes that arrive
-during one round trip publish together in the next. Polling costs a
+during one round trip publish together in the next. A check costs a
 kilobyte-sized read. A publication costs one appended revision, not the
 section.
 
@@ -159,7 +160,7 @@ client with the account the system keeps for that mount. It falls back to the
 mount only when it can't sign in that way.
 
 A file's identity is its root object space, not its server file ID, which
-changes when maintenance replaces the file. Polling opens by path each time
+changes when maintenance replaces the file. A check opens by path each time
 for the same reason.
 
 ## Offline
@@ -180,31 +181,48 @@ OneNote keeps every section of an open notebook in sync and on this computer, no
 the one on screen. Watched in the lab with a notebook of 200 sections on Samba, OneNote
 2010:
 
-- reads every section file once when the notebook opens (all 200 within 15 seconds), so a
-  section never shown before opens with the share gone;
+- reads every section file once when it first opens the notebook (all 200 within 15
+  seconds), so a section never shown before opens with the share gone; opening it again
+  with its cache warm, it only lists the folders and reads the files listed otherwise;
 - arms one CHANGE_NOTIFY on the notebook's folder, with WATCH_TREE and a filter of names,
   attributes, size and last write, and otherwise sends nothing: 22 idle minutes put no SMB
-  request on the wire, not even an echo;
+  request on the wire, not even an echo, and the section on screen waits on the same watch;
 - lists the folder once when the server reports a change, and reads only the section that
   changed, some seconds later;
 - tries a section it could not reach again about every 31 seconds.
 
-Snowbound's `session::Background` does the same, with one thread per notebook:
+Snowbound does the same. Opening a notebook lists its folders and reads only the files whose
+listed size or last write time changed since it last read them, keeping what it took from
+each, with the file's stamp, in the cache (`discover::Cache`). On a share, a changed section
+whose replica already holds it as it stands, as after its own edits published, costs just a
+stamp read. `session::Background` then keeps the sections in sync, one thread per notebook:
 
 ```text
-share ─ CHANGE_NOTIFY (tree) ─► the sections it names are due in 1 s ─► stamp ─► moved: rebase
-first pass:  one section every 100 ms; a section without a replica gets its offline copy
-failing:     again in 31 s        otherwise: again in an hour, against a lost notification
+connect:  arm the watch, list every folder
+            listed as before:  compare the known stamp with the replica, locally
+            listed otherwise:  check, one section every 100 ms
+share ─ CHANGE_NOTIFY (tree) ─► the file it names is due in 1 s ─► stamp ─► moved: rebase
+                             └► a folder it names is listed in 1 s ─► the files listed otherwise
+failing:  again in 31 s          otherwise: again in an hour, against a lost notification
 ```
 
 A check costs one stamp read. Only a section whose replica has edits waiting, or whose file
 moved past the replica's base, has its replica opened for the usual sync steps, and it is
-closed again afterwards; the open section is left to its own session. A connection that
-drops takes its watch with it, so the next one checks every section again. A notebook in a
-folder on this computer has no copies and learns of changes from FSEvents or inotify; one on
-a network volume the system mounted, whose server's changes those never report, keeps copies
-and is checked every 15 seconds. Closing a notebook deletes its copies, except any with
-edits still waiting.
+closed again afterwards; a section without one gets its offline copy. The section open on
+screen is left to its session, whose worker no longer polls: the watch wakes it, and once the
+session lets go of the replica the background checks the file at once. A connection that drops
+takes its watch with it, so the next one lists every folder again, and so does working online
+again.
+
+A notebook in a folder on this computer has no copies and learns of changes from FSEvents or
+inotify. One on a network volume the system mounted keeps copies. A Mac's SMB mount reports
+another client's change to FSEvents only for a folder watched in its own right, and names just
+that folder, so every folder of the notebook is watched and a report lists it. A Linux SMB
+mount reports none of another client's changes to inotify, so there each section's stamp is
+read every 15 seconds. On iOS, a folder on the device (Snowbound's own, or On My iPhone) has no
+copies and learns of other apps' writes through file coordination (`NSFilePresenter`); one a
+file provider keeps elsewhere, as iCloud Drive does, keeps copies and is checked every 15
+seconds. Closing a notebook deletes its copies, except any with edits still waiting.
 
 ## Notebook structure
 

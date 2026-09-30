@@ -1,4 +1,4 @@
-use super::{Entry, EntryKind, Source, component};
+use super::{Entry, EntryKind, Listed, Source, component};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -43,6 +43,7 @@ impl Source for Local {
                 .into_string()
                 .map_err(|_| io::ErrorKind::InvalidData)?;
             let kind = entry.file_type()?;
+            let metadata = entry.metadata()?;
             entries.push(Entry {
                 name,
                 kind: if kind.is_dir() {
@@ -51,6 +52,13 @@ impl Source for Local {
                     EntryKind::File
                 } else {
                     EntryKind::Other
+                },
+                listed: Listed {
+                    size: metadata.len(),
+                    modified: metadata
+                        .modified()?
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_nanos() as u64),
                 },
             });
         }
@@ -67,6 +75,8 @@ impl Source for Local {
 pub struct Smb<'a> {
     client: &'a crate::smb::Client,
     root: String,
+    /// Where the sections' replicas are, named by file identity.
+    copies: Option<PathBuf>,
 }
 
 #[cfg(feature = "smb")]
@@ -76,7 +86,19 @@ impl<'a> Smb<'a> {
         if !root.is_empty() && !root.split('/').all(component) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        Ok(Self { client, root })
+        Ok(Self {
+            client,
+            root,
+            copies: None,
+        })
+    }
+
+    /// Takes a section whose file stands as its replica's base in `folder` from the replica.
+    pub(crate) fn copies(self, folder: PathBuf) -> Self {
+        Self {
+            copies: Some(folder),
+            ..self
+        }
     }
 
     fn path(&self, relative: &str) -> io::Result<String> {
@@ -107,6 +129,10 @@ impl Source for Smb<'_> {
                 } else {
                     EntryKind::File
                 },
+                listed: Listed {
+                    size: entry.size,
+                    modified: entry.modified,
+                },
             })
             .collect())
     }
@@ -117,5 +143,15 @@ impl Source for Smb<'_> {
 
     fn read_asset(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
         self.client.read_asset(&self.path(path)?, limit)
+    }
+
+    /// Reads the file's stamp, then its replica's base if that has the same.
+    fn copy(&mut self, path: &str, known: [u8; 16]) -> Option<Vec<u8>> {
+        let replica = crate::session::replica_file(self.copies.as_ref()?, &known);
+        if !replica.exists() {
+            return None;
+        }
+        let stamp = self.client.stamp(&self.path(path).ok()?).ok()?;
+        crate::copied(&replica, &stamp).ok().flatten()
     }
 }

@@ -369,6 +369,9 @@ def compare(notebook, native, versions=None, password_file=None):
                         # Stroke coordinates are absolute; left-to-right pages report them
                         # relative to the canonical margin origin, right-to-left pages as stored.
                         extent = ink_extent(space, source)
+                        # A moved drawing keeps its strokes and takes an offset.
+                        extent[0] += source['layout']['x'] or 0.0
+                        extent[1] += source['layout']['y'] or 0.0
                         if not source_page['kind']['rtl']:
                             for index, (axis, canonical_origin) in enumerate((('x', 36.0), ('y', 14.4))):
                                 origin = source_page['kind']['margin_origin_' + axis]

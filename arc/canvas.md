@@ -106,6 +106,33 @@ on the page itself, as OneNote 2010 places it: the same column at the caret's
 grid point, outside any outline. It selects, drags on the grid, deletes and
 moves with Insert Space as a picture does, and opens and saves as above.
 
+## Recordings
+
+Record Audio works as OneNote 2010's does. The caret's paragraph splits around
+a line saying when recording started, in OneNote's grey `cite` style, and the
+caret goes on below it. Text written while recording links to the moment it
+was written. On Stop, the file goes in above that line, named after the page.
+Hovering a linked note or a recording shows OneNote's blue play button in the
+margin, and a click asks the host to play from that moment. The host records a
+16 kHz WAV and stores it as IMA ADPCM, which OneNote plays.
+
+## Drawing
+
+The Draw tab's tools work as OneNote 2010's do with a mouse (`corpus/ink-tools`).
+Every stroke and every shape is a drawing of its own, added on top of the page
+when the pen lifts: one edit and one undo step, published as one appended
+revision, or in one with the strokes queued behind it during a sync round trip,
+as keystrokes are. Shapes are ink too. Their corners snap to the placement grid, and the
+drawing keeps the shape's kind and anchors beside its strokes, which OneNote
+edits it by. A highlighter's rectangular tip multiplies what lies beneath, so
+text under it stays dark. The stroke eraser takes whole drawings, or only the
+strokes it touches in an older drawing of several. The lasso picks the drawings
+with most of their points inside it. They move by their offset, as OneNote
+moves ink, and Delete removes them. Escape returns to Select & Type, where a
+click on ink picks it. The default pen draws in the open section's accent at
+the light theme's shade, so a stroke stores one real colour and shows it in both
+themes.
+
 ## Content the editor doesn't understand
 
 Nothing is lost for being unfamiliar. A paragraph the canvas can't draw

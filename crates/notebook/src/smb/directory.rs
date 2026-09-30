@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 pub struct DirectoryEntry {
     pub name: String,
     pub size: u64,
+    /// LastWriteTime, FILETIME.
+    pub modified: u64,
     /// MS-FSCC file attributes; directory is 0x10 and reparse point is 0x400.
     pub attributes: u32,
 }
@@ -71,7 +73,7 @@ impl Client {
             };
             for entry in decode(&response.output_buffer)? {
                 if entries
-                    .insert(entry.name, (entry.size, entry.attributes))
+                    .insert(entry.name, (entry.size, entry.modified, entry.attributes))
                     .is_some()
                 {
                     return Err(io::ErrorKind::ResourceBusy.into());
@@ -89,9 +91,10 @@ impl Client {
         Ok(entries
             .into_iter()
             .filter(|(name, _)| name != "." && name != "..")
-            .map(|(name, (size, attributes))| DirectoryEntry {
+            .map(|(name, (size, modified, attributes))| DirectoryEntry {
                 name,
                 size,
+                modified,
                 attributes,
             })
             .collect())
@@ -199,6 +202,7 @@ fn decode(mut bytes: &[u8]) -> io::Result<Vec<DirectoryEntry>> {
         entries.push(DirectoryEntry {
             name,
             size: size.try_into().map_err(|_| io::ErrorKind::InvalidData)?,
+            modified: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
             attributes: u32::from_le_bytes(bytes[56..60].try_into().unwrap()),
         });
         if next == 0 {
@@ -214,6 +218,7 @@ mod tests {
 
     fn record(name: &str, size: u64, attributes: u32) -> Vec<u8> {
         let mut bytes = vec![0; 64];
+        bytes[24..32].copy_from_slice(&(size + 7).to_le_bytes());
         bytes[40..48].copy_from_slice(&size.to_le_bytes());
         bytes[56..60].copy_from_slice(&attributes.to_le_bytes());
         let name: Vec<_> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -240,6 +245,7 @@ mod tests {
             expected.push(DirectoryEntry {
                 name,
                 size,
+                modified: size + 7,
                 attributes,
             });
         }

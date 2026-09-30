@@ -391,7 +391,7 @@ impl State {
         self.search.finding = false;
         self.search.claim = true;
         self.ui.close_popup(crate::search::results());
-        self.sync_index(true);
+        self.sync_index(true, Vec::new());
     }
 
     /// Opens or closes a pane, as its command does.
@@ -406,7 +406,7 @@ impl State {
                     unchecked: false,
                     scope: TagScope::Notebook,
                 });
-                self.sync_index(true);
+                self.sync_index(true, Vec::new());
             }
             _ => self.open_search_pane(),
         }

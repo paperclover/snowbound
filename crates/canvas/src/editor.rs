@@ -28,14 +28,17 @@ mod equation;
 #[cfg(test)]
 mod evidence;
 mod format;
+mod ink;
 mod link;
 mod ops;
 pub(crate) mod page;
+mod recording;
 mod space;
 mod table;
 pub use format::{
     Alignment, BULLET_LIBRARY, FormatState, Formatting, ListStyle, NUMBER_LIBRARY, NoteTag, Toggle,
 };
+pub use ink::{FAVORITES, Pen};
 pub use link::{Link, shown_urls};
 pub use page::ReadOnlyObject;
 
@@ -120,6 +123,9 @@ pub struct CanvasEditor {
     /// The outline, caret and undo depth a run of typing left, which typing there joins as
     /// OneNote 2010 does until the caret moves or another kind of edit comes between.
     typing: Option<(ExGuid, TextPosition, usize)>,
+    recording: Option<recording::Live>,
+    /// Drawings being dragged and how far, shown there until dropped.
+    ink_drag: Option<(Vec<ExGuid>, [f32; 2])>,
 }
 
 /// Imported page state the editable content does not carry.
@@ -813,6 +819,17 @@ enum History {
         index: usize,
         file: Option<Box<page::Content>>,
     },
+    /// Restores the drawing on the page at `index` in paint order, or removes the one there
+    /// when `None`.
+    Ink {
+        index: usize,
+        ink: Option<Box<onestore::page::Ink>>,
+    },
+    /// Gives a drawing back the strokes it had.
+    Strokes {
+        ink: ExGuid,
+        strokes: Vec<onestore::page::InkStroke>,
+    },
     Remove {
         outline: onestore::ExGuid,
         focus: RestoreFocus,
@@ -870,6 +887,8 @@ impl CanvasEditor {
             stored: None,
             whole: None,
             typing: None,
+            recording: None,
+            ink_drag: None,
         })
     }
 
@@ -1058,9 +1077,11 @@ impl CanvasEditor {
         let reaches_one = |history: &History| match history {
             History::Date(_) => date_changed,
             History::Paper { .. } => false,
-            History::Image { .. } | History::Picture { .. } | History::File { .. } => {
-                objects_changed
-            }
+            History::Image { .. }
+            | History::Picture { .. }
+            | History::File { .. }
+            | History::Ink { .. }
+            | History::Strokes { .. } => objects_changed,
             History::Draft { outlines, .. } => changed.contains(&outlines[0].id),
             History::Text { outline, change } => {
                 changed.contains(outline)
@@ -1446,6 +1467,8 @@ impl CanvasEditor {
             stored: None,
             whole: None,
             typing: None,
+            recording: None,
+            ink_drag: None,
         })
     }
 
@@ -3683,6 +3706,14 @@ impl CanvasEditor {
                 .get(*index)
                 .and_then(page::Content::file)
                 .is_some(),
+            History::Ink {
+                index,
+                ink: Some(_),
+            } => *index <= self.objects.len(),
+            History::Ink { index, ink: None } => {
+                matches!(self.objects.get(*index), Some(page::Content::Ink(_)))
+            }
+            History::Strokes { ink, .. } => self.has_ink(*ink),
             History::Remove { outline, focus } => {
                 self.outlines.iter().any(|item| item.id == *outline)
                     && match focus {
@@ -3917,6 +3948,17 @@ impl CanvasEditor {
                     None => Some(Box::new(self.remove_file(index))),
                 },
             },
+            History::Ink { index, ink } => History::Ink {
+                index,
+                ink: match ink {
+                    Some(ink) => {
+                        self.add_ink(index, *ink);
+                        None
+                    }
+                    None => Some(Box::new(self.remove_ink(index))),
+                },
+            },
+            History::Strokes { ink, strokes } => self.set_strokes(ink, strokes),
             History::Remove { outline, focus } => {
                 let index = self
                     .outlines
@@ -4065,6 +4107,7 @@ impl CanvasEditor {
             .document
             .replace(range.clone(), replacement)?;
         self.own_lists(&mut edit)?;
+        self.link_notes(&mut edit)?;
         let inverse = self.apply(
             engine,
             edit,
@@ -4163,6 +4206,7 @@ impl CanvasEditor {
         selection: Selection,
     ) -> Result<(), EditorError> {
         self.own_lists(&mut edit)?;
+        self.link_notes(&mut edit)?;
         let inverse = self.apply(engine, edit, selection, true, None)?;
         self.record_change(inverse);
         Ok(())

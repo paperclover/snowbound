@@ -13,6 +13,10 @@ const NATIVE_READ: &str = include_str!("../../../corpus/m6/native-features-01/re
 const TITLE: &str = "Files and recording";
 
 fn page(bytes: &[u8]) -> (ExGuid, Page) {
+    titled(bytes, TITLE)
+}
+
+fn titled(bytes: &[u8], title: &str) -> (ExGuid, Page) {
     let store = Store::parse(bytes).unwrap();
     let index = RevisionIndex::parse(&store).unwrap();
     let document = Document::parse(&index).unwrap();
@@ -21,7 +25,7 @@ fn page(bytes: &[u8]) -> (ExGuid, Page) {
         .unwrap()
         .into_iter()
         .map(|(space, _)| (space, Page::from_space(&document, space).unwrap()))
-        .find(|(_, page)| page.title == TITLE)
+        .find(|(_, page)| page.title == title)
         .unwrap()
 }
 
@@ -157,4 +161,112 @@ fn editing_a_recorded_page_keeps_the_recording_and_its_annotation() {
         let count = Document::parse(&index).unwrap().pages().unwrap().len();
         std::fs::write(directory.join("expected-count.txt"), count.to_string()).unwrap();
     }
+}
+
+/// The recordings page `space` lists (AudioRecordingGuids).
+fn playlist(bytes: &[u8], space: ExGuid) -> Vec<[u8; 16]> {
+    let store = Store::parse(bytes).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let revision = document.spaces[&space].active().unwrap();
+    revision
+        .nodes
+        .values()
+        .find_map(|node| match &node.kind {
+            onestore::document::Kind::Page { recordings, .. } => Some(recordings.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// OneNote 2010's own recording (`corpus/recording/native`): a WMA started after "Before
+/// recording", its line saying when and notes linked while it ran.
+const RECORDED: &[u8] = include_bytes!("../../../corpus/recording/native/notebook/files.one");
+/// The same page after OneNote deleted the recording: the page lists no recording, and the
+/// notes keep their links.
+const DELETED: &[u8] = include_bytes!("../../../corpus/recording/native/deleted/files.one");
+
+/// `ONESTORE_RECORDING_EDIT_EXPORT` names a new directory receiving the edited section for
+/// a cold reopen (`corpus/recording/edit`).
+#[test]
+fn onenote_s_recording_round_trips_through_deleting_restoring_and_linking() {
+    let (space, native) = titled(RECORDED, "Recorded");
+    let (native_recording, _) = recording(&native);
+    assert_eq!(native_recording.kind, 1);
+    assert!(native_recording.duration_ms.is_some_and(|ms| ms > 30_000));
+    assert_eq!(playlist(RECORDED, space), vec![native_recording.id]);
+    let (_, deleted) = titled(DELETED, "Recorded");
+    assert!(playlist(DELETED, space).is_empty());
+    assert!(recording_paragraph(&deleted).is_none());
+
+    // Deleting the recording unlists it, as OneNote does; the notes keep their links.
+    let mut removed = native.clone();
+    let outline = body(&mut removed);
+    let at = outline
+        .paragraphs
+        .iter()
+        .position(|paragraph| matches!(paragraph.content, ParagraphContent::Attachment(_)))
+        .unwrap();
+    let file = outline.paragraphs.remove(at);
+    let written = ops::saved(RECORDED, space, &removed).unwrap();
+    assert!(playlist(&written, space).is_empty());
+    assert_eq!(titled(&written, "Recorded").1, removed);
+
+    // Putting it back, as undo does, stores the same recording, listed again.
+    let written = ops::saved(&written, space, &native).unwrap();
+    let (_, restored) = titled(&written, "Recorded");
+    assert_eq!(restored, native);
+    let bytes = |page: &Page| match &recording_paragraph(page).unwrap().content {
+        ParagraphContent::Attachment(file) => file.bytes.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(bytes(&restored), bytes(&native));
+    assert!(bytes(&restored).unwrap().starts_with(b"0&\xb2\x75"));
+    assert_eq!(playlist(&written, space), vec![native_recording.id]);
+    assert_eq!(recording_paragraph(&restored).unwrap(), &file);
+
+    // A note written while playing it back links to a moment, as one taken while recording.
+    let mut linked = restored.clone();
+    let mut added = ops::paragraph("Linked by Snowbound");
+    added.media = MediaIndex {
+        recordings: vec![native_recording.id],
+        time_ms: Some(25_000),
+    };
+    body(&mut linked).paragraphs.push(added);
+    let written = ops::saved(&written, space, &linked).unwrap();
+    assert_eq!(titled(&written, "Recorded").1, linked);
+
+    if let Some(directory) = std::env::var_os("ONESTORE_RECORDING_EDIT_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("files.one"), &written).unwrap();
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            include_bytes!("../../../corpus/recording/native/notebook/Open Notebook.onetoc2"),
+        )
+        .unwrap();
+    }
+}
+
+fn body(page: &mut Page) -> &mut onestore::page::Outline {
+    page.objects
+        .iter_mut()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => Some(outline),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn recording_paragraph(page: &Page) -> Option<&onestore::page::PageParagraph> {
+    page.objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Outline(outline) => Some(&outline.paragraphs),
+            _ => None,
+        })
+        .flatten()
+        .find(|paragraph| {
+            matches!(&paragraph.content, ParagraphContent::Attachment(file) if file.recording.is_some())
+        })
 }

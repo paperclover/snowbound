@@ -3,6 +3,7 @@
 //! translate their platform's events into these calls and carry out the returned requests.
 
 pub mod accessibility;
+pub mod ink;
 #[cfg(test)]
 mod profile;
 mod scroll;
@@ -47,6 +48,8 @@ pub enum Cursor {
     RowResize,
     /// Insert Space's line down the page.
     ColResize,
+    /// A drawing tool's.
+    Crosshair,
 }
 
 /// Work only the host can do, asked for by an event.
@@ -62,6 +65,11 @@ pub enum Request {
     OpenLink(String),
     /// Open a copy of a file with the system's application for it, as a double click does.
     OpenAttachment(onestore::page::Attachment),
+    /// Play recording `file` from `at_ms`, as a note's play button does.
+    Play {
+        file: onestore::page::Attachment,
+        at_ms: u32,
+    },
 }
 
 /// What a secondary press lands on, which its context menu offers commands for.
@@ -235,6 +243,7 @@ pub struct PageView {
     caret: f32,
     /// When the caret last moved, which restarts its blink.
     blink_from: Instant,
+    ink: ink::State,
 }
 
 /// Room, in OneNote pixels, the view leaves beyond content it scrolls to.
@@ -293,6 +302,7 @@ impl PageView {
             found: Vec::new(),
             caret: 1.0,
             blink_from: Instant::now(),
+            ink: Default::default(),
         };
         view.place_opened();
         view
@@ -306,6 +316,7 @@ impl PageView {
         self.space = false;
         self.object_focus = None;
         self.found.clear();
+        self.leave_ink();
     }
 
     /// Shows the stored page after a change made elsewhere in place of the one shown,
@@ -320,6 +331,7 @@ impl PageView {
         }
         self.drag = None;
         self.object_focus = None;
+        self.refresh_ink();
         self.moved()
     }
 
@@ -858,6 +870,15 @@ impl PageView {
                 found: &self.found,
             },
         )?);
+        if self.drag.is_none()
+            && self.pointer_inside
+            && !self.space
+            && let Some((button, ..)) = self
+                .editor
+                .play_button(self.viewport.document_point(self.pointer))
+        {
+            append_play_button(button, colors.paper, &mut primitives);
+        }
         if let Some(axis) = self
             .space_axis()
             .filter(|_| self.pointer_inside || self.drag.is_some())
@@ -879,6 +900,7 @@ impl PageView {
                 &mut primitives,
             );
         }
+        self.append_ink_feedback(colors.paper.ink, &mut primitives);
         Ok(primitives)
     }
 
@@ -887,7 +909,24 @@ impl PageView {
         if let Some(axis) = self.space_axis() {
             return [Cursor::ColResize, Cursor::RowResize][axis];
         }
-        let hit = self.hit_test(self.viewport.document_point(self.pointer));
+        let point = self.viewport.document_point(self.pointer);
+        if self
+            .editor
+            .ink_extent(self.ink_selection())
+            .is_some_and(|[x0, y0, x1, y1]| {
+                (x0..=x1).contains(&point[0]) && (y0..=y1).contains(&point[1])
+            })
+        {
+            return Cursor::Move;
+        }
+        if self.drawing() {
+            return Cursor::Crosshair;
+        }
+        let point = self.viewport.document_point(self.pointer);
+        if self.drag.is_none() && self.play_button(point).is_some() {
+            return Cursor::Pointer;
+        }
+        let hit = self.hit_test(point);
         match (&self.drag, hit) {
             (Some(Drag::Image { handle, .. }), _) => handle_cursor(*handle),
             (None, Some(Hit::Image { handle, .. })) => handle_cursor(handle),
@@ -939,6 +978,7 @@ impl PageView {
         if !focused {
             self.drag = None;
             self.space = false;
+            self.end_ink();
         }
         self.changed()
     }
@@ -960,6 +1000,9 @@ impl PageView {
     pub fn pointer_moved(&mut self, position: [f32; 2]) -> Result<Response> {
         self.pointer_inside = true;
         self.pointer = position;
+        if self.inking() {
+            return self.ink_moved(self.viewport.document_point(position));
+        }
         match &mut self.drag {
             Some(Drag::Text { anchor, unit }) => {
                 let (anchor, unit) = (*anchor, *unit);
@@ -1018,6 +1061,13 @@ impl PageView {
                 line: point[axis],
             });
             return Ok(Response::redraw());
+        }
+        if let Some((file, at_ms)) = self.play_button(point) {
+            self.drag = None;
+            return Ok(Response::request(Request::Play { file, at_ms }));
+        }
+        if let Some(response) = self.ink_pressed(point)? {
+            return Ok(response);
         }
         let unit = self
             .clicks
@@ -1143,6 +1193,9 @@ impl PageView {
     }
 
     pub fn pointer_released(&mut self) -> Result<Response> {
+        if self.inking() {
+            return self.ink_released(self.viewport.document_point(self.pointer));
+        }
         if let Some(Drag::Space { axis, line }) = self.drag {
             self.drag = None;
             let delta = self.viewport.document_point(self.pointer)[axis] - line;
@@ -1436,6 +1489,39 @@ impl PageView {
         self.edited()
     }
 
+    /// Record Audio: see [`CanvasEditor::start_recording`]; none where text cannot go.
+    pub fn start_recording(&mut self, label: &str) -> Result<(Option<[u8; 16]>, Response)> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok((None, Response::default()));
+        }
+        let id = self.editor.start_recording(&mut self.engine, label)?;
+        Ok((Some(id), self.edited()?))
+    }
+
+    /// Stop: see [`CanvasEditor::finish_recording`]. A file without an icon takes the
+    /// page's blank one.
+    pub fn finish_recording(&mut self, mut file: onestore::page::Attachment) -> Result<Response> {
+        file.preview
+            .get_or_insert_with(|| crate::gpu::page::file_icon().into());
+        self.editor.finish_composition();
+        self.editor.finish_recording(&mut self.engine, file)?;
+        self.follow_pictures()?;
+        self.edited()
+    }
+
+    /// The recording a press at document point `point` plays and the moment it plays from:
+    /// that of a play button OneNote shows beside a linked note or a recording.
+    fn play_button(&self, point: [f32; 2]) -> Option<(onestore::page::Attachment, u32)> {
+        if !self.pointer_inside || self.space {
+            return None;
+        }
+        let pointer = self.viewport.document_point(self.pointer);
+        let ([x0, y0, x1, y1], recording, at) = self.editor.play_button(pointer)?;
+        ((x0..=x1).contains(&point[0]) && (y0..=y1).contains(&point[1]))
+            .then(|| Some((self.editor.recording_file(recording)?.clone(), at)))
+            .flatten()
+    }
+
     /// Insert, Attach File: see [`CanvasEditor::insert_attachment`]. A file without an icon
     /// takes the page's blank one.
     pub fn insert_attachment(&mut self, mut file: onestore::page::Attachment) -> Result<Response> {
@@ -1561,6 +1647,9 @@ impl PageView {
         } = self.modifiers;
         if key == &Key::Named(NamedKey::Modifier) {
             return Ok(Response::default());
+        }
+        if let Some(response) = self.ink_key(key)? {
+            return Ok(response);
         }
         if let Some(ObjectFocus::Image(id) | ObjectFocus::File(id)) = self.object_focus
             && matches!(key, Key::Named(NamedKey::Backspace | NamedKey::Delete))
@@ -1806,6 +1895,22 @@ pub fn page_hit_test(
     pixel: f32,
 ) -> Option<Hit> {
     page_hit(editor, scene, point, pixel, None)
+}
+
+/// OneNote 2010's play button: a blue disc with a white triangle, in `rect`.
+fn append_play_button(rect: [f32; 4], paper: Paper, primitives: &mut Vec<Primitive<'_>>) {
+    let side = rect[2] - rect[0];
+    primitives.push(Primitive::Gradient {
+        rect,
+        radius: [side / 2.0; 2],
+        colors: [0x00e6a56e, 0x00c8783a].map(|color| paper.shade(crate::gpu::colorref(color))),
+    });
+    primitives.push(Primitive::Path {
+        data: "M4 3L8 5.25L4 7.5Z",
+        origin: [rect[0], rect[1]],
+        style: draw::PathStyle::Fill,
+        colors: [[1.0; 4]; 2],
+    });
 }
 
 /// Logical pixels a finger's grip targets extend beyond the drawn grips.

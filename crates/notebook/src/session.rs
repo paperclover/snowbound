@@ -1,7 +1,7 @@
 //! The application's view of a notebook: sections opened through a local replica that
 //! publishes their edits to the section file in the background.
 
-pub use crate::background::Background;
+pub use crate::background::{Background, Known};
 use crate::{
     EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover,
 };
@@ -72,7 +72,14 @@ fn entries(folder: &discover::Folder) -> Entries {
 /// Where a notebook's files live: a mounted directory or an SMB share. Paths are catalog
 /// paths, `/`-separated and relative to the notebook root.
 pub trait Storage: Send + Sync {
-    fn discover(&self, limits: discover::Limits) -> Result<discover::Folder>;
+    /// Reads the notebook's catalog, reading only the files `cache` holds as listed otherwise.
+    fn discover(
+        &self,
+        cache: &mut discover::Cache,
+        limits: discover::Limits,
+    ) -> Result<discover::Folder>;
+    /// Where the notebook lives, which names its catalog's cache.
+    fn location(&self) -> String;
     fn exists(&self, path: &str) -> bool;
     fn read(&self, path: &str) -> Result<Vec<u8>>;
     /// Creates a file holding `bytes`; an existing file is an error.
@@ -110,11 +117,16 @@ impl Directory {
 }
 
 impl Storage for Directory {
-    fn discover(&self, limits: discover::Limits) -> Result<discover::Folder> {
-        Ok(discover::discover(
-            &mut discover::Local::open(&self.0)?,
-            limits,
-        )?)
+    fn discover(
+        &self,
+        cache: &mut discover::Cache,
+        limits: discover::Limits,
+    ) -> Result<discover::Folder> {
+        Ok(cache.discover(&mut discover::Local::open(&self.0)?, limits)?)
+    }
+
+    fn location(&self) -> String {
+        self.0.to_string_lossy().into_owned()
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -162,6 +174,8 @@ impl Storage for Directory {
 pub struct Share {
     client: Arc<crate::smb::Client>,
     root: String,
+    /// Where the sections' replicas are.
+    copies: PathBuf,
 }
 
 #[cfg(feature = "smb")]
@@ -177,11 +191,17 @@ impl Share {
 
 #[cfg(feature = "smb")]
 impl Storage for Share {
-    fn discover(&self, limits: discover::Limits) -> Result<discover::Folder> {
-        Ok(discover::discover(
-            &mut discover::Smb::new(&self.client, &self.root)?,
-            limits,
-        )?)
+    fn discover(
+        &self,
+        cache: &mut discover::Cache,
+        limits: discover::Limits,
+    ) -> Result<discover::Folder> {
+        let mut source = discover::Smb::new(&self.client, &self.root)?.copies(self.copies.clone());
+        Ok(cache.discover(&mut source, limits)?)
+    }
+
+    fn location(&self) -> String {
+        format!("{}/{}", self.client.share(), self.root)
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -240,6 +260,9 @@ pub struct Notebook {
     root: Option<PathBuf>,
     cache: PathBuf,
     catalog: discover::Folder,
+    /// What reading the catalog took from each file, kept at `listing` in the cache.
+    read: discover::Cache,
+    listing: PathBuf,
 }
 
 impl Notebook {
@@ -274,7 +297,16 @@ impl Notebook {
         cache: impl AsRef<Path>,
     ) -> Result<Self> {
         let root = root.replace('\\', "/");
-        Self::with(Box::new(Share { client, root }), None, cache)
+        let copies = cache.as_ref().join("smb");
+        Self::with(
+            Box::new(Share {
+                client,
+                root,
+                copies,
+            }),
+            None,
+            cache,
+        )
     }
 
     fn with(
@@ -283,14 +315,40 @@ impl Notebook {
         cache: impl AsRef<Path>,
     ) -> Result<Self> {
         let cache = cache.as_ref().to_path_buf();
-        std::fs::create_dir_all(&cache)?;
-        let catalog = storage.discover(LIMITS)?;
-        Ok(Self {
+        let listings = cache.join("listings");
+        std::fs::create_dir_all(&listings)?;
+        let name: String = <sha2::Sha256 as sha2::Digest>::digest(storage.location())[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let listing = listings.join(format!("{name}.json"));
+        let mut read = std::fs::read(&listing)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let catalog = storage.discover(&mut read, LIMITS)?;
+        let notebook = Self {
             storage,
             root,
             cache,
             catalog,
-        })
+            read,
+            listing,
+        };
+        notebook.keep_listing();
+        Ok(notebook)
+    }
+
+    /// Keeps what the catalog read for the next time the notebook opens; failing costs only
+    /// reading the files again.
+    fn keep_listing(&self) {
+        let _ = (|| -> Result<()> {
+            let folder = self.listing.parent().unwrap_or(Path::new("."));
+            let mut file = tempfile::NamedTempFile::new_in(folder)?;
+            serde_json::to_writer(&mut file, &self.read).map_err(io::Error::from)?;
+            file.persist(&self.listing).map_err(|error| error.error)?;
+            Ok(())
+        })();
     }
 
     pub fn catalog(&self) -> &discover::Folder {
@@ -301,7 +359,8 @@ impl Notebook {
     /// file identity so a renamed or moved section stays the same section. A failed read
     /// keeps the previous catalog: an unreachable notebook is not an empty one.
     pub fn refresh(&mut self) -> Result<Vec<Change>> {
-        let catalog = self.storage.discover(LIMITS)?;
+        let catalog = self.storage.discover(&mut self.read, LIMITS)?;
+        self.keep_listing();
         let (before, before_orders) = entries(&self.catalog);
         let (after, after_orders) = entries(&catalog);
         let mut changes = Vec::new();
@@ -900,15 +959,18 @@ impl Notebook {
         })
     }
 
-    /// Every readable section's catalog path and replica, for `Background::watch`.
-    pub fn replicas(&self) -> Vec<(String, Option<PathBuf>)> {
+    /// Every readable section, for `Background::watch`.
+    pub fn replicas(&self) -> Vec<Known> {
         let mut sections = Vec::new();
         let mut folders = vec![&self.catalog];
         while let Some(folder) = folders.pop() {
             for section in &folder.sections {
                 if matches!(section.state, discover::SectionState::Readable { .. }) {
-                    let replica = self.replica_path(&section.path).ok();
-                    sections.push((section.path.clone(), replica));
+                    sections.push(Known {
+                        path: section.path.clone(),
+                        replica: self.replica_path(&section.path).ok(),
+                        found: self.read.found(&section.path),
+                    });
                 }
             }
             folders.extend(folder.groups.iter().rev());
@@ -917,23 +979,24 @@ impl Notebook {
     }
 
     /// Keeps the sections of a mounted notebook in sync while they are not open
-    /// (`Background`): each file is checked every `interval`, and sooner when
-    /// `Background::touched` reports it changed. `copies` keeps an offline copy of every
-    /// section, for a folder that is not on this computer.
+    /// (`Background`): a file is checked when `Background::touched` reports it changed, and
+    /// otherwise every `Background::BACKSTOP` when `watched`, as a host that watches the
+    /// folder reports every change, or else every `Background::UNWATCHED`. `copies` keeps an
+    /// offline copy of every section, for a folder that is not on this computer.
     pub fn background(
         &self,
-        interval: Duration,
+        watched: bool,
         copies: bool,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Background> {
-        self.background_with(interval, copies, |file| FileRemote(file.to_owned()), notify)
+        self.background_with(watched, copies, |file| FileRemote(file.to_owned()), notify)
     }
 
     /// `background`, reaching each section file through the remote `remote` makes for it
     /// (`section_with`).
     pub fn background_with<R: Remote + 'static>(
         &self,
-        interval: Duration,
+        watched: bool,
         copies: bool,
         remote: impl Fn(&Path) -> R + Clone + Send + 'static,
         notify: impl Fn() + Send + 'static,
@@ -948,8 +1011,14 @@ impl Notebook {
         Background::start(
             copies,
             move |_| {
-                let (root, remote) = (root.clone(), remote.clone());
-                Ok((move |path: &str| remote(&root.join(path)), interval))
+                let (folder, remote) = (root.clone(), remote.clone());
+                let bind = move |path: &str| remote(&folder.join(path));
+                let mut local = discover::Local::open(&root)?;
+                let list = move |folder: &str| {
+                    use discover::Source;
+                    local.entries(folder, LIMITS.entries)
+                };
+                Ok(((bind, list), watched))
             },
             notify,
         )
@@ -1085,7 +1154,7 @@ fn catalog_path(folder: &str, name: &str) -> String {
 }
 
 /// The replica in `cache` of the section `identity` names.
-fn replica_file(cache: &Path, identity: &[u8; 16]) -> PathBuf {
+pub(crate) fn replica_file(cache: &Path, identity: &[u8; 16]) -> PathBuf {
     let name: String = identity.iter().map(|byte| format!("{byte:02x}")).collect();
     cache.join(format!("{name}.sqlite"))
 }

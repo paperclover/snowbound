@@ -2,9 +2,10 @@
 //! chords on each platform, when it applies and what it does.
 
 use crate::{Command as Work, FONTS, HIGHLIGHTS, SIZES, State, page, platform, search};
-use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, Toggle};
-use canvas::interaction::Request;
+use canvas::editor::{Alignment, FAVORITES, FormatState, Formatting, ListStyle, Pen, Toggle};
+use canvas::interaction::{Request, ink::Tool};
 use draw::edit::{Key, Modifiers, NamedKey, Platform};
+use onestore::page::ink::ShapeKind;
 use std::{error::Error, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +55,12 @@ pub enum Id {
     DateTime,
     RecordAudio,
     RecordVideo,
+    /// The Draw tab's tools.
+    SelectType,
+    Pen,
+    Eraser,
+    Lasso,
+    Shape(ShapeKind),
     Toggle(Toggle),
     Highlight,
     FontColor,
@@ -90,6 +97,8 @@ pub enum Choice {
     RuleLines(Option<usize>),
     /// A template whose art becomes the page's background, or `None` for none.
     Art(Option<&'static str>),
+    /// A place in the pen gallery, which Pen then draws with.
+    Pen(usize),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -299,6 +308,14 @@ pub const COMMANDS: &[Command] = &[
     ),
     row!(Id::RecordAudio, "Record Audio", NONE, NONE),
     row!(Id::RecordVideo, "Record Video", NONE, NONE),
+    row!(Id::SelectType, "Select & Type", NONE, NONE),
+    row!(Id::Pen, "Pen", NONE, NONE),
+    row!(Id::Eraser, "Eraser", NONE, NONE),
+    row!(Id::Lasso, "Lasso Select", NONE, NONE),
+    row!(Id::Shape(ShapeKind::Line), "Line", NONE, NONE),
+    row!(Id::Shape(ShapeKind::Arrow), "Arrow", NONE, NONE),
+    row!(Id::Shape(ShapeKind::Rectangle), "Rectangle", NONE, NONE),
+    row!(Id::Shape(ShapeKind::Ellipse), "Oval", NONE, NONE),
     row!(Id::Toggle(Toggle::Bold), "Bold", &[cmd('b')], &[cmd('b')]),
     row!(
         Id::Toggle(Toggle::Italic),
@@ -438,7 +455,8 @@ pub fn title(choice: Choice) -> String {
         | Choice::Table(_)
         | Choice::PageColor(_)
         | Choice::RuleLines(_)
-        | Choice::Art(_) => {
+        | Choice::Art(_)
+        | Choice::Pen(_) => {
             unreachable!("Only the toolbar offers these")
         }
     }
@@ -596,6 +614,20 @@ pub fn shortcut(id: Id) -> String {
 }
 
 impl State {
+    /// The pen gallery: a pen in the open section's accent, then OneNote's favourites. The
+    /// accent takes the light theme's shade in either theme, so a stroke stores one colour
+    /// and shows it in both.
+    pub(crate) fn pens(&self) -> [Pen; 15] {
+        let section = crate::section_color(
+            self.session
+                .as_ref()
+                .and_then(|session| session.tabs[session.tab].color),
+        );
+        let [red, green, blue] = draw::srgb_bytes(ui::Theme::light().section(section).accent);
+        let accent = Pen::new(35.0, Some(u32::from_le_bytes([red, green, blue, 0])));
+        std::array::from_fn(|place| place.checked_sub(1).map_or(accent, |at| FAVORITES[at]))
+    }
+
     pub(crate) fn format_state(&self) -> FormatState {
         self.view.editor.format_state().unwrap_or_default()
     }
@@ -643,7 +675,9 @@ impl State {
             Choice::Highlight(_) | Choice::Color(_) | Choice::List(_) => return enabled(text),
             Choice::Table(_) => Id::Table,
             Choice::PageColor(_) | Choice::RuleLines(_) | Choice::Art(_) => Id::PageColor,
+            Choice::Pen(_) => Id::Pen,
         };
+        let tool = self.view.tool();
         match id {
             Id::Settings
             | Id::NewNotebook
@@ -708,11 +742,30 @@ impl State {
             },
             Id::PageColor => enabled(writable && session.is_some()),
             Id::ScreenClipping => enabled(text && cfg!(target_os = "macos")),
-            // Record Audio and Video await #36.
-            Id::RecordAudio | Id::RecordVideo => enabled(false),
+            Id::RecordAudio => Status {
+                enabled: matches!(self.media, crate::recording::Media::Recording { .. })
+                    || text && !modal,
+                checked: matches!(self.media, crate::recording::Media::Recording { .. }),
+            },
+            // Recording video would need a camera pipeline and an encoder OneNote 2010 plays.
+            Id::RecordVideo => enabled(false),
             Id::InsertSpace => Status {
                 enabled: writable,
                 checked: self.view.inserting_space(),
+            },
+            Id::SelectType => Status {
+                enabled: page,
+                checked: tool == Tool::Select,
+            },
+            Id::Pen | Id::Eraser | Id::Lasso | Id::Shape(_) => Status {
+                enabled: writable,
+                checked: match (id, tool) {
+                    (Id::Pen, Tool::Pen(_))
+                    | (Id::Eraser, Tool::Eraser)
+                    | (Id::Lasso, Tool::Lasso) => true,
+                    (Id::Shape(kind), Tool::Shape(shape, _)) => kind == shape,
+                    _ => false,
+                },
             },
             Id::Table
             | Id::Picture
@@ -825,6 +878,11 @@ impl State {
             Choice::RuleLines(lines) => {
                 let lines = lines.map(|index| canvas::template::RULE_LINES[index].1);
                 return self.paper_page(self.view.editor.page_color(), lines, None);
+            }
+            Choice::Pen(place) => {
+                self.toolbar.pen = place;
+                self.save_settings();
+                Id::Pen
             }
         };
         let field = self.ui.focused().filter(|focus| *focus != page());
@@ -980,11 +1038,30 @@ impl State {
                 self.save_settings();
                 return Ok(());
             }
-            Id::RecordAudio | Id::RecordVideo => {
-                return Ok(());
-            }
+            Id::RecordAudio => return self.record_audio(),
+            Id::RecordVideo => return Ok(()),
             Id::InsertSpace => {
                 let response = self.view.insert_space();
+                self.respond(response);
+                return Ok(());
+            }
+            Id::SelectType | Id::Pen | Id::Eraser | Id::Lasso | Id::Shape(_) => {
+                let pens = self.pens();
+                let tool = match id {
+                    Id::Pen => Tool::Pen(pens[self.toolbar.pen.min(pens.len() - 1)]),
+                    Id::Eraser => Tool::Eraser,
+                    Id::Lasso => Tool::Lasso,
+                    // Shapes draw with a pen a little thicker, as OneNote's do.
+                    Id::Shape(kind) => Tool::Shape(
+                        kind,
+                        Pen {
+                            width: 50.0,
+                            ..pens[0]
+                        },
+                    ),
+                    _ => Tool::Select,
+                };
+                let response = self.view.set_tool(tool);
                 self.respond(response);
                 return Ok(());
             }

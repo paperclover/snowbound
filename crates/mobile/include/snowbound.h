@@ -16,9 +16,10 @@ typedef void (*sb_coordinator)(const char *path, bool write, void (*body)(void *
 void sb_set_coordinator(sb_coordinator coordinator);
 void sb_set_sync_wake(void (*wake)(void));
 char *sb_tags(void);
+char *sb_pens(void);
 bool sb_tag_icon(uint16_t shape, bool checked, uint32_t pixels, uint8_t *rgba);
 
-const Library *sb_library_open(const char *path, const char *cache, char **error);
+const Library *sb_library_open(const char *path, const char *cache, bool local, char **error);
 const Library *sb_library_server(const char *address, const char *share, const char *user, const char *password,
                                  const char *domain, const char *root, const char *cache, char **error);
 char *sb_library_sections(const Library *library);
@@ -28,6 +29,7 @@ char *sb_library_search(const Library *library, const Section *open, const char 
 char *sb_library_tagged(const Library *library, const Section *open, const char *path);
 char *sb_library_sync_status(const Library *library);
 void sb_library_set_offline(const Library *library, bool offline);
+void sb_library_touched(const Library *library, const char *path);
 void sb_library_sync_now(const Library *library);
 void sb_library_free(const Library *library);
 
@@ -73,6 +75,8 @@ bool sb_view_find(View *view, const char *query);
 bool sb_view_select_paragraph(View *view, const char *id);
 char *sb_view_copy(View *view, bool cut);
 void sb_view_insert_space(View *view);
+void sb_view_set_tool(View *view, uint8_t tool, uint8_t pen);
+bool sb_view_ink_selection(const View *view, float rect[4]);
 char *sb_view_paper(const View *view);
 bool sb_view_set_paper(View *view, int16_t red, uint8_t green, uint8_t blue, int8_t ruled);
 bool sb_view_set_art(View *view, const char *name);

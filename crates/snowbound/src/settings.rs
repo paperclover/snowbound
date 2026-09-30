@@ -39,6 +39,8 @@ pub struct Toolbar {
     /// Places in OneNote's bullet and numbering libraries picked lately, latest first.
     pub bullets: Vec<usize>,
     pub numbering: Vec<usize>,
+    /// The place in the pen gallery Pen draws with: the accent pen first.
+    pub pen: usize,
 }
 
 impl Default for Toolbar {
@@ -49,6 +51,7 @@ impl Default for Toolbar {
             font_color: Some(0x0000ff),
             bullets: Vec::new(),
             numbering: Vec::new(),
+            pen: 0,
         }
     }
 }
@@ -175,6 +178,7 @@ mod tests {
                 font_color: Some(0x00ff00),
                 bullets: vec![3, 0],
                 numbering: vec![16],
+                pen: 6,
             },
             user_name: Some("Snowbound Test".into()),
             color_scheme: ColorScheme::Dark,

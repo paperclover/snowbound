@@ -1222,7 +1222,16 @@ impl<'a> Writer<'_, 'a> {
             .iter()
             .map(|stroke| (stroke.id, stroke))
             .collect();
-        self.write(|page| content::ink_changes(page, ink, ink.id, data, &strokes, holder))
+        self.write(|page| content::ink_changes(page, ink, ink.id, data, &strokes, holder))?;
+        // A drawing moved before, as undoing its deletion brings it back, keeps its offset.
+        match (ink.layout.x, ink.layout.y) {
+            (None, None) => Ok(()),
+            (Some(x), Some(y)) => {
+                let edit = OutlineEdit::Position { x, y };
+                self.write(|page| edit.changes(page, ink.id))
+            }
+            _ => Err(OpError::Unsupported("An ink position needs both coordinates").into()),
+        }
     }
 
     /// Adds a page object on top, then moves it before `before`.

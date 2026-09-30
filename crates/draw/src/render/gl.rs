@@ -21,6 +21,7 @@ const ZERO: GLenum = 0;
 const ONE: GLenum = 1;
 const SRC_ALPHA: GLenum = 0x0302;
 const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
+const DST_COLOR: GLenum = 0x0306;
 const BLEND: GLenum = 0x0BE2;
 const SCISSOR_TEST: GLenum = 0x0C11;
 const MAX_TEXTURE_SIZE: GLenum = 0x0D33;
@@ -463,6 +464,9 @@ impl Renderer {
                         gpu.atlas.name,
                         [ZERO, ONE_MINUS_SRC_ALPHA, ZERO, ONE_MINUS_SRC_ALPHA],
                     ),
+                    Blend::Multiply => {
+                        (gpu.atlas.name, [DST_COLOR, ONE_MINUS_SRC_ALPHA, ZERO, ONE])
+                    }
                 };
                 glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
                 glBindTexture(TEXTURE_2D, texture);

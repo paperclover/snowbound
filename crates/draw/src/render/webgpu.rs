@@ -13,6 +13,7 @@ pub(super) struct Gpu {
     pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
     erase_pipeline: wgpu::RenderPipeline,
+    multiply_pipeline: wgpu::RenderPipeline,
     atlas: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     image_sampler: wgpu::Sampler,
@@ -98,6 +99,20 @@ impl Renderer {
             color: erase,
             alpha: erase,
         });
+        // The fragment's colour is scaled by its coverage, so this leaves the target times
+        // the colour where covered and the target elsewhere; alpha stays.
+        let multiply_pipeline = make_pipeline(wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Dst,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        });
         let (atlas, bind_group) = atlas(&device, &pipeline, ATLAS_SIZE);
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Draw vertices"),
@@ -118,6 +133,7 @@ impl Renderer {
                 pipeline,
                 image_pipeline,
                 erase_pipeline,
+                multiply_pipeline,
                 atlas,
                 bind_group,
                 image_sampler,
@@ -268,6 +284,7 @@ impl Renderer {
                     Blend::Over => (&gpu.pipeline, &gpu.bind_group),
                     Blend::Image(id) => (&gpu.image_pipeline, &self.images[&id].texture),
                     Blend::Erase => (&gpu.erase_pipeline, &gpu.bind_group),
+                    Blend::Multiply => (&gpu.multiply_pipeline, &gpu.bind_group),
                 };
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, binding, &[]);

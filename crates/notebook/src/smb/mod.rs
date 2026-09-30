@@ -48,6 +48,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// The server and share, as `//server/share`.
+    pub(crate) fn share(&self) -> String {
+        format!("//{}/{}", self.tree.server, self.tree.share_name)
+    }
+
     pub fn connect(
         address: &str,
         share: &str,

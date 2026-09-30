@@ -188,6 +188,8 @@ enum Blend {
     Image(u64),
     /// Clearing it by the batch's coverage.
     Erase,
+    /// Multiplying it by the batch's colour where covered.
+    Multiply,
 }
 
 #[repr(C)]
@@ -425,6 +427,14 @@ pub enum Primitive<'a> {
         width: f32,
         /// A round pen tip caps the ends; otherwise they are square.
         round: bool,
+        color: [f32; 4],
+    },
+    /// A highlighter's stroke between two points, `width` units across with square ends:
+    /// its opaque `color` multiplies what lies beneath, so text under it stays dark.
+    Highlight {
+        from: [f32; 2],
+        to: [f32; 2],
+        width: f32,
         color: [f32; 4],
     },
 }
@@ -851,6 +861,15 @@ impl Renderer {
                 round,
                 color,
             } => self.segment(space, *from, *to, *width, *round, *color)?,
+            Primitive::Highlight {
+                from,
+                to,
+                width,
+                color,
+            } => {
+                blend = Blend::Multiply;
+                self.segment(space, *from, *to, *width, false, *color)?;
+            }
             Primitive::Image { image, rect } => {
                 if let Some(rect) = space.visible_rect(*rect)? {
                     self.image(image, active_images)?;
@@ -1598,6 +1617,11 @@ pub fn from_oklab([lightness, a, b]: [f32; 3]) -> [f32; 3] {
 pub fn srgb(red: u8, green: u8, blue: u8) -> [f32; 4] {
     let [red, green, blue] = [red, green, blue].map(|byte| linear(f32::from(byte) / 255.0));
     [red, green, blue, 1.0]
+}
+
+/// The sRGB bytes of linear RGBA `color`, as `srgb` takes them.
+pub fn srgb_bytes([red, green, blue, _]: [f32; 4]) -> [u8; 3] {
+    [red, green, blue].map(srgb_byte)
 }
 
 #[cfg(all(test, feature = "wgpu"))]

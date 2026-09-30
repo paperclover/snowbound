@@ -1,4 +1,4 @@
-use notebook::discover::{Entry, Error, Limits, Local, Source, discover};
+use notebook::discover::{Cache, Entry, Error, Limits, Local, Source, discover};
 use std::{fs, io, path::Path};
 
 fn limits() -> Limits {
@@ -356,4 +356,83 @@ fn unreadable_children_are_listed_as_unavailable_and_retried() {
     let denied = notebook.refresh();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
     assert!(denied.is_err());
+}
+
+/// A local folder that notes each file read, with copies of some files by identity.
+struct Counting {
+    source: Local,
+    read: Vec<String>,
+    copies: Vec<([u8; 16], Vec<u8>)>,
+}
+
+impl Source for Counting {
+    fn entries(&mut self, path: &str, limit: usize) -> io::Result<Vec<Entry>> {
+        self.source.entries(path, limit)
+    }
+
+    fn read(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        self.read.push(path.to_owned());
+        self.source.read(path, limit)
+    }
+
+    fn copy(&mut self, _: &str, known: [u8; 16]) -> Option<Vec<u8>> {
+        let (_, copy) = self
+            .copies
+            .iter()
+            .find(|(identity, _)| *identity == known)?;
+        Some(copy.clone())
+    }
+}
+
+#[test]
+fn a_cached_discovery_reads_only_the_files_listed_otherwise() {
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path());
+    let two = |title| onestore::create_section("two.one", title, "Fixture").unwrap();
+    fs::write(root.path().join("two.one"), two("Two")).unwrap();
+    let mut source = Counting {
+        source: Local::open(root.path()).unwrap(),
+        read: Vec::new(),
+        copies: Vec::new(),
+    };
+    let mut cache = Cache::default();
+    let first = cache.discover(&mut source, limits()).unwrap();
+    assert_eq!(std::mem::take(&mut source.read).len(), 3);
+    let again = cache.discover(&mut source, limits()).unwrap();
+    assert!(source.read.is_empty(), "{:?}", source.read);
+    assert_eq!(
+        serde_json::to_value(&again).unwrap(),
+        serde_json::to_value(&first).unwrap()
+    );
+
+    let changed = two("Two, changed");
+    fs::write(root.path().join("two.one"), &changed).unwrap();
+    let after = cache.discover(&mut source, limits()).unwrap();
+    assert_eq!(std::mem::take(&mut source.read), ["two.one"]);
+    let fresh = discover(&mut Local::open(root.path()).unwrap(), limits()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(&fresh).unwrap()
+    );
+    assert!(cache.found("two.one").unwrap().1 == onestore::Stamp::of(&changed).unwrap());
+
+    // Kept across launches, it reads nothing unchanged.
+    let mut kept: Cache = serde_json::from_slice(&serde_json::to_vec(&cache).unwrap()).unwrap();
+    kept.discover(&mut source, limits()).unwrap();
+    assert!(source.read.is_empty(), "{:?}", source.read);
+
+    // A file written as a copy of it holds, as a replica its own edits published from, is
+    // taken from the copy.
+    let copied = two("Two, published");
+    fs::write(root.path().join("two.one"), &copied).unwrap();
+    let identity = onestore::Store::parse(&changed).unwrap().header.file_id;
+    source.copies.push((identity, copied.clone()));
+    kept.discover(&mut source, limits()).unwrap();
+    assert!(source.read.is_empty(), "{:?}", source.read);
+    assert!(kept.found("two.one").unwrap().1 == onestore::Stamp::of(&copied).unwrap());
+
+    // A failed discovery leaves the cache as it was.
+    fs::write(root.path().join("one.one"), b"unfinished").unwrap();
+    assert!(kept.discover(&mut source, limits()).is_err());
+    assert!(kept.found("two.one").is_some());
 }

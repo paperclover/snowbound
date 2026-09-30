@@ -172,6 +172,11 @@ pub fn new_id() -> Result<ExGuid, EditError> {
     Ok(id)
 }
 
+/// A GUID of its own, as a recording's identity takes (AudioRecordingGuid).
+pub fn new_guid() -> Result<[u8; 16], EditError> {
+    crate::write::fresh_guid().map_err(|_| EditError::Identity)
+}
+
 impl Paragraph {
     pub fn project(&self) -> Result<TextProjection, EditError> {
         let mut runs = Vec::new();

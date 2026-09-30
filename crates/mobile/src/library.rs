@@ -7,7 +7,7 @@ use canvas::search::{Entry, Index, Query, Tagged};
 use notebook::{
     Remote, Replica,
     discover::{Folder, SectionState},
-    session::{self, Background, Event, Notebook, SyncStatus},
+    session::{self, Background, Event, Known, Notebook, SyncStatus},
     smb::{Client, Credentials},
 };
 use onestore::{
@@ -265,15 +265,17 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
 }
 
 impl Library {
-    pub(crate) fn open(path: &Path, cache: &Path) -> Result<Self> {
+    /// The notebook folder or lone section file at `path`. A folder `local` to this device
+    /// reports every change to `touched`; any other, as a file provider keeps it, gets offline
+    /// copies of its sections and is checked every few seconds.
+    pub(crate) fn open(path: &Path, cache: &Path, local: bool) -> Result<Self> {
         let (notebook, place, background) = if path.is_file() {
             (None, Place::File(path.to_owned()), None)
         } else {
             let notebook = Notebook::open(path, cache)?;
-            // Nothing here tells a file provider's folder on this device from one elsewhere.
             let background = notebook.background_with(
-                Background::UNWATCHED,
-                false,
+                local,
+                !local,
                 |file| Coordinated(file.to_owned()),
                 sync_woken,
             )?;
@@ -331,8 +333,10 @@ impl Library {
         background.watch(
             files
                 .iter()
-                .map(|(path, identity)| {
-                    (path.clone(), Some(smb.join(format!("{identity}.sqlite"))))
+                .map(|(path, identity)| Known {
+                    path: path.clone(),
+                    replica: Some(smb.join(format!("{identity}.sqlite"))),
+                    found: None,
                 })
                 .collect(),
         );
@@ -467,6 +471,9 @@ impl Library {
             }
         };
         section.set_offline(self.offline.load(Ordering::Relaxed));
+        if let Some(background) = &self.background {
+            background.hold(path, &section);
+        }
         Ok(section)
     }
 
@@ -1033,7 +1040,9 @@ fn space(text: *const c_char) -> Result<ExGuid> {
 }
 
 /// The notebook folder or lone section file at `path`, its section replicas kept in the
-/// directory `cache`; null with `error` set if it cannot be read.
+/// directory `cache`; null with `error` set if it cannot be read. A folder `local` to this
+/// device has the host report its changes to `sb_library_touched`; any other is checked
+/// every few seconds and kept in offline copies.
 ///
 /// # Safety
 /// `path` and `cache` are NUL-terminated UTF-8; `error` is null or a place for a string.
@@ -1041,9 +1050,10 @@ fn space(text: *const c_char) -> Result<ExGuid> {
 pub unsafe extern "C" fn sb_library_open(
     path: *const c_char,
     cache: *const c_char,
+    local: bool,
     error: *mut *mut c_char,
 ) -> *const Library {
-    match Library::open(Path::new(&string(path)), Path::new(&string(cache))) {
+    match Library::open(Path::new(&string(path)), Path::new(&string(cache)), local) {
         Ok(library) => Arc::into_raw(Arc::new(library)),
         Err(cause) => {
             failed(cause, error);
@@ -1165,6 +1175,18 @@ pub extern "C" fn sb_library_set_offline(library: &Library, offline: bool) {
     }
     for (_, shared) in library.open_sections() {
         shared.section.set_offline(offline);
+    }
+}
+
+/// Checks the sections at or below `path`, `/`-separated from the notebook's folder, as the
+/// host's watch on a local folder reports them changed; `""` names the folder.
+///
+/// # Safety
+/// `path` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_library_touched(library: &Library, path: *const c_char) {
+    if let Some(background) = &library.background {
+        background.touched(&[string(path)]);
     }
 }
 
