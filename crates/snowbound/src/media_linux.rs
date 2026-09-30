@@ -351,14 +351,14 @@ impl Recorder {
         self.0.set(if paused { PAUSED } else { PLAYING });
     }
 
-    /// Ends the recording, its file complete: the end travels down the pipeline so the
-    /// file's header and index are written.
-    pub fn stop(self) -> Result<(), String> {
+    /// Ends the recording, its file complete, with nothing left to run: the end travels
+    /// down the pipeline so the file's header and index are written.
+    pub fn stop(self) -> Result<impl FnOnce() -> Result<(), String> + Send, String> {
         let pipeline = &self.0;
         pipeline.set(PLAYING);
         unsafe { (pipeline.gst.send_event)(pipeline.element, (pipeline.gst.new_eos)()) };
         match pipeline.wait(PATIENCE, EOS | ERROR) {
-            Some(EOS) => Ok(()),
+            Some(EOS) => Ok(|| Ok(())),
             _ => Err("The recording stopped early. Try recording again.".into()),
         }
     }
@@ -397,7 +397,7 @@ mod tests {
             recorder.pause(false);
         }
         std::thread::sleep(std::time::Duration::from_millis(seconds * 500));
-        recorder.stop().unwrap();
+        recorder.stop().unwrap()().unwrap();
     }
 
     /// The live test sources stand in for a microphone and camera.

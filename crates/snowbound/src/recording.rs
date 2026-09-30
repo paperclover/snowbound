@@ -22,6 +22,12 @@ pub(crate) enum Media {
         video: bool,
         path: std::path::PathBuf,
     },
+    /// A stopped recording's file being finished, which goes on the page once ready.
+    Saving {
+        video: bool,
+        path: std::path::PathBuf,
+        job: std::thread::JoinHandle<Result<Vec<u8>, String>>,
+    },
     Playing(Box<Playback>),
 }
 
@@ -61,10 +67,11 @@ impl State {
     /// Record Audio or Record Video: starts recording at the caret, or stops the recording
     /// under way.
     pub(crate) fn record(&mut self, video: bool) -> Result<(), Box<dyn Error>> {
-        if matches!(self.media, Media::Recording { .. }) {
-            return self.stop_recording();
+        match self.media {
+            Media::Recording { .. } => return self.stop_recording(false),
+            Media::Saving { .. } => return Ok(()),
+            _ => self.media = Media::Idle,
         }
-        self.media = Media::Idle;
         let folder = std::env::temp_dir().join("Snowbound Recordings");
         std::fs::create_dir_all(&folder)?;
         let extension = if video { "avi" } else { "wav" };
@@ -92,7 +99,7 @@ impl State {
         let (id, response) = self.view.start_recording(&label)?;
         self.respond(response);
         if id.is_none() {
-            recorder.stop()?;
+            recorder.stop()?()?;
             return Ok(());
         }
         self.media = Media::Recording {
@@ -103,32 +110,62 @@ impl State {
         Ok(())
     }
 
-    /// Stop: the recording under way goes on the page where it started.
-    pub(crate) fn stop_recording(&mut self) -> Result<(), Box<dyn Error>> {
-        let Media::Recording {
-            recorder,
-            video,
-            path,
-        } = std::mem::take(&mut self.media)
-        else {
-            return Ok(());
+    /// Stop: the recording under way stops, and goes on the page where it started once its
+    /// file is saved, which happens meanwhile; `wait` waits for it.
+    pub(crate) fn stop_recording(&mut self, wait: bool) -> Result<(), Box<dyn Error>> {
+        match std::mem::take(&mut self.media) {
+            Media::Recording {
+                recorder,
+                video,
+                path,
+            } => {
+                // Nothing written while the file saves links to the recording.
+                self.view.editor.pause_recording(true);
+                let finish = match recorder.stop() {
+                    Ok(finish) => finish,
+                    Err(detail) => {
+                        platform::alert("Couldn't finish the recording", &detail);
+                        return Ok(());
+                    }
+                };
+                let recorded = path.clone();
+                let job = std::thread::spawn(move || {
+                    finish()?;
+                    let recorded = std::fs::read(&recorded).map_err(|error| error.to_string())?;
+                    Ok(if video {
+                        recorded
+                    } else {
+                        compress(&recorded).map_or(recorded, |(bytes, _)| bytes)
+                    })
+                });
+                self.media = Media::Saving { video, path, job };
+            }
+            other => self.media = other,
+        }
+        match &self.media {
+            Media::Saving { job, .. } if wait || job.is_finished() => {}
+            _ => return Ok(()),
+        }
+        let Media::Saving { video, path, job } = std::mem::take(&mut self.media) else {
+            unreachable!("saving, as matched")
         };
+        let saved = job
+            .join()
+            .unwrap_or_else(|_| Err("Try recording again.".into()));
         let Some(id) = self.view.editor.recording() else {
             return Ok(());
         };
-        if let Err(detail) = recorder.stop() {
-            platform::alert("Couldn't finish the recording", &detail);
-            return Ok(());
-        }
-        let recorded = std::fs::read(&path)?;
-        let (bytes, duration_ms) = if video {
-            let duration = video::Movie::parse(&recorded).map(|movie| movie.duration_ms());
-            (recorded, duration)
-        } else {
-            match compress(&recorded) {
-                Some((bytes, duration)) => (bytes, Some(duration)),
-                None => (recorded, None),
+        let bytes = match saved {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                platform::alert("Couldn't finish the recording", &detail);
+                return Ok(());
             }
+        };
+        let duration_ms = if video {
+            video::Movie::parse(&bytes).map(|movie| movie.duration_ms())
+        } else {
+            Wave::parse(&bytes).map(|wave| wave.duration_ms())
         };
         let preview = platform::file_icon(&path);
         std::fs::remove_file(&path)?;
@@ -176,7 +213,7 @@ impl State {
     /// Plays recording `file` from `at_ms` in the transport, or opens it in the system's
     /// player where Snowbound cannot play it.
     pub(crate) fn play(&mut self, file: &Attachment, at_ms: u32) -> Result<(), Box<dyn Error>> {
-        if matches!(self.media, Media::Recording { .. }) {
+        if matches!(self.media, Media::Recording { .. } | Media::Saving { .. }) {
             return Ok(());
         }
         self.media = Media::Idle;
@@ -233,18 +270,18 @@ impl State {
 
     pub(crate) fn transport_status(&self, transport: Transport) -> crate::commands::Status {
         let (recording, playing) = match &self.media {
-            Media::Idle => (false, None),
+            Media::Idle | Media::Saving { .. } => (false, None),
             Media::Recording { .. } => (true, None),
             Media::Playing(playback) => (false, Some(playback.player.playing())),
         };
         let (enabled, checked) = match transport {
             Transport::Pause => (
                 recording || playing.is_some(),
-                self.view.editor.recording_paused() || playing == Some(false),
+                Some(self.view.editor.recording_paused() || playing == Some(false)),
             ),
-            Transport::Stop => (recording || playing.is_some(), false),
-            Transport::Skip(_) | Transport::SeekTo => (playing.is_some(), false),
-            Transport::SeePlayback => (true, self.see_playback),
+            Transport::Stop => (recording || playing.is_some(), None),
+            Transport::Skip(_) | Transport::SeekTo => (playing.is_some(), None),
+            Transport::SeePlayback => (true, Some(self.see_playback)),
         };
         crate::commands::Status { enabled, checked }
     }
@@ -253,8 +290,8 @@ impl State {
     pub(crate) fn run_transport(&mut self, transport: Transport) -> Result<(), Box<dyn Error>> {
         match (transport, &mut self.media) {
             (Transport::SeePlayback, _) => self.see_playback = !self.see_playback,
-            (Transport::Stop, Media::Recording { .. }) => self.stop_recording()?,
-            (Transport::Stop, _) => self.media = Media::Idle,
+            (Transport::Stop, Media::Recording { .. }) => self.stop_recording(false)?,
+            (Transport::Stop, Media::Playing(_)) => self.media = Media::Idle,
             (Transport::Pause, Media::Recording { recorder, .. }) => {
                 let paused = !self.view.editor.recording_paused();
                 recorder.pause(paused);
@@ -294,9 +331,14 @@ impl State {
         page: [f32; 4],
     ) -> Result<(), Box<dyn Error>> {
         let row = theme.font_size * 2.0;
+        if matches!(self.media, Media::Saving { .. }) {
+            self.stop_recording(false)?;
+        }
+        let mut played = None;
         let (clock_text, picture) = match &mut self.media {
             Media::Idle => {
-                self.view.played = None;
+                let response = self.view.set_played(None)?;
+                self.respond(response);
                 return Ok(());
             }
             Media::Recording { video, .. } => {
@@ -311,9 +353,18 @@ impl State {
                 self.ui.wake_after(Duration::from_millis(250));
                 (format!("{state}  {}", clock(at)), None)
             }
+            Media::Saving { video, .. } => {
+                self.ui.wake_after(Duration::from_millis(100));
+                let saving = if *video {
+                    "Saving video…"
+                } else {
+                    "Saving audio…"
+                };
+                (saving.to_owned(), None)
+            }
             Media::Playing(playback) => {
                 let at = playback.player.position_ms();
-                self.view.played = playback
+                played = playback
                     .recording
                     .filter(|_| self.see_playback)
                     .and_then(|id| self.view.editor.played_note(id, at))
@@ -349,6 +400,8 @@ impl State {
                 )
             }
         };
+        let response = self.view.set_played(played)?;
+        self.respond(response);
         let picture_height = picture
             .as_ref()
             .map_or(0.0, |image| image.size()[1] as f32 + 6.0);
@@ -388,14 +441,19 @@ impl State {
                 ..Spec::default()
             },
         );
-        let paused = self.transport_status(Transport::Pause).checked;
+        let paused = self.transport_status(Transport::Pause).checked == Some(true);
         let playing = matches!(self.media, Media::Playing(_));
         let pause = match (playing, paused) {
             (true, true) => "Play",
             (false, true) => "Resume",
             _ => "Pause",
         };
-        let mut buttons = vec![(pause, Transport::Pause)];
+        let saving = matches!(self.media, Media::Saving { .. });
+        let mut buttons = if saving {
+            Vec::new()
+        } else {
+            vec![(pause, Transport::Pause)]
+        };
         if playing {
             buttons.extend([
                 ("−10 min", Transport::Skip(-600)),
@@ -404,7 +462,7 @@ impl State {
         }
         let mut chosen = buttons
             .into_iter()
-            .filter(|(label, _)| ui::button(&mut self.ui, label, label).clicked)
+            .filter(|(label, transport)| self.transport_button(label, *transport))
             .last()
             .map(|(_, transport)| transport);
         let seek = self.seek(theme, &clock_text);
@@ -416,7 +474,7 @@ impl State {
             ]);
         }
         for (label, transport) in after {
-            if ui::button(&mut self.ui, label, label).clicked {
+            if self.transport_button(label, transport) {
                 chosen = Some(transport);
             }
         }
@@ -424,7 +482,7 @@ impl State {
         {
             chosen = Some(Transport::SeePlayback);
         }
-        if ui::button(&mut self.ui, "stop", "Stop").clicked {
+        if !saving && ui::button(&mut self.ui, "stop", "Stop").clicked {
             chosen = Some(Transport::Stop);
         }
         self.ui.close();
@@ -438,6 +496,20 @@ impl State {
             self.run_transport(transport)?;
         }
         Ok(())
+    }
+
+    /// A transport button showing `label`, a skip named by its command's title, which the
+    /// label abbreviates; returns whether it was clicked.
+    fn transport_button(&mut self, label: &str, transport: Transport) -> bool {
+        let clicked = ui::button(&mut self.ui, label, label).clicked;
+        if matches!(transport, Transport::Skip(_))
+            && let Some(node) = self.ui.access(self.ui.id(label))
+        {
+            node.set_label(
+                crate::commands::command(crate::commands::Id::Transport(transport)).title,
+            );
+        }
+        clicked
     }
 
     /// The transport's clock, or while seeking the field taking the moment: Enter goes
@@ -466,10 +538,18 @@ impl State {
                         text: Some(clock_text),
                         pad: [6.0, 0.0],
                         center: true,
+                        role: playing.then_some(accesskit::Role::Button),
                         ..Spec::default()
                     },
                 )
                 .clicked;
+            if playing && let Some(node) = self.ui.access(self.ui.id("clock")) {
+                let title =
+                    crate::commands::command(crate::commands::Id::Transport(Transport::SeekTo))
+                        .title;
+                node.set_label(title.trim_end_matches('…'));
+                node.set_value(clock_text);
+            }
             if clicked {
                 let _ = self.run_transport(Transport::SeekTo);
             }
@@ -1045,5 +1125,10 @@ pub(crate) mod tests {
         assert_eq!(clock(8_400), "0:08");
         assert_eq!(clock(754_000), "12:34");
         assert_eq!(clock(3_723_000), "1:02:03");
+        // Seek To takes the clock's own forms back.
+        assert_eq!(moment("12:34"), Some(754_000));
+        assert_eq!(moment(" 1:02:03 "), Some(3_723_000));
+        assert_eq!(moment("45"), Some(45_000));
+        assert_eq!(moment("1:x"), None);
     }
 }

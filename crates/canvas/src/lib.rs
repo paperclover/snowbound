@@ -6,6 +6,7 @@ pub mod layout;
 pub mod math;
 pub mod outline;
 pub mod search;
+pub mod spelling;
 pub mod template;
 
 pub mod date;

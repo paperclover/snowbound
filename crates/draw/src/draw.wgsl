@@ -67,11 +67,34 @@ fn shadow(p: vec2<f32>, half: vec2<f32>, corner: f32, sigma: f32) -> f32 {
     return value;
 }
 
+// Distance from `p` to the tapered capsule from (-h, 0) to (h, 0) with round ends of radii
+// `r0` and `r1` (Inigo Quilez's uneven capsule).
+fn taper(p: vec2<f32>, h: f32, r0: f32, r1: f32) -> f32 {
+    let q = vec2<f32>(abs(p.y), p.x + h);
+    let span = 2.0 * h;
+    let b = (r0 - r1) / max(span, 1e-6);
+    let far = length(q - vec2<f32>(0.0, span)) - r1;
+    if abs(b) >= 1.0 {
+        return min(length(q) - r0, far);
+    }
+    let a = sqrt(1.0 - b * b);
+    let k = dot(q, vec2<f32>(-b, a));
+    if k < 0.0 {
+        return length(q) - r0;
+    }
+    if k > a * span {
+        return far;
+    }
+    return dot(q, vec2<f32>(a, b)) - r0;
+}
+
 @fragment
 fn fragment(input: Vertex) -> @location(0) vec4<f32> {
     var color = textureSample(atlas, atlas_sampler, input.uv) * input.color;
     if input.blur > 0.0 {
         color *= shadow(input.local, input.shape.xy, input.shape.z, input.blur);
+    } else if input.blur < 0.0 {
+        color *= clamp(0.5 - taper(input.local, input.shape.x, input.shape.y, input.shape.z), 0.0, 1.0);
     } else if input.shape.x > 0.0 && input.shape.y > 0.0 {
         let q = abs(input.local) - input.shape.xy + input.shape.zw;
         var distance: f32;

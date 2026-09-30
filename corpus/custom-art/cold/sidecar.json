@@ -1,0 +1,30 @@
+﻿{
+    "attributes":  "Hidden, Directory",
+    "files":  [
+                  {
+                      "path":  "tags",
+                      "attributes":  "Directory",
+                      "sha256":  null
+                  },
+                  {
+                      "path":  "tags.json",
+                      "attributes":  "Archive",
+                      "sha256":  "297cb1a778848dca82e207fedb0d57ca60baa19add18e5e613eeb9252020b45f"
+                  },
+                  {
+                      "path":  "tags/6dd10fabf6733354f911effb092fda9bfbbc9c1f3739576a18937093288767a9.svg",
+                      "attributes":  "Archive",
+                      "sha256":  "6dd10fabf6733354f911effb092fda9bfbbc9c1f3739576a18937093288767a9"
+                  },
+                  {
+                      "path":  "tags/d5cf52aa0db673980ffdd0481ecaa2cae00216c8ee9c288510cf68dc3d803e92.png",
+                      "attributes":  "Archive",
+                      "sha256":  "d5cf52aa0db673980ffdd0481ecaa2cae00216c8ee9c288510cf68dc3d803e92"
+                  }
+              ],
+    "notebook":  [
+                     ".snowbound",
+                     "Custom art.one",
+                     "Open Notebook.onetoc2"
+                 ]
+}

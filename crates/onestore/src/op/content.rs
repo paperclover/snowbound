@@ -239,7 +239,14 @@ pub(crate) fn picture_changes(
         values.push((0x08001d13 | (1 << 31), Vec::new()));
     }
     values.push((0x14001c3b, 0x409_u32.to_le_bytes().to_vec()));
-    values.push((0x08001d85, Vec::new()));
+    // IsPrintout, and the printout page shown (DisplayedPageNumber).
+    values.push((
+        0x08001d85 | (u32::from(image.printout.is_some()) << 31),
+        Vec::new(),
+    ));
+    if let Some(page) = image.printout {
+        values.push((0x14001df9, page.to_le_bytes().to_vec()));
+    }
     let mut changed = BTreeMap::new();
     changed.insert(
         file,
@@ -555,7 +562,8 @@ fn write_strokes(
 }
 
 /// The drawing attributes OneNote shares between strokes drawn with the same pen. A pen
-/// drawn with the mouse ignores pressure; a shape's pen spans every coordinate instead.
+/// drawn with the mouse ignores pressure, and one that follows it records it as a third
+/// dimension (`corpus/ink-pressure`); a shape's pen spans every coordinate instead.
 #[derive(PartialEq)]
 struct InkPen {
     width: u32,
@@ -565,6 +573,7 @@ struct InkPen {
     pen_tip: Option<u8>,
     raster_operation: Option<u8>,
     shape: bool,
+    pressure: bool,
 }
 
 impl InkPen {
@@ -577,17 +586,22 @@ impl InkPen {
             pen_tip: stroke.pen_tip,
             raster_operation: stroke.raster_operation,
             shape,
+            pressure: !stroke.pressure.is_empty(),
         }
     }
 
     fn values(&self) -> Values {
-        let dimensions = if self.shape {
+        let mut dimensions = if self.shape {
             crate::page::ink::SHAPE_DIMENSIONS
         } else {
             crate::page::ink::DIMENSIONS
-        };
+        }
+        .to_vec();
+        if self.pressure {
+            dimensions.extend(crate::page::ink::PRESSURE_DIMENSION);
+        }
         let mut values: Values = vec![
-            (0x1c00340a, dimensions.to_vec()),
+            (0x1c00340a, dimensions),
             (0x1400340c, self.height.to_le_bytes().to_vec()),
             (0x1400340d, self.width.to_le_bytes().to_vec()),
         ];
@@ -603,7 +617,7 @@ impl InkPen {
         if let Some(operation) = self.raster_operation {
             values.push((0x0c003413, vec![operation]));
         }
-        if !self.shape {
+        if !self.shape && !self.pressure {
             values.push((0x88003411, Vec::new()));
         }
         values
@@ -624,6 +638,14 @@ fn stroke_path(stroke: &InkStroke) -> Result<Values, Error> {
     {
         return Err(invalid(
             "Stroke points and pen size must be finite and positive",
+        ));
+    }
+    if !stroke.pressure.is_empty()
+        && (stroke.pressure.len() != stroke.points.len()
+            || stroke.pressure.iter().any(|p| !p.is_finite()))
+    {
+        return Err(invalid(
+            "A stroke's pressure needs one finite level per point",
         ));
     }
     Ok(vec![(0x1c00340b, stroke.packet())])

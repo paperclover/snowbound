@@ -3,6 +3,7 @@
 //! animation state. Input is answered with the previous frame's layout, so a frame's
 //! events are routed before building and its layout is solved after.
 
+mod access;
 mod layout;
 mod list;
 pub mod popup;
@@ -15,7 +16,7 @@ pub use list::{List, Row, Rows, list};
 pub use theme::{Menu, PopupMotion, Section, Shades, Shadow, Theme};
 pub use widgets::{
     PaintedScroller, Scroller, ScrollerPart, Scrollers, button, check_box, edit_key,
-    edit_modifiers, scrollbar, text_field,
+    edit_modifiers, password_field, scrollbar, text_field,
 };
 
 use draw::{
@@ -55,6 +56,8 @@ const POPUP: [f32; 2] = [0.16, 0.12];
 const TIP_DELAY: f32 = 0.5;
 const TIP_WARM: f32 = 0.5;
 const TIP_FADE: f32 = 0.1;
+/// How far outside a control the ring the keyboard's focus draws round it lies, and its width.
+const FOCUS_RING: f32 = 2.0;
 
 /// A box's identity across frames: its parent's id combined with a builder-chosen part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +71,11 @@ impl Id {
         self.0.hash(&mut hasher);
         part.hash(&mut hasher);
         Id(hasher.finish())
+    }
+
+    /// The box's node in the interface's accessibility tree.
+    pub fn node(self) -> accesskit::NodeId {
+        accesskit::NodeId(self.0)
     }
 }
 
@@ -210,10 +218,11 @@ pub enum Anchor {
     Over([f32; 4]),
     /// At a point, as a context menu opens.
     Point([f32; 2]),
-    /// Centred in the window over the interface, which dims, as a dialog opens.
+    /// Centred across the window near its top, over the interface, which dims, as a dialog
+    /// opens.
     Dialog,
-    /// Centred across the window near its top, swinging in as a dialog does, as a command
-    /// palette opens.
+    /// Where a dialog opens, swinging in as one does but leaving the interface undimmed, as a
+    /// command palette opens.
     Top,
 }
 
@@ -227,9 +236,8 @@ impl Anchor {
             Anchor::Right(rect) => (rect, Some(0)),
             Anchor::Over(rect) => (rect, None),
             Anchor::Point([x, y]) => ([x, y, x, y], Some(1)),
-            Anchor::Dialog => return ((room - size) / 2.0).max(0.0),
-            Anchor::Top if axis == 0 => return ((room - size) / 2.0).max(0.0),
-            Anchor::Top => return room / 8.0,
+            Anchor::Dialog | Anchor::Top if axis == 0 => return ((room - size) / 2.0).max(0.0),
+            Anchor::Dialog | Anchor::Top => return (room / 8.0).min(room - size).max(0.0),
         };
         let [low, high] = [rect[axis], rect[axis + 2]];
         let (first, second) = if along == Some(axis) {
@@ -363,12 +371,17 @@ pub struct Spec<'a> {
     /// How far the children fade out into the box's fill towards its leading and trailing
     /// edges, as a row of them cut there does.
     pub fade: [f32; 2],
+    /// What the box is to assistive technology; without one, its text shows as a label and
+    /// its children as its parent's. `Ui::access` adds the rest of what it says.
+    pub role: Option<accesskit::Role>,
 }
 
 /// Input the host forwards; positions and wheel distances are logical pixels.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     PointerMoved([f32; 2]),
+    /// A pen's pressure from 0 to 1 for the pointer events that follow; none for a mouse.
+    Pressure(Option<f32>),
     PointerLeft,
     Button {
         button: MouseButton,
@@ -382,6 +395,8 @@ pub enum Event {
     },
     Ime(Ime),
     Modifiers(ModifiersState),
+    /// Assistive technology acting on a box of the tree `Ui::accessibility` built.
+    Access(accesskit::ActionRequest),
 }
 
 /// How the user acted on a box this frame.
@@ -501,6 +516,7 @@ struct Built {
     marks: Vec<([f32; 4], [f32; 4], f32)>,
     fold: Option<u32>,
     fade: [f32; 2],
+    access: Option<accesskit::Node>,
     /// Folded away with the form it belongs to: it takes no room, paint or input, and takes
     /// its group's rectangle.
     hidden: bool,
@@ -524,8 +540,8 @@ struct State {
     /// A text field's selection, and the selection and unit of the press a drag extends.
     selection: Selection,
     press: (Selection, SelectionUnit),
-    /// The field selects all its text when next built.
-    select_all: bool,
+    /// The text a field selects when next built, from and to byte offsets clamped to its end.
+    select: Option<[usize; 2]>,
     /// Where a dragged scrollbar thumb was taken, from its start.
     grab: f32,
     /// A system scroller's part held down, and when a held arrow or track next repeats.
@@ -544,9 +560,11 @@ struct Popup {
     highlight: Option<u64>,
     /// A colour picker's hue in degrees, saturation and lightness, once it has one.
     picked: Option<[f32; 3]>,
-    /// The height its results ease from and to, and the seconds since they set out.
-    height: Option<[f32; 3]>,
     opened: Instant,
+    /// As a submenu, the row of the menu below it that it opens beside, whatever its anchor.
+    beside: Option<Id>,
+    /// A menu's row whose submenu opens, and when; None once it has.
+    submenu: Option<(u64, Option<Instant>)>,
 }
 
 /// The tooltip of the box under the pointer, the last frame it was built, and when it
@@ -684,6 +702,14 @@ pub struct Ui {
     caret: Option<(Id, Instant, u64)>,
     /// When the next timed change is due, such as a caret's blink.
     wake: Option<Instant>,
+    /// The controls the keyboard moves among, in the latest layout's order.
+    stops: Vec<access::Stop>,
+    /// The keyboard last moved the focus, so the focused control shows a ring.
+    focus_ring: bool,
+    /// Where Escape returns the focus from the controls the keyboard moved it among.
+    resume: Option<Id>,
+    /// The nodes last sent to assistive technology.
+    sent: HashMap<Id, accesskit::Node>,
 }
 
 impl Ui {
@@ -726,6 +752,10 @@ impl Ui {
             routed: false,
             caret: None,
             wake: None,
+            stops: Vec::new(),
+            focus_ring: false,
+            resume: None,
+            sent: HashMap::new(),
         }
     }
 
@@ -767,6 +797,14 @@ impl Ui {
         self.focus
     }
 
+    /// The focus where it is a text field, which the keyboard's edits act on.
+    pub fn focused_field(&self) -> Option<Id> {
+        self.focus.filter(|focus| {
+            let flags = self.hit_flags(*focus);
+            flags.contains(Flags::FOCUSABLE) && !flags.contains(Flags::CUSTOM)
+        })
+    }
+
     pub fn set_focus(&mut self, id: Option<Id>) {
         self.focus = id;
     }
@@ -776,7 +814,7 @@ impl Ui {
     pub fn focus_all(&mut self, id: Id) {
         let state = self.states.entry(id).or_default();
         state.touched = self.frame;
-        state.select_all = true;
+        state.select = Some([0, usize::MAX]);
         self.focus = Some(id);
     }
 
@@ -833,6 +871,18 @@ impl Ui {
         for event in std::mem::take(&mut self.queue) {
             self.route(event);
         }
+        // Boxes that move under a still pointer, as reordered tabs or a scrolled list, take
+        // the hover from it.
+        if !self.moved
+            && self.active.is_none()
+            && let Some(point) = self.pointer
+        {
+            let hover = self.hit(point, Flags::CLICKABLE | Flags::CUSTOM);
+            if hover != self.hover {
+                self.custom_event(self.hover, Event::PointerLeft);
+                self.hover = hover;
+            }
+        }
         self.ease(dt);
     }
 
@@ -856,6 +906,7 @@ impl Ui {
                 self.hover = hover;
                 self.custom_event(self.active.or(hover), event);
             }
+            Event::Pressure(_) => self.custom_event(self.active.or(self.hover), event),
             Event::PointerLeft => {
                 self.pointer = None;
                 if self.active.is_none() {
@@ -871,6 +922,7 @@ impl Ui {
                 let Some(point) = self.pointer else {
                     return;
                 };
+                self.focus_ring = false;
                 if !self.popups.is_empty() {
                     let under = self.popups.iter().rposition(|popup| {
                         self.rect(popup.id)
@@ -945,6 +997,11 @@ impl Ui {
                 key: Key::Named(NamedKey::Escape),
                 ..
             } if !self.popups.is_empty() => self.close_from(self.popups.len() - 1),
+            Event::Key {
+                key: Key::Named(key),
+                ..
+            } if self.traverse(key) => {}
+            Event::Access(request) => self.act(request),
             Event::Key { .. } | Event::Ime(_) => {
                 if let Some(focus) = self.focus {
                     self.signals.entry(focus).or_default().events.push(event);
@@ -1008,15 +1065,32 @@ impl Ui {
                 self.popups.iter().position(|popup| popup.id == id)
             })
             .max();
-        self.close_from(within.map_or(0, |within| within + 1));
+        self.push_popup(id, within.map_or(0, |within| within + 1), None);
+    }
+
+    /// Opens popup `id` as the submenu of open popup `from`, beside its row `row`, in place of
+    /// any other opened from it.
+    pub fn open_submenu(&mut self, id: Id, from: Id, row: Id) {
+        let Some(from) = self.popups.iter().position(|popup| popup.id == from) else {
+            return;
+        };
+        if self.popups.get(from + 1).is_none_or(|open| open.id != id) {
+            self.push_popup(id, from + 1, Some(row));
+        }
+    }
+
+    /// Closes the popups from `at` on and opens `id` above the rest.
+    fn push_popup(&mut self, id: Id, at: usize, beside: Option<Id>) {
+        self.close_from(at);
         self.popups.push(Popup {
             id,
             focus: self.focus,
             query: String::new(),
             highlight: None,
             picked: None,
-            height: None,
             opened: self.now,
+            beside,
+            submenu: None,
         });
         self.focus = Some(id);
         self.states.entry(id).or_default().touched = self.frame;
@@ -1026,9 +1100,13 @@ impl Ui {
         self.popups.iter().any(|popup| popup.id == id)
     }
 
-    /// Closes popup `id` and those opened from it, returning the focus it took.
+    /// Closes popup `id` and those opened from it, returning the focus it took; a submenu
+    /// closes the menus it opened from with it, as choosing from it ends them.
     pub fn close_popup(&mut self, id: Id) {
-        if let Some(index) = self.popups.iter().position(|popup| popup.id == id) {
+        if let Some(mut index) = self.popups.iter().position(|popup| popup.id == id) {
+            while index > 0 && self.popups[index].beside.is_some() {
+                index -= 1;
+            }
             self.close_from(index);
         }
     }
@@ -1071,7 +1149,7 @@ impl Ui {
     }
 
     /// The box being built, which new boxes become children of.
-    pub(crate) fn current(&self) -> Id {
+    pub fn current(&self) -> Id {
         self.nodes[*self.stack.last().unwrap()].id
     }
 
@@ -1145,6 +1223,12 @@ impl Ui {
         *goal = target;
         self.animating |= value != goal;
         *value
+    }
+
+    /// Makes `family` the interface's font, where fontique doesn't know the system's, as
+    /// with Mac OS X 10.6's Lucida Grande.
+    pub fn set_system_font(&mut self, family: &str) {
+        self.texts.set_system_font(family);
     }
 
     /// Previews `family` in the font `data` holds, as a font menu shows the substitute a
@@ -1339,11 +1423,17 @@ impl Ui {
             self.paint(index, None, None);
         }
         self.modal = if self.popups.is_empty() { 0 } else { beneath };
-        for id in [&mut self.hover, &mut self.active, &mut self.focus] {
+        for id in [
+            &mut self.hover,
+            &mut self.active,
+            &mut self.focus,
+            &mut self.resume,
+        ] {
             if id.is_some_and(|id| !self.states.contains_key(&id)) {
                 *id = None;
             }
         }
+        self.stops = self.stops();
     }
 
     /// How far open popup `id` beside `anchor` shows this frame, from 0 to 1, while open.
@@ -1380,7 +1470,7 @@ impl Ui {
         if anchor == Anchor::Dialog {
             self.display.push(Display::Rect {
                 rect: self.nodes[0].rect,
-                fill: [0.0, 0.0, 0.0, self.theme.shadow[3] * 0.5 * open],
+                fill: [0.0, 0.0, 0.0, self.theme.shadow[3] * open],
                 shade: None,
                 border: None,
                 radius: 0.0,
@@ -1614,6 +1704,21 @@ impl Ui {
         if inner_clip != clip {
             self.display.push(Display::Clip(clip));
         }
+        let node = &self.nodes[index];
+        if self.focus_ring
+            && self.focus == Some(node.id)
+            && node.access.is_some()
+            && node.anchor.is_none()
+            && !node.flags.contains(Flags::CUSTOM)
+        {
+            let size = size.map(|side| side + 2.0 * FOCUS_RING);
+            self.display.push(Display::Path {
+                data: outline(Shape::Rounded, size, node.radius + FOCUS_RING),
+                origin: [painted[0] - FOCUS_RING, painted[1] - FOCUS_RING],
+                style: PathStyle::Stroke(FOCUS_RING),
+                colors: [self.theme.accent; 2],
+            });
+        }
         if own.is_some() {
             self.display.push(Display::Motion(motion));
         }
@@ -1812,13 +1917,13 @@ impl Ui {
     pub(crate) fn field(
         &mut self,
         id: Id,
-    ) -> (&mut Selection, &mut (Selection, SelectionUnit), &mut bool) {
+    ) -> (
+        &mut Selection,
+        &mut (Selection, SelectionUnit),
+        &mut Option<[usize; 2]>,
+    ) {
         let state = self.states.entry(id).or_default();
-        (
-            &mut state.selection,
-            &mut state.press,
-            &mut state.select_all,
-        )
+        (&mut state.selection, &mut state.press, &mut state.select)
     }
 
     pub(crate) fn grab(&mut self, id: Id) -> &mut f32 {
@@ -1881,6 +1986,7 @@ impl Built {
             marks: Vec::new(),
             fold: spec.fold,
             fade: spec.fade,
+            access: spec.role.map(accesskit::Node::new),
             hidden: false,
             computed: [0.0; 2],
             relative: [0.0; 2],

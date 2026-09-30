@@ -1,0 +1,32 @@
+[
+  {
+    "path": ".snowbound/tags/6dd10fabf6733354f911effb092fda9bfbbc9c1f3739576a18937093288767a9.svg",
+    "bytes": 1207,
+    "sha256": "6dd10fabf6733354f911effb092fda9bfbbc9c1f3739576a18937093288767a9",
+    "mtime_ns": 1790751357201384901
+  },
+  {
+    "path": ".snowbound/tags/d5cf52aa0db673980ffdd0481ecaa2cae00216c8ee9c288510cf68dc3d803e92.png",
+    "bytes": 377,
+    "sha256": "d5cf52aa0db673980ffdd0481ecaa2cae00216c8ee9c288510cf68dc3d803e92",
+    "mtime_ns": 1790751357201807401
+  },
+  {
+    "path": ".snowbound/tags.json",
+    "bytes": 493,
+    "sha256": "297cb1a778848dca82e207fedb0d57ca60baa19add18e5e613eeb9252020b45f",
+    "mtime_ns": 1790751357202100985
+  },
+  {
+    "path": "Custom art.one",
+    "bytes": 8024,
+    "sha256": "db7099a6b0663436d14e11cbff66b2b1555cdd90d29191f41bcbc606f55783d3",
+    "mtime_ns": 1790751357200828150
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 1612,
+    "sha256": "7ab2e99e22102099e12bec081dc1e99ada669fb7b00a596fd766ce4030060109",
+    "mtime_ns": 1790751357200618358
+  }
+]

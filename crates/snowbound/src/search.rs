@@ -3,7 +3,8 @@
 //! its own, from the section files and the open section's replica.
 
 use crate::pane::Pane;
-use crate::{Command, Library, State, Theme, art, commands, lap, page};
+use crate::{Command, Library, State, Theme, art, commands, lap, name, page};
+use accesskit::Role;
 use canvas::search::{Entry, Found, Index, PageMatch, Query, page_matches, paragraph_match};
 use notebook::Replica;
 use onestore::ExGuid;
@@ -735,9 +736,11 @@ impl State {
                 Spec {
                     size: [fill(), px(ui::shell::TOOL)],
                     pad: [4.0, 0.0],
+                    role: Some(Role::SearchInput),
                     ..Spec::default()
                 },
             );
+            name(&mut self.ui, field(), "Search");
             if signal.pressed && !searching {
                 self.start_search();
             }
@@ -755,11 +758,17 @@ impl State {
 
     fn scope_button(&mut self, theme: &Theme) {
         let button = self.ui.id("scope");
-        if ui::shell::tool_button(&mut self.ui, "scope", art::SEARCH, theme.text_dim, false).pressed
+        if ui::shell::tool_button(&mut self.ui, "scope", art::SEARCH, theme.text_dim, None).pressed
         {
             let rect = self.ui.rect(button).unwrap_or_default();
             self.search.anchor = Some(Anchor::Below(rect));
             self.ui.open_popup(scope_menu());
+        }
+        let open = self.ui.popup_open(scope_menu());
+        if let Some(node) = self.ui.access(button) {
+            node.set_label("Search In");
+            node.set_has_popup(accesskit::HasPopup::Menu);
+            node.set_expanded(open);
         }
     }
 
@@ -785,7 +794,7 @@ impl State {
                 .enumerate()
                 .map(|(index, scope)| ui::popup::Item {
                     text: scope.name(),
-                    checked: *scope == current,
+                    checked: Some(*scope == current),
                     separated: index == 0,
                     ..Default::default()
                 }),
@@ -854,9 +863,11 @@ impl State {
                 pad: [4.0, 4.0],
                 gap: 4.0,
                 anchor: Some(anchor),
+                role: Some(Role::Dialog),
                 ..Spec::default()
             },
         );
+        name(&mut self.ui, results(), "Search");
         self.ui.open(
             "box",
             Spec {
@@ -884,9 +895,11 @@ impl State {
             Spec {
                 size: [fill(), px(ui::shell::TOOL)],
                 pad: [4.0, 0.0],
+                role: Some(Role::SearchInput),
                 ..Spec::default()
             },
         );
+        name(&mut self.ui, field(), "Search");
         self.scope_button(theme);
         self.ui.close();
         let query = self.search.query.trim().to_owned();
@@ -935,6 +948,7 @@ impl State {
                     size: [fit(), px(22.0)],
                     text: Some(&scope),
                     color: Some(theme.accent),
+                    role: Some(Role::Button),
                     ..Spec::default()
                 },
             )
@@ -988,6 +1002,7 @@ impl State {
                 Spec {
                     size: [fill(), px(view)],
                     fill: Some(theme.popup),
+                    role: Some(Role::ListBox),
                     ..Spec::default()
                 },
                 ui::List {
@@ -998,6 +1013,10 @@ impl State {
                 },
                 &mut self.search.selected,
                 |ui, row| {
+                    if let Some(node) = ui.access(results().child("rows").child(row.key)) {
+                        node.set_role(Role::ListBoxOption);
+                        node.set_selected(row.selected);
+                    }
                     let found = &found[row.index];
                     if row.index == 0 || row.index == titled {
                         let heading = if found.in_title {
@@ -1022,6 +1041,11 @@ impl State {
                     result_row(ui, theme, found, &places[row.index], row.selected);
                 },
             );
+            if let Some(key) = self.search.selected
+                && let Some(node) = self.ui.access(field())
+            {
+                node.set_active_descendant(results().child("rows").child(key).node());
+            }
             // Arrows show the page they select, as OneNote previews it.
             if before != self.search.selected
                 && keys.iter().any(|key| *key != NamedKey::Enter)
@@ -1053,6 +1077,7 @@ impl State {
                     text: Some(&link),
                     color: Some(theme.accent),
                     pad: [6.0, 0.0],
+                    role: Some(Role::Link),
                     ..Spec::default()
                 },
             )
@@ -1106,16 +1131,20 @@ impl State {
         );
         let mut step = None;
         if count > 0 {
-            if ui::shell::tool_button(&mut self.ui, "previous", art::CHEVRON_UP, theme.text, false)
+            if ui::shell::tool_button(&mut self.ui, "previous", art::CHEVRON_UP, theme.text, None)
                 .clicked
             {
                 step = Some(false);
             }
-            if ui::shell::tool_button(&mut self.ui, "next", ui::shell::CHEVRON, theme.text, false)
+            let button = self.ui.id("previous");
+            name(&mut self.ui, button, "Previous Match");
+            if ui::shell::tool_button(&mut self.ui, "next", ui::shell::CHEVRON, theme.text, None)
                 .clicked
             {
                 step = Some(true);
             }
+            let button = self.ui.id("next");
+            name(&mut self.ui, button, "Next Match");
         }
         ui::text_field(
             &mut self.ui,
@@ -1125,14 +1154,19 @@ impl State {
             Spec {
                 size: [fill(), px(ui::shell::TOOL)],
                 pad: [4.0, 0.0],
+                role: Some(Role::SearchInput),
                 ..Spec::default()
             },
         );
+        name(&mut self.ui, find_field(), "Find on Page");
         if std::mem::take(&mut self.search.claim) {
             self.ui.set_focus(Some(find_field()));
         }
-        if ui::shell::tool_button(&mut self.ui, "close", art::CLOSE, theme.text_dim, false).clicked
-        {
+        let close =
+            ui::shell::tool_button(&mut self.ui, "close", art::CLOSE, theme.text_dim, None).clicked;
+        let button = self.ui.id("close");
+        name(&mut self.ui, button, "Close");
+        if close {
             self.end_search();
             return Ok(());
         }

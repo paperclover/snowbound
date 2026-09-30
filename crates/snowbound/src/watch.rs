@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 /// Reports until dropped.
 pub struct Watch {
     _stream: platform::Stream,
+    /// In iCloud Drive, file coordination's reports too, which name the conflict versions a
+    /// file gains; those change no file.
+    _presenter: Option<crate::icloud::Presenter>,
 }
 
 /// Watches the folder at `root`: `changed` hears the paths that changed below it, relative to
@@ -35,6 +38,13 @@ pub fn watch(root: &Path, changed: impl Fn(Vec<String>) + Send + Sync + 'static)
     } else {
         return None;
     };
+    let changed = std::sync::Arc::new(changed);
+    let presenter = crate::icloud::ubiquitous(&root)
+        .then(|| {
+            let changed = std::sync::Arc::clone(&changed);
+            crate::icloud::presenter(&root, move |paths| changed(paths))
+        })
+        .flatten();
     let folder = root.clone();
     let relative = move |paths: Vec<PathBuf>| {
         changed(
@@ -50,7 +60,10 @@ pub fn watch(root: &Path, changed: impl Fn(Vec<String>) + Send + Sync + 'static)
     platform::Stream::start(&folders, Box::new(relative))
         .inspect_err(|error| eprintln!("{}: changes go unwatched: {error}", root.display()))
         .ok()
-        .map(|stream| Watch { _stream: stream })
+        .map(|stream| Watch {
+            _stream: stream,
+            _presenter: presenter,
+        })
 }
 
 /// Whether the folder at `path` is on this computer's own disks rather than on a network

@@ -20,6 +20,9 @@ smb2 = { version = "=0.21.0", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true }
 zeroize = { version = "1.9.0", optional = true }
 
+[target.'cfg(target_vendor = "apple")'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["fs"] }
+
 [dev-dependencies]
 libc = "0.2"
 serde_json = "1"

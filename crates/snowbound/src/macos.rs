@@ -10,8 +10,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSColor,
-    NSColorSpace, NSDatePicker, NSDatePickerElementFlags, NSDatePickerStyle, NSEvent, NSEventType,
-    NSMenu, NSMenuItem,
+    NSColorSpace, NSDatePicker, NSDatePickerElementFlags, NSDatePickerStyle, NSEvent,
+    NSEventSubtype, NSEventType, NSMenu, NSMenuItem,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
@@ -29,7 +29,13 @@ use winit::{
     window::{Window, WindowAttributes},
 };
 
-pub use crate::aqua::{move_cursor, resize_grip, scrollers};
+/// Runs `run` inside an autorelease pool. 10.6 has none outside NSApplication's run loop,
+/// and quitting releases the windows after it returns.
+pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
+    objc2::rc::autoreleasepool(|_| run())
+}
+
+pub use crate::aqua::{cover_border_line, move_cursor, resize_grip, system_interface};
 
 static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 static INPUT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
@@ -123,7 +129,7 @@ pub fn install_title_bar(window: &Window) {
     let responds =
         |selector: Sel| -> bool { unsafe { msg_send![&window, respondsToSelector: selector] } };
     // Before 10.10 the title bar keeps its own line above the row.
-    if !responds(sel!(setTitleVisibility:)) {
+    if crate::aqua::before_lion() || !responds(sel!(setTitleVisibility:)) {
         return;
     }
     unsafe {
@@ -187,6 +193,9 @@ pub fn window_controls(_: &mut ui::Ui, _: &Window) {}
 /// Whether AppKit draws the title bar: before 10.10 content can't extend under it, and
 /// otherwise the app draws it around the traffic lights.
 pub fn system_titlebar(window: &Window) -> bool {
+    if crate::aqua::before_lion() {
+        return true;
+    }
     let window = ns_window(window);
     unsafe {
         let frame: NSRect = msg_send![&window, frame];
@@ -358,22 +367,150 @@ unsafe extern "C" {
         list: *const std::ffi::c_void,
         data: *mut std::ffi::c_void,
     ) -> i32;
+    fn SecKeychainAddInternetPassword(
+        keychain: *const std::ffi::c_void,
+        server_length: u32,
+        server: *const u8,
+        domain_length: u32,
+        domain: *const u8,
+        account_length: u32,
+        account: *const u8,
+        path_length: u32,
+        path: *const u8,
+        port: u16,
+        protocol: u32,
+        authentication: u32,
+        password_length: u32,
+        password: *const u8,
+        item: *mut *const std::ffi::c_void,
+    ) -> i32;
+    fn SecKeychainItemModifyAttributesAndData(
+        item: *const std::ffi::c_void,
+        attributes: *const std::ffi::c_void,
+        length: u32,
+        data: *const u8,
+    ) -> i32;
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(object: *const std::ffi::c_void);
+}
+
+/// kSecProtocolTypeSMB, as the Finder keeps an SMB server's passwords.
+const SMB: u32 = u32::from_be_bytes(*b"smb ");
+/// errSecDuplicateItem.
+const DUPLICATE: i32 = -25299;
+
+/// What the sign-in offers for keeping a password, which the keychain keeps.
+pub fn remember_label() -> Option<&'static str> {
+    Some("Remember this password in my keychain")
+}
+
+/// Keeps `login`'s password for `mount`'s server in the default keychain, as the Finder keeps
+/// one, replacing any kept for the account before.
+pub fn save_login(
+    mount: &crate::library::Mount,
+    login: &crate::library::Login,
+) -> Result<(), String> {
+    save_login_in(std::ptr::null(), mount, login)
+}
+
+fn save_login_in(
+    keychain: *const std::ffi::c_void,
+    mount: &crate::library::Mount,
+    login: &crate::library::Login,
+) -> Result<(), String> {
+    let (server, user, password) = (mount.host(), &login.user, &login.password);
+    let port = match mount.host() == mount.server {
+        true => 0,
+        false => mount.server[server.len() + 1..].parse().unwrap_or(0),
+    };
+    let status = unsafe {
+        SecKeychainAddInternetPassword(
+            keychain,
+            server.len() as u32,
+            server.as_ptr(),
+            0,
+            std::ptr::null(),
+            user.len() as u32,
+            user.as_ptr(),
+            0,
+            std::ptr::null(),
+            port,
+            SMB,
+            u32::from_be_bytes(*b"dflt"),
+            password.len() as u32,
+            password.as_ptr(),
+            std::ptr::null_mut(),
+        )
+    };
+    let status = match status {
+        DUPLICATE => {
+            let mut item = std::ptr::null();
+            let found = unsafe {
+                SecKeychainFindInternetPassword(
+                    keychain,
+                    server.len() as u32,
+                    server.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    user.len() as u32,
+                    user.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                    port,
+                    SMB,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut item,
+                )
+            };
+            if found != 0 {
+                found
+            } else {
+                let status = unsafe {
+                    SecKeychainItemModifyAttributesAndData(
+                        item,
+                        std::ptr::null(),
+                        password.len() as u32,
+                        password.as_ptr(),
+                    )
+                };
+                unsafe { CFRelease(item) };
+                status
+            }
+        }
+        status => status,
+    };
+    match status {
+        0 => Ok(()),
+        status => Err(format!("The keychain didn't keep the password ({status})")),
+    }
 }
 
 /// The password the keychain keeps for `mount`'s account on its server, as macOS saved it
-/// when the share was mounted; the system asks the user to allow the app to read it.
+/// when the share was mounted or Snowbound when it signed in; the system asks the user to
+/// allow the app to read it.
 pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login, String> {
+    smb_login_in(std::ptr::null(), mount)
+}
+
+fn smb_login_in(
+    keychain: *const std::ffi::c_void,
+    mount: &crate::library::Mount,
+) -> Result<crate::library::Login, String> {
     let Some(user) = &mount.user else {
         return Ok(crate::library::Login::guest(mount));
     };
-    // kSecProtocolTypeSMB is 'smb '.
-    const SMB: u32 = u32::from_be_bytes(*b"smb ");
+    let server = mount.host();
     let (mut length, mut data) = (0, std::ptr::null_mut());
     let status = unsafe {
         SecKeychainFindInternetPassword(
-            std::ptr::null(),
-            mount.server.len() as u32,
-            mount.server.as_ptr(),
+            keychain,
+            server.len() as u32,
+            server.as_ptr(),
             0,
             std::ptr::null(),
             user.len() as u32,
@@ -390,8 +527,7 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
     };
     if status != 0 {
         return Err(format!(
-            "The keychain has no password for {user} on {} ({status})",
-            mount.server
+            "Enter the password for \u{201c}{user}\u{201d} on \u{201c}{server}\u{201d}."
         ));
     }
     let password = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), length as usize) };
@@ -430,11 +566,22 @@ pub fn pick_notebook(title: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Asks where to `action` something named `name` by default, with the system's save panel.
-pub fn pick_new(title: &str, name: &str, action: &str) -> Option<std::path::PathBuf> {
+/// Asks where to `action` something named `name` by default, with the system's save panel,
+/// starting in `folder` where given.
+pub fn pick_new(
+    title: &str,
+    name: &str,
+    action: &str,
+    folder: Option<&std::path::Path>,
+) -> Option<std::path::PathBuf> {
     let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
     unsafe {
         let panel = objc2_app_kit::NSSavePanel::savePanel(mtm);
+        if let Some(folder) = folder.and_then(std::path::Path::to_str) {
+            panel.setDirectoryURL(Some(&objc2_foundation::NSURL::fileURLWithPath(
+                &NSString::from_str(folder),
+            )));
+        }
         panel.setCanCreateDirectories(true);
         panel.setTitle(Some(&NSString::from_str(title)));
         panel.setPrompt(Some(&NSString::from_str(action)));
@@ -633,6 +780,18 @@ pub fn install_text_input(window: &Window) {
         // The subclass adds no ivars, so the existing allocation remains valid.
         AnyObject::set_class(view, class);
     }
+}
+
+/// A tablet pen's pressure in the event AppKit is delivering, from 0 to 1; none for a mouse
+/// or trackpad. winit reports only a trackpad's Force Touch, so the pen's comes from here.
+pub fn pen_pressure() -> Option<f32> {
+    let mtm = MainThreadMarker::new()?;
+    let event = NSApplication::sharedApplication(mtm).currentEvent()?;
+    let tablet = matches!(
+        unsafe { event.r#type() },
+        NSEventType::LeftMouseDown | NSEventType::LeftMouseDragged | NSEventType::LeftMouseUp
+    ) && unsafe { event.subtype() } == NSEventSubtype::TabletPoint;
+    tablet.then(|| unsafe { event.pressure() })
 }
 
 pub fn double_click_interval() -> std::time::Duration {
@@ -934,7 +1093,7 @@ declare_class!(
             let status = usize::try_from(unsafe { item.tag() }).ok().and_then(|tag| {
                 STATUSES.with_borrow(|statuses| statuses.get(tag).copied())
             }).unwrap_or_default();
-            unsafe { item.setState(isize::from(status.checked)) };
+            unsafe { item.setState(isize::from(status.checked == Some(true))) };
             objc2::runtime::Bool::new(status.enabled)
         }
 
@@ -1080,5 +1239,59 @@ pub fn input_language() -> String {
             TISGetInputSourceProperty(&source, kTISPropertyInputSourceLanguages)
                 .and_then(|languages| msg_send_id![languages, firstObject]);
         language.map_or_else(String::new, |language| language.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::library::{Login, Mount};
+
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        fn SecKeychainCreate(
+            path: *const std::ffi::c_char,
+            password_length: u32,
+            password: *const u8,
+            prompt: bool,
+            access: *const std::ffi::c_void,
+            keychain: *mut *const std::ffi::c_void,
+        ) -> i32;
+        fn SecKeychainDelete(keychain: *const std::ffi::c_void) -> i32;
+    }
+
+    /// A kept password reads back for the server whatever its port, and keeping another
+    /// replaces it; in a keychain of the test's own, never the user's.
+    #[test]
+    #[ignore = "a rebuilt test binary may make the system ask on screen to allow keychain access"]
+    fn logins_kept_in_a_keychain_read_back() {
+        let path = std::env::temp_dir().join(format!("snowbound-{}.keychain", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let name = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let mut keychain = std::ptr::null();
+        let lock = b"test keychain";
+        let status = unsafe {
+            SecKeychainCreate(
+                name.as_ptr(),
+                lock.len() as u32,
+                lock.as_ptr(),
+                false,
+                std::ptr::null(),
+                &mut keychain,
+            )
+        };
+        assert_eq!(status, 0);
+        let mount = Mount::from_address("smb://amy@nas.local:1445/notes").unwrap();
+        let login = |password: &str| Login {
+            user: "amy".into(),
+            password: password.into(),
+            domain: String::new(),
+        };
+        assert!(super::smb_login_in(keychain, &mount).is_err());
+        super::save_login_in(keychain, &mount, &login("first")).unwrap();
+        super::save_login_in(keychain, &mount, &login("second")).unwrap();
+        let read = super::smb_login_in(keychain, &mount);
+        unsafe { SecKeychainDelete(keychain) };
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read.unwrap().password, "second");
     }
 }

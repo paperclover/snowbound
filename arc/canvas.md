@@ -106,15 +106,40 @@ on the page itself, as OneNote 2010 places it: the same column at the caret's
 grid point, outside any outline. It selects, drags on the grid, deletes and
 moves with Insert Space as a picture does, and opens and saves as above.
 
+An outline holding only pictures or files takes a paragraph after them where a
+click beside them lands, as OneNote 2010 adds one when typing there. It is
+stored with the first edit that reaches it, and undoing back to it empty takes it
+out again (`corpus/object-outline`).
+
+A file printout's pages are pictures whose stored data is the printout's XPS
+package. The page draws the PNG OneNote rendered of each
+(WebPictureContainer14), framed in grey as OneNote frames them, and moves them as
+pictures. Snowbound does not write XPS, so a printout page deleted and brought
+back by undo returns as that picture (`corpus/printout`).
+
 ## Recordings
 
-Record Audio works as OneNote 2010's does. The caret's paragraph splits around
-a line saying when recording started, in OneNote's grey `cite` style, and the
-caret goes on below it. Text written while recording links to the moment it
-was written. On Stop, the file goes in above that line, named after the page.
-Hovering a linked note or a recording shows OneNote's blue play button in the
-margin, and a click asks the host to play from that moment. The host records a
-16 kHz WAV and stores it as IMA ADPCM, which OneNote plays.
+Record Audio and Record Video work as OneNote 2010's do. The caret's paragraph
+splits around a line saying when recording started, in OneNote's grey `cite`
+style, and the caret goes on below it. Text written while recording links to
+the moment it was written; text written while paused links to nothing, and the
+pause is left out of later moments. On Stop, the file goes in above that line,
+named after the page. Hovering a linked note or a recording shows OneNote's blue
+play button in the margin, and a click asks the host to play from five seconds
+before that moment, OneNote's default rewind. While a recording plays, See
+Playback highlights the note linked last at or before the moment playing,
+scrolling it into view when it changes.
+
+The host records audio as 16 kHz WAV and stores it as IMA ADPCM, and video as
+AVI of Motion JPEG at 320 by 240 and 15 pictures a second with PCM sound, both
+of which OneNote plays (`corpus/recording/video`). GStreamer writes that AVI
+directly; on macOS a capture session records a movie that `AVAssetReader` reads
+back into it off the main thread after Stop, the transport saying so and the page
+editable meanwhile. Mac OS X 10.6, without AVFoundation, opens recordings in the
+system's player and does not record. Snowbound plays both itself: the sound through the platform's
+player, decoded from IMA ADPCM first, and a video's pictures in the transport
+over the page, which also carries OneNote's Pause, Stop, ten-second and
+ten-minute skips, Seek To and See Playback.
 
 ## Drawing
 
@@ -132,6 +157,23 @@ moves ink, and Delete removes them. Escape returns to Select & Type, where a
 click on ink picks it. The default pen draws in the open section's accent at
 the light theme's shade, so a stroke stores one real colour and shows it in both
 themes.
+
+A pen that reports pressure (a tablet on macOS, the Apple Pencil) draws and stores it as
+OneNote 2010 does with pressure sensitivity on: each point's width is the pen's times
+0.25 plus 1.5 times the pressure, and the stroke keeps NormalPressure beside X and Y
+(`corpus/ink-pressure`). A mouse or finger draws at the pen's width.
+
+## Tables and selections across them
+
+Note tags on a table sit in the tag column centred on it, and a click checks its
+box (`corpus/table-tags`). A selection crossing a table's edge deletes as
+OneNote 2010 deletes one: nothing joins across the edge, cells inside are
+emptied, and where the selection runs on past the table its rows inside go, the
+table with them when all do. What replaces the selection goes in at its start
+(`corpus/cross-container`). Tab and Link leave such a selection alone, and
+Shift+Enter a caret inside a link, as OneNote's do; Alt+= across paragraphs
+makes each paragraph's part an equation, and a deletion between two equations
+joins them where neither seam lies inside an object (`corpus/equation-join`).
 
 ## Content the editor doesn't understand
 
@@ -158,8 +200,24 @@ editable text area, whose runs carry the canvas's real line boxes and
 character positions, so a screen reader's caret and selection land where the
 eye does. Native selection and replacement actions go through the editor's
 history like any other edit. The tree updates only while an assistive client
-is listening, and never for a caret blink. The interface kit around the page
-doesn't have a tree yet.
+is listening, and never for a caret blink. The interface's own tree holds it at
+the page's box (see [the interface kit](ui.md#accessibility-and-the-keyboard)).
+
+## Spelling
+
+Spelling is checked as OneNote 2010 checks it with its default proofing
+options. Words in capitals, words with digits, and Internet and file addresses
+go unchecked, and a word repeating the one before it is marked as repeated.
+Each run is checked in the language it stores, so a French paragraph takes the
+French dictionary and an equation none. The host supplies the dictionary;
+`canvas::spelling` checks each paragraph on a thread of its own when it first
+comes into view, and keeps the result by the paragraph's text, so drawing never
+waits on it. Marked words carry OneNote's red zigzag, one pixel thick at any
+zoom and laid on the device's pixel grid so a 1× screen shows OneNote's exact
+pixels, except the word still being typed. The context menu (the edit menu on
+iOS) offers the dictionary's corrections, Ignore and Add to Dictionary, and the
+Spelling pane (F7) walks the page's marked words. A correction is an ordinary
+edit, one revision. Nothing about spelling is stored in the page.
 
 ## Search, dates, conflicts
 

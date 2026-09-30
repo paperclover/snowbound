@@ -38,9 +38,11 @@ extension CanvasView {
             let values = argument.split(separator: ",").compactMap { Double($0) }
             tap(at: CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y))
         case "pencil":
+            // Points as `x,y`, or `x,y,pressure` for the Pencil's pressure from 0 to 1.
             let points = argument.split(separator: ";").map {
                 let values = $0.split(separator: ",").compactMap { Double($0) }
-                return CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y)
+                let point = CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y)
+                return (point, values.count > 2 ? Float(values[2]) : -1) as InkSample
             }
             inkPressed(points[0])
             inkMoved(points.dropFirst())
@@ -80,6 +82,12 @@ extension CanvasView {
         case "rotate":
             let orientation: UIInterfaceOrientationMask = argument == "portrait" ? .portrait : .landscapeRight
             window?.windowScene?.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
+        case "menu":
+            guard let range = selectedTextRange,
+                let menu = interactions.lazy.compactMap({ $0 as? UIEditMenuInteraction }).first(where: { $0.delegate === self })
+            else { break }
+            let caret = caretRect(for: range.start)
+            menu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: caret.midX, y: caret.minY)))
         case "done": _ = resignFirstResponder()
         case "selectall": selectAll(nil)
         case "format": apply(UInt8(argument) ?? 0)

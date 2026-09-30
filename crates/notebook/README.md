@@ -62,6 +62,8 @@ failures; `notify` runs on a background thread whenever an event waits.
 removes; `release(id, archive, Resolution)` ends an uncertain attempt. The author an
 edit names is the host's: the app passes the account's full name.
 `import_page` creates a page holding a copy of another; `delete_pages` removes pages.
+`set_pause(pause)` has edits publish once `pause` passes without another (at most 30 s after the
+first waiting), as a notebook on a cloud drive does; `wake()` publishes them at once.
 `sync_status()` gives when the section file was last reached, why it could not be since
 and how many edits wait for it. `set_offline(true)` works offline as OneNote does: the
 worker stops connecting and edits queue until `wake()` (Sync Now) or `set_offline(false)`.
@@ -114,6 +116,17 @@ keeps the remote's place, a page moved here goes before the next page in the loc
 the remote left in place, or last, and a page the remote removed comes back as a new copy
 of the local one, placed the same way (`corpus/conflict-page/native-pages`,
 `native-restore`). Nothing blocks the queue.
+
+A remote a file provider keeps may list versions of the file beside it (`Remote::versions`,
+`version`, `retire`), as iCloud Drive keeps a commit that lost to another device's. Each step
+merges them first (`resolve.rs`): per object space, the newest revision of the version's that
+the file holds, or holds merged, is where the two last agreed; the section opened at those
+revisions (`onestore::Section::open_at`) is the base the version's changes lower from
+(`lower_page`), and they replay on the file through the rebase rules above, conflict pages where
+they clash. The revisions the merge writes are named after the version's it merged
+(`Section::seal_as`), so a version merged once, here or on another device, merges as nothing
+again. It is published on the file's stamp, then retired; one of another section, or one that
+cannot be read, is retired with `keep` for the remote to keep beside the file.
 
 Publication attempts are recorded before network I/O. An attempt confirms only
 when the remote holds its revisions, or every page it changed as it changed them,
@@ -273,9 +286,12 @@ cache as it was.
 
 Each file read must be a consistent, bounded snapshot. The result is an
 observation across multiple files, not an atomic notebook transaction or
-authorization to publish an edit. Refresh rejects observed topology changes and
-duplicate physical files with the same logical identity. Retain the last accepted
-catalog if discovery fails; a connection failure does not mean files were deleted.
+authorization to publish an edit. Refresh rejects observed topology changes. Of
+several files with one identity (a `Name 2.one` copy), the one its folder's TOC names,
+else the newest, lists; the others list in `unavailable` as `Reason::Copy`. iOS's
+`.Name.one.icloud` placeholders list there under their real names as `Reason::Evicted`.
+Retain the last accepted catalog if discovery fails; a connection failure does not mean
+files were deleted.
 
 `read_external_asset` resolves a validated UUID `.onebin` filename beneath the
 selected section's sibling `_onefiles` folder and returns exact bounded bytes.
@@ -342,6 +358,30 @@ is `Reordered`. A failed read returns the error and keeps
 the previous catalog, so an unreachable share never reads as an emptied
 notebook.
 
+## Snowbound's folder
+
+`sidecar` keeps Snowbound-only data in the notebook's `.snowbound` folder, which
+OneNote 2010 skips because it has the Windows hidden attribute: `Storage::hide` sets it
+through `smb::Client::hide` (SET_INFO FileBasicInformation, always, since Samba reports a
+dot name hidden without storing it) or macOS's `UF_HIDDEN`, which an smbfs mount passes
+to the share; Linux keeps no such attribute. Discovery skips dot names, and a notebook
+without the folder is whole.
+
+```text
+.snowbound/
+├ tags.json   [{ name, shape, art, mapped }]: a tag's name and symbol → its art
+└ tags/       <SHA-256>.png | .svg, written through a temporary name, never rewritten
+```
+
+`Notebook::map_tag_art(name, shape, bytes, extension)` makes the folder and hides it,
+keeps the picture, then rereads `tags.json`, merges its mapping and replaces the file,
+reading it back and merging again until its own holds. `sidecar::merge` keeps every tag
+either side mapped; one tag mapped by both keeps the later `mapped`, then the greater art
+name. A mapping two writers replace within one round trip of each other can still lose
+one side's new tag until that side maps it again. `tag_art` reads the mappings, passing
+over entries that name no picture, and `tag_art_file` returns a picture once its bytes
+match its name.
+
 ## SMB (feature `smb`)
 
 `notebook::smb` provides blocking SMB access for OneNote sections and
@@ -398,6 +438,12 @@ directory/reparse flags. Concurrent directory changes are not an atomic snapshot
 are rejected with `ResourceBusy`. Notebook identities come from the files, not
 directory names or sizes. Missing paths, denied access and non-directory paths
 have distinct I/O error kinds.
+
+`smb::shares(address, credentials, timeout)` lists the disk shares a server offers the
+account, over `IPC$` and srvsvc. `smb::Refusal::of(&error)` names why `Client::connect`,
+`shares` or `read_dir` failed as a person remedies it: unreachable, SMB1 only, sign-in
+refused, no such share, denied, no such folder. A server that turns SMB2's negotiation
+away is asked for SMB1's `NT LM 0.12` once, which an SMB1-only server agrees to.
 
 `Client::watch(path, changed)` arms one CHANGE_NOTIFY with WATCH_TREE on a directory, as
 OneNote 2010 watches a notebook's folder, and keeps it armed on the client's runtime without

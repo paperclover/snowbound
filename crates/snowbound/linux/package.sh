@@ -4,7 +4,6 @@
 set -eu
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 here="$root/crates/snowbound/linux"
-icon="$root/crates/snowbound/assets/icon/Snowbound-SnowLeopard.png"
 target="$root/target"
 tools="$target/zig"
 mkdir -p "$tools" "$target/dist"
@@ -39,19 +38,9 @@ EOF
     name=snowbound-linux-$arch
     stage="$target/dist/$name"
     rm -rf "$stage"
-    mkdir -p "$stage/bin" "$stage/share/applications"
+    mkdir -p "$stage/bin"
     cp "$target/$triple/release/snowbound" "$stage/bin/"
-    cp "$here/snowbound.desktop" "$stage/share/applications/"
-    cp "$here/README.md" "$here/install.sh" "$stage/"
-    for side in 16 24 32 48 64 128 256 512; do
-        folder="$stage/share/icons/hicolor/${side}x$side/apps"
-        mkdir -p "$folder"
-        if command -v sips >/dev/null; then
-            sips -s format png -z "$side" "$side" "$icon" --out "$folder/snowbound.png" >/dev/null
-        else
-            magick "$icon" -resize "${side}x$side" -depth 8 "$folder/snowbound.png"
-        fi
-    done
+    cp "$here/README.md" "$stage/"
     COPYFILE_DISABLE=1 tar --no-xattrs -C "$target/dist" -czf "$target/dist/$name.tar.gz" "$name"
     echo "$target/dist/$name.tar.gz"
 done

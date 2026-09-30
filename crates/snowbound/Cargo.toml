@@ -26,13 +26,18 @@ parley.workspace = true
 winit = "0.30.13"
 arboard = { version = "3.6.1", default-features = false }
 accesskit = "0.25.0"
+accesskit_consumer = "0.39.0"
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["rwh_06"] }
+# Updates: fetched over HTTPS, verified with ed25519 and SHA-256.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+ring = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSCell", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSWorkspace"] }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray", "NSRange", "NSError", "NSFileCoordinator", "NSFilePresenter", "NSFileVersion", "NSFileManager", "NSNotification", "NSOperation", "block2"] }
+block2 = "0.5.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["accesskit_unix", "async-io"] }
@@ -43,3 +48,7 @@ libc = "0.2"
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 # The colours of winit's own window frame, which the toolbar continues.
 sctk-adwaita = { version = "0.10.1", default-features = false }
+# Sets the window's icon through xdg-toplevel-icon on winit's own Wayland connection.
+wayland-backend = { version = "0.3.17", features = ["client_system"] }
+wayland-client = "0.31.15"
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }

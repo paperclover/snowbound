@@ -119,7 +119,7 @@ impl ParagraphSplit {
             }
         } else if let Some(after) = runs
             .iter()
-            .position(|run| run.start == self.offset && self.offset > 0)
+            .position(|run| run.start == self.offset && run.end > run.start && self.offset > 0)
             && link(after - 1)
             && link(after)
             && !resolved[after].text.starts_with('\u{fddf}')
@@ -142,7 +142,14 @@ impl ParagraphSplit {
             guid: self.guid,
             n: 4,
         };
-        let typing = runs.last().and_then(|run| run.format).unwrap_or(normal_id);
+        // The text's last characters' style, past a final run an edit emptied.
+        let typing = runs
+            .iter()
+            .rev()
+            .find(|run| run.end > run.start)
+            .or(runs.last())
+            .and_then(|run| run.format)
+            .unwrap_or(normal_id);
         // Enter at the start leaves the emptied upper paragraph the first run's style, as
         // OneNote does (`evidence/structural-edits/xml/c2s-*`).
         let leading = runs.first().and_then(|run| run.format);

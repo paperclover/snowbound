@@ -3,7 +3,7 @@ import UIKit
 /// A section's sync status from `sb_library_sync_status`.
 struct SectionSync: Decodable {
     enum State: UInt8, Decodable, Comparable {
-        case upToDate, syncing, inUse, notConnected, readOnly, failed
+        case upToDate, syncing, inUse, notConnected, readOnly, protected, unreadable, failed
 
         static func < (a: State, b: State) -> Bool { a.rawValue < b.rawValue }
     }
@@ -55,6 +55,8 @@ enum Sync {
         case .syncing: "Syncing…"
         case .inUse: "Section in use"
         case .notConnected: "Not connected"
+        case .protected: "Password protected"
+        case .unreadable: "Can’t read this section"
         case .readOnly, .failed: "Unable to sync"
         }
     }
@@ -65,7 +67,8 @@ enum Sync {
         case .upToDate: "checkmark.circle"
         case .syncing, .inUse: "arrow.triangle.2.circlepath"
         case .notConnected: "wifi.slash"
-        case .readOnly, .failed: "exclamationmark.triangle"
+        case .protected: "lock"
+        case .readOnly, .unreadable, .failed: "exclamationmark.triangle"
         }
     }
 
@@ -77,6 +80,7 @@ enum Sync {
         case .readOnly: "You can’t change this notebook where it’s stored. Changes stay on this \(device)."
         case .inUse: "Someone else is saving this section. Sync continues when they finish."
         case .notConnected: "Changes stay on this \(device) and sync when the notebook is back."
+        case .protected: "Snowbound can’t open password-protected sections yet."
         default: nil
         }
     }

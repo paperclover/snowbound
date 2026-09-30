@@ -6,7 +6,11 @@ use super::{CanvasEditor, EditError, EditorError, History, Placement, page};
 use onestore::{
     ExGuid,
     op::PageOp,
-    page::{Ink, InkStroke, PageObject, ink::snap, text::new_id},
+    page::{
+        Ink, InkStroke, PageObject,
+        ink::{level, snap},
+        text::new_id,
+    },
 };
 
 /// A pen or highlighter, as OneNote's pen gallery and Color & Thickness choose one.
@@ -47,8 +51,9 @@ impl Pen {
         }
     }
 
-    /// A stroke of this pen through `points`, snapped to the HIMETRIC grid stored.
-    pub fn stroke(&self, points: &[[f32; 2]]) -> Result<InkStroke, EditError> {
+    /// A stroke of this pen through `points`, snapped to the HIMETRIC grid stored, its width
+    /// following `pressure` at each point unless that is empty, as a mouse's is.
+    pub fn stroke(&self, points: &[[f32; 2]], pressure: &[f32]) -> Result<InkStroke, EditError> {
         let points_of = |himetric: f32| snap(himetric * 72.0 / 2540.0);
         Ok(InkStroke {
             id: new_id()?,
@@ -63,6 +68,7 @@ impl Pen {
             transparency: self.highlighter.then_some(127),
             pen_tip: self.highlighter.then_some(1),
             raster_operation: self.highlighter.then_some(9),
+            pressure: pressure.iter().copied().map(level).collect(),
         })
     }
 }

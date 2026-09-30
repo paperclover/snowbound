@@ -1,4 +1,5 @@
 use crate::{Axis, Event, Flags, Id, Signal, Spec, Ui, fit, px};
+use accesskit::Role;
 use draw::RasterImage;
 use draw::edit::{self, Command, Movement};
 use parley::{
@@ -25,6 +26,7 @@ pub fn button(ui: &mut Ui, part: impl Hash, text: &str) -> Signal {
         radius: 4.0,
         pad: [theme.font_size * 0.75, 0.0],
         center: true,
+        role: Some(Role::Button),
         ..Spec::default()
     };
     ui.leaf(part, spec)
@@ -42,9 +44,13 @@ pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Si
             flags: Flags::CLICKABLE,
             size: [crate::children(), px(height)],
             gap: 8.0,
+            role: Some(Role::CheckBox),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_toggled(checked.into());
+    }
     // A box's signal is taken once, so its hover and click are read together.
     let signal = ui.signal(id);
     ui.leaf(
@@ -303,6 +309,48 @@ pub fn text_field(
     placeholder: &str,
     spec: Spec<'_>,
 ) -> Signal {
+    field(ui, id, text, placeholder, spec, false)
+}
+
+/// A text field for a password, showing and announcing a bullet for each character.
+pub fn password_field(
+    ui: &mut Ui,
+    id: Id,
+    text: &mut String,
+    placeholder: &str,
+    spec: Spec<'_>,
+) -> Signal {
+    field(ui, id, text, placeholder, spec, true)
+}
+
+fn field(
+    ui: &mut Ui,
+    id: Id,
+    text: &mut String,
+    placeholder: &str,
+    spec: Spec<'_>,
+    secret: bool,
+) -> Signal {
+    const BULLET: &str = "\u{2022}";
+    // The text laid out, and where its offsets fall in `text`: a secret shows bullets.
+    let masked = |text: &str| {
+        if secret {
+            BULLET.repeat(text.chars().count())
+        } else {
+            text.to_owned()
+        }
+    };
+    let to_text = |text: &str, index: usize| match secret {
+        true => (text.char_indices().map(|(at, _)| at))
+            .nth(index / BULLET.len())
+            .unwrap_or(text.len()),
+        false => index,
+    };
+    let to_shown = |text: &str, index: usize| match secret {
+        true => text[..index].chars().count() * BULLET.len(),
+        false => index,
+    };
+    let mut shown_text = masked(text);
     let signal = ui.signal(id);
     let pad = spec.pad[0];
     let size = ui.theme.font_size;
@@ -312,13 +360,13 @@ pub fn text_field(
         .zip(ui.rect(id))
         .map(|(pointer, rect)| pointer[0] - rect[0] - pad)
         .filter(|_| signal.pressed || signal.dragging);
-    let (mut selection, mut press, select_all) = {
-        let (selection, press, select_all) = ui.field(id);
-        (*selection, *press, std::mem::take(select_all))
+    let (mut selection, mut press, select) = {
+        let (selection, press, select) = ui.field(id);
+        (*selection, *press, select.take())
     };
     let before = [selection.anchor(), selection.focus()];
     let (texts, frame) = ui.texts();
-    let mut label = texts.label(text, size, false, None, frame);
+    let mut label = texts.label(&shown_text, size, false, None, frame);
     if let Some(x) = pointer {
         let layout = &label.layout;
         let unit = if signal.pressed { signal.unit } else { press.1 };
@@ -342,10 +390,10 @@ pub fn text_field(
             Selection::new(anchor, focus)
         };
     }
-    selection = if select_all {
+    selection = if let Some([anchor, focus]) = select {
         Selection::new(
-            Cursor::from_byte_index(&label.layout, 0, Affinity::Downstream),
-            Cursor::from_byte_index(&label.layout, usize::MAX, Affinity::Upstream),
+            Cursor::from_byte_index(&label.layout, anchor, Affinity::Downstream),
+            Cursor::from_byte_index(&label.layout, focus, Affinity::Upstream),
         )
     } else {
         selection.refresh(&label.layout)
@@ -419,11 +467,13 @@ pub fn text_field(
             }
             _ => continue,
         };
+        let range = to_text(text, range.start)..to_text(text, range.end);
         text.replace_range(range.clone(), inserted);
-        label = texts.label(text, size, false, None, frame);
+        shown_text = masked(text);
+        label = texts.label(&shown_text, size, false, None, frame);
         selection = Selection::from_byte_index(
             &label.layout,
-            range.start + inserted.len(),
+            to_shown(text, range.start + inserted.len()),
             Affinity::Downstream,
         );
     }
@@ -437,7 +487,7 @@ pub fn text_field(
     let shown = if text.is_empty() {
         placeholder
     } else {
-        text.as_str()
+        shown_text.as_str()
     };
     let height = spec.size[1];
     let backdrop = spec.fill.unwrap_or(theme.base);
@@ -452,9 +502,20 @@ pub fn text_field(
                 theme.text
             }),
             cursor: Some(CursorIcon::Text),
+            role: spec.role.or(Some(if secret {
+                Role::PasswordInput
+            } else {
+                Role::TextInput
+            })),
             ..spec
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_value(shown_text.as_str());
+        if !placeholder.is_empty() {
+            node.set_placeholder(placeholder);
+        }
+    }
     if signal.focused {
         let line = label.size[1];
         let top = match height.size {
@@ -508,6 +569,7 @@ pub fn edit_key(key: &Key) -> edit::Key {
             NamedKey::End => Edit::End,
             NamedKey::PageUp => Edit::PageUp,
             NamedKey::PageDown => Edit::PageDown,
+            NamedKey::F7 => Edit::F7,
             NamedKey::F11 => Edit::F11,
             NamedKey::Alt
             | NamedKey::AltGraph

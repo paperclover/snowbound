@@ -328,11 +328,8 @@ pub(crate) fn validate(
                 }
             }
             (ParagraphContent::Table(table), ParagraphContent::Table(previous)) => {
-                if table.id != previous.id
-                    || table.layout != previous.layout
-                    || table.tags != previous.tags
-                {
-                    return Err(invalid("Table identity, layout and tags cannot be edited"));
+                if table.id != previous.id || table.layout != previous.layout {
+                    return Err(invalid("Table identity and layout cannot be edited"));
                 }
                 let cells: BTreeMap<ExGuid, &TableCell> = previous
                     .rows
@@ -747,6 +744,7 @@ fn bare(paragraph: &PageParagraph) -> PageParagraph {
     match &mut stripped.content {
         ParagraphContent::Text(text) => text.tags.clear(),
         ParagraphContent::Table(table) => {
+            table.tags.clear();
             for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
                 cell.paragraphs = cell.paragraphs.iter().map(bare).collect();
             }
@@ -1766,8 +1764,14 @@ impl Lowering {
                 .ok_or_else(|| invalid("A paragraph is missing after text edits"))?
                 .clone();
             let mut targets = vec![(*id, &paragraph.tags, current.tags.clone())];
-            if let (Some(text), Some(stored)) = (paragraph.text(), current.text()) {
-                targets.push((text.id, &text.tags, stored.tags.clone()));
+            match (&paragraph.content, &current.content) {
+                (ParagraphContent::Text(text), ParagraphContent::Text(stored)) => {
+                    targets.push((text.id, &text.tags, stored.tags.clone()))
+                }
+                (ParagraphContent::Table(table), ParagraphContent::Table(stored)) => {
+                    targets.push((table.id, &table.tags, stored.tags.clone()))
+                }
+                _ => {}
             }
             for (target, tags, stored) in targets {
                 if same_tags(tags, &stored) {

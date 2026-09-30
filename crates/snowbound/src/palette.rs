@@ -1,14 +1,17 @@
-//! The command palette: the command table's commands, then the open notebooks' sections and
-//! every page the search index holds to go to, narrowed as typed.
+//! The palette: the open notebooks, their sections and every page the search index holds to
+//! go to, or after a leading `>` the command table's commands, narrowed as typed.
 
 use crate::{
-    Command, Library, State,
-    commands::{self, COMMANDS, Choice},
+    Command, Library, State, art,
+    commands::{self, Choice},
     library,
 };
 use onestore::ExGuid;
 use std::sync::Arc;
 use ui::{Id, popup::Item};
+
+/// What the palette's query starts with to list commands.
+pub(crate) const COMMANDS: &str = ">";
 
 pub(crate) fn id() -> Id {
     Id::ROOT.child("palette")
@@ -16,16 +19,45 @@ pub(crate) fn id() -> Id {
 
 enum Target {
     Command(commands::Id),
+    Notebook(String),
     Section(Arc<Library>, String),
     Page(String, ExGuid),
 }
 
-/// A row: its text, the dim text after it, and what it runs; a heading runs nothing.
+/// A row: its text, the dim text after it, its icon and what it runs; a heading runs nothing.
 struct Row {
     text: String,
     after: String,
+    icon: Option<&'static [&'static str]>,
+    tint: Option<[f32; 4]>,
     disabled: bool,
     target: Option<Target>,
+}
+
+impl Row {
+    fn heading(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            after: String::new(),
+            icon: None,
+            tint: None,
+            disabled: false,
+            target: None,
+        }
+    }
+
+    fn item(&self) -> Item<'_> {
+        Item {
+            text: &self.text,
+            shortcut: &self.after,
+            icon: self.icon,
+            tint: self.tint,
+            disabled: self.disabled,
+            heading: self.target.is_none(),
+            separated: self.target.is_none(),
+            ..Item::default()
+        }
+    }
 }
 
 impl State {
@@ -35,31 +67,44 @@ impl State {
             return;
         }
         let format = self.format_state();
-        let mut rows: Vec<Row> = COMMANDS
+        let mut commands: Vec<Row> = commands::COMMANDS
             .iter()
+            .filter(|command| commands::offered(command.id))
             .map(|command| Row {
                 text: command.title.to_owned(),
                 after: commands::shortcut(command.id),
+                icon: crate::artwork(command.id),
+                tint: None,
                 disabled: !self.status(&Choice::Command(command.id), &format).enabled,
                 target: Some(Target::Command(command.id)),
             })
             .collect();
-        rows.extend(self.tags.iter().enumerate().map(|(place, tag)| {
+        commands.extend(self.tags.iter().enumerate().map(|(place, tag)| {
             let id = commands::Id::Tag(place);
             Row {
                 text: tag.label.clone(),
                 after: commands::shortcut(id),
+                icon: Some(crate::tag_art(tag)),
+                tint: Some([1.0; 4]),
                 disabled: !self.status(&Choice::Command(id), &format).enabled,
                 target: Some(Target::Command(id)),
             }
         }));
-        let heading = |text: &str| Row {
-            text: text.to_owned(),
-            after: String::new(),
-            disabled: false,
-            target: None,
-        };
-        rows.push(heading("Sections"));
+        let mut places = vec![Row::heading("Notebooks")];
+        places.extend(
+            (self.notebooks.iter())
+                .filter(|library| library.catalog().is_some())
+                .map(|library| Row {
+                    text: library.name.clone(),
+                    after: String::new(),
+                    icon: Some(art::NOTEBOOK),
+                    tint: None,
+                    disabled: false,
+                    target: Some(Target::Notebook(library.location.clone())),
+                }),
+        );
+        places.push(Row::heading("Sections"));
+        let theme = &self.ui.theme;
         for library in &self.notebooks {
             // A section opened on its own has no catalog, and lists itself at "".
             let mut folders: Vec<_> = library.catalog().into_iter().collect();
@@ -80,21 +125,23 @@ impl State {
                 paths.collect()
             };
             for path in paths {
-                rows.extend(library.tabs(path).into_iter().map(|tab| Row {
+                places.extend(library.tabs(path).into_iter().map(|tab| Row {
                     text: tab.name,
                     after: library.name.clone(),
+                    icon: Some(art::SECTION),
+                    tint: Some(theme.section(crate::section_color(tab.color)).accent),
                     disabled: false,
                     target: Some(Target::Section(Arc::clone(library), tab.path)),
                 }));
             }
         }
-        rows.push(heading("Pages"));
+        places.push(Row::heading("Pages"));
         let index = self
             .search
             .index
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        rows.extend(index.entries().iter().map(|entry| {
+        places.extend(index.entries().iter().map(|entry| {
             let (location, path) = entry.section.split_once('\n').unwrap_or_default();
             let mut section = library::section_name(path, &None);
             if section.is_empty() {
@@ -109,30 +156,24 @@ impl State {
                     entry.title.clone()
                 },
                 after: section,
+                icon: Some(art::PAGE),
+                tint: None,
                 disabled: false,
                 target: Some(Target::Page(entry.section.clone(), entry.space)),
             }
         }));
         drop(index);
-        let items: Vec<Item> = rows
-            .iter()
-            .map(|row| Item {
-                text: &row.text,
-                shortcut: &row.after,
-                disabled: row.disabled,
-                heading: row.target.is_none(),
-                separated: row.target.is_none(),
-                ..Item::default()
-            })
-            .collect();
+        let items = [&commands, &places].map(|rows| rows.iter().map(Row::item).collect::<Vec<_>>());
         let chosen = ui::popup::palette(
             &mut self.ui,
             id(),
-            &items,
-            "Search commands, sections and pages",
+            &[(COMMANDS, &items[0]), ("", &items[1])],
+            "Search pages, sections and notebooks (type > for commands)",
         );
-        match chosen.and_then(|index| rows.swap_remove(index).target) {
+        let mut rows = [commands, places];
+        match chosen.and_then(|(mode, index)| rows[mode].swap_remove(index).target) {
             Some(Target::Command(command)) => self.choose(Choice::Command(command)),
+            Some(Target::Notebook(location)) => self.open_notebook(location, None),
             Some(Target::Section(library, path)) => {
                 self.commands.push(Command::OpenSection(library, path));
             }

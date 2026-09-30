@@ -278,8 +278,10 @@ mod tests {
                 layout: Default::default(),
                 size: None,
                 bytes: Some(Arc::clone(&bytes)),
+                display: None,
                 alt: None,
                 background: false,
+                printout: None,
             })
         };
         let space = ExGuid {

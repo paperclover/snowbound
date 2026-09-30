@@ -25,8 +25,9 @@ frame-rate independent, a retargeted animation continues smoothly from where
 it is, and it settles fast. Popups open and close on short timed curves,
 slow enough to follow: a menu swings out of the pointer or its button as it
 fades in, a combo's field widens into its list, and a dialog swings up into
-place over a dimmed window, as Windows opens a window; the command palette swings
-in the same way near the window's top. On GNOME and KDE, menus instead
+place near the window's top over a dimmed window, as Windows opens a window; the
+command palette swings in the same way, undimmed. A filtered list shows its new
+results at once. On GNOME and KDE, menus instead
 look and move as the desktop's own (see [platforms](platforms.md)).
 
 ## Why not native widgets
@@ -85,7 +86,7 @@ frame N
   are built each frame and the solver picks, so a group folds in the frame the
   window narrows, with no widths remembered or worked out by the app. A folded
   group is a dropdown of the same command-table rows, and a gallery it lists
-  opens under it, since a folded-away box takes its group's rectangle. The
+  opens beside its row as a submenu, on hover, Right or a click. The
   section tabs scroll sideways past the row's room, fading out where cut.
 - **Nothing runs while nothing changes.** The kit reports whether it wants
   another frame (queued input, an animation still settling) and when a timed
@@ -105,6 +106,51 @@ palette on a popup layer that takes input above everything else. `ui::shell`
 has the OneNote-specific controls: section tabs and compact toolbar buttons.
 The kit doesn't know what a notebook is. `snowbound` assembles the window from
 these parts.
+
+## Accessibility and the keyboard
+
+The interface presents itself to assistive technology as an AccessKit tree
+built from the same boxes as the frame. A box with a `Spec::role` is a node;
+the kit's widgets choose their own, and `Ui::access` adds states, values and
+names to any box. A box without a role lets its children through, and its
+text reads as a label.
+
+- **Names come from what a sighted user reads.** A control without one is
+  named by its text and its children's, or by its tooltip: the title names
+  it, the chord becomes its shortcut, and the description its description.
+  An icon button's command-table title is its name, and a split button's arrow
+  is that name with "Options", so no two toolbar controls share one.
+- **Popups are menus and dialogs.** A menu's highlighted row is the focus
+  within it, so arrows read as they move; a palette is a dialog whose field
+  keeps the focus while its list's selection moves. Opening a popup moves the
+  focus into it, and closing it gives the focus back. A command menu opens at
+  its top with nothing highlighted; a value picker (fonts, sizes, a combo's
+  list) opens on its current value.
+- **Actions are input.** A press or a new value from assistive technology
+  arrives as an event and is answered next frame, as a click would be.
+- **Only changes are sent**, and only while something listens.
+
+The page keeps its own tree (see [canvas](canvas.md#accessibility)). The
+host grafts it at the page's box, sending the interface's tree first, since
+it holds the graft, then the page's.
+
+```text
+Window
+├─ Toolbar         buttons named by their tooltips, combos with their values
+├─ TabList         section tabs
+├─ Group "Page"    the page's own tree, grafted
+├─ TabList         page tabs
+└─ Menu | Dialog   open popups
+```
+
+The keyboard reaches the same controls. Tab steps through them, within an
+open popup or across the window; a toolbar, tab list or tree is one step,
+entered at its selected control, and arrows move within it. F6 steps between
+those groups and the page, as Windows and GTK step between panes, and on
+macOS Control-F5 goes to the toolbar. Space or Enter presses, Escape closes a
+popup or returns the focus to where the keyboard took it from, and the
+focused control wears a ring until the pointer is used. The page keeps Tab
+for itself, so F6 leaves it.
 
 ## `draw`: the renderer
 
@@ -142,6 +188,7 @@ repaint, cache eviction and a new renderer must all produce identical pixels.
 
 A covered window gets no redraws, so interaction is scripted.
 `SNOWBOUND_REPLAY` feeds the app a file of pointer, key, wait and snapshot
-steps. `--screenshot` draws the whole window offscreen in each appearance
+steps, and `accessibility` steps that write the whole window's tree as text, so a
+hidden window's tree can be checked without a screen reader. `--screenshot` draws the whole window offscreen in each appearance
 (the README's screenshots are made this way). `ui`'s own tests build frames
 headlessly and assert on layout, routing and signals.

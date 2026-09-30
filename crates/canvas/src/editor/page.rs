@@ -5,7 +5,7 @@ use crate::{
     outline::{Arrange, OutlineLayout},
 };
 use onestore::page::text::Paragraph;
-use onestore::page::{Attachment, Image, Ink, Outline, Page, PageObject};
+use onestore::page::{Attachment, Image, Ink, Outline, Page, PageObject, PageParagraph};
 use std::collections::BTreeMap;
 
 /// A title object's own state, plus the child origins `build` replaces with page coordinates.
@@ -21,6 +21,8 @@ pub(crate) struct Import {
     pub outlines: Vec<TextOutline>,
     pub date: Option<PageDate>,
     pub areas: Vec<TitleArea>,
+    /// The paragraph each outline holding no text shows after its objects, not stored.
+    pub provisional: BTreeMap<onestore::ExGuid, PageParagraph>,
 }
 
 pub(crate) enum Content {
@@ -184,6 +186,7 @@ pub(crate) fn build(
     let mut outlines = Vec::new();
     let mut areas = Vec::new();
     let mut date = None;
+    let mut provisional = BTreeMap::new();
     for object in std::mem::take(&mut page.objects) {
         match &object {
             PageObject::Outline(outline) => {
@@ -202,7 +205,28 @@ pub(crate) fn build(
                     )
                 };
                 if editable {
-                    match TextOutline::from_outline(engine, outline, &page.definitions) {
+                    // Pictures and files alone in an outline take a paragraph after them where
+                    // a click beside them lands, as OneNote 2010 adds one when typing there.
+                    let extended;
+                    let source = if crate::document::leaves(&outline.paragraphs, None)
+                        .next()
+                        .is_none()
+                    {
+                        let blank = crate::document::node(
+                            Paragraph::new(String::new(), Default::default()),
+                            Default::default(),
+                        )?;
+                        extended = Outline {
+                            paragraphs: [&outline.paragraphs[..], std::slice::from_ref(&blank)]
+                                .concat(),
+                            ..outline.clone()
+                        };
+                        provisional.insert(outline.id, blank);
+                        &extended
+                    } else {
+                        outline
+                    };
+                    match TextOutline::from_outline(engine, source, &page.definitions) {
                         Ok(outline) => {
                             objects.push(Content::Editable(outline.id));
                             outlines.push(outline);
@@ -210,7 +234,9 @@ pub(crate) fn build(
                         }
                         Err(error) if !unsupported(&error) => return Err(error),
                         // Drawn as stored when the editor cannot hold it.
-                        Err(_) => {}
+                        Err(_) => {
+                            provisional.remove(&outline.id);
+                        }
                     }
                 }
                 match outline.layout(engine, &page.definitions) {
@@ -396,6 +422,7 @@ pub(crate) fn build(
         outlines,
         date,
         areas,
+        provisional,
     })
 }
 
@@ -415,11 +442,15 @@ fn stroke_bounds(ink: &Ink) -> Option<[f32; 4]> {
     ink.strokes
         .iter()
         .flat_map(|stroke| {
-            let r = stroke.width.max(stroke.height) * 0.5;
+            let size = stroke.width.max(stroke.height) * 0.5;
             stroke
                 .points
                 .iter()
-                .map(move |[x, y]| [x - r, y - r, x + r, y + r])
+                .enumerate()
+                .map(move |(index, [x, y])| {
+                    let r = size * stroke.thickness(index);
+                    [x - r, y - r, x + r, y + r]
+                })
         })
         .chain(ink.groups.iter().filter_map(stroke_bounds))
         .reduce(|a, b| {

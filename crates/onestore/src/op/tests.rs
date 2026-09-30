@@ -1099,8 +1099,10 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     layout: Layout::default(),
                     size: Some([0.75, 0.75]),
                     bytes: Some(PNG.into()),
+                    display: None,
                     alt: Some("dot".into()),
                     background: false,
+                    printout: None,
                 }),
                 Family::Attachment => ParagraphContent::Attachment(Attachment {
                     id: id(),
@@ -1152,8 +1154,10 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     },
                     size: Some([0.75, 0.75]),
                     bytes: Some(PNG.into()),
+                    display: None,
                     alt: None,
                     background: false,
+                    printout: None,
                 })
             } else {
                 PageObject::Ink(Ink {
@@ -1254,8 +1258,13 @@ fn stroke(rng: &mut Rng) -> InkStroke {
         color: Some(0x0000ff),
         transparency: None,
         pen_tip: None,
-        // Every other stroke a highlighter's.
+        // Every other stroke a highlighter's, and every third a pressure pen's.
         raster_operation: (x as u32).is_multiple_of(2).then_some(9),
+        pressure: if (x as u32).is_multiple_of(3) {
+            [0.0, 0.3, 1.0].map(crate::page::ink::level).to_vec()
+        } else {
+            Vec::new()
+        },
     }
 }
 

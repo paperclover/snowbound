@@ -90,7 +90,10 @@ fn clipboard_link(
 impl State {
     /// Ctrl+K and the toolbar's Link: the dialog opens on what the selection links.
     pub(crate) fn open_link_dialog(&mut self) {
-        let (text, address) = self.view.link_prefill();
+        // As OneNote 2010's, Link does nothing over a selection across paragraphs.
+        let Some((text, address)) = self.view.link_prefill() else {
+            return;
+        };
         self.link = Some(LinkDialog {
             text,
             address,
@@ -113,12 +116,6 @@ impl State {
         }
         let theme = ui.theme.clone();
         let row = theme.font_size * 2.0;
-        let window = ui.rect(Id::ROOT).unwrap_or_default();
-        let height = ui.rect(id()).map_or(360.0, |rect| rect[3] - rect[1]);
-        let [left, top] = [
-            ((window[2] - WIDTH) / 2.0).max(0.0),
-            ((window[3] - height) / 2.0).max(0.0),
-        ];
         let fields = [text_field(), address_field(), search_field()];
         let entered =
             ui::popup::navigation(ui, &fields[..2], &[NamedKey::Enter]).contains(&NamedKey::Enter);
@@ -133,10 +130,14 @@ impl State {
                 radius: 8.0,
                 pad: [16.0, 12.0],
                 gap: 4.0,
-                anchor: Some(Anchor::Below([left, top, left, top])),
+                anchor: Some(Anchor::Dialog),
+                role: Some(accesskit::Role::Dialog),
                 ..Spec::default()
             },
         );
+        if let Some(node) = ui.access(id()) {
+            node.set_label("Link");
+        }
         let field = |ui: &mut ui::Ui, label: &str, id: Id, value: &mut String, hint: &str| {
             if !label.is_empty() {
                 ui.leaf(
@@ -162,6 +163,9 @@ impl State {
                     ..Spec::default()
                 },
             );
+            if let Some(node) = ui.access(id) {
+                node.set_label(label.trim_end_matches(':'));
+            }
         };
         field(ui, "Text to display:", text_field(), &mut dialog.text, "");
         field(ui, "Address:", address_field(), &mut dialog.address, "");
@@ -196,6 +200,7 @@ impl State {
                 radius: 4.0,
                 pad: [4.0, 4.0],
                 flags: Flags::CLIP,
+                role: Some(accesskit::Role::List),
                 ..Spec::default()
             },
         );
@@ -213,6 +218,7 @@ impl State {
                 hover_fill: Some(theme.hover()),
                 radius: 4.0,
                 pad: [8.0, 0.0],
+                role: Some(accesskit::Role::ListItem),
                 ..Spec::default()
             };
             if ui.leaf(space, spec).clicked {
@@ -301,13 +307,52 @@ impl State {
             text,
             ..Item::default()
         };
-        let items = if context.attachment.is_some() {
+        // OneNote 2010 heads the menu on a marked word with its corrections.
+        let mut items = match &context.spelling {
+            Some(correction) if correction.repeated => vec![
+                item("Delete Repeated Word"),
+                item("Ignore"),
+                Item {
+                    separated: true,
+                    ..item("Spelling…")
+                },
+            ],
+            Some(correction) => {
+                let mut items: Vec<Item> = correction
+                    .suggestions
+                    .iter()
+                    .map(|suggestion| item(suggestion.as_str()))
+                    .collect();
+                if items.is_empty() {
+                    items.push(Item {
+                        disabled: true,
+                        ..item("(No Spelling Suggestions)")
+                    });
+                }
+                items.extend([
+                    Item {
+                        separated: true,
+                        ..item("Ignore")
+                    },
+                    item("Add to Dictionary"),
+                    Item {
+                        separated: true,
+                        ..item("Spelling…")
+                    },
+                ]);
+                items
+            }
+            None => Vec::new(),
+        };
+        let corrections = items.len();
+        items.extend(if context.attachment.is_some() {
             // OneNote 2010's commands for the file itself; its clipboard holds text alone.
             vec![item("Open"), item("Save As…")]
         } else {
             let mut items = vec![
                 Item {
                     disabled: !context.selected,
+                    separated: corrections > 0,
                     ..item("Cut")
                 },
                 Item {
@@ -348,16 +393,43 @@ impl State {
                 ]);
             }
             items
-        };
+        });
         let Some(chosen) =
             ui::popup::menu(&mut self.ui, menu(), Anchor::Point(*point), &items, None)
         else {
             return Ok(());
         };
+        let chosen_text = items[chosen].text.to_owned();
         let Some((context, _)) = self.text_menu.take() else {
             return Ok(());
         };
-        let response = match items[chosen].text {
+        if chosen < corrections {
+            let correction = context.spelling.unwrap();
+            let response = match chosen_text.as_str() {
+                _ if chosen < correction.suggestions.len() => {
+                    self.view.correct(&correction, &chosen_text)?
+                }
+                "Delete Repeated Word" => self.view.correct(&correction, "")?,
+                "Spelling…" => {
+                    self.open_spelling_pane();
+                    return Ok(());
+                }
+                text => {
+                    if let Some(spelling) = &self.view.spelling {
+                        if text == "Ignore" {
+                            spelling.ignore(&correction.word);
+                        } else {
+                            spelling.learn(&correction.word);
+                        }
+                    }
+                    self.window.request_redraw();
+                    return Ok(());
+                }
+            };
+            self.respond(response);
+            return Ok(());
+        }
+        let response = match chosen_text.as_str() {
             "Open" => return self.open_attachment(&context.attachment.unwrap()),
             "Save As…" => return self.save_attachment(&context.attachment.unwrap()),
             "Cut" => self.view.copy(true)?,

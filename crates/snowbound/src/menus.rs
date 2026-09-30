@@ -217,7 +217,7 @@ impl State {
             (Target::Page(space), "Copy Link to Page") => {
                 let copied = self
                     .page_link(space, None)
-                    .and_then(|link| Ok(self.clipboard.set_text(link)?));
+                    .and_then(|link| self.clipboard.set_text(link));
                 if let Err(error) = copied {
                     eprintln!("Copying the link failed: {error}");
                 }

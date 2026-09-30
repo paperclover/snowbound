@@ -543,7 +543,7 @@ impl<'a> Working<'a> {
                 for (edit, id) in accepted.drain(..).zip(ids) {
                     (edit.reply)(Ok(id));
                 }
-                crate::wake(worker);
+                crate::edited(worker);
             }
             Err(error) => {
                 let message = error.to_string();
@@ -679,6 +679,7 @@ fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<
                 author,
                 objects,
                 crate::now(),
+                None,
             )?;
             added.push((author.clone(), edit));
         }

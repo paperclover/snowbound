@@ -598,8 +598,10 @@ fn perform(
                 },
                 size: Some([174.5, 640.0]),
                 bytes: Some(std::sync::Arc::from(ART.as_slice())),
+                display: None,
                 alt: None,
                 background: true,
+                printout: None,
             };
             let shown = editor.page().unwrap().objects.iter().any(|object| {
                 matches!(object, onestore::page::PageObject::Image(image) if image.background)
@@ -710,10 +712,16 @@ fn perform(
             let points: Vec<[f32; 2]> = (0..12)
                 .map(|step| [x + 6.0 * step as f32, y + 9.0 * (step as f32 / 2.0).sin()])
                 .collect();
+            // Every other stroke a pressure pen's.
+            let pressure: Vec<f32> = if random.below(2) == 0 {
+                (0..12).map(|step| step as f32 / 11.0).collect()
+            } else {
+                Vec::new()
+            };
             let ink = onestore::page::Ink {
                 id: onestore::page::text::new_id().unwrap(),
                 layout: Default::default(),
-                strokes: vec![pen.stroke(&points).unwrap()],
+                strokes: vec![pen.stroke(&points, &pressure).unwrap()],
                 groups: Vec::new(),
                 shape: None,
             };
@@ -735,7 +743,7 @@ fn perform(
                 from[0] + 18.0 * (1 + random.below(6)) as f32,
                 from[1] + 18.0 * (1 + random.below(4)) as f32,
             ];
-            let pen = Pen::new(50.0, Some(0x7a9a1f)).stroke(&[]).unwrap();
+            let pen = Pen::new(50.0, Some(0x7a9a1f)).stroke(&[], &[]).unwrap();
             let ink = onestore::page::Ink::drawn(kinds[random.below(4)], from, to, &pen).unwrap();
             editor.draw(ink).is_ok()
         }

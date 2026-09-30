@@ -15,6 +15,44 @@ fn stale(_: EditError) -> onestore::Error {
     refused("The editor lost track of the stored page")
 }
 
+/// Whether `op` needs paragraph `blank`, last in `outline` and not stored yet: it edits the
+/// paragraph or its text, or adds to or moves within the outline's top level.
+fn reaches(op: &PageOp, outline: ExGuid, blank: &PageParagraph) -> bool {
+    let text = blank.text().map(|text| text.id);
+    let own = |id: &ExGuid| *id == blank.id || Some(*id) == text;
+    match op {
+        PageOp::Text { text, .. }
+        | PageOp::Format { text, .. }
+        | PageOp::Link { text, .. }
+        | PageOp::Equation { text, .. }
+        | PageOp::Split { text, .. } => own(text),
+        PageOp::Join { left, right } => own(left) || own(right),
+        PageOp::Insert {
+            container, before, ..
+        } => *container == outline || before.as_ref().is_some_and(own),
+        PageOp::Move {
+            object,
+            parent,
+            before,
+        } => {
+            own(object)
+                || parent
+                    .as_ref()
+                    .is_some_and(|parent| *parent == outline || own(parent))
+                || before.as_ref().is_some_and(own)
+        }
+        PageOp::Delete { object: id }
+        | PageOp::Level { paragraph: id, .. }
+        | PageOp::Outline { object: id, .. }
+        | PageOp::Paragraph { paragraph: id, .. }
+        | PageOp::Style { paragraph: id, .. }
+        | PageOp::Media { paragraph: id, .. }
+        | PageOp::List { paragraph: id, .. }
+        | PageOp::Tags { target: id, .. } => own(id),
+        _ => false,
+    }
+}
+
 /// Definitions a paragraph names: its lists, style and note tags.
 pub(super) fn references(node: &PageParagraph) -> impl Iterator<Item = ExGuid> + '_ {
     let content_tags = match &node.content {
@@ -266,12 +304,30 @@ impl CanvasEditor {
         taken
     }
 
+    /// Queues `lowered`, storing first the provisional paragraph of an outline an op reaches.
     pub(super) fn record(&mut self, lowered: Lowered) {
-        if let Ok(ops) = &mut self.ops {
-            match lowered {
-                Ok(mut lowered) => ops.append(&mut lowered),
-                Err(error) => self.ops = Err(error),
+        let Ok(ops) = &mut self.ops else {
+            return;
+        };
+        let lowered = match lowered {
+            Ok(lowered) => lowered,
+            Err(error) => {
+                self.ops = Err(error);
+                return;
             }
+        };
+        for op in lowered {
+            for (outline, (blank, stored)) in &mut self.provisional {
+                if !*stored && reaches(&op, *outline, blank) {
+                    *stored = true;
+                    ops.push(PageOp::Insert {
+                        container: *outline,
+                        before: None,
+                        paragraphs: vec![blank.clone()],
+                    });
+                }
+            }
+            ops.push(op);
         }
     }
 

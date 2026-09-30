@@ -20,6 +20,8 @@ for arg; do
             # Test binaries whose dev-dependencies take draw's wgpu backend (ui, canvas)
             # name Metal, which 10.6 lacks; nothing they run on 10.6 calls into it.
             Metal) arg=Foundation ;;
+            # 10.7's; rt/avfoundation.c stands in for what the app imports from them.
+            AVFoundation | CoreMedia) arg=Foundation ;;
         esac
     fi
     [ "$prev" = -arch ] && arch=$arg

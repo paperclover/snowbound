@@ -34,8 +34,8 @@ pub struct Section<'a> {
     /// The in-place writes of the sealed transactions, in order.
     patches: Vec<(u64, Vec<u8>)>,
     state: StoreState,
-    /// Payloads the opened image embeds, by identity.
-    files: &'a [([u8; 16], Chunk)],
+    /// Payloads the opened images embed, by identity, with the image holding each.
+    files: &'a [([u8; 16], Chunk, &'a [u8])],
     /// Payload identities the file-data store declares.
     declared: BTreeSet<[u8; 16]>,
     spaces: BTreeMap<ExGuid, Space<'a>>,
@@ -139,74 +139,125 @@ struct Open<'a> {
 impl<'a> Section<'a> {
     /// Parses and fully validates a section image.
     pub fn open(arena: &'a Arena, image: Vec<u8>) -> Result<Self> {
-        let bytes: &'a [u8] = arena.0.alloc_slice_copy(&image);
-        drop(image);
-        let store = Store::parse(bytes)?;
-        if let Some(offset) = store.checksum_mismatches.first() {
-            return Err(Error {
-                offset: *offset,
-                message: "Cannot write a file with transaction checksum damage",
-            });
-        }
-        if store.header.file_type != FileType::Section {
+        Self::open_with(arena, vec![image], |_, space| {
+            space.labels.get(&(ExGuid::default(), 1)).copied()
+        })
+    }
+
+    /// Opens an earlier state of a section: each object space in `revisions` at the revision
+    /// given, taken from the first of `images` that stores it, and no other space; the first
+    /// image is the section's. For reading, as a merge reads the state two copies of a section
+    /// last shared, which may lie partly in each copy.
+    pub fn open_at(
+        arena: &'a Arena,
+        images: Vec<Vec<u8>>,
+        revisions: &BTreeMap<ExGuid, ExGuid>,
+    ) -> Result<Self> {
+        let section = Self::open_with(arena, images, |id, space| {
+            revisions
+                .get(id)
+                .copied()
+                .filter(|rid| space.revisions.contains_key(rid))
+        })?;
+        if !section.spaces.contains_key(&section.root) {
             return Err(Error {
                 offset: 0,
-                message: "Choose a section file",
+                message: "The earlier state names no revision of the section's root",
             });
         }
-        let index = RevisionIndex::parse(&store)?;
-        index.validate_current()?;
+        Ok(section)
+    }
+
+    /// `open`, each object space at the revision `revision` chooses in the first image where it
+    /// chooses one; a space it chooses none for is left out. Payloads are read from the image
+    /// that first declares them.
+    fn open_with(
+        arena: &'a Arena,
+        images: Vec<Vec<u8>>,
+        revision: impl Fn(&ExGuid, &crate::ObjectSpace<'_>) -> Option<ExGuid>,
+    ) -> Result<Self> {
+        let mut opened = None;
         let mut spaces = BTreeMap::new();
-        for (id, space) in &index.spaces {
-            let Some(rid) = space.labels.get(&(ExGuid::default(), 1)).copied() else {
-                continue;
-            };
-            let revision = bound(bytes, index.resolve(*id, rid)?);
-            let history = space
-                .labels
-                .get(&(versions::HISTORY, 1))
-                .map(|history| -> Result<History<'a>> {
-                    Ok(History {
-                        rid: *history,
-                        revision: bound(bytes, index.resolve(*id, *history)?),
-                        depth: chain_depth(&index, *id, *history),
-                        pending: BTreeMap::new(),
-                    })
-                })
-                .transpose()?;
-            let state = SpaceState::Stored {
-                revision,
-                depth: chain_depth(&index, *id, rid),
-            };
-            spaces.insert(*id, Space::new(Some(rid), state, history));
-        }
-        let mut files = Vec::new();
-        for node in store.lists.values().flat_map(|list| &list.nodes) {
-            if node.id != 0x94 || node.freed() {
-                continue;
-            }
-            let (Some(guid), Some(Reference::Data(chunk))) =
-                (node.payload.first_chunk(), node.reference)
-            else {
+        let mut files: Vec<([u8; 16], Chunk, &'a [u8])> = Vec::new();
+        for image in images {
+            let bytes: &'a [u8] = arena.0.alloc_slice_copy(&image);
+            drop(image);
+            let store = Store::parse(bytes)?;
+            if let Some(offset) = store.checksum_mismatches.first() {
                 return Err(Error {
-                    offset: node.offset,
-                    message: "File-data object lacks a data reference",
+                    offset: *offset,
+                    message: "Cannot write a file with transaction checksum damage",
                 });
-            };
-            files.push((*guid, chunk));
+            }
+            if store.header.file_type != FileType::Section {
+                return Err(Error {
+                    offset: 0,
+                    message: "Choose a section file",
+                });
+            }
+            let index = RevisionIndex::parse(&store)?;
+            index.validate_current()?;
+            for (id, space) in &index.spaces {
+                let Some(rid) = revision(id, space).filter(|_| !spaces.contains_key(id)) else {
+                    continue;
+                };
+                let revision = bound(bytes, index.resolve(*id, rid)?);
+                let history = space
+                    .labels
+                    .get(&(versions::HISTORY, 1))
+                    .map(|history| -> Result<History<'a>> {
+                        Ok(History {
+                            rid: *history,
+                            revision: bound(bytes, index.resolve(*id, *history)?),
+                            depth: chain_depth(&index, *id, *history),
+                            pending: BTreeMap::new(),
+                        })
+                    })
+                    .transpose()?;
+                let state = SpaceState::Stored {
+                    revision,
+                    depth: chain_depth(&index, *id, rid),
+                };
+                spaces.insert(*id, Space::new(Some(rid), state, history));
+            }
+            let known = files.len();
+            for node in store.lists.values().flat_map(|list| &list.nodes) {
+                if node.id != 0x94 || node.freed() {
+                    continue;
+                }
+                let (Some(guid), Some(Reference::Data(chunk))) =
+                    (node.payload.first_chunk(), node.reference)
+                else {
+                    return Err(Error {
+                        offset: node.offset,
+                        message: "File-data object lacks a data reference",
+                    });
+                };
+                // A payload an earlier image declares is the same bytes: it names them.
+                if !files[..known].iter().any(|(declared, ..)| declared == guid) {
+                    files.push((*guid, chunk, bytes));
+                }
+            }
+            if opened.is_none() {
+                opened = Some((bytes, store.state()?, index.root));
+            }
         }
-        files.sort_unstable_by_key(|(guid, _)| *guid);
+        let (bytes, state, root) = opened.ok_or(Error {
+            offset: 0,
+            message: "Choose a section file",
+        })?;
+        files.sort_by_key(|(guid, ..)| *guid);
         Ok(Self {
             arena,
             segments: vec![(0, bytes)],
             patches: Vec::new(),
-            state: store.state()?,
-            declared: files.iter().map(|(guid, _)| *guid).collect(),
+            state,
+            declared: files.iter().map(|(guid, ..)| *guid).collect(),
             files: arena.0.alloc_slice_copy(&files),
             spaces,
             payloads: Vec::new(),
             broken: false,
-            root: index.root,
+            root,
             undo: None,
         })
     }
@@ -426,12 +477,12 @@ impl<'a> Section<'a> {
 
     /// Reads a payload of the opened image by identity.
     fn files(&self) -> Files<'a> {
-        let (bytes, files) = (self.segments[0].1, self.files);
+        let files = self.files;
         std::rc::Rc::new(move |guid| {
-            let start = files.partition_point(|(id, _)| *id < guid);
+            let start = files.partition_point(|(id, ..)| *id < guid);
             match files[start..]
                 .iter()
-                .take_while(|(id, _)| *id == guid)
+                .take_while(|(id, ..)| *id == guid)
                 .count()
             {
                 0 => Err(Error {
@@ -439,7 +490,7 @@ impl<'a> Section<'a> {
                     message: "File-data object is not declared",
                 }),
                 1 => {
-                    let chunk = files[start].1;
+                    let (_, chunk, bytes) = files[start];
                     let (offset, length) = (chunk.offset as usize, chunk.length as usize);
                     let blob = bytes.get(offset..offset + length).ok_or(Error {
                         offset,
@@ -633,7 +684,26 @@ impl<'a> Section<'a> {
     /// embed, as one transaction on `stamp`; none when nothing changed. An error leaves the
     /// section to be reopened.
     pub fn seal(&mut self) -> Result<Option<Transaction>> {
+        self.seal_as(&BTreeMap::new())
+    }
+
+    /// `seal`, each space in `names` taking the revision identity named there, one the space
+    /// does not store, instead of a fresh one: a merge names what it wrote after what it
+    /// merged, so that the next merge knows it holds that.
+    pub fn seal_as(&mut self, names: &BTreeMap<ExGuid, ExGuid>) -> Result<Option<Transaction>> {
         self.usable()?;
+        if names.iter().any(|(space, name)| {
+            name.guid == [0; 16]
+                || self
+                    .spaces
+                    .get(space)
+                    .is_some_and(|stored| stored.rid == Some(*name))
+        }) {
+            return Err(Error {
+                offset: 0,
+                message: "Name each revision anew",
+            });
+        }
         self.broken = true;
         let arena = &self.arena.0;
         let mut appending = Appending::new(self.state.clone());
@@ -680,7 +750,7 @@ impl<'a> Section<'a> {
                                 previous: space.restored.or(space.rid),
                                 new_space: space.rid.is_none(),
                                 label: (ExGuid::default(), 1),
-                                rid: None,
+                                rid: names.get(id).copied(),
                                 live: file,
                                 commit: &commit,
                                 replaced: &replaced,

@@ -43,8 +43,10 @@ impl Template {
                     },
                     size: art.size,
                     bytes: Some(bytes.into()),
+                    display: None,
                     alt: None,
                     background: true,
+                    printout: None,
                 })
             })
             .collect()

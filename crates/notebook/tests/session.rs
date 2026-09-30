@@ -205,12 +205,10 @@ fn saves_wait_for_an_unreachable_file_and_publish_after_relaunch() {
     section.close().unwrap();
     assert_eq!(
         notebook::Replica::open(
-            std::fs::read_dir(&cache)
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path()
+            walkdir(&cache)
+                .into_iter()
+                .find(|path| path.extension().is_some_and(|ext| ext == "sqlite"))
+                .expect("the section's replica")
         )
         .unwrap()
         .status(id)
@@ -386,11 +384,13 @@ fn a_notebook_directory_lists_its_sections_and_opens_them() {
     section.close().unwrap();
 }
 
-/// The replicas in `cache`, beside the folder of catalog listings.
+/// The replicas in `cache`, in the folder of each location.
 fn replicas(cache: &Path) -> usize {
-    std::fs::read_dir(cache)
-        .unwrap()
-        .filter(|entry| entry.as_ref().unwrap().path().is_file())
+    std::fs::read_dir(cache.join("replicas"))
+        .into_iter()
+        .flatten()
+        .flat_map(|folder| std::fs::read_dir(folder.unwrap().path()).unwrap())
+        .filter(|entry| entry.as_ref().unwrap().path().extension() == Some("sqlite".as_ref()))
         .count()
 }
 
@@ -1200,8 +1200,17 @@ fn every_section_gets_an_offline_copy_that_closing_the_notebook_discards() {
         !notebook.replica_path("First.one").unwrap().exists()
     });
     assert!(second.exists(), "a copy with edits waiting stays");
-    let kept = notebook::Replica::open(&second).unwrap();
-    assert_eq!(kept.pending().unwrap().len(), 1);
+    // The stopping thread may still be peeking at it, as a host opening a section waits out.
+    let mut kept = None;
+    until("the background let go of the copy", || {
+        match notebook::Replica::open(&second) {
+            Ok(replica) => kept = Some(replica),
+            Err(error) if error.busy() => {}
+            Err(error) => panic!("{error}"),
+        }
+        kept.is_some()
+    });
+    assert_eq!(kept.unwrap().pending().unwrap().len(), 1);
 }
 
 /// A section file whose stamp reads are counted.
@@ -1367,4 +1376,18 @@ fn the_background_takes_each_file_discovery_read_rather_than_reading_it_again() 
     drop(background);
     let rebased = notebook::Replica::open(&replica).unwrap();
     assert_eq!(rebased.page(space).unwrap(), stored_page(&file, space));
+}
+
+/// Every file under `dir`, depth first.
+fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(walkdir(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
 }

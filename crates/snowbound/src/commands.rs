@@ -2,7 +2,7 @@
 //! chords on each platform, when it applies and what it does.
 
 use crate::recording::{Media, Transport};
-use crate::{Command as Work, FONTS, HIGHLIGHTS, SIZES, State, page, platform, search};
+use crate::{Command as Work, FONTS, HIGHLIGHTS, SIZES, State, platform, search};
 use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, Pen, Toggle};
 use canvas::interaction::{Request, ink::Tool};
 use draw::edit::{Key, Modifiers, NamedKey, Platform};
@@ -14,6 +14,7 @@ pub enum Id {
     Settings,
     NewNotebook,
     OpenNotebook,
+    OpenFromServer,
     CloseNotebook,
     NewSection,
     NewSectionGroup,
@@ -32,6 +33,9 @@ pub enum Id {
     Find,
     Search,
     SearchResults,
+    /// The palette listing notebooks, sections and pages to go to.
+    GoTo,
+    /// The palette listing commands, as typing `>` in it does.
     CommandPalette,
     Back,
     Forward,
@@ -42,6 +46,10 @@ pub enum Id {
     PageList,
     DarkPages,
     FullPageView,
+    /// OneNote's Hide Spelling Errors, which leaves misspelled words unmarked.
+    HideSpelling,
+    /// The Spelling pane, on the next marked word.
+    Spelling,
     PageColor,
     Table,
     Picture,
@@ -78,6 +86,13 @@ pub enum Id {
     RemoveTags,
     FindTags,
     Help,
+    CheckForUpdates,
+}
+
+/// Whether this platform can run command `id` at all; the toolbar and palette leave out
+/// one it can't.
+pub fn offered(id: Id) -> bool {
+    id != Id::ScreenClipping || cfg!(target_os = "macos")
 }
 
 /// What a menu or toolbar offers: a command, or one of a list's entries.
@@ -106,7 +121,8 @@ pub enum Choice {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub enabled: bool,
-    pub checked: bool,
+    /// Whether a toggle command is on; `None` for a command that is not a toggle.
+    pub checked: Option<bool>,
 }
 
 /// A key with modifiers; `command` is the shortcut modifier, Control off macOS.
@@ -196,6 +212,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Settings, "Settings…", &[cmd(',')], &[cmd(',')]),
     row!(Id::NewNotebook, "New Notebook…", NONE, NONE),
     row!(Id::OpenNotebook, "Open Notebook…", &[cmd('o')], &[cmd('o')]),
+    row!(Id::OpenFromServer, "Open Notebook from Server…", NONE, NONE),
     row!(Id::CloseNotebook, "Close This Notebook", NONE, NONE),
     row!(Id::NewSection, "New Section", &[cmd('t')], &[cmd('t')]),
     row!(Id::NewSectionGroup, "New Section Group", NONE, NONE),
@@ -243,6 +260,7 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('f').option()],
         &[key('o').option()],
     ),
+    row!(Id::GoTo, "Go to Page or Section…", &[cmd('p')], &[cmd('p')]),
     row!(
         Id::CommandPalette,
         "Command Palette…",
@@ -279,6 +297,13 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Sidebar, "Notebook List", &[cmd('s').control()], NONE),
     row!(Id::PageList, "Page List", NONE, NONE),
     row!(Id::DarkPages, "Dark Pages", NONE, NONE),
+    row!(Id::HideSpelling, "Hide Spelling Errors", NONE, NONE),
+    row!(
+        Id::Spelling,
+        "Spelling…",
+        &[named(NamedKey::F7)],
+        &[named(NamedKey::F7)]
+    ),
     // AppKit's Enter Full Screen takes Control-Command-F.
     row!(
         Id::FullPageView,
@@ -443,6 +468,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     row!(Id::FindTags, "Find Tags", NONE, NONE),
     row!(Id::Help, "Snowbound Help", NONE, NONE),
+    row!(Id::CheckForUpdates, "Check for Updates…", NONE, NONE),
 ];
 
 /// The most tags a list holds: MS-ONE's action types 0 to 99 number them.
@@ -604,6 +630,8 @@ impl Chord {
             Press::Named(NamedKey::Space) => (" ".to_owned(), self.shift),
             Press::Named(NamedKey::ArrowLeft) => ('\u{f702}'.to_string(), self.shift),
             Press::Named(NamedKey::ArrowRight) => ('\u{f703}'.to_string(), self.shift),
+            // AppKit's NSF7FunctionKey.
+            Press::Named(NamedKey::F7) => ('\u{f70a}'.to_string(), self.shift),
             Press::Named(named) => unreachable!("No command takes {named:?}"),
         }
     }
@@ -616,6 +644,7 @@ impl Chord {
                 Press::Named(NamedKey::Space) => "Space".to_owned(),
                 Press::Named(NamedKey::ArrowLeft) => "←".to_owned(),
                 Press::Named(NamedKey::ArrowRight) => "→".to_owned(),
+                Press::Named(NamedKey::F7) => "F7".to_owned(),
                 _ => key.to_uppercase(),
             };
             [
@@ -690,24 +719,26 @@ impl State {
     pub(crate) fn status(&self, choice: &Choice, format: &FormatState) -> Status {
         let session = self.session.as_ref();
         let welcome = session.is_none() && !self.temporary && self.sectionless.is_none();
-        let modal = self.options.is_some() || self.link.is_some() || self.tag_list.is_some();
+        let modal = self.options.is_some()
+            || self.link.is_some()
+            || self.tag_list.is_some()
+            || self.server.is_some();
         let page = (session.is_some() || self.temporary) && !modal;
         let writable = page && !session.is_some_and(|session| session.read_only());
-        let text = writable && self.view.accepts_text();
+        // Picked drawings leave the text selection behind them unseen, so it takes no edits.
+        let typing = self.view.accepts_text() && self.view.ink_selection().is_empty();
+        let text = writable && typing;
         // Edit commands act on a focused field instead of the page.
-        let field = self
-            .ui
-            .focused()
-            .is_some_and(|focus| focus != crate::page());
+        let field = self.ui.focused_field().is_some();
         let [anchor, focus] = self.view.editor.selection().positions;
-        let selected = page && !field && self.view.accepts_text() && anchor != focus;
+        let selected = page && !field && typing && anchor != focus;
         let enabled = |enabled| Status {
             enabled,
-            checked: false,
+            checked: None,
         };
         let checked = |checked| Status {
             enabled: text,
-            checked,
+            checked: Some(checked),
         };
         let id = match choice {
             Choice::Command(id) => *id,
@@ -723,10 +754,19 @@ impl State {
             Id::Settings
             | Id::NewNotebook
             | Id::OpenNotebook
+            | Id::OpenFromServer
+            | Id::GoTo
             | Id::CommandPalette
             | Id::CustomizeTags
-            | Id::Help => enabled(!modal),
-            Id::CloseNotebook | Id::ShowNotebook => enabled(!modal && self.notebook().is_some()),
+            | Id::Help
+            | Id::CheckForUpdates => enabled(!modal),
+            Id::CloseNotebook => enabled(!modal && self.notebook().is_some()),
+            Id::ShowNotebook => enabled(
+                !modal
+                    && self
+                        .notebook()
+                        .is_some_and(|library| library.folder().is_some()),
+            ),
             Id::NewSection | Id::NewSectionGroup => enabled(
                 !modal
                     && self
@@ -736,17 +776,19 @@ impl State {
             Id::NewPage | Id::NewSubpage | Id::CopyPageLink | Id::Find | Id::Search => {
                 enabled(!modal && session.is_some())
             }
-            Id::PageVersions => {
-                session
-                    .filter(|_| !modal)
-                    .map_or_else(Status::default, |session| Status {
-                        enabled: !session.page_versions(session.space).is_empty(),
-                        checked: session.shown_history == Some(session.space),
-                    })
-            }
+            Id::PageVersions => session.filter(|_| !modal).map_or(
+                Status {
+                    enabled: false,
+                    checked: Some(false),
+                },
+                |session| Status {
+                    enabled: !session.page_versions(session.space).is_empty(),
+                    checked: Some(session.shown_history == Some(session.space)),
+                },
+            ),
             Id::FullPageView => Status {
                 enabled: !welcome && !modal,
-                checked: self.full_page,
+                checked: Some(self.full_page),
             },
             Id::Undo => enabled(writable && !field && self.view.editor.can_undo()),
             Id::Redo => enabled(writable && !field && self.view.editor.can_redo()),
@@ -759,58 +801,70 @@ impl State {
             Id::ZoomIn | Id::ZoomOut | Id::ActualSize => enabled(page),
             Id::Sidebar => Status {
                 enabled: !welcome && !modal,
-                checked: self.sidebar,
+                checked: Some(self.sidebar),
             },
             Id::PageList => Status {
                 enabled: !modal && session.is_some(),
-                checked: self.pages_open,
+                checked: Some(self.pages_open),
             },
             Id::SearchResults => Status {
                 enabled: !modal && session.is_some(),
-                checked: matches!(self.search.pane, Some(crate::pane::Pane::Search { .. })),
+                checked: Some(matches!(
+                    self.search.pane,
+                    Some(crate::pane::Pane::Search { .. })
+                )),
             },
             Id::FindTags => Status {
                 enabled: !modal && session.is_some(),
-                checked: matches!(self.search.pane, Some(crate::pane::Pane::Tags { .. })),
+                checked: Some(matches!(
+                    self.search.pane,
+                    Some(crate::pane::Pane::Tags { .. })
+                )),
             },
             Id::DarkPages => Status {
                 enabled: !modal,
-                checked: !self.light_pages,
+                checked: Some(!self.light_pages),
             },
+            Id::HideSpelling => Status {
+                enabled: !modal && self.spelling.is_some(),
+                checked: Some(self.hide_spelling),
+            },
+            Id::Spelling => enabled(text && self.view.spelling.is_some()),
             Id::FormatPainter => Status {
                 enabled: text,
-                checked: self.painter.is_some(),
+                checked: Some(self.painter.is_some()),
             },
             Id::PageColor => enabled(writable && session.is_some()),
-            Id::ScreenClipping => enabled(text && cfg!(target_os = "macos")),
+            Id::ScreenClipping => enabled(text && offered(id)),
             Id::RecordAudio | Id::RecordVideo => {
                 let recording = match self.media {
                     Media::Recording { video, .. } => Some(video),
                     _ => None,
                 };
                 Status {
-                    enabled: recording.is_some() || text && !modal,
-                    checked: recording == Some(id == Id::RecordVideo),
+                    enabled: recording.is_some()
+                        || text && !modal && !matches!(self.media, Media::Saving { .. }),
+                    checked: Some(recording == Some(id == Id::RecordVideo)),
                 }
             }
             Id::Transport(transport) => self.transport_status(transport),
             Id::InsertSpace => Status {
                 enabled: writable,
-                checked: self.view.inserting_space(),
+                checked: Some(self.view.inserting_space()),
             },
             Id::SelectType => Status {
                 enabled: page,
-                checked: tool == Tool::Select,
+                checked: Some(tool == Tool::Select),
             },
             Id::Pen | Id::Eraser | Id::Lasso | Id::Shape(_) => Status {
                 enabled: writable,
-                checked: match (id, tool) {
+                checked: Some(match (id, tool) {
                     (Id::Pen, Tool::Pen(_))
                     | (Id::Eraser, Tool::Eraser)
                     | (Id::Lasso, Tool::Lasso) => true,
                     (Id::Shape(kind), Tool::Shape(shape, _)) => kind == shape,
                     _ => false,
-                },
+                }),
             },
             Id::Table
             | Id::Picture
@@ -832,7 +886,7 @@ impl State {
             Id::Numbering => checked(format.numbering),
             Id::Align(alignment) => checked(format.alignment == Some(alignment)),
             Id::Tag(place) => match self.tags.get(place) {
-                Some(tag) => checked(format.tags.contains(&(tag.clone(), place as u16))),
+                Some(tag) => checked(format.tags.contains(&(tag.stored(), place as u16))),
                 None => Status::default(),
             },
         }
@@ -930,7 +984,7 @@ impl State {
                 Id::Pen
             }
         };
-        let field = self.ui.focused().filter(|focus| *focus != page());
+        let field = self.ui.focused_field();
         let response = match id {
             Id::Settings => {
                 self.open_options();
@@ -938,6 +992,7 @@ impl State {
             }
             Id::NewNotebook => Work::NewNotebook,
             Id::OpenNotebook => Work::OpenNotebook,
+            Id::OpenFromServer => Work::OpenFromServer(None),
             Id::CloseNotebook => {
                 Work::CloseNotebook(Arc::clone(self.notebook().ok_or("No notebook is open")?))
             }
@@ -1011,12 +1066,21 @@ impl State {
                 self.start_search();
                 return Ok(());
             }
+            Id::Spelling => {
+                self.open_spelling_pane();
+                return Ok(());
+            }
             Id::SearchResults | Id::FindTags => {
                 self.toggle_pane(id == Id::FindTags);
                 return Ok(());
             }
-            Id::CommandPalette => {
-                self.ui.open_popup(crate::palette::id());
+            Id::GoTo | Id::CommandPalette => {
+                let query = if id == Id::GoTo {
+                    ""
+                } else {
+                    crate::palette::COMMANDS
+                };
+                ui::popup::open_with(&mut self.ui, crate::palette::id(), query);
                 return Ok(());
             }
             Id::Back | Id::Forward => {
@@ -1077,6 +1141,12 @@ impl State {
                 platform::character_palette();
                 return Ok(());
             }
+            Id::HideSpelling => {
+                self.hide_spelling = !self.hide_spelling;
+                self.show_spelling();
+                self.save_settings();
+                return Ok(());
+            }
             Id::DarkPages => {
                 self.light_pages = !self.light_pages;
                 self.follow_color_scheme();
@@ -1130,6 +1200,10 @@ impl State {
                 platform::reveal(HELP);
                 return Ok(());
             }
+            Id::CheckForUpdates => {
+                self.updates.check_now();
+                return Ok(());
+            }
             Id::Toggle(toggle) => return format(self, Formatting::Toggle(toggle)),
             // The highlighter and font colour apply their last pick.
             Id::Highlight => return format(self, Formatting::Highlight(self.toolbar.highlight)),
@@ -1142,7 +1216,9 @@ impl State {
             Id::ClearFormatting => return format(self, Formatting::Clear),
             Id::Tag(place) => {
                 let tag = self.tags[place].clone();
-                return format(self, Formatting::Tag(tag, place as u16));
+                format(self, Formatting::Tag(tag, place as u16))?;
+                self.keep_tag_art(place);
+                return Ok(());
             }
             Id::CustomizeTags => {
                 self.open_customize_tags();

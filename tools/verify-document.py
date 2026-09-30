@@ -9,6 +9,7 @@ from PIL import Image
 from datetime import datetime, timezone
 import json
 import math
+import re
 from pathlib import Path, PureWindowsPath
 from zoneinfo import ZoneInfo
 import subprocess
@@ -156,6 +157,12 @@ def compare_objects(space, roots, page, native_roots, assets, native_payloads, a
             data = assets[json.dumps(container['reference'], sort_keys=True)]
             if kind['type'] == 'Image':
                 expected = base64.b64decode(native.find('one:Data', ns).text)
+                if kind['printout'] and data.startswith(b'PK\x03\x04'):
+                    # A printout page stores its XPS package; the read shows OneNote's rendering
+                    # of it, kept as the picture's WebPictureContainer14.
+                    web = next(field['value']['Objects'][0] for group in node['extra']
+                               for field in group if field['id'] == 0x200034c8)
+                    data = assets[json.dumps(space['nodes'][web]['kind']['reference'], sort_keys=True)]
                 if data != expected:
                     actual_image = Image.open(BytesIO(data)).convert('RGBA')
                     expected_image = Image.open(BytesIO(expected)).convert('RGBA')
@@ -256,6 +263,9 @@ def exported_links(runs):
     over http, and URL text it finds in a page's text is a link, a removed link's included
     (`corpus/link-edit/native-typed`)."""
     def href(link):
+        # A file address naming a drive gains the third slash of its URL.
+        if link is not None and re.match(r'file://[A-Za-z]:', link):
+            return 'file:///' + link[len('file://'):]
         if link is None or ':' in link.split('/')[0] or link.startswith('\\\\'):
             return link
         return 'http://' + link

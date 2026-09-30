@@ -70,6 +70,44 @@ class RecordingTest(unittest.TestCase):
         self.assertEqual(int.from_bytes(data[20:22], 'little'), 0x11)
         self.assertEqual(int.from_bytes(data[24:28], 'little'), 16000)
 
+    def test_snowbound_s_video_recording_opens_in_onenote_as_a_video_recording(self):
+        read = self.cold('video')
+        _, playlist, links = recorded(read)
+        recording, = playlist
+        shown = [text for text, _, _ in links]
+        self.assertEqual(shown, ['Before recording', '[Recorded.avi]', '',
+                                 'Video recording started: 5:18 PM Tuesday, September 29, 2026',
+                                 'First linked note', 'Second linked note'])
+        self.assertEqual(links[1][2], recording)
+        first, second = (link[1] for _, link, _ in links[4:])
+        self.assertTrue(40 <= first < second)
+        entry, data = payload(read, 'Recorded.avi')
+        self.assertEqual(entry['kind'], 'MediaFile')
+        # Motion JPEG and PCM in AVI, which OneNote plays (`video/played-from-note.png`).
+        self.assertEqual(data[:4] + data[8:12], b'RIFFAVI ')
+        self.assertIn(b'vidsMJPG', data[:1024])
+        self.assertIn(b'auds', data[:1024])
+
+    def test_onenote_lists_avi_mpg_and_wmv_files_as_recordings_but_not_mp4_or_mov(self):
+        page = ET.parse(FIXTURE / 'native/read/attached-video.xml').getroot()
+        kinds = {element.get('preferredName'): element.tag.split('}')[1]
+                 for element in page.iter()
+                 if element.tag.endswith(('}MediaFile', '}InsertedFile'))}
+        self.assertEqual(kinds['mjpeg-pcm.avi'], 'MediaFile')
+        self.assertEqual(kinds['mpeg1.mpg'], 'MediaFile')
+        self.assertEqual(kinds['wmv2.wmv'], 'MediaFile')
+        self.assertEqual(kinds['h264-aac.mp4'], 'InsertedFile')
+        self.assertEqual(kinds['h264-aac.mov'], 'InsertedFile')
+
+    def test_notes_written_while_onenote_s_recording_is_paused_are_not_linked(self):
+        page = ET.parse(FIXTURE / 'native/read/paused-while-recording.xml').getroot()
+        linked = {texts(element)[0]: element.find('one:MediaIndex', ns) is not None
+                  for element in page.findall('.//one:OE', ns)
+                  if element.find('one:T', ns) is not None and texts(element)[0]}
+        self.assertTrue(linked['Another note here'])
+        self.assertFalse(linked['Typed while paused'])
+        self.assertTrue(linked['After resuming'])
+
     def test_onenote_s_recording_opens_as_recorded_after_snowbound_deletes_restores_and_links(self):
         read = self.cold('edit')
         _, playlist, links = recorded(read)

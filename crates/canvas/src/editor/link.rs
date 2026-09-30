@@ -175,6 +175,10 @@ fn field_code(address: &str) -> String {
     format!("\u{fddf}HYPERLINK \"{address}\"")
 }
 
+/// A range of a paragraph the Link dialog links, with the text it shows and the address it
+/// holds.
+type Linked = (usize, Range<u32>, String, String);
+
 impl CanvasEditor {
     /// The link in the active outline at `position`, its ends included.
     pub fn link_at(&self, position: TextPosition) -> Option<Link> {
@@ -234,12 +238,13 @@ impl CanvasEditor {
 
     /// What the Link dialog links, as OneNote 2010 picks it: the selection within one
     /// paragraph, else the link or word at the caret, else nothing at the caret. With the
-    /// text it shows and the address it holds.
-    fn link_range(&self) -> Result<(usize, Range<u32>, String, String), EditError> {
+    /// text it shows and the address it holds; none for a selection across paragraphs, which
+    /// OneNote's Link leaves alone.
+    fn link_range(&self) -> Result<Option<Linked>, EditError> {
         let [anchor, focus] = self.active_outline().selection.positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
         if start.paragraph != end.paragraph {
-            return Err(EditError::UnsupportedContent);
+            return Ok(None);
         }
         let text = self
             .active_outline()
@@ -263,11 +268,16 @@ impl CanvasEditor {
                 .filter(|link| link.range().start <= range.start && range.end <= link.label.end)
                 .map(|link| link.target)
                 .unwrap_or_default();
-            return Ok((start.paragraph, range.clone(), shown(range)?, address));
+            return Ok(Some((
+                start.paragraph,
+                range.clone(),
+                shown(range)?,
+                address,
+            )));
         }
         if let Some(link) = self.link_at(start) {
             let label = shown(link.label.clone())?;
-            return Ok((start.paragraph, link.range(), label, link.target));
+            return Ok(Some((start.paragraph, link.range(), label, link.target)));
         }
         // The word at the caret, within plain visible text.
         let byte = text.byte_offset(start.offset)?;
@@ -293,14 +303,22 @@ impl CanvasEditor {
             .last()
             .map_or(byte, |(at, c)| byte + at + c.len_utf8());
         let range = text.utf16_offset(from)?..text.utf16_offset(to)?;
-        Ok((start.paragraph, range.clone(), shown(range)?, String::new()))
+        Ok(Some((
+            start.paragraph,
+            range.clone(),
+            shown(range)?,
+            String::new(),
+        )))
     }
 
-    /// The text and address the Link dialog opens with.
-    pub fn link_prefill(&self) -> (String, String) {
-        self.link_range()
-            .map(|(_, _, text, address)| (text, address))
-            .unwrap_or_default()
+    /// The text and address the Link dialog opens with; none where it does not open, over a
+    /// selection across paragraphs.
+    pub fn link_prefill(&self) -> Option<(String, String)> {
+        match self.link_range() {
+            Ok(Some((_, _, text, address))) => Some((text, address)),
+            Ok(None) => None,
+            Err(_) => Some(Default::default()),
+        }
     }
 
     /// OK in the Link dialog: what [`Self::link_prefill`] picked becomes `text`, or the
@@ -314,7 +332,9 @@ impl CanvasEditor {
         if address.trim().is_empty() {
             return Ok(());
         }
-        let (paragraph, range, _, _) = self.link_range()?;
+        let Some((paragraph, range, _, _)) = self.link_range()? else {
+            return Ok(());
+        };
         let current = self
             .active_outline()
             .document
@@ -601,7 +621,7 @@ mod tests {
         typed(&mut editor, engine, "Zplain words here");
         let paragraph = editor.selection().positions[0].paragraph;
         editor.select(at(paragraph, 13)).unwrap();
-        assert_eq!(editor.link_prefill(), ("here".into(), String::new()));
+        assert_eq!(editor.link_prefill(), Some(("here".into(), String::new())));
         editor.set_link(engine, "here", "example.net/x").unwrap();
         typed(&mut editor, engine, "Q");
         editor.enter(engine, false).unwrap();
@@ -622,12 +642,15 @@ mod tests {
                 .into(),
             )
             .unwrap();
-        assert_eq!(editor.link_prefill(), ("me please".into(), String::new()));
+        assert_eq!(
+            editor.link_prefill(),
+            Some(("me please".into(), String::new()))
+        );
         editor
             .set_link(engine, "me please", "https://example.com/selected")
             .unwrap();
         editor.enter(engine, false).unwrap();
-        assert_eq!(editor.link_prefill(), (String::new(), String::new()));
+        assert_eq!(editor.link_prefill(), Some((String::new(), String::new())));
         editor
             .set_link(engine, "", "https://example.com/only")
             .unwrap();

@@ -1,8 +1,9 @@
 //! OneNote 2010's task panes beside the page: Page Search Results (Alt+O), listing the
-//! search's results sorted and grouped, and the Tags Summary, listing tagged paragraphs.
+//! search's results sorted and grouped, the Tags Summary, listing tagged paragraphs, and
+//! Spelling (F7), walking the page's marked words.
 
 use crate::search::{Scope, marked};
-use crate::{State, Theme, art, page};
+use crate::{State, Theme, art, page, platform};
 use canvas::gpu::tag_sources;
 use canvas::outline::TagIcon;
 use canvas::search::{Found, Tagged};
@@ -29,6 +30,10 @@ pub enum Pane {
         group: Group,
         unchecked: bool,
         scope: TagScope,
+    },
+    /// The word is `State::correction`; `chosen` is the suggestion Change takes.
+    Spelling {
+        chosen: usize,
     },
 }
 
@@ -330,18 +335,25 @@ fn popup(name: &str) -> Id {
     Id::ROOT.child(("pane popup", name))
 }
 
-/// A combo box `width` wide showing `current` of `names`, returning the one chosen.
-fn choice(ui: &mut Ui, name: &str, current: usize, names: &[&str], width: f32) -> Option<usize> {
+/// A combo box `label`led, `width` wide, showing `current` of `names`, returning the one
+/// chosen.
+fn choice(
+    ui: &mut Ui,
+    name: &str,
+    label: &str,
+    current: usize,
+    names: &[&str],
+    width: f32,
+) -> Option<usize> {
     let combo = ui.id(name);
-    if ui::shell::combo(ui, name, names[current], width).pressed {
-        ui.open_popup(popup(name));
-    }
+    ui::shell::combo(ui, name, label, names[current], width, popup(name), true);
     let items: Vec<_> = names
         .iter()
         .enumerate()
         .map(|(index, text)| ui::popup::Item {
             text,
-            checked: index == current,
+            checked: Some(index == current),
+            current: index == current,
             ..Default::default()
         })
         .collect();
@@ -414,9 +426,149 @@ impl State {
 
     /// Closes the pane; the Search Results pane takes its search, and the marks, with it.
     fn close_pane(&mut self) {
+        self.correction = None;
         if matches!(self.search.pane.take(), Some(Pane::Search { .. })) {
             self.end_search();
         }
+    }
+
+    /// Opens the Spelling pane on the next marked word, as F7 does.
+    pub(crate) fn open_spelling_pane(&mut self) {
+        if !matches!(self.search.pane, Some(Pane::Spelling { .. })) {
+            self.close_pane();
+        }
+        self.next_word();
+    }
+
+    /// Shows the next marked word in the Spelling pane; past the last, the check is complete.
+    fn next_word(&mut self) {
+        match self.view.next_correction() {
+            Ok(Some((response, correction))) => {
+                self.respond(response);
+                self.correction = Some(correction);
+                self.search.pane = Some(Pane::Spelling { chosen: 0 });
+            }
+            Ok(None) => {
+                self.close_pane();
+                platform::alert("The spelling check is complete.", "");
+            }
+            Err(error) => eprintln!("{error}"),
+        }
+    }
+
+    fn spelling_pane(&mut self, theme: &Theme, mut chosen: usize) {
+        let Some(correction) = &self.correction else {
+            return;
+        };
+        let ui = &mut self.ui;
+        label(
+            ui,
+            theme,
+            "kind",
+            if correction.repeated {
+                "Repeated word:"
+            } else {
+                "Current spelling:"
+            },
+        );
+        ui.leaf(
+            "word",
+            Spec {
+                size: [fill(), px(ui::shell::TOOL)],
+                text: Some(&correction.word),
+                bold: true,
+                fill: Some(theme.base),
+                border: Some(theme.chip),
+                radius: 4.0,
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+        ui.open(
+            "actions",
+            Spec {
+                size: [fill(), px(theme.font_size * 2.0)],
+                gap: 4.0,
+                ..Spec::default()
+            },
+        );
+        let [first, second] = if correction.repeated {
+            ["Delete", "Ignore"]
+        } else {
+            ["Ignore", "Add to Dictionary"]
+        };
+        let pressed = [first, second].map(|text| ui::button(ui, text, text).clicked);
+        ui.close();
+        let mut change = false;
+        if !correction.repeated {
+            label(ui, theme, "suggestions label", "Suggestions:");
+            ui.open(
+                "suggestions",
+                Spec {
+                    axis: Axis::Y,
+                    size: [fill(), px(TAGGED * 5.0 + 2.0)],
+                    fill: Some(theme.base),
+                    border: Some(theme.chip),
+                    radius: 4.0,
+                    pad: [1.0, 1.0],
+                    role: Some(accesskit::Role::List),
+                    ..Spec::default()
+                },
+            );
+            for (index, suggestion) in correction.suggestions.iter().enumerate() {
+                let row = ui.leaf(
+                    index,
+                    Spec {
+                        flags: Flags::CLICKABLE,
+                        size: [fill(), px(TAGGED)],
+                        text: Some(suggestion),
+                        fill: (index == chosen).then(|| theme.hover()),
+                        hover_fill: Some(theme.hover()),
+                        pad: [6.0, 0.0],
+                        role: Some(accesskit::Role::ListItem),
+                        ..Spec::default()
+                    },
+                );
+                if row.clicked {
+                    chosen = index;
+                    change = row.unit != draw::edit::SelectionUnit::Grapheme;
+                }
+            }
+            if correction.suggestions.is_empty() {
+                label(ui, theme, "none", "(No Spelling Suggestions)");
+            }
+            ui.close();
+            if !correction.suggestions.is_empty() {
+                change |= ui::button(ui, "change", "Change").clicked;
+            }
+        }
+        self.search.pane = Some(Pane::Spelling { chosen });
+        let Some(correction) = self
+            .correction
+            .take_if(|_| change || pressed.contains(&true))
+        else {
+            return;
+        };
+        let spelling = self.view.spelling.clone();
+        let text = match (correction.repeated, pressed) {
+            (_, _) if change => correction.suggestions.get(chosen).map(String::as_str),
+            (true, [true, _]) => Some(""),
+            (false, [false, true]) => {
+                spelling.inspect(|spelling| spelling.learn(&correction.word));
+                None
+            }
+            _ => {
+                spelling.inspect(|spelling| spelling.ignore(&correction.word));
+                None
+            }
+        };
+        if let Some(text) = text {
+            match self.view.correct(&correction, text) {
+                Ok(response) => self.respond(response),
+                Err(error) => eprintln!("{error}"),
+            }
+        }
+        self.next_word();
     }
 
     /// The open pane at the window's right, easing open and closed.
@@ -465,16 +617,19 @@ impl State {
                     text: Some(match pane {
                         Pane::Search { .. } => "Search Results",
                         Pane::Tags { .. } => "Tags Summary",
+                        Pane::Spelling { .. } => "Spelling",
                     }),
                     bold: true,
                     ..Spec::default()
                 },
             );
-            if ui::shell::tool_button(&mut self.ui, "close", art::CLOSE, theme.text_dim, false)
+            if ui::shell::tool_button(&mut self.ui, "close", art::CLOSE, theme.text_dim, None)
                 .clicked
             {
                 self.close_pane();
             }
+            let close = self.ui.id("close");
+            crate::name(&mut self.ui, close, "Close");
             self.ui.close();
             match self.search.pane {
                 Some(Pane::Search { sort, descending }) => {
@@ -487,6 +642,7 @@ impl State {
                     unchecked,
                     scope,
                 }) => self.tags_pane(theme, group, unchecked, scope),
+                Some(Pane::Spelling { chosen }) => self.spelling_pane(theme, chosen),
                 None => {}
             }
         }
@@ -532,9 +688,11 @@ impl State {
                 border: Some(border),
                 radius: 4.0,
                 pad: [6.0, 0.0],
+                role: Some(accesskit::Role::SearchInput),
                 ..Spec::default()
             },
         );
+        crate::name(&mut self.ui, field(), "Search");
         if std::mem::take(&mut self.search.claim) {
             self.ui.set_focus(Some(field()));
         }
@@ -544,7 +702,14 @@ impl State {
             .iter()
             .position(|scope| *scope == self.search.scope)
             .unwrap_or_default();
-        if let Some(index) = choice(&mut self.ui, "scope", current, &names, INSIDE) {
+        if let Some(index) = choice(
+            &mut self.ui,
+            "scope",
+            "Search scope",
+            current,
+            &names,
+            INSIDE,
+        ) {
             self.search.scope = Scope::ALL[index];
         }
         self.ui.open(
@@ -561,7 +726,7 @@ impl State {
             .position(|listed| *listed == sort)
             .unwrap_or_default();
         let width = INSIDE - ui::shell::TOOL - 2.0;
-        if let Some(index) = choice(&mut self.ui, "by", current, &names, width) {
+        if let Some(index) = choice(&mut self.ui, "by", "Sort by", current, &names, width) {
             sort = Sort::ALL[index];
             // Dates start newest first, names from the start of the alphabet.
             descending = sort == Sort::Date;
@@ -571,7 +736,7 @@ impl State {
         } else {
             art::CHEVRON_UP
         };
-        if ui::shell::tool_button(&mut self.ui, "direction", arrow, theme.text, false).clicked {
+        if ui::shell::tool_button(&mut self.ui, "direction", arrow, theme.text, None).clicked {
             descending = !descending;
         }
         let tip = if descending {
@@ -603,14 +768,16 @@ impl State {
             })
             .collect();
         let before = self.search.selected;
+        let list = Id::ROOT.child("pane results");
         let clicked = ui::list(
             &mut self.ui,
-            Id::ROOT.child("pane results"),
+            list,
             Spec {
                 size: [fill(), fill()],
                 fill: Some(theme.base),
                 border: Some(theme.chip),
                 radius: 4.0,
+                role: Some(accesskit::Role::ListBox),
                 ..Spec::default()
             },
             ui::List {
@@ -621,6 +788,10 @@ impl State {
             },
             &mut self.search.selected,
             |ui, row| {
+                if let Some(node) = ui.access(list.child(row.key)) {
+                    node.set_role(accesskit::Role::ListBoxOption);
+                    node.set_selected(row.selected);
+                }
                 if let Ok(group) = rows.starts.binary_search(&row.index) {
                     heading(ui, theme, &headings[group]);
                 }
@@ -633,6 +804,11 @@ impl State {
                 );
             },
         );
+        if let Some(key) = self.search.selected
+            && let Some(node) = self.ui.access(field())
+        {
+            node.set_active_descendant(list.child(key).node());
+        }
         let moved = before != self.search.selected && !keys.contains(&NamedKey::Enter);
         let chosen = clicked.or_else(|| {
             self.search
@@ -670,7 +846,14 @@ impl State {
             .iter()
             .position(|listed| *listed == group)
             .unwrap_or_default();
-        if let Some(index) = choice(&mut self.ui, "group", current, &names, INSIDE) {
+        if let Some(index) = choice(
+            &mut self.ui,
+            "group",
+            "Group tags by",
+            current,
+            &names,
+            INSIDE,
+        ) {
             group = Group::ALL[index];
         }
         if ui::check_box(
@@ -686,14 +869,16 @@ impl State {
         let tagged = self.tagged(scope, unchecked);
         let (order, rows, headings) = arrange_tags(&tagged, group);
         let mut selected = None;
+        let list = Id::ROOT.child("pane tags");
         let clicked = ui::list(
             &mut self.ui,
-            Id::ROOT.child("pane tags"),
+            list,
             Spec {
                 size: [fill(), fill()],
                 fill: Some(theme.base),
                 border: Some(theme.chip),
                 radius: 4.0,
+                role: Some(accesskit::Role::List),
                 ..Spec::default()
             },
             ui::List {
@@ -704,6 +889,9 @@ impl State {
             },
             &mut selected,
             |ui, row| {
+                if let Some(node) = ui.access(list.child(row.key)) {
+                    node.set_role(accesskit::Role::ListItem);
+                }
                 if let Ok(at) = rows.starts.binary_search(&row.index) {
                     heading(ui, theme, &headings[at]);
                 }
@@ -716,7 +904,7 @@ impl State {
             .iter()
             .position(|listed| *listed == scope)
             .unwrap_or_default();
-        if let Some(index) = choice(&mut self.ui, "tag scope", current, &names, INSIDE) {
+        if let Some(index) = choice(&mut self.ui, "tag scope", "Search", current, &names, INSIDE) {
             scope = TagScope::ALL[index];
         }
         self.search.pane = Some(Pane::Tags {

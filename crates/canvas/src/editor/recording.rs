@@ -88,8 +88,13 @@ impl CanvasEditor {
         if self.recording.is_some() {
             return Err(EditError::InvalidRange.into());
         }
-        let id = onestore::page::text::new_guid()?;
         self.leave_title(engine)?;
+        if let Some(id) = self.across(engine, |editor, engine| {
+            editor.start_recording(engine, label)
+        })? {
+            return Ok(id);
+        }
+        let id = onestore::page::text::new_guid()?;
         let [anchor, focus] = self.selection().positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
         let mut format = self.typing_format(start)?;

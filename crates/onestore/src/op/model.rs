@@ -450,7 +450,8 @@ fn inserted(text: &Paragraph) -> Paragraph {
     }))
 }
 
-/// A stroke as the store keeps it: points on the HIMETRIC grid, pen size in HIMETRIC.
+/// A stroke as the store keeps it: points on the HIMETRIC grid, pen size in HIMETRIC,
+/// pressure in levels.
 fn stroked(stroke: &crate::page::InkStroke) -> crate::page::InkStroke {
     let himetric = |points: f32| points * 2540.0 / 72.0 * 72.0 / 2540.0;
     crate::page::InkStroke {
@@ -461,6 +462,12 @@ fn stroked(stroke: &crate::page::InkStroke) -> crate::page::InkStroke {
             .collect(),
         width: himetric(stroke.width),
         height: himetric(stroke.height),
+        pressure: stroke
+            .pressure
+            .iter()
+            .copied()
+            .map(crate::page::ink::level)
+            .collect(),
         ..stroke.clone()
     }
 }

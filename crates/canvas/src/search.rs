@@ -77,7 +77,7 @@ impl Query {
 }
 
 /// Ideographs and kana are words of their own, as their text has no spaces between words.
-fn ideographic(character: char) -> bool {
+pub(crate) fn ideographic(character: char) -> bool {
     matches!(u32::from(character),
         0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x3ffff)
 }

@@ -1,5 +1,6 @@
 //! Open notebooks: where each lives and the sections its tabs offer.
 
+use canvas::{editor::NoteTag, gpu::TagArt};
 use notebook::discover::{Folder, SectionState};
 use notebook::session::{Background, Notebook, Section};
 use notebook::smb::{Client, Credentials};
@@ -99,6 +100,116 @@ impl Mount {
             root: root.join("/"),
         })
     }
+
+    /// The folder an address typed or kept names: `smb://[domain;][user@]server[:port]/share/folder`,
+    /// `\\server\share\folder`, or either without its scheme; the share may be left to choose.
+    pub fn from_address(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let rest = match text.get(..6) {
+            Some(scheme) if scheme.eq_ignore_ascii_case("smb://") => &text[6..],
+            _ => text.trim_start_matches(['/', '\\']),
+        }
+        .replace('\\', "/");
+        let (authority, path) = rest.split_once('/').unwrap_or((&rest, ""));
+        let (account, server) = match authority.rsplit_once('@') {
+            Some((account, server)) => (account, server),
+            None => ("", authority),
+        };
+        if server.is_empty() || server.contains(char::is_whitespace) {
+            return None;
+        }
+        let account = account.split(':').next().unwrap_or_default();
+        let (domain, user) = account.split_once(';').unwrap_or(("", account));
+        let mut parts = path.split('/').filter(|part| !part.is_empty()).map(decode);
+        let user = decode(user);
+        Some(Self {
+            server: server.to_owned(),
+            share: parts.next().unwrap_or_default(),
+            user: (!user.is_empty() && !user.eq_ignore_ascii_case("guest")).then_some(user),
+            domain: decode(domain),
+            root: parts.collect::<Vec<_>>().join("/"),
+        })
+    }
+
+    /// The address `from_address` reads back, naming the account but never a password.
+    pub fn url(&self) -> String {
+        let mut url = String::from("smb://");
+        if let Some(user) = &self.user {
+            if !self.domain.is_empty() {
+                url += &format!("{};", encode(&self.domain));
+            }
+            url += &format!("{}@", encode(user));
+        }
+        url += &self.server;
+        for part in [&self.share, &self.root] {
+            if !part.is_empty() {
+                url += &format!("/{}", encode(part));
+            }
+        }
+        url
+    }
+
+    /// The server's name or address without a port.
+    pub fn host(&self) -> &str {
+        match self.server.rsplit_once(':') {
+            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => host,
+            _ => &self.server,
+        }
+    }
+
+    /// Where the embedded client dials: the server, on SMB's port unless it names another.
+    pub fn endpoint(&self) -> String {
+        if self.host() == self.server {
+            format!("{}:445", self.server)
+        } else {
+            self.server.clone()
+        }
+    }
+
+    /// The notebook's name: its folder's, or the share's where it fills the share.
+    fn name(&self) -> String {
+        self.root
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(&self.share)
+            .to_owned()
+    }
+}
+
+/// `text` with `%XX` escapes decoded.
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match text
+            .get(at + 1..at + 3)
+            .filter(|_| bytes[at] == b'%')
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// `text` escaped for an address, `/` kept.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                char::from(byte).to_string()
+            }
+            byte => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 /// An account on an SMB server.
@@ -111,7 +222,6 @@ pub struct Login {
 
 impl Login {
     /// The guest account a mount without one signed in as.
-    #[cfg(any(target_os = "macos", test))]
     pub fn guest(mount: &Mount) -> Self {
         Self {
             user: String::new(),
@@ -130,7 +240,7 @@ struct Server {
 impl Server {
     fn connect(&self) -> io::Result<Client> {
         Client::connect(
-            &self.mount.server,
+            &self.mount.endpoint(),
             &self.mount.share,
             Credentials {
                 username: &self.login.user,
@@ -169,6 +279,8 @@ pub struct Library {
     pub background: Option<Arc<Background>>,
     /// Reports the changes to a mounted notebook's folder to `background`.
     watch: Option<Arc<crate::watch::Watch>>,
+    /// The art the notebook's tags draw with, as its `.snowbound` folder maps them.
+    tag_art: Mutex<Arc<TagArt>>,
 }
 
 impl Library {
@@ -177,6 +289,25 @@ impl Library {
     /// account the system keeps for the mount, as OneNote's own client coordinates with
     /// OneNote; without that account it opens through the mount.
     pub fn notebook(location: &str, cache: &Path) -> Self {
+        if let Some(mount) = server_address(location) {
+            let login = match mount.user {
+                Some(_) => crate::platform::smb_login(&mount),
+                None => Ok(Login::guest(&mount)),
+            };
+            return login
+                .and_then(|login| Self::on_share(location, mount.clone(), login, cache))
+                .unwrap_or_else(|reason| Self {
+                    location: location.to_owned(),
+                    name: mount.name(),
+                    notebook: Err(reason),
+                    server: None,
+                    notice: None,
+                    cache: cache.to_owned(),
+                    background: None,
+                    watch: None,
+                    tag_art: Default::default(),
+                });
+        }
         let mut notice = None;
         if let Some(mount) = crate::platform::smb_mount(Path::new(location)) {
             match crate::platform::smb_login(&mount)
@@ -199,6 +330,9 @@ impl Library {
             name: file_name(Path::new(location)),
             background,
             watch,
+            tag_art: Mutex::new(Arc::new(
+                notebook.as_ref().map(read_tag_art).unwrap_or_default(),
+            )),
             notebook: notebook.map(Some).map_err(|error| error.to_string()),
             server: None,
             notice,
@@ -215,7 +349,9 @@ impl Library {
         cache: &Path,
     ) -> Result<Self, String> {
         let server = Arc::new(Server { mount, login });
-        let client = server.connect().map_err(|error| error.to_string())?;
+        let client = server.connect().map_err(|error| {
+            crate::server::refusal(&error, &server.mount, server.login.user.is_empty())
+        })?;
         let mut notebook = Notebook::open_smb(Arc::new(client), &server.mount.root, cache)
             .map_err(|error| error.to_string())?;
         let connect = Arc::clone(&server);
@@ -230,7 +366,11 @@ impl Library {
         background.watch(notebook.replicas());
         Ok(Self {
             location: location.to_owned(),
-            name: file_name(Path::new(location)),
+            name: match server_address(location) {
+                Some(_) => server.mount.name(),
+                None => file_name(Path::new(location)),
+            },
+            tag_art: Mutex::new(Arc::new(read_tag_art(&notebook))),
             notebook: Ok(Some(notebook)),
             server: Some(server),
             notice: None,
@@ -238,6 +378,50 @@ impl Library {
             background: Some(Arc::new(background)),
             watch: None,
         })
+    }
+
+    /// The art the notebook's tags draw with.
+    pub fn tag_art(&self) -> Arc<TagArt> {
+        Arc::clone(
+            &self
+                .tag_art
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    /// Draws `tag` with its art, `bytes`, in this notebook from now on, and keeps the art in
+    /// the notebook's folder on a thread of its own; a section opened on its own keeps none.
+    pub fn map_tag_art(self: &Arc<Self>, tag: &NoteTag, bytes: Vec<u8>) {
+        let (Some(art), Ok(Some(_))) = (&tag.art, &self.notebook) else {
+            return;
+        };
+        let Some(sources) = canvas::gpu::art_sources(art, || Some(bytes.clone())) else {
+            return;
+        };
+        {
+            let mut mapped = self
+                .tag_art
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if mapped.art(&tag.label, tag.shape) == Some(art.as_str()) {
+                return;
+            }
+            Arc::make_mut(&mut mapped).map(&tag.label, tag.shape, art, sources);
+        }
+        let extension = art.rsplit('.').next().unwrap_or_default().to_owned();
+        let (library, tag) = (Arc::clone(self), tag.clone());
+        std::thread::spawn(move || {
+            let kept = library.reopen().and_then(|notebook| {
+                Ok(notebook.map_tag_art(&tag.label, tag.shape, &bytes, &extension)?)
+            });
+            if let Err(error) = kept {
+                eprintln!(
+                    "{}: keeping the art of tag {:?} failed: {error}",
+                    library.location, tag.label
+                );
+            }
+        });
     }
 
     /// This notebook read again, the way it was opened, for changing its structure.
@@ -274,6 +458,7 @@ impl Library {
             cache: self.cache.clone(),
             background: self.background.clone(),
             watch,
+            tag_art: Mutex::new(self.tag_art()),
         }
     }
 
@@ -285,6 +470,7 @@ impl Library {
             name: file_name(Path::new(location)),
             background,
             watch,
+            tag_art: Default::default(),
             notebook: Ok(Some(notebook)),
             server: None,
             notice: None,
@@ -303,6 +489,7 @@ impl Library {
             cache: cache.to_owned(),
             background: None,
             watch: None,
+            tag_art: Default::default(),
         }
     }
 
@@ -333,7 +520,7 @@ impl Library {
                         root => format!("{root}/{path}"),
                     };
                     let cache = notebook.replica_path(path)?;
-                    std::fs::create_dir_all(self.cache.join("smb"))?;
+                    std::fs::create_dir_all(cache.parent().unwrap_or(&self.cache))?;
                     let replica = if cache.exists() {
                         notebook::Replica::open(&cache)
                     } else {
@@ -348,7 +535,13 @@ impl Library {
                         Section::resume_smb(file, replica, LIMIT, connect, notifier())
                     })
                 }
+                (Ok(Some(notebook)), None) if self.in_icloud() => {
+                    crate::icloud::section(notebook, path, notifier())
+                }
                 (Ok(Some(notebook)), None) => notebook.section(path, notifier()),
+                (Ok(None), _) if self.in_icloud() => {
+                    crate::icloud::lone_section(Path::new(path), &self.cache, notifier())
+                }
                 (Ok(None), _) => Section::open(path, &self.cache, notifier()),
                 (Err(error), _) => return Err(error.clone().into()),
             };
@@ -379,7 +572,20 @@ impl Library {
         }
         let server = self.server.as_ref()?;
         let file = file.strip_prefix(&server.mount.root).ok()?;
-        Some(Path::new(&self.location).join(file))
+        Some(self.folder()?.join(file))
+    }
+
+    /// The notebook's folder or section file on this computer; none for a notebook opened
+    /// straight from its server.
+    pub fn folder(&self) -> Option<&Path> {
+        server_address(&self.location)
+            .is_none()
+            .then(|| Path::new(&self.location))
+    }
+
+    /// Whether iCloud Drive keeps the notebook, or the section opened on its own.
+    pub fn in_icloud(&self) -> bool {
+        self.folder().is_some_and(crate::icloud::ubiquitous)
     }
 
     /// How the notebook's files are reached.
@@ -390,6 +596,7 @@ impl Library {
                 server.mount.server, server.mount.share
             ),
             (None, Some(_)) => "The system’s mount of the share".to_owned(),
+            (None, None) if self.in_icloud() => "iCloud Drive".to_owned(),
             (None, None) => "Folder on this computer".to_owned(),
         }
     }
@@ -467,6 +674,15 @@ impl Library {
     }
 }
 
+/// The share folder a notebook opened from its server's address lives in, as its location
+/// keeps it.
+pub fn server_address(location: &str) -> Option<Mount> {
+    location
+        .starts_with("smb://")
+        .then(|| Mount::from_address(location))
+        .flatten()
+}
+
 /// Whether the folder at `path` is the notebook's recycle bin, which OneNote keeps out of its lists.
 pub fn recycle_bin(path: &str) -> bool {
     path.rsplit('/').next() == Some("OneNote_RecycleBin")
@@ -475,6 +691,27 @@ pub fn recycle_bin(path: &str) -> bool {
 /// A mounted notebook's background sync, following Work Offline, and the watch that reports
 /// the folder's changes to it. A folder on a network volume is kept in offline copies, as on a
 /// share, and where the system does not report its server's changes, checked more often.
+/// The art `notebook` maps its tags to, each picture read once a run.
+fn read_tag_art(notebook: &Notebook) -> TagArt {
+    let mut read = TagArt::default();
+    let mappings = notebook.tag_art().unwrap_or_else(|error| {
+        eprintln!("Reading the notebook's tag art failed: {error}");
+        Vec::new()
+    });
+    for mapping in mappings {
+        let bytes = || {
+            notebook
+                .tag_art_file(&mapping.art)
+                .inspect_err(|error| eprintln!("Reading tag art {} failed: {error}", mapping.art))
+                .ok()
+        };
+        if let Some(sources) = canvas::gpu::art_sources(&mapping.art, bytes) {
+            read.map(&mapping.name, mapping.shape, &mapping.art, sources);
+        }
+    }
+    read
+}
+
 fn local_background(
     notebook: &mut Notebook,
     location: &str,
@@ -482,8 +719,11 @@ fn local_background(
     let reports = Arc::new(OnceLock::new());
     let watch = watcher(location, Arc::clone(&reports));
     let copies = !crate::watch::on_this_computer(Path::new(location));
-    let Some(background) = notebook
-        .background(watch.is_some(), copies, notify_background)
+    let background = match crate::icloud::ubiquitous(Path::new(location)) {
+        true => crate::icloud::background(notebook, notify_background),
+        false => notebook.background(watch.is_some(), copies, notify_background),
+    };
+    let Some(background) = background
         .inspect_err(|error| eprintln!("Background sync did not start: {error}"))
         .ok()
     else {
@@ -619,27 +859,54 @@ pub fn locate(path: &Path) -> Located {
 mod tests {
     use super::*;
 
-    /// A notebook on a share opens, edits and publishes through the embedded client, as a
-    /// mounted share's notebook does: `ONESTORE_SMB_LAB=127.0.0.1:PORT` (a disposable Samba
-    /// share `agent`, guest access; `tools/w7/linux_vm.py up NAME`).
+    /// Removes the folder at `path` on the share and everything in it.
+    fn remove_tree(client: &Client, path: &str) {
+        for entry in client.read_dir(path, 10_000).unwrap_or_default() {
+            let inner = format!("{path}/{}", entry.name);
+            if entry.attributes & 0x10 != 0 {
+                remove_tree(client, &inner);
+            } else {
+                client.delete(&inner).unwrap();
+            }
+        }
+        let _ = client.delete(path);
+    }
+
+    /// A notebook opened from its server's address opens, edits and publishes through the
+    /// embedded client: `ONESTORE_SMB_LAB=HOST:PORT` with a share `agent` (guest, or
+    /// `ONESTORE_SMB_LAB_USER` and `ONESTORE_SMB_LAB_PASSWORD`; `tools/w7/linux_vm.py up
+    /// NAME`). Its notebook lives in the folder `ONESTORE_SMB_LAB_ROOT` (a fresh one by
+    /// default), removed before and after unless `ONESTORE_SMB_LAB_KEEP` keeps it.
     #[test]
     #[ignore = "requires an owned Samba share at ONESTORE_SMB_LAB"]
     fn a_notebook_on_a_share_opens_through_the_embedded_client() {
         let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
-        let root = format!("snowbound-{}", std::process::id());
+        let root = std::env::var("ONESTORE_SMB_LAB_ROOT").unwrap_or_else(|_| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos();
+            format!("snowbound-{}-{nanos}", std::process::id())
+        });
+        let user = std::env::var("ONESTORE_SMB_LAB_USER").ok();
         let mount = Mount {
             server: address,
             share: "agent".into(),
-            user: None,
+            user: user.clone(),
             domain: String::new(),
             root: root.clone(),
         };
-        let login = Login::guest(&mount);
+        let login = Login {
+            user: user.unwrap_or_default(),
+            password: std::env::var("ONESTORE_SMB_LAB_PASSWORD").unwrap_or_default(),
+            domain: String::new(),
+        };
         let server = Server {
             mount: mount.clone(),
             login: login.clone(),
         };
         let client = Arc::new(server.connect().unwrap());
+        remove_tree(&client, &root);
         client.create_directory(&root).unwrap();
         let cache = std::env::temp_dir().join(format!("snowbound-share-{}", std::process::id()));
         let page = onestore::PageCreation::new(None, Some(""), "Rust Author").unwrap();
@@ -647,7 +914,9 @@ mod tests {
             .unwrap()
             .create_section("", "New Section 1", &page)
             .unwrap();
-        let library = Library::on_share("/Volumes/agent/lab", mount, login, &cache).unwrap();
+        let location = mount.url();
+        let library = Library::on_share(&location, mount, login, &cache).unwrap();
+        assert!(library.folder().is_none());
         let path = library.first_section().unwrap();
         let section = library.open(&path, || {}).unwrap();
         let (space, ..) = section.pages().unwrap()[0].clone();
@@ -681,7 +950,14 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         let file = format!("{root}/{path}");
         loop {
-            let bytes = client.read_storage(&file, LIMIT).unwrap();
+            // A publication in progress holds the file from readers for a moment.
+            let bytes = match client.read_storage(&file, LIMIT) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                read => read.unwrap(),
+            };
             let arena = onestore::Arena::default();
             let titles = onestore::Section::open(&arena, bytes)
                 .unwrap()
@@ -695,7 +971,12 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
         }
         section.close().unwrap();
+        drop(library);
         let _ = std::fs::remove_dir_all(&cache);
+        if std::env::var_os("ONESTORE_SMB_LAB_KEEP").is_none() {
+            remove_tree(&client, &root);
+            assert!(client.read_dir(&root, 1).is_err(), "the folder is gone");
+        }
     }
 
     #[test]
@@ -722,6 +1003,7 @@ mod tests {
             cache: PathBuf::new(),
             background: None,
             watch: None,
+            tag_art: Default::default(),
         };
         let shown = |root, file| library(root).local(Path::new(file));
         let under = Some(PathBuf::from("/Volumes/agent/lab/Group/New Section 1.one"));

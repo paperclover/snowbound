@@ -174,6 +174,10 @@ pub struct NoteTag {
     /// COLORREFs; none leaves the text's own.
     pub color: Option<u32>,
     pub highlight: Option<u32>,
+    /// Snowbound's own art for the tag, named for its content, which a notebook's
+    /// `.snowbound` folder maps the tag's name and symbol to; OneNote draws the symbol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub art: Option<String>,
 }
 
 /// OneNote 2010's tag list before it is customized, the first nine on Ctrl+1 to Ctrl+9
@@ -220,8 +224,17 @@ impl NoteTag {
                 // The highlighting tags also set black text.
                 color: highlight.map(|_| 0),
                 highlight,
+                art: None,
             })
             .collect()
+    }
+
+    /// The tag as its definition stores it, without Snowbound's art.
+    pub fn stored(&self) -> Self {
+        Self {
+            art: None,
+            ..self.clone()
+        }
     }
 
     /// The definition OneNote stores for the tag at place `action_type` in the list.
@@ -256,6 +269,7 @@ impl NoteTag {
                 shape: shape.unwrap_or(0),
                 color: *color,
                 highlight: *highlight,
+                art: None,
             },
             action_type.unwrap_or(0),
         ))
@@ -905,7 +919,7 @@ impl CanvasEditor {
             Formatting::Toggle(toggle) => state.toggles.contains(toggle),
             Formatting::Bullets => state.bullets,
             Formatting::Numbering => state.numbering,
-            Formatting::Tag(tag, action_type) => state.tags.contains(&(tag.clone(), *action_type)),
+            Formatting::Tag(tag, action_type) => state.tags.contains(&(tag.stored(), *action_type)),
             _ => false,
         };
         let mut outlines = Vec::new();
@@ -939,9 +953,10 @@ impl CanvasEditor {
         self.focus_outline(outline)?;
         let outline = self.active_outline();
         let document = &outline.document;
-        let paragraph = leaves(document.nodes(), None)
-            .position(|(_, _, node)| node.id == id)
-            .ok_or(EditError::InvalidRange)?;
+        let Some(paragraph) = leaves(document.nodes(), None).position(|(_, _, node)| node.id == id)
+        else {
+            return self.click_block_check(engine, id);
+        };
         let at = TextPosition {
             paragraph,
             offset: 0,
@@ -960,6 +975,53 @@ impl CanvasEditor {
                 container,
                 range,
                 replacement,
+            },
+            selection,
+        )
+    }
+
+    /// A click on the check box of a table, picture or file paragraph `id`.
+    fn click_block_check(
+        &mut self,
+        engine: &mut TextEngine,
+        id: ExGuid,
+    ) -> Result<(), EditorError> {
+        let outline = self.active_outline();
+        let (container, index, node) = descendants(outline.document.nodes(), None)
+            .find(|(_, _, node)| node.id == id)
+            .ok_or(EditError::InvalidRange)?;
+        let mut node = node.clone();
+        let checkable = |tag: &Tag| {
+            matches!(
+                self.tag_kind(tag),
+                Some(Kind::TagDefinition { shape: Some(shape), .. })
+                    if crate::outline::checkable(*shape)
+            )
+        };
+        let content = match &mut node.content {
+            ParagraphContent::Table(table) => table.tags.as_mut_slice(),
+            _ => &mut [],
+        };
+        let mut tags: Vec<&mut Tag> = node.tags.iter_mut().chain(content).collect();
+        let checked = tags
+            .iter()
+            .filter(|tag| checkable(tag))
+            .all(|tag| tag.status & 1 != 0);
+        let completed = if checked { Some(0) } else { time32() };
+        for tag in &mut tags {
+            if checkable(tag) && (tag.status & 1 != 0) == checked {
+                tag.status ^= 1;
+                tag.completed = completed;
+            }
+        }
+        let selection = outline.selection;
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index..index + 1,
+                replacement: vec![node],
             },
             selection,
         )
@@ -1976,6 +2038,7 @@ mod tests {
             shape: 61,
             color: Some(0x0000_0080),
             highlight: Some(0x00ff_cc00),
+            art: None,
         };
         editor
             .format(&mut engine, Formatting::Tag(tag.clone(), 0))

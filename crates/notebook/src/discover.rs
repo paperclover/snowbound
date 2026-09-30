@@ -8,12 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
+    time::Duration,
 };
 
 mod source;
 pub use source::Local;
 #[cfg(feature = "smb")]
 pub use source::Smb;
+pub(crate) use source::placeholder;
 
 #[derive(Debug, Serialize)]
 pub struct Section {
@@ -21,6 +23,10 @@ pub struct Section {
     /// Header.guidFile, also used by FileIdentityGuid in a parent TOC.
     pub file_id: [u8; 16],
     pub state: SectionState,
+    /// Another section of the catalog holds the same file, as a copy made beside it does, and
+    /// is the one its folder's TOC lists by that identity (or else has the shorter path). OneNote
+    /// opens both; the copy's TOC entry, where one exists, is its own.
+    pub copy: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +60,31 @@ pub struct Unavailable {
     pub path: String,
     pub group: bool,
     pub error: String,
+    pub reason: Reason,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub enum Reason {
+    /// Access denied, or gone mid-listing.
+    Denied,
+    /// Not yet on this device (`EntryKind::Evicted`), for the host to download.
+    Evicted,
+    /// Mid-write through every retry.
+    InUse,
+    /// Not a notebook file this can read: corrupt, or too large.
+    Unreadable,
+    /// Another group at `of` holds the same TOC; the catalog lists that one.
+    Copy { of: String },
+}
+
+/// A section file or group folder holding an identity, one of the copies discovery chooses
+/// among.
+struct Claim {
+    path: String,
+    group: bool,
+    /// Its folder's TOC lists the identity under its name.
+    listed: bool,
+    modified: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +108,9 @@ pub enum EntryKind {
     File,
     Directory,
     Other,
+    /// A notebook file kept elsewhere and not yet on this device, as iOS lists one that
+    /// iCloud Drive evicted.
+    Evicted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -107,6 +141,9 @@ pub struct Cache {
 
 /// The most bytes of images a cache holds for `Cache::take`.
 const HELD: usize = 64 << 20;
+/// How many more times a read that meets a commit in progress is tried, and how far apart.
+const RETRIES: usize = 3;
+const RETRY: Duration = Duration::from_millis(250);
 
 /// A notebook file as discovery read it.
 #[derive(Clone, Serialize, Deserialize)]
@@ -135,17 +172,18 @@ impl Cache {
     /// A failed discovery leaves the cache as it was.
     pub fn discover(&mut self, source: &mut impl Source, limits: Limits) -> Result<Folder, Error> {
         let mut remaining = limits.entries;
-        let mut identities = BTreeMap::new();
+        let mut claims = BTreeMap::new();
         let mut found = Cache::default();
-        let folder = scan(
+        let mut folder = scan(
             source,
             "",
             &limits,
             0,
             &mut remaining,
-            &mut identities,
+            &mut claims,
             (&self.read, &mut found),
         )?;
+        set_aside(&mut folder, &claims);
         *self = found;
         Ok(folder)
     }
@@ -259,12 +297,6 @@ pub enum Error {
     Changed { path: String },
     #[error("Invalid or unsupported directory entry: {path}")]
     Entry { path: String },
-    #[error("File identity occurs at both {first} and {second}")]
-    DuplicateIdentity {
-        file: [u8; 16],
-        first: String,
-        second: String,
-    },
 }
 
 /// Discovers rooted notebook topology within caller-specified work and size limits.
@@ -279,7 +311,7 @@ fn scan(
     limits: &Limits,
     depth: usize,
     remaining: &mut usize,
-    identities: &mut BTreeMap<[u8; 16], String>,
+    claims: &mut BTreeMap<[u8; 16], Vec<Claim>>,
     (cached, found): (&BTreeMap<String, Read>, &mut Cache),
 ) -> Result<Folder, Error> {
     if depth > limits.depth {
@@ -324,18 +356,19 @@ fn scan(
                 limits,
                 depth + 1,
                 remaining,
-                identities,
+                claims,
                 (cached, found),
             ) {
                 Ok(group) => result.groups.push(group),
-                Err(error @ Error::Io { .. }) if unavailable(&error) => {
-                    result.unavailable.push(Unavailable {
+                Err(error) => match unavailable(&error) {
+                    Some(reason) => result.unavailable.push(Unavailable {
                         path: child,
                         group: true,
                         error: error.to_string(),
-                    });
-                }
-                Err(error) => return Err(error),
+                        reason,
+                    }),
+                    None => return Err(error),
+                },
             }
             continue;
         }
@@ -347,6 +380,19 @@ fn scan(
         } else {
             continue;
         };
+        // Without an evicted TOC the folder lists in path order; nothing writes a second one,
+        // as its placeholder blocks creating it.
+        if entry.kind == EntryKind::Evicted {
+            if expected == FileType::Section {
+                result.unavailable.push(Unavailable {
+                    path: child,
+                    group: false,
+                    error: "Not downloaded to this device yet".into(),
+                    reason: Reason::Evicted,
+                });
+            }
+            continue;
+        }
         if entry.kind != EntryKind::File
             || (expected == FileType::TableOfContents && result.toc.is_some())
         {
@@ -367,41 +413,71 @@ fn scan(
                     .and_then(Read::file_id)
                     .and_then(|known| source.copy(&child, known));
                 let fetched = copied.is_none();
-                let bytes =
-                    match copied.map_or_else(|| source.read(&child, limits.bytes_per_file), Ok) {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            let error = Error::Io {
-                                path: child.clone(),
-                                error,
-                            };
-                            if expected == FileType::Section && unavailable(&error) {
-                                result.unavailable.push(Unavailable {
-                                    path: child,
-                                    group: false,
-                                    error: error.to_string(),
-                                });
-                                continue;
+                // A section that cannot be read lists as unavailable; the rest still open.
+                let mut list_unavailable = |error: Error| match unavailable(&error) {
+                    Some(reason) if expected == FileType::Section => {
+                        result.unavailable.push(Unavailable {
+                            path: child.clone(),
+                            group: false,
+                            error: error.to_string(),
+                            reason,
+                        });
+                        Ok(())
+                    }
+                    _ => Err(error),
+                };
+                let read = copied.map_or_else(
+                    || {
+                        let mut read = source.read(&child, limits.bytes_per_file);
+                        // A read that meets a commit in progress succeeds once it lands.
+                        for _ in 0..RETRIES {
+                            if !read.as_ref().is_err_and(|error| {
+                                matches!(
+                                    error.kind(),
+                                    io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy
+                                )
+                            }) {
+                                break;
                             }
-                            return Err(error);
+                            std::thread::sleep(RETRY);
+                            read = source.read(&child, limits.bytes_per_file);
                         }
-                    };
+                        read
+                    },
+                    Ok,
+                );
+                let bytes = match read {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        list_unavailable(Error::Io {
+                            path: child.clone(),
+                            error,
+                        })?;
+                        continue;
+                    }
+                };
                 if bytes.len() > limits.bytes_per_file {
                     return Err(Error::Limit { path: child });
                 }
-                let store = Store::parse(&bytes).map_err(|error| Error::Document {
-                    path: child.clone(),
-                    error,
-                })?;
-                if store.header.file_type != expected || !store.checksum_mismatches.is_empty() {
-                    return Err(Error::Document {
-                        path: child,
-                        error: onestore::Error {
+                let parsed = Store::parse(&bytes).and_then(|store| {
+                    if store.header.file_type != expected || !store.checksum_mismatches.is_empty() {
+                        return Err(onestore::Error {
                             offset: 0,
                             message: "Unexpected file type or checksum mismatch",
-                        },
-                    });
-                }
+                        });
+                    }
+                    Ok(store)
+                });
+                let store = match parsed {
+                    Ok(store) => store,
+                    Err(error) => {
+                        list_unavailable(Error::Document {
+                            path: child.clone(),
+                            error,
+                        })?;
+                        continue;
+                    }
+                };
                 let held = held(&store, expected);
                 let file_id = store.header.file_id;
                 if let Ok(held) = &held {
@@ -438,11 +514,13 @@ fn scan(
                     color,
                     document,
                 },
+                copy: false,
             }),
             Ok(Held::Locked) => result.sections.push(Section {
                 path: child.clone(),
                 file_id,
                 state: SectionState::Locked,
+                copy: false,
             }),
             Ok(Held::Toc(unresolved)) => {
                 result.toc = Some(Toc {
@@ -455,15 +533,9 @@ fn scan(
                 path: child.clone(),
                 file_id,
                 state: SectionState::Unreadable(error),
+                copy: false,
             }),
             Err(error) => return Err(Error::Document { path: child, error }),
-        }
-        if let Some(first) = identities.insert(file_id, child.clone()) {
-            return Err(Error::DuplicateIdentity {
-                file: file_id,
-                first,
-                second: child,
-            });
         }
     }
     let order: BTreeMap<_, _> = result
@@ -492,6 +564,39 @@ fn scan(
                 &b.path,
             ))
     });
+    let listed = |file: [u8; 16], path: &str| {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        result
+            .toc
+            .iter()
+            .flat_map(|toc| &toc.unresolved)
+            .any(|entry| {
+                entry.file == file
+                    && entry
+                        .filename
+                        .as_deref()
+                        .is_some_and(|filename| filename.eq_ignore_ascii_case(name))
+            })
+    };
+    let modified = |path: &str| found.read.get(path).map_or(0, |read| read.listed.modified);
+    for section in &result.sections {
+        claims.entry(section.file_id).or_default().push(Claim {
+            path: section.path.clone(),
+            group: false,
+            listed: listed(section.file_id, &section.path),
+            modified: modified(&section.path),
+        });
+    }
+    for group in &result.groups {
+        if let Some(toc) = &group.toc {
+            claims.entry(toc.file_id).or_default().push(Claim {
+                path: group.path.clone(),
+                group: true,
+                listed: listed(toc.file_id, &group.path),
+                modified: modified(&join(&group.path, &toc.filename)),
+            });
+        }
+    }
     let present: BTreeSet<_> = result
         .sections
         .iter()
@@ -528,6 +633,96 @@ fn scan(
     Ok(result)
 }
 
+/// Keeps one group of each TOC identity in the catalog, the one its parent's TOC lists or else
+/// the newest; the others list as unavailable copies with their sections. Of sections holding
+/// one file, each lists, and all but the one its folder's TOC lists (or else the one with the
+/// shortest path) are marked as copies: a choice that stands while the files keep their names.
+fn set_aside(folder: &mut Folder, claims: &BTreeMap<[u8; 16], Vec<Claim>>) {
+    let mut copies = BTreeMap::new();
+    for claims in claims.values() {
+        let mut groups: Vec<_> = claims.iter().filter(|claim| claim.group).collect();
+        groups.sort_by_key(|claim| {
+            (
+                !claim.listed,
+                std::cmp::Reverse(claim.modified),
+                claim.path.len(),
+                &claim.path,
+            )
+        });
+        if let [original, rest @ ..] = &groups[..] {
+            for copy in rest {
+                copies.insert(copy.path.clone(), original.path.clone());
+            }
+        }
+    }
+    if !copies.is_empty() {
+        demote(folder, &copies);
+    }
+    let mut sections = BTreeSet::new();
+    for claims in claims.values() {
+        let mut held: Vec<_> = claims
+            .iter()
+            .filter(|claim| {
+                !claim.group
+                    && !copies
+                        .keys()
+                        .any(|copy: &String| claim.path.starts_with(&format!("{copy}/")))
+            })
+            .collect();
+        held.sort_by_key(|claim| (!claim.listed, claim.path.len(), &claim.path));
+        sections.extend(held.iter().skip(1).map(|claim| claim.path.clone()));
+    }
+    if !sections.is_empty() {
+        mark(folder, &sections);
+    }
+}
+
+fn demote(folder: &mut Folder, copies: &BTreeMap<String, String>) {
+    folder.groups.retain(|group| {
+        let Some(of) = copies.get(&group.path) else {
+            return true;
+        };
+        let name = of.rsplit('/').next().unwrap_or(of);
+        folder.unavailable.push(Unavailable {
+            path: group.path.clone(),
+            group: true,
+            error: format!("A copy of \u{201c}{name}\u{201d}, which opens instead"),
+            reason: Reason::Copy { of: of.clone() },
+        });
+        false
+    });
+    for group in &mut folder.groups {
+        demote(group, copies);
+    }
+}
+
+fn mark(folder: &mut Folder, copies: &BTreeSet<String>) {
+    for section in &mut folder.sections {
+        section.copy = copies.contains(&section.path);
+    }
+    for group in &mut folder.groups {
+        mark(group, copies);
+    }
+}
+
+/// Whether `store` holds a password-protected section.
+pub(crate) fn locked(store: &Store) -> bool {
+    RevisionIndex::parse(store)
+        .and_then(|index| {
+            let document = Document::parse(&index)?;
+            Ok(encrypted(document.active(document.root)?))
+        })
+        .unwrap_or(false)
+}
+
+fn encrypted(revision: &onestore::document::Revision<'_>) -> bool {
+    revision
+        .roots
+        .get(&1)
+        .and_then(|id| revision.nodes.get(id))
+        .is_some_and(|node| matches!(node.kind, Kind::Encrypted { .. }))
+}
+
 /// What discovery takes from the file `store` holds, a section or a TOC as `expected`.
 fn held(store: &Store, expected: FileType) -> Result<Held, onestore::Error> {
     let index = RevisionIndex::parse(store)?;
@@ -540,7 +735,7 @@ fn held(store: &Store, expected: FileType) -> Result<Held, onestore::Error> {
             .and_then(|id| revision.nodes.get(id))
     };
     if expected == FileType::Section {
-        if root(1).is_some_and(|node| matches!(node.kind, Kind::Encrypted { .. })) {
+        if encrypted(revision) {
             return Ok(Held::Locked);
         }
         index.validate_current()?;
@@ -592,12 +787,19 @@ fn held(store: &Store, expected: FileType) -> Result<Held, onestore::Error> {
     Ok(Held::Toc(unresolved))
 }
 
-/// Access denied or a file gone mid-listing; a lost connection stays fatal.
-fn unavailable(error: &Error) -> bool {
-    matches!(error, Error::Io { error, .. } if matches!(
-        error.kind(),
-        io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
-    ))
+/// Why a file or group that failed lists as unavailable; `None` fails the whole discovery,
+/// as a lost connection does.
+fn unavailable(error: &Error) -> Option<Reason> {
+    match error {
+        Error::Io { error, .. } => match error.kind() {
+            io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound => Some(Reason::Denied),
+            io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy => Some(Reason::InUse),
+            io::ErrorKind::InvalidData | io::ErrorKind::FileTooLarge => Some(Reason::Unreadable),
+            _ => None,
+        },
+        Error::Document { .. } => Some(Reason::Unreadable),
+        _ => None,
+    }
 }
 
 /// Not the notebook's: dot files, among them macOS's `.DS_Store` and AppleDouble `._`

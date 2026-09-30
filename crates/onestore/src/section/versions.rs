@@ -134,9 +134,16 @@ impl<'a> Section<'a> {
         }
         let image = self.image();
         let store = Store::parse(&image)?;
-        let index = RevisionIndex::parse(&store)?;
-        let rid = self.version_revision(&index, space, context)?;
-        let resolved = index.resolve(space, rid)?;
+        let rid = self.version_revision(&RevisionIndex::parse(&store)?, space, context)?;
+        self.page_at(space, rid)
+    }
+
+    /// Page `space` as its stored revision `revision` holds it, whichever context that
+    /// revision is current under, if any. Reads the sealed image: O(section).
+    pub fn page_at(&self, space: ExGuid, revision: ExGuid) -> Result<Page> {
+        let image = self.image();
+        let store = Store::parse(&image)?;
+        let resolved = RevisionIndex::parse(&store)?.resolve(space, revision)?;
         let (view, _) = Revision::parse(space, &resolved, FileType::Section, &mut |guid| {
             store.file_data(guid)
         })?;

@@ -1,5 +1,5 @@
 use onestore::page::text::{EditError, Paragraph, new_id};
-use onestore::page::{PageParagraph, ParagraphContent, TextObject};
+use onestore::page::{PageParagraph, ParagraphContent, TableCell, TextObject};
 use onestore::{ExGuid, document::Format};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -247,10 +247,110 @@ fn divides_link(text: &Paragraph, offset: u32) -> Result<bool, EditError> {
     Ok(at > 0 && link(at - 1) && link(at) && !text.text()[at..].starts_with('\u{fddf}'))
 }
 
+/// What deleting `range`, which crosses a table's edge, leaves of `nodes`, whose
+/// first text leaf is paragraph `*next`, and whether all of them lay inside it. As OneNote 2010
+/// deletes such a selection, each container keeps what lies outside it and nothing joins
+/// across a container's edge: the end paragraphs keep their outer text, a cell inside keeps
+/// one empty paragraph, except that where the selection runs on past a table its rows with
+/// every cell inside go, and the table when all of them do. A paragraph that goes leaves its
+/// children to its parent.
+fn cut(
+    nodes: &[PageParagraph],
+    next: &mut usize,
+    range: &Range<TextPosition>,
+) -> Result<(Vec<PageParagraph>, bool), EditError> {
+    let (start, end) = (range.start, range.end);
+    let mut kept = Vec::new();
+    let mut gone = BTreeMap::new();
+    for node in nodes {
+        let inside = match &node.content {
+            ParagraphContent::Text(text) => {
+                let at = *next;
+                *next += 1;
+                let text = &text.text;
+                let length = text.utf16_offset(text.text().len())?;
+                let shown = match at {
+                    at if at == start.paragraph => Some(text.slice(0..start.offset)?),
+                    at if at == end.paragraph => Some(text.slice(end.offset..length)?),
+                    _ => None,
+                };
+                if let Some(shown) = shown {
+                    let mut node = node.clone();
+                    node.text_mut().unwrap().text = shown;
+                    kept.push(node);
+                    continue;
+                }
+                start.paragraph < at && at < end.paragraph
+            }
+            ParagraphContent::Table(table) => {
+                let mut table = table.clone();
+                let mut whole_rows = Vec::new();
+                for row in &mut table.rows {
+                    let mut cells = Vec::new();
+                    for cell in &row.cells {
+                        let (paragraphs, inside) = cut(&cell.paragraphs, next, range)?;
+                        cells.push((cell, paragraphs, inside));
+                    }
+                    let whole = cells.iter().all(|(_, _, inside)| *inside);
+                    row.cells = cells
+                        .into_iter()
+                        .map(|(cell, paragraphs, inside)| {
+                            let paragraphs = if inside {
+                                let (_, _, leaf) = leaves(&cell.paragraphs, None)
+                                    .next()
+                                    .ok_or(EditError::InvalidStructure)?;
+                                let mut leaf = leaf.clone();
+                                let text = &mut leaf.text_mut().unwrap().text;
+                                *text = text.slice(0..0)?;
+                                leaf.parent = None;
+                                leaf.level = 1;
+                                vec![leaf]
+                            } else {
+                                paragraphs
+                            };
+                            Ok(TableCell {
+                                paragraphs,
+                                ..cell.clone()
+                            })
+                        })
+                        .collect::<Result<_, EditError>>()?;
+                    whole_rows.push(whole);
+                }
+                // Rows go only where the selection runs on past the table.
+                if end.paragraph >= *next {
+                    let mut whole = whole_rows.into_iter();
+                    table.rows.retain(|_| !whole.next().unwrap_or(false));
+                }
+                if table.rows.is_empty() {
+                    true
+                } else {
+                    let mut node = node.clone();
+                    node.content = ParagraphContent::Table(table);
+                    kept.push(node);
+                    continue;
+                }
+            }
+            _ => start.paragraph < *next && *next <= end.paragraph,
+        };
+        if inside {
+            gone.insert(node.id, node.parent);
+        } else {
+            kept.push(node.clone());
+        }
+    }
+    let whole = kept.is_empty();
+    for node in &mut kept {
+        while let Some(parent) = node.parent.and_then(|parent| gone.get(&parent)) {
+            node.parent = *parent;
+        }
+    }
+    Ok((kept, whole))
+}
+
 /// Whether a split or join keeping `first` up to UTF-16 `start` and `last` from `end` on meets
 /// an embedded object at the seam or carries one to another paragraph, or joins inside an
-/// equation: the object's run data belongs to its paragraph, and an equation divides only at
-/// its edges (Enter inside one breaks its line instead, `CanvasEditor::enter`).
+/// equation's objects: the object's run data belongs to its paragraph, and an equation divides
+/// only at its edges (Enter inside one breaks its line instead, `CanvasEditor::enter`).
 fn moves_object(
     first: &Paragraph,
     start: u32,
@@ -266,9 +366,21 @@ fn moves_object(
         .chars()
         .next()
         .map(|c| end + c.len_utf16() as u32);
+    // An equation joins where both seams lie outside its objects (fractions, scripts and the
+    // like), as OneNote 2010 joins two equations a deletion meets.
+    let nested = |text: &str| {
+        text.chars().fold(0_i32, |depth, c| match c {
+            '\u{fdd0}' => depth + 1,
+            '\u{fdef}' => depth - 1,
+            _ => depth,
+        }) > 0
+    };
     Ok(first.text()[..before].ends_with('\u{fffc}')
         || last.text()[after..].contains('\u{fffc}')
-        || start > 0 && math(first, start) && following.is_some_and(|next| math(last, next)))
+        || start > 0
+            && math(first, start)
+            && following.is_some_and(|next| math(last, next))
+            && (nested(&first.text()[..before]) || nested(&last.text()[..after])))
 }
 
 /// Paragraph positions of each node's first text leaf, counting from `first`.
@@ -689,15 +801,15 @@ impl TextDocument {
         if range.start > range.end {
             return Err(EditError::InvalidRange);
         }
+        if self.crosses_table(range.clone())? {
+            return self.replace_across(range, replacement);
+        }
         let (container, start, first) = self
             .leaf(range.start.paragraph)
             .ok_or(EditError::InvalidRange)?;
-        let (end_container, end, last) = self
+        let (_, end, last) = self
             .leaf(range.end.paragraph)
             .ok_or(EditError::InvalidRange)?;
-        if container != end_container {
-            return Err(EditError::UnsupportedContent);
-        }
         let nodes = self.container(container)?;
         let first_text = &first.text().unwrap().text;
         let last_text = &last.text().unwrap().text;
@@ -760,6 +872,66 @@ impl TextDocument {
             container,
             range: start..end + 1 + adopted.len(),
             replacement: [head].into_iter().chain(added).chain(adopted).collect(),
+        })
+    }
+
+    /// Whether `range` crosses a table's edge: its ends lie in different containers, or a table
+    /// lies between them.
+    pub(crate) fn crosses_table(&self, range: Range<TextPosition>) -> Result<bool, EditError> {
+        let (container, start, _) = self
+            .leaf(range.start.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let (end_container, end, _) = self
+            .leaf(range.end.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        Ok(container != end_container
+            || self.container(container)?[start..end]
+                .iter()
+                .any(|node| matches!(node.content, ParagraphContent::Table(_))))
+    }
+
+    /// `replace` of a range crossing a table's edge, as OneNote 2010 deletes such a selection
+    /// before inserting at its start: see [`cut`].
+    fn replace_across(
+        &self,
+        range: Range<TextPosition>,
+        replacement: Vec<Paragraph>,
+    ) -> Result<DocumentEdit, EditError> {
+        // A caret never stands inside hidden text, such as a link's field code.
+        for end in [range.start, range.end] {
+            let text = self
+                .paragraph(end.paragraph)
+                .ok_or(EditError::InvalidRange)?;
+            let at = text.byte_offset(end.offset)?;
+            let hidden = |byte: usize| {
+                text.spans()
+                    .iter()
+                    .find(|span| byte < span.end)
+                    .is_some_and(|span| span.format.hidden == Some(true))
+            };
+            if at > 0 && hidden(at - 1) && hidden(at) {
+                return Err(EditError::InvalidRange);
+            }
+        }
+        let root = |paragraph: usize| self.starts.partition_point(|start| *start <= paragraph) - 1;
+        let (first, last) = (root(range.start.paragraph), root(range.end.paragraph));
+        let (kept, _) = cut(
+            &self.nodes[first..=last],
+            &mut self.starts[first].clone(),
+            &range,
+        )?;
+        let mut nodes = self.nodes[..first].to_vec();
+        nodes.extend(kept);
+        nodes.extend_from_slice(&self.nodes[last + 1..]);
+        let mut cut = Self::from_nodes(nodes)?;
+        let insertion = cut.replace(range.start..range.start, replacement)?;
+        cut.apply(insertion)?;
+        let end = cut.nodes.len() + last + 1 - self.nodes.len();
+        Ok(DocumentEdit {
+            columns: BTreeMap::new(),
+            container: None,
+            range: first..last + 1,
+            replacement: cut.nodes.drain(first..end).collect(),
         })
     }
 
@@ -1245,9 +1417,9 @@ mod tests {
                 .paragraphs()
                 .map(Paragraph::text)
                 .collect::<Vec<_>>(),
-            ["after"]
+            ["", "after"]
         );
-        assert_eq!(document.nodes().len(), 1);
+        assert_eq!(document.nodes().len(), 2);
     }
 
     #[test]
@@ -1259,9 +1431,17 @@ mod tests {
             document.replace(position(1, 2)..position(1, 3), text()),
             Err(EditError::InvalidRange)
         );
+        let across = document
+            .replace(position(1, 1)..position(3, 1), text())
+            .unwrap();
+        let mut deleted = document.clone();
+        deleted.apply(across).unwrap();
         assert_eq!(
-            document.replace(position(1, 0)..position(3, 1), text()),
-            Err(EditError::UnsupportedContent)
+            deleted
+                .paragraphs()
+                .map(Paragraph::text)
+                .collect::<Vec<_>>(),
+            ["before", "aX", "ight", "after"],
         );
         let ParagraphContent::Table(table) = &document.nodes()[1].content else {
             panic!()
@@ -1778,9 +1958,43 @@ mod tests {
                     for replacement in &replacements {
                         let mut document = original.clone();
                         let planned = document.replace(start..end, replacement.clone());
-                        if regions[start.paragraph] != regions[end.paragraph] {
-                            assert_eq!(planned, Err(EditError::UnsupportedContent));
+                        if regions[start.paragraph..=end.paragraph]
+                            .iter()
+                            .any(|region| *region != regions[start.paragraph])
+                        {
+                            // Across a container's edge nothing joins: the start keeps what
+                            // precedes it, followed by the replacement, and the end what
+                            // follows it.
+                            let planned = planned.unwrap();
                             assert_eq!(document, original);
+                            let undo = document.apply(planned).unwrap();
+                            let texts: Vec<_> =
+                                document.paragraphs().map(Paragraph::text).collect();
+                            let before: Vec<_> =
+                                original.paragraphs().map(Paragraph::text).collect();
+                            assert_eq!(texts[..start.paragraph], before[..start.paragraph]);
+                            let text = |position: TextPosition| before[position.paragraph];
+                            let byte = |position: TextPosition| {
+                                original
+                                    .paragraphs()
+                                    .nth(position.paragraph)
+                                    .unwrap()
+                                    .byte_offset(position.offset)
+                                    .unwrap()
+                            };
+                            let mut inserted: Vec<String> =
+                                replacement.iter().map(|p| p.text().to_owned()).collect();
+                            inserted[0].insert_str(0, &text(start)[..byte(start)]);
+                            let at = start.paragraph;
+                            assert_eq!(texts[at..at + inserted.len()], inserted);
+                            assert!(
+                                texts[at + inserted.len()..].contains(&&text(end)[byte(end)..])
+                            );
+                            let after = document.clone();
+                            let redo = document.apply(undo).unwrap();
+                            assert_eq!(document, original, "{start:?}..{end:?}");
+                            document.apply(redo).unwrap();
+                            assert_eq!(document, after);
                             continue;
                         }
                         let planned = planned.unwrap();

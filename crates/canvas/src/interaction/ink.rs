@@ -47,10 +47,13 @@ pub(super) struct State {
     gesture: Option<Gesture>,
     /// Drawings picked by the lasso or a click.
     selection: Vec<ExGuid>,
+    /// The pen's pressure where the pointer is, from 0 to 1; none for a mouse or finger.
+    pressure: Option<f32>,
 }
 
 enum Gesture {
-    Stroke(Vec<[f32; 2]>),
+    /// The points drawn through, and the pressure at each where the pen reports it.
+    Stroke(Vec<[f32; 2]>, Vec<f32>),
     Shape([f32; 2]),
     /// `mark` counts the ops waiting when the sweep began.
     Erase {
@@ -78,6 +81,12 @@ impl PageView {
         self.ink.tool = tool;
         self.leave_ink();
         Response::redraw()
+    }
+
+    /// The pen's pressure at the pointer, from 0 to 1, for what the pointer does next: none
+    /// for a mouse or finger, whose strokes keep their pen's width.
+    pub fn set_pressure(&mut self, pressure: Option<f32>) {
+        self.ink.pressure = pressure;
     }
 
     /// Drawings the lasso or a click picked.
@@ -154,7 +163,7 @@ impl PageView {
                 self.ink.selection = vec![id];
                 Gesture::Move { press: point }
             }
-            Tool::Pen(_) => Gesture::Stroke(vec![point]),
+            Tool::Pen(_) => Gesture::Stroke(vec![point], self.ink.pressure.into_iter().collect()),
             Tool::Shape(..) => Gesture::Shape(self.grid(point)),
             Tool::Eraser => {
                 let mark = self.editor.pending_ops();
@@ -185,12 +194,18 @@ impl PageView {
 
     /// The pointer moved to page point `point` during a gesture.
     pub(super) fn ink_moved(&mut self, point: [f32; 2]) -> Result<Response> {
+        let pressure = self.ink.pressure;
         match &mut self.ink.gesture {
-            Some(Gesture::Stroke(points) | Gesture::Lasso(points)) => {
+            Some(Gesture::Stroke(points, _) | Gesture::Lasso(points)) => {
                 let last = points[points.len() - 1];
                 // Samples closer than a HIMETRIC unit store as one point.
                 if (point[0] - last[0]).hypot(point[1] - last[1]) >= 72.0 / 2540.0 {
                     points.push(point);
+                    if let Some(Gesture::Stroke(_, levels)) = &mut self.ink.gesture
+                        && let Some(&last) = levels.last()
+                    {
+                        levels.push(pressure.unwrap_or(last));
+                    }
                 }
                 Ok(Response::redraw())
             }
@@ -222,14 +237,14 @@ impl PageView {
             return Ok(Response::default());
         };
         match gesture {
-            Gesture::Stroke(points) => {
+            Gesture::Stroke(points, pressure) => {
                 let Tool::Pen(pen) = self.ink.tool else {
                     return Ok(Response::default());
                 };
                 self.editor.draw(Ink {
                     id: new_id()?,
                     layout: Default::default(),
-                    strokes: vec![pen.stroke(&points)?],
+                    strokes: vec![pen.stroke(&points, &pressure)?],
                     groups: Vec::new(),
                     shape: None,
                 })?;
@@ -243,7 +258,7 @@ impl PageView {
                     return Ok(Response::redraw());
                 }
                 self.editor
-                    .draw(Ink::drawn(kind, from, to, &pen.stroke(&[])?)?)?;
+                    .draw(Ink::drawn(kind, from, to, &pen.stroke(&[], &[])?)?)?;
             }
             Gesture::Erase { .. } => return Ok(Response::redraw()),
             Gesture::Lasso(mut points) => {
@@ -312,14 +327,14 @@ impl PageView {
             crate::gpu::page::append_ink(&ink, [0.0; 2], automatic, primitives)
         };
         match (&self.ink.gesture, self.ink.tool) {
-            (Some(Gesture::Stroke(points)), Tool::Pen(pen)) => {
-                if let Ok(stroke) = pen.stroke(points) {
+            (Some(Gesture::Stroke(points, pressure)), Tool::Pen(pen)) => {
+                if let Ok(stroke) = pen.stroke(points, pressure) {
                     preview(ink(vec![stroke]), primitives);
                 }
             }
             (Some(Gesture::Shape(from)), Tool::Shape(kind, pen)) => {
                 let to = self.grid(point);
-                if let Ok(pen) = pen.stroke(&[])
+                if let Ok(pen) = pen.stroke(&[], &[])
                     && let Ok(shape) = Ink::drawn(kind, *from, to, &pen)
                 {
                     preview(shape, primitives);

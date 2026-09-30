@@ -8,6 +8,18 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo to put on a page.</string>
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.net.paperclover.snowbound</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>Snowbound</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Snowbound opens notebooks on file servers on your network.</string>
 	<key>UIApplicationSceneManifest</key>

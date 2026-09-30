@@ -623,6 +623,68 @@ fn read_limits_respect_negotiation_and_available_credits() {
 
 /// Notebook structure over the share: sections and groups created, renamed, coloured,
 /// ordered and deleted through `Notebook::open_smb`, seen again by a fresh discovery.
+/// The hidden attribute lands through the client, on a folder whose name Samba would not
+/// hide by itself too, and a notebook's art folder takes it; a replacing rename replaces.
+#[test]
+#[ignore = "requires an owned Samba share at ONESTORE_SMB_LAB"]
+fn live_sidecar() {
+    let client = std::sync::Arc::new(client());
+    let root = format!("sidecar-{}", std::process::id());
+    client.create_directory(&root).unwrap();
+    let attributes = |name: &str| {
+        client
+            .read_dir(&root, 100)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.name == name)
+            .unwrap()
+            .attributes
+    };
+    let plain = format!("{root}/plain");
+    client.create_directory(&plain).unwrap();
+    assert_eq!(attributes("plain") & HIDDEN, 0);
+    client.hide(&plain).unwrap();
+    client.hide(&plain).unwrap();
+    assert_eq!(attributes("plain") & (HIDDEN | 0x10), HIDDEN | 0x10);
+    let cache = tempfile::tempdir().unwrap();
+    let notebook =
+        crate::session::Notebook::open_smb(std::sync::Arc::clone(&client), &root, cache.path())
+            .unwrap();
+    let mapped = notebook
+        .map_tag_art("Launch", 13, b"rocket", "png")
+        .unwrap();
+    assert_eq!(attributes(".snowbound") & HIDDEN, HIDDEN);
+    assert_eq!(notebook.tag_art().unwrap(), mapped);
+    assert_eq!(notebook.tag_art_file(&mapped[0].art).unwrap(), b"rocket");
+    let [first, second] = ["first", "second"].map(|name| format!("{root}/{name}"));
+    client.create(&first, b"first").unwrap();
+    client.create(&second, b"second").unwrap();
+    assert_eq!(
+        client.rename(&first, &second).unwrap_err().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    client.replace(&first, &second).unwrap();
+    assert_eq!(client.read_asset(&second, 100).unwrap(), b"first");
+    if std::env::var_os("ONESTORE_SMB_KEEP").is_none() {
+        client.delete(&second).unwrap();
+        client.delete(&plain).unwrap();
+        for file in client
+            .read_dir(&format!("{root}/.snowbound/tags"), 100)
+            .unwrap()
+        {
+            if file.attributes & 0x10 == 0 {
+                client
+                    .delete(&format!("{root}/.snowbound/tags/{}", file.name))
+                    .unwrap();
+            }
+        }
+        for path in [".snowbound/tags", ".snowbound/tags.json", ".snowbound"] {
+            client.delete(&format!("{root}/{path}")).unwrap();
+        }
+        client.delete(&root).unwrap();
+    }
+}
+
 #[test]
 #[ignore = "requires an owned Samba share at ONESTORE_SMB_LAB"]
 fn live_structure() {
@@ -728,4 +790,151 @@ fn live_structure() {
         client.delete(&format!("{root}/{path}")).unwrap();
     }
     client.delete(&root).unwrap();
+}
+
+/// Signs in as `ONESTORE_SMB_LAB_USER` with `ONESTORE_SMB_LAB_PASSWORD` where set, else as a
+/// guest, to a server with a share `agent`; only lists and reads.
+#[test]
+#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba with a share `agent`"]
+fn live_refusals_name_their_remedy() {
+    let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
+    let user = std::env::var("ONESTORE_SMB_LAB_USER").unwrap_or_default();
+    let password = std::env::var("ONESTORE_SMB_LAB_PASSWORD").unwrap_or_default();
+    let timeout = Duration::from_secs(10);
+    let account = || Credentials {
+        username: &user,
+        password: &password,
+        domain: "",
+    };
+    assert!(
+        shares(&address, account(), timeout)
+            .unwrap()
+            .contains(&"agent".to_owned())
+    );
+    let refusal = |result: io::Result<Client>| Refusal::of(&result.err().unwrap());
+    assert_eq!(
+        refusal(Client::connect(&address, "missing", account(), timeout)),
+        Refusal::NoShare
+    );
+    assert_eq!(
+        refusal(Client::connect("127.0.0.1:9", "agent", account(), timeout)),
+        Refusal::Unreachable
+    );
+    let client = Client::connect(&address, "agent", account(), timeout).unwrap();
+    assert_eq!(
+        Refusal::of(&client.read_dir("missing-folder", 10).unwrap_err()),
+        Refusal::NoFolder
+    );
+    if !user.is_empty() {
+        let wrong = Credentials {
+            password: "not the password",
+            ..account()
+        };
+        assert_eq!(
+            refusal(Client::connect(&address, "agent", wrong, timeout)),
+            Refusal::SignIn
+        );
+    }
+}
+
+/// A server that answers only SMB1: it hangs up on SMB2's negotiation and agrees to NT LM
+/// 0.12, as Windows XP or Samba held to NT1 do.
+#[test]
+fn an_smb1_only_server_is_named() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut message = vec![0; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut message).unwrap();
+            if message.starts_with(b"\xffSMB") {
+                let mut reply = b"\xffSMB\x72".to_vec();
+                reply.resize(32, 0);
+                reply.extend_from_slice(&[17, 0, 0]);
+                reply.resize(32 + 1 + 34 + 2, 0);
+                stream
+                    .write_all(&(reply.len() as u32).to_be_bytes())
+                    .unwrap();
+                stream.write_all(&reply).unwrap();
+            }
+        }
+    });
+    let error = Client::connect(
+        &address,
+        "share",
+        Credentials::default(),
+        Duration::from_secs(5),
+    )
+    .err()
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(Refusal::of(&error), Refusal::Smb1);
+}
+
+#[test]
+#[ignore = "requires ONESTORE_SMB1_LAB pointing to a disposable Samba held to SMB1 (NT1)"]
+fn live_smb1_only_server_is_named() {
+    let error = Client::connect(
+        &std::env::var("ONESTORE_SMB1_LAB").unwrap(),
+        "agent",
+        Credentials::default(),
+        Duration::from_secs(10),
+    )
+    .err()
+    .unwrap();
+    assert_eq!(Refusal::of(&error), Refusal::Smb1, "{error}");
+}
+
+fn corpus(path: &str) -> Vec<u8> {
+    fs::read(format!(
+        "{}/../../corpus/{path}",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+}
+
+fn from(bytes: &[u8]) -> impl FnMut(u64, &mut [u8]) -> io::Result<usize> + '_ {
+    |offset, output| {
+        let rest = bytes.get(offset as usize..).unwrap_or_default();
+        let count = rest.len().min(output.len());
+        output[..count].copy_from_slice(&rest[..count]);
+        Ok(count)
+    }
+}
+
+#[test]
+fn a_password_protected_section_is_not_contention() {
+    let bytes = corpus("native-encrypted/encrypted-01/notebook/synthetic.one");
+    let error = snapshot(from(&bytes), 1 << 20).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    let valid = corpus("outline-edit/before/notebook/synthetic.one");
+    assert_eq!(snapshot(from(&valid), 1 << 20).unwrap(), valid);
+}
+
+#[test]
+fn a_stably_invalid_file_is_not_contention() {
+    // OneNote's stub: consistent storage whose object space has no revisions yet.
+    let bytes = corpus("native-encrypted/cold-encrypted-02/notebook/Open Notebook.one");
+    let error = snapshot(from(&bytes), 1 << 20).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_torn_read_is_contention() {
+    let bytes = corpus("outline-edit/before/notebook/synthetic.one");
+    let mut headers = 0;
+    let torn = |offset: u64, output: &mut [u8]| {
+        let count = from(&bytes)(offset, output)?;
+        if offset == 0 {
+            headers += 1;
+            output[1023] ^= headers as u8;
+        }
+        Ok(count)
+    };
+    let error = snapshot(torn, 1 << 20).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 }

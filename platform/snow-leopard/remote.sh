@@ -7,12 +7,14 @@
 #   remote.sh start BINARY [ARGS...] ship and leave running there, output in NAME.log;
 #                                    BINARY may be an .app bundle
 #   remote.sh stop NAME              end what start started (a bundle by its executable)
-#   remote.sh screen LOCAL.png       wake the display and capture it (screencapture
-#                                    writes nothing from ssh)
+#   remote.sh screen LOCAL.png [APP] wake the display and capture it, or APP's window with
+#                                    its shadow (screencapture writes nothing from ssh)
 #   remote.sh input ARGS...          click|double X Y | drag X Y X2 Y2 | scroll X Y LINES
 #                                    | type TEXT | key KEYCODE [command|shift|option|control]...
 #   remote.sh selectors BINARY       selector-like names BINARY holds that nothing on
 #                                    10.6 implements
+#   remote.sh art                    fetch 10.6's window buttons and scroller pieces
+#                                    into crates/snowbound/assets/snow-leopard
 #   remote.sh mirror PATH...         copy repo paths to the same absolute paths there, so
 #                                    test binaries find fixtures by CARGO_MANIFEST_DIR
 #   remote.sh pull REMOTE [LOCAL]    copy a file back (e.g. a screenshot)
@@ -37,10 +39,11 @@ ship() {
 tool() {
     sdk=$here/../../target/snow-leopard/MacOSX10.6.sdk
     out=$here/../../target/snow-leopard/$1
-    if [ ! "$out" -nt "$here/console/$1.c" ]; then
+    source=$(ls "$here/console/$1".[cm])
+    if [ ! "$out" -nt "$source" ]; then
         clang -arch x86_64 -isysroot "$sdk" -mmacosx-version-min=10.6 -O2 -Wall \
-            -framework ApplicationServices -framework CoreServices -lobjc \
-            "$here/console/$1.c" -o "$out" 2>&1 | grep -v -e "MH_DYLIB_STUB" -e "no platform load" >&2 || true
+            -framework AppKit -framework ApplicationServices -framework CoreServices -lobjc \
+            "$source" -o "$out" 2>&1 | grep -v -e "MH_DYLIB_STUB" -e "no platform load" >&2 || true
     fi
     ship "$out"
 }
@@ -88,7 +91,8 @@ stop)
     ;;
 screen)
     tool screen
-    ssh "$host" "$dir/screen $dir/screen.png && cat $dir/screen.png" > "$2"
+    quote "${3:-}"
+    ssh "$host" "$dir/screen $dir/screen.png${3:+$quoted} && cat $dir/screen.png" > "$2"
     ;;
 input)
     shift
@@ -100,6 +104,13 @@ selectors)
     tool selectors
     strings -a "$2" | grep -E '^[a-z][a-z]+([A-Z][a-z0-9]+)*[A-Z]?[A-Za-z0-9]*(:([A-Za-z][A-Za-z0-9]*:)*)?$' |
         grep -E '[a-z]{2}[A-Z][a-z]|:$' | sort -u | ssh "$host" "$dir/selectors 2>/dev/null"
+    ;;
+art)
+    tool art
+    art=$here/../../crates/snowbound/assets/snow-leopard
+    mkdir -p "$art"
+    ssh "$host" "rm -rf $dir/pieces && $dir/art $dir/pieces 2>/dev/null && cd $dir/pieces && tar czf - *.png" |
+        tar xzf - -C "$art"
     ;;
 mirror)
     shift
@@ -120,7 +131,7 @@ sh)
     ssh "$host" "$@"
     ;;
 *)
-    sed -n '2,21s/^# \{0,1\}//p' "$0" >&2
+    sed -n '2,23s/^# \{0,1\}//p' "$0" >&2
     exit 2
     ;;
 esac

@@ -429,8 +429,16 @@ pub struct Image {
     pub size: Option<[f32; 2]>,
     #[serde(with = "payload")]
     pub bytes: Option<Arc<[u8]>>,
+    /// The raster OneNote shows for a picture stored in a format it draws itself, a
+    /// printout's XPS page or a metafile (WebPictureContainer14).
+    #[serde(default, with = "payload")]
+    pub display: Option<Arc<[u8]>>,
     pub alt: Option<String>,
     pub background: bool,
+    /// The page of a file printout the picture shows, zero-based (DisplayedPageNumber);
+    /// OneNote frames printout pages.
+    #[serde(default)]
+    pub printout: Option<u32>,
 }
 
 impl PartialEq for Image {
@@ -440,6 +448,7 @@ impl PartialEq for Image {
             && self.size == other.size
             && self.alt == other.alt
             && self.background == other.background
+            && self.printout == other.printout
     }
 }
 
@@ -454,6 +463,7 @@ impl Image {
             container,
             alt,
             background,
+            printout,
             picture_width,
             picture_height,
             ..
@@ -461,25 +471,44 @@ impl Image {
         else {
             unreachable!()
         };
-        let bytes = if let Some(container) = container {
+        let payload = |container: Option<&ExGuid>| -> Result<Option<Arc<[u8]>>, Error> {
+            let Some(container) = container else {
+                return Ok(None);
+            };
             let data = revision
                 .nodes
                 .get(container)
                 .ok_or_else(|| invalid("Missing canvas image data"))?;
             match &data.kind {
-                Kind::File { payload, .. } => payload.map(Arc::from),
-                _ => return Err(invalid("Canvas image data has the wrong type")),
+                Kind::File { payload, .. } => Ok(payload.map(Arc::from)),
+                _ => Err(invalid("Canvas image data has the wrong type")),
             }
-        } else {
-            None
         };
+        let bytes = payload(container.as_ref())?;
+        let fields = node.extra.first().map(Vec::as_slice).unwrap_or_default();
+        let web = fields.iter().find_map(|field| match &field.value {
+            FieldValue::Objects(ids) if field.id == 0x200034c8 => ids.first(),
+            _ => None,
+        });
         Ok(Self {
             id,
             layout: node.layout.clone(),
             size: picture_width.zip(*picture_height).map(|(w, h)| [w, h]),
             bytes,
+            display: payload(web)?,
             alt: alt.clone(),
             background: background.unwrap_or(false),
+            printout: printout.unwrap_or(false).then(|| {
+                fields
+                    .iter()
+                    .find_map(|field| match field.value {
+                        FieldValue::Bytes(&[a, b, c, d]) if field.id == 0x14001df9 => {
+                            Some(u32::from_le_bytes([a, b, c, d]))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            }),
         })
     }
 }

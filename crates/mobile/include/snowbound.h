@@ -15,6 +15,9 @@ void sb_string_free(char *text);
 typedef void (*sb_coordinator)(const char *path, bool write, void (*body)(void *), void *context);
 void sb_set_coordinator(sb_coordinator coordinator);
 void sb_set_sync_wake(void (*wake)(void));
+typedef void (*sb_versions)(const char *path, void (*found)(void *, const char *id, const char *device), void *context);
+typedef bool (*sb_retire)(const char *path, const char *id, bool keep);
+void sb_set_versions(sb_versions versions, sb_retire retire);
 char *sb_tags(void);
 char *sb_pens(uint32_t section);
 bool sb_tag_icon(uint16_t shape, bool checked, uint32_t pixels, uint8_t *rgba);
@@ -22,6 +25,9 @@ bool sb_tag_icon(uint16_t shape, bool checked, uint32_t pixels, uint8_t *rgba);
 const Library *sb_library_open(const char *path, const char *cache, bool local, char **error);
 const Library *sb_library_server(const char *address, const char *share, const char *user, const char *password,
                                  const char *domain, const char *root, const char *cache, char **error);
+bool sb_notebook_create(const char *path, const char *cache, const char *author, const char *date, const char *time,
+                        char **error);
+bool sb_notebook_moved(const char *cache, const char *from, const char *to, char **error);
 char *sb_library_sections(const Library *library);
 char *sb_library_new_section(const Library *library, const char *folder, const char *name, const char *author,
                              const char *date, const char *time);
@@ -31,6 +37,7 @@ char *sb_library_sync_status(const Library *library);
 void sb_library_set_offline(const Library *library, bool offline);
 void sb_library_touched(const Library *library, const char *path);
 void sb_library_sync_now(const Library *library);
+bool sb_library_close(const Library *library, double seconds, char **error);
 void sb_library_free(const Library *library);
 
 Share *sb_share_connect(const char *address, const char *share, const char *user, const char *password,
@@ -62,6 +69,7 @@ void sb_view_content(View *view, float bounds[4]);
 bool sb_view_block(const View *view, float x, float y, float rect[4]);
 void sb_view_set_transform(View *view, float zoom, float x, float y);
 uint8_t sb_view_target(const View *view, float x, float y);
+void sb_view_pressure(View *view, float pressure);
 bool sb_view_press(View *view, float x, float y);
 bool sb_view_drag(View *view, float x, float y);
 bool sb_view_release(View *view);
@@ -69,6 +77,8 @@ bool sb_view_undo(View *view, bool redo);
 bool sb_view_can_undo(const View *view, bool redo);
 uint64_t sb_view_format(const View *view);
 bool sb_view_apply(View *view, uint8_t command);
+char *sb_view_correction(const View *view);
+bool sb_view_correct(View *view, uint8_t command, const char *text);
 char *sb_view_title(const View *view);
 bool sb_view_focus_title(View *view);
 bool sb_view_find(View *view, const char *query);

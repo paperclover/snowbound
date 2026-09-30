@@ -82,11 +82,34 @@ float shadow(vec2 p, vec2 half_size, float corner, float sigma) {
     return value;
 }
 
+// Distance from `p` to the tapered capsule from (-h, 0) to (h, 0) with round ends of radii
+// `r0` and `r1` (Inigo Quilez's uneven capsule).
+float taper(vec2 p, float h, float r0, float r1) {
+    vec2 q = vec2(abs(p.y), p.x + h);
+    float span = 2.0 * h;
+    float b = (r0 - r1) / max(span, 1e-6);
+    float far = length(q - vec2(0.0, span)) - r1;
+    if (abs(b) >= 1.0) {
+        return min(length(q) - r0, far);
+    }
+    float a = sqrt(1.0 - b * b);
+    float k = dot(q, vec2(-b, a));
+    if (k < 0.0) {
+        return length(q) - r0;
+    }
+    if (k > a * span) {
+        return far;
+    }
+    return dot(q, vec2(a, b)) - r0;
+}
+
 void main() {
     vec4 color = texture2D(atlas, v_uv) * v_color;
     vec4 shape = v_shape;
     if (v_blur > 1e-6) {
         color *= shadow(v_local, shape.xy, shape.z, v_blur);
+    } else if (v_blur < -0.5) {
+        color *= clamp(0.5 - taper(v_local, shape.x, shape.y, shape.z), 0.0, 1.0);
     } else if (shape.x > 0.0 && shape.y > 0.0) {
         vec2 q = abs(v_local) - shape.xy + shape.zw;
         float distance;

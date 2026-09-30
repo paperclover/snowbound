@@ -198,6 +198,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				CODE_SIGN_ENTITLEMENTS = Snowbound.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../crates/mobile/include";
@@ -219,7 +220,7 @@
 					"-framework",
 					CoreText,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.clover.snowbound;
+				PRODUCT_BUNDLE_IDENTIFIER = net.paperclover.snowbound;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;
@@ -233,6 +234,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ARCHS = arm64;
+				CODE_SIGN_ENTITLEMENTS = Snowbound.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../crates/mobile/include";
@@ -254,7 +256,7 @@
 					"-framework",
 					CoreText,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.clover.snowbound;
+				PRODUCT_BUNDLE_IDENTIFIER = net.paperclover.snowbound;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = NO;

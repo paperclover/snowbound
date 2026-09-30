@@ -849,8 +849,15 @@ fn step<R: Remote>(
             Err(error) => (None, Err(error)),
         };
     }
+    // A version kept beside the file leaves its stamp as it was.
+    let versions = match remote.versions() {
+        Ok(versions) => versions,
+        Err(error) => return (None, Err(Error::RemoteIo(error))),
+    };
     match crate::peek(replica) {
-        Ok((base, 0)) if base == stamp => return (Some(0), Ok((stamp, moved))),
+        Ok((base, 0)) if base == stamp && versions.is_empty() => {
+            return (Some(0), Ok((stamp, moved)));
+        }
         Err(error) if error.busy() => return (None, Ok((stamp, false))),
         _ => {}
     }
@@ -906,6 +913,18 @@ impl<R: Remote> Remote for Discovered<'_, R> {
 
     fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), onestore::CommitError> {
         self.remote.confirm(base)
+    }
+
+    fn versions(&mut self) -> io::Result<Vec<crate::Version>> {
+        self.remote.versions()
+    }
+
+    fn version(&mut self, id: &str) -> io::Result<Vec<u8>> {
+        self.remote.version(id)
+    }
+
+    fn retire(&mut self, id: &str, keep: bool) -> io::Result<()> {
+        self.remote.retire(id, keep)
     }
 }
 

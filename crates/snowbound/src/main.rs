@@ -4,9 +4,15 @@ mod art;
 mod attachment;
 mod background;
 mod commands;
-#[cfg(test)]
+#[cfg(all(test, feature = "wgpu"))]
 mod conflict_render;
+#[cfg(target_os = "linux")]
+#[path = "desktop_linux.rs"]
+mod desktop;
 mod history;
+#[cfg_attr(target_os = "linux", path = "icloud_linux.rs")]
+#[cfg_attr(target_os = "macos", path = "icloud_macos.rs")]
+mod icloud;
 mod library;
 mod link;
 mod manage;
@@ -28,16 +34,22 @@ mod recording;
 mod rename;
 mod screenshot;
 mod search;
+mod server;
 mod settings;
 mod sidebar;
+#[cfg_attr(target_os = "linux", path = "spell_linux.rs")]
+#[cfg_attr(target_os = "macos", path = "spell_macos.rs")]
+mod spell;
 #[cfg_attr(not(feature = "wgpu"), path = "surface_gl.rs")]
 mod surface;
 mod sync;
 mod tags;
 mod templates;
+mod update;
 mod video;
 mod watch;
 
+use canvas::gpu::colorref;
 use canvas::gpu::page::PageScene;
 use canvas::interaction::{Cursor, PageView, Place, Request, Response, TextColors, accessibility};
 use canvas::{
@@ -45,10 +57,6 @@ use canvas::{
     document::TextDocument,
     editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, TextOutline},
     layout::TextEngine,
-};
-use canvas::{
-    gpu::{colorref, tag_sources},
-    outline::TagIcon,
 };
 use draw::Renderer;
 use library::Library;
@@ -116,11 +124,28 @@ const HIGHLIGHTS: [(u32, &str); 15] = [
     (0xc0c0c0, "Gray 25%"),
     (0x000000, "Black"),
 ];
-/// Office's theme and standard font colours, COLORREF.
-const FONT_COLORS: [u32; 20] = [
-    0xffffff, 0x000000, 0xe1ecee, 0x7d491f, 0xbd814f, 0x4d50c0, 0x59bb9b, 0xa26480, 0xc6ac4b,
-    0x4696f7, 0x0000c0, 0x0000ff, 0x00c0ff, 0x00ffff, 0x50d092, 0x50b000, 0xf0b000, 0xc07000,
-    0x602000, 0xa03070,
+/// Office's theme and standard font colours, COLORREF, with the names their tooltips give.
+const FONT_COLORS: [(u32, &str); 20] = [
+    (0xffffff, "White, Background 1"),
+    (0x000000, "Black, Text 1"),
+    (0xe1ecee, "Tan, Background 2"),
+    (0x7d491f, "Dark Blue, Text 2"),
+    (0xbd814f, "Blue, Accent 1"),
+    (0x4d50c0, "Red, Accent 2"),
+    (0x59bb9b, "Olive Green, Accent 3"),
+    (0xa26480, "Purple, Accent 4"),
+    (0xc6ac4b, "Aqua, Accent 5"),
+    (0x4696f7, "Orange, Accent 6"),
+    (0x0000c0, "Dark Red"),
+    (0x0000ff, "Red"),
+    (0x00c0ff, "Orange"),
+    (0x00ffff, "Yellow"),
+    (0x50d092, "Light Green"),
+    (0x50b000, "Green"),
+    (0xf0b000, "Light Blue"),
+    (0xc07000, "Blue"),
+    (0x602000, "Dark Blue"),
+    (0xa03070, "Purple"),
 ];
 /// Height of a page tab's row, whose tab leaves `ROW_GAP` below it so tabs stand apart
 /// while the gaps still take the pointer.
@@ -144,6 +169,8 @@ enum UserEvent {
     Accessibility(accesskit_winit::Event),
     /// The section's synchronization thread reported an event.
     Sync,
+    /// An update check moved on.
+    Update,
     /// Scripted input from `SNOWBOUND_REPLAY`.
     Replay(Replay),
     /// A page background finished rasterizing on its worker thread.
@@ -154,10 +181,35 @@ enum UserEvent {
     /// The desktop's colours changed, where the window system doesn't say so itself.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Appearance,
+    /// The iCloud account signed out, signed in or switched, or iCloud Drive was turned off.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ICloudAccount,
 }
 
 /// Asks the event loop for a frame from any thread.
 struct Redraw(EventLoopProxy<UserEvent>);
+
+enum Clipboard {
+    System(platform::Clipboard),
+    Memory(String),
+}
+
+impl Clipboard {
+    fn set_text(&mut self, text: String) -> Result<(), Box<dyn Error>> {
+        match self {
+            Self::System(clipboard) => clipboard.set_text(text)?,
+            Self::Memory(held) => *held = text,
+        }
+        Ok(())
+    }
+
+    fn get_text(&mut self) -> Result<String, Box<dyn Error>> {
+        Ok(match self {
+            Self::System(clipboard) => clipboard.get_text()?,
+            Self::Memory(held) => held.clone(),
+        })
+    }
+}
 
 impl std::task::Wake for Redraw {
     fn wake(self: Arc<Self>) {
@@ -170,9 +222,13 @@ enum Replay {
     Input(ui::Event),
     /// Paints the next frame into a PNG as well as the window.
     Snapshot(PathBuf),
+    /// Writes the window's accessibility tree as text.
+    Accessibility(PathBuf),
     /// A frame during a wait, as a visible window's display would ask for.
     Tick,
     Appearance(winit::window::Theme),
+    /// Resizes the window's content, in points.
+    Resize([f32; 2]),
     Quit,
 }
 
@@ -423,10 +479,20 @@ const HOLD: std::time::Duration = std::time::Duration::from_millis(200);
 enum Command {
     /// Opens a notebook's section by catalog path, at the page it showed last.
     OpenSection(Arc<Library>, String),
+    /// Asks for a picture for the tag New Tag or Modify Tag edits.
+    TagPicture,
     /// Asks for a notebook folder and opens it.
     OpenNotebook,
+    /// Asks for a server's address and opens a notebook on it; with a notebook's location,
+    /// signs in again to open it.
+    OpenFromServer(Option<String>),
     /// Asks where to keep a new notebook and creates it.
     NewNotebook,
+    /// Opens the notebooks in the app's iCloud Drive folder, making one there if it has none.
+    UseICloud,
+    /// Adds Snowbound to the app menu.
+    #[cfg(target_os = "linux")]
+    Install,
     /// Closes a notebook, keeping its files.
     CloseNotebook(Arc<Library>),
     /// Changes a notebook's sections and groups.
@@ -532,8 +598,11 @@ struct State {
     menu: Option<(menus::Target, [f32; 2])>,
     /// The Options dialog's choices while it is open.
     options: Option<options::Options>,
+    updates: update::Updates,
     /// The Link dialog's fields while it is open.
     link: Option<link::LinkDialog>,
+    /// Open Notebook from Server while it is open.
+    server: Option<server::Connect>,
     /// The user's tag list, which the toolbar, menus and Ctrl+1 to Ctrl+9 apply.
     tags: Vec<canvas::editor::NoteTag>,
     /// The Customize Tags dialog's list while it is open.
@@ -542,6 +611,11 @@ struct State {
     text_menu: Option<(canvas::interaction::Context, [f32; 2])>,
     color_scheme: settings::ColorScheme,
     light_pages: bool,
+    /// The system's spell checker, where it has one.
+    spelling: Option<canvas::spelling::Spelling>,
+    hide_spelling: bool,
+    /// The word the Spelling pane shows.
+    correction: Option<canvas::interaction::Correction>,
     /// The strip's fill with the window focused and not, continuing the system's title bar.
     titlebar: [[f32; 4]; 2],
     /// A section or group being renamed in the sidebar.
@@ -600,10 +674,15 @@ struct State {
     initial_date: Option<u64>,
     occluded: bool,
     ime_allowed: bool,
-    clipboard: platform::Clipboard,
+    clipboard: Clipboard,
     access_adapter: accesskit_winit::Adapter,
     accessibility: accessibility::Accessibility,
+    /// Assistive technology holds the page's tree, grafted into the interface's.
+    page_grafted: bool,
 }
+
+/// The page's accessibility tree, which the interface's holds at the page's box.
+const PAGE_TREE: accesskit::TreeId = accesskit::TreeId(accesskit::Uuid::from_u128(1));
 
 fn strip() -> Id {
     Id::ROOT.child("strip")
@@ -614,6 +693,8 @@ fn tab_row() -> Id {
     Id::ROOT.child("tab row")
 }
 
+/// The page's box, only ever built as the graft of the page's accessibility tree, so the
+/// tree is sent while it is laid out.
 fn page() -> Id {
     Id::ROOT.child("page")
 }
@@ -683,6 +764,11 @@ impl State {
         library::on_background(move || {
             let _ = background.send_event(UserEvent::Sync);
         });
+        let account = proxy.clone();
+        icloud::on_account_change(move || {
+            let _ = account.send_event(UserEvent::ICloudAccount);
+        });
+        icloud::look_up(notify(proxy.clone()));
         let mut notebooks = Vec::new();
         let mut session = None;
         let mut sectionless = None;
@@ -785,7 +871,7 @@ impl State {
         let titlebar = platform::titlebar(appearance).unwrap_or([ui.theme.strip; 2]);
         // A window shown but never focused hears no focus event; a hidden one draws as focused.
         ui.window_focused = !visible || window.has_focus();
-        ui.scrollers = platform::scrollers();
+        platform::system_interface(&mut ui);
         ui.set_focus(Some(page()));
         for family in FONTS {
             for (face, _) in engine.substitute(family).map_or(&[][..], |s| &s.faces) {
@@ -802,10 +888,18 @@ impl State {
             .collect();
         fonts.sort_unstable_by_key(|name| name.to_lowercase());
         fonts.dedup();
-        let clipboard = platform::Clipboard::new(&window)?;
+        // A replay's or hidden window's copies leave the user's clipboard alone.
+        let clipboard = if visible && std::env::var_os("SNOWBOUND_REPLAY").is_none() {
+            Clipboard::System(platform::Clipboard::new(&window)?)
+        } else {
+            Clipboard::Memory(String::new())
+        };
         let redraw: std::task::Waker = Arc::new(Redraw(proxy.clone())).into();
         let search = search::Search::new(stored.search_scope, redraw.clone());
-        let state = Self {
+        let spelling = spell::dictionary()
+            .map(|dictionary| canvas::spelling::Spelling::new(dictionary, redraw.clone()));
+        let updates = update::Updates::start(visible && !stored.manual_updates, proxy.clone());
+        let mut state = Self {
             author: stored.user_name.unwrap_or_else(platform::user_name),
             window,
             redraw,
@@ -832,12 +926,14 @@ impl State {
             title_focus: None,
             menu: None,
             link: None,
+            server: None,
             tags: stored
                 .tags
                 .unwrap_or_else(canvas::editor::NoteTag::defaults),
             tag_list: None,
             text_menu: None,
             options: None,
+            updates,
             color_scheme: stored.color_scheme,
             light_pages: stored.light_pages,
             titlebar,
@@ -881,7 +977,20 @@ impl State {
             swipe: navigation::Swipe::default(),
             access_adapter,
             accessibility: accessibility::Accessibility::default(),
+            page_grafted: false,
+            spelling,
+            hide_spelling: stored.hide_spelling,
+            correction: None,
         };
+        // A notebook opened from its server that couldn't sign in asks to, as the Finder does.
+        let unsigned = state.notebooks.iter().find(|library| {
+            library.notebook.is_err() && library::server_address(&library.location).is_some()
+        });
+        if let Some(location) = unsigned.map(|library| library.location.clone()) {
+            state.commands.push(Command::OpenFromServer(Some(location)));
+        }
+        state.visited();
+        state.show_spelling();
         state.title();
         platform::update_tag_menu(&state.tags);
         Ok(state)
@@ -906,6 +1015,7 @@ impl State {
             [size.width, size.height].map(|side| side as f32 / self.window.scale_factor() as f32),
             scale,
         )?;
+        self.update_accessibility(false)?;
         lap("build", start);
         self.window.set_cursor(
             platform::resize_direction(&self.window, self.pointer)
@@ -951,8 +1061,10 @@ impl State {
     /// its box.
     fn layout(&mut self, size: [f32; 2], scale: f32) -> Result<(), Box<dyn Error>> {
         self.ui.begin(size, scale, Instant::now());
+        platform::cover_border_line(&mut self.ui, size[0]);
         let (section, open_tab, open_page) = self.build()?;
         self.options_dialog();
+        self.server_dialog();
         self.link_dialog()?;
         self.customize_tags();
         self.palette();
@@ -1151,6 +1263,7 @@ impl State {
                     TAB_ROW,
                     theme.strip,
                 );
+                name(&mut self.ui, row, "Sections");
                 self.drag_tabs(held, slot, settled, row);
                 let Some(session) = &self.session else {
                     unreachable!("The tabs are the session's")
@@ -1268,9 +1381,13 @@ impl State {
                 flags: Flags::CUSTOM | Flags::FOCUSABLE,
                 size: [fill(), fill()],
                 fill: Some(theme.paper),
+                role: Some(accesskit::Role::GenericContainer),
                 ..Spec::default()
             },
         );
+        if let Some(node) = self.ui.access(page()) {
+            node.set_tree_id(PAGE_TREE);
+        }
         self.template_strip(&theme);
         if let Some(rect) = self.ui.rect(page()) {
             self.transport(&theme, rect)?;
@@ -1486,6 +1603,7 @@ impl State {
             fill: Some(theme.strip),
             pad: [0.0, (TITLE - ui::shell::TOOL) / 2.0],
             gap: GAP,
+            role: Some(accesskit::Role::Toolbar),
             ..Spec::default()
         };
         if strip_row {
@@ -1529,7 +1647,7 @@ impl State {
     /// The toolbar's groups, as OneNote's ribbon groups its buttons. The groups used most in
     /// taking notes fold last, and those with chords or a place in the menu bar first.
     fn tools(&mut self, theme: &Theme) {
-        use Entry::{Open, Rule, Run, Soon};
+        use Entry::{Open, Rule, Run};
         use canvas::editor::{Alignment, BULLET_LIBRARY, ListStyle, NUMBER_LIBRARY, Toggle};
         use commands::{Choice, Id as Cmd};
         use ui::shell::TOOL;
@@ -1548,11 +1666,14 @@ impl State {
                 .map_or_else(commands::Status::default, |(_, status)| *status)
         };
         let status_of = &status_of;
+        // A font or size applies where the font commands do.
+        let fonts_apply = self.status(&Choice::Font(String::new()), &state).enabled;
         let fonts = &self.fonts;
         let recent_fonts = &self.recent_fonts;
         let pens = &self.toolbar;
         let engine = &self.view.engine;
         let session = self.session.as_ref();
+        let update = self.updates.status();
         let label = format!("{:.0}%", self.view.zoom() * 100.0);
         let drawing_pens = self.pens();
         let ui = &mut self.ui;
@@ -1561,7 +1682,7 @@ impl State {
         let mut choice = group(
             ui,
             "navigate",
-            4,
+            6,
             |ui| {
                 let mut choice = None;
                 for id in [Cmd::Back, Cmd::Forward, Cmd::Undo, Cmd::Redo] {
@@ -1577,7 +1698,7 @@ impl State {
         choice = group(
             ui,
             "clipboard",
-            3,
+            5,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1587,9 +1708,10 @@ impl State {
                 } else if ui::shell::split_button(
                     ui,
                     "paste",
+                    title(Cmd::Paste),
                     art::PASTE,
                     None,
-                    false,
+                    None,
                     toolbar_popup("paste"),
                 )
                 .clicked
@@ -1653,9 +1775,8 @@ impl State {
             size: ui::Size::Pixels(120.0),
             strictness: 64.0 / 120.0,
         };
-        if ui::shell::combo(ui, "font", &font, width).pressed {
-            ui.open_popup(toolbar_popup("font"));
-        }
+        let menu = toolbar_popup("font");
+        ui::shell::combo(ui, "font", "Font", &font, width, menu, fonts_apply);
         // Each family is named with the substitute it shows in, and picked by its own name; a
         // family of None heads a group. Typing searches the full list.
         let named = |name: &str| {
@@ -1702,9 +1823,8 @@ impl State {
             choice = Some(Choice::Font(name.to_owned()));
         }
         let combo = ui.id("size");
-        if ui::shell::combo(ui, "size", &size, 44.0).pressed {
-            ui.open_popup(toolbar_popup("size"));
-        }
+        let menu = toolbar_popup("size");
+        ui::shell::combo(ui, "size", "Font Size", &size, 44.0, menu, fonts_apply);
         // A size typed in the field joins the list, in half points as stored.
         let mut sizes = SIZES.to_vec();
         if let Some(typed) = ui::popup::query(ui, toolbar_popup("size"))
@@ -1720,7 +1840,8 @@ impl State {
             .iter()
             .map(|label| ui::popup::Item {
                 text: label,
-                checked: *label == size,
+                checked: Some(*label == size),
+                current: *label == size,
                 ..Default::default()
             })
             .collect();
@@ -1737,7 +1858,7 @@ impl State {
         choice = group(
             ui,
             "character",
-            6,
+            8,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1747,7 +1868,7 @@ impl State {
                     (
                         "highlight",
                         Cmd::Highlight,
-                        &HIGHLIGHTS.map(|(color, _)| color)[..],
+                        &HIGHLIGHTS[..],
                         5,
                         "No Color",
                         None,
@@ -1763,13 +1884,26 @@ impl State {
                 ] {
                     let split = ui.id(part);
                     let icon = artwork(id).unwrap_or_default();
-                    if ui::shell::split_button(ui, part, icon, bar, false, toolbar_popup(part))
-                        .clicked
+                    if !status_of(id).enabled {
+                        ui::shell::unavailable(ui, part, icon, text, true);
+                    } else if ui::shell::split_button(
+                        ui,
+                        part,
+                        title(id),
+                        icon,
+                        bar,
+                        None,
+                        toolbar_popup(part),
+                    )
+                    .clicked
                     {
                         choice = Some(Choice::Command(id));
                     }
                     tip(ui, id);
-                    let colors: Vec<_> = swatches.iter().map(|color| colorref(*color)).collect();
+                    let colors: Vec<_> = swatches
+                        .iter()
+                        .map(|&(color, name)| (colorref(color), name))
+                        .collect();
                     let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
                     if let Some(chosen) =
                         ui::popup::colors(ui, toolbar_popup(part), anchor, none, &colors, columns)
@@ -1778,8 +1912,8 @@ impl State {
                             swatches
                                 .iter()
                                 .zip(&colors)
-                                .find(|(_, color)| **color == chosen)
-                                .map(|(stored, _)| *stored)
+                                .find(|(_, (color, _))| *color == chosen)
+                                .map(|((stored, _), _)| *stored)
                         });
                         choice = Some(if id == Cmd::Highlight {
                             Choice::Highlight(color)
@@ -1791,7 +1925,7 @@ impl State {
                 dropdown(
                     ui,
                     "script",
-                    Head::Menu(art::STRIKETHROUGH),
+                    Head::Menu("Text Effects", art::STRIKETHROUGH),
                     &[
                         Run(Cmd::Toggle(Toggle::Strikethrough)),
                         Run(Cmd::Toggle(Toggle::Subscript)),
@@ -1832,7 +1966,7 @@ impl State {
         choice = group(
             ui,
             "paragraph",
-            5,
+            7,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -1844,9 +1978,20 @@ impl State {
                         "numbering"
                     };
                     let icon = artwork(id).unwrap_or_default();
-                    let on = status_of(id).checked;
-                    if ui::shell::split_button(ui, part, icon, None, on, toolbar_popup(part))
-                        .clicked
+                    let status = status_of(id);
+                    if !status.enabled {
+                        ui::shell::unavailable(ui, part, icon, text, true);
+                        toggled(ui, part, status);
+                    } else if ui::shell::split_button(
+                        ui,
+                        part,
+                        title(id),
+                        icon,
+                        None,
+                        status.checked,
+                        toolbar_popup(part),
+                    )
+                    .clicked
                     {
                         choice = Some(Choice::Command(id));
                     }
@@ -1931,10 +2076,17 @@ impl State {
                 }
                 let aligned = alignments
                     .into_iter()
-                    .find(|id| status_of(*id).checked)
+                    .find(|id| status_of(*id).checked == Some(true))
                     .unwrap_or(alignments[0]);
                 let icon = artwork(aligned).unwrap_or_default();
-                dropdown(ui, "align", Head::Menu(icon), &paragraph[1..], status_of).or(choice)
+                dropdown(
+                    ui,
+                    "align",
+                    Head::Menu("Alignment", icon),
+                    &paragraph[1..],
+                    status_of,
+                )
+                .or(choice)
             },
             |ui| {
                 let mut entries = vec![
@@ -1962,19 +2114,19 @@ impl State {
         choice = group(
             ui,
             "tags",
-            7,
+            9,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
                 for &(place, tag) in tags.iter().take(3) {
                     choice = tag_tool(ui, place, tag, status_of(Cmd::Tag(place))).or(choice);
                 }
-                dropdown(ui, "tags", Head::More, &all_tags, status_of).or(choice)
+                dropdown(ui, "tags", Head::More("More Tags"), &all_tags, status_of).or(choice)
             },
             |ui| {
                 let head = match tags.first() {
                     Some(&(place, tag)) => Head::Tag(place, tag),
-                    None => Head::More,
+                    None => Head::More("Tags"),
                 };
                 dropdown(ui, "menu", head, &all_tags, status_of)
             },
@@ -2008,17 +2160,25 @@ impl State {
             Cmd::RecordAudio,
             Cmd::RecordVideo,
         ]
-        .map(Run);
+        .into_iter()
+        .filter(|id| commands::offered(*id))
+        .map(Run)
+        .collect::<Vec<_>>();
         choice = group(
             ui,
             "insert",
-            2,
+            4,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
                 if status_of(Cmd::Table).enabled {
-                    let anchor =
-                        ui::shell::menu_button(ui, "table", art::TABLE, toolbar_popup("table"));
+                    let anchor = ui::shell::menu_button(
+                        ui,
+                        "table",
+                        art::TABLE,
+                        None,
+                        toolbar_popup("table"),
+                    );
                     tip(ui, Cmd::Table);
                     if let Some([columns, rows]) =
                         ui::popup::table_picker(ui, toolbar_popup("table"), anchor, [10, 8])
@@ -2027,32 +2187,68 @@ impl State {
                     }
                 } else {
                     ui::shell::unavailable(ui, "table", art::TABLE, text, true);
+                    tip(ui, Cmd::Table);
                 }
                 for id in inserted {
                     choice = tool(ui, id, status_of(id)).or(choice);
                 }
-                let mut entries = more.to_vec();
+                let mut entries = more.clone();
                 entries.push(Rule);
                 entries.extend(drawing.clone());
-                dropdown(ui, "more", Head::More, &entries, status_of).or(choice)
+                dropdown(
+                    ui,
+                    "more",
+                    Head::More("More Insert Options"),
+                    &entries,
+                    status_of,
+                )
+                .or(choice)
             },
             |ui| {
                 let mut entries = vec![Open("table", Cmd::Table)];
                 entries.extend(inserted.map(Run));
                 entries.push(Rule);
-                entries.extend(more);
+                entries.extend(more.iter().copied());
                 entries.push(Rule);
                 entries.extend(drawing.clone());
-                dropdown(ui, "menu", Head::Menu(art::PLUS), &entries, status_of)
+                dropdown(
+                    ui,
+                    "menu",
+                    Head::Menu("Insert", art::PLUS),
+                    &entries,
+                    status_of,
+                )
             },
         )
         .or(choice);
+        // Where the row has room, some of Insert's menu shows as buttons too, and folds away
+        // first, as the Draw group does.
+        for (part, priority, ids) in [
+            ("files", 0, [Cmd::ScreenClipping, Cmd::Attachment]),
+            ("recording", 3, [Cmd::RecordAudio, Cmd::RecordVideo]),
+        ] {
+            choice = group(
+                ui,
+                part,
+                priority,
+                |ui| {
+                    divider(ui, theme);
+                    let mut choice = None;
+                    for id in ids.into_iter().filter(|id| commands::offered(*id)) {
+                        choice = tool(ui, id, status_of(id)).or(choice);
+                    }
+                    choice
+                },
+                |_| None,
+            )
+            .or(choice);
+        }
         // Pen draws with the gallery's last pick. Folded, the group leaves its tools to
         // Insert's menus, so the narrowest row keeps its width.
         choice = group(
             ui,
             "draw",
-            1,
+            2,
             |ui| {
                 divider(ui, theme);
                 let mut choice = tool(ui, Cmd::SelectType, status_of(Cmd::SelectType));
@@ -2064,6 +2260,7 @@ impl State {
                     if ui::shell::split_button(
                         ui,
                         "pen",
+                        title(Cmd::Pen),
                         art::PEN,
                         bar,
                         status.checked,
@@ -2080,11 +2277,19 @@ impl State {
                     }
                 } else {
                     ui::shell::unavailable(ui, "pen", art::PEN, text, true);
+                    tip(ui, Cmd::Pen);
                 }
                 for id in [Cmd::Eraser, Cmd::Lasso] {
                     choice = tool(ui, id, status_of(id)).or(choice);
                 }
-                dropdown(ui, "shapes", Head::Menu(art::SHAPES), &shapes, status_of).or(choice)
+                dropdown(
+                    ui,
+                    "shapes",
+                    Head::Tools("Shapes", art::SHAPES),
+                    &shapes,
+                    status_of,
+                )
+                .or(choice)
             },
             |_| None,
         )
@@ -2097,21 +2302,21 @@ impl State {
             },
         );
         if let Some(session) = session {
-            sync::control(ui, session, theme);
+            sync::control(ui, session, &update, theme);
         }
-        // Spelling awaits a platform spell checker.
         let views = [
             Run(Cmd::Sidebar),
             Run(Cmd::PageList),
             Run(Cmd::DarkPages),
             Run(Cmd::FullPageView),
             Rule,
-            Soon("Spelling", Some(art::SPELLING)),
+            Run(Cmd::HideSpelling),
+            Run(Cmd::Spelling),
         ];
         choice = group(
             ui,
             "view",
-            0,
+            1,
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -2120,6 +2325,7 @@ impl State {
                         ui,
                         "page color",
                         art::PAGE_COLOR,
+                        None,
                         toolbar_popup("page color"),
                     );
                     tip(ui, Cmd::PageColor);
@@ -2140,6 +2346,7 @@ impl State {
                     .or(choice.take());
                 } else {
                     ui::shell::unavailable(ui, "page color", art::PAGE_COLOR, text, true);
+                    tip(ui, Cmd::PageColor);
                 }
                 choice = tool(ui, Cmd::ZoomOut, status_of(Cmd::ZoomOut)).or(choice);
                 let level = ui.leaf(
@@ -2151,6 +2358,7 @@ impl State {
                         hover_fill: Some(theme.hover()),
                         radius: 4.0,
                         center: true,
+                        role: Some(accesskit::Role::Button),
                         ..Spec::default()
                     },
                 );
@@ -2158,8 +2366,18 @@ impl State {
                     choice = Some(Choice::Command(Cmd::ActualSize));
                 }
                 tip(ui, Cmd::ActualSize);
+                if let Some(node) = ui.access(ui.id("level")) {
+                    node.set_value(label.as_str());
+                }
                 choice = tool(ui, Cmd::ZoomIn, status_of(Cmd::ZoomIn)).or(choice);
-                dropdown(ui, "view", Head::More, &views, status_of).or(choice)
+                dropdown(
+                    ui,
+                    "view",
+                    Head::More("More View Options"),
+                    &views,
+                    status_of,
+                )
+                .or(choice)
             },
             |ui| {
                 let mut entries = vec![
@@ -2171,7 +2389,13 @@ impl State {
                     Rule,
                 ];
                 entries.extend(views);
-                dropdown(ui, "menu", Head::Menu(art::ZOOM_IN), &entries, status_of)
+                dropdown(
+                    ui,
+                    "menu",
+                    Head::Menu("View", art::ZOOM_IN),
+                    &entries,
+                    status_of,
+                )
             },
         )
         .or(choice);
@@ -2204,8 +2428,14 @@ impl State {
             );
             if folded {
                 let open = self.ui.popup_open(search::results());
-                if ui::shell::tool_button(&mut self.ui, "search", art::SEARCH, theme.text, open)
-                    .pressed
+                if ui::shell::tool_button(
+                    &mut self.ui,
+                    "search",
+                    art::SEARCH,
+                    theme.text,
+                    Some(open),
+                )
+                .pressed
                 {
                     self.start_search();
                 }
@@ -2213,7 +2443,7 @@ impl State {
             } else if let Err(error) = self.search_box(theme) {
                 eprintln!("{error}");
             }
-            if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, false).clicked {
+            if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, None).clicked {
                 self.commands.push(Command::NewPage { under: None });
             }
             tip(&mut self.ui, commands::Id::NewPage);
@@ -2222,7 +2452,7 @@ impl State {
             } else {
                 art::SIDEBAR_EXPAND
             };
-            if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text, false).clicked {
+            if ui::shell::tool_button(&mut self.ui, "toggle", toggle, theme.text, None).clicked {
                 self.pages_open = !self.pages_open;
             }
             tip(&mut self.ui, commands::Id::PageList);
@@ -2244,9 +2474,14 @@ impl State {
                 flags: Flags::SCROLL | Flags::CLIP,
                 axis: Axis::Y,
                 size: [px(width), fill()],
+                role: Some(accesskit::Role::TabList),
                 ..Spec::default()
             },
         );
+        if let Some(node) = self.ui.access(panel) {
+            node.set_label("Pages");
+            node.set_orientation(accesskit::Orientation::Vertical);
+        }
         let found = self
             .search
             .found_in(&session.library.key(&session.tabs[session.tab].path));
@@ -2298,6 +2533,10 @@ impl State {
         for event in events {
             let response = match event {
                 ui::Event::PointerMoved(point) => self.view.pointer_moved(device(point))?,
+                ui::Event::Pressure(pressure) => {
+                    self.view.set_pressure(pressure);
+                    continue;
+                }
                 ui::Event::PointerLeft => self.view.pointer_left(),
                 ui::Event::Button {
                     button: MouseButton::Left,
@@ -2327,7 +2566,9 @@ impl State {
                     self.open_text_menu()?;
                     continue;
                 }
-                ui::Event::Button { .. } | ui::Event::Ime(Ime::Enabled) => continue,
+                ui::Event::Button { .. } | ui::Event::Ime(Ime::Enabled) | ui::Event::Access(_) => {
+                    continue;
+                }
                 // A conflict page takes no typing; commands and caret moves still apply.
                 ui::Event::Ime(Ime::Preedit(..) | Ime::Commit(_)) if read_only => continue,
                 ui::Event::Key { ref key, .. }
@@ -2445,7 +2686,11 @@ impl State {
                     self.open_path(&path);
                 }
             }
+            Command::OpenFromServer(location) => self.open_server(location.as_deref()),
             Command::NewNotebook => self.new_notebook()?,
+            Command::UseICloud => self.use_icloud()?,
+            #[cfg(target_os = "linux")]
+            Command::Install => desktop::install(),
             Command::CloseNotebook(library) => self.close_notebook(&library),
             Command::Structure(library, change) => self.restructure(library, change),
             // The index follows the section's page list.
@@ -2475,6 +2720,7 @@ impl State {
             Command::Page(Request::OpenAttachment(file)) => self.open_attachment(&file)?,
             Command::Page(Request::Play { file, at_ms }) => self.play(&file, at_ms)?,
             Command::Choose(choice) => self.run(choice)?,
+            Command::TagPicture => self.pick_tag_picture(),
         }
         Ok(())
     }
@@ -2541,7 +2787,7 @@ impl State {
             return Ok(());
         }
         // A recording goes on the page it started on.
-        self.stop_recording()?;
+        self.stop_recording(true)?;
         // The page shown so far keeps what was typed while the next one loaded.
         self.persist()?;
         if let Some(session) = &self.session {
@@ -2692,7 +2938,7 @@ impl State {
             self.ui.set_focus(Some(page()));
         }
         self.title();
-        self.update_accessibility()?;
+        self.update_accessibility(true)?;
         self.window.request_redraw();
         Ok(())
     }
@@ -2719,7 +2965,7 @@ impl State {
             LogicalSize::new((x1 - x0) / scale, (y1 - y0) / scale),
         );
         let start = Instant::now();
-        self.update_accessibility()?;
+        self.update_accessibility(true)?;
         lap("accessibility", start);
         Ok(())
     }
@@ -2839,6 +3085,24 @@ impl State {
         self.respond(response);
         self.window.request_redraw();
         Ok(())
+    }
+
+    /// Publishes the open section's stored edits now, rather than after a pause in typing,
+    /// and waits up to `wait` for them to reach the file.
+    fn publish_now(&self, wait: std::time::Duration) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let deadline = Instant::now() + wait;
+        loop {
+            session.section.wake();
+            if Instant::now() >= deadline
+                || session.section.pending().is_ok_and(|pending| pending.is_empty())
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// Hands the section the ops the editor recorded since the last call, as one edit; the
@@ -3001,52 +3265,150 @@ impl State {
         Ok(())
     }
 
-    fn update_accessibility(&mut self) -> Result<(), Box<dyn Error>> {
-        let mut error = None;
-        let view = &self.view;
-        let corner = self.ui.rect(page()).unwrap_or_default();
-        let scale = self.ui.scale();
-        // Bounds are in the window's pixels, which `scale` renders fewer of when capped.
-        let ratio = self.window.scale_factor() as f32 / scale;
-        let viewport = canvas::gpu::Viewport {
-            size: view.viewport.size.map(|side| (side as f32 * ratio) as u32),
-            scale: view.viewport.scale * ratio,
-            origin: [0, 1].map(|axis| (view.viewport.origin[axis] + corner[axis] * scale) * ratio),
-        };
+    /// Sends assistive technology what changed in the interface, then in the page where
+    /// `page` asks or its tree is not grafted yet. The interface's tree goes first, since it
+    /// holds the page's.
+    fn update_accessibility(&mut self, page: bool) -> Result<(), Box<dyn Error>> {
+        let built = self.ui.rect(self::page()).is_some();
+        if !built && self.page_grafted {
+            // Its graft is gone, and with it the tree, which must be sent whole again.
+            self.accessibility.deactivate();
+            self.page_grafted = false;
+        }
+        let graft = self::page().node();
+        let title = self.window.title();
+        let scale = self.window.scale_factor();
+        let grafted = self.page_grafted;
+        let mut focus_page = false;
         self.access_adapter.update_if_active(|| {
-            match self.accessibility.update(
-                &view.editor,
-                view.scene.as_ref(),
-                viewport,
-                &self.window.title(),
-                view.outline_preview(),
-                view.object_focus().and_then(|focus| focus.read_only()),
-            ) {
-                Ok(update) => update,
-                Err(failure) => {
-                    error = Some(failure);
-                    self.accessibility.deactivate();
-                    let mut root = accesskit::Node::new(accesskit::Role::Window);
-                    root.set_label(self.window.title());
-                    accesskit::TreeUpdate {
-                        nodes: vec![(accessibility::ROOT, root)],
-                        tree: Some(accesskit::TreeInfo::new(accessibility::ROOT)),
-                        tree_id: accesskit::TreeId::ROOT,
-                        focus: accessibility::ROOT,
-                    }
-                }
+            let mut update = self.ui.accessibility(&title, scale);
+            // The focus may rest on the graft only once it holds the page's tree.
+            if update.focus == graft && !grafted {
+                update.focus = ui::Id::ROOT.node();
+                focus_page = true;
             }
+            update
         });
+        if !built || (!page && grafted) {
+            return Ok(());
+        }
+        let mut error = None;
+        let mut sent = false;
+        let (view, ui, window) = (&self.view, &self.ui, &self.window);
+        self.access_adapter.update_if_active(|| {
+            sent = true;
+            page_tree(view, ui, window, &mut self.accessibility).unwrap_or_else(|failure| {
+                error = Some(failure);
+                self.accessibility.deactivate();
+                let mut root = accesskit::Node::new(accesskit::Role::Group);
+                root.set_label("Page");
+                accesskit::TreeUpdate {
+                    nodes: vec![(accessibility::ROOT, root)],
+                    tree: Some(accesskit::TreeInfo::new(accessibility::ROOT)),
+                    tree_id: PAGE_TREE,
+                    focus: accessibility::ROOT,
+                }
+            })
+        });
+        self.page_grafted = sent;
+        if focus_page {
+            self.access_adapter
+                .update_if_active(|| accesskit::TreeUpdate {
+                    nodes: Vec::new(),
+                    tree: None,
+                    tree_id: accesskit::TreeId::ROOT,
+                    focus: graft,
+                });
+        }
         if let Some(error) = error {
             return Err(error.into());
         }
         Ok(())
     }
 
+    /// Writes the window's whole accessibility tree to `path` as text, a line a node as the
+    /// platform shows them, for a replay to check what assistive technology is told.
+    fn write_accessibility(&self, path: &Path) -> Result<(), Box<dyn Error>> {
+        use accesskit_consumer::{NodeRef, Tree, TreeChangeHandler, common_filter};
+        struct Unwatched;
+        impl TreeChangeHandler for Unwatched {
+            fn node_added(&mut self, _: &NodeRef) {}
+            fn node_updated(&mut self, _: &NodeRef, _: &NodeRef) {}
+            fn focus_moved(&mut self, _: Option<&NodeRef>, _: Option<&NodeRef>) {}
+            fn node_removed(&mut self, _: &NodeRef) {}
+        }
+        fn write(node: &NodeRef, depth: usize, out: &mut String) {
+            let data = node.data();
+            *out += &format!("{}{:?}", "  ".repeat(depth), node.role());
+            for (name, text) in [
+                ("", data.label()),
+                ("= ", data.value()),
+                ("keys ", data.keyboard_shortcut()),
+                ("-- ", data.description()),
+            ] {
+                if let Some(text) = text {
+                    *out += &format!(" {name}{text:?}");
+                }
+            }
+            for (state, on) in [
+                ("toggled", data.toggled().is_some()),
+                ("on", data.toggled() == Some(accesskit::Toggled::True)),
+                ("expanded", data.is_expanded() == Some(true)),
+                ("selected", data.is_selected() == Some(true)),
+                ("disabled", data.is_disabled()),
+                ("focused", node.is_focused()),
+            ] {
+                if on {
+                    *out += &format!(" [{state}]");
+                }
+            }
+            out.push('\n');
+            for child in node.filtered_children(common_filter) {
+                write(&child, depth + 1, out);
+            }
+        }
+        let graft = page().node();
+        let mut chrome = self
+            .ui
+            .accessibility_tree(&self.window.title(), self.window.scale_factor());
+        let focus = std::mem::replace(&mut chrome.focus, ui::Id::ROOT.node());
+        let mut tree = Tree::new(chrome, true);
+        if self.ui.rect(page()).is_some() {
+            let mut fresh = accessibility::Accessibility::default();
+            let page = page_tree(&self.view, &self.ui, &self.window, &mut fresh)?;
+            tree.update_and_process_changes(page, &mut Unwatched);
+        }
+        if focus != graft || self.ui.rect(page()).is_some() {
+            let update = accesskit::TreeUpdate {
+                nodes: Vec::new(),
+                tree: None,
+                tree_id: accesskit::TreeId::ROOT,
+                focus,
+            };
+            tree.update_and_process_changes(update, &mut Unwatched);
+        }
+        let mut out = String::new();
+        write(&tree.state().root(), 0, &mut out);
+        std::fs::write(path, out)?;
+        Ok(())
+    }
+
+    /// Forgets what assistive technology was sent, so the next update sends both trees whole.
+    fn deactivate_accessibility(&mut self) {
+        self.ui.deactivate_accessibility();
+        self.accessibility.deactivate();
+        self.page_grafted = false;
+    }
+
     fn access_action(&mut self, request: accesskit::ActionRequest) -> Result<(), Box<dyn Error>> {
         trace_input(&request);
         use accesskit::{Action, ActionData};
-        if request.target_tree != accesskit::TreeId::ROOT {
+        if request.target_tree == accesskit::TreeId::ROOT {
+            self.ui.event(ui::Event::Access(request));
+            self.window.request_redraw();
+            return Ok(());
+        }
+        if request.target_tree != PAGE_TREE {
             return Ok(());
         }
         if let Some(field) = self.accessibility.date_for_node(request.target_node) {
@@ -3143,6 +3505,12 @@ impl State {
         self.window.scale_factor() as f32 * (most / longest).min(1.0)
     }
 
+    /// Marks misspelled words on the page unless Hide Spelling Errors is on.
+    fn show_spelling(&mut self) {
+        self.view.spelling = self.spelling.clone().filter(|_| !self.hide_spelling);
+        self.window.request_redraw();
+    }
+
     /// The paper the open page lies on: the theme's, in the page's colour.
     fn paper(&self) -> canvas::gpu::Paper {
         canvas::gpu::Paper {
@@ -3157,6 +3525,9 @@ impl State {
         let start = Instant::now();
         let paper = self.paper();
         self.view.update_pictures(paper, &self.redraw);
+        if let Some(session) = &self.session {
+            self.view.tag_art = session.library.tag_art();
+        }
         let theme = &self.ui.theme;
         let page_primitives = self.view.primitives(TextColors {
             caret: theme.caret,
@@ -3281,7 +3652,7 @@ impl State {
             pressed: true,
             at,
         } = event
-            && matches!(self.ui.box_at(self.pointer), Some(id) if id == strip() || id == tab_row())
+            && matches!(self.ui.box_at(self.pointer), Some(id) if id == strip() || id == tab_row() || id == sidebar::header())
         {
             let double = self.strip_press.is_some_and(|last| {
                 at.saturating_duration_since(last) <= platform::double_click_interval()
@@ -3328,6 +3699,37 @@ fn theme(appearance: winit::window::Theme, light_pages: bool, backdrop: bool) ->
     }
 }
 
+/// The page's accessibility tree, as changed since `access` last sent it, for the graft at
+/// the page's box: bounds in the window's pixels, which the interface's scale renders fewer
+/// of when capped.
+fn page_tree(
+    view: &PageView,
+    ui: &Ui,
+    window: &Window,
+    access: &mut accessibility::Accessibility,
+) -> Result<accesskit::TreeUpdate, onestore::page::text::EditError> {
+    let corner = ui.rect(page()).unwrap_or_default();
+    let scale = ui.scale();
+    let ratio = window.scale_factor() as f32 / scale;
+    let viewport = canvas::gpu::Viewport {
+        size: view.viewport.size.map(|side| (side as f32 * ratio) as u32),
+        scale: view.viewport.scale * ratio,
+        origin: [0, 1].map(|axis| (view.viewport.origin[axis] + corner[axis] * scale) * ratio),
+    };
+    let update = access.update(
+        &view.editor,
+        view.scene.as_ref(),
+        viewport,
+        "Page",
+        view.outline_preview(),
+        view.object_focus().and_then(|focus| focus.read_only()),
+    )?;
+    Ok(accesskit::TreeUpdate {
+        tree_id: PAGE_TREE,
+        ..update
+    })
+}
+
 /// A section's colour as linear RGBA; sections without one take OneNote's default blue.
 fn section_color(color: Option<u32>) -> [f32; 4] {
     color.map_or(draw::srgb(0x8a, 0xa8, 0xe4), canvas::gpu::colorref)
@@ -3346,6 +3748,7 @@ fn conflict_bar(ui: &mut Ui, bar: Bar, sections: &[&str], steps: [bool; 2]) -> O
             hover_fill: Some(draw::srgb(0xff, 0xe4, 0xa6)),
             pad: [12.0, 6.0],
             gap: 8.0,
+            role: Some(accesskit::Role::Button),
             ..Spec::default()
         },
     );
@@ -3770,6 +4173,7 @@ fn page_tab(
         pad: [pad, 0.0],
         offset: [0.0, tab.shift],
         shadow: tab.lifted.then_some([0.0, 0.0, 0.0, 0.35]),
+        role: Some(accesskit::Role::Tab),
         ..Spec::default()
     };
     let (spec, color) = if selected {
@@ -3805,6 +4209,10 @@ fn page_tab(
         (spec, color)
     };
     let row = ui.open(id, spec);
+    if let Some(node) = ui.access(row) {
+        node.set_selected(selected);
+        node.set_level(tab.indent as usize + 1);
+    }
     let kept = match tab.renaming {
         Some(name) => rename::edit(ui, theme, name, ROW - ROW_GAP),
         None => {
@@ -3924,17 +4332,23 @@ fn pen_gallery(
             } else {
                 (pen.width / 25.0).clamp(1.5, 4.0)
             };
-            let across = (CELL[1] - tall) / 2.0;
+            // Centred between two spacers, which share what the stroke leaves of the cell.
+            let space = Spec {
+                size: [fill(), fill()],
+                ..Spec::default()
+            };
+            ui.leaf("above", space.clone());
             ui.leaf(
                 "stroke",
                 Spec {
-                    size: [fill(), fill()],
+                    size: [fill(), px(tall)],
                     fill: Some(pen.color.map_or(ink, colorref)),
-                    inset: [6.0, across, 6.0, across],
+                    inset: [2.0, 0.0, 2.0, 0.0],
                     radius: tall / 2.0,
                     ..Spec::default()
                 },
             );
+            ui.leaf("below", space);
         },
     )
 }
@@ -3977,23 +4391,22 @@ enum Entry<'a> {
     Run(commands::Id),
     /// Applies the tag at this place in the tag list.
     Tag(usize, &'a canvas::editor::NoteTag),
-    /// Opens the toolbar's popup `name`, which applies the command, under the button the
-    /// popup's own control would open it from, or where that is folded away, this menu's.
+    /// Opens the toolbar's popup `name`, which applies the command, as a submenu.
     Open(&'static str, commands::Id),
-    /// A command not built yet, shown disabled.
-    Soon(&'static str, Option<&'static [&'static str]>),
     /// Rules off the entries after it.
     Rule,
 }
 
 /// What opens a toolbar menu: the arrow of a button running a command, a button showing
-/// artwork, or a bare arrow.
+/// artwork, or a bare arrow; the last two named for assistive technology.
 enum Head<'a> {
     Split(commands::Id),
     /// A button applying the tag at this place in the tag list.
     Tag(usize, &'a canvas::editor::NoteTag),
-    Menu(&'static [&'static str]),
-    More,
+    Menu(&'static str, &'static [&'static str]),
+    /// A `Menu` of tools, lit while one of them is on.
+    Tools(&'static str, &'static [&'static str]),
+    More(&'static str),
 }
 
 /// A toolbar menu `part` of `entries` opened by `head`, whose command enabled and checked as
@@ -4007,13 +4420,19 @@ fn dropdown(
 ) -> Option<commands::Choice> {
     use commands::Choice;
     let button = ui.id(part);
-    let menu = button.child("menu");
+    // Not the split button's arrow, `button.child("menu")`.
+    let menu = button.child("popup");
     let mut choice = None;
+    let usable = entries.iter().any(|entry| match *entry {
+        Entry::Run(id) | Entry::Open(_, id) => status_of(id).enabled,
+        Entry::Tag(place, _) => status_of(commands::Id::Tag(place)).enabled,
+        Entry::Rule => false,
+    });
     let anchor = match head {
         Head::Split(id) if status_of(id).enabled => {
             let icon = artwork(id).unwrap_or_default();
             let on = status_of(id).checked;
-            if ui::shell::split_button(ui, part, icon, None, on, menu).clicked {
+            if ui::shell::split_button(ui, part, title(id), icon, None, on, menu).clicked {
                 choice = Some(Choice::Command(id));
             }
             tip(ui, id);
@@ -4021,21 +4440,61 @@ fn dropdown(
         }
         Head::Tag(place, tag) if status_of(commands::Id::Tag(place)).enabled => {
             let on = status_of(commands::Id::Tag(place)).checked;
-            if ui::shell::split_button(ui, part, tag_art(tag), None, on, menu).clicked {
+            let art = tag_art(tag);
+            if ui::shell::split_button(ui, part, &tag.label, art, None, on, menu).clicked {
                 choice = Some(Choice::Command(commands::Id::Tag(place)));
             }
             tag_tip(ui, place, tag);
             ui::Anchor::Below(ui.rect(button).unwrap_or_default())
         }
         // Where its command does not apply, the button only opens the menu.
-        Head::Split(id) => ui::shell::menu_button(ui, part, artwork(id).unwrap_or_default(), menu),
-        Head::Tag(_, tag) => ui::shell::menu_button(ui, part, tag_art(tag), menu),
-        Head::Menu(icon) => ui::shell::menu_button(ui, part, icon, menu),
-        Head::More => {
+        Head::Split(id) => {
+            let icon = artwork(id).unwrap_or_default();
+            let anchor = ui::shell::menu_button(ui, part, icon, None, menu);
+            name(ui, button, title(id));
+            anchor
+        }
+        Head::Tag(_, tag) => {
+            let anchor = ui::shell::menu_button(ui, part, tag_art(tag), None, menu);
+            name(ui, button, &tag.label);
+            anchor
+        }
+        // A menu of nothing that applies fades as a button would.
+        Head::Menu(label, _) | Head::Tools(label, _) | Head::More(label) if !usable => {
+            let (icon, arrow) = match head {
+                Head::Menu(_, icon) | Head::Tools(_, icon) => (icon, true),
+                _ => (ui::shell::CHEVRON, false),
+            };
+            let tint = ui.theme.text;
+            ui::shell::unavailable(ui, part, icon, tint, arrow);
+            name(ui, button, label);
+            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+        }
+        Head::Menu(label, icon) => {
+            let anchor = ui::shell::menu_button(ui, part, icon, None, menu);
+            name(ui, button, label);
+            anchor
+        }
+        Head::Tools(label, icon) => {
+            let on = entries.iter().any(|entry| match *entry {
+                Entry::Run(id) | Entry::Open(_, id) => status_of(id).checked == Some(true),
+                _ => false,
+            });
+            let anchor = ui::shell::menu_button(ui, part, icon, Some(on), menu);
+            name(ui, button, label);
+            anchor
+        }
+        Head::More(label) => {
             let open = ui.popup_open(menu);
             let text = ui.theme.text;
-            if ui::shell::tool_button(ui, part, ui::shell::CHEVRON, text, open).pressed {
+            if ui::shell::tool_button(ui, part, ui::shell::CHEVRON, text, Some(open)).pressed {
                 ui.open_popup(menu);
+            }
+            if let Some(node) = ui.access(button) {
+                node.set_label(label);
+                node.clear_toggled();
+                node.set_has_popup(accesskit::HasPopup::Menu);
+                node.set_expanded(open);
             }
             ui::Anchor::Below(ui.rect(button).unwrap_or_default())
         }
@@ -4048,9 +4507,24 @@ fn dropdown(
             _ => String::new(),
         })
         .collect();
+    // A gallery row beside its command's own row, or under its button, is named for the
+    // split button's arrow it stands in for.
+    let runs = |id| {
+        matches!(head, Head::Split(head) if head == id)
+            || entries
+                .iter()
+                .any(|entry| matches!(entry, Entry::Run(run) if *run == id))
+    };
+    let options: Vec<_> = entries
+        .iter()
+        .map(|entry| match *entry {
+            Entry::Open(_, id) if runs(id) => format!("{} Options", title(id)),
+            _ => String::new(),
+        })
+        .collect();
     let (mut items, mut actions) = (Vec::new(), Vec::new());
     let mut separated = false;
-    for (entry, key) in entries.iter().zip(&keys) {
+    for ((entry, key), options) in entries.iter().zip(&keys).zip(&options) {
         let item = match *entry {
             Entry::Rule => {
                 separated = true;
@@ -4066,26 +4540,24 @@ fn dropdown(
             },
             Entry::Tag(place, tag) => ui::popup::Item {
                 text: &tag.label,
-                icon: TagIcon::of(tag.shape, false).map(tag_sources),
+                icon: tags::artwork(tag),
                 ink: tag.color.map(colorref),
                 highlight: tag.highlight.map(colorref),
-                colored: true,
+                tint: Some([1.0; 4]),
                 shortcut: key,
                 checked: status_of(commands::Id::Tag(place)).checked,
                 disabled: !status_of(commands::Id::Tag(place)).enabled,
                 ..Default::default()
             },
             Entry::Open(_, id) => ui::popup::Item {
-                text: commands::command(id).title,
+                text: if options.is_empty() {
+                    commands::command(id).title
+                } else {
+                    options
+                },
                 icon: artwork(id),
-                shortcut: "›",
+                submenu: true,
                 disabled: !status_of(id).enabled,
-                ..Default::default()
-            },
-            Entry::Soon(text, icon) => ui::popup::Item {
-                text,
-                icon,
-                disabled: true,
                 ..Default::default()
             },
         };
@@ -4095,14 +4567,22 @@ fn dropdown(
         });
         actions.push(*entry);
     }
-    match ui::popup::menu(ui, menu, anchor, &items, None).map(|index| actions[index]) {
+    let chosen = ui::popup::menu(ui, menu, anchor, &items, None).map(|index| actions[index]);
+    ui::popup::submenus(ui, menu, &items, |index| match actions[index] {
+        Entry::Open(name, _) => Some(toolbar_popup(name)),
+        _ => None,
+    });
+    match chosen {
         Some(Entry::Run(id)) => Some(Choice::Command(id)),
         Some(Entry::Tag(place, _)) => Some(Choice::Command(commands::Id::Tag(place))),
-        Some(Entry::Open(name, _)) => {
-            ui.open_popup(toolbar_popup(name));
-            None
-        }
         _ => choice,
+    }
+}
+
+/// Names box `id` to assistive technology, where no tooltip does.
+fn name(ui: &mut Ui, id: Id, label: &str) {
+    if let Some(node) = ui.access(id) {
+        node.set_label(label);
     }
 }
 
@@ -4116,11 +4596,22 @@ fn tool(ui: &mut Ui, id: commands::Id, status: commands::Status) -> Option<comma
     let tint = ui.theme.text;
     if !status.enabled {
         ui::shell::unavailable(ui, part, icon, tint, false);
+        toggled(ui, part, status);
+        tip(ui, id);
         return None;
     }
     let clicked = ui::shell::tool_button(ui, part, icon, tint, status.checked).clicked;
     tip(ui, id);
     clicked.then_some(commands::Choice::Command(id))
+}
+
+/// Keeps a faded toggle `part` exposed as one, whether or not it is on.
+fn toggled(ui: &mut Ui, part: impl std::hash::Hash, status: commands::Status) {
+    if let Some(checked) = status.checked
+        && let Some(node) = ui.access(ui.id(part))
+    {
+        node.set_toggled(checked.into());
+    }
 }
 
 /// A tool button applying the tag at `place` in the tag list, as `tool` builds a command's.
@@ -4135,6 +4626,8 @@ fn tag_tool(
     let tint = [1.0; 4];
     if !status.enabled {
         ui::shell::unavailable(ui, part, tag_art(tag), tint, false);
+        toggled(ui, part, status);
+        tag_tip(ui, place, tag);
         return None;
     }
     let clicked = ui::shell::tool_button(ui, part, tag_art(tag), tint, status.checked).clicked;
@@ -4196,6 +4689,7 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
         Cmd::PageColor => art::PAGE_COLOR,
         Cmd::ZoomIn => art::ZOOM_IN,
         Cmd::ZoomOut => art::ZOOM_OUT,
+        Cmd::HideSpelling | Cmd::Spelling => art::SPELLING,
         _ => return None,
     })
 }
@@ -4208,8 +4702,8 @@ fn tag_art(tag: &canvas::editor::NoteTag) -> &'static [&'static str] {
     // Artwork is borrowed for the program's life, so each colour pair is made once.
     type Chips = BTreeMap<(Option<u32>, Option<u32>), &'static [&'static str]>;
     static CHIPS: Mutex<Chips> = Mutex::new(BTreeMap::new());
-    if let Some(icon) = TagIcon::of(tag.shape, false) {
-        return tag_sources(icon);
+    if let Some(art) = tags::artwork(tag) {
+        return art;
     }
     let hex = |colorref: u32| {
         let [red, green, blue, _] = colorref.to_le_bytes();
@@ -4243,11 +4737,14 @@ fn tag_tip(ui: &mut Ui, place: usize, tag: &canvas::editor::NoteTag) {
     ui::popup::tooltip(ui, &tag.label, &key, None);
 }
 
-/// A tooltip naming command `id` and its chord on the box built last. It names the command,
-/// not a dialog it opens, so it leaves off the menu's ellipsis.
+/// A tooltip naming command `id` and its chord on the box built last.
 fn tip(ui: &mut Ui, id: commands::Id) {
-    let title = commands::command(id).title.trim_end_matches('…');
-    ui::popup::tooltip(ui, title, &commands::shortcut(id), None);
+    ui::popup::tooltip(ui, title(id), &commands::shortcut(id), None);
+}
+
+/// Command `id`'s title without the menu's ellipsis, naming the command, not a dialog it opens.
+fn title(id: commands::Id) -> &'static str {
+    commands::command(id).title.trim_end_matches('…')
 }
 
 /// The line leading a toolbar group, as far from its buttons as the groups are apart.
@@ -4369,10 +4866,17 @@ impl App {
             "Keep Editing",
             "Discard Changes",
         ) {
+            if let Some(state) = &self.state {
+                state.publish_now(QUIT_PUBLISH);
+            }
             event_loop.exit();
         }
     }
 }
+
+/// How long quitting waits for the open section's edits to reach its file; they stay in the
+/// replica and publish at the next launch otherwise.
+const QUIT_PUBLISH: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -4402,6 +4906,20 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::Quit => {
                 self.close(event_loop);
+                return;
+            }
+            UserEvent::ICloudAccount => {
+                if let Some(state) = &mut self.state {
+                    state.icloud_account_changed();
+                    state.window.request_redraw();
+                }
+                return;
+            }
+            UserEvent::Update => {
+                if let Some(state) = &mut self.state {
+                    state.updated();
+                    state.window.request_redraw();
+                }
                 return;
             }
             UserEvent::Sync => {
@@ -4436,10 +4954,20 @@ impl ApplicationHandler<UserEvent> for App {
                     match replay {
                         Replay::Input(event) => state.input(event),
                         Replay::Snapshot(path) => state.snapshot = Some(path),
+                        Replay::Accessibility(path) => {
+                            if let Err(error) = state.write_accessibility(&path) {
+                                eprintln!("{error}");
+                            }
+                        }
                         Replay::Tick => {}
                         Replay::Appearance(appearance) => {
                             state.window.set_theme(Some(appearance));
                             state.set_appearance(appearance);
+                        }
+                        Replay::Resize([width, height]) => {
+                            let _ = state
+                                .window
+                                .request_inner_size(LogicalSize::new(width, height));
                         }
                         Replay::Quit => {
                             self.close(event_loop);
@@ -4464,12 +4992,12 @@ impl ApplicationHandler<UserEvent> for App {
         let was_marked = state.view.editor.marked_range().is_some();
         let result = match event.window_event {
             accesskit_winit::WindowEvent::InitialTreeRequested => {
-                state.accessibility.deactivate();
-                state.update_accessibility()
+                state.deactivate_accessibility();
+                state.update_accessibility(true)
             }
             accesskit_winit::WindowEvent::ActionRequested(request) => state.access_action(request),
             accesskit_winit::WindowEvent::AccessibilityDeactivated => {
-                state.accessibility.deactivate();
+                state.deactivate_accessibility();
                 Ok(())
             }
         };
@@ -4525,7 +5053,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if matches!(event, WindowEvent::CloseRequested) {
             if let Some(state) = &mut self.state
-                && let Err(error) = state.stop_recording().and_then(|()| state.persist())
+                && let Err(error) = state.stop_recording(true).and_then(|()| state.persist())
             {
                 eprintln!("{error}");
             }
@@ -4560,6 +5088,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 WindowEvent::Focused(focused) => {
                     state.ui.window_focused = focused;
+                    if !focused {
+                        // Someone switching to another device finds their edits there.
+                        state.publish_now(std::time::Duration::ZERO);
+                    }
                     state.window.request_redraw();
                 }
                 WindowEvent::Occluded(occluded) => {
@@ -4575,6 +5107,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 WindowEvent::CursorLeft { .. } => state.input(ui::Event::PointerLeft),
                 WindowEvent::CursorMoved { position, .. } => {
+                    state.input(ui::Event::Pressure(platform::pen_pressure()));
                     state.input(ui::Event::PointerMoved([
                         position.x as f32 / scale,
                         position.y as f32 / scale,
@@ -4584,11 +5117,14 @@ impl ApplicationHandler<UserEvent> for App {
                     state: pressed,
                     button,
                     ..
-                } => state.input(ui::Event::Button {
-                    button,
-                    pressed: pressed == ElementState::Pressed,
-                    at: Instant::now(),
-                }),
+                } => {
+                    state.input(ui::Event::Pressure(platform::pen_pressure()));
+                    state.input(ui::Event::Button {
+                        button,
+                        pressed: pressed == ElementState::Pressed,
+                        at: Instant::now(),
+                    })
+                }
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     if let MouseScrollDelta::PixelDelta(p) = delta {
                         state.swipe_scroll(phase, [p.x as f32 / scale, p.y as f32 / scale]);
@@ -4643,13 +5179,10 @@ impl ApplicationHandler<UserEvent> for App {
         if repaint || wake.is_some_and(|wake| wake <= now) {
             state.window.request_redraw();
         }
-        let next = [
-            blink,
-            wake.filter(|wake| *wake > now),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        let next = [blink, wake.filter(|wake| *wake > now)]
+            .into_iter()
+            .flatten()
+            .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 }
@@ -4667,7 +5200,7 @@ fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn E
 /// Feeds a development script to the window from another thread, one command per line
 /// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `key NAME`, `type
 /// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`,
-/// `appearance light|dark` and `quit`.
+/// `accessibility TEXT_PATH`, `appearance light|dark`, `resize WIDTH HEIGHT` and `quit`.
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
     let mut steps = Vec::new();
     for line in script.lines().filter(|line| !line.trim().is_empty()) {
@@ -4691,6 +5224,10 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
             "wheel" => Ok(Replay::Input(ui::Event::Wheel(
                 numbers()?.try_into().map_err(|_| "wheel takes DX DY")?,
             ))),
+            "pressure" => Ok(Replay::Input(ui::Event::Pressure(match rest {
+                "none" => None,
+                level => Some(level.parse()?),
+            }))),
             "press" => Ok(Replay::Input(button(true))),
             "release" => Ok(Replay::Input(button(false))),
             "key" => Ok(Replay::Input(ui::Event::Key {
@@ -4699,6 +5236,10 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                     "Enter" => Key::Named(NamedKey::Enter),
                     "Backspace" => Key::Named(NamedKey::Backspace),
                     "Tab" => Key::Named(NamedKey::Tab),
+                    "Space" => Key::Named(NamedKey::Space),
+                    "F5" => Key::Named(NamedKey::F5),
+                    "F6" => Key::Named(NamedKey::F6),
+                    "F7" => Key::Named(NamedKey::F7),
                     "Left" => Key::Named(NamedKey::ArrowLeft),
                     "Right" => Key::Named(NamedKey::ArrowRight),
                     "Up" => Key::Named(NamedKey::ArrowUp),
@@ -4722,7 +5263,13 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
             ))),
             "wait" => Err(std::time::Duration::from_millis(rest.parse()?)),
             "quit" => Ok(Replay::Quit),
+            "resize" => Ok(Replay::Resize(
+                numbers()?
+                    .try_into()
+                    .map_err(|_| "resize takes WIDTH HEIGHT")?,
+            )),
             "snapshot" => Ok(Replay::Snapshot(rest.into())),
+            "accessibility" => Ok(Replay::Accessibility(rest.into())),
             "appearance" => Ok(Replay::Appearance(match rest {
                 "light" => winit::window::Theme::Light,
                 "dark" => winit::window::Theme::Dark,
@@ -4760,6 +5307,14 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    platform::with_pool(launch)
+}
+
+fn launch() -> Result<(), Box<dyn Error>> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|arg| arg == update::FINISH) {
+        return update::finish(args);
+    }
     let mut args = std::env::args_os().skip(1);
     let mut positional = Vec::new();
     let mut substitutes = Vec::new();
@@ -4897,6 +5452,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             reference,
         }
     };
+    if screenshot.is_some() {
+        screenshot::prepare();
+    }
     let event_loop = platform::event_loop(screenshot.is_some())?;
     if let Some(script) = std::env::var_os("SNOWBOUND_REPLAY") {
         replay(std::fs::read_to_string(script)?, event_loop.create_proxy())?;
@@ -4916,6 +5474,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         startup_error: None,
     };
     event_loop.run_app(&mut app)?;
+    let restart = app
+        .state
+        .as_ref()
+        .and_then(|state| state.updates.restarting());
+    if let Some(staged) = restart {
+        update::relaunch(&staged)?;
+    }
     app.startup_error.map_or(Ok(()), Err)
 }
 

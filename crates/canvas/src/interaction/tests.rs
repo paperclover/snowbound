@@ -14,17 +14,22 @@ const COLORS: TextColors = TextColors {
     paper: crate::gpu::Paper::WHITE,
 };
 
+static NO_ART: std::sync::LazyLock<crate::gpu::TagArt> = std::sync::LazyLock::new(Default::default);
+
 /// Paint for a view at `scale` device pixels per point on a display of `display_scale`.
 pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint<'static> {
     Paint {
         caret: f32::from(u8::from(show_caret)),
         scale,
+        device_origin: [0.0; 2],
         pixel: display_scale / scale,
         colors: COLORS,
         visible: [f32::NEG_INFINITY, f32::INFINITY],
         chrome: true,
         found: &[],
         played: None,
+        spelling: None,
+        tag_art: &NO_ART,
     }
 }
 
@@ -699,8 +704,10 @@ fn a_picture_in_an_outline_takes_the_click_over_its_text() {
         id,
         layout: Default::default(),
         bytes: None,
+        display: None,
         alt: None,
         background: false,
+        printout: None,
     });
     source.paragraphs.insert(1, picture);
     let editor = CanvasEditor::from_page(
@@ -885,12 +892,15 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
         Paint {
             caret: 0.0,
             scale: 1.0,
+            device_origin: [0.0; 2],
             pixel: 1.0,
             colors: COLORS,
             visible: [f32::NEG_INFINITY, f32::INFINITY],
             chrome: true,
             found: &[],
             played: None,
+            spelling: None,
+            tag_art: &NO_ART,
         },
         &mut primitives,
     )
@@ -960,12 +970,15 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
         Paint {
             caret: 0.0,
             scale: 1.0,
+            device_origin: [0.0; 2],
             pixel: 1.0,
             colors: COLORS,
             visible: [f32::NEG_INFINITY, f32::INFINITY],
             chrome: true,
             found: &[],
             played: None,
+            spelling: None,
+            tag_art: &NO_ART,
         },
         &mut primitives,
     )
@@ -1528,8 +1541,10 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
         id,
         layout: Default::default(),
         bytes: None,
+        display: None,
         alt: None,
         background: false,
+        printout: None,
     });
     source.paragraphs.insert(1, picture);
     let editor = CanvasEditor::from_page(
@@ -2884,4 +2899,239 @@ fn a_file_dropped_on_blank_page_lies_on_the_page_and_drags() {
     let _ = view.undo(false).unwrap();
     assert_eq!(placed(&view).unwrap().layout.x, Some(504.0));
     view.primitives(COLORS).unwrap();
+}
+
+/// Words the fake dictionary misses are marked red under their text once checked, except
+/// the word still being typed; the context menu offers the dictionary's corrections, and
+/// taking one is one edit and one undo step.
+#[test]
+fn misspelled_words_are_marked_and_corrected_in_one_edit() {
+    struct Wake(std::sync::mpsc::Sender<()>);
+    impl std::task::Wake for Wake {
+        fn wake(self: Arc<Self>) {
+            let _ = self.0.send(());
+        }
+    }
+    let mut engine = TextEngine::default();
+    let document = TextDocument::new(vec![Paragraph::new(
+        "Ths sentence has the typos".into(),
+        Default::default(),
+    )])
+    .unwrap();
+    let outline = TextOutline::new(&mut engine, document, 400.0, [36.0, 36.0]).unwrap();
+    let editor = CanvasEditor::from_page(
+        Page {
+            title: String::new(),
+            identity: None,
+            created: None,
+            margin_origin: [36.0, 14.4],
+            color: None,
+            rule_lines: None,
+            definitions: Default::default(),
+            objects: vec![onestore::page::PageObject::Outline(outline.snapshot())],
+        },
+        &mut engine,
+    )
+    .unwrap();
+    let mut view = PageView::new(editor, engine, None, [800, 600], 1.0, Duration::ZERO);
+    view.viewport.scale = 1.0;
+    view.viewport.origin = [0.0; 2];
+    let (woken, wakes) = std::sync::mpsc::channel();
+    view.spelling = Some(crate::spelling::Spelling::new(
+        Box::new(crate::spelling::tests::Fake),
+        Arc::new(Wake(woken)).into(),
+    ));
+    let red = draw::srgb(0xff, 0x00, 0x00);
+    let marks = |view: &PageView| -> Vec<[f32; 2]> {
+        view.primitives(COLORS)
+            .unwrap()
+            .into_iter()
+            .filter_map(|primitive| match primitive {
+                Primitive::Rect { rect, color } if color == red => Some([rect[0], rect[1]]),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(marks(&view).is_empty());
+    wakes
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the spelling thread wakes the host");
+    let outline = view.editor.active_outline();
+    let [origin_x, origin_y] = outline.origin();
+    let [left, right, baseline] = outline.underlines(0, 0..3).unwrap()[0];
+    let under = marks(&view);
+    // OneNote's pixels along "Ths": a column each, stepping mid, low, mid, high on the
+    // three pixel rows from one to three below the baseline.
+    let [start, end, line] =
+        [origin_x + left, origin_x + right, origin_y + baseline].map(f32::round);
+    assert_eq!(under.len(), (end - start) as usize);
+    for (column, [x, y]) in under.into_iter().enumerate() {
+        assert_eq!(x, start + column as f32);
+        assert_eq!(y, line + [2.0, 3.0, 2.0, 1.0][column % 4]);
+    }
+
+    let _ = view
+        .pointer_moved([origin_x + (left + right) / 2.0, origin_y + baseline - 3.0])
+        .unwrap();
+    let (_, context) = view.context().unwrap().unwrap();
+    let correction = context.spelling.unwrap();
+    assert_eq!(correction.word, "Ths");
+    assert_eq!(correction.suggestions, ["This", "Thus"]);
+    view.editor.take_ops().unwrap();
+    assert!(view.correct(&correction, "This").unwrap().changed);
+    assert_eq!(
+        view.editor.active_outline().shown_text(),
+        "This sentence has the typos"
+    );
+    assert!(!view.editor.take_ops().unwrap().is_empty());
+    marks(&view);
+    wakes
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the spelling thread wakes the host");
+    assert!(marks(&view).is_empty());
+    let _ = view.undo(false).unwrap();
+    assert_eq!(
+        view.editor.active_outline().shown_text(),
+        "Ths sentence has the typos"
+    );
+
+    view.editor
+        .move_selection(&mut view.engine, Movement::DocumentEnd, false)
+        .unwrap();
+    let _ = view.key(&Key::Character(" ".into()), Some(" ")).unwrap();
+    for letter in ["q", "w", "r", "t"] {
+        let _ = view
+            .key(&Key::Character(letter.into()), Some(letter))
+            .unwrap();
+    }
+    marks(&view);
+    wakes
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the spelling thread wakes the host");
+    let typing = marks(&view).len();
+    let _ = view.key(&Key::Character(" ".into()), Some(" ")).unwrap();
+    marks(&view);
+    wakes
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the spelling thread wakes the host");
+    assert!(marks(&view).len() > typing);
+}
+
+/// See Playback scrolls the note playing into view, as OneNote 2010 does
+/// (`corpus/recording/native/read/onenote-see-playback-scrolls.png`); the caret stays.
+#[test]
+fn the_note_playing_scrolls_into_view() {
+    let mut engine = TextEngine::default();
+    let lines = (0..100)
+        .map(|line| Paragraph::new(format!("Line {line}"), Default::default()))
+        .collect();
+    let outline = TextOutline::new(
+        &mut engine,
+        TextDocument::new(lines).unwrap(),
+        240.0,
+        [36.0, 36.0],
+    )
+    .unwrap();
+    let editor = CanvasEditor::from_page(
+        Page {
+            title: String::new(),
+            identity: None,
+            created: None,
+            margin_origin: [36.0, 14.4],
+            color: None,
+            rule_lines: None,
+            definitions: Default::default(),
+            objects: vec![onestore::page::PageObject::Outline(outline.snapshot())],
+        },
+        &mut engine,
+    )
+    .unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        None,
+        [800, 200],
+        1.0,
+        Duration::from_millis(500),
+    );
+    view.viewport.scale = 1.0;
+    view.viewport.origin = [0.0; 2];
+    let caret = view.editor.selection();
+    let outline = view.editor.outlines()[0].id;
+    let at = |offset| TextPosition {
+        paragraph: 60,
+        offset,
+    };
+    let note: Selection = [at(0), at(7)].into();
+    let played = Some((outline, note));
+    assert!(view.set_played(played).unwrap().moved);
+    let rects = view.editor.outlines()[0].range_rects(note).unwrap();
+    let top = view.editor.outlines()[0].origin()[1] + rects[0].y0 as f32;
+    let bottom = view.editor.outlines()[0].origin()[1] + rects[0].y1 as f32;
+    let shown = [top, bottom].map(|y| y + view.viewport.origin[1]);
+    assert!(shown[0] >= 0.0 && shown[1] <= 200.0, "{shown:?}");
+    assert_eq!(view.editor.selection(), caret);
+    // Playing on within the same note leaves the view where the reader put it.
+    view.viewport.origin[1] = 0.0;
+    assert!(!view.set_played(played).unwrap().moved);
+    assert_eq!(view.viewport.origin[1], 0.0);
+}
+
+/// The Spelling pane walks marked words from the caret in page order, wraps to the page's
+/// top, and ends once none is left.
+#[test]
+fn the_spelling_pane_walks_marked_words_from_the_caret() {
+    let mut engine = TextEngine::default();
+    let document = TextDocument::new(
+        ["the wrng word", "this is qwrt here"]
+            .map(|text| Paragraph::new(text.into(), Default::default()))
+            .into(),
+    )
+    .unwrap();
+    let outline = TextOutline::new(&mut engine, document, 400.0, [36.0, 36.0]).unwrap();
+    let editor = CanvasEditor::from_page(
+        Page {
+            title: String::new(),
+            identity: None,
+            created: None,
+            margin_origin: [36.0, 14.4],
+            color: None,
+            rule_lines: None,
+            definitions: Default::default(),
+            objects: vec![onestore::page::PageObject::Outline(outline.snapshot())],
+        },
+        &mut engine,
+    )
+    .unwrap();
+    let mut view = PageView::new(editor, engine, None, [800, 600], 1.0, Duration::ZERO);
+    let spelling = crate::spelling::Spelling::new(
+        Box::new(crate::spelling::tests::Fake),
+        std::task::Waker::noop().clone(),
+    );
+    view.spelling = Some(spelling.clone());
+    let caret = |paragraph, offset| [TextPosition { paragraph, offset }; 2].into();
+    view.editor.select(caret(1, 17)).unwrap();
+    let next = |view: &mut PageView| {
+        view.next_correction()
+            .unwrap()
+            .map(|(_, correction)| correction.word)
+    };
+    assert_eq!(next(&mut view).as_deref(), Some("wrng"));
+    assert_eq!(
+        view.editor.selection().positions,
+        [
+            TextPosition {
+                paragraph: 0,
+                offset: 4
+            },
+            TextPosition {
+                paragraph: 0,
+                offset: 8
+            }
+        ]
+    );
+    spelling.ignore("wrng");
+    assert_eq!(next(&mut view).as_deref(), Some("qwrt"));
+    spelling.learn("qwrt");
+    assert_eq!(next(&mut view), None);
 }

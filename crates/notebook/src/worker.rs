@@ -3,7 +3,7 @@ use std::{
     collections::hash_map::RandomState,
     hash::BuildHasher,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, SyncSender},
     },
@@ -21,8 +21,20 @@ pub(super) struct Signal {
     /// A watch on the file's folder wakes the worker when the file changes, so an idle worker
     /// waits for that instead of checking the file on its own (`Background::hold`).
     pub(crate) watched: AtomicBool,
+    pause: Mutex<Pause>,
     sender: SyncSender<()>,
 }
+
+/// How local edits wait before they publish (`SyncWorker::set_pause`).
+#[derive(Default)]
+struct Pause {
+    length: Duration,
+    /// When the first and the last edit waiting arrived.
+    waiting: Option<(Instant, Instant)>,
+}
+
+/// The longest local edits wait for a pause in typing.
+const LONGEST: Duration = Duration::from_secs(30);
 
 impl Signal {
     pub(crate) fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
@@ -33,6 +45,7 @@ impl Signal {
             synced: AtomicU64::new(0),
             requested: AtomicBool::new(false),
             watched: AtomicBool::new(false),
+            pause: Mutex::default(),
             sender,
         };
         (Arc::new(signal), receiver)
@@ -41,6 +54,28 @@ impl Signal {
     pub(super) fn wake(&self) {
         // One retained notification covers edits that arrive during network I/O.
         let _ = self.sender.try_send(());
+    }
+
+    /// A burst of local edits is durable.
+    pub(super) fn edited(&self) {
+        if let Ok(mut pause) = self.pause.lock() {
+            let now = Instant::now();
+            pause.waiting = Some((pause.waiting.map_or(now, |(first, _)| first), now));
+        }
+        self.wake();
+    }
+
+    /// How much longer waiting edits wait for a pause in typing, if they do.
+    fn paused(&self) -> Option<Duration> {
+        let pause = self.pause.lock().ok()?;
+        let (first, last) = pause.waiting?;
+        let now = Instant::now();
+        Some(
+            (last + pause.length)
+                .min(first + LONGEST)
+                .checked_duration_since(now)?,
+        )
+        .filter(|wait| !wait.is_zero())
     }
 }
 
@@ -63,6 +98,16 @@ impl SyncWorker {
     /// When a step or poll last reached the remote.
     pub fn synced(&self) -> Option<u64> {
         Some(self.signal.synced.load(Ordering::Acquire)).filter(|time| *time != 0)
+    }
+
+    /// Local edits publish once `pause` passes without another, or once they have waited
+    /// half a minute, rather than each burst at once: a cloud drive uploads every publication
+    /// and turns each concurrent one into a conflict version. `wake` publishes them at once.
+    pub fn set_pause(&self, pause: Duration) {
+        if let Ok(mut current) = self.signal.pause.lock() {
+            current.length = pause;
+        }
+        self.signal.wake();
     }
 
     /// Working offline, the worker neither connects nor steps: local edits stay queued
@@ -156,6 +201,16 @@ impl Replica {
                         reported = false;
                         let _ = receiver.recv();
                         continue;
+                    }
+                    if !worker_signal.requested.load(Ordering::Acquire)
+                        && let Some(wait) = worker_signal.paused()
+                    {
+                        let _ = receiver.recv_timeout(wait);
+                        continue;
+                    }
+                    if let Ok(mut pause) = worker_signal.pause.lock() {
+                        // The step publishes what waits; edits from now on wait anew.
+                        pause.waiting = None;
                     }
                     let result = match remote.as_mut() {
                         Some(remote) => {

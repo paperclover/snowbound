@@ -35,16 +35,24 @@ fn locate(document: &TextDocument, id: ExGuid) -> Option<CellLocation<'_>> {
     None
 }
 
+/// A new cell like `source`, one empty paragraph in its first text's format; a cell holding
+/// no text, only pictures or files, gives a plain one.
 fn empty_cell(source: &TableCell) -> Result<TableCell, EditError> {
-    let (_, _, paragraph) = leaves(&source.paragraphs, None)
-        .next()
-        .ok_or(EditError::UnsupportedContent)?;
-    let format = paragraph.text().unwrap().text.format_at(0)?;
-    let mut node = crate::document::node(
-        Paragraph::new(String::new(), format.clone()),
-        paragraph.format.clone(),
-    )?;
-    node.style = paragraph.style;
+    let node = match leaves(&source.paragraphs, None).next() {
+        Some((_, _, paragraph)) => {
+            let format = paragraph.text().unwrap().text.format_at(0)?;
+            let mut node = crate::document::node(
+                Paragraph::new(String::new(), format.clone()),
+                paragraph.format.clone(),
+            )?;
+            node.style = paragraph.style;
+            node
+        }
+        None => crate::document::node(
+            Paragraph::new(String::new(), Default::default()),
+            Default::default(),
+        )?,
+    };
     Ok(TableCell {
         id: new_id()?,
         layout: Default::default(),
@@ -377,6 +385,16 @@ impl CanvasEditor {
         )
     }
     pub fn enter(&mut self, engine: &mut TextEngine, soft: bool) -> Result<(), EditorError> {
+        let [anchor, focus] = self.active_outline().selection.positions;
+        // Inside a link's label OneNote 2010 ignores Shift+Enter, and Enter follows the link
+        // (`PageView` asks the host), so neither breaks it.
+        if anchor == focus
+            && self.link_at(focus).is_some_and(|link| {
+                link.label.start < focus.offset && focus.offset < link.label.end
+            })
+        {
+            return Ok(());
+        }
         if soft {
             return self.insert(engine, "\u{000b}");
         }

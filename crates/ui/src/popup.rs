@@ -6,6 +6,7 @@ use crate::{
     Anchor, Axis, Event, Flags, ICON, ICON_GAP, Id, List, Menu, Overflow, Popup, Row, Rows, Spec,
     TIP_DELAY, TIP_FADE, TIP_WARM, Tip, Ui, children, fill, fit, list::GUTTER, mix, px, text_field,
 };
+use accesskit::Role;
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{AtomKind, CaseMatching, Normalization, Pattern},
@@ -21,6 +22,8 @@ const ROW: f32 = 26.0;
 pub(crate) const MENU_ROW: f32 = 22.0;
 /// Rows a list shows before it scrolls.
 const ROWS: f32 = 12.0;
+/// How long the pointer rests on a row before its submenu opens, as Windows waits by default.
+const SUBMENU_DELAY: Duration = Duration::from_millis(200);
 const NARROWEST: f32 = 140.0;
 const PALETTE: f32 = 560.0;
 /// Where a tooltip's description wraps.
@@ -29,8 +32,6 @@ const TIP_WIDTH: f32 = 280.0;
 const CELL: f32 = 22.0;
 /// Inset of an item's text from the highlight it previews.
 const SAMPLE_PAD: f32 = 2.0;
-/// Seconds a popup takes to ease to the height of its results.
-const RESIZE: f32 = 0.15;
 thread_local! {
     /// Scratch space for ranking, a few hundred kilobytes, reused across frames.
     static MATCHER: RefCell<Matcher> = RefCell::new(Matcher::new(Config::DEFAULT));
@@ -57,19 +58,30 @@ pub struct Item<'a> {
     pub ink: Option<[f32; 4]>,
     pub highlight: Option<[f32; 4]>,
     pub icon: Option<&'static [&'static str]>,
-    /// The icon has colours of its own, so the text's colour does not tint it.
-    pub colored: bool,
+    /// What the icon's `currentColor` paints in place of the text's colour, as a section's
+    /// icon takes its colour; white leaves an icon with colours of its own as drawn.
+    pub tint: Option<[f32; 4]>,
     /// Keys that run the item, shown dim at the trailing edge.
     pub shortcut: &'a str,
-    /// Marked with a check in place of its icon.
-    pub checked: bool,
-    /// Starts highlighted when the menu opens, as a checked item does.
+    /// Whether a check marks it in place of its icon; `None` where it is not a toggle.
+    pub checked: Option<bool>,
+    /// Opens a further menu, as a trailing arrow shows.
+    pub submenu: bool,
+    /// The value a picker opens on, highlighted and scrolled into view; a command menu
+    /// has none and opens at its top, however its items are checked.
     pub current: bool,
     pub disabled: bool,
     /// Starts a group, ruled off from the one above while unfiltered.
     pub separated: bool,
     /// Names the group it starts: shown only while unfiltered, never chosen.
     pub heading: bool,
+}
+
+impl Item<'_> {
+    /// What the row shows at its trailing edge: an arrow where it opens a menu, else its keys.
+    fn trailing(&self) -> &str {
+        if self.submenu { "›" } else { self.shortcut }
+    }
 }
 
 /// Builds popup `id` as a menu of `items` beside `anchor` while it is open, under a
@@ -101,10 +113,12 @@ pub fn menu(
                         0.0
                     },
             ),
-            shortcut.max(measure(item.shortcut)),
+            shortcut.max(measure(item.trailing())),
         ]
     });
-    let icons = items.iter().any(|item| item.icon.is_some() || item.checked);
+    let icons = items
+        .iter()
+        .any(|item| item.icon.is_some() || item.checked == Some(true));
     let width =
         text + if shortcut > 0.0 {
             3.0 * ICON_GAP + shortcut
@@ -125,18 +139,73 @@ pub fn menu(
     choose(
         ui,
         id,
+        Role::Menu,
         anchor,
-        items,
+        &[("", items)],
         filter,
         width.max(least).max(NARROWEST),
         style.row,
     )
+    .map(|(_, index)| index)
+}
+
+/// Opens the submenus of open menu `id` of `items` beside their rows, as `submenu` names
+/// them by item: a row's once the pointer rests on it for `SUBMENU_DELAY`, or at once on
+/// Right or a click. Resting on another row closes it.
+pub fn submenus(ui: &mut Ui, id: Id, items: &[Item], submenu: impl Fn(usize) -> Option<Id>) {
+    let Some(highlight) = ui
+        .popups
+        .iter()
+        .find(|popup| popup.id == id)
+        .map(|popup| popup.highlight)
+    else {
+        return;
+    };
+    let rows = id.child("rows");
+    let opens = |key: u64| {
+        items
+            .get(key as usize)
+            .is_some_and(|item| item.submenu && !item.disabled)
+    };
+    let right =
+        highlight.is_some_and(opens) && !navigation(ui, &[id], &[NamedKey::ArrowRight]).is_empty();
+    let under = highlight.filter(|key| {
+        ui.pointer
+            .zip(ui.rect(rows.child(*key)))
+            .is_some_and(|(point, rect)| crate::contains(rect, point))
+    });
+    let now = ui.now;
+    let popup = state(ui, id);
+    if right {
+        popup.submenu = highlight.map(|key| (key, Some(now)));
+    } else if let Some(key) = under
+        && popup.submenu.is_none_or(|(rested, _)| rested != key)
+    {
+        popup.submenu = Some((key, Some(now + SUBMENU_DELAY)));
+    }
+    let Some((key, Some(due))) = popup.submenu else {
+        return;
+    };
+    if now < due {
+        ui.wake = Some(ui.wake.map_or(due, |wake| wake.min(due)));
+        return;
+    }
+    popup.submenu = Some((key, None));
+    match submenu(key as usize).filter(|_| opens(key)) {
+        Some(child) => ui.open_submenu(child, id, rows.child(key)),
+        None => {
+            if let Some(at) = ui.popups.iter().position(|popup| popup.id == id) {
+                ui.close_from(at + 1);
+            }
+        }
+    }
 }
 
 /// Shows `title`, with the `keys` that run it and a `description` under it, in a tooltip
 /// below the box built last while the pointer rests on it or on a box inside it: after a
 /// delay, or at once while another has just shown. A press or the wheel hides it until the
-/// pointer leaves.
+/// pointer leaves. It names the box to assistive technology, or where the box has no role,
+/// the unnamed controls inside it.
 pub fn tooltip(ui: &mut Ui, title: &str, keys: &str, description: Option<&str>) {
     tooltip_below(ui, None, title, keys, description);
 }
@@ -157,6 +226,27 @@ fn tooltip_below(
     let Some(&index) = ui.nodes[*ui.stack.last().unwrap()].children.last() else {
         return;
     };
+    if part.is_none() {
+        let own = ui.nodes[index].access.is_some();
+        let controls = ui.nodes[index..].iter_mut().filter_map(|node| {
+            node.access
+                .as_mut()
+                .filter(|access| own || !crate::access::holds(access.role()))
+        });
+        for (count, node) in controls.take(if own { 1 } else { usize::MAX }).enumerate() {
+            if node.label().is_none() {
+                node.set_label(title);
+            }
+            if count == 0 {
+                if !keys.is_empty() {
+                    node.set_keyboard_shortcut(keys);
+                }
+                if let Some(description) = description {
+                    node.set_description(description);
+                }
+            }
+        }
+    }
     // The boxes built since are the box's own.
     let hovered = ui
         .hover
@@ -238,31 +328,62 @@ fn tooltip_below(
 }
 
 /// Builds popup `id` as a command palette across the top of the window while it is open,
-/// listing `items` that match what is typed, most relevant first, under a filter field
-/// showing `placeholder` while empty. Returns the index of the item chosen.
-pub fn palette(ui: &mut Ui, id: Id, items: &[Item], placeholder: &str) -> Option<usize> {
+/// under a filter field showing `placeholder` while empty. What is typed picks the first of
+/// `modes` whose prefix it starts with, and the rest of it narrows that mode's items, most
+/// relevant first. Returns the mode and the index of the item chosen.
+pub fn palette(
+    ui: &mut Ui,
+    id: Id,
+    modes: &[(&str, &[Item])],
+    placeholder: &str,
+) -> Option<(usize, usize)> {
     if !ui.popup_open(id) {
         return None;
     }
     let window = ui.rect(Id::ROOT).unwrap_or_default();
     let width = PALETTE.min(window[2] - 8.0 * PAD).max(NARROWEST);
-    choose(ui, id, Anchor::Top, items, Some(placeholder), width, ROW)
+    choose(
+        ui,
+        id,
+        Role::Dialog,
+        Anchor::Top,
+        modes,
+        Some(placeholder),
+        width,
+        ROW,
+    )
 }
 
+/// Opens popup `id` with `query` typed in its filter field and the caret after it, or
+/// retypes it where the popup is open.
+pub fn open_with(ui: &mut Ui, id: Id, query: &str) {
+    ui.open_popup(id);
+    let popup = state(ui, id);
+    popup.query = query.to_owned();
+    popup.highlight = None;
+    ui.states.entry(id.child("filter")).or_default().select = Some([usize::MAX; 2]);
+}
+
+/// Builds popup `id` as a `role` under a filter field showing `filter` while empty, listing
+/// the items of the first of `modes` whose prefix the query starts with: a menu of items, or
+/// a dialog of a list box of options.
+#[allow(clippy::too_many_arguments)]
 fn choose(
     ui: &mut Ui,
     id: Id,
+    role: Role,
     anchor: Anchor,
-    items: &[Item],
+    modes: &[(&str, &[Item])],
     filter: Option<&str>,
     width: f32,
     row: f32,
-) -> Option<usize> {
+) -> Option<(usize, usize)> {
     let field = id.child("filter");
     if filter.is_some() && ui.focus == Some(id) {
         ui.focus = Some(field);
     }
     let keys = navigation(ui, &[id, field], &KEYS);
+    let rows = id.child("rows");
     let popup = state(ui, id);
     let mut query = std::mem::take(&mut popup.query);
     let mut highlight = popup.highlight;
@@ -273,7 +394,7 @@ fn choose(
         Anchor::Over(rect) => (Flags::STILL, rect[3] - rect[1]),
         _ => (Flags::default(), ROW),
     };
-    surface(ui, id, anchor, width);
+    surface(ui, id, role, anchor, width);
     if let Some(placeholder) = filter {
         let before = query.clone();
         text_field(
@@ -288,21 +409,32 @@ fn choose(
                 border: Some(theme.accent),
                 radius: 4.0,
                 pad: [8.0, 0.0],
+                role: Some(Role::SearchInput),
                 ..Spec::default()
             },
         );
+        // New results show from their top at once.
         if query != before {
             highlight = None;
+            ui.lists.remove(&rows);
         }
     }
-    let matches = Matches::new(items, &query, style.rule_band);
-    // Unfiltered, the current or checked item starts highlighted; filtered, the best match.
+    let (mode, (prefix, items)) = modes
+        .iter()
+        .enumerate()
+        .find(|(_, (prefix, _))| query.starts_with(prefix))
+        .expect("a mode takes any query");
+    if role == Role::Dialog
+        && let Some(node) = ui.access(id)
+    {
+        node.set_label(filter.unwrap_or_default());
+    }
+    let typed = &query[prefix.len()..];
+    let matches = Matches::new(items, typed, style.rule_band);
+    // Unfiltered, the current item starts highlighted; filtered, the best match.
     highlight = highlight.or_else(|| {
-        let first = if query.is_empty() {
-            matches
-                .order
-                .iter()
-                .position(|index| items[*index].current || items[*index].checked)
+        let first = if typed.is_empty() {
+            matches.order.iter().position(|index| items[*index].current)
         } else {
             (0..matches.count()).find(|row| matches.selectable(*row))
         };
@@ -318,24 +450,6 @@ fn choose(
     let view = content
         .max(row)
         .min((ROWS * row).min(window - 4.0 * PAD - field).max(row));
-    // The popup eases to its new height as the results change; the rows do not move.
-    let dt = ui.dt;
-    let [from, to, elapsed] = state(ui, id).height.get_or_insert([view, view, RESIZE]);
-    *elapsed = (*elapsed + dt).min(RESIZE);
-    let height = *to - (*to - *from) * (1.0 - *elapsed / RESIZE).powi(3);
-    if *to != view {
-        [*from, *to, *elapsed] = [height, view, 0.0];
-    }
-    ui.animating |= height != view;
-    ui.open(
-        "results",
-        Spec {
-            flags: Flags::CLIP,
-            axis: Axis::Y,
-            size: [fill(), px(height)],
-            ..Spec::default()
-        },
-    );
     let chosen = if matches.count() == 0 {
         ui.leaf(
             "empty",
@@ -358,16 +472,22 @@ fn choose(
         };
         let clicked = crate::list(
             ui,
-            id.child("rows"),
+            rows,
             Spec {
                 size: [fill(), px(view)],
                 fill: Some(style.fill),
+                role: (role == Role::Dialog).then_some(Role::ListBox),
                 ..Spec::default()
             },
             list,
             &mut highlight,
-            |ui, row| menu_row(ui, &style, &matches, row),
+            |ui, row| menu_row(ui, &style, &matches, role, row),
         );
+        // The keys choose from the list while the focus stays where they are typed.
+        let active = highlight.filter(|key| matches.find(*key).is_some());
+        for owner in [id, id.child("filter")] {
+            highlighted(ui, owner, active.map(|key| rows.child(key)));
+        }
         let entered = keys.contains(&NamedKey::Enter);
         clicked.or_else(|| {
             highlight
@@ -376,10 +496,14 @@ fn choose(
         })
     };
     ui.close();
-    ui.close();
     if let Some(row) = chosen {
-        ui.close_popup(id);
-        return Some(matches.order[row]);
+        let index = matches.order[row];
+        // A row opening a submenu opens it beside itself, keeping the menu, as `submenus` builds.
+        if !items[index].submenu {
+            ui.close_popup(id);
+            return Some((mode, index));
+        }
+        state(ui, id).submenu = Some((matches.key(row), Some(ui.now)));
     }
     let popup = state(ui, id);
     popup.query = query;
@@ -388,9 +512,39 @@ fn choose(
 }
 
 /// Builds a menu's row: the item's icon or check, its text and its shortcut, on the
-/// highlight when selected, under a rule when it starts a group.
-fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, row: Row) {
+/// highlight when selected, under a rule when it starts a group. In a dialog's list it is
+/// an option.
+fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, owner: Role, row: Row) {
     let item = &matches.items[row.key as usize];
+    let current = ui.current();
+    if let Some(node) = ui.access(current) {
+        node.set_role(match owner {
+            _ if item.heading => Role::Heading,
+            Role::Dialog => Role::ListBoxOption,
+            _ if item.checked.is_some() => Role::MenuItemCheckBox,
+            _ => Role::MenuItem,
+        });
+        node.set_label(item.text);
+        if let Some(checked) = item.checked {
+            node.set_toggled(checked.into());
+        }
+        if item.submenu {
+            node.set_has_popup(accesskit::HasPopup::Menu);
+            node.set_expanded(false);
+        }
+        if row.selected {
+            node.set_selected(true);
+        }
+        if item.disabled {
+            node.set_disabled();
+        }
+        match item.shortcut {
+            "" => {}
+            // A palette's trailing text may say where an option lies rather than its keys.
+            trailing if owner == Role::Dialog => node.set_description(trailing),
+            keys => node.set_keyboard_shortcut(keys),
+        }
+    }
     if row.index > 0 && matches.ruled && item.separated {
         ui.leaf(
             "rule",
@@ -424,16 +578,16 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, row: Row) {
         },
     );
     if matches.icons {
-        let tint = if item.colored && !item.checked {
-            [1.0, 1.0, 1.0, color[3]]
-        } else {
-            color
+        let checked = item.checked == Some(true);
+        let tint = match item.tint {
+            Some([red, green, blue, _]) if !checked => [red, green, blue, color[3]],
+            _ => color,
         };
         ui.leaf(
             "icon",
             Spec {
                 size: [px(ICON), fill()],
-                icon: if item.checked { Some(CHECK) } else { item.icon },
+                icon: if checked { Some(CHECK) } else { item.icon },
                 color: Some(if item.disabled {
                     mix(tint, style.fill, 0.5)
                 } else {
@@ -486,12 +640,12 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, row: Row) {
             ui.leaf("text", text);
         }
     }
-    if !item.shortcut.is_empty() {
+    if !item.trailing().is_empty() {
         ui.leaf(
             "shortcut",
             Spec {
                 size: [fit(), fill()],
-                text: Some(item.shortcut),
+                text: Some(item.trailing()),
                 font_size: Some(style.font_size),
                 color: Some(style.dim),
                 ..Spec::default()
@@ -501,15 +655,16 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, row: Row) {
     ui.close();
 }
 
-/// Builds popup `id` as a grid of `swatches` in rows of `columns` beside `anchor` while it
-/// is open, under a button labelled `none` for no colour of its own. Returns the swatch
-/// chosen, or None for the button.
+/// Builds popup `id` as a grid of `swatches`, each a colour and its name or `""` to be
+/// named by its hex, in rows of `columns` beside `anchor` while it is open, under a button
+/// labelled `none` for no colour of its own. Returns the swatch chosen, or None for the
+/// button.
 pub fn colors(
     ui: &mut Ui,
     id: Id,
     anchor: Anchor,
     none: &str,
-    swatches: &[[f32; 4]],
+    swatches: &[([f32; 4], &str)],
     columns: usize,
 ) -> Option<Option<[f32; 4]>> {
     if !ui.popup_open(id) {
@@ -557,7 +712,7 @@ pub fn colors(
     }
     if let Some(index) = chosen {
         ui.close_popup(id);
-        return Some((index > 0).then(|| swatches[index - 1]));
+        return Some((index > 0).then(|| swatches[index - 1].0));
     }
 
     let theme = ui.theme.clone();
@@ -565,6 +720,7 @@ pub fn colors(
     surface(
         ui,
         id,
+        Role::Menu,
         anchor,
         columns as f32 * CELL + 2.0 * ui.theme.menu().pad,
     );
@@ -577,6 +733,7 @@ pub fn colors(
             fill: lit(0),
             radius: 4.0,
             pad: [8.0, 0.0],
+            role: Some(Role::MenuItem),
             ..Spec::default()
         },
     );
@@ -589,7 +746,7 @@ pub fn colors(
                 ..Spec::default()
             },
         );
-        for (column, color) in colors.iter().enumerate() {
+        for (column, (color, name)) in colors.iter().enumerate() {
             let index = 1 + row * columns + column;
             ui.open_as(
                 cell(index),
@@ -599,9 +756,18 @@ pub fn colors(
                     fill: lit(index),
                     radius: 4.0,
                     pad: [3.0, 3.0],
+                    role: Some(Role::MenuItem),
                     ..Spec::default()
                 },
             );
+            if let Some(node) = ui.access(cell(index)) {
+                if name.is_empty() {
+                    let [red, green, blue] = draw::srgb_bytes(*color);
+                    node.set_label(format!("#{red:02X}{green:02X}{blue:02X}"));
+                } else {
+                    node.set_label(*name);
+                }
+            }
             ui.leaf(
                 "swatch",
                 Spec {
@@ -616,9 +782,17 @@ pub fn colors(
         }
         ui.close();
     }
+    highlighted(ui, id, highlight.map(cell));
     ui.close();
     state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
+}
+
+/// Tells assistive technology the keys of `id` highlight `cell`, as a focus within it.
+fn highlighted(ui: &mut Ui, id: Id, cell: Option<Id>) {
+    if let (Some(cell), Some(node)) = (cell, ui.access(id)) {
+        node.set_active_descendant(cell.node());
+    }
 }
 
 /// Builds popup `id` as a grid of `size` columns and rows beside `anchor` while it is open,
@@ -677,6 +851,7 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
     surface(
         ui,
         id,
+        Role::Menu,
         anchor,
         columns as f32 * CELL + 2.0 * ui.theme.menu().pad,
     );
@@ -718,9 +893,13 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
                     flags: Flags::CLICKABLE,
                     size: [px(CELL), px(CELL)],
                     pad: [3.0, 3.0],
+                    role: Some(Role::MenuItem),
                     ..Spec::default()
                 },
             );
+            if let Some(node) = ui.access(cell(row * columns + column)) {
+                node.set_label(format!("{}x{} Table", column + 1, row + 1));
+            }
             ui.leaf(
                 "square",
                 Spec {
@@ -740,6 +919,7 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
         ui.close();
     }
     ui.close();
+    highlighted(ui, id, highlight.map(cell));
     ui.close();
     state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
@@ -825,7 +1005,13 @@ pub fn gallery(
         .iter()
         .map(|group| group.columns as f32 * group.size[0])
         .fold(0.0, f32::max);
-    surface(ui, id, anchor, width + 2.0 * ui.theme.menu().pad);
+    surface(
+        ui,
+        id,
+        Role::Menu,
+        anchor,
+        width + 2.0 * ui.theme.menu().pad,
+    );
     let mut index = 0;
     for (number, group) in groups.iter().enumerate() {
         ui.leaf(
@@ -859,9 +1045,15 @@ pub fn gallery(
                         border: current.contains(&index).then_some(theme.accent),
                         radius: 4.0,
                         pad: [PAD, PAD],
+                        role: Some(Role::MenuItem),
                         ..Spec::default()
                     },
                 );
+                if current.contains(&index)
+                    && let Some(node) = ui.access(cell_id(index))
+                {
+                    node.set_selected(true);
+                }
                 cell(ui, index);
                 ui.close();
                 index += 1;
@@ -869,6 +1061,7 @@ pub fn gallery(
             ui.close();
         }
     }
+    highlighted(ui, id, highlight.map(cell_id));
     ui.close();
     state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
@@ -931,7 +1124,16 @@ pub fn color_picker(
     }
 
     let theme = ui.theme.clone();
-    surface(ui, id, anchor, FIELD[0] + 2.0 * ui.theme.menu().pad);
+    surface(
+        ui,
+        id,
+        Role::Dialog,
+        anchor,
+        FIELD[0] + 2.0 * ui.theme.menu().pad,
+    );
+    if let Some(node) = ui.access(id) {
+        node.set_label(title);
+    }
     let color = |hsl| {
         let [red, green, blue] = from_hsl(hsl);
         draw::srgb(red, green, blue)
@@ -1095,11 +1297,21 @@ fn from_hsl([hue, saturation, lightness]: [f32; 3]) -> [u8; 3] {
     [red, green, blue].map(|channel| ((channel + base) * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
-/// Opens popup `id`'s panel `width` wide beside `anchor`; the caller closes it.
-fn surface(ui: &mut Ui, id: Id, anchor: Anchor, width: f32) {
+/// Opens popup `id`'s panel, a `role` `width` wide beside `anchor`; the caller closes it.
+fn surface(ui: &mut Ui, id: Id, role: Role, anchor: Anchor, width: f32) {
     let style = ui.theme.menu();
     let pad = style.pad;
-    let anchor = match anchor {
+    // Level with its row, past the menu's edges.
+    let beside = ui
+        .popups
+        .iter()
+        .position(|popup| popup.id == id)
+        .and_then(|at| {
+            let [_, top, _, bottom] = ui.rect(ui.popups[at].beside?)?;
+            let [left, _, right, _] = ui.rect(ui.popups[at.checked_sub(1)?].id)?;
+            Some([left, top, right, bottom])
+        });
+    let anchor = match beside.map_or(anchor, Anchor::Right) {
         Anchor::Below([left, top, right, bottom]) => {
             Anchor::Below([left, top - PAD, right, bottom + PAD])
         }
@@ -1122,6 +1334,7 @@ fn surface(ui: &mut Ui, id: Id, anchor: Anchor, width: f32) {
         pad: [pad; 2],
         gap: pad,
         anchor: Some(anchor),
+        role: Some(role),
         ..Spec::default()
     };
     ui.open_as(id, spec);
@@ -1225,7 +1438,9 @@ impl<'a> Matches<'a> {
             rules,
             ruled,
             rule,
-            icons: items.iter().any(|item| item.icon.is_some() || item.checked),
+            icons: items
+                .iter()
+                .any(|item| item.icon.is_some() || item.checked == Some(true)),
         }
     }
 }

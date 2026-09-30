@@ -638,6 +638,16 @@ impl TextLayout {
         rect
     }
 
+    /// Each line's part of `selection` as a mark under the text runs: its left, its right
+    /// and the line's baseline.
+    pub fn underlines(&self, selection: Selection) -> Vec<[f32; 3]> {
+        selection
+            .geometry(&self.shaped)
+            .into_iter()
+            .map(|(rect, index)| [rect.x0 as f32, rect.x1 as f32, self.lines[index].baseline])
+            .collect()
+    }
+
     pub fn selection(&self, selection: Selection) -> Vec<BoundingBox> {
         selection
             .geometry(&self.shaped)

@@ -39,10 +39,6 @@ pub enum Structure {
     },
 }
 
-/// The colour OneNote 2010 gave each new notebook beside its default one, COLORREF
-/// (`corpus/notebook-management/native/new-notebook`).
-const NOTEBOOK_COLOR: u32 = 0x00aeba91;
-
 /// `current`, the path of a section, after `from` moved to `to`: a section moved itself,
 /// or one inside a moved group.
 fn follow(current: &str, from: &str, to: &str) -> String {
@@ -168,16 +164,44 @@ impl State {
         self.refresh()
     }
 
-    /// Asks where to create a notebook and creates it, as File, New does in OneNote.
+    /// Asks where to create a notebook and creates it, as File, New does in OneNote; the
+    /// panel starts in iCloud Drive, as Notes keeps notes there.
     pub(crate) fn new_notebook(&mut self) -> Result<(), Box<dyn Error>> {
-        let Some(root) = platform::pick_new("New Notebook", "My Notebook", "Create") else {
+        let icloud = crate::icloud::folder().or_else(crate::icloud::drive);
+        let Some(root) =
+            platform::pick_new("New Notebook", "My Notebook", "Create", icloud.as_deref())
+        else {
             return Ok(());
         };
+        self.create_notebook(root)
+    }
+
+    /// Opens the notebooks in the app's own iCloud Drive folder, or makes one there.
+    pub(crate) fn use_icloud(&mut self) -> Result<(), Box<dyn Error>> {
+        let folder = crate::icloud::folder().ok_or("iCloud Drive is off")?;
+        let mut notebooks: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)?
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+            .map(|entry| entry.path())
+            .collect();
+        notebooks.sort();
+        if notebooks.is_empty() {
+            return self.create_notebook(folder.join("My Notebook"));
+        }
+        for notebook in notebooks {
+            self.open_notebook(notebook.to_string_lossy().into_owned(), None);
+        }
+        Ok(())
+    }
+
+    /// Creates a notebook in the new folder `root` and opens it.
+    fn create_notebook(&mut self, root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
         let page = self.dated_page(None)?;
         let (cache, notify) = (self.cache.clone(), notify(self.proxy.clone()));
         self.load(move || {
             let location = std::path::absolute(&root)?.to_string_lossy().into_owned();
-            let notebook = Notebook::create(&location, &cache, NOTEBOOK_COLOR, &page)?;
+            let notebook = Notebook::create(&location, &cache, Notebook::NEW_COLOR, &page)?;
             let library = Arc::new(Library::created(&location, notebook, &cache));
             let path = library
                 .first_section()
@@ -187,6 +211,42 @@ impl State {
             Ok(Loaded::Section(Box::new(session), page))
         });
         Ok(())
+    }
+
+    /// Closes the notebooks in iCloud Drive once its account signs out or changes: their
+    /// folders go with the account. Replicas holding edits stay, the open section's also
+    /// exported as a recovery archive; signing in again and reopening publishes them.
+    pub(crate) fn icloud_account_changed(&mut self) {
+        let closing: Vec<Arc<Library>> = self
+            .notebooks
+            .iter()
+            .filter(|library| library.in_icloud())
+            .cloned()
+            .collect();
+        if let Some(session) = &self.session
+            && session.library.in_icloud()
+            && session
+                .section
+                .pending()
+                .is_ok_and(|pending| !pending.is_empty())
+            && let Some(folder) = platform::settings_dir().map(|folder| folder.join("Recovery"))
+        {
+            let archive = folder.join(format!(
+                "{}-{}.sqlite",
+                session.library.name,
+                crate::filetime()
+            ));
+            let exported = std::fs::create_dir_all(&folder)
+                .map_err(notebook::Error::from)
+                .and_then(|()| session.section.export_recovery(&archive));
+            if let Err(error) = exported {
+                eprintln!("{}: {error}", archive.display());
+            }
+        }
+        for library in closing {
+            self.close_notebook(&library);
+        }
+        crate::icloud::look_up(notify(self.proxy.clone()));
     }
 
     /// Closes `library`: its files stay, its offline copies go unless edits wait in them,
@@ -584,7 +644,7 @@ mod tests {
         std::fs::create_dir_all(&temporary).unwrap();
         let root = temporary.join("Managed");
         let cache = temporary.join("cache");
-        let mut notebook = Notebook::create(&root, &cache, NOTEBOOK_COLOR, &dated()).unwrap();
+        let mut notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &dated()).unwrap();
         for (folder, name) in [("", "New Section 2"), ("", "Binned")] {
             notebook.create_section(folder, name, &dated()).unwrap();
         }
@@ -816,7 +876,7 @@ mod tests {
         let root = temporary.join("Emptied");
         let location = root.to_str().unwrap();
         let cache = temporary.join("cache");
-        let mut notebook = Notebook::create(location, &cache, NOTEBOOK_COLOR, &dated()).unwrap();
+        let mut notebook = Notebook::create(location, &cache, Notebook::NEW_COLOR, &dated()).unwrap();
         notebook.create_group("", "Group").unwrap();
         notebook.create_section("Group", "Inner", &dated()).unwrap();
 

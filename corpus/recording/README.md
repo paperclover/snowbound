@@ -32,6 +32,30 @@ was not observed):
   click plays from the linked moment.
 - **Deleting** the recording removes AudioRecordingGuids from the page; the
   notes keep their links (`native/deleted`).
+- **Pause** while recording (the Pause button again resumes) leaves the pause
+  out of the clock; a note written while paused is not linked
+  (`native/read/paused-while-recording.xml`).
+- **See Playback** (on by default) highlights, as a selection, the note
+  linked last at or before the moment playing; the line saying when, linked at
+  0, is not highlighted (`native/read/onenote-see-playback.png`). When the
+  note playing is off screen OneNote scrolls just far enough to show it
+  (`native/read/onenote-see-playback-scrolls.png`: 60 lines between two
+  notes, played from the top of the page). A linked
+  note plays from five seconds before its moment, the default of Options,
+  Audio & Video (`native/read/onenote-audio-video-options.png`), which also
+  shows the default video profile, Windows Media Video 8 for Local Area Network
+  (256 Kbps). Control-Alt-P plays and Control-Alt-S stops; Control-Alt-A does
+  not record.
+- **Record Video** without a camera says "No camera available. Make sure the
+  camera is properly installed and connected." (`native/read/onenote-no-camera.png`).
+  Installing a virtual camera in the clone was refused, so OneNote's own video
+  recording was not observed.
+- **0x1c001cc8** is a run list of {u32 character position, u8 state} on text
+  objects, OneNote's proofing state: its page date and time and the line saying
+  when recording started always carry `00 00 00 00 03` (three recordings, all
+  pages of `native/`), typed text none or 0, 1 or 9 (a misspelling), equations
+  5. OneNote writes and rereads it itself and reads text without it, so
+  Snowbound writes it only on new pages' dates, as before.
 - **Attach File** of a .wav makes it a recording as well: identity,
   IRecordMedia 1 and its length (1,000 ms), listed on the page
   (`native/attached`). MS-ONE requires this of .wma, .mp3, .wav, .wmv, .avi and
@@ -61,5 +85,19 @@ is a fresh OneNote 2010 read: the same playlist, links, WMA bytes and the new
 link. Regenerate with `ONESTORE_RECORDING_EDIT_EXPORT`, then
 `tools/native_runner.py DIR COLD --expected-pages 2 --collect-notebook
 --screenshots`.
+
+`video/` is Record Video. `native/read/attached-video.xml` is OneNote
+attaching one file of each kind: .avi, .mpg and .wmv become recordings (kind 2,
+with their length), .mp4 and .mov plain files. OneNote played Motion JPEG AVI
+with PCM or IMA ADPCM sound, MPEG-1 and WMV 8 with pictures
+(`onenote-plays-attached-*.png`), but H.264 in AVI without them. `video/candidate`
+is `a_video_recording_stores_its_file_line_and_linked_notes_for_onenote` in
+`crates/snowbound/src/recording.rs`: two seconds of Motion JPEG at 320 by 240,
+15 a second, with 16 kHz PCM, as Snowbound records video. `video/cold` is a
+fresh OneNote 2010 read; OneNote played it from a linked note with See Playback
+highlighting it (`video/played-from-note.png`), and played what the macOS
+conversion makes of `video/camera.mov` (H.264 and AAC, as a capture session
+records) and what GStreamer recorded in a Debian 13 VM from its test sources
+(`video/onenote-plays-*.png`). Regenerate with `SNOWBOUND_VIDEO_EXPORT`.
 
 `tools/test_recording.py` checks the rows without a VM.

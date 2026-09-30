@@ -18,11 +18,9 @@ use winit::{
     error::EventLoopError,
     event_loop::{EventLoop, EventLoopProxy},
     platform::wayland::{EventLoopExtWayland, WindowAttributesExtWayland},
-    window::{Icon, ResizeDirection, Theme, Window, WindowAttributes},
+    window::{ResizeDirection, Theme, Window, WindowAttributes},
 };
 
-/// The name the desktop entry, the icon theme and window matching know the app by.
-const APP_ID: &str = "snowbound";
 /// The title bar's leading margin; the window controls sit at its trailing end.
 pub const LEADING: f32 = 8.0;
 /// The margin past the window controls.
@@ -40,10 +38,13 @@ static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 /// KWin leaves windows square.
 static BREEZE_RADIUS: AtomicU32 = AtomicU32::new(0);
 
-pub fn event_loop(_headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
+pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
     // Month and day names and date orders follow the user's locale; other categories stay C.
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
     let event_loop = EventLoop::with_user_event().build()?;
+    if !headless {
+        crate::desktop::prepare(&event_loop);
+    }
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     watch_settings(event_loop.create_proxy());
@@ -148,15 +149,18 @@ fn breeze_radius(connection: &zbus::blocking::Connection) -> Option<f32> {
 /// xdg-decoration and otherwise by winit's Adwaita frame; named so the desktop entry supplies
 /// the icon on Wayland, while X11 takes it from the window.
 pub fn window_attributes() -> WindowAttributes {
-    let icon = icon_pixels(64).and_then(|(side, rgba)| Icon::from_rgba(rgba, side, side).ok());
+    use crate::desktop::APP_ID;
     Window::default_attributes()
         .with_name(APP_ID, APP_ID)
-        .with_window_icon(icon)
+        .with_window_icon(crate::desktop::window_icon())
         .with_transparent(cuts_corners())
 }
 
-/// The window manager or the frame draws the title bar.
-pub fn install_title_bar(_: &Window) {}
+/// The window manager or the frame draws the title bar; the icon is the window's own where
+/// the compositor allows.
+pub fn install_title_bar(window: &Window) {
+    crate::desktop::set_toplevel_icon(window);
+}
 
 /// Wayland's clipboard through the window's own connection, as not every compositor offers
 /// a clipboard to clients without a window; X11's otherwise.
@@ -522,10 +526,20 @@ pub fn window_controls(ui: &mut Ui, window: &Window) {
                     hover_fill: Some(disc(0.18)),
                     radius: ui::shell::TOOL / 2.0,
                     center: true,
+                    role: Some(accesskit::Role::Button),
                     ..Spec::default()
                 },
             )
             .clicked;
+        let name = match *control {
+            "minimize" => "Minimize",
+            "maximize" if window.is_maximized() => "Restore",
+            "maximize" => "Maximize",
+            _ => "Close",
+        };
+        if let Some(node) = ui.access(ui.id(control)) {
+            node.set_label(name);
+        }
         match *control {
             _ if !clicked => {}
             "minimize" => window.set_minimized(true),
@@ -581,10 +595,15 @@ pub fn move_cursor() -> winit::window::CursorIcon {
     winit::window::CursorIcon::Move
 }
 
-/// Scrollbars overlay the content.
-pub fn scrollers() -> Option<ui::Scrollers> {
-    None
+/// No system border lies under the chrome.
+pub fn cover_border_line(_: &mut Ui, _: f32) {}
+
+pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
+    run()
 }
+
+/// The interface keeps fontconfig's font and scrollbars overlay the content.
+pub fn system_interface(_: &mut Ui) {}
 
 /// Resizing takes the window's edges.
 pub fn resize_grip(_: &mut Ui, _: &Window, _: [f32; 2]) {}
@@ -604,6 +623,11 @@ pub fn configure_presentation(_: &wgpu::Surface<'_>) {}
 
 #[cfg(feature = "wgpu")]
 pub fn commit_presentation(_: &Window) {}
+
+/// winit reports no tablet pressure here, so every stroke keeps its pen's width.
+pub fn pen_pressure() -> Option<f32> {
+    None
+}
 
 /// GTK's default double-click time.
 pub fn double_click_interval() -> Duration {
@@ -766,7 +790,7 @@ pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
 pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login, String> {
     let user = mount.user.clone().unwrap_or_default();
     let mut lookup = Command::new("secret-tool");
-    lookup.args(["lookup", "protocol", "smb", "server", &mount.server]);
+    lookup.args(["lookup", "protocol", "smb", "server", mount.host()]);
     if !user.is_empty() {
         lookup.args(["user", &user]);
     }
@@ -802,70 +826,55 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
     })
 }
 
+/// What the sign-in offers for keeping a password, where the Secret Service's tool is
+/// installed to keep it.
+pub fn remember_label() -> Option<&'static str> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .any(|folder| folder.join("secret-tool").is_file())
+        .then_some("Remember this password")
+}
+
+/// Keeps `login`'s password for `mount`'s server in the Secret Service, where `smb_login`
+/// and GNOME's file manager look for it.
+pub fn save_login(
+    mount: &crate::library::Mount,
+    login: &crate::library::Login,
+) -> Result<(), String> {
+    use std::io::Write;
+    let label = format!("{} on {}", login.user, mount.host());
+    let mut store = Command::new("secret-tool")
+        .args(["store", "--label", &label, "protocol", "smb"])
+        .args(["server", mount.host(), "user", &login.user])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    store
+        .stdin
+        .take()
+        .ok_or("The Secret Service didn't take the password")?
+        .write_all(login.password.as_bytes())
+        .map_err(|error| error.to_string())?;
+    match store.wait() {
+        Ok(status) if status.success() => Ok(()),
+        _ => Err("The Secret Service didn't keep the password".to_owned()),
+    }
+}
+
 pub fn settings_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
 /// The app's folder in the XDG base directory `variable` names, or in `fallback` under home.
 fn xdg_dir(variable: &str, fallback: &str) -> Option<PathBuf> {
-    Some(xdg_base(variable, fallback)?.join(APP_ID))
+    Some(xdg_base(variable, fallback)?.join("snowbound"))
 }
 
-fn xdg_base(variable: &str, fallback: &str) -> Option<PathBuf> {
+pub(crate) fn xdg_base(variable: &str, fallback: &str) -> Option<PathBuf> {
     std::env::var_os(variable)
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(fallback)))
-}
-
-/// Looks beside the executable first, as the release archive installs it, then in the
-/// XDG data directories.
-fn icon_pixels(pixels: u32) -> Option<(u32, Vec<u8>)> {
-    let home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
-    let system = std::env::var("XDG_DATA_DIRS")
-        .ok()
-        .filter(|dirs| !dirs.is_empty())
-        .unwrap_or_else(|| "/usr/local/share:/usr/share".into());
-    let roots: Vec<PathBuf> = std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(exe.parent()?.parent()?.join("share")))
-        .into_iter()
-        .chain(home)
-        .chain(std::env::split_paths(&system))
-        .collect();
-    let sizes = [16, 24, 32, 48, 64, 128, 256, 512];
-    let ordered = sizes
-        .iter()
-        .filter(|&&side| side >= pixels)
-        .chain(sizes.iter().rev().filter(|&&side| side < pixels));
-    ordered
-        .flat_map(|side| {
-            roots.iter().map(move |root| {
-                root.join(format!("icons/hicolor/{side}x{side}/apps/{APP_ID}.png"))
-            })
-        })
-        .find_map(|path| decode_rgba(&path))
-}
-
-fn decode_rgba(path: &std::path::Path) -> Option<(u32, Vec<u8>)> {
-    let file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
-    let mut decoder = png::Decoder::new(file);
-    decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().ok()?;
-    let mut pixels = vec![0; reader.output_buffer_size()?];
-    let frame = reader.next_frame(&mut pixels).ok()?;
-    pixels.truncate(frame.buffer_size());
-    let rgba = match frame.color_type {
-        png::ColorType::Rgba => pixels,
-        png::ColorType::Rgb => pixels
-            .chunks_exact(3)
-            .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 255])
-            .collect(),
-        _ => return None,
-    };
-    (frame.width == frame.height).then_some((frame.width, rgba))
 }
 
 /// The account's full name from its passwd entry, or its login where that has none.
@@ -1170,7 +1179,12 @@ pub fn pick_notebook(title: &str) -> Option<PathBuf> {
 }
 
 /// Asks where to put something named `name` by default; the dialog names its own button.
-pub fn pick_new(title: &str, name: &str, _action: &str) -> Option<PathBuf> {
+pub fn pick_new(
+    title: &str,
+    name: &str,
+    _action: &str,
+    _folder: Option<&std::path::Path>,
+) -> Option<PathBuf> {
     let asked = dialog(
         [
             "--file-selection",
@@ -1191,18 +1205,28 @@ pub fn pick_new(title: &str, name: &str, _action: &str) -> Option<PathBuf> {
 
 /// Tells the user something they asked for could not be done: `message`, then what to do.
 pub fn alert(message: &str, detail: &str) {
+    show(["--warning", "--sorry"], message, detail);
+}
+
+/// Tells the user how something they asked for turned out.
+pub fn inform(message: &str, detail: &str) {
+    show(["--info", "--msgbox"], message, detail);
+}
+
+/// Shows `message` and `detail` in zenity's or else kdialog's dialog of the `kinds`.
+fn show([zenity, kdialog]: [&'static str; 2], message: &str, detail: &str) {
     let (title, text) = (message.to_owned(), detail.to_owned());
     std::thread::spawn(move || {
         let shown = Command::new("zenity")
             .args([
-                "--warning",
+                zenity,
                 &format!("--title={title}"),
                 &format!("--text={text}"),
             ])
             .status()
             .or_else(|_| {
                 Command::new("kdialog")
-                    .args(["--sorry", &text, "--title", &title])
+                    .args([kdialog, &text, "--title", &title])
                     .status()
             });
         if shown.is_err() {

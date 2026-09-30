@@ -1,0 +1,15 @@
+{
+ "sections": [
+  "Alone.one"
+ ],
+ "pages": [
+  {
+   "section": "Alone.one",
+   "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:Title><one:OE><one:T><![CDATA[File alone]]></one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"300\" height=\"100\"/><one:OEChildren><one:OE><one:InsertedFile pathSource=\"__ASSETS__\\notes.txt\" preferredName=\"notes.txt\"/></one:OE></one:OEChildren></one:Outline></one:Page>"
+  },
+  {
+   "section": "Alone.one",
+   "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:Title><one:OE><one:T><![CDATA[Picture alone]]></one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"300\" height=\"100\"/><one:OEChildren><one:OE><one:Image format=\"png\"><one:Size width=\"64\" height=\"48\"/><one:Data>iVBORw0KGgoAAAANSUhEUgAAAEAAAAAwCAIAAAAuKetIAAAAj0lEQVR4nO3ZsQkDQQwF0bnhit7AoYMrx0W4DtfiAswaDgd7A37pRyAJZdoezxdlEidxEidxEidxErfPgjFuXMxx3E8MMCtYZUwWmj8hiZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4iZM4idu/ZBd8EXza/o/uxSRO4iRO4lzdwK/eahkMdcPZIWgAAAAASUVORK5CYII=</one:Data></one:Image></one:OE></one:OEChildren></one:Outline></one:Page>"
+  }
+ ]
+}

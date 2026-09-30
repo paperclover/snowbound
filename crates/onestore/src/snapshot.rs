@@ -23,29 +23,47 @@ pub(crate) fn read_exact(
 
 /// Reads a bounded snapshot; the caller must provide fresh I/O and exclude in-place maintenance.
 /// Includes unpublished trailing bytes so subsequent commits can validate the physical file.
+/// `None` is a torn read or storage that does not validate.
 pub fn read_snapshot(
     read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
     limit: usize,
 ) -> io::Result<Option<Vec<u8>>> {
-    snapshot(read, limit, |store| {
-        RevisionIndex::parse(store)?.validate_current()
-    })
+    let Some(bytes) = image(read, limit)? else {
+        return Ok(None);
+    };
+    let valid = Store::parse(&bytes).is_ok_and(|store| {
+        store.checksum_mismatches.is_empty()
+            && RevisionIndex::parse(&store).is_ok_and(|index| index.validate_current().is_ok())
+    });
+    Ok(valid.then_some(bytes))
 }
 
 /// Reads stable storage and checksums without requiring traversable property references.
 /// Used to inspect encrypted or incomplete documents; this does not establish edit readiness.
 /// The caller must provide fresh I/O and exclude in-place maintenance, as for `read_snapshot`.
+/// `None` is a torn read; stable storage that fails to parse or checksum is `InvalidData`.
 pub fn read_storage_snapshot(
     read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
     limit: usize,
 ) -> io::Result<Option<Vec<u8>>> {
-    snapshot(read, limit, |_| Ok(()))
+    let Some(bytes) = image(read, limit)? else {
+        return Ok(None);
+    };
+    let store =
+        Store::parse(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !store.checksum_mismatches.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Checksum mismatch",
+        ));
+    }
+    Ok(Some(bytes))
 }
 
-fn snapshot(
+/// The file's bytes, or `None` where its header changed or its storage ended early meanwhile.
+fn image(
     mut read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
     limit: usize,
-    validate: impl FnOnce(&Store<'_>) -> Result<(), crate::Error>,
 ) -> io::Result<Option<Vec<u8>>> {
     let mut header = [0; 1024];
     read_exact(&mut read, 0, &mut header)?;
@@ -82,15 +100,5 @@ fn snapshot(
     }
     let mut after = [0; 1024];
     read_exact(&mut read, 0, &mut after)?;
-    if header != after {
-        return Ok(None);
-    }
-    let parsed = Store::parse(&bytes).and_then(|store| {
-        if !store.checksum_mismatches.is_empty() {
-            return Ok(false);
-        }
-        validate(&store)?;
-        Ok(true)
-    });
-    Ok(matches!(parsed, Ok(true)).then_some(bytes))
+    Ok((header == after).then_some(bytes))
 }

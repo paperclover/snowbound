@@ -7,13 +7,16 @@ use crate::{
     menus::{Dragged, Target},
     rename, section_color,
 };
-use notebook::discover::{Folder, SectionState};
+use notebook::discover::{Folder, Reason, SectionState};
 use std::{collections::HashSet, sync::Arc};
 use ui::{Axis, Flags, Id, Signal, Spec, Theme, Ui, fill, fit, px};
 
 pub const WIDTH: f32 = 220.0;
 /// The square the sidebar's button stands in at the start of the section tabs.
 const RAIL: f32 = crate::TAB_ROW;
+/// How far below the row's middle the button and the header's title sit: the tabs stand
+/// on the row's foot, so their labels sit 1 to 3 pixels low.
+const DROP: f32 = 2.0;
 const ROW: f32 = 24.0;
 /// How far each level of the tree sits inside its parent.
 const INDENT: f32 = 16.0;
@@ -29,13 +32,15 @@ pub enum Action {
     Fold(String),
     NewNotebook,
     OpenNotebook,
+    /// Signs in again to the notebook opened from its server at this location.
+    SignIn(String),
     /// Opens the Options dialog, which macOS reaches from the application menu instead.
     Options,
     /// A row's context menu, opened here.
     Menu(Target, [f32; 2]),
     /// Ends renaming, with the name typed or without.
     Renamed(bool),
-    /// Explains why a section or group can't be read: its name and the reason.
+    /// Explains why a section or group can't be opened: the alert's title and message.
     Unavailable(String, String),
 }
 
@@ -126,15 +131,32 @@ impl Entry {
     }
 }
 
-/// The sidebar's header row, `header` tall, then with `rows` the tree of `notebooks` with
-/// the open section marked.
-fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32, rows: bool) {
+/// The header, whose empty space drags the window as the tab row's does.
+pub fn header() -> Id {
+    Id::ROOT.child("sidebar header")
+}
+
+/// The sidebar's header row, `header` tall and dragging the window when `drags`, then
+/// with `rows` the tree of `notebooks` with the open section marked.
+fn sidebar(
+    ui: &mut Ui,
+    tree: &mut Tree,
+    notebooks: &[Arc<Library>],
+    header: f32,
+    drags: bool,
+    rows: bool,
+) {
     let (theme, folded) = (tree.theme, tree.folded);
-    ui.open(
-        "header",
+    ui.open_as(
+        self::header(),
         Spec {
+            flags: if drags {
+                Flags::CLICKABLE
+            } else {
+                Flags::default()
+            },
             size: [fill(), px(header)],
-            pad: [crate::FRAME, (header - ui::shell::TOOL) / 2.0],
+            pad: [crate::FRAME, (header - ui::shell::TOOL) / 2.0 + DROP],
             gap: 6.0,
             ..Spec::default()
         },
@@ -179,7 +201,11 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
             ui.id(("notebook", index)),
             Row {
                 label: &library.name,
-                icon: Leading::Icon(art::NOTEBOOK),
+                icon: Leading::Icon(if library.in_icloud() {
+                    art::ICLOUD
+                } else {
+                    art::NOTEBOOK
+                }),
                 depth: 0,
                 dim: library.notebook.is_err(),
                 fold: Some(unfolded),
@@ -187,7 +213,11 @@ fn sidebar(ui: &mut Ui, tree: &mut Tree, notebooks: &[Arc<Library>], header: f32
                 renamed: false,
             },
         );
-        if row.clicked || fold {
+        let unsigned = library.notebook.is_err()
+            && crate::library::server_address(&library.location).is_some();
+        if row.clicked && unsigned {
+            tree.action = Some(Action::SignIn(library.location.clone()));
+        } else if row.clicked || fold {
             tree.action = Some(Action::Fold(key));
         }
         if let Some(point) = row.context {
@@ -378,7 +408,16 @@ fn folder(
             },
         );
         if row.clicked {
-            tree.action = Some(Action::Unavailable(name, entry.error.clone()));
+            tree.action = Some(match entry.reason {
+                Reason::Denied => Action::Unavailable(
+                    format!("Can't read \u{201c}{name}\u{201d}"),
+                    format!("{}\n\nIt appears here once you have access.", entry.error),
+                ),
+                _ => Action::Unavailable(
+                    format!("Can't open \u{201c}{name}\u{201d}"),
+                    format!("{}.", entry.error),
+                ),
+            });
         }
     }
 }
@@ -550,9 +589,18 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
             pad: [6.0 + INDENT * row.depth as f32, 0.0],
             // The field's text stands where the label did.
             gap: if row.renamed { 6.0 - rename::PAD } else { 6.0 },
+            role: Some(accesskit::Role::TreeItem),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_label(row.label);
+        node.set_level(row.depth as usize + 1);
+        node.set_selected(row.selected.is_some());
+        if let Some(unfolded) = row.fold {
+            node.set_expanded(unfolded);
+        }
+    }
     let color = if row.dim { theme.text_dim } else { theme.text };
     let (icon, [red, green, blue, _]) = match row.icon {
         Leading::Icon(icon) => (icon, theme.text),
@@ -599,11 +647,17 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
                     ui::shell::CHEVRON
                 }),
                 color: Some(theme.text_dim),
+                role: Some(accesskit::Role::Button),
                 ..Spec::default()
             },
         )
         .clicked
     });
+    if let Some(unfolded) = row.fold
+        && let Some(node) = ui.access(id.child("fold"))
+    {
+        node.set_label(if unfolded { "Collapse" } else { "Expand" });
+    }
     ui.close();
     (ui.signal(id), folded)
 }
@@ -638,9 +692,11 @@ impl crate::State {
             Spec {
                 axis: Axis::Y,
                 size: [px(WIDTH), fill()],
+                role: Some(accesskit::Role::Tree),
                 ..Spec::default()
             },
         );
+        crate::name(&mut self.ui, rows_id, "Notebooks");
         let open = self.session.as_ref().and_then(|session| {
             let index = self
                 .notebooks
@@ -648,6 +704,7 @@ impl crate::State {
                 .position(|library| Arc::ptr_eq(library, &session.library))?;
             Some((index, session.tabs[session.tab].path.as_str()))
         });
+        let drags = self.chrome_drags();
         let mut tree = Tree::new(theme, open, &self.folded, self.renaming.as_mut());
         tree.lifted = self
             .drag
@@ -662,6 +719,7 @@ impl crate::State {
             &mut tree,
             &self.notebooks,
             crate::TAB_ROW,
+            drags,
             width > 0.5,
         );
         let Tree {
@@ -697,11 +755,11 @@ impl crate::State {
             Some(Action::Renamed(keep)) => self.finish_renaming(keep),
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
             Some(Action::OpenNotebook) => self.commands.push(crate::Command::OpenNotebook),
+            Some(Action::SignIn(location)) => self
+                .commands
+                .push(crate::Command::OpenFromServer(Some(location))),
             Some(Action::Options) => self.open_options(),
-            Some(Action::Unavailable(name, error)) => crate::platform::alert(
-                &format!("Can't read \u{201c}{name}\u{201d}"),
-                &format!("{error}\n\nIt appears here once you have access."),
-            ),
+            Some(Action::Unavailable(title, message)) => crate::platform::alert(&title, &message),
             Some(Action::Open { .. }) | None => {}
         }
         width
@@ -721,12 +779,14 @@ impl crate::State {
             Spec {
                 flags: Flags::FLOAT | Flags::CLIP,
                 size: [px(RAIL), px(height)],
-                pad: [(RAIL - ui::shell::TOOL) / 2.0; 2],
+                pad: [
+                    (RAIL - ui::shell::TOOL) / 2.0,
+                    (RAIL - ui::shell::TOOL) / 2.0 + DROP,
+                ],
                 ..Spec::default()
             },
         );
-        if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, theme.text, false).clicked
-        {
+        if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, theme.text, None).clicked {
             self.sidebar = !self.sidebar;
             self.save_settings();
         }
@@ -955,10 +1015,23 @@ impl crate::State {
     /// Shows the notebook at `location` at `section`, or its first section, opening it
     /// unless it is open.
     pub(crate) fn open_notebook(&mut self, location: String, section: Option<String>) {
+        self.open_notebook_with(location, section, |location, cache| {
+            Ok(Library::notebook(location, cache))
+        });
+    }
+
+    /// Shows the notebook at `location` as `open_notebook` does, reading it with `read` unless
+    /// it is open and readable.
+    pub(crate) fn open_notebook_with(
+        &mut self,
+        location: String,
+        section: Option<String>,
+        read: impl FnOnce(&str, &std::path::Path) -> Result<Library, String> + Send + 'static,
+    ) {
         let open = self
             .notebooks
             .iter()
-            .find(|library| library.location == location)
+            .find(|library| library.location == location && library.notebook.is_ok())
             .cloned();
         // The notebook shown already shows a section, which only one reader may hold.
         if let Some(session) = &self.session
@@ -971,7 +1044,10 @@ impl crate::State {
         }
         let (cache, notify) = (self.cache.clone(), crate::notify(self.proxy.clone()));
         self.load(move || {
-            let library = open.unwrap_or_else(|| Arc::new(Library::notebook(&location, &cache)));
+            let library = match open {
+                Some(library) => library,
+                None => Arc::new(read(&location, &cache)?),
+            };
             if let Err(error) = &library.notebook {
                 return Err(error.clone().into());
             }
@@ -989,25 +1065,52 @@ impl crate::State {
     /// what is missing, and the two ways to start.
     pub(crate) fn welcome(&mut self, theme: &Theme) {
         let id = self.ui.id("welcome");
+        #[cfg(target_os = "linux")]
+        let install = crate::desktop::installable().then_some((
+            "install",
+            art::PLUS,
+            "Install Snowbound",
+            crate::Command::Install,
+        ));
+        #[cfg(not(target_os = "linux"))]
+        let install = None;
         self.notice(
             theme,
             id,
             theme.base,
             "No notebooks open",
-            vec![
-                (
-                    "new",
-                    art::PLUS,
-                    "New Notebook",
-                    crate::Command::NewNotebook,
-                ),
-                (
-                    "open",
-                    art::NOTEBOOK,
-                    "Open Existing",
-                    crate::Command::OpenNotebook,
-                ),
-            ],
+            crate::icloud::folder()
+                .map(|_| {
+                    (
+                        "icloud",
+                        art::ICLOUD,
+                        "Use iCloud Drive",
+                        crate::Command::UseICloud,
+                    )
+                })
+                .into_iter()
+                .chain([
+                    (
+                        "new",
+                        art::PLUS,
+                        "New Notebook",
+                        crate::Command::NewNotebook,
+                    ),
+                    (
+                        "open",
+                        art::NOTEBOOK,
+                        "Open Existing",
+                        crate::Command::OpenNotebook,
+                    ),
+                    (
+                        "server",
+                        art::SERVER,
+                        "Open Notebook from Server…",
+                        crate::Command::OpenFromServer(None),
+                    ),
+                ])
+                .chain(install)
+                .collect(),
         );
     }
 
@@ -1020,9 +1123,10 @@ impl crate::State {
                 folder: String::new(),
             },
         );
+        let id = self.ui.id("no sections");
         self.notice(
             theme,
-            crate::page(),
+            id,
             theme.strip,
             "No sections in this notebook",
             vec![("new", art::PLUS, "New Section", new)],
@@ -1039,7 +1143,7 @@ impl crate::State {
         title: &str,
         buttons: Vec<(&str, &'static [&'static str], &str, crate::Command)>,
     ) {
-        const BUTTON: [f32; 2] = [200.0, 32.0];
+        const BUTTON: [f32; 2] = [240.0, 32.0];
         let [left, top, right, bottom] = self.ui.rect(id).unwrap_or_default();
         self.ui.open_as(
             id,
@@ -1086,6 +1190,7 @@ impl crate::State {
                     hover_border: Some(theme.accent),
                     radius: 6.0,
                     center: true,
+                    role: Some(accesskit::Role::Button),
                     ..Spec::default()
                 },
             );

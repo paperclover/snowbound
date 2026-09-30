@@ -1,0 +1,13 @@
+{
+  "exit": 0,
+  "stdout": "",
+  "stderr": "",
+  "w": 800,
+  "h": 600,
+  "error": null,
+  "win": {
+    "title": "Mac: Fictitious: caf\u00e9, \u6771\u4eac, \u0645\u0631\u062d\u0628\u0627 - Microsoft OneNote",
+    "class": "Framework::CFrame",
+    "dialog": false
+  }
+}

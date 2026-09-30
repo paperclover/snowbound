@@ -82,11 +82,17 @@ pub trait Storage: Send + Sync {
     fn location(&self) -> String;
     fn exists(&self, path: &str) -> bool;
     fn read(&self, path: &str) -> Result<Vec<u8>>;
+    /// Reads a file of at most `limit` bytes as it stands, whatever it holds.
+    fn read_file(&self, path: &str, limit: usize) -> Result<Vec<u8>>;
     /// Creates a file holding `bytes`; an existing file is an error.
     fn create(&self, path: &str, bytes: &[u8]) -> Result<()>;
     fn create_directory(&self, path: &str) -> Result<()>;
+    /// Gives a file or directory the Windows hidden attribute, where the storage keeps one.
+    fn hide(&self, path: &str) -> Result<()>;
     /// Renames or moves a file or directory; an existing target is an error.
     fn rename(&self, from: &str, to: &str) -> Result<()>;
+    /// Renames a file over another, replacing it.
+    fn replace(&self, from: &str, to: &str) -> Result<()>;
     /// Deletes a file or an empty directory.
     fn delete(&self, path: &str) -> Result<()>;
     /// Names a section or TOC file for its notebook, as `onestore::place`.
@@ -137,8 +143,24 @@ impl Storage for Directory {
         Ok(onestore::read_file(self.path(path))?)
     }
 
+    fn read_file(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(self.path(path))?
+            .take(limit as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err(io::Error::from(io::ErrorKind::FileTooLarge).into());
+        }
+        Ok(bytes)
+    }
+
     fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
-        std::fs::File::create_new(self.path(path))?.write_all(bytes)?;
+        let path = self.path(path);
+        if discover::placeholder(&path).is_some_and(|placeholder| placeholder.exists()) {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+        }
+        std::fs::File::create_new(path)?.write_all(bytes)?;
         Ok(())
     }
 
@@ -146,7 +168,29 @@ impl Storage for Directory {
         Ok(std::fs::create_dir(self.path(path))?)
     }
 
+    /// macOS keeps the attribute as `UF_HIDDEN`, and passes it on to a share it mounted.
+    fn hide(&self, path: &str) -> Result<()> {
+        #[cfg(target_vendor = "apple")]
+        {
+            use nix::sys::stat::{FileFlag, stat};
+            let path = self.path(path);
+            let flags = stat(&path).map_err(io::Error::from)?.st_flags;
+            let flags = FileFlag::from_bits_retain(flags);
+            if !flags.contains(FileFlag::UF_HIDDEN) {
+                nix::unistd::chflags(&path, flags | FileFlag::UF_HIDDEN)
+                    .map_err(io::Error::from)?;
+            }
+        }
+        #[cfg(not(target_vendor = "apple"))]
+        let _ = path;
+        Ok(())
+    }
+
     fn rename(&self, from: &str, to: &str) -> Result<()> {
+        Ok(std::fs::rename(self.path(from), self.path(to))?)
+    }
+
+    fn replace(&self, from: &str, to: &str) -> Result<()> {
         Ok(std::fs::rename(self.path(from), self.path(to))?)
     }
 
@@ -201,7 +245,7 @@ impl Storage for Share {
     }
 
     fn location(&self) -> String {
-        format!("{}/{}", self.client.share(), self.root)
+        self.client.location(&self.root)
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -217,6 +261,10 @@ impl Storage for Share {
             .read_storage(&self.path(path), 256 * 1024 * 1024)?)
     }
 
+    fn read_file(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
+        Ok(self.client.read_asset(&self.path(path), limit)?)
+    }
+
     fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
         Ok(self.client.create(&self.path(path), bytes)?)
     }
@@ -225,8 +273,16 @@ impl Storage for Share {
         Ok(self.client.create_directory(&self.path(path))?)
     }
 
+    fn hide(&self, path: &str) -> Result<()> {
+        Ok(self.client.hide(&self.path(path))?)
+    }
+
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         Ok(self.client.rename(&self.path(from), &self.path(to))?)
+    }
+
+    fn replace(&self, from: &str, to: &str) -> Result<()> {
+        Ok(self.client.replace(&self.path(from), &self.path(to))?)
     }
 
     fn delete(&self, path: &str) -> Result<()> {
@@ -266,6 +322,10 @@ pub struct Notebook {
 }
 
 impl Notebook {
+    /// The colour OneNote 2010 gives each new notebook beside its default one, COLORREF
+    /// (`corpus/notebook-management/native/new-notebook`).
+    pub const NEW_COLOR: u32 = 0x00aeba91;
+
     pub fn open(root: impl AsRef<Path>, cache: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().canonicalize()?;
         Self::with(Box::new(Directory(root.clone())), Some(root), cache)
@@ -297,7 +357,7 @@ impl Notebook {
         cache: impl AsRef<Path>,
     ) -> Result<Self> {
         let root = root.replace('\\', "/");
-        let copies = cache.as_ref().join("smb");
+        let copies = crate::location::folder(cache.as_ref(), &client.location(&root));
         Self::with(
             Box::new(Share {
                 client,
@@ -327,6 +387,31 @@ impl Notebook {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let catalog = storage.discover(&mut read, LIMITS)?;
+        let location = storage.location();
+        let mut claims: BTreeMap<String, Vec<([u8; 16], &str)>> = BTreeMap::new();
+        let mut folders = vec![&catalog];
+        while let Some(folder) = folders.pop() {
+            for section in &folder.sections {
+                let identity = match (&root, &section.state) {
+                    (Some(_), discover::SectionState::Readable { document, .. }) => *document,
+                    (None, discover::SectionState::Readable { .. }) => section.file_id,
+                    _ => continue,
+                };
+                claims
+                    .entry(replica_location(&location, section))
+                    .or_default()
+                    .push((identity, &section.path));
+            }
+            folders.extend(&folder.groups);
+        }
+        for (at, sections) in &claims {
+            let identities: Vec<[u8; 16]> =
+                sections.iter().map(|(identity, _)| *identity).collect();
+            crate::location::claim(&cache, at, &identities, |identity| {
+                let (_, path) = sections.iter().find(|(held, _)| held == identity)?;
+                Stamp::of(&storage.read(path).ok()?).ok()
+            })?;
+        }
         let notebook = Self {
             storage,
             root,
@@ -353,6 +438,30 @@ impl Notebook {
 
     pub fn catalog(&self) -> &discover::Folder {
         &self.catalog
+    }
+
+    /// The tags the notebook draws with Snowbound's art (`crate::sidecar`); none where it
+    /// maps none.
+    pub fn tag_art(&self) -> Result<Vec<crate::sidecar::TagMapping>> {
+        crate::sidecar::mappings(&*self.storage)
+    }
+
+    /// The picture a mapping names, once its bytes match its name.
+    pub fn tag_art_file(&self, art: &str) -> Result<Vec<u8>> {
+        crate::sidecar::art(&*self.storage, art)
+    }
+
+    /// Maps tag `name` with symbol `shape` to picture `bytes`, a PNG or SVG as `extension`
+    /// says, making the notebook's hidden `.snowbound` folder where it has none. Returns the
+    /// notebook's mappings as they then stand.
+    pub fn map_tag_art(
+        &self,
+        name: &str,
+        shape: u16,
+        bytes: &[u8],
+        extension: &str,
+    ) -> Result<Vec<crate::sidecar::TagMapping>> {
+        crate::sidecar::map(&*self.storage, name, shape, bytes, extension)
     }
 
     /// Rereads the notebook and reports what changed since the last catalog, keyed by
@@ -941,22 +1050,30 @@ impl Notebook {
         Ok(())
     }
 
-    /// Where the replica of the section at catalog `path` lives: named by the section's
-    /// document identity in a mounted notebook (`Section::open`), by its file identity under
-    /// `smb` on a share. It exists once the section has been opened.
+    /// Where the replica of the section at catalog `path` lives, in the notebook's
+    /// `location::folder`: named by the section's document identity in a mounted notebook
+    /// (`Section::open`), by its file identity on a share. It exists once the section has
+    /// been opened.
     pub fn replica_path(&self, path: &str) -> Result<PathBuf> {
         let section = self.section_path(path)?;
+        let folder = self.replica_folder(section);
         Ok(match (&self.root, &section.state) {
             (Some(_), discover::SectionState::Readable { document, .. }) => {
-                replica_file(&self.cache, document)
+                replica_file(&folder, document)
             }
             (Some(_), _) => {
                 let image = self.storage.read(&section.path)?;
                 let root = RevisionIndex::parse(&Store::parse(&image)?)?.root;
-                replica_file(&self.cache, &root.guid)
+                replica_file(&folder, &root.guid)
             }
-            (None, _) => replica_file(&self.cache.join("smb"), &section.file_id),
+            (None, _) => replica_file(&folder, &section.file_id),
         })
+    }
+
+    /// The `location::folder` holding the replica of `section`.
+    fn replica_folder(&self, section: &discover::Section) -> PathBuf {
+        let location = replica_location(&self.storage.location(), section);
+        crate::location::folder(&self.cache, &location)
     }
 
     /// Every readable section, for `Background::watch`, handing on the files the last
@@ -1040,7 +1157,8 @@ impl Notebook {
         connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Section> {
-        let path = self.section_path(path)?.path.clone();
+        let section = self.section_path(path)?;
+        let (path, replicas) = (section.path.clone(), self.replica_folder(section));
         let Some(root) = &self.root else {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -1053,7 +1171,11 @@ impl Notebook {
         if !file.starts_with(root) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
         }
-        Section::open_with(file, &self.cache, connect, notify)
+        let replica = |identity: &[u8; 16], _: &[u8]| {
+            std::fs::create_dir_all(&replicas)?;
+            Ok(replica_file(&replicas, identity))
+        };
+        Section::open_in(file, replica, connect, notify)
     }
 }
 
@@ -1156,6 +1278,17 @@ fn catalog_path(folder: &str, name: &str) -> String {
     }
 }
 
+/// The location keying the replica of `section` in the notebook at `notebook`: the notebook's,
+/// so that a section renamed or moved within it keeps its replica, or for a copy of another
+/// section of the notebook its own file's.
+fn replica_location(notebook: &str, section: &discover::Section) -> String {
+    if section.copy {
+        format!("{notebook}/{}", section.path)
+    } else {
+        notebook.to_owned()
+    }
+}
+
 /// The replica in `cache` of the section `identity` names.
 pub(crate) fn replica_file(cache: &Path, identity: &[u8; 16]) -> PathBuf {
     let name: String = identity.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -1212,6 +1345,10 @@ pub enum SyncState {
     NotConnected,
     /// The file cannot be written where it is stored.
     ReadOnly,
+    /// The section is password protected, which Snowbound cannot open.
+    Protected,
+    /// The file is stably not a section Snowbound can read.
+    Unreadable,
     Failed,
 }
 
@@ -1221,6 +1358,8 @@ impl SyncStatus {
         match self.error.as_ref().map(io::Error::kind) {
             Some(PermissionDenied | ReadOnlyFilesystem) => SyncState::ReadOnly,
             Some(WouldBlock | ResourceBusy) => SyncState::InUse,
+            Some(Unsupported) => SyncState::Protected,
+            Some(InvalidData) => SyncState::Unreadable,
             Some(
                 NotFound | ConnectionRefused | ConnectionReset | ConnectionAborted | NotConnected
                 | TimedOut | HostUnreachable | NetworkUnreachable | NetworkDown | BrokenPipe
@@ -1249,9 +1388,9 @@ pub struct Section {
 }
 
 impl Section {
-    /// Opens the section file through a replica in `cache`, creating the replica from the
-    /// file on first use and converting an older one. `notify` runs on a background thread
-    /// whenever an event is available.
+    /// Opens the lone section file through a replica in `cache`, in the file's
+    /// `location::folder`, creating the replica from the file on first use and converting an
+    /// older one. `notify` runs on a background thread whenever an event is available.
     pub fn open(
         file: impl AsRef<Path>,
         cache: impl AsRef<Path>,
@@ -1266,15 +1405,32 @@ impl Section {
     pub fn open_with<R: Remote + 'static>(
         file: impl AsRef<Path>,
         cache: impl AsRef<Path>,
-        mut connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
+        connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Self> {
         let file = file.as_ref().canonicalize()?;
+        let location = file.to_string_lossy().into_owned();
+        let replicas = |identity: &[u8; 16], source: &[u8]| {
+            let folder = crate::location::claim(cache.as_ref(), &location, &[*identity], |_| {
+                Stamp::of(source).ok()
+            })?;
+            Ok(replica_file(&folder, identity))
+        };
+        Self::open_in(file, replicas, connect, notify)
+    }
+
+    /// Opens the canonical section `file` through the replica `replica` names for its document
+    /// identity and image.
+    fn open_in<R: Remote + 'static>(
+        file: PathBuf,
+        replica: impl FnOnce(&[u8; 16], &[u8]) -> Result<PathBuf>,
+        mut connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
         let source = connect(&file)?.read()?;
         let store = Store::parse(&source)?;
         let identity = RevisionIndex::parse(&store)?.root;
-        std::fs::create_dir_all(&cache)?;
-        let cache = replica_file(cache.as_ref(), &identity.guid);
+        let cache = replica(&identity.guid, &source)?;
         let replica = if cache.exists() {
             Replica::open(&cache)?
         } else {
@@ -1553,6 +1709,14 @@ impl Section {
     pub fn wake(&self) {
         if let Some(worker) = &self.worker {
             worker.wake();
+        }
+    }
+
+    /// Publishes local edits once `pause` passes without another (`SyncWorker::set_pause`),
+    /// as a notebook on a cloud drive does; `wake` publishes them at once.
+    pub fn set_pause(&self, pause: Duration) {
+        if let Some(worker) = &self.worker {
+            worker.set_pause(pause);
         }
     }
 

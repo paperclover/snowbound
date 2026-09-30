@@ -66,6 +66,67 @@ pub struct ObjectLayout {
     pub kind: ObjectKind,
     /// Outline-local bottom of the whole object, label included.
     pub bottom: f32,
+    pub tags: Option<BlockTags>,
+}
+
+/// The note tags of a table, picture or file, which OneNote centres on it in the tag column.
+#[derive(Clone)]
+pub struct BlockTags {
+    /// The paragraph holding the block.
+    pub paragraph: ExGuid,
+    /// Its siblings' group, whose list markers the tags clear.
+    parent: Option<ExGuid>,
+    /// The block's left edge, outline-local.
+    x: f32,
+    /// Origins are outline-local.
+    pub tags: Vec<ParagraphTag>,
+}
+
+impl BlockTags {
+    /// `node`'s tags and those of its content, `content`, shaped as a tagged paragraph of
+    /// `node`'s format would show them; `None` without any.
+    fn new(
+        node: &PageParagraph,
+        content: &[onestore::document::Tag],
+        x: f32,
+        shape: &mut impl FnMut(
+            &PageParagraph,
+            Option<&Count>,
+            f32,
+            &[f32],
+        ) -> Result<ParagraphLayout, LayoutError>,
+    ) -> Result<Option<Self>, LayoutError> {
+        if node.tags.is_empty() && content.is_empty() {
+            return Ok(None);
+        }
+        let mut tagged = caption(node.id, node.id, "", node.format.clone());
+        tagged.tags.clone_from(&node.tags);
+        if let ParagraphContent::Text(text) = &mut tagged.content {
+            text.tags = content.to_vec();
+        }
+        let tags = shape(&tagged, None, ATTACHMENT_WIDTH, &[0.0, 0.0])?.tags;
+        Ok(Some(Self {
+            paragraph: node.id,
+            parent: node.parent,
+            x,
+            tags,
+        }))
+    }
+
+    /// Centres the tags on a block spanning `top..bottom`.
+    fn centre(&mut self, top: f32, bottom: f32) {
+        for tag in &mut self.tags {
+            tag.origin[1] = (top + bottom - tag.size) / 2.0;
+        }
+    }
+
+    fn offset(&mut self, [x, y]: [f32; 2]) {
+        self.x += x;
+        for tag in &mut self.tags {
+            tag.origin[0] += x;
+            tag.origin[1] += y;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -121,6 +182,10 @@ impl ObjectLayout {
         if let ObjectKind::File(label) | ObjectKind::Unsupported(label) = &mut self.kind {
             label.origin[1] = label_top;
         }
+        let [_, top, _, bottom] = self.bounds();
+        if let Some(tags) = &mut self.tags {
+            tags.centre(top, bottom);
+        }
         flow
     }
 }
@@ -131,19 +196,27 @@ fn verticals<'a>(
     tables: &'a mut [TableLayout],
     objects: &'a mut [ObjectLayout],
 ) -> impl Iterator<Item = &'a mut f32> {
-    let cells = tables.iter_mut().flat_map(|table| &mut table.cells);
+    let tags = |tags: &'a mut Option<BlockTags>| {
+        tags.iter_mut()
+            .flat_map(|tags| &mut tags.tags)
+            .map(|tag| &mut tag.origin[1])
+    };
     paragraphs
         .iter_mut()
         .map(|paragraph| &mut paragraph.origin[1])
-        .chain(cells.flat_map(|cell| {
-            let [_, top, _, bottom] = &mut cell.rect;
-            [top, bottom]
+        .chain(tables.iter_mut().flat_map(move |table| {
+            let cells = table.cells.iter_mut().flat_map(|cell| {
+                let [_, top, _, bottom] = &mut cell.rect;
+                [top, bottom]
+            });
+            cells.chain(tags(&mut table.tags))
         }))
-        .chain(objects.iter_mut().flat_map(|object| {
+        .chain(objects.iter_mut().flat_map(move |object| {
             let ObjectLayout {
                 rect: [_, top, _, end],
                 bottom,
                 kind,
+                tags: block,
                 ..
             } = object;
             let label = match kind {
@@ -152,7 +225,10 @@ fn verticals<'a>(
                 }
                 ObjectKind::Picture | ObjectKind::Ink(_) => None,
             };
-            [top, end, bottom].into_iter().chain(label)
+            [top, end, bottom]
+                .into_iter()
+                .chain(label)
+                .chain(tags(block))
         }))
 }
 
@@ -167,6 +243,7 @@ pub struct TableLayout {
     /// Cells are in paragraph order with disjoint visible ranges.
     pub cells: Vec<CellLayout>,
     pub borders: bool,
+    pub tags: Option<BlockTags>,
 }
 
 #[derive(Clone)]
@@ -515,6 +592,7 @@ fn file_column(
         rect: [left, 0.0, left + w, 0.0],
         kind: ObjectKind::File(label),
         bottom: 0.0,
+        tags: None,
     };
     Ok((object, h))
 }
@@ -1104,13 +1182,16 @@ impl ParagraphLayout {
         self.markers.iter().map(|(_, [x, _])| *x).reduce(f32::min)
     }
 
-    /// Places the tags for siblings whose leftmost marker starts at `marker`; later tags
-    /// follow the first to its right, toward the text.
     fn place_tags(&mut self, marker: Option<f32>) {
-        for (index, tag) in self.tags.iter_mut().enumerate() {
-            tag.origin[0] =
-                ParagraphTag::column(self.origin[0], marker, tag.size) + tag.size * index as f32;
-        }
+        place_tags(&mut self.tags, self.origin[0], marker);
+    }
+}
+
+/// Places the tags of content at `x` among siblings whose leftmost marker starts at
+/// `marker`; later tags follow the first to its right, toward the content.
+fn place_tags(tags: &mut [ParagraphTag], x: f32, marker: Option<f32>) {
+    for (index, tag) in tags.iter_mut().enumerate() {
+        tag.origin[0] = ParagraphTag::column(x, marker, tag.size) + tag.size * index as f32;
     }
 }
 
@@ -1136,8 +1217,37 @@ impl OutlineLayout {
         -self
             .paragraphs
             .iter()
-            .map(|p| p.tags.iter().skip(1).map(|tag| tag.size).sum::<f32>())
+            .map(|p| p.tags.as_slice())
+            .chain(self.block_tags().map(|block| block.tags.as_slice()))
+            .map(|tags| tags.iter().skip(1).map(|tag| tag.size).sum::<f32>())
             .fold(0.0, f32::max)
+    }
+
+    fn block_tags(&self) -> impl Iterator<Item = &BlockTags> {
+        let tables = self.tables.iter().filter_map(|table| table.tags.as_ref());
+        tables.chain(
+            self.objects
+                .iter()
+                .filter_map(|object| object.tags.as_ref()),
+        )
+    }
+
+    /// Every note tag the outline draws, with the paragraph it marks and its outline-local
+    /// origin before `tag_column_offset`.
+    pub fn tags(&self) -> impl Iterator<Item = (ExGuid, [f32; 2], &ParagraphTag)> {
+        let text = self.paragraphs.iter().flat_map(|paragraph| {
+            paragraph.tags.iter().map(move |tag| {
+                let y = paragraph.origin[1] + tag.origin[1];
+                (paragraph.id, [tag.origin[0], y], tag)
+            })
+        });
+        let blocks = self.block_tags().flat_map(|block| {
+            block
+                .tags
+                .iter()
+                .map(|tag| (block.paragraph, tag.origin, tag))
+        });
+        text.chain(blocks)
     }
 
     /// Innermost table cell containing a visible paragraph index.
@@ -1172,15 +1282,22 @@ impl OutlineLayout {
                     *value += offset;
                 }
             }
+            if let Some(tags) = &mut table.tags {
+                tags.offset(origin);
+            }
         }
         for object in &mut child.objects {
             for (value, offset) in object.rect.iter_mut().zip(origin.into_iter().cycle()) {
                 *value += offset;
             }
             object.bottom += origin[1];
+            if let Some(tags) = &mut object.tags {
+                tags.offset(origin);
+            }
             if let ObjectKind::File(label) | ObjectKind::Unsupported(label) = &mut object.kind {
+                let y = label.origin[1];
                 label.reset_origin(label.origin[0] + origin[0]);
-                label.origin[1] += origin[1];
+                label.origin[1] = y + origin[1];
             }
         }
         self.paragraphs.extend(child.paragraphs);
@@ -1230,6 +1347,21 @@ impl OutlineLayout {
         for paragraph in &mut self.paragraphs {
             let marker = markers.get(&paragraph.parent).copied();
             paragraph.place_tags(marker);
+        }
+        let tables = self
+            .tables
+            .iter_mut()
+            .filter_map(|table| table.tags.as_mut());
+        let objects = self
+            .objects
+            .iter_mut()
+            .filter_map(|object| object.tags.as_mut());
+        for block in tables.chain(objects) {
+            place_tags(
+                &mut block.tags,
+                block.x,
+                markers.get(&block.parent).copied(),
+            );
         }
     }
 
@@ -1299,6 +1431,11 @@ impl OutlineLayout {
                         let space = spacing(&node.format)?;
                         let y = top(&mut state, space);
                         let mut child = Self::table(table, depth + 1, edit, shape)?;
+                        child.tables[0].tags =
+                            BlockTags::new(node, &table.tags, 0.0, shape)?.map(|mut tags| {
+                                tags.centre(0.0, child.size[1]);
+                                tags
+                            });
                         if depth == 0 {
                             block.rel = verticals(
                                 &mut child.paragraphs,
@@ -1325,6 +1462,7 @@ impl OutlineLayout {
                                     rect: [x, 0.0, x + w, 0.0],
                                     kind: ObjectKind::Picture,
                                     bottom: 0.0,
+                                    tags: None,
                                 };
                                 (object, h, x + w)
                             }
@@ -1345,6 +1483,7 @@ impl OutlineLayout {
                                     rect: [x, 0.0, x + w, 0.0],
                                     kind: ObjectKind::Ink(ink.clone()),
                                     bottom: 0.0,
+                                    tags: None,
                                 };
                                 (object, h, x + w)
                             }
@@ -1372,6 +1511,7 @@ impl OutlineLayout {
                                     rect: [x, 0.0, x + w, 0.0],
                                     kind: ObjectKind::Unsupported(label),
                                     bottom: 0.0,
+                                    tags: None,
                                 };
                                 (object, h, x + w)
                             }
@@ -1379,6 +1519,7 @@ impl OutlineLayout {
                                 unreachable!("text and tables are not objects")
                             }
                         };
+                        object.tags = BlockTags::new(node, &[], x, shape)?;
                         let flow = object.place(y, height);
                         result.objects.push(object);
                         (space, height, flow, extent)
@@ -1755,14 +1896,12 @@ impl OutlineLayout {
         {
             return Err(LayoutError::InvalidWidth);
         }
-        if !table.tags.is_empty() {
-            return Err(LayoutError::UnsupportedContent);
-        }
         let mut result = Self {
             tables: vec![TableLayout {
                 id: table.id,
                 cells: Vec::new(),
                 borders: table.borders.unwrap_or(true),
+                tags: None,
             }],
             size: [
                 (0..table.columns.len())
@@ -1798,6 +1937,17 @@ impl OutlineLayout {
                 height = height.max(child.size[1]);
                 for paragraph in &mut child.paragraphs {
                     paragraph.parent.get_or_insert(cell.id);
+                }
+                let tables = child
+                    .tables
+                    .iter_mut()
+                    .filter_map(|table| table.tags.as_mut());
+                let objects = child
+                    .objects
+                    .iter_mut()
+                    .filter_map(|object| object.tags.as_mut());
+                for block in tables.chain(objects) {
+                    block.parent.get_or_insert(cell.id);
                 }
                 let paragraph_start = result.paragraphs.len();
                 result.append(child, [x, y + 3.54]);
@@ -2614,6 +2764,7 @@ mod tests {
                 transparency: None,
                 pen_tip: None,
                 raster_operation: None,
+                pressure: Vec::new(),
             }],
             groups: Vec::new(),
             shape: None,

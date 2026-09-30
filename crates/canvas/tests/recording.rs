@@ -185,3 +185,68 @@ fn a_recording_from_the_title_goes_to_the_body_s_start() {
     assert_eq!(shown[3].1.time_ms, Some(20131));
     assert_eq!(shown[1].1, MediaIndex::default());
 }
+
+/// A note written while recording is paused links to nothing, and the pause is left out of
+/// later moments, as OneNote 2010 links them (`corpus/recording/native/read/paused-while-recording.xml`).
+/// See Playback then highlights the note linked last at or before the moment playing.
+#[test]
+fn notes_written_while_paused_stay_unlinked_and_see_playback_follows_the_rest() {
+    let source = onestore::create_section("files.one", "Recorded", "Author").unwrap();
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source).unwrap();
+    let (space, ..) = section.pages().unwrap()[0].clone();
+    let mut engine = TextEngine::default();
+    let mut editor = CanvasEditor::from_page(section.page(space).unwrap(), &mut engine).unwrap();
+    let outline = editor
+        .outlines()
+        .iter()
+        .find(|outline| !outline.title)
+        .unwrap()
+        .id;
+    editor.focus_outline(outline).unwrap();
+    editor
+        .move_selection(&mut engine, Movement::DocumentEnd, false)
+        .unwrap();
+    let id = editor.start_recording(&mut engine, "Started").unwrap();
+    let wait = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+    wait(30);
+    editor.insert(&mut engine, "Before the pause").unwrap();
+    editor.pause_recording(true);
+    assert!(editor.recording_paused());
+    let paused_at = editor.recording_ms().unwrap();
+    editor.insert(&mut engine, "\nWhile paused").unwrap();
+    wait(300);
+    assert_eq!(editor.recording_ms(), Some(paused_at));
+    editor.pause_recording(false);
+    wait(30);
+    editor.insert(&mut engine, "\nAfter the pause").unwrap();
+    let page = editor.page().unwrap();
+    let shown = body(&page);
+    let moment = |text: &str| {
+        shown
+            .iter()
+            .find(|(shown, _)| shown == text)
+            .unwrap()
+            .1
+            .time_ms
+    };
+    let before = moment("Before the pause").unwrap();
+    let after = moment("After the pause").unwrap();
+    assert_eq!(moment("While paused"), None);
+    assert!(
+        before >= 30 && after >= before + 30 && after < before + 300,
+        "{before} {after}"
+    );
+
+    let note = |at| {
+        editor
+            .played_note(id, at)
+            .and_then(|note| canvas::search::paragraph_match(&editor, note))
+            .map(|(_, selection)| selection.positions[0].paragraph)
+    };
+    // Before the first note only the line saying when, which is never highlighted.
+    assert_eq!(note(before - 1), None);
+    let first = note(before).unwrap();
+    assert_eq!(note(after - 1), Some(first));
+    assert!(note(after).unwrap() > first);
+}

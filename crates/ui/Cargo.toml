@@ -5,12 +5,14 @@ edition = "2024"
 publish = false
 
 [dependencies]
+accesskit = "0.25.0"
 draw = { path = "../draw", default-features = false, features = ["render"] }
 nucleo-matcher = "0.3.1"
 parley.workspace = true
 winit = "0.30.13"
 
 [dev-dependencies]
+accesskit_consumer = "0.39.0"
 draw = { path = "../draw", features = ["wgpu"] }
 pollster = "0.4"
 png = "0.18"

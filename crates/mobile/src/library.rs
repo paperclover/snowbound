@@ -6,7 +6,7 @@ use crate::{Result, owned, report, string};
 use canvas::search::{Entry, Index, Query, Tagged};
 use notebook::{
     Remote, Replica,
-    discover::{Folder, SectionState},
+    discover::{Folder, Reason, SectionState},
     session::{self, Background, Event, Known, Notebook, SyncStatus},
     smb::{Client, Credentials},
 };
@@ -87,6 +87,28 @@ pub(crate) fn coordinated<F: FnOnce() -> T, T>(path: &Path, write: bool, work: F
         .ok_or_else(|| io::Error::other("Another app is using the notebook's file; try again."))
 }
 
+/// Calls `found(context, id, device)` for each conflict version the host's file provider keeps
+/// beside the file at `path`, as iCloud Drive keeps another device's commit that lost:
+/// `id` is a file the version's contents read from, `device` who saved it or null.
+pub type Versions = extern "C" fn(
+    path: *const c_char,
+    found: extern "C" fn(*mut c_void, *const c_char, *const c_char),
+    context: *mut c_void,
+);
+
+/// Marks version `id` of the file at `path` resolved and removes it, first keeping a copy
+/// beside the file when `keep`; false when it could not.
+pub type Retire = extern "C" fn(path: *const c_char, id: *const c_char, keep: bool) -> bool;
+
+static VERSIONS: OnceLock<(Versions, Retire)> = OnceLock::new();
+
+/// Merges the conflict versions the host lists into their files from now on, then has the
+/// host retire them; set once, before any library opens.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_set_versions(versions: Versions, retire: Retire) {
+    let _ = VERSIONS.set((versions, retire));
+}
+
 /// A local section file read and published under the host's file coordination.
 struct Coordinated(PathBuf);
 
@@ -115,6 +137,42 @@ impl Remote for Coordinated {
 
     fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError> {
         coordinated(&self.0, true, || onestore::confirm_file(&self.0, base)).map_err(uncommitted)?
+    }
+
+    fn versions(&mut self) -> io::Result<Vec<notebook::Version>> {
+        let Some((versions, _)) = VERSIONS.get() else {
+            return Ok(Vec::new());
+        };
+        extern "C" fn found(context: *mut c_void, id: *const c_char, device: *const c_char) {
+            // SAFETY: `context` is the list below, alive for the host's call.
+            let listed = unsafe { &mut *context.cast::<Vec<notebook::Version>>() };
+            listed.push(notebook::Version {
+                id: string(id),
+                device: (!device.is_null()).then(|| string(device)),
+            });
+        }
+        let mut listed: Vec<notebook::Version> = Vec::new();
+        let path = CString::new(self.0.as_os_str().as_encoded_bytes())?;
+        versions(path.as_ptr(), found, (&raw mut listed).cast());
+        Ok(listed)
+    }
+
+    /// A version's contents never change: they read without coordination.
+    fn version(&mut self, id: &str) -> io::Result<Vec<u8>> {
+        std::fs::read(id)
+    }
+
+    fn retire(&mut self, id: &str, keep: bool) -> io::Result<()> {
+        let Some((_, retire)) = VERSIONS.get() else {
+            return Ok(());
+        };
+        let path = CString::new(self.0.as_os_str().as_encoded_bytes())?;
+        let id = CString::new(id)?;
+        if retire(path.as_ptr(), id.as_ptr(), keep) {
+            Ok(())
+        } else {
+            Err(io::Error::other("The version could not be retired"))
+        }
     }
 }
 
@@ -169,7 +227,7 @@ enum Place {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Listed {
     tabs: Vec<Tab>,
-    /// Each section's file identity in hex, which names its replica, by catalog path.
+    /// Each readable section's file identity in hex, which names its replica, by catalog path.
     files: BTreeMap<String, String>,
 }
 
@@ -177,10 +235,14 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Every section's file identity in `folder` and its groups, by catalog path.
-fn files(folder: &Folder, files: &mut BTreeMap<String, String>) {
+/// Every readable section's file identity in `folder` and its groups, by catalog path, as
+/// `Notebook::replicas` lists a local notebook's. `Client::read` answers a protected section
+/// as it does one mid-write (WouldBlock), so syncing one would show it in use for good.
+pub(crate) fn files(folder: &Folder, files: &mut BTreeMap<String, String>) {
     for section in &folder.sections {
-        files.insert(section.path.clone(), hex(&section.file_id));
+        if matches!(section.state, SectionState::Readable { .. }) {
+            files.insert(section.path.clone(), hex(&section.file_id));
+        }
     }
     for group in &folder.groups {
         self::files(group, files);
@@ -205,7 +267,14 @@ pub struct Library {
     open: Mutex<Vec<(String, Weak<Shared>)>>,
     /// Work Offline, which sections opened later follow too.
     offline: AtomicBool,
+    /// How long edits wait for a pause in typing before they publish (`Section::set_pause`):
+    /// a file provider such as iCloud Drive uploads each publication, and makes one concurrent
+    /// with another device's a conflict version.
+    pause: Duration,
 }
+
+/// The pause edits to a file a provider keeps elsewhere wait for.
+const PAUSE: Duration = Duration::from_secs(3);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct Tab {
@@ -218,6 +287,15 @@ pub(crate) struct Tab {
     pub(crate) color: [u8; 3],
     /// Password-protected or unreadable sections list but do not open.
     pub(crate) readable: bool,
+    /// Not on this device yet, as iCloud Drive keeps it elsewhere; the host downloads it.
+    #[serde(default)]
+    pub(crate) downloading: bool,
+    /// The name of the section this file copies, which opens instead.
+    #[serde(default)]
+    pub(crate) copy: Option<String>,
+    /// Why the file could not be read, where retrying or repair may help.
+    #[serde(default)]
+    pub(crate) problem: Option<String>,
 }
 
 fn rgb(colorref: u32) -> [u8; 3] {
@@ -246,6 +324,9 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
             group: folder.path.clone(),
             color: rgb(color.unwrap_or(SECTION_COLOR)),
             readable,
+            downloading: false,
+            copy: None,
+            problem: None,
         });
     }
     for entry in folder.unavailable.iter().filter(|entry| !entry.group) {
@@ -255,6 +336,16 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
             group: folder.path.clone(),
             color: rgb(SECTION_COLOR),
             readable: false,
+            downloading: entry.reason == Reason::Evicted,
+            copy: match &entry.reason {
+                Reason::Copy { of } => Some(stem(of)),
+                _ => None,
+            },
+            problem: match entry.reason {
+                Reason::InUse => Some("Section in use".into()),
+                Reason::Unreadable => Some("Can’t read this section".into()),
+                _ => None,
+            },
         });
     }
     for group in &folder.groups {
@@ -294,6 +385,7 @@ impl Library {
             background,
             open: Mutex::default(),
             offline: AtomicBool::new(false),
+            pause: if local { Duration::ZERO } else { PAUSE },
         })
     }
 
@@ -315,6 +407,7 @@ impl Library {
             background: Some(background),
             open: Mutex::default(),
             offline: AtomicBool::new(false),
+            pause: Duration::ZERO,
         };
         let reached = library.with_notebook(false, |_| Ok(()));
         match library.listed() {
@@ -326,21 +419,29 @@ impl Library {
 
     /// Has the background sync a share notebook's sections, `files` as `Listed` keeps them.
     fn watch(&self, files: &BTreeMap<String, String>) {
-        let Some(background) = &self.background else {
+        let (Some(background), Some(replicas)) = (&self.background, self.share_replicas()) else {
             return;
         };
-        let smb = self.cache.join("smb");
         background.watch(
             files
                 .iter()
                 .map(|(path, identity)| Known {
                     path: path.clone(),
-                    replica: Some(smb.join(format!("{identity}.sqlite"))),
+                    replica: Some(replicas.join(format!("{identity}.sqlite"))),
                     found: None,
                     image: None,
                 })
                 .collect(),
         );
+    }
+
+    /// The cache folder of a share notebook's replicas.
+    fn share_replicas(&self) -> Option<PathBuf> {
+        let Place::Share { server, root, .. } = &self.place else {
+            return None;
+        };
+        let location = notebook::location::smb(&server.address, &server.share, root);
+        Some(notebook::location::folder(&self.cache, &location))
     }
 
     /// Where a share notebook's last listing is kept.
@@ -418,6 +519,9 @@ impl Library {
                 group: String::new(),
                 color: rgb(SECTION_COLOR),
                 readable: true,
+                downloading: false,
+                copy: None,
+                problem: None,
             }]);
         }
         let listed = self.with_notebook(false, |notebook| {
@@ -472,6 +576,7 @@ impl Library {
             }
         };
         section.set_offline(self.offline.load(Ordering::Relaxed));
+        section.set_pause(self.pause);
         if let Some(background) = &self.background {
             background.hold(path, &section);
         }
@@ -505,13 +610,15 @@ impl Library {
                     .listed()
                     .and_then(|mut listed| listed.files.remove(path))
                     .ok_or("The notebook hasn’t listed this section")?;
-                let cache = self.cache.join("smb").join(format!("{identity}.sqlite"));
+                let replicas = self.share_replicas().ok_or("Not a share")?;
+                let cache = replicas.join(format!("{identity}.sqlite"));
                 let replica = if cache.exists() {
                     Replica::open(&cache)?
                 } else {
                     let client = self
                         .client()
                         .ok_or("The server can’t be reached, and this section hasn’t been opened here before.")?;
+                    std::fs::create_dir_all(&replicas)?;
                     Replica::create(&cache, &client.read_storage(&file, LIMIT)?)?
                 };
                 let server = Arc::clone(server);
@@ -904,6 +1011,71 @@ impl Library {
             .collect()
     }
 
+    /// Publishes every edit the notebook's replicas hold within `limit`, then lets go of the
+    /// notebook as OneNote closes one: nothing syncs from then on, and each replica holding
+    /// nothing unpublished is deleted once no session holds it. An error leaves it syncing.
+    pub(crate) fn close(&self, limit: Duration) -> Result<()> {
+        const WAITING: &str = "Some changes haven’t been saved to the notebook yet.";
+        let deadline = Instant::now() + limit;
+        let open = self.open_sections();
+        for (_, shared) in &open {
+            while !shared.section.pending()?.is_empty() {
+                if Instant::now() >= deadline {
+                    return Err(WAITING.into());
+                }
+                shared.section.wake();
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let Some(background) = &self.background else {
+            return Ok(());
+        };
+        let before: HashMap<String, Option<u64>> = background
+            .status()
+            .into_iter()
+            .map(|(path, status)| (path, status.synced))
+            .collect();
+        // Sections without a replica hold nothing to publish.
+        let replicas: Vec<&String> = {
+            let notebook = self.notebook();
+            before
+                .keys()
+                .filter(|path| !open.iter().any(|(held, _)| held == *path))
+                .filter(|path| {
+                    notebook
+                        .as_ref()
+                        .and_then(|notebook| notebook.replica_path(path).ok())
+                        .is_some_and(|replica| replica.exists())
+                })
+                .collect()
+        };
+        loop {
+            // Working offline, the background checks only when woken.
+            background.wake();
+            let status = background.status();
+            let mut waiting = replicas.iter().filter_map(|path| {
+                match status.iter().find(|(listed, _)| listed == *path) {
+                    Some((_, status))
+                        if status.queued == 0
+                            && status.error.is_none()
+                            && status.synced > before[*path] =>
+                    {
+                        None
+                    }
+                    Some((_, status)) => Some(status.error.as_ref().map(ToString::to_string)),
+                    None => Some(None),
+                }
+            });
+            let Some(error) = waiting.next() else { break };
+            if Instant::now() >= deadline {
+                return Err(error.unwrap_or_else(|| WAITING.to_owned()).into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        background.discard();
+        Ok(())
+    }
+
     fn open_sections(&self) -> Vec<(String, Arc<Shared>)> {
         let mut open = self.open.lock().unwrap_or_else(|error| error.into_inner());
         open.retain(|(_, shared)| shared.strong_count() > 0);
@@ -1091,8 +1263,56 @@ pub unsafe extern "C" fn sb_library_server(
     }
 }
 
+/// Creates the notebook folder `path` holding one section with one page titled with `date`
+/// and `time`, as OneNote's New Notebook does; `sb_library_open` opens it. False, with
+/// `error` set, when it cannot be made.
+///
+/// # Safety
+/// Every string is NUL-terminated UTF-8; `error` is null or a place for a string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_notebook_create(
+    path: *const c_char,
+    cache: *const c_char,
+    author: *const c_char,
+    date: *const c_char,
+    time: *const c_char,
+    error: *mut *mut c_char,
+) -> bool {
+    let created = dated(&string(author), &string(date), &string(time)).and_then(|page| {
+        Notebook::create(string(path), string(cache), Notebook::NEW_COLOR, &page)?;
+        Ok(())
+    });
+    created.map_err(|cause| failed(cause, error)).is_ok()
+}
+
+/// Moves the replicas of the notebook folder or lone section file the app has just moved
+/// from `from` to `to`, so that its edits waiting there still publish. False, with `error`
+/// set, when they cannot be moved.
+///
+/// # Safety
+/// Every string is NUL-terminated UTF-8; `error` is null or a place for a string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_notebook_moved(
+    cache: *const c_char,
+    from: *const c_char,
+    to: *const c_char,
+    error: *mut *mut c_char,
+) -> bool {
+    let moved = || -> Result<()> {
+        let from = notebook::location::local(Path::new(&string(from)))?;
+        let to = notebook::location::local(Path::new(&string(to)))?;
+        Ok(notebook::location::moved(
+            Path::new(&string(cache)),
+            &from,
+            &to,
+        )?)
+    };
+    moved().map_err(|cause| failed(cause, error)).is_ok()
+}
+
 /// The notebook's sections read again, as JSON: each with `name`, `path`, `group`,
-/// `color` as sRGB bytes and `readable`, in the notebook's order; null if it cannot be read.
+/// `color` as sRGB bytes, `readable`, `downloading` and `copy`, in the notebook's order; null
+/// if it cannot be read.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_library_sections(library: &Library) -> *mut c_char {
     json(library.tabs())
@@ -1200,6 +1420,24 @@ pub extern "C" fn sb_library_sync_now(library: &Library) {
     for (_, shared) in library.open_sections() {
         shared.section.wake();
     }
+}
+
+/// Publishes every edit the notebook holds within `seconds`, then lets go of it
+/// (`Library::close`) so its folder can be moved or deleted: false, with `error` set, while
+/// an edit is still unpublished, and the notebook syncs on.
+///
+/// # Safety
+/// `error` is null or a place for a string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_library_close(
+    library: &Library,
+    seconds: f64,
+    error: *mut *mut c_char,
+) -> bool {
+    library
+        .close(Duration::from_secs_f64(seconds))
+        .map_err(|cause| failed(cause, error))
+        .is_ok()
 }
 
 /// # Safety

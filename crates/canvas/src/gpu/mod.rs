@@ -1,6 +1,8 @@
 pub mod page;
 #[cfg(test)]
 mod profile;
+mod tag_art;
+pub use tag_art::{TagArt, art_sources, import as import_tag_art};
 
 use crate::{
     layout::{TextBrush, TextLayout},

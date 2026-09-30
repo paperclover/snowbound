@@ -104,7 +104,7 @@ const LCIDS: &[(&str, u32)] = &[
 ];
 
 /// en-US, what OneNote records when nothing better is known.
-const EN_US: u32 = 1033;
+pub(crate) const EN_US: u32 = 1033;
 
 /// The Windows LCID of a BCP-47 tag such as an input source's language (`de`, `en-GB`,
 /// `zh-Hans`), matched by region, then script, then language, else en-US.
@@ -133,6 +133,15 @@ pub fn lcid(tag: &str) -> u32 {
         .unwrap_or(EN_US)
 }
 
+/// The BCP-47 tag of a Windows LCID; a bare language stands for the locale Windows picks
+/// for it. None for LCIDs outside the table, such as math's.
+pub fn tag(lcid: u32) -> Option<&'static str> {
+    LCIDS
+        .iter()
+        .find(|(_, known)| *known == lcid)
+        .map(|(tag, _)| *tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +166,9 @@ mod tests {
             ("", EN_US),
         ] {
             assert_eq!(super::lcid(tag), lcid, "{tag}");
+        }
+        for (lcid, tag) in [(1033, Some("en")), (2057, Some("en-GB")), (0x1007f, None)] {
+            assert_eq!(super::tag(lcid), tag);
         }
     }
 }

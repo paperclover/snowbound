@@ -35,7 +35,8 @@ impl Palette {
 /// `gradientTransform`). `fill-opacity` and `stroke-opacity` apply, and strokes have round
 /// caps and joins. A slot's paths keep the shading among their colours: the hue turn,
 /// saturation scale and lightness shift that carry the mean of the slot's colours in a
-/// source onto the palette's colour apply to each of them.
+/// source onto the palette's colour apply to each of them. A source's `image`s of PNG
+/// `data:` URLs, as `picture_icon` writes them, paint beneath its paths.
 pub(crate) fn rasterize(sources: &[&str], size: u32, ink: [f32; 3], palette: &Palette) -> Image {
     let side = size;
     let size = size as f32;
@@ -43,6 +44,9 @@ pub(crate) fn rasterize(sources: &[&str], size: u32, ink: [f32; 3], palette: &Pa
     for source in sources {
         let svg = roxmltree::Document::parse(source).expect("Bundled icon SVG must be valid");
         assert_eq!(svg.root_element().attribute("viewBox"), Some("0 0 16 16"));
+        for image in svg.descendants().filter(|node| node.has_tag_name("image")) {
+            picture(image, side, &mut pixels);
+        }
         let paint = |value: &str| -> Option<Paint> {
             match value {
                 "none" => None,
@@ -171,6 +175,61 @@ pub(crate) fn rasterize(sources: &[&str], size: u32, ink: [f32; 3], palette: &Pa
         },
         data,
         ..Image::default()
+    }
+}
+
+/// An icon source drawing the PNG `png` centred in the icon at its own proportions; none
+/// where it is not a picture.
+pub fn picture_icon(png: &[u8]) -> Option<String> {
+    use base64::Engine;
+    let [width, height] = super::RasterImage::measure(png)
+        .ok()?
+        .map(|side| side as f32);
+    let scale = 16.0 / width.max(height);
+    let [width, height] = [width * scale, height * scale];
+    Some(format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><image x="{}" y="{}" width="{width}" height="{height}" href="data:image/png;base64,{}"/></svg>"#,
+        (16.0 - width) / 2.0,
+        (16.0 - height) / 2.0,
+        base64::engine::general_purpose::STANDARD.encode(png),
+    ))
+}
+
+/// Paints `node`, a picture of `picture_icon`'s, over `pixels`, an icon `side` pixels
+/// square, filtered to the whole pixels its box covers.
+fn picture(node: roxmltree::Node, side: u32, pixels: &mut [[f32; 4]]) {
+    use base64::Engine;
+    let scale = side as f32 / 16.0;
+    let at = |name| {
+        let value: f32 = node.attribute(name).unwrap().parse().unwrap();
+        value * scale
+    };
+    let [x, y] = [at("x"), at("y")];
+    let [left, top, right, bottom] = [x, y, x + at("width"), y + at("height")]
+        .map(|edge| edge.round().clamp(0.0, side as f32) as u32);
+    let decoded = node
+        .attribute("href")
+        .and_then(|href| href.strip_prefix("data:image/png;base64,"))
+        .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+        .and_then(|png| image::load_from_memory_with_format(&png, image::ImageFormat::Png).ok());
+    let Some(decoded) = decoded.filter(|_| right > left && bottom > top) else {
+        return;
+    };
+    let shown = image::imageops::resize(
+        &decoded.into_rgba8(),
+        right - left,
+        bottom - top,
+        image::imageops::FilterType::Triangle,
+    );
+    for (column, row, color) in shown.enumerate_pixels() {
+        let pixel = &mut pixels[((top + row) * side + left + column) as usize];
+        let [r, g, b, a] = color.0;
+        let alpha = f32::from(a) / 255.0;
+        let color = super::srgb(r, g, b);
+        for channel in 0..3 {
+            pixel[channel] = color[channel] * alpha + pixel[channel] * (1.0 - alpha);
+        }
+        pixel[3] = alpha + pixel[3] * (1.0 - alpha);
     }
 }
 
@@ -548,6 +607,37 @@ mod tests {
         assert_eq!(alpha(8, 8), 128);
         // The stroke's outer half covers only what the fill leaves.
         assert_eq!(alpha(1, 8), 64);
+    }
+
+    /// A 2×1 PNG, red then half-transparent blue, fits the icon's width, centred, and paints
+    /// beneath the paths of later sources.
+    #[test]
+    fn pictures_fill_their_box_at_their_proportions() {
+        let mut png = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png, 2, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[255, 0, 0, 255, 0, 0, 255, 128])
+            .unwrap();
+        let source = picture_icon(&png).unwrap();
+        let image = rasterize(&[&source, MARK], 32, [1.0; 3], &Palette::default());
+        let pixel = |x: usize, y: usize| &image.data[(y * 32 + x) * 4..][..4];
+        // The picture spans rows 8 to 24 of 32.
+        assert_eq!(pixel(2, 4)[3], 0);
+        assert_eq!(pixel(2, 12), [255, 0, 0, 255]);
+        assert_eq!(pixel(30, 20), [0, 0, 255, 128]);
+        assert_eq!(pixel(30, 28)[3], 0);
+        let marked = rasterize(&[MARK], 32, [1.0; 3], &Palette::default());
+        let covered: Vec<_> = (0..32 * 32)
+            .filter(|at| marked.data[at * 4 + 3] == 255)
+            .collect();
+        assert!(!covered.is_empty());
+        for at in covered {
+            assert_eq!(image.data[at * 4..][..4], marked.data[at * 4..][..4]);
+        }
+        assert!(picture_icon(b"not a picture").is_none());
     }
 
     #[test]

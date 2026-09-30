@@ -43,19 +43,28 @@ struct Pen {
     }
 }
 
+/// A point a touch passed, in the view's bounds, and the Pencil's pressure there from 0 to its
+/// greatest, or -1 for a finger, whose strokes keep their pen's width.
+typealias InkSample = (point: CGPoint, pressure: Float)
+
 /// Follows one touch from the moment it lands, gathering every point the hardware sampled,
 /// for the canvas's pens, eraser and lasso. A second finger cancels a finger's stroke, so two
 /// fingers scroll; a hand resting beside the Pencil is ignored.
 final class InkGesture: UIGestureRecognizer {
-    /// Points the touch passed since the action last took them, in the view's bounds.
-    var points: [CGPoint] = []
+    /// Points the touch passed since the action last took them.
+    var points: [InkSample] = []
     private var tracked: UITouch?
+
+    private func sample(_ touch: UITouch) -> InkSample {
+        let pressure = touch.type == .pencil ? Float(touch.force / touch.maximumPossibleForce) : -1
+        return (touch.preciseLocation(in: view), pressure)
+    }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
         for touch in touches {
             if tracked == nil {
                 tracked = touch
-                points = [touch.preciseLocation(in: view)]
+                points = [sample(touch)]
                 state = .began
             } else if tracked?.type == .direct {
                 state = .cancelled
@@ -67,13 +76,13 @@ final class InkGesture: UIGestureRecognizer {
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let tracked, touches.contains(tracked) else { return }
-        points += (event.coalescedTouches(for: tracked) ?? [tracked]).map { $0.preciseLocation(in: view) }
+        points += (event.coalescedTouches(for: tracked) ?? [tracked]).map(sample)
         state = .changed
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         guard let tracked, touches.contains(tracked) else { return }
-        points.append(tracked.preciseLocation(in: view))
+        points.append(sample(tracked))
         state = .ended
     }
 

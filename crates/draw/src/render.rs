@@ -13,7 +13,7 @@ use gl as backend;
 use webgpu as backend;
 
 pub use backend::Target;
-pub use icon::Palette;
+pub use icon::{Palette, picture_icon};
 pub use text::{Decoration, Glyph, GlyphRun, Glyphs, paint_parley_run};
 #[cfg(feature = "wgpu")]
 pub use translucent::Translucent;
@@ -205,7 +205,8 @@ struct Vertex {
     /// that rectangle's half size and corner radius; a zero half size paints everywhere.
     clip_local: [f32; 2],
     clip: [f32; 3],
-    /// The standard deviation, in device pixels, of the blur that makes `shape` a shadow.
+    /// The standard deviation, in device pixels, of the blur that makes `shape` a shadow;
+    /// negative, `shape` is a tapered capsule's half length and end radii.
     blur: f32,
 }
 
@@ -427,6 +428,14 @@ pub enum Primitive<'a> {
         width: f32,
         /// A round pen tip caps the ends; otherwise they are square.
         round: bool,
+        color: [f32; 4],
+    },
+    /// A round pen's stroke between two points, `widths` units across at each, joined by the
+    /// lines touching both ends, as a pressure pen's width changes along a stroke.
+    Taper {
+        from: [f32; 2],
+        to: [f32; 2],
+        widths: [f32; 2],
         color: [f32; 4],
     },
     /// A highlighter's stroke between two points, `width` units across with square ends:
@@ -860,7 +869,13 @@ impl Renderer {
                 width,
                 round,
                 color,
-            } => self.segment(space, *from, *to, *width, *round, *color)?,
+            } => self.segment(space, *from, *to, [*width; 2], *round, *color)?,
+            Primitive::Taper {
+                from,
+                to,
+                widths,
+                color,
+            } => self.segment(space, *from, *to, *widths, true, *color)?,
             Primitive::Highlight {
                 from,
                 to,
@@ -868,7 +883,7 @@ impl Renderer {
                 color,
             } => {
                 blend = Blend::Multiply;
-                self.segment(space, *from, *to, *width, false, *color)?;
+                self.segment(space, *from, *to, [*width; 2], false, *color)?;
             }
             Primitive::Image { image, rect } => {
                 if let Some(rect) = space.visible_rect(*rect)? {
@@ -1348,13 +1363,14 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws the segment as a capsule in its own frame, reusing the rounded-rectangle distance.
+    /// Draws the segment as a capsule in its own frame, reusing the rounded-rectangle distance;
+    /// ends of two widths make it a tapered capsule, which the shader marks by a negative blur.
     fn segment(
         &mut self,
         space: Space,
         from: [f32; 2],
         to: [f32; 2],
-        width: f32,
+        widths: [f32; 2],
         round: bool,
         color: [f32; 4],
     ) -> Result<(), RenderError> {
@@ -1366,8 +1382,15 @@ impl Renderer {
         };
         let [from, to] = [pixel(from), pixel(to)];
         // Hairlines stay one device pixel wide.
-        let radius = (width * space.scale).max(1.0) * 0.5;
-        if from.iter().chain(&to).chain(&color).any(|v| !v.is_finite()) || !radius.is_finite() {
+        let radii = widths.map(|width| (width * space.scale).max(1.0) * 0.5);
+        let radius = radii[0].max(radii[1]);
+        if from
+            .iter()
+            .chain(&to)
+            .chain(&color)
+            .chain(&radii)
+            .any(|v| !v.is_finite())
+        {
             return Err(RenderError::InvalidPrimitive);
         }
         let pad = radius + 1.0;
@@ -1392,6 +1415,12 @@ impl Renderer {
         let center = [(from[0] + to[0]) * 0.5, (from[1] + to[1]) * 0.5];
         let half = [length * 0.5 + radius, radius];
         let corner = if round { radius } else { 0.0 };
+        let tapered = radii[0] != radii[1];
+        let (shape, blur) = if tapered {
+            ([length * 0.5, radii[0], radii[1], 0.0], -1.0)
+        } else {
+            ([half[0], half[1], corner, corner], 0.0)
+        };
         let [hx, hy] = [half[0] + 1.0, half[1] + 1.0];
         for local in [
             [-hx, -hy],
@@ -1411,11 +1440,11 @@ impl Renderer {
                 uv: [0.5 / self.atlas_side() as f32; 2],
                 color,
                 local,
-                shape: [half[0], half[1], corner, corner],
+                shape,
                 stroke: 0.0,
                 clip_local: [0.0; 2],
                 clip: [0.0; 3],
-                blur: 0.0,
+                blur,
             });
         }
         Ok(())

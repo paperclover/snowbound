@@ -7,6 +7,7 @@ use crate::{
     Anchor, Corner, Display, Extent, Flags, Id, Section, Shape, Signal, Spec, Ui, children, fill,
     mix, px,
 };
+use accesskit::{HasPopup, Role};
 use std::hash::Hash;
 
 /// A menu's downward arrow.
@@ -102,6 +103,7 @@ pub fn section_tabs(
             ],
             fill: Some(fill),
             fade: [fade(offset > 0.5), fade(offset < most - 0.5)],
+            role: Some(Role::TabList),
             ..Spec::default()
         },
     );
@@ -144,13 +146,16 @@ pub fn section_tabs(
             }
         };
         let lift = f32::from(u8::from(lifted == Some(index)));
-        let open = ui
-            .animate(ui.id(("open", name)), f32::from(u8::from(index == active)))
-            .max(lift);
+        let open = ui.animate(
+            ui.id(("open", name)),
+            f32::from(u8::from(index == active || lifted == Some(index))),
+        );
         // Whole device pixels, so a rising tab reuses its rasterized outlines.
         let tall = ((low + (tallest - low) * open) * ui.scale()).round() / ui.scale();
         let colors = theme.section(color);
-        let fill = mix(colors.tab, section.frame[0], open);
+        // A lifted tab rises in its own colour; only the open one takes the frame's.
+        let top = if index == active { section } else { &colors };
+        let fill = mix(colors.tab, top.frame[0], open);
         let fade = |color: [f32; 4], alpha: f32| [color[0], color[1], color[2], color[3] * alpha];
         let signal = ui.leaf(
             ("tab", index),
@@ -168,14 +173,18 @@ pub fn section_tabs(
                 gradient: Some(fill),
                 hover_fill: (index != active).then(|| mix(colors.frame[0], [1.0; 4], 0.08)),
                 // A tab not open is outlined in its own hue, fainter than the open one's.
-                border: Some(mix(mix(colors.tab, colors.edge, 0.55), section.edge, open)),
+                border: Some(mix(mix(colors.tab, colors.edge, 0.55), top.edge, open)),
                 shadow: (open > 0.0).then(|| fade([0.0, 0.0, 0.0, 0.35 + 0.15 * lift], open)),
                 radius: TAB_ROUNDING,
                 shape: Shape::Tab { lean: lean(height) },
                 pad: [TAB_PAD, 0.0],
+                role: Some(Role::Tab),
                 ..Spec::default()
             },
         );
+        if let Some(node) = ui.access(tab_id(row, index)) {
+            node.set_selected(index == active);
+        }
         if signal.clicked && index != active {
             clicked = Some(index);
         }
@@ -243,30 +252,53 @@ fn lean(height: f32) -> f32 {
     (height - 2.0) / 2.0
 }
 
-/// A square button showing `icon` tinted by `tint`, lit while `on`; artwork in its own
-/// colours takes white.
+/// A square button showing `icon` tinted by `tint`, a toggle lit while `on` is `Some(true)`
+/// or a plain button where it is `None`; artwork in its own colours takes white. A tooltip
+/// names it.
 pub fn tool_button(
     ui: &mut Ui,
     part: impl Hash,
     icon: &'static [&'static str],
     tint: [f32; 4],
-    on: bool,
+    on: Option<bool>,
 ) -> Signal {
     let hover = ui.theme.hover();
-    ui.leaf(
+    let id = ui.open(
         part,
         Spec {
             flags: Flags::CLICKABLE,
             size: [px(TOOL), px(TOOL)],
             icon: Some(icon),
             color: Some(tint),
-            fill: on.then_some(hover),
+            fill: (on == Some(true)).then_some(hover),
             hover_fill: Some(hover),
             radius: 4.0,
             center: true,
+            role: Some(Role::Button),
             ..Spec::default()
         },
-    )
+    );
+    press_state(ui, id, on);
+    ui.close();
+    ui.signal(id)
+}
+
+/// Shows button `id` as a toggle, pressed or not, where `on` is given.
+fn press_state(ui: &mut Ui, id: Id, on: Option<bool>) {
+    if let Some(on) = on
+        && let Some(node) = ui.access(id)
+    {
+        node.set_toggled(on.into());
+    }
+}
+
+/// Marks control `id` as opening popup `menu`, and whether it is open.
+fn opens(ui: &mut Ui, id: Id, menu: Id) {
+    let open = ui.popup_open(menu);
+    if let Some(node) = ui.access(id) {
+        node.set_has_popup(HasPopup::Menu);
+        node.set_expanded(open);
+    }
 }
 
 /// A tool button, with a menu arrow where `menu`, whose command does not apply now: `icon`
@@ -280,13 +312,20 @@ pub fn unavailable(
 ) {
     let faded = |[red, green, blue, alpha]: [f32; 4]| [red, green, blue, alpha * 0.35];
     let arrow = faded(ui.theme.text_dim);
-    ui.open(
+    let id = ui.open(
         part,
         Spec {
             size: [children(), px(TOOL)],
+            role: Some(Role::Button),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_disabled();
+        if menu {
+            node.set_has_popup(HasPopup::Menu);
+        }
+    }
     ui.leaf(
         "icon",
         Spec {
@@ -312,16 +351,19 @@ pub fn unavailable(
     ui.close();
 }
 
-/// A button showing `icon`, lit while `on`, joined to an arrow that opens popup `menu`,
-/// with the colour it applies as a bar under the icon when given. Hovering the button fills
-/// it alone; hovering the arrow, or its menu being open, outlines both as one control.
-/// Returns the button's signal.
+/// A button `name`d and showing `icon`, a toggle lit while `on` as `tool_button`'s, joined
+/// to an arrow that opens popup `menu`, with the colour it applies as a bar under the icon
+/// when given. Hovering the button fills it alone; hovering the arrow, or its menu being
+/// open, outlines both as one control. The arrow is named "`name` Options", as Office names
+/// its split buttons' arrows. Returns the button's signal.
+#[allow(clippy::too_many_arguments)]
 pub fn split_button(
     ui: &mut Ui,
     part: impl Hash,
+    name: &str,
     icon: &'static [&'static str],
     bar: Option<[f32; 4]>,
-    on: bool,
+    on: Option<bool>,
     menu: Id,
 ) -> Signal {
     const RADIUS: f32 = 4.0;
@@ -332,7 +374,7 @@ pub fn split_button(
     let [button, arrow] = [split.child("button"), split.child("menu")];
     let lit = ui.animate(
         split.child("lit"),
-        f32::from(u8::from(on || ui.hover == Some(button))),
+        f32::from(u8::from(on == Some(true) || ui.hover == Some(button))),
     );
     let outlined = ui.hover == Some(arrow) || ui.popup_open(menu);
     let ring = ui.animate(split.child("ring"), f32::from(u8::from(outlined)));
@@ -348,9 +390,14 @@ pub fn split_button(
         Spec {
             flags: Flags::CLICKABLE | Flags::CLIP,
             size: [px(TOOL), px(TOOL)],
+            role: Some(Role::Button),
             ..Spec::default()
         },
     );
+    press_state(ui, button, on);
+    if let Some(node) = ui.access(button) {
+        node.set_label(name);
+    }
     // Rounded past the clip, so the fill meets the arrow square.
     ui.leaf(
         "face",
@@ -379,20 +426,24 @@ pub fn split_button(
     }
     ui.close();
     ui.close();
-    if ui
-        .leaf(
-            "menu",
-            Spec {
-                flags: Flags::CLICKABLE,
-                size: [px(ARROW), px(TOOL)],
-                icon: Some(CHEVRON),
-                color: Some(ui.theme.text_dim),
-                center: true,
-                ..Spec::default()
-            },
-        )
-        .pressed
-    {
+    ui.open_as(
+        arrow,
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [px(ARROW), px(TOOL)],
+            icon: Some(CHEVRON),
+            color: Some(ui.theme.text_dim),
+            center: true,
+            role: Some(Role::Button),
+            ..Spec::default()
+        },
+    );
+    opens(ui, arrow, menu);
+    if let Some(node) = ui.access(arrow) {
+        node.set_label(format!("{name} Options"));
+    }
+    ui.close();
+    if ui.signal(arrow).pressed {
         ui.open_popup(menu);
     }
     ui.leaf(
@@ -409,12 +460,14 @@ pub fn split_button(
     ui.signal(button)
 }
 
-/// A button showing `icon` and a menu arrow, one control that opens popup `menu`. Returns
-/// where the menu opens so its icons line up under the button's.
+/// A button showing `icon` and a menu arrow, one control that opens popup `menu`, a toggle
+/// lit while `on` as `tool_button`'s. Returns where the menu opens so its icons line up
+/// under the button's.
 pub fn menu_button(
     ui: &mut Ui,
     part: impl Hash,
     icon: &'static [&'static str],
+    on: Option<bool>,
     menu: Id,
 ) -> Anchor {
     let theme = ui.theme.clone();
@@ -423,12 +476,15 @@ pub fn menu_button(
         Spec {
             flags: Flags::CLICKABLE,
             size: [px(TOOL + ARROW), px(TOOL)],
-            fill: ui.popup_open(menu).then(|| theme.hover()),
+            fill: (ui.popup_open(menu) || on == Some(true)).then(|| theme.hover()),
             hover_fill: Some(theme.hover()),
             radius: 4.0,
+            role: Some(Role::Button),
             ..Spec::default()
         },
     );
+    opens(ui, id, menu);
+    press_state(ui, id, on);
     for (part, icon, width, color) in [
         ("icon", icon, TOOL, theme.text),
         ("arrow", CHEVRON, ARROW, theme.text_dim),
@@ -455,27 +511,53 @@ pub fn menu_button(
     Anchor::Below([left - shift, top, right - shift, bottom])
 }
 
-/// A drop-down box `width` wide showing `text`.
-pub fn combo(ui: &mut Ui, part: impl Hash, text: &str, width: impl Into<Extent>) -> Signal {
+/// A drop-down box `name`d, `width` wide, showing `text`, that opens popup `menu`; where
+/// not `enabled` it shows faded and takes no clicks or focus, as `unavailable` buttons do.
+pub fn combo(
+    ui: &mut Ui,
+    part: impl Hash,
+    name: &str,
+    text: &str,
+    width: impl Into<Extent>,
+    menu: Id,
+    enabled: bool,
+) {
     let theme = ui.theme.clone();
+    let faded = |[red, green, blue, alpha]: [f32; 4]| {
+        [red, green, blue, if enabled { alpha } else { alpha * 0.35 }]
+    };
     let id = ui.open(
         part,
         Spec {
-            flags: Flags::CLICKABLE,
+            flags: if enabled {
+                Flags::CLICKABLE
+            } else {
+                Flags::default()
+            },
             size: [width.into(), px(TOOL)],
             fill: Some(theme.base),
-            hover_border: Some(theme.accent),
-            border: Some(theme.chip),
+            hover_border: enabled.then_some(theme.accent),
+            border: Some(faded(theme.chip)),
             radius: 4.0,
             pad: [8.0, 0.0],
+            role: Some(Role::ComboBox),
             ..Spec::default()
         },
     );
+    opens(ui, id, menu);
+    if let Some(node) = ui.access(id) {
+        node.set_label(name);
+        node.set_value(text);
+        if !enabled {
+            node.set_disabled();
+        }
+    }
     ui.leaf(
         "text",
         Spec {
             size: [fill(), px(TOOL)],
             text: Some(text),
+            color: Some(faded(theme.text)),
             ..Spec::default()
         },
     );
@@ -484,13 +566,15 @@ pub fn combo(ui: &mut Ui, part: impl Hash, text: &str, width: impl Into<Extent>)
         Spec {
             size: [px(12.0), px(TOOL)],
             icon: Some(CHEVRON),
-            color: Some(theme.text_dim),
+            color: Some(faded(theme.text_dim)),
             center: true,
             ..Spec::default()
         },
     );
     ui.close();
-    ui.signal(id)
+    if enabled && ui.signal(id).pressed {
+        ui.open_popup(menu);
+    }
 }
 
 impl Ui {

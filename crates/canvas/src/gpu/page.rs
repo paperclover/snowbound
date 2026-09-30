@@ -98,7 +98,8 @@ fn outline_origin(
 
 /// Draws `ink` moved by `offset`, strokes without a colour in the paper's `automatic` ink. A
 /// highlighter's rectangular tip sweeps a band as wide as the tip reaches across each
-/// segment, its colour multiplying what lies beneath as OneNote's MaskPen does.
+/// segment, its colour multiplying what lies beneath as OneNote's MaskPen does. A pressure
+/// pen's width follows its pressure from point to point, as OneNote's does.
 pub(crate) fn append_ink(
     ink: &onestore::page::Ink,
     offset: [f32; 2],
@@ -112,12 +113,21 @@ pub(crate) fn append_ink(
             color[3] = 1.0 - f32::from(stroke.transparency.unwrap_or(0)) / 255.0;
         }
         let round = stroke.pen_tip != Some(1);
-        let segment = |from: [f32; 2], to: [f32; 2]| {
+        let size = stroke.width.max(stroke.height);
+        let segment = |from: [f32; 2], to: [f32; 2], [t0, t1]: [f32; 2]| {
             if !highlighter {
+                if round && t0 != t1 {
+                    return Primitive::Taper {
+                        from,
+                        to,
+                        widths: [size * t0, size * t1],
+                        color,
+                    };
+                }
                 return Primitive::Segment {
                     from,
                     to,
-                    width: stroke.width.max(stroke.height),
+                    width: size * (t0 + t1) / 2.0,
                     round,
                     color,
                 };
@@ -132,28 +142,30 @@ pub(crate) fn append_ink(
             Primitive::Highlight {
                 from,
                 to,
-                width: stroke.width * across + stroke.height * along,
+                width: (stroke.width * across + stroke.height * along) * (t0 + t1) / 2.0,
                 color,
             }
         };
         let mut points = stroke
             .points
             .iter()
-            .map(|[x, y]| [x + offset[0], y + offset[1]]);
-        let Some(mut from) = points.next() else {
+            .enumerate()
+            .map(|(index, [x, y])| ([x + offset[0], y + offset[1]], stroke.thickness(index)));
+        let Some((mut from, mut thick)) = points.next() else {
             continue;
         };
-        // Samples along a straight run make one segment, since each joint paints its overlap
-        // twice.
-        let mut end = from;
-        for to in points {
-            if !between(from, end, to) {
-                primitives.push(segment(from, end));
-                from = end;
+        // Samples along a straight run of one width make one segment, since each joint paints
+        // its overlap twice.
+        let (mut end, mut end_thick) = (from, thick);
+        for (to, to_thick) in points {
+            let same = end == from || (to_thick == end_thick && end_thick == thick);
+            if !(same && between(from, end, to)) {
+                primitives.push(segment(from, end, [thick, end_thick]));
+                (from, thick) = (end, end_thick);
             }
-            end = to;
+            (end, end_thick) = (to, to_thick);
         }
-        primitives.push(segment(from, end));
+        primitives.push(segment(from, end, [thick, end_thick]));
     }
     for group in &ink.groups {
         append_ink(group, offset, automatic, primitives);
@@ -326,21 +338,18 @@ impl PageScene {
     }
 
     /// Every picture the page draws, page-level ones and those inside outlines, except the
-    /// template backgrounds it recognises; one the renderer cannot decode is left out.
+    /// template backgrounds it recognises; one the renderer cannot decode is left out. A
+    /// picture shows its stored bytes, else the raster OneNote made of them.
     fn pictures(objects: &[Content], editor: Option<&CanvasEditor>) -> Result<Self, SceneError> {
-        fn nested<'a>(
-            nodes: &'a [onestore::page::PageParagraph],
-            payloads: &mut Vec<(onestore::ExGuid, Option<&'a Arc<[u8]>>)>,
-        ) {
+        type Payloads<'a> = Vec<(onestore::ExGuid, [Option<&'a Arc<[u8]>>; 2])>;
+        fn nested<'a>(nodes: &'a [onestore::page::PageParagraph], payloads: &mut Payloads<'a>) {
             for node in nodes {
                 match &node.content {
                     onestore::page::ParagraphContent::Image(image) => {
-                        payloads.push((image.id, image.bytes.as_ref()))
+                        payloads.push((image.id, [image.bytes.as_ref(), image.display.as_ref()]))
                     }
                     onestore::page::ParagraphContent::Attachment(file) => {
-                        if let Some(icon) = file.preview.as_ref() {
-                            payloads.push((file.id, Some(icon)))
-                        }
+                        payloads.push((file.id, [file.preview.as_ref(), None]))
                     }
                     onestore::page::ParagraphContent::Table(table) => {
                         for cell in table.rows.iter().flat_map(|row| &row.cells) {
@@ -361,13 +370,11 @@ impl PageScene {
                     {
                         backgrounds.insert(source.id, art);
                     } else {
-                        payloads.push((source.id, source.bytes.as_ref()))
+                        payloads.push((source.id, [source.bytes.as_ref(), source.display.as_ref()]))
                     }
                 }
                 Content::File { source, .. } => {
-                    if let Some(icon) = source.preview.as_ref() {
-                        payloads.push((source.id, Some(icon)))
-                    }
+                    payloads.push((source.id, [source.preview.as_ref(), None]))
                 }
                 Content::Outline { source, .. } => nested(&source.paragraphs, &mut payloads),
                 Content::Editable(id) => {
@@ -382,7 +389,7 @@ impl PageScene {
         }
         let mut pictures = std::collections::BTreeMap::new();
         for (id, encoded) in payloads {
-            let Some(picture) = encoded.and_then(Picture::new) else {
+            let Some(picture) = encoded.into_iter().flatten().find_map(Picture::new) else {
                 continue;
             };
             if pictures.insert(id, picture).is_some() {
@@ -772,6 +779,7 @@ impl PageScene {
     }
 
     /// `moving` draws one picture at a previewed rectangle instead of its stored layout.
+    /// Outlines the editor does not hold draw their tags' symbols.
     pub fn append_primitives_with<'a, E: From<SceneError>>(
         &'a self,
         primitives: &mut Vec<Primitive<'a>>,
@@ -904,23 +912,31 @@ impl PageScene {
                     let Some(image) = image else {
                         continue;
                     };
-                    primitives.push(Primitive::Image {
-                        image,
-                        rect: match moving {
-                            Some((id, [x0, y0, x1, y1])) if id == source.id => [
-                                x0 + offset[0],
-                                y0 + offset[1],
-                                x1 + offset[0],
-                                y1 + offset[1],
-                            ],
-                            _ => [
-                                object_origin[0],
-                                object_origin[1],
-                                object_origin[0] + width,
-                                object_origin[1] + height,
-                            ],
-                        },
-                    })
+                    let rect = match moving {
+                        Some((id, [x0, y0, x1, y1])) if id == source.id => [
+                            x0 + offset[0],
+                            y0 + offset[1],
+                            x1 + offset[0],
+                            y1 + offset[1],
+                        ],
+                        _ => [
+                            object_origin[0],
+                            object_origin[1],
+                            object_origin[0] + width,
+                            object_origin[1] + height,
+                        ],
+                    };
+                    primitives.push(Primitive::Image { image, rect });
+                    // OneNote frames a printout's page with a one-pixel grey line.
+                    if source.printout.is_some() {
+                        let [x0, y0, x1, y1] = rect;
+                        primitives.push(Primitive::RoundedRect {
+                            rect: [x0 + 0.375, y0 + 0.375, x1 - 0.375, y1 - 0.375],
+                            radius: [0.0; 2],
+                            stroke: Some(draw::Stroke::Solid(0.75)),
+                            color: paper.shade(colorref(0x00cc_cccc)),
+                        });
+                    }
                 }
                 Content::Outline { .. } | Content::Date { .. } => {
                     let outline = match content {
@@ -931,6 +947,8 @@ impl PageScene {
                             .layout(),
                     };
                     outline.append_table_primitives(primitives, object_origin, paper);
+                    let art = super::TagArt::default();
+                    outline.append_block_tag_primitives(primitives, object_origin, &art);
                     let everything = [f32::NEG_INFINITY, f32::INFINITY];
                     outline.append_background_primitives(
                         primitives,
@@ -945,6 +963,7 @@ impl PageScene {
                             paragraph,
                             object_origin,
                             paper.ink,
+                            &art,
                             primitives,
                         );
                     }
@@ -1040,13 +1059,14 @@ impl crate::outline::OutlineLayout {
     }
 
     /// One paragraph of this outline, whose origin is `origin`: its text or equation, list
-    /// markers and tags.
+    /// markers and tags, those `art` maps drawn with their art.
     pub fn append_paragraph_primitives<'a>(
         &'a self,
         index: usize,
         paragraph: &'a crate::outline::ParagraphLayout,
         origin: [f32; 2],
         ink: [f32; 4],
+        art: &super::TagArt,
         primitives: &mut Vec<Primitive<'a>>,
     ) {
         let [x, y] = [
@@ -1117,10 +1137,37 @@ impl crate::outline::OutlineLayout {
         }
         for tag in &paragraph.tags {
             primitives.push(Primitive::Icon {
-                sources: super::tag_sources(tag.icon),
+                sources: art.sources(tag),
                 origin: [
                     origin[0] + self.tag_column_offset() + tag.origin[0],
                     y + tag.origin[1],
+                ],
+                size: tag.size,
+                tint: [1.0, 1.0, 1.0, if tag.disabled { 0.45 } else { 1.0 }],
+                palette: draw::Palette::default(),
+            });
+        }
+    }
+
+    /// The note tags of this outline's tables, pictures and files, whose origin is `origin`,
+    /// those `art` maps drawn with their art.
+    pub fn append_block_tag_primitives(
+        &self,
+        primitives: &mut Vec<Primitive<'_>>,
+        origin: [f32; 2],
+        art: &super::TagArt,
+    ) {
+        let tables = self.tables.iter().filter_map(|table| table.tags.as_ref());
+        let objects = self
+            .objects
+            .iter()
+            .filter_map(|object| object.tags.as_ref());
+        for tag in tables.chain(objects).flat_map(|block| &block.tags) {
+            primitives.push(Primitive::Icon {
+                sources: art.sources(tag),
+                origin: [
+                    origin[0] + self.tag_column_offset() + tag.origin[0],
+                    origin[1] + tag.origin[1],
                 ],
                 size: tag.size,
                 tint: [1.0, 1.0, 1.0, if tag.disabled { 0.45 } else { 1.0 }],
@@ -1577,6 +1624,7 @@ mod tests {
                     size: None,
                     id: onestore::page::text::new_id().unwrap(),
                     bytes: Some(image_bytes.clone()),
+                    display: None,
                     layout: Layout {
                         x: Some(x),
                         y: Some(y),
@@ -1586,6 +1634,7 @@ mod tests {
                     },
                     alt: None,
                     background,
+                    printout: None,
                 }));
             }
             let (mut scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();
@@ -1944,8 +1993,10 @@ mod tests {
                         ..Default::default()
                     },
                     bytes: None,
+                    display: None,
                     alt: Some("missing diagram".into()),
                     background: false,
+                    printout: None,
                 }),
                 PageObject::Unsupported(unknown.clone()),
             ],
@@ -2112,8 +2163,10 @@ mod tests {
                         ..Default::default()
                     },
                     bytes: Some(Arc::from(bytes.clone())),
+                    display: None,
                     alt: None,
                     background: false,
+                    printout: None,
                 }),
                 outline(50.0, "last"),
             ],
@@ -2254,6 +2307,7 @@ mod tests {
             transparency: Some(51),
             pen_tip: None,
             raster_operation: None,
+            pressure: Vec::new(),
         };
         let ink = Ink {
             id: ExGuid::default(),
@@ -2318,6 +2372,59 @@ mod tests {
     }
 
     #[test]
+    fn pressure_widens_a_stroke_from_point_to_point_as_onenote_draws_it() {
+        use onestore::page::{Ink, InkStroke};
+        let stroke = |points: Vec<[f32; 2]>, pressure: Vec<f32>| InkStroke {
+            id: ExGuid::default(),
+            points,
+            width: 4.0,
+            height: 4.0,
+            color: None,
+            transparency: None,
+            pen_tip: None,
+            raster_operation: None,
+            pressure,
+        };
+        let ink = Ink {
+            id: ExGuid::default(),
+            layout: Layout::default(),
+            strokes: vec![
+                stroke(
+                    vec![[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]],
+                    vec![0.0, 0.5, 1.0],
+                ),
+                // A straight run at one pressure is one segment.
+                stroke(vec![[0.0, 10.0], [10.0, 10.0], [20.0, 10.0]], vec![0.0; 3]),
+            ],
+            groups: Vec::new(),
+            shape: None,
+        };
+        let mut primitives = Vec::new();
+        append_ink(&ink, [0.0; 2], [0.0, 0.0, 0.0, 1.0], &mut primitives);
+        let found: Vec<([f32; 2], [f32; 2], [f32; 2])> = primitives
+            .iter()
+            .map(|primitive| match primitive {
+                Primitive::Taper {
+                    from, to, widths, ..
+                } => (*from, *to, *widths),
+                Primitive::Segment {
+                    from, to, width, ..
+                } => (*from, *to, [*width; 2]),
+                _ => panic!(),
+            })
+            .collect();
+        // A quarter of the pen at no pressure, all of it at half and 1.75 times at full.
+        assert_eq!(
+            found,
+            [
+                ([0.0, 0.0], [10.0, 0.0], [1.0, 4.0]),
+                ([10.0, 0.0], [20.0, 0.0], [4.0, 7.0]),
+                ([0.0, 10.0], [20.0, 10.0], [1.0, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
     fn scene_owns_decoded_images_and_reuses_identity_across_translated_frames() {
         let mut encoded = Vec::new();
         {
@@ -2349,8 +2456,10 @@ mod tests {
                     ..Default::default()
                 },
                 bytes: Some(Arc::from(encoded.clone())),
+                display: None,
                 alt: None,
                 background: false,
+                printout: None,
             })],
         };
         let mut engine = TextEngine::default();
@@ -2412,8 +2521,10 @@ mod tests {
                 ..Default::default()
             },
             bytes: Some(Arc::from(bytes.clone())),
+            display: None,
             alt: None,
             background,
+            printout: None,
         };
         let [background, picture] = [image(0.0, true), image(50.0, false)];
         let id = picture.id;
@@ -2481,8 +2592,10 @@ mod tests {
                     ..Default::default()
                 },
                 bytes: Some(Arc::clone(&bytes)),
+                display: None,
                 alt: None,
                 background: false,
+                printout: None,
             })
             .collect();
         assert!(20 * u64::from(side * side) * 4 > draw::MAX_IMAGE_BYTES);

@@ -89,6 +89,7 @@ fn stroke(points: &[[f32; 2]], color: Option<u32>) -> InkStroke {
         transparency: None,
         pen_tip: None,
         raster_operation: None,
+        pressure: Vec::new(),
     }
 }
 
@@ -391,6 +392,7 @@ fn tool_page(source: &[u8]) -> (ExGuid, Page, Vec<Ink>) {
         transparency: None,
         pen_tip: None,
         raster_operation: None,
+        pressure: Vec::new(),
     };
     let marker = InkStroke {
         width: himetric(70.0),
@@ -630,4 +632,165 @@ fn onenote_drawings_take_erasing_moving_and_more_strokes() {
         assert_eq!(found.iter().find(|found| found.id == ink.id), Some(&ink));
     }
     export("ONESTORE_INK_TOOLS_EDIT_EXPORT", "ink.one", &written);
+}
+
+/// OneNote 2010's pressure ink, taken in from ISF (`tools/native/ink-pressure.ps1`).
+const PRESSURE: &[u8] = include_bytes!("../../../corpus/ink-pressure/native/notebook/Pressure.one");
+
+#[test]
+fn onenote_pressure_ink_reads_each_point_s_level_over_the_pen_s_range() {
+    let (_, page) = titled(PRESSURE, "Levels");
+    let [fine, coarse] = drawings(&page)[..] else {
+        panic!("{:?}", drawings(&page).len());
+    };
+    for (ink, range) in [(fine, 1023.0), (coarse, 255.0)] {
+        assert_eq!(ink.strokes.len(), 9);
+        for (step, stroke) in ink.strokes.iter().enumerate() {
+            let level = (step as f32 / 8.0 * range).round() / range;
+            assert_eq!(stroke.pressure.len(), stroke.points.len());
+            assert!(stroke.pressure.iter().all(|p| (p - level).abs() < 1e-6));
+            assert!((stroke.thickness(0) - (0.25 + 1.5 * level)).abs() < 1e-6);
+        }
+    }
+    let (_, page) = titled(PRESSURE, "Strokes");
+    let [ramp, _, flat, tilt, block] = drawings(&page)[..] else {
+        panic!("{:?}", drawings(&page).len());
+    };
+    let ramp = &ramp.strokes[0].pressure;
+    assert_eq!((ramp.len(), ramp[0], ramp[40]), (41, 0.0, 1.0));
+    // A pen that ignores the pressure it recorded draws at its width throughout.
+    assert!(flat.strokes[0].pressure.is_empty());
+    assert_eq!(flat.strokes[0].thickness(20), 1.0);
+    // Tilt beside the pressure leaves the pressure as it is.
+    let tilted = &tilt.strokes[0].pressure;
+    assert!((tilted[0] - 205.0 / 1023.0).abs() < 1e-6, "{tilted:?}");
+    assert_eq!(block.strokes[0].pen_tip, Some(1));
+    assert_eq!(block.strokes[0].pressure.len(), 11);
+}
+
+/// `ONESTORE_INK_PRESSURE_EXPORT` names a new directory receiving the candidate for a cold
+/// reopen: OneNote's pressure ink after Snowbound erases a stroke of one drawing, moves one
+/// and deletes another, beside Snowbound's own pressure strokes.
+#[test]
+fn pressure_ink_is_written_as_onenote_keeps_it_and_survives_edits() {
+    use onestore::document::Kind;
+    use onestore::{OutlineEdit, op::PageOp};
+    let (levels_space, levels) = titled(PRESSURE, "Levels");
+    let fine = drawings(&levels)[0].clone();
+    let erased = ops::page_edited(
+        PRESSURE,
+        levels_space,
+        vec![PageOp::Strokes {
+            ink: fine.id,
+            add: Vec::new(),
+            remove: vec![fine.strokes[0].id],
+        }],
+    )
+    .unwrap();
+    let pen = |points: Vec<[f32; 2]>, pressure: Vec<f32>| Ink {
+        id: new_id().unwrap(),
+        layout: Default::default(),
+        strokes: vec![InkStroke {
+            id: new_id().unwrap(),
+            points: points.into_iter().map(|p| p.map(snap)).collect(),
+            width: snap(himetric(500.0)),
+            height: snap(himetric(500.0)),
+            color: Some(0x7a9a1f),
+            transparency: None,
+            pen_tip: None,
+            raster_operation: None,
+            pressure: pressure
+                .into_iter()
+                .map(onestore::page::ink::level)
+                .collect(),
+        }],
+        groups: Vec::new(),
+        shape: None,
+    };
+    // Constant levels of none, half and full pressure, and a ramp from none to full.
+    let mut inks: Vec<Ink> = [0.0, 0.5, 1.0]
+        .into_iter()
+        .enumerate()
+        .map(|(row, pressure)| {
+            let y = 520.0 + 36.0 * row as f32;
+            pen(vec![[36.0, y], [108.0, y], [180.0, y]], vec![pressure; 3])
+        })
+        .collect();
+    inks.push(pen(
+        (0..=40)
+            .map(|step| [36.0 + 6.0 * step as f32, 640.0])
+            .collect(),
+        (0..=40).map(|step| step as f32 / 40.0).collect(),
+    ));
+    let written = added(&erased, levels_space, &inks);
+    let (strokes_space, strokes) = titled(&written, "Strokes");
+    let [ramp, wave, ..] = drawings(&strokes)[..] else {
+        unreachable!()
+    };
+    let written = ops::page_edited(
+        &written,
+        strokes_space,
+        vec![
+            PageOp::Delete { object: wave.id },
+            PageOp::Outline {
+                object: ramp.id,
+                edit: OutlineEdit::Position { x: 72.0, y: 108.0 },
+            },
+        ],
+    )
+    .unwrap();
+
+    let stored = page_in(&written, levels_space);
+    let found = drawings(&stored);
+    let kept = found.iter().find(|ink| ink.id == fine.id).unwrap();
+    assert_eq!(kept.strokes, fine.strokes[1..]);
+    for ink in &inks {
+        assert_eq!(found.iter().find(|found| found.id == ink.id), Some(&ink));
+    }
+    let stored = page_in(&written, strokes_space);
+    let moved = drawings(&stored);
+    assert_eq!(moved.len(), 4);
+    assert_eq!(
+        (moved[0].layout.x, moved[0].layout.y),
+        (Some(72.0), Some(108.0))
+    );
+    assert_eq!(moved[0].strokes, ramp.strokes);
+
+    // New pressure strokes store NormalPressure after X and Y and leave IgnorePressure out,
+    // as OneNote does with pressure sensitivity on; OneNote's tilt stays as it stored it.
+    let store = Store::parse(&written).unwrap();
+    let index = RevisionIndex::parse(&store).unwrap();
+    let document = Document::parse(&index).unwrap();
+    let style = |space: ExGuid, stroke: ExGuid| {
+        let revision = document.active(space).unwrap();
+        let Kind::InkStroke {
+            style: Some(style), ..
+        } = revision.nodes[&stroke].kind
+        else {
+            panic!()
+        };
+        revision.nodes[&style].kind.clone()
+    };
+    match style(levels_space, inks[0].strokes[0].id) {
+        Kind::InkStyle {
+            dimensions,
+            ignore_pressure: None,
+            ..
+        } => {
+            assert_eq!(dimensions.len(), 96);
+            assert_eq!(
+                &dimensions[64..],
+                &[
+                    0x2d, 0x50, 0x07, 0x73, 0xf4, 0xf9, 0x18, 0x4e, 0xb3, 0xf2, 0x2c, 0xe1, 0xb1,
+                    0xa3, 0x61, 0x0c, 0, 0, 0, 0, 0xff, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x3f
+                ]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    match style(strokes_space, moved[2].strokes[0].id) {
+        Kind::InkStyle { dimensions, .. } => assert_eq!(dimensions.len(), 5 * 32),
+        other => panic!("{other:?}"),
+    }
+    export("ONESTORE_INK_PRESSURE_EXPORT", "Pressure.one", &written);
 }

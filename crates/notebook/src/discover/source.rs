@@ -1,8 +1,22 @@
 use super::{Entry, EntryKind, Listed, Source, component};
 use std::{
+    collections::BTreeSet,
     io,
     path::{Path, PathBuf},
 };
+
+/// The notebook file iOS lists as `.Name.icloud` while iCloud Drive keeps it elsewhere.
+fn evicted(name: &str) -> Option<&str> {
+    let real = name.strip_prefix('.')?.strip_suffix(".icloud")?;
+    let lower = real.to_ascii_lowercase();
+    (lower.ends_with(".one") || lower.ends_with(".onetoc2")).then_some(real)
+}
+
+/// Where iOS lists the file at `path` while iCloud Drive keeps it elsewhere.
+pub(crate) fn placeholder(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    Some(path.with_file_name(format!(".{name}.icloud")))
+}
 
 /// A canonical local root; symbolic-link entries are not traversed.
 pub struct Local {
@@ -62,6 +76,16 @@ impl Source for Local {
                 },
             });
         }
+        let present: BTreeSet<_> = entries.iter().map(|entry| entry.name.clone()).collect();
+        entries.retain_mut(|entry| match evicted(&entry.name).map(str::to_owned) {
+            Some(real) if present.contains(&real) => false,
+            Some(real) => {
+                entry.name = real;
+                entry.kind = EntryKind::Evicted;
+                true
+            }
+            None => true,
+        });
         Ok(entries)
     }
 

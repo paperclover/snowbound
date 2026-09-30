@@ -169,9 +169,12 @@ MS-ONESTORE and MS-ONE are good, but they are not the whole truth:
   note to a moment in a recording. Ink and math were reverse-engineered, each
   against an independent oracle. For ink, the stroke extents from OneNote's own
   export, and for the Draw tab's pens, highlighters and shapes, the objects
-  OneNote stored while drawing them in the lab (`corpus/ink-tools`). For math, the MathML it exports, matched byte for byte. Recordings
+  OneNote stored while drawing them in the lab (`corpus/ink-tools`), and for pressure,
+  its PDF export of strokes it took in from ISF (`corpus/ink-pressure`). For math, the MathML it exports, matched byte for byte. Recordings
   and their links follow what OneNote stored while recording in the lab, read
-  back through its XML export (`corpus/recording`). Embedded objects are read
+  back through its XML export (`corpus/recording`); OneNote lists attached
+  .avi, .mpg and .wmv files as video recordings but not .mp4 or .mov, so video
+  is stored as Motion JPEG AVI, which it plays. Embedded objects are read
   and kept, but never authored.
 
 Readers stay tolerant (files in the wild are older, odder, or written by other

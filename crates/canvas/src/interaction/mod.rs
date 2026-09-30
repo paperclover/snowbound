@@ -84,6 +84,21 @@ pub struct Context {
     pub paragraph: Option<onestore::ExGuid>,
     /// The file the press selected, which Open and Save As take.
     pub attachment: Option<onestore::page::Attachment>,
+    /// The marked word the press landed on, which the menu offers corrections for.
+    pub spelling: Option<Correction>,
+}
+
+/// A marked word under a context menu, and what it could become.
+#[derive(Debug, PartialEq)]
+pub struct Correction {
+    pub word: String,
+    /// Replacements, best first; none for a repeated word, which Delete Repeated Word
+    /// removes with the space before it.
+    pub suggestions: Vec<String>,
+    pub repeated: bool,
+    outline: onestore::ExGuid,
+    /// What a correction replaces: the word, or a repeated word and the space before it.
+    range: Selection,
 }
 
 /// What an event did: `changed` means the page or selection changed (the host saves,
@@ -136,6 +151,8 @@ pub struct TextColors {
 struct Paint<'a> {
     caret: f32,
     scale: f32,
+    /// The device pixel the document origin lands on, for marks drawn on the pixel grid.
+    device_origin: [f32; 2],
     pixel: f32,
     colors: TextColors,
     /// The document's top and bottom the view shows; paragraphs wholly outside it are
@@ -147,6 +164,8 @@ struct Paint<'a> {
     found: &'a [crate::search::PageMatch],
     /// The note See Playback highlights.
     played: Option<&'a crate::search::PageMatch>,
+    spelling: Option<&'a crate::spelling::Spelling>,
+    tag_art: &'a crate::gpu::TagArt,
 }
 
 enum Drag {
@@ -242,7 +261,11 @@ pub struct PageView {
     /// Matches of the search shown on the page, marked under their text.
     pub found: Vec<crate::search::PageMatch>,
     /// The note playing, highlighted as See Playback highlights it.
-    pub played: Option<crate::search::PageMatch>,
+    played: Option<crate::search::PageMatch>,
+    /// Marks misspelled and repeated words; none leaves words unmarked.
+    pub spelling: Option<crate::spelling::Spelling>,
+    /// The art the page's notebook draws its tags with.
+    pub tag_art: std::sync::Arc<crate::gpu::TagArt>,
     /// The caret's opacity in its blink.
     caret: f32,
     /// When the caret last moved, which restarts its blink.
@@ -305,6 +328,8 @@ impl PageView {
             host_viewport: false,
             found: Vec::new(),
             played: None,
+            spelling: None,
+            tag_art: Default::default(),
             caret: 1.0,
             blink_from: Instant::now(),
             ink: Default::default(),
@@ -537,17 +562,15 @@ impl PageView {
             let shaped = outline.shaped();
             let left = offset[0] + outline.origin()[0] + shaped.tag_column_offset();
             let top = offset[1] + outline.origin()[1];
-            shaped.paragraphs.iter().find_map(|paragraph| {
-                paragraph.tags.iter().find_map(|tag| {
-                    let x0 = left + tag.origin[0];
-                    let y0 = top + paragraph.origin[1] + tag.origin[1];
-                    (matches!(tag.icon, crate::outline::TagIcon::Task { .. })
-                        && (x0..=x0 + tag.size).contains(&x)
-                        && (y0..=y0 + tag.size).contains(&y))
-                    .then(|| {
-                        let [x1, y1] = [x0 + tag.size, y0 + tag.size];
-                        [view(x0, 0), view(y0, 1), view(x1, 0), view(y1, 1)]
-                    })
+            shaped.tags().find_map(|(_, origin, tag)| {
+                let x0 = left + origin[0];
+                let y0 = top + origin[1];
+                (matches!(tag.icon, crate::outline::TagIcon::Task { .. })
+                    && (x0..=x0 + tag.size).contains(&x)
+                    && (y0..=y0 + tag.size).contains(&y))
+                .then(|| {
+                    let [x1, y1] = [x0 + tag.size, y0 + tag.size];
+                    [view(x0, 0), view(y0, 1), view(x1, 0), view(y1, 1)]
                 })
             })
         })
@@ -643,23 +666,33 @@ impl PageView {
             rect.y1 += f64::from(origin[1]);
             rect
         };
-        let outline = self.editor.active_outline().bounds();
+        let outline = self
+            .object_focus
+            .is_none()
+            .then(|| self.editor.active_outline().bounds());
+        self.reveal(rect, outline);
+        Ok(())
+    }
+
+    /// Scrolls document `rect` into view, and with it all of `outline` where that fits.
+    fn reveal(&mut self, rect: parley::BoundingBox, outline: Option<parley::BoundingBox>) {
         for (axis, (mut start, mut end)) in [(rect.x0, rect.x1), (rect.y0, rect.y1)]
             .into_iter()
             .enumerate()
         {
             let size = f64::from(self.viewport.size[axis]);
             let margin = f64::from(16.0 * self.display_scale).min(size * 0.25);
-            let (outline_start, outline_end) =
-                [(outline.x0, outline.x1), (outline.y0, outline.y1)][axis];
-            let outline_start = outline_start.min(start);
-            let outline_end = outline_end.max(end);
-            if self.object_focus.is_none()
-                && (outline_end - outline_start) * f64::from(self.viewport.scale)
+            if let Some(outline) = outline {
+                let (outline_start, outline_end) =
+                    [(outline.x0, outline.x1), (outline.y0, outline.y1)][axis];
+                let outline_start = outline_start.min(start);
+                let outline_end = outline_end.max(end);
+                if (outline_end - outline_start) * f64::from(self.viewport.scale)
                     <= size - margin * 2.0
-            {
-                start = outline_start;
-                end = outline_end;
+                {
+                    start = outline_start;
+                    end = outline_end;
+                }
             }
             let start =
                 start * f64::from(self.viewport.scale) + f64::from(self.viewport.origin[axis]);
@@ -673,7 +706,45 @@ impl PageView {
             };
             self.viewport.origin[axis] += shift as f32;
         }
-        Ok(())
+    }
+
+    /// Highlights `played`, the note playing, as See Playback does, scrolling it into view
+    /// as OneNote does when the note changes.
+    pub fn set_played(&mut self, played: Option<crate::search::PageMatch>) -> Result<Response> {
+        if played == self.played {
+            return Ok(Response::default());
+        }
+        self.played = played;
+        let outline = played.and_then(|(id, _)| {
+            self.editor
+                .outlines()
+                .iter()
+                .find(|outline| outline.id == id)
+        });
+        if let (Some(outline), Some((_, selection))) = (outline, played)
+            && !self.host_viewport
+            && !self.viewport.size.contains(&0)
+        {
+            let [x, y] = outline.origin().map(f64::from);
+            let rect = outline
+                .range_rects(selection)?
+                .into_iter()
+                .reduce(|a, b| a.union(b))
+                .map(|rect| parley::BoundingBox {
+                    x0: rect.x0 + x,
+                    y0: rect.y0 + y,
+                    x1: rect.x1 + x,
+                    y1: rect.y1 + y,
+                });
+            if let Some(rect) = rect {
+                self.reveal(rect, None);
+                return self.moved();
+            }
+        }
+        Ok(Response {
+            redraw: true,
+            ..Response::default()
+        })
     }
 
     /// Moves the caret by lines until it has gone a view's height, then scrolls as far so
@@ -868,6 +939,7 @@ impl PageView {
                     0.0
                 },
                 scale: self.viewport.scale,
+                device_origin: self.viewport.origin,
                 pixel: self.pixel(),
                 colors,
                 visible: [0.0, self.viewport.size[1] as f32]
@@ -875,6 +947,8 @@ impl PageView {
                 chrome: !self.touch || self.focused,
                 found: &self.found,
                 played: self.played.as_ref(),
+                spelling: self.spelling.as_ref(),
+                tag_art: &self.tag_art,
             },
         )?);
         if self.drag.is_none()
@@ -1429,12 +1503,125 @@ impl PageView {
                 .leaf(anchor.min(focus).paragraph)
                 .map(|(_, _, node)| node.id),
             attachment: None,
+            spelling: self.selected_correction(),
         };
         Ok(Some((self.changed()?, context)))
     }
 
-    /// The text and address the Link dialog opens with for the selection.
-    pub fn link_prefill(&self) -> (String, String) {
+    /// The marked word at the caret, or wholly selected, with its corrections.
+    pub fn selected_correction(&self) -> Option<Correction> {
+        let [anchor, focus] = self.editor.selection().positions;
+        let correction = self.correction(anchor.min(focus))?;
+        (anchor == focus || self.correction(anchor.max(focus)).as_ref() == Some(&correction))
+            .then_some(correction)
+    }
+
+    /// The marked word at `at` in the focused outline, with its corrections.
+    fn correction(&self, at: crate::document::TextPosition) -> Option<Correction> {
+        let spelling = self.spelling.as_ref()?;
+        let outline = self.editor.active_outline();
+        let paragraph = outline.document().paragraph(at.paragraph)?;
+        let byte = paragraph.byte_offset(at.offset).ok()?;
+        let mark = spelling
+            .marks(paragraph)
+            .into_iter()
+            .find(|mark| mark.range.start <= byte && byte <= mark.range.end)?;
+        correction(spelling, outline, at.paragraph, &mark)
+    }
+
+    /// The Spelling pane's next word: the first marked word after the selection in page
+    /// order, wrapping round to the top, selected. None once the page marks no word.
+    pub fn next_correction(&mut self) -> Result<Option<(Response, Correction)>> {
+        let Some(spelling) = &self.spelling else {
+            return Ok(None);
+        };
+        let (id, word, correction) = {
+            let mut outlines: Vec<&TextOutline> = self.editor.outlines().iter().collect();
+            outlines.sort_by(|a, b| {
+                let [ax, ay] = a.origin();
+                let [bx, by] = b.origin();
+                ay.total_cmp(&by).then(ax.total_cmp(&bx))
+            });
+            let active = self.editor.active_outline().id;
+            let active = outlines.iter().position(|outline| outline.id == active);
+            let [anchor, focus] = self.editor.selection().positions;
+            let after = anchor.max(focus);
+            let mut marked = outlines.iter().enumerate().flat_map(|(order, outline)| {
+                outline.layouts().flat_map(move |(index, _)| {
+                    let paragraph = outline.document().paragraph(index);
+                    paragraph
+                        .map(|paragraph| spelling.marks_now(paragraph))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(move |mark| (order, *outline, index, mark))
+                })
+            });
+            let mut first = None;
+            // The first word not wholly before the selection; the page's first after them all.
+            let found = marked.find(|(order, outline, index, mark)| {
+                first.get_or_insert_with(|| (*order, *outline, *index, mark.clone()));
+                let Some(active) = active else {
+                    return true;
+                };
+                let paragraph = outline.document().paragraph(*index);
+                let offset = |byte| {
+                    paragraph.map_or(0, |paragraph| paragraph.utf16_offset(byte).unwrap_or(0))
+                };
+                let caret = (after.paragraph, after.offset);
+                *order > active
+                    || *order == active
+                        && ((*index, offset(mark.range.end)) > caret
+                            || (*index, offset(mark.range.start)) >= caret)
+            });
+            let Some((_, outline, index, mark)) = found.or(first) else {
+                return Ok(None);
+            };
+            let correction = correction(spelling, outline, index, &mark).ok_or("Unmarked word")?;
+            let paragraph = outline
+                .document()
+                .paragraph(index)
+                .ok_or("Missing paragraph")?;
+            let at = |byte| -> Result<crate::document::TextPosition> {
+                Ok(crate::document::TextPosition {
+                    paragraph: index,
+                    offset: paragraph.utf16_offset(byte)?,
+                })
+            };
+            let word: Selection = [at(mark.range.start)?, at(mark.range.end)?].into();
+            (outline.id, word, correction)
+        };
+        self.editor.focus_outline(id)?;
+        self.editor.select(word)?;
+        Ok(Some((self.edited()?, correction)))
+    }
+
+    /// Replaces the word `correction` names with `text`, or with nothing, as one edit; not
+    /// once an edit since has changed the word.
+    pub fn correct(&mut self, correction: &Correction, text: &str) -> Result<Response> {
+        let [start, end] = correction.range.positions;
+        let unchanged = self
+            .editor
+            .outlines()
+            .iter()
+            .find(|outline| outline.id == correction.outline)
+            .and_then(|outline| outline.document().paragraph(start.paragraph))
+            .and_then(|paragraph| {
+                let range = paragraph.byte_offset(start.offset).ok()?
+                    ..paragraph.byte_offset(end.offset).ok()?;
+                Some(paragraph.text().get(range)?.trim_start() == correction.word)
+            });
+        if unchanged != Some(true) {
+            return Ok(Response::default());
+        }
+        self.editor.focus_outline(correction.outline)?;
+        self.editor.select(correction.range)?;
+        self.editor.correct(&mut self.engine, text)?;
+        self.edited()
+    }
+
+    /// The text and address the Link dialog opens with for the selection; none where it does
+    /// not open.
+    pub fn link_prefill(&self) -> Option<(String, String)> {
         self.editor.link_prefill()
     }
 
@@ -1489,8 +1676,10 @@ impl PageView {
             },
             size: Some(size),
             bytes: Some(bytes.into()),
+            display: None,
             alt: None,
             background: false,
+            printout: None,
         };
         self.editor.insert_picture(&mut self.engine, image)?;
         self.edited()
@@ -1995,19 +2184,17 @@ fn page_hit(
             }
             let shaped = outline.shaped();
             let [left, top] = outline.origin();
-            let check = shaped.paragraphs.iter().find(|paragraph| {
-                paragraph.tags.iter().any(|tag| {
-                    let tag_x = left + shaped.tag_column_offset() + tag.origin[0];
-                    let tag_y = top + paragraph.origin[1] + tag.origin[1];
-                    tag.icon.checkable()
-                        && (tag_x..=tag_x + tag.size).contains(&x)
-                        && (tag_y..=tag_y + tag.size).contains(&y)
-                })
+            let check = shaped.tags().find(|(_, origin, tag)| {
+                let tag_x = left + shaped.tag_column_offset() + origin[0];
+                let tag_y = top + origin[1];
+                tag.icon.checkable()
+                    && (tag_x..=tag_x + tag.size).contains(&x)
+                    && (tag_y..=tag_y + tag.size).contains(&y)
             });
-            if let Some(paragraph) = check {
+            if let Some((paragraph, ..)) = check {
                 return Some(Hit::Check {
                     outline: outline.id,
-                    paragraph: paragraph.id,
+                    paragraph,
                 });
             }
             let text = outline.bounds();
@@ -2435,14 +2622,13 @@ fn reach(outline: &TextOutline) -> [f32; 2] {
         .iter()
         .flat_map(|paragraph| {
             let markers = paragraph.markers.iter().map(|(_, [x, _])| *x);
-            let tags = paragraph
-                .tags
-                .iter()
-                .map(move |tag| tag.origin[0] + column + 0.75);
-            std::iter::once(paragraph.origin[0] - 7.5)
-                .chain(markers)
-                .chain(tags)
+            std::iter::once(paragraph.origin[0] - 7.5).chain(markers)
         })
+        .chain(
+            shaped
+                .tags()
+                .map(|(_, origin, _)| origin[0] + column + 0.75),
+        )
         .fold(-7.5, f32::min);
     let [x, y] = outline.origin();
     [x + left, y - 6.0]
@@ -2492,11 +2678,8 @@ fn outline_chrome(outline: &TextOutline, pixel: f32) -> ([f32; 4], f32) {
     let left = shaped
         .paragraphs
         .iter()
-        .flat_map(|paragraph| {
-            let tags = paragraph.tags.iter().map(|tag| tag.origin[0] + column);
-            let markers = paragraph.markers.iter().map(|(_, [x, _])| x + 7.5);
-            tags.chain(markers)
-        })
+        .flat_map(|paragraph| paragraph.markers.iter().map(|(_, [x, _])| x + 7.5))
+        .chain(shaped.tags().map(|(_, origin, _)| origin[0] + column))
         .fold(0.0, f32::min);
     (
         [
@@ -2608,17 +2791,22 @@ fn append_outline<'a>(
     let Paint {
         caret,
         scale,
+        device_origin,
         pixel,
         colors,
         visible,
         found,
         played,
+        spelling,
         ..
     } = paint;
     let rows = [visible[0] - y, visible[1] - y];
     outline
         .shaped()
         .append_table_primitives(primitives, origin, colors.paper);
+    outline
+        .shaped()
+        .append_block_tag_primitives(primitives, origin, paint.tag_art);
     outline
         .shaped()
         .append_background_primitives(primitives, origin, rows, colors.paper);
@@ -2668,8 +2856,25 @@ fn append_outline<'a>(
             paragraph,
             origin,
             colors.paper.ink,
+            paint.tag_art,
             primitives,
         );
+    }
+    if let Some(spelling) = spelling {
+        let typing = editor
+            .and_then(CanvasEditor::typing)
+            .filter(|(id, _)| *id == outline.id)
+            .map(|(_, at)| at);
+        append_marks(
+            spelling,
+            outline,
+            typing,
+            origin,
+            rows,
+            [scale, device_origin[0], device_origin[1]],
+            pixel,
+            primitives,
+        )?;
     }
     if let Some(editor) = editor {
         for rect in editor.marked_rects()? {
@@ -2703,4 +2908,102 @@ fn append_outline<'a>(
         }
     }
     Ok(())
+}
+
+/// OneNote's red zigzag under each marked word of the paragraphs between outline-local
+/// `rows`: a pixel thick, two high and four long, 1.5 to 3.5 pixels below the baseline, laid
+/// on the device grid `[scale, x, y]` so it stays hard-edged. The word ending at the caret of
+/// a run of typing, `typing`, is still being written and goes unmarked.
+#[allow(clippy::too_many_arguments)]
+fn append_marks(
+    spelling: &crate::spelling::Spelling,
+    outline: &TextOutline,
+    typing: Option<crate::document::TextPosition>,
+    origin: [f32; 2],
+    rows: [f32; 2],
+    [scale, device_x, device_y]: [f32; 3],
+    pixel: f32,
+    primitives: &mut Vec<Primitive<'_>>,
+) -> Result<()> {
+    let color = draw::srgb(0xff, 0x00, 0x00);
+    let dot = (pixel * scale).round().max(1.0);
+    let shown = outline.layouts().filter(|(_, paragraph)| {
+        paragraph.origin[1] + paragraph.text.height() >= rows[0] && paragraph.origin[1] <= rows[1]
+    });
+    for (index, _) in shown {
+        let Some(paragraph) = outline.document().paragraph(index) else {
+            continue;
+        };
+        for mark in spelling.marks(paragraph) {
+            let start = paragraph.utf16_offset(mark.range.start)?;
+            let end = paragraph.utf16_offset(mark.range.end)?;
+            if typing.is_some_and(|at| at.paragraph == index && at.offset == end) {
+                continue;
+            }
+            for [left, right, baseline] in outline.underlines(index, start..end)? {
+                let right = ((origin[0] + right) * scale + device_x).round();
+                let mut x = ((origin[0] + left) * scale + device_x).round();
+                let top = ((origin[1] + baseline) * scale + device_y).round() + dot;
+                for step in [1.0, 2.0, 1.0, 0.0].into_iter().cycle() {
+                    if x >= right {
+                        break;
+                    }
+                    let y = top + step * dot;
+                    primitives.push(Primitive::Rect {
+                        rect: [
+                            (x - device_x) / scale,
+                            (y - device_y) / scale,
+                            (x + dot - device_x) / scale,
+                            (y + dot - device_y) / scale,
+                        ],
+                        color,
+                    });
+                    x += dot;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Marked word `mark` of paragraph `index` of `outline`, with its corrections.
+fn correction(
+    spelling: &crate::spelling::Spelling,
+    outline: &TextOutline,
+    index: usize,
+    mark: &crate::spelling::Mark,
+) -> Option<Correction> {
+    let paragraph = outline.document().paragraph(index)?;
+    let text = paragraph.text();
+    let word = text[mark.range.clone()].to_owned();
+    let start = if mark.repeated {
+        text[..mark.range.start].trim_end().len()
+    } else {
+        mark.range.start
+    };
+    let position = |byte| {
+        Some(crate::document::TextPosition {
+            paragraph: index,
+            offset: paragraph.utf16_offset(byte).ok()?,
+        })
+    };
+    let suggestions = if mark.repeated {
+        Vec::new()
+    } else {
+        let language = paragraph
+            .spans()
+            .iter()
+            .find(|span| span.end > mark.range.start)
+            .and_then(|span| span.format.language);
+        let mut suggestions = spelling.suggest(&word, language);
+        suggestions.truncate(5);
+        suggestions
+    };
+    Some(Correction {
+        suggestions,
+        repeated: mark.repeated,
+        outline: outline.id,
+        range: [position(start)?, position(mark.range.end)?].into(),
+        word,
+    })
 }

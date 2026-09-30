@@ -105,6 +105,35 @@ fn a_notebook_folder_lists_sections_in_order_with_groups_and_colours() {
 }
 
 #[test]
+fn a_new_notebook_opens_with_one_section_and_refuses_a_taken_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("Mine");
+    let cache = directory.path().join("cache");
+    std::fs::create_dir(&cache).unwrap();
+    let c = |path: &Path| CString::new(path.to_str().unwrap()).unwrap();
+    let create = |error: &mut *mut c_char| unsafe {
+        library::sb_notebook_create(
+            c(&root).as_ptr(),
+            c(&cache).as_ptr(),
+            c"Clover Test".as_ptr(),
+            c"Tuesday, September 29, 2026".as_ptr(),
+            c"9:41 AM".as_ptr(),
+            error,
+        )
+    };
+    let mut error = std::ptr::null_mut();
+    assert!(create(&mut error));
+    assert!(error.is_null());
+    let library = Library::open(&root, &cache, true).unwrap();
+    let tabs = library.tabs().unwrap();
+    assert_eq!(tabs.len(), 1);
+    assert!(tabs[0].readable);
+    assert!(!create(&mut error));
+    assert!(!error.is_null());
+    unsafe { sb_string_free(error) };
+}
+
+#[test]
 fn touches_route_to_text_the_page_and_the_focused_outlines_grip() {
     let (_directory, section) = features();
     let mut canvas = canvas(&section, "Paragraph controls");
@@ -496,22 +525,24 @@ fn to_do_marks_a_new_pages_body() {
     assert_eq!(tags, 1);
 }
 
-/// Against the Samba lab (`ONESTORE_SMB_LAB=127.0.0.1:PORT`, share `agent`, guest): a
-/// notebook folder copied to the share lists, a section opens and publishes typing, and the
-/// listing kept in the cache opens the section again while the server cannot be reached.
+/// Against a disposable share `agent` (`ONESTORE_SMB_LAB=HOST:PORT`, as
+/// `SNOWBOUND_TEST_SMB_USER` with `SNOWBOUND_TEST_SMB_PASSWORD`, or a guest): a notebook
+/// folder copied to the share lists, a section opens and publishes typing, and the listing
+/// kept in the cache opens the section again while the server cannot be reached.
 #[test]
-#[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
+#[ignore = "requires ONESTORE_SMB_LAB pointing to a disposable share"]
 fn a_notebook_on_a_share_saves_and_opens_offline() {
     let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
+    let variable = |name| std::env::var(name).unwrap_or_default();
     let server = |address: &str| library::Server {
         address: address.into(),
         share: "agent".into(),
-        user: String::new(),
-        password: String::new(),
+        user: variable("SNOWBOUND_TEST_SMB_USER"),
+        password: variable("SNOWBOUND_TEST_SMB_PASSWORD"),
         domain: String::new(),
     };
     let client = server(&address).connect().unwrap();
-    let root = format!("mobile-{}", std::process::id());
+    let root = format!("snowbound-test-mobile-{}", std::process::id());
     client.create_directory(&root).unwrap();
     let source = corpus("media-edit/candidate/Features.one");
     client
@@ -552,6 +583,12 @@ fn a_notebook_on_a_share_saves_and_opens_offline() {
         ))
     };
     std::fs::copy(listing(&address), listing(&format!("{host}:9"))).unwrap();
+    notebook::location::moved(
+        cache.path(),
+        &notebook::location::smb(&address, "agent", &root),
+        &notebook::location::smb(&format!("{host}:9"), "agent", &root),
+    )
+    .unwrap();
     let offline = Arc::new(Library::server(unreachable, &root, cache.path()).unwrap());
     assert_eq!(offline.tabs().unwrap()[0].path, "Features.one");
     let reopened = open(&offline, "Features.one");
@@ -561,6 +598,23 @@ fn a_notebook_on_a_share_saves_and_opens_offline() {
         .unwrap()
         .0;
     assert!(canvas::search::page_text(&page).contains("Shared "));
+    client.delete(&format!("{root}/Features.one")).unwrap();
+    client.delete(&root).unwrap();
+}
+
+#[test]
+fn a_share_notebook_syncs_only_its_readable_sections() {
+    let (directory, root) = copy("native-encrypted/cold-encrypted-02/notebook");
+    std::fs::copy(
+        corpus("m6/native-features-01/notebook/Empty.one"),
+        root.join("Empty.one"),
+    )
+    .unwrap();
+    let notebook =
+        notebook::session::Notebook::open(&root, directory.path().join("cache")).unwrap();
+    let mut files = std::collections::BTreeMap::new();
+    library::files(notebook.catalog(), &mut files);
+    assert_eq!(files.keys().collect::<Vec<_>>(), ["Empty.one"]);
 }
 
 /// Paths the test coordinator was asked for, with whether to write.
@@ -964,4 +1018,73 @@ fn the_accent_pen_and_shapes_draw_as_the_desktop_and_a_cancelled_sweep_stores_no
     assert!(canvas.page.editor.ink_extent(&[drawn[before].id]).is_some());
     assert!(!canvas.page.editor.can_redo());
     assert_eq!(stored_ink(&section, space).len(), before + 2);
+}
+
+/// Queues an offline edit to Features.one and closes its session, leaving the edit to the
+/// background; the replicas in the cache, and the text edited in.
+fn unpublished_edit() -> (tempfile::TempDir, PathBuf, Arc<Library>, ExGuid) {
+    let (directory, root, library, section) = notebook_open("Features.one");
+    sb_library_set_offline(&library, true);
+    let mut canvas = canvas(&section, "Paragraph controls");
+    focus(&mut canvas, "Collapsed parent");
+    canvas.insert("Unpublished ".into()).unwrap();
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+    assert!(eventually(|| !section
+        .shared
+        .section
+        .pending()
+        .unwrap()
+        .is_empty()));
+    let space = canvas.space;
+    drop(canvas);
+    drop(section);
+    (directory, root, library, space)
+}
+
+fn replicas(directory: &tempfile::TempDir) -> usize {
+    let Ok(folders) = std::fs::read_dir(directory.path().join("cache/replicas")) else {
+        return 0;
+    };
+    folders
+        .filter_map(|folder| std::fs::read_dir(folder.ok()?.path()).ok())
+        .flatten()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .is_ok_and(|entry| entry.path().extension() == Some("sqlite".as_ref()))
+        })
+        .count()
+}
+
+#[test]
+fn closing_publishes_a_pending_edit_so_the_notebook_renames_without_orphans() {
+    let (directory, root, library, space) = unpublished_edit();
+    library.close(Duration::from_secs(20)).unwrap();
+    assert!(stored_text(&root.join("Features.one"), space).contains("Unpublished "));
+    drop(library);
+    assert!(eventually(|| replicas(&directory) == 0));
+    let renamed = directory.path().join("Renamed");
+    std::fs::rename(&root, &renamed).unwrap();
+    let library = Arc::new(Library::open(&renamed, &directory.path().join("cache"), true).unwrap());
+    let section = open(&library, "Features.one");
+    let canvas = canvas(&section, "Paragraph controls");
+    assert!(stored_text(&renamed.join("Features.one"), canvas.space).contains("Unpublished "));
+}
+
+#[test]
+fn closing_refuses_while_an_edit_cannot_publish_then_deletes_nothing_pending() {
+    let (directory, root, library, space) = unpublished_edit();
+    let away = directory.path().join("Away");
+    std::fs::rename(&root, &away).unwrap();
+    assert!(library.close(Duration::from_secs(2)).is_err());
+    assert!(replicas(&directory) > 0);
+    std::fs::rename(&away, &root).unwrap();
+    library.close(Duration::from_secs(20)).unwrap();
+    assert!(stored_text(&root.join("Features.one"), space).contains("Unpublished "));
+    drop(library);
+    std::fs::remove_dir_all(&root).unwrap();
+    assert!(eventually(|| replicas(&directory) == 0));
 }

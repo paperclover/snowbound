@@ -118,7 +118,7 @@ impl Accessibility {
         editor: &CanvasEditor,
         scene: Option<&(PageScene, [f32; 2])>,
         viewport: Viewport,
-        title: &str,
+        label: &str,
         preview: Option<(ExGuid, [f32; 2])>,
         read_only_focus: Option<usize>,
     ) -> Result<TreeUpdate, EditError> {
@@ -331,8 +331,8 @@ impl Accessibility {
             f64::from(viewport.origin[1]),
         ]));
         page.set_children(children);
-        let mut root = Node::new(Role::Window);
-        root.set_label(title);
+        let mut root = Node::new(Role::Group);
+        root.set_label(label);
         root.set_children(vec![PAGE]);
         root.set_bounds(Rect::new(
             0.0,

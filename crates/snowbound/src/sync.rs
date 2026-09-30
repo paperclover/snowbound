@@ -1,7 +1,7 @@
 //! The sync status at the top right, and the popup it opens: OneNote's Shared Notebook
 //! Synchronization for the open section's notebook and each of its sections.
 
-use crate::{Session, State, art, filetime, library, platform};
+use crate::{Session, State, art, filetime, library, platform, update};
 use notebook::session::{SyncState, SyncStatus};
 use std::error::Error;
 use ui::{
@@ -45,6 +45,12 @@ fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option
             art::SYNC_OFFLINE,
             Some("Changes stay on this computer and sync when the notebook is back."),
         ),
+        SyncState::Protected => (
+            "Password protected",
+            art::SYNC_ERROR,
+            Some("Snowbound can’t open password-protected sections yet."),
+        ),
+        SyncState::Unreadable => ("Can’t read this section", art::SYNC_ERROR, None),
         SyncState::Failed => ("Unable to sync", art::SYNC_ERROR, None),
         SyncState::Syncing => ("Syncing…", art::SYNC_BUSY, None),
         SyncState::UpToDate => ("Up to date", art::SYNC_DONE, None),
@@ -115,8 +121,21 @@ fn when(time: u64) -> String {
     }
 }
 
-/// The status's icon in the toolbar, named in its tooltip, which opens the popup.
-pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme) {
+const TITLE: &str = "Notebook Sync Status";
+
+/// What the popup says of a newer build: downloading, or waiting to be installed.
+fn update_note(update: &update::Status) -> Option<String> {
+    match update {
+        update::Status::Downloading(version) => Some(format!("Downloading {version}…")),
+        update::Status::Ready(version, _) => Some(format!("{version} is ready")),
+        update::Status::Available(version) => Some(format!("{version} is available")),
+        _ => None,
+    }
+}
+
+/// The status's icon in the toolbar, which opens the popup; its tooltip names the status,
+/// and a dot on it says a newer build is ready.
+pub(crate) fn control(ui: &mut Ui, session: &Session, update: &update::Status, theme: &Theme) {
     let sync = overall(&sections(session));
     let strong = ui.popup_open(id()) || sync.error.is_some() && !library::offline();
     let (label, icon, _) = describe(&sync);
@@ -130,11 +149,40 @@ pub(crate) fn control(ui: &mut Ui, session: &Session, theme: &Theme) {
             hover_fill: Some(theme.hover()),
             radius: 4.0,
             center: true,
+            role: Some(accesskit::Role::Button),
             ..Spec::default()
         },
     );
+    let waiting = matches!(
+        update,
+        update::Status::Ready(..) | update::Status::Available(_)
+    );
+    if waiting {
+        ui.leaf(
+            "update",
+            Spec {
+                flags: Flags::FLOAT,
+                size: [px(7.0), px(7.0)],
+                position: [TOOL - 8.0, 1.0],
+                fill: Some(theme.accent),
+                radius: 3.5,
+                ..Spec::default()
+            },
+        );
+    }
+    let open = ui.popup_open(id());
+    let note = update_note(update).filter(|_| waiting);
+    if let Some(node) = ui.access(button()) {
+        node.set_label(TITLE);
+        node.set_value(label);
+        if let Some(note) = &note {
+            node.set_description(format!("Snowbound {note}"));
+        }
+        node.set_has_popup(accesskit::HasPopup::Dialog);
+        node.set_expanded(open);
+    }
     ui.close();
-    ui::popup::tooltip(ui, label, "", None);
+    ui::popup::tooltip(ui, label, "", note.as_deref());
     if ui.signal(button()).clicked {
         if ui.popup_open(id()) {
             ui.close_popup(id());
@@ -148,6 +196,7 @@ impl State {
     /// Builds the sync status popup while it is open.
     pub(crate) fn sync_popup(&mut self) -> Result<(), Box<dyn Error>> {
         let (ui, notebooks) = (&mut self.ui, &self.notebooks);
+        let update = self.updates.status();
         let Some(session) = &mut self.session else {
             ui.close_popup(id());
             return Ok(());
@@ -174,9 +223,13 @@ impl State {
                 pad: [14.0, 10.0],
                 gap: 2.0,
                 anchor: Some(Anchor::Below(ui.rect(button()).unwrap_or_default())),
+                role: Some(accesskit::Role::Dialog),
                 ..Spec::default()
             },
         );
+        if let Some(node) = ui.access(id()) {
+            node.set_label(TITLE);
+        }
         let text = |ui: &mut Ui, part: &str, text: &str, color: [f32; 4], bold: bool| {
             ui.leaf(
                 part,
@@ -220,7 +273,7 @@ impl State {
             );
             ui.close();
         };
-        text(ui, "title", "Notebook Sync Status", theme.text, true);
+        text(ui, "title", TITLE, theme.text, true);
         row(ui, "Notebook", &session.library.name);
         row(ui, "Location", &session.library.location);
         row(ui, "Connection", &session.library.transport());
@@ -277,6 +330,32 @@ impl State {
             let notice = format!("Snowbound’s SMB client couldn’t sign in: {notice}");
             text(ui, "notice", &notice, theme.text_dim, false);
         }
+        let (mut folder, mut restart) = (false, false);
+        if let Some(note) = update_note(&update) {
+            text(ui, "update-title", "Snowbound Update", theme.text, true);
+            row(ui, "Update", &note);
+            ui.open(
+                "update",
+                Spec {
+                    size: [fill(), children()],
+                    pad: [0.0, 4.0],
+                    gap: 8.0,
+                    ..Spec::default()
+                },
+            );
+            folder = ui::button(ui, "build-folder", "Build Folder").clicked;
+            ui.leaf(
+                "space",
+                Spec {
+                    size: [fill(), px(1.0)],
+                    ..Spec::default()
+                },
+            );
+            if matches!(update, update::Status::Ready(..)) {
+                restart = ui::button(ui, "restart", "Restart to Update").clicked;
+            }
+            ui.close();
+        }
         ui.open(
             "controls",
             Spec {
@@ -308,9 +387,13 @@ impl State {
                         radius: 4.0,
                         pad: [theme.font_size * 0.75, 0.0],
                         center: true,
+                        role: Some(accesskit::Role::Button),
                         ..Spec::default()
                     },
                 );
+                if let Some(node) = ui.access(ui.id("show-file")) {
+                    node.set_disabled();
+                }
                 false
             }
         };
@@ -330,6 +413,17 @@ impl State {
         }
         if let Some(file) = file.filter(|_| show) {
             platform::show_file(&file);
+        }
+        match update {
+            update::Status::Downloading(version)
+            | update::Status::Ready(version, _)
+            | update::Status::Available(version)
+                if folder =>
+            {
+                update::show_build(&version)
+            }
+            _ if restart => self.restart_to_update(),
+            _ => {}
         }
         Ok(())
     }

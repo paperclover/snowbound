@@ -8,8 +8,10 @@
 #include <limits.h>
 #include <math.h>
 #include <mach/mach_time.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -105,6 +107,30 @@ int fclonefileat(int fd, int dirfd, const char *to, int flags) {
 
 // Callers keep using `fd` (std's remove_dir_all passes it to openat/unlinkat), so the
 // stream takes over that number rather than closing it.
+// 10.6 packs directory entries 4 bytes apart, and std reads the dirent's 64-bit inode
+// in place, which debug builds check for alignment. A misaligned entry is copied into a
+// per-thread aligned one, as good as the original until the next readdir.
+static pthread_key_t entry_key;
+static pthread_once_t entry_once = PTHREAD_ONCE_INIT;
+static void make_entry_key(void) { pthread_key_create(&entry_key, free); }
+
+struct dirent *readdir(DIR *dir) __asm("_readdir" __DARWIN_SUF_64_BIT_INO_T);
+struct dirent *readdir(DIR *dir) {
+    static __typeof__(readdir) *real_readdir;
+    if (!real_readdir) real_readdir = (__typeof__(readdir) *)dlsym(RTLD_NEXT, "readdir$INODE64");
+    struct dirent *entry = real_readdir(dir);
+    if (!entry || ((uintptr_t)entry & 7) == 0) return entry;
+    pthread_once(&entry_once, make_entry_key);
+    struct dirent *aligned = pthread_getspecific(entry_key);
+    if (!aligned) {
+        aligned = malloc(sizeof *aligned);
+        if (!aligned) return entry;
+        pthread_setspecific(entry_key, aligned);
+    }
+    memcpy(aligned, entry, entry->d_reclen < sizeof *aligned ? entry->d_reclen : sizeof *aligned);
+    return aligned;
+}
+
 DIR *fdopendir(int fd) __asm("_fdopendir" __DARWIN_SUF_64_BIT_INO_T __DARWIN_SUF_UNIX03);
 DIR *fdopendir(int fd) {
     char path[PATH_MAX];

@@ -628,20 +628,25 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         }
     }
 
-    /// The Pencil, or a drawing finger, comes down at `point` in the scroll view's bounds.
-    func inkPressed(_ point: CGPoint) {
+    /// The Pencil, or a drawing finger, comes down at `sample`'s point in the scroll view's bounds.
+    func inkPressed(_ sample: InkSample) {
         guard let handle else { return }
         // Drawing puts the keyboard away, as Notes does.
         if isFirstResponder { _ = resignFirstResponder() }
         use(inkTool)
         editMenu.dismissMenu()
-        let point = visible(point)
+        let point = visible(sample.point)
+        sb_view_pressure(handle, sample.pressure)
         edit { sb_view_press(handle, Float(point.x), Float(point.y)) }
     }
 
-    func inkMoved(_ points: ArraySlice<CGPoint>) {
+    func inkMoved(_ samples: ArraySlice<InkSample>) {
         guard let handle else { return }
-        for point in points.map(visible) { _ = sb_view_drag(handle, Float(point.x), Float(point.y)) }
+        for sample in samples {
+            let point = visible(sample.point)
+            sb_view_pressure(handle, sample.pressure)
+            _ = sb_view_drag(handle, Float(point.x), Float(point.y))
+        }
         dirty = true
     }
 
@@ -664,7 +669,10 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         _ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
         suggestedActions: [UIMenuElement]
     ) -> UIMenu? {
-        guard configuration.identifier as? NSString == Self.inkMenu else { return UIMenu(children: suggestedActions) }
+        guard configuration.identifier as? NSString == Self.inkMenu else {
+            return selectedTextRange.flatMap { editMenu(for: $0, suggestedActions: suggestedActions) }
+                ?? UIMenu(children: suggestedActions)
+        }
         return UIMenu(children: [
             UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
                 self?.deleteInk()
@@ -828,7 +836,32 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
                     self?.apply(10)
                 }, at: 0)
         }
-        return UIMenu(children: suggestedActions + [UIMenu(options: .displayInline, children: extra)])
+        return UIMenu(
+            children: spellingActions() + suggestedActions + [UIMenu(options: .displayInline, children: extra)])
+    }
+
+    private struct Correction: Decodable {
+        let word: String
+        let suggestions: [String]
+        let repeated: Bool
+    }
+
+    /// OneNote's corrections for the marked word at the selection, first in the menu.
+    private func spellingActions() -> [UIMenuElement] {
+        guard let handle, let correction = decode(Correction.self, sb_view_correction(handle)) else { return [] }
+        let correct = { [weak self] (command: UInt8, text: String?) in
+            guard let self, let handle = self.handle else { return }
+            self.edit(external: true) { sb_view_correct(handle, command, text) }
+        }
+        let replacements =
+            correction.repeated
+            ? [UIAction(title: "Delete Repeated Word") { _ in correct(0, "") }]
+            : correction.suggestions.map { word in UIAction(title: word) { _ in correct(0, word) } }
+        let ignore = UIAction(title: "Ignore") { _ in correct(1, nil) }
+        let learn = UIAction(title: "Add to Dictionary") { _ in correct(2, nil) }
+        return [
+            UIMenu(options: .displayInline, children: replacements + (correction.repeated ? [ignore] : [ignore, learn]))
+        ]
     }
 
     // MARK: Page

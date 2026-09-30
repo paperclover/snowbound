@@ -553,6 +553,16 @@ impl PageCreation {
         Ok(self)
     }
 
+    /// Creates the page in the object space `{guid},1`, its series named after it, instead of
+    /// under fresh identities: a merge that recreates a page, or must create the same page
+    /// each time it runs, names it.
+    pub fn in_space(mut self, guid: [u8; 16]) -> Result<Self, Error> {
+        self.guid = guid;
+        self.series_guid = guid.map(|byte| byte ^ 0x5a);
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Who creates the page.
     pub fn author(&self) -> &str {
         &self.author

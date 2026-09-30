@@ -502,14 +502,23 @@ impl Scene {
             },
         );
         let combo = ui.id("font");
-        shell::combo(ui, "font", "Calibri", 120.0);
+        shell::combo(
+            ui,
+            "font",
+            "Font",
+            "Calibri",
+            120.0,
+            Id::ROOT.child("fonts"),
+            true,
+        );
         let split = ui.id("color");
         shell::split_button(
             ui,
             "color",
+            "Font Color",
             art!("icons/font-color"),
             Some(draw::srgb(0xe8, 0x3a, 0x30)),
-            false,
+            None,
             Id::ROOT.child("font color"),
         );
         ui.close();
@@ -581,7 +590,7 @@ fn menu(scene: &mut Scene) {
             text: "Bold",
             icon: Some(art!("icons/bold")),
             shortcut: "⌘B",
-            checked: true,
+            checked: Some(true),
             separated: true,
             ..Item::default()
         },
@@ -637,7 +646,7 @@ fn font_items() -> Vec<Item<'static>> {
         .iter()
         .map(|text| Item {
             text,
-            checked: *text == "Calibri",
+            checked: Some(*text == "Calibri"),
             ..Item::default()
         })
         .collect()
@@ -652,7 +661,7 @@ fn fonts(scene: &mut Scene) {
     });
 }
 
-fn office_colors() -> Vec<[f32; 4]> {
+fn office_colors() -> Vec<([f32; 4], &'static str)> {
     let theme = [
         (0xff, 0xff, 0xff),
         (0x00, 0x00, 0x00),
@@ -691,7 +700,7 @@ fn office_colors() -> Vec<[f32; 4]> {
         }));
     }
     colors.extend(standard);
-    colors
+    colors.into_iter().map(|color| (color, "")).collect()
 }
 
 fn colors(scene: &mut Scene) {
@@ -731,7 +740,7 @@ fn highlight(scene: &mut Scene) {
         (0xc0, 0xc0, 0xc0),
         (0x00, 0x00, 0x00),
     ]
-    .map(|(r, g, b)| draw::srgb(r, g, b));
+    .map(|(r, g, b)| (draw::srgb(r, g, b), ""));
     let id = Id::ROOT.child("highlight");
     scene.open(id, vec![key(NamedKey::ArrowDown)], |ui, [_, split]| {
         let anchor = below(ui, split);
@@ -761,7 +770,7 @@ fn palette(scene: &mut Scene) {
     });
     let id = Id::ROOT.child("palette");
     scene.open(id, typed("ne"), |ui, _| {
-        ui::popup::palette(ui, id, &commands, "Search commands");
+        ui::popup::palette(ui, id, &[("", &commands)], "Search commands");
     });
 }
 
@@ -806,7 +815,7 @@ fn tags(scene: &mut Scene) {
     .map(|(text, icon, shortcut)| Item {
         text,
         icon,
-        colored: true,
+        tint: Some([1.0; 4]),
         shortcut,
         ..Item::default()
     });

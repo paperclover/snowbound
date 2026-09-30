@@ -285,3 +285,39 @@ fn drawing_tools_store_each_stroke_and_undo_it_in_one_step() {
     assert!(lab.view.editor.take_ops().unwrap().is_empty());
     assert_eq!(lab.view.ink_selection(), [drawn[5].id]);
 }
+
+/// A pen reporting pressure stores it at each point, following the pen between reports; a
+/// mouse's stroke after it keeps the pen's width, as OneNote stores one (`corpus/ink-pressure`).
+#[test]
+fn a_pressure_pen_stores_its_pressure_and_a_mouse_its_width() {
+    let source = onestore::create_section("ink.one", "Pressure", "Author").unwrap();
+    let arena = Arena::default();
+    let mut lab = open(&arena, source);
+    let _ = lab.view.set_tool(Tool::Pen(FAVORITES[0]));
+    let path = line([60.0, 150.0], [220.0, 150.0], 4);
+    let view = &mut lab.view;
+    view.set_pressure(Some(0.2));
+    let _ = view.pointer_moved(path[0]).unwrap();
+    let _ = view.pointer_pressed(Instant::now()).unwrap();
+    for (point, pressure) in path[1..]
+        .iter()
+        .zip([Some(0.4), None, Some(1.0), Some(0.9)])
+    {
+        if pressure.is_some() {
+            view.set_pressure(pressure);
+        }
+        let _ = view.pointer_moved(*point).unwrap();
+    }
+    let _ = view.pointer_released().unwrap();
+    lab.store();
+    lab.view.set_pressure(None);
+    lab.drag(&line([60.0, 200.0], [220.0, 200.0], 4));
+    lab.store();
+    let drawn = lab.drawings();
+    let level = onestore::page::ink::level;
+    assert_eq!(
+        drawn[0].strokes[0].pressure,
+        [0.2, 0.4, 0.4, 1.0, 0.9].map(level)
+    );
+    assert!(drawn[1].strokes[0].pressure.is_empty());
+}

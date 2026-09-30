@@ -12,16 +12,29 @@ use objc2::{
     sel,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use ui::{Axis, PaintedScroller, Scroller, ScrollerPart};
 use winit::{
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{CursorIcon, Window},
 };
 
+static PRETEND: AtomicBool = AtomicBool::new(false);
+
+/// Lays the app out as on 10.6, for `--screenshot` to draw a Snow Leopard window anywhere.
+pub fn pretend() {
+    PRETEND.store(true, Ordering::Relaxed);
+}
+
 /// Whether the system predates 10.7, which moved scrollers over the content, gave
 /// NSScroller its styles and let windows resize from any edge.
 pub(crate) fn before_lion() -> bool {
+    if PRETEND.load(Ordering::Relaxed) {
+        return true;
+    }
     let scroller = AnyClass::get("NSScroller").expect("AppKit is linked");
     let styled: bool =
         unsafe { msg_send![scroller, respondsToSelector: sel!(preferredScrollerStyle)] };
@@ -35,6 +48,7 @@ pub fn textured(window: &Window, row: f32) -> bool {
     if !before_lion() {
         return false;
     }
+    TEXTURED.store(true, Ordering::Relaxed);
     let RawWindowHandle::AppKit(handle) =
         window.window_handle().expect("Live AppKit window").as_raw()
     else {
@@ -55,6 +69,28 @@ pub fn textured(window: &Window, row: f32) -> bool {
         let _: () = msg_send![&window, setContentBorderThickness: f64::from(row), forEdge: 3usize];
     }
     true
+}
+
+static TEXTURED: AtomicBool = AtomicBool::new(false);
+
+/// 10.6 draws a dark line along the lower edge of a textured window's top content border.
+/// The app paints the window's own grey over it, key or not, beneath everything else, so
+/// the gradient runs straight into the notebook's frame and pane.
+pub fn cover_border_line(ui: &mut ui::Ui, width: f32) {
+    if !TEXTURED.load(Ordering::Relaxed) {
+        return;
+    }
+    let grey = if ui.window_focused { 167 } else { 216 };
+    ui.leaf(
+        "border line",
+        ui::Spec {
+            flags: ui::Flags::FLOAT,
+            size: [ui::px(width), ui::px(1.0)],
+            position: [0.0, crate::TITLE + crate::TAB_ROW - 1.0],
+            fill: Some(draw::srgb(grey, grey, grey)),
+            ..ui::Spec::default()
+        },
+    );
 }
 
 /// `-mouseDownCanMoveWindow` for the content view: a textured window drags from any press
@@ -84,11 +120,22 @@ extern "C" fn yes(_: &AnyObject, _: Sel) -> Bool {
     Bool::YES
 }
 
-/// AppKit's scrollers, on systems whose scrollers sit beside the content.
-pub fn scrollers() -> Option<ui::Scrollers> {
+/// 10.6's interface font, Lucida Grande, which fontique's system-ui doesn't name, and its
+/// scrollers.
+pub fn system_interface(ui: &mut ui::Ui) {
     if !before_lion() {
-        return None;
+        return;
     }
+    ui.set_system_font("Lucida Grande");
+    ui.scrollers = Some(if PRETEND.load(Ordering::Relaxed) {
+        sampled_scrollers()
+    } else {
+        scrollers()
+    });
+}
+
+/// AppKit's scrollers.
+fn scrollers() -> ui::Scrollers {
     MainThreadMarker::new().expect("Views belong to the main thread");
     let window_class = objc2_app_kit::NSWindow::class();
     // A scroller colours its knob by whether its window is key; these windows never show.
@@ -113,7 +160,7 @@ pub fn scrollers() -> Option<ui::Scrollers> {
     let thickness: f64 = unsafe { msg_send![AnyClass::get("NSScroller").unwrap(), scrollerWidth] };
     let mut views: HashMap<(bool, bool), Retained<AnyObject>> = HashMap::new();
     let mut painted: HashMap<[u32; 6], PaintedScroller> = HashMap::new();
-    Some(ui::Scrollers {
+    ui::Scrollers {
         thickness: thickness as f32,
         paint: Box::new(move |request: &Scroller| {
             let key = [
@@ -152,7 +199,138 @@ pub fn scrollers() -> Option<ui::Scrollers> {
             painted.insert(key, result.clone());
             result
         }),
-    })
+    }
+}
+
+/// A scroller's pieces as 10.6 draws them, sampled with `remote.sh art`: a track with its
+/// arrows and no knob, and the same with a knob, 400 pixels long.
+struct Pieces {
+    track: Vec<Vec<[u8; 4]>>,
+    knob: Vec<Vec<[u8; 4]>>,
+}
+
+/// Lines of `png`'s pixels across `axis`, from its start: rows for a vertical scroller,
+/// columns for a horizontal one.
+fn lines(png: &[u8], axis: Axis) -> Vec<Vec<[u8; 4]>> {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().expect("A sampled scroller is a PNG");
+    let mut bytes = vec![0; reader.output_buffer_size().expect("Small")];
+    let info = reader
+        .next_frame(&mut bytes)
+        .expect("A sampled scroller is a PNG");
+    let [width, height] = [info.width, info.height].map(|side| side as usize);
+    let pixel = |x: usize, y: usize| -> [u8; 4] {
+        let at = (y * width + x) * 4;
+        bytes[at..at + 4].try_into().unwrap()
+    };
+    match axis {
+        Axis::Y => (0..height)
+            .map(|y| (0..width).map(|x| pixel(x, y)).collect())
+            .collect(),
+        Axis::X => (0..width)
+            .map(|x| (0..height).map(|y| pixel(x, y)).collect())
+            .collect(),
+    }
+}
+
+fn pieces(axis: Axis, active: bool) -> Pieces {
+    macro_rules! art {
+        ($name:literal) => {
+            include_bytes!(concat!("../assets/snow-leopard/", $name))
+        };
+    }
+    let [track, full]: [&[u8]; 2] = match (axis, active) {
+        (Axis::Y, true) => [
+            art!("scroller-vertical-track-key.png"),
+            art!("scroller-vertical-key.png"),
+        ],
+        (Axis::Y, false) => [
+            art!("scroller-vertical-track-other.png"),
+            art!("scroller-vertical-other.png"),
+        ],
+        (Axis::X, true) => [
+            art!("scroller-horizontal-track-key.png"),
+            art!("scroller-horizontal-key.png"),
+        ],
+        (Axis::X, false) => [
+            art!("scroller-horizontal-track-other.png"),
+            art!("scroller-horizontal-other.png"),
+        ],
+    };
+    let [track, full] = [track, full].map(|png| lines(png, axis));
+    // The knob is where the two differ.
+    let differs: Vec<usize> = (0..track.len())
+        .filter(|&at| track[at] != full[at])
+        .collect();
+    let knob = full[differs[0]..=differs[differs.len() - 1]].to_vec();
+    Pieces { track, knob }
+}
+
+/// Lines `length` long from `source`: its first `head` and last `tail` lines, and its
+/// middle line repeated between them.
+fn stretch(source: &[Vec<[u8; 4]>], length: usize, head: usize, tail: usize) -> Vec<Vec<[u8; 4]>> {
+    let middle = &source[source.len() / 2];
+    let head = head.min(length);
+    let tail = tail.min(length - head);
+    source[..head]
+        .iter()
+        .chain(std::iter::repeat_n(middle, length - head - tail))
+        .chain(&source[source.len() - tail..])
+        .cloned()
+        .collect()
+}
+
+/// Scrollers put together from 10.6's own pieces, for a Snow Leopard window drawn
+/// elsewhere. Parts lie where AppKit puts them: the track from 4 pixels in to 30 from the
+/// end, then the decrement arrow's 14 and the increment arrow's 16.
+fn sampled_scrollers() -> ui::Scrollers {
+    const THICKNESS: usize = 15;
+    let mut cache: HashMap<(bool, bool), Pieces> = HashMap::new();
+    ui::Scrollers {
+        thickness: THICKNESS as f32,
+        paint: Box::new(move |request: &Scroller| {
+            let pieces = cache
+                .entry((request.axis == Axis::Y, request.active))
+                .or_insert_with(|| pieces(request.axis, request.active));
+            let length = request.length.round().max(60.0) as usize;
+            let mut lines = stretch(&pieces.track, length, 12, 44);
+            let slot = [4.0, length as f32 - 30.0];
+            let room = slot[1] - slot[0];
+            let knob_length = (room * request.proportion).clamp(20.0, room);
+            let start = (slot[0] + request.value * (room - knob_length)).round();
+            let knob = stretch(&pieces.knob, knob_length.round() as usize, 10, 10);
+            for (line, knob) in lines[start as usize..].iter_mut().zip(knob) {
+                *line = knob;
+            }
+            let pixels = match request.axis {
+                Axis::Y => lines.concat(),
+                Axis::X => (0..THICKNESS)
+                    .flat_map(|across| lines.iter().map(move |line| line[across]))
+                    .collect(),
+            };
+            let rgba = pixels
+                .into_iter()
+                .flat_map(|[r, g, b, a]| {
+                    [r, g, b]
+                        .map(|v| (u16::from(v) * u16::from(a) / 255) as u8)
+                        .into_iter()
+                        .chain([a])
+                })
+                .collect();
+            let size = match request.axis {
+                Axis::Y => [THICKNESS as u32, length as u32],
+                Axis::X => [length as u32, THICKNESS as u32],
+            };
+            PaintedScroller {
+                image: draw::RasterImage::new(size, rgba).expect("A scroller is a valid image"),
+                knob: [start, start + knob_length.round()],
+                slot,
+                decrement: [length as f32 - 30.0, length as f32 - 16.0],
+                increment: [length as f32 - 16.0, length as f32],
+            }
+        }),
+    }
 }
 
 unsafe fn paint(

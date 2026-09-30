@@ -94,7 +94,7 @@ impl State {
             unstored();
             return Ok(());
         };
-        if let Some(path) = platform::pick_new("Save As", &file.filename, "Save") {
+        if let Some(path) = platform::pick_new("Save As", &file.filename, "Save", None) {
             std::fs::write(path, bytes)?;
         }
         Ok(())

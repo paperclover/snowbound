@@ -155,7 +155,8 @@ impl Player {
     pub fn open(path: &Path, audible: bool) -> Option<Self> {
         let url = url(path)?;
         unsafe {
-            let player: Allocated<AnyObject> = msg_send_id![class("AVAudioPlayer"), alloc];
+            // Mac OS X 10.6 has no AVFoundation.
+            let player: Allocated<AnyObject> = msg_send_id![AnyClass::get("AVAudioPlayer")?, alloc];
             let player: Option<Retained<AnyObject>> = msg_send_id![
                 player,
                 initWithContentsOfURL: &*url,
@@ -218,6 +219,13 @@ pub enum Recorder {
 /// Set when the capture session has finished writing its movie.
 static MOVIE_WRITTEN: AtomicBool = AtomicBool::new(false);
 
+/// Mac OS X 10.6 has no AVFoundation to record with.
+fn recordable() -> Result<(), String> {
+    AnyClass::get("AVCaptureDevice")
+        .map(|_| ())
+        .ok_or_else(|| "To record, use Mac OS X 10.7 or later.".into())
+}
+
 /// What to do when the system refused `device` ("microphone" or "camera").
 fn refused(device: &str, pane: &str) -> String {
     format!("Allow Snowbound to use the {device} in System Settings, Privacy & Security, {pane}.")
@@ -234,6 +242,7 @@ impl Recorder {
     /// Records mono 16-bit PCM at `rate` into a WAV file at `path`. The system asks for the
     /// microphone the first time; refused, recording fails with what to do about it.
     pub fn audio(path: &Path, rate: u32) -> Result<Self, String> {
+        recordable()?;
         unsafe {
             if denied(AVMediaTypeAudio) {
                 return Err(refused("microphone", "Microphone"));
@@ -258,6 +267,7 @@ impl Recorder {
     /// Records the default camera, with the microphone where there is one, as a Motion JPEG
     /// AVI file at `path` once stopped. The system asks for each device the first time.
     pub fn video(path: &Path) -> Result<Self, String> {
+        recordable()?;
         unsafe {
             if denied(AVMediaTypeVideo) {
                 return Err(refused("camera", "Camera"));
@@ -346,12 +356,13 @@ impl Recorder {
         }
     }
 
-    /// Ends the recording, its file complete.
-    pub fn stop(self) -> Result<(), String> {
-        match self {
+    /// Ends the recording. Its file is complete once what this returns has run, on any
+    /// thread: a video's conversion takes a while.
+    pub fn stop(self) -> Result<impl FnOnce() -> Result<(), String> + Send, String> {
+        let movie = match self {
             Self::Audio(recorder) => {
                 let _: () = unsafe { msg_send![&recorder, stop] };
-                Ok(())
+                None
             }
             Self::Video {
                 session,
@@ -373,11 +384,18 @@ impl Recorder {
                     }
                     let _: () = msg_send![&session, stopRunning];
                 }
-                let avi = avi(&movie).ok_or("The recording stopped early. Try recording again.");
-                let _ = std::fs::remove_file(&movie);
-                std::fs::write(&path, avi?).map_err(|error| error.to_string())
+                Some((movie, path))
             }
-        }
+        };
+        Ok(move || {
+            let Some((movie, path)) = movie else {
+                return Ok(());
+            };
+            let avi = objc2::rc::autoreleasepool(|_| avi(&movie))
+                .ok_or("The recording stopped early. Try recording again.");
+            let _ = std::fs::remove_file(&movie);
+            std::fs::write(&path, avi?).map_err(|error| error.to_string())
+        })
     }
 }
 

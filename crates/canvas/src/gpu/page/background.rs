@@ -753,8 +753,10 @@ mod tests {
             },
             size: None,
             bytes: Some(Arc::from(bytes)),
+            display: None,
             alt: None,
             background: true,
+            printout: None,
         }
     }
 

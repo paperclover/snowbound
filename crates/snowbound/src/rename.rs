@@ -65,6 +65,7 @@ pub fn edit(ui: &mut Ui, theme: &Theme, name: &mut String, height: f32) -> Optio
             ..Spec::default()
         },
     );
+    crate::name(ui, field(), "Name");
     signal.events.iter().find_map(|event| match event {
         Event::Key {
             key: Key::Named(key @ (NamedKey::Enter | NamedKey::Escape)),

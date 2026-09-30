@@ -119,28 +119,52 @@ impl CanvasEditor {
             self.pending = Some((outline.id, start, format));
             return Ok(());
         }
-        if start.paragraph != end.paragraph {
-            return Err(EditError::UnsupportedContent.into());
+        // Across paragraphs each paragraph's part becomes an equation of its own, as in
+        // OneNote 2010, in one undo step.
+        let depth = self.undo.len();
+        let result = (|| {
+            for paragraph in start.paragraph..=end.paragraph {
+                let text = self
+                    .active_outline()
+                    .document
+                    .paragraph(paragraph)
+                    .ok_or(EditError::InvalidRange)?;
+                let from = if paragraph == start.paragraph {
+                    start.offset
+                } else {
+                    0
+                };
+                let to = if paragraph == end.paragraph {
+                    end.offset
+                } else {
+                    text.utf16_offset(text.text().len())?
+                };
+                if from == to {
+                    continue;
+                }
+                let linear = text
+                    .slice(from..to)?
+                    .project()?
+                    .text()
+                    .text()
+                    .replace('\n', " ");
+                let base = format_after(text, from).cloned().unwrap_or_default();
+                let math = Math::paragraph(&Math::from_linear(&linear), &base);
+                let caret = from + math.utf16_offset(math.text().len())?;
+                self.replace_zone(engine, paragraph, from..to, math, caret)?;
+            }
+            Ok(())
+        })();
+        let entries = self.undo.split_off(depth);
+        match entries.len() {
+            0 => {}
+            1 => self.undo.extend(entries),
+            _ => self.undo.push(History::Group {
+                entries,
+                page: false,
+            }),
         }
-        let text = outline
-            .document
-            .paragraph(start.paragraph)
-            .ok_or(EditError::InvalidRange)?;
-        let selected = text.slice(start.offset..end.offset)?;
-        let linear = selected.project()?.text().text().replace('\n', " ");
-        let base = format_after(text, start.offset)
-            .cloned()
-            .unwrap_or_default();
-        let math = Math::paragraph(&Math::from_linear(&linear), &base);
-        let caret = start.offset + math.utf16_offset(math.text().len())?;
-        self.replace_zone(
-            engine,
-            start.paragraph,
-            start.offset..end.offset,
-            math,
-            caret,
-        )?;
-        Ok(())
+        result
     }
 
     /// Builds the equation up after the space typed at `typed` ended part of it, as the

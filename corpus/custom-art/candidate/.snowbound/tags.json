@@ -1,0 +1,20 @@
+[
+  {
+    "name": "Launch",
+    "shape": 13,
+    "art": "d5cf52aa0db673980ffdd0481ecaa2cae00216c8ee9c288510cf68dc3d803e92.png",
+    "mapped": 134352249571937330
+  },
+  {
+    "name": "Ship it",
+    "shape": 127,
+    "art": "6dd10fabf6733354f911effb092fda9bfbbc9c1f3739576a18937093288767a9.svg",
+    "mapped": 134352249571944730
+  },
+  {
+    "name": "Done",
+    "shape": 3,
+    "art": "6dd10fabf6733354f911effb092fda9bfbbc9c1f3739576a18937093288767a9.svg",
+    "mapped": 134352249571951950
+  }
+]

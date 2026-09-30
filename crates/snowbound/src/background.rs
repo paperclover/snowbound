@@ -146,6 +146,19 @@ pub fn menu(
         );
     };
     let chosen = ui::popup::gallery(ui, id, anchor, &groups, &current, |ui, index| {
+        let name = match cells[index] {
+            Cell::Color(Some(color)) => PAGE_COLORS
+                .iter()
+                .find(|(_, listed)| *listed == color)
+                .map(|(name, _)| *name),
+            Cell::Custom => Some("Custom Color"),
+            Cell::Art(Some(name)) => Some(name),
+            Cell::Rules(Some(index)) => Some(RULE_LINES[index].0),
+            _ => None,
+        };
+        if let Some(name) = name {
+            crate::name(ui, ui.current(), name);
+        }
         match cells[index] {
             Cell::Color(None) | Cell::Art(None) | Cell::Rules(None) => label(ui, "None"),
             Cell::ShowAll => label(ui, "Show All…"),

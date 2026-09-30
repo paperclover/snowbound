@@ -326,6 +326,38 @@ fn clicks_use_the_previous_layout_and_hover_animates() {
     assert!(!ui.wants_frame());
 }
 
+/// Two boxes swapping places under a still pointer, as dropped tabs reorder, pass the hover
+/// to the one that arrives.
+#[test]
+fn a_box_moving_under_a_still_pointer_takes_the_hover() {
+    let build = |ui: &mut Ui, swapped: bool| {
+        let mut hovered = [false; 2];
+        frame(ui, |ui| {
+            for (index, hover) in hovered.iter_mut().enumerate() {
+                let x = if (index == 0) != swapped { 0.0 } else { 100.0 };
+                *hover = ui
+                    .leaf(
+                        index,
+                        Spec {
+                            flags: Flags::CLICKABLE | Flags::FLOAT,
+                            size: [px(50.0), px(20.0)],
+                            position: [x, 0.0],
+                            ..Spec::default()
+                        },
+                    )
+                    .hovered;
+            }
+        });
+        hovered
+    };
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui, false);
+    ui.event(Event::PointerMoved([10.0, 10.0]));
+    assert_eq!(build(&mut ui, false), [true, false]);
+    build(&mut ui, true);
+    assert_eq!(build(&mut ui, true), [false, true]);
+}
+
 /// A click whose press and release arrive together starts an animation that a box built
 /// earlier in the frame reads: the frame that handled the click asks for the next one.
 #[test]
@@ -434,12 +466,16 @@ fn custom_boxes_receive_their_events_and_a_leave_when_the_pointer_moves_off() {
         ui.cursor().is_none(),
         "the host picks the cursor over its box"
     );
+    ui.event(Event::Pressure(Some(0.5)));
     ui.event(Event::PointerMoved([350.0, 20.0]));
     let signals = build(&mut ui);
     assert_eq!(
         signals[0].events,
-        [Event::PointerMoved([350.0, 20.0])],
-        "a drag keeps its box"
+        [
+            Event::Pressure(Some(0.5)),
+            Event::PointerMoved([350.0, 20.0])
+        ],
+        "a drag keeps its box, and the pen's pressure goes with it"
     );
     ui.event(Event::Button {
         button: MouseButton::Left,
@@ -1299,9 +1335,9 @@ fn the_palette_centres_near_the_windows_top_and_chooses_the_best_match() {
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::palette(ui, palette, &commands, "Search commands")
+            chosen = popup::palette(ui, palette, &[("", &commands)], "Search commands")
         });
-        chosen
+        chosen.map(|(_, index)| index)
     };
     build(&mut ui);
     ui.open_popup(palette);
@@ -1321,10 +1357,41 @@ fn the_palette_centres_near_the_windows_top_and_chooses_the_best_match() {
 }
 
 #[test]
+fn a_prefix_typed_in_the_palette_switches_what_it_lists() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let palette = Id::ROOT.child("palette");
+    let [commands, places] = [items(), fonts()];
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            let modes: [(&str, &[popup::Item]); 2] = [(">", &commands), ("", &places)];
+            chosen = popup::palette(ui, palette, &modes, "Go to");
+        });
+        chosen
+    };
+    build(&mut ui);
+    popup::open_with(&mut ui, palette, ">");
+    build(&mut ui);
+    ui.event(typed("sel"));
+    ui.event(key(NamedKey::Enter));
+    assert_eq!(build(&mut ui), Some((0, 3)), "typed after the prefix");
+    popup::open_with(&mut ui, palette, ">");
+    build(&mut ui);
+    ui.event(key(NamedKey::Backspace));
+    build(&mut ui);
+    assert_eq!(popup::query(&ui, palette), Some(""));
+    ui.event(typed("tnr"));
+    ui.event(key(NamedKey::Enter));
+    assert_eq!(build(&mut ui), Some((1, 42)), "back among the places");
+}
+
+#[test]
 fn colour_grids_move_in_two_dimensions_and_choose_a_swatch_or_none() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let grid = Id::ROOT.child("colours");
-    let swatches: Vec<[f32; 4]> = (0..6).map(|index| [index as f32, 0.0, 0.0, 1.0]).collect();
+    let swatches: Vec<([f32; 4], &str)> = (0..6)
+        .map(|index| ([index as f32, 0.0, 0.0, 1.0], ""))
+        .collect();
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
@@ -1344,7 +1411,7 @@ fn colour_grids_move_in_two_dimensions_and_choose_a_swatch_or_none() {
     ] {
         ui.event(key(named));
     }
-    assert_eq!(build(&mut ui), Some(Some(swatches[4])));
+    assert_eq!(build(&mut ui), Some(Some(swatches[4].0)));
     ui.open_popup(grid);
     for _ in 0..40 {
         build(&mut ui);
@@ -1421,6 +1488,64 @@ fn popups_opened_within_a_popup_stay_above_it() {
     ui.event(key(NamedKey::Escape));
     build(&mut ui, false);
     assert!(ui.popup_open(menu_id()) && !ui.popup_open(submenu));
+}
+
+#[test]
+fn a_submenu_opens_beside_its_row_once_the_pointer_rests_and_closes_with_its_choice() {
+    let submenu = Id::ROOT.child("submenu");
+    let mut entries = items();
+    entries[1].submenu = true;
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            chosen = popup::menu(ui, menu_id(), BELOW, &entries, None);
+            popup::submenus(ui, menu_id(), &entries, |item| {
+                (item == 1).then_some(submenu)
+            });
+            popup::menu(ui, submenu, BELOW, &items(), None);
+        });
+        chosen
+    };
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui);
+    ui.open_popup(menu_id());
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    ui.event(Event::PointerMoved(row(&ui, 1)));
+    for _ in 0..10 {
+        build(&mut ui);
+    }
+    assert!(!ui.popup_open(submenu), "not while the pointer passes");
+    for _ in 0..30 {
+        build(&mut ui);
+    }
+    assert!(ui.popup_open(submenu), "once it rests");
+    let [menu, beside] = [menu_id(), submenu].map(|id| ui.rect(id).unwrap());
+    assert!(
+        beside[0] >= menu[2] - 1.0,
+        "beside the menu, not below the anchor"
+    );
+    ui.event(key(NamedKey::Escape));
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    assert!(
+        ui.popup_open(menu_id()) && !ui.popup_open(submenu),
+        "Escape closes only the submenu, which stays shut while the pointer rests"
+    );
+    let point = row(&ui, 1);
+    click(&mut ui, point);
+    assert_eq!(build(&mut ui), None, "a click opens it, not a choice");
+    build(&mut ui);
+    assert!(ui.popup_open(menu_id()) && ui.popup_open(submenu));
+    let first = ui.rect(submenu.child("rows").child(0_u64)).unwrap();
+    click(&mut ui, [first[0] + 4.0, first[1] + 4.0]);
+    build(&mut ui);
+    assert!(
+        !ui.popup_open(menu_id()) && !ui.popup_open(submenu),
+        "a choice ends both"
+    );
 }
 
 /// Keys in order, counting the lookups a list makes.
@@ -1635,6 +1760,39 @@ fn a_long_menu_scrolls_by_dragging_its_thumb() {
     );
 }
 
+#[test]
+fn a_command_menu_opens_at_its_top_and_a_picker_on_its_current_value() {
+    let names: Vec<String> = (0..40).map(|index| format!("Item {index}")).collect();
+    let rows = menu_id().child("rows");
+    for picker in [false, true] {
+        let items: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(index, text)| popup::Item {
+                text,
+                checked: Some(index == 30),
+                current: picker && index == 30,
+                ..popup::Item::default()
+            })
+            .collect();
+        let build = |ui: &mut Ui| {
+            frame(ui, |ui| {
+                popup::menu(ui, menu_id(), BELOW, &items, None);
+            })
+        };
+        let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+        build(&mut ui);
+        ui.open_popup(menu_id());
+        for _ in 0..3 {
+            build(&mut ui);
+        }
+        assert_eq!(ui.popups[0].highlight, picker.then_some(30));
+        let top = ui.rect(rows).unwrap()[1];
+        let first = ui.rect(rows.child(0u64)).map(|rect| rect[1]);
+        assert_eq!(first == Some(top), !picker, "{first:?} under {top}");
+    }
+}
+
 const FONTS: [&str; 46] = [
     "American Typewriter",
     "Andale Mono",
@@ -1764,7 +1922,7 @@ fn typing_more_never_reveals_what_a_shorter_query_filtered_out() {
 }
 
 #[test]
-fn a_filtered_menu_eases_to_its_new_height_while_its_rows_appear_in_place() {
+fn a_filtered_menu_shows_its_new_results_at_once_from_the_top() {
     let fonts = fonts();
     let build = |ui: &mut Ui| {
         frame(ui, |ui| {
@@ -1777,35 +1935,35 @@ fn a_filtered_menu_eases_to_its_new_height_while_its_rows_appear_in_place() {
     for _ in 0..12 {
         build(&mut ui);
     }
-    let results = menu_id().child("results");
+    let results = menu_id().child("rows");
     let height = |ui: &Ui| {
         let rect = ui.rect(results).unwrap();
         rect[3] - rect[1]
     };
-    let tall = height(&ui);
     assert!(
-        !ui.wants_frame() && tall > 5.0 * popup::MENU_ROW,
+        !ui.wants_frame() && height(&ui) > 5.0 * popup::MENU_ROW,
         "open at its full height"
     );
-    ui.event(typed("tnr"));
-    build(&mut ui);
-    build(&mut ui);
-    let row = ui.rect(menu_id().child("rows").child(42_u64)).unwrap();
+    ui.event(key(NamedKey::End));
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    // Each query shows its results where they settle in the frame it is typed.
+    for query in ["t", "nr"] {
+        ui.event(typed(query));
+        build(&mut ui);
+        let shown = [ui.rect(results), ui.rect(results.child(42_u64))];
+        build(&mut ui);
+        assert!(!ui.wants_frame(), "nothing eases");
+        assert_eq!([ui.rect(results), ui.rect(results.child(42_u64))], shown);
+    }
+    let row = ui.rect(results.child(42_u64)).unwrap();
     assert_eq!(
         row[1],
         ui.rect(results).unwrap()[1],
         "Times New Roman at the top"
     );
-    let easing = height(&ui);
-    assert!(easing > popup::MENU_ROW && easing < tall, "{easing}");
-    let mut frames = 0;
-    while ui.wants_frame() {
-        build(&mut ui);
-        frames += 1;
-        assert_eq!(ui.rect(menu_id().child("rows").child(42_u64)), Some(row));
-    }
     assert_eq!(height(&ui), popup::MENU_ROW);
-    assert!(frames <= 10, "settles in {frames} frames");
 }
 
 /// A column `width` wide holding one label: its box, and the label as laid out.
@@ -1975,8 +2133,8 @@ fn popups_ease_open_and_closed_then_stop_asking_for_frames() {
     assert!(first.opacity < 0.1 && first.zoom < 0.96 && first.tilt > 0.15);
     assert_eq!(
         first.pivot,
-        [200.0, 125.0],
-        "the dialog swings from its top centre"
+        [200.0, 300.0 / 8.0],
+        "the dialog swings from its top centre, an eighth down"
     );
     for _ in 0..16 {
         frame(&mut ui, build);
@@ -2070,9 +2228,15 @@ fn dialog_frame(ui: &mut Ui, text: &mut String) -> Reported {
             },
         );
         let combo = ui.id("combo");
-        if shell::combo(ui, "combo", "Light", 120.0).pressed {
-            ui.open_popup(Id::ROOT.child("schemes"));
-        }
+        shell::combo(
+            ui,
+            "combo",
+            "Color scheme",
+            "Light",
+            120.0,
+            Id::ROOT.child("schemes"),
+            true,
+        );
         let items = ["System", "Light", "Dark"].map(|text| popup::Item {
             text,
             ..popup::Item::default()
@@ -2126,7 +2290,7 @@ fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_cl
     let mut chosen = None;
     let mut build = |ui: &mut Ui| {
         frame(ui, |ui| {
-            shell::combo(ui, "combo", "Calibri", 120.0);
+            shell::combo(ui, "combo", "Font", "Calibri", 120.0, menu_id(), true);
             let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
             chosen = popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"));
         });
@@ -2235,7 +2399,7 @@ fn split_frame(ui: &mut Ui) -> Signal {
                 ..Spec::default()
             },
         );
-        signal = shell::split_button(ui, "split", CHECK_ICON, None, false, split_menu());
+        signal = shell::split_button(ui, "split", "Split", CHECK_ICON, None, None, split_menu());
         let item = popup::Item {
             text: "Item",
             ..Default::default()
@@ -2331,7 +2495,7 @@ fn a_menu_button_opens_its_menu_with_the_icons_under_its_own() {
                     ..Spec::default()
                 },
             );
-            let anchor = shell::menu_button(ui, "align", CHECK_ICON, menu_id());
+            let anchor = shell::menu_button(ui, "align", CHECK_ICON, None, menu_id());
             popup::menu(ui, menu_id(), anchor, &items, None);
             ui.close();
         });
@@ -2542,4 +2706,40 @@ fn a_colour_picker_applies_its_colour_and_keeps_it_through_hsl() {
     ui.event(key(NamedKey::Enter));
     assert_eq!(build(&mut ui), Some([0xd4, 0xf9, 0xf2]));
     assert!(!ui.popup_open(picker));
+}
+
+#[test]
+fn password_fields_edit_the_characters_behind_their_bullets() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut text = String::new();
+    let edit = |ui: &mut Ui, text: &mut String| {
+        frame(ui, |ui| {
+            password_field(
+                ui,
+                field(),
+                text,
+                "",
+                Spec {
+                    size: [px(200.0), px(26.0)],
+                    pad: [6.0, 0.0],
+                    ..Spec::default()
+                },
+            );
+        })
+    };
+    edit(&mut ui, &mut text);
+    ui.set_focus(Some(field()));
+    for typed_text in ["p", "ä", "ß"] {
+        ui.event(typed(typed_text));
+    }
+    edit(&mut ui, &mut text);
+    ui.event(key(NamedKey::ArrowLeft));
+    ui.event(key(NamedKey::ArrowLeft));
+    ui.event(typed("x"));
+    ui.event(key(NamedKey::Delete));
+    edit(&mut ui, &mut text);
+    assert_eq!(text, "pxß");
+    ui.event(key(NamedKey::Backspace));
+    edit(&mut ui, &mut text);
+    assert_eq!(text, "pß");
 }

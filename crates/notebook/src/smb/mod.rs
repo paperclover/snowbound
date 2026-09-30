@@ -30,6 +30,9 @@ mod remote;
 pub use directory::DirectoryEntry;
 pub use remote::SmbRemote;
 
+/// FILE_ATTRIBUTE_HIDDEN.
+pub const HIDDEN: u32 = 0x2;
+
 #[derive(Default)]
 pub struct Credentials<'a> {
     pub username: &'a str,
@@ -42,15 +45,17 @@ pub struct Credentials<'a> {
 /// Paths are relative to the share; both `/` and `\` are separators.
 pub struct Client {
     connection: Mutex<Option<Connection>>,
+    /// The server as `connect` was given it, which names the share's `location`.
+    address: String,
     tree: Tree,
     timeout: Duration,
     runtime: Mutex<Option<Runtime>>,
 }
 
 impl Client {
-    /// The server and share, as `//server/share`.
-    pub(crate) fn share(&self) -> String {
-        format!("//{}/{}", self.tree.server, self.tree.share_name)
+    /// The notebook folder `root` on this share, as `crate::location` names it.
+    pub(crate) fn location(&self, root: &str) -> String {
+        crate::location::smb(&self.address, &self.tree.share_name, root)
     }
 
     pub fn connect(
@@ -69,25 +74,18 @@ impl Client {
         let (connection, tree) = runtime
             .block_on(async {
                 tokio::time::timeout(timeout, async {
-                    let mut connection = Connection::connect(address, timeout).await?;
-                    connection.set_compression_requested(false);
-                    connection.negotiate().await?;
-                    Session::setup(
-                        &mut connection,
-                        credentials.username,
-                        credentials.password,
-                        credentials.domain,
-                    )
-                    .await?;
-                    let tree = Tree::connect(&mut connection, share).await?;
-                    Ok::<_, smb2::Error>((connection, tree))
+                    let mut connection = sign_in(address, &credentials, timeout).await?;
+                    let tree = Tree::connect(&mut connection, share)
+                        .await
+                        .map_err(io::Error::other)?;
+                    Ok::<_, io::Error>((connection, tree))
                 })
                 .await
             })
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-            .map_err(io::Error::other)?;
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
         Ok(Self {
             connection: Mutex::new(Some(connection)),
+            address: address.to_owned(),
             tree,
             timeout,
             runtime: Mutex::new(Some(runtime)),
@@ -211,6 +209,7 @@ impl Client {
                 0xc0000043 | 0xc0000054 | 0xc0000055 => io::ErrorKind::WouldBlock,
                 0xc0000011 => io::ErrorKind::UnexpectedEof,
                 0xc0000034 | 0xc000003a => io::ErrorKind::NotFound,
+                0xc0000035 => io::ErrorKind::AlreadyExists,
                 // Windows reports a delete-pending file as access denied too.
                 0xc0000022 | 0xc0000056 => io::ErrorKind::PermissionDenied,
                 0xc0000103 => io::ErrorKind::NotADirectory,
@@ -288,6 +287,15 @@ impl Client {
     /// Renames or moves a file or directory within the share; an existing target is an
     /// error.
     pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.rename_over(from, to, false)
+    }
+
+    /// Renames a file over another within the share, replacing it.
+    pub fn replace(&self, from: &str, to: &str) -> io::Result<()> {
+        self.rename_over(from, to, true)
+    }
+
+    fn rename_over(&self, from: &str, to: &str, replace: bool) -> io::Result<()> {
         if to.is_empty() || to.contains('\0') {
             return Err(io::ErrorKind::InvalidInput.into());
         }
@@ -303,7 +311,9 @@ impl Client {
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect();
+        // FileRenameInformation: ReplaceIfExists, then reserved bytes and no root directory.
         let mut buffer = vec![0; 16];
+        buffer[0] = u8::from(replace);
         buffer.extend_from_slice(&u32::try_from(name.len()).unwrap().to_le_bytes());
         buffer.extend_from_slice(&name);
         let _: SetInfoResponse = self.request(
@@ -313,6 +323,47 @@ impl Client {
                 file_info_class: 10,
                 additional_information: 0,
                 file_id: file.id.ok_or(io::ErrorKind::InvalidInput)?,
+                buffer,
+            },
+        )?;
+        file.close()
+    }
+
+    /// Gives a file or directory the hidden attribute, keeping its others, as OneNote 2010
+    /// skips a hidden folder.
+    pub fn hide(&self, path: &str) -> io::Result<()> {
+        // FILE_READ_ATTRIBUTES and FILE_WRITE_ATTRIBUTES.
+        let file = self.open_with(path, 0x180, 7, CreateDisposition::FileOpen, 0)?;
+        let file_id = file.id.ok_or(io::ErrorKind::InvalidInput)?;
+        // FileBasicInformation: four times, then the attributes; a time of 0 stays as it is.
+        let basic: QueryInfoResponse = self.request(
+            Command::QueryInfo,
+            QueryInfoRequest {
+                info_type: InfoType::File,
+                file_info_class: 4,
+                output_buffer_length: 40,
+                additional_information: 0,
+                flags: 0,
+                file_id,
+                input_buffer: Vec::new(),
+            },
+        )?;
+        let attributes = basic
+            .output_buffer
+            .get(32..36)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        // Set even where reported: Samba reports a dot name hidden without storing it so.
+        let mut buffer = vec![0; 40];
+        buffer[32..36].copy_from_slice(&(attributes | HIDDEN).to_le_bytes());
+        let _: SetInfoResponse = self.request(
+            Command::SetInfo,
+            SetInfoRequest {
+                info_type: InfoType::File,
+                file_info_class: 4,
+                additional_information: 0,
+                file_id,
                 buffer,
             },
         )?;
@@ -363,7 +414,7 @@ impl Client {
     /// Reads one bounded, consistent snapshot; contention returns WouldBlock.
     pub fn read(&self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
         self.read_with(path, |file| {
-            onestore::read_snapshot(|offset, output| file.read_at(offset, output), limit)
+            snapshot(|offset, output| file.read_at(offset, output), limit).map(Some)
         })
     }
 
@@ -463,6 +514,158 @@ impl Client {
             state: CommitState::Committed,
             error,
         })
+    }
+}
+
+/// The disk shares the server at `address` offers the account, by name.
+pub fn shares(
+    address: &str,
+    credentials: Credentials<'_>,
+    timeout: Duration,
+) -> io::Result<Vec<String>> {
+    if Handle::try_current().is_ok() || timeout.is_zero() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let shares = runtime
+        .block_on(async {
+            tokio::time::timeout(timeout, async {
+                let mut connection = sign_in(address, &credentials, timeout).await?;
+                let shares = smb2::client::list_shares(&mut connection)
+                    .await
+                    .map_err(io::Error::other);
+                connection.mark_dead();
+                shares
+            })
+            .await
+        })
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+    Ok(shares.into_iter().map(|share| share.name).collect())
+}
+
+/// A negotiated session with the server at `address`, signed in with `credentials`.
+async fn sign_in(
+    address: &str,
+    credentials: &Credentials<'_>,
+    timeout: Duration,
+) -> io::Result<Connection> {
+    let mut connection = Connection::connect(address, timeout)
+        .await
+        .map_err(io::Error::other)?;
+    connection.set_compression_requested(false);
+    if let Err(error) = connection.negotiate().await {
+        connection.mark_dead();
+        return Err(if speaks_only_smb1(address, timeout).await {
+            io::Error::new(io::ErrorKind::Unsupported, Refusal::Smb1)
+        } else {
+            io::Error::other(error)
+        });
+    }
+    Session::setup(
+        &mut connection,
+        credentials.username,
+        credentials.password,
+        credentials.domain,
+    )
+    .await
+    .map_err(io::Error::other)?;
+    Ok(connection)
+}
+
+/// Whether the server at `address` agrees to SMB1, as one that turned SMB2 away does when
+/// it speaks only SMB1.
+async fn speaks_only_smb1(address: &str, timeout: Duration) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const DIALECT: &[u8] = b"\x02NT LM 0.12\0";
+    let mut message = Vec::with_capacity(35 + DIALECT.len());
+    message.extend_from_slice(b"\xffSMB\x72");
+    // Status, then flags (canonical paths, case-insensitive) and flags2 (NT status codes).
+    message.extend_from_slice(&[0, 0, 0, 0, 0x18, 0x01, 0x40]);
+    // PID high, signature, reserved, TID, PID, UID and MID.
+    message.extend_from_slice(&[0; 14]);
+    message.extend_from_slice(&[0xff, 0xff, 0xff, 0xfe, 0, 0, 0, 0]);
+    message.push(0);
+    message.extend_from_slice(&(DIALECT.len() as u16).to_le_bytes());
+    message.extend_from_slice(DIALECT);
+    let probe = async {
+        let mut stream = tokio::net::TcpStream::connect(address).await?;
+        stream
+            .write_all(&(message.len() as u32).to_be_bytes())
+            .await?;
+        stream.write_all(&message).await?;
+        // The frame's length, the SMB1 header, then the word count and the dialect chosen.
+        let mut reply = [0; 39];
+        stream.read_exact(&mut reply).await?;
+        io::Result::Ok(reply[4..8] == *b"\xffSMB" && reply[37..] == [0, 0])
+    };
+    matches!(tokio::time::timeout(timeout, probe).await, Ok(Ok(true)))
+}
+
+/// Why a server turned a connection or a listing away, as a person can remedy it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Nothing answered at the address in time.
+    Unreachable,
+    /// The server speaks only SMB1, which this client does not.
+    Smb1,
+    /// The server refused the name and password, or a guest.
+    SignIn,
+    /// The server has no share by that name.
+    NoShare,
+    /// The account may not open the share or folder.
+    Denied,
+    /// The folder is not on the share.
+    NoFolder,
+    Other,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unreachable => "The server can't be reached",
+            Self::Smb1 => "The server speaks only SMB1",
+            Self::SignIn => "The server refused the sign-in",
+            Self::NoShare => "The server has no such share",
+            Self::Denied => "Access denied",
+            Self::NoFolder => "The folder is not on the share",
+            Self::Other => "The server refused the request",
+        })
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+impl Refusal {
+    /// What an error from `Client::connect`, `shares` or `Client::read_dir` means.
+    pub fn of(error: &io::Error) -> Self {
+        use smb2::ErrorKind as Smb;
+        let inner = error.get_ref();
+        if let Some(refusal) = inner.and_then(|inner| inner.downcast_ref::<Self>()) {
+            return *refusal;
+        }
+        let Some(smb) = inner.and_then(|inner| inner.downcast_ref::<smb2::Error>()) else {
+            return match error.kind() {
+                io::ErrorKind::TimedOut | io::ErrorKind::NotConnected => Self::Unreachable,
+                _ => Self::Other,
+            };
+        };
+        let tree = matches!(
+            smb,
+            smb2::Error::Protocol {
+                command: Command::TreeConnect,
+                ..
+            }
+        );
+        match smb.kind() {
+            Smb::AuthRequired | Smb::SigningRequired => Self::SignIn,
+            Smb::NotFound if tree => Self::NoShare,
+            Smb::NotFound | Smb::NotADirectory => Self::NoFolder,
+            Smb::AccessDenied => Self::Denied,
+            Smb::Io | Smb::ConnectionLost | Smb::TimedOut => Self::Unreachable,
+            _ => Self::Other,
+        }
     }
 }
 
@@ -817,6 +1020,36 @@ impl CommitIo for File<'_> {
 }
 
 /// The reads `Stamp::check` makes: the header and a probe of the last byte.
+/// `onestore::read_snapshot`, telling a file that is stably unreadable from a torn read:
+/// storage that is consistent yet fails validation is refused, not reported as contention.
+fn snapshot(
+    mut read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    if let Some(bytes) = onestore::read_snapshot(&mut read, limit)? {
+        return Ok(bytes);
+    }
+    let storage =
+        onestore::read_storage_snapshot(&mut read, limit)?.ok_or(io::ErrorKind::WouldBlock)?;
+    // A writer may have finished between the two reads.
+    let at = |offset: u64, output: &mut [u8]| {
+        let rest = storage.get(offset as usize..).unwrap_or_default();
+        let count = rest.len().min(output.len());
+        output[..count].copy_from_slice(&rest[..count]);
+        Ok(count)
+    };
+    if let Some(bytes) = onestore::read_snapshot(at, limit)? {
+        return Ok(bytes);
+    }
+    let locked =
+        onestore::Store::parse(&storage).is_ok_and(|store| crate::discover::locked(&store));
+    Err(if locked {
+        io::Error::new(io::ErrorKind::Unsupported, "Password protected")
+    } else {
+        io::Error::new(io::ErrorKind::InvalidData, "Can't read this section")
+    })
+}
+
 fn checked(stamp: &onestore::Stamp) -> [(u64, usize); 2] {
     [(0, 1024), (stamp.length.saturating_sub(1), 2)]
 }

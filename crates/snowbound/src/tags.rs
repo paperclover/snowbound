@@ -2,10 +2,12 @@
 //! the user's tag list: the tags the toolbar, the menus and Ctrl+1 to Ctrl+9 apply.
 
 use crate::{State, commands, platform};
+use accesskit::Role;
 use canvas::editor::NoteTag;
 use canvas::gpu::{colorref, tag_sources};
 use canvas::outline::{TagIcon, symbol_name};
 use draw::edit::Platform;
+use notebook::sidecar::art_name;
 use ui::{Anchor, Axis, Flags, Id, Spec, Ui, children, fill, fit, px};
 use winit::keyboard::NamedKey;
 
@@ -42,21 +44,132 @@ const GALLERY: [[u16; 15]; 10] = [
     ],
 ];
 
-/// Font Color's swatches, Office's forty in their grid, as COLORREFs.
-const FONT_COLORS: [u32; 40] = [
-    0x000000, 0x003399, 0x003333, 0x003300, 0x663300, 0x800000, 0x993333, 0x333333, //
-    0x000080, 0x0066ff, 0x008080, 0x008000, 0x808000, 0xff0000, 0x996666, 0x808080, //
-    0x0000ff, 0x0099ff, 0x00cc99, 0x669933, 0xcccc33, 0xff6633, 0x800080, 0x969696, //
-    0xff00ff, 0x00ccff, 0x00ffff, 0x00ff00, 0xffff00, 0xffcc00, 0x663399, 0xc0c0c0, //
-    0xcc99ff, 0x99ccff, 0x99ffff, 0xccffcc, 0xffffcc, 0xffcc99, 0xff99cc, 0xffffff,
+/// Snowbound's own symbols past OneNote's: their names, the symbols OneNote shows in their
+/// place, and their art, which a notebook keeps as it keeps a picture chosen for a tag.
+const EXTRAS: [(&str, u16, &str); 15] = [
+    (
+        "Snowflake",
+        34,
+        include_str!("../assets/tags/snowflake.svg"),
+    ),
+    ("Rocket", 127, include_str!("../assets/tags/rocket.svg")),
+    ("Fire", 140, include_str!("../assets/tags/fire.svg")),
+    (
+        "Thumbs Up",
+        55,
+        include_str!("../assets/tags/thumbs-up.svg"),
+    ),
+    (
+        "Thumbs Down",
+        113,
+        include_str!("../assets/tags/thumbs-down.svg"),
+    ),
+    ("Laughing", 25, include_str!("../assets/tags/laughing.svg")),
+    (
+        "Surprised",
+        25,
+        include_str!("../assets/tags/surprised.svg"),
+    ),
+    ("Bug", 17, include_str!("../assets/tags/bug.svg")),
+    ("Trophy", 26, include_str!("../assets/tags/trophy.svg")),
+    ("Gift", 142, include_str!("../assets/tags/gift.svg")),
+    ("Coffee", 20, include_str!("../assets/tags/coffee.svg")),
+    ("Warning", 17, include_str!("../assets/tags/warning.svg")),
+    ("Map Pin", 22, include_str!("../assets/tags/map-pin.svg")),
+    ("Camera", 122, include_str!("../assets/tags/camera.svg")),
+    ("Sparkles", 13, include_str!("../assets/tags/sparkles.svg")),
 ];
 
-/// Highlight Color's swatches as COLORREFs, which differ from the highlighter's in Sky Blue
-/// and Dark Green.
-const HIGHLIGHTS: [u32; 15] = [
-    0x00ffff, 0x00ff00, 0xffcc00, 0xff00ff, 0xff0000, //
-    0x0000ff, 0x800000, 0x808000, 0x003300, 0x800080, //
-    0x000080, 0x008080, 0x808080, 0xc0c0c0, 0x000000,
+/// The symbol OneNote shows for a tag drawn with a picture chosen for it, until another is
+/// picked.
+const PICTURE_FALLBACK: u16 = 36;
+
+/// The names a notebook keeps `EXTRAS`' art under.
+fn extra_art() -> &'static [String] {
+    static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        EXTRAS
+            .iter()
+            .map(|(_, _, svg)| art_name(svg.as_bytes(), "svg"))
+            .collect()
+    })
+}
+
+/// Where the pictures chosen for tags are kept, by the names a notebook keeps them under.
+fn pictures() -> Option<std::path::PathBuf> {
+    Some(platform::settings_dir()?.join("tag-art"))
+}
+
+/// Tag art `art`: one of Snowbound's own symbols, or a picture chosen for a tag.
+pub(crate) fn art_bytes(art: &str) -> Option<Vec<u8>> {
+    match extra_art().iter().position(|name| name == art) {
+        Some(extra) => Some(EXTRAS[extra].2.as_bytes().to_vec()),
+        None => std::fs::read(pictures()?.join(art)).ok(),
+    }
+}
+
+/// Font Color's swatches, Office's forty in their grid, as COLORREFs with their names.
+const FONT_COLORS: [(u32, &str); 40] = [
+    (0x000000, "Black"),
+    (0x003399, "Brown"),
+    (0x003333, "Olive Green"),
+    (0x003300, "Dark Green"),
+    (0x663300, "Dark Teal"),
+    (0x800000, "Dark Blue"),
+    (0x993333, "Indigo"),
+    (0x333333, "Gray-80%"),
+    (0x000080, "Dark Red"),
+    (0x0066ff, "Orange"),
+    (0x008080, "Dark Yellow"),
+    (0x008000, "Green"),
+    (0x808000, "Teal"),
+    (0xff0000, "Blue"),
+    (0x996666, "Blue-Gray"),
+    (0x808080, "Gray-50%"),
+    (0x0000ff, "Red"),
+    (0x0099ff, "Light Orange"),
+    (0x00cc99, "Lime"),
+    (0x669933, "Sea Green"),
+    (0xcccc33, "Aqua"),
+    (0xff6633, "Light Blue"),
+    (0x800080, "Violet"),
+    (0x969696, "Gray-40%"),
+    (0xff00ff, "Pink"),
+    (0x00ccff, "Gold"),
+    (0x00ffff, "Yellow"),
+    (0x00ff00, "Bright Green"),
+    (0xffff00, "Turquoise"),
+    (0xffcc00, "Sky Blue"),
+    (0x663399, "Plum"),
+    (0xc0c0c0, "Gray-25%"),
+    (0xcc99ff, "Rose"),
+    (0x99ccff, "Tan"),
+    (0x99ffff, "Light Yellow"),
+    (0xccffcc, "Light Green"),
+    (0xffffcc, "Light Turquoise"),
+    (0xffcc99, "Pale Blue"),
+    (0xff99cc, "Lavender"),
+    (0xffffff, "White"),
+];
+
+/// Highlight Color's swatches as COLORREFs with their names, which differ from the
+/// highlighter's in Sky Blue and Dark Green.
+const HIGHLIGHTS: [(u32, &str); 15] = [
+    (0x00ffff, "Yellow"),
+    (0x00ff00, "Bright Green"),
+    (0xffcc00, "Sky Blue"),
+    (0xff00ff, "Pink"),
+    (0xff0000, "Blue"),
+    (0x0000ff, "Red"),
+    (0x800000, "Dark Blue"),
+    (0x808000, "Teal"),
+    (0x003300, "Dark Green"),
+    (0x800080, "Violet"),
+    (0x000080, "Dark Red"),
+    (0x008080, "Dark Yellow"),
+    (0x808080, "Gray-50%"),
+    (0xc0c0c0, "Gray-25%"),
+    (0x000000, "Black"),
 ];
 
 /// The Customize Tags dialog's list while it is open.
@@ -65,6 +178,15 @@ pub struct TagList {
     selected: Option<usize>,
     /// The New Tag or Modify Tag dialog's fields, and the place Modify Tag replaces.
     editor: Option<(NoteTag, Option<usize>)>,
+}
+
+/// What the Symbol gallery picked.
+enum Pick {
+    Symbol(u16),
+    /// One of `EXTRAS`.
+    Extra(usize),
+    /// Custom Image…, which asks for a picture.
+    Picture,
 }
 
 fn id() -> Id {
@@ -83,9 +205,13 @@ fn popup(name: &str) -> Id {
     editor_id().child(("popup", name))
 }
 
-/// A tag's artwork before its name: its symbol, or none.
-fn artwork(tag: &NoteTag) -> Option<&'static [&'static str]> {
-    TagIcon::of(tag.shape, false).map(tag_sources)
+/// A tag's artwork: its own art, else its symbol, or none.
+pub(crate) fn artwork(tag: &NoteTag) -> Option<&'static [&'static str]> {
+    tag.art
+        .as_deref()
+        .and_then(|art| canvas::gpu::art_sources(art, || art_bytes(art)))
+        .map(|[plain, _]| plain)
+        .or_else(|| TagIcon::of(tag.shape, false).map(tag_sources))
 }
 
 /// The tag's name in its colours, as the list and Preview show it.
@@ -132,9 +258,13 @@ fn button(ui: &mut Ui, part: &str, text: &str, enabled: bool) -> bool {
             radius: 4.0,
             pad: [theme.font_size * 0.75, 0.0],
             center: true,
+            role: Some(Role::Button),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(ui.id(part)) {
+        node.set_disabled();
+    }
     false
 }
 
@@ -144,18 +274,20 @@ fn tool(ui: &mut Ui, part: &str, art: &'static [&'static str], tip: &str, enable
     let text = ui.theme.text;
     if !enabled {
         ui::shell::unavailable(ui, part, art, text, false);
+        ui::popup::tooltip(ui, tip, "", None);
         return false;
     }
-    let clicked = ui::shell::tool_button(ui, part, art, text, false).clicked;
+    let clicked = ui::shell::tool_button(ui, part, art, text, None).clicked;
     ui::popup::tooltip(ui, tip, "", None);
     clicked
 }
 
-/// A button showing `art` in its own colours, with `bar` under it, and a menu arrow; opens
-/// popup `menu` and returns where it opens.
+/// A button `name`d, showing `art` in its own colours, with `bar` under it, and a menu
+/// arrow; opens popup `menu` and returns where it opens.
 fn picker(
     ui: &mut Ui,
     part: &str,
+    name: &str,
     art: Option<&'static [&'static str]>,
     bar: Option<[f32; 4]>,
     menu: Id,
@@ -172,9 +304,15 @@ fn picker(
             hover_fill: Some(theme.hover()),
             border: Some(theme.chip),
             radius: 4.0,
+            role: Some(Role::Button),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(button) {
+        node.set_label(name);
+        node.set_has_popup(accesskit::HasPopup::Menu);
+        node.set_expanded(open);
+    }
     ui.open(
         "icon",
         Spec {
@@ -242,15 +380,20 @@ fn dialog(ui: &mut Ui, id: Id, title: &str, width: f32) {
             pad: [14.0, 10.0],
             gap: 6.0,
             anchor: Some(Anchor::Dialog),
+            role: Some(Role::Dialog),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_label(title);
+    }
     ui.leaf(
         "title",
         Spec {
             size: [fill(), px(ROW + 4.0)],
             text: Some(title),
             bold: true,
+            role: Some(Role::Heading),
             ..Spec::default()
         },
     );
@@ -307,6 +450,7 @@ impl State {
                 border: Some(theme.chip),
                 radius: 4.0,
                 pad: [2.0, 2.0],
+                role: Some(Role::List),
                 ..Spec::default()
             },
         );
@@ -321,9 +465,13 @@ impl State {
                     fill: selected.then_some(theme.selection),
                     hover_fill: Some(theme.hover()),
                     radius: 3.0,
+                    role: Some(Role::ListItem),
                     ..Spec::default()
                 },
             );
+            if let Some(node) = ui.access(row) {
+                node.set_selected(selected);
+            }
             // OneNote's list marks a tag without a symbol with its "None" symbol art.
             match artwork(tag) {
                 Some(art) => icon(ui, "icon", Some(art), [1.0; 4]),
@@ -420,6 +568,7 @@ impl State {
                 shape: 0,
                 color: None,
                 highlight: None,
+                art: None,
             };
             list.editor = Some((tag, None));
         } else if let Some(place) = modify {
@@ -429,7 +578,8 @@ impl State {
             ui.open_popup(editor_id());
             ui.set_focus(Some(name_field()));
         }
-        if let Some((tag, place)) = tag_editor(ui, &mut list.editor) {
+        let mut picking = false;
+        if let Some((tag, place)) = tag_editor(ui, &mut list.editor, &mut picking) {
             match place {
                 Some(place) => list.tags[place] = tag,
                 None => {
@@ -439,6 +589,9 @@ impl State {
             }
         }
         ui.close();
+        if picking {
+            self.commands.push(crate::Command::TagPicture);
+        }
         if ok {
             self.tags = list.tags.clone();
             self.save_settings();
@@ -452,11 +605,64 @@ impl State {
     }
 }
 
+impl State {
+    /// Asks for a picture, a PNG or SVG, for the tag New Tag or Modify Tag edits, which then
+    /// draws with it; OneNote shows the tag's symbol, or a blue circle where it has none.
+    pub(crate) fn pick_tag_picture(&mut self) {
+        let Some((tag, _)) = self.tag_list.as_mut().and_then(|list| list.editor.as_mut()) else {
+            return;
+        };
+        let Some(path) = platform::pick_file("Custom Image", &["png", "svg"]) else {
+            return;
+        };
+        let kept = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| canvas::gpu::import_tag_art(&bytes));
+        let Some((bytes, extension)) = kept else {
+            return platform::alert("Couldn't use the picture", "Choose a PNG or SVG picture.");
+        };
+        if bytes.len() > notebook::sidecar::LIMIT {
+            return platform::alert("Couldn't use the picture", "Choose an SVG of 1 MB or less.");
+        }
+        let art = art_name(&bytes, extension);
+        let written = pictures()
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+            .and_then(|folder| {
+                std::fs::create_dir_all(&folder)?;
+                match std::fs::File::create_new(folder.join(&art)) {
+                    Ok(mut file) => std::io::Write::write_all(&mut file, &bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                    Err(error) => Err(error),
+                }
+            });
+        if let Err(error) = written {
+            return platform::alert("Couldn't keep the picture", &error.to_string());
+        }
+        tag.art = Some(art);
+        if tag.shape == 0 {
+            tag.shape = PICTURE_FALLBACK;
+        }
+    }
+
+    /// Has the open notebook draw the tag at `place` with its art, as Snowbound draws it
+    /// wherever the notebook opens.
+    pub(crate) fn keep_tag_art(&self, place: usize) {
+        let (Some(tag), Some(session)) = (self.tags.get(place), &self.session) else {
+            return;
+        };
+        if let Some(bytes) = tag.art.as_deref().and_then(art_bytes) {
+            session.library.map_tag_art(tag, bytes);
+        }
+    }
+}
+
 /// Builds the New Tag or Modify Tag dialog while it is open over Customize Tags. Returns the
-/// tag and the place it replaces once OK keeps it.
+/// tag and the place it replaces once OK keeps it; sets `picking` once Custom Image… asks
+/// for a picture.
 fn tag_editor(
     ui: &mut Ui,
     editor: &mut Option<(NoteTag, Option<usize>)>,
+    picking: &mut bool,
 ) -> Option<(NoteTag, Option<usize>)> {
     if !ui.popup_open(editor_id()) {
         *editor = None;
@@ -506,6 +712,9 @@ fn tag_editor(
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(name_field()) {
+        node.set_label("Display name");
+    }
     ui.open(
         "pickers",
         Spec {
@@ -535,10 +744,31 @@ fn tag_editor(
     };
     column(ui, "symbol", "Symbol:");
     let symbol = artwork(tag).unwrap_or(crate::art::FONT_COLOR);
-    let tint = if tag.shape == 0 { theme.text } else { [1.0; 4] };
-    let anchor = picker(ui, "picker", Some(symbol), None, popup("symbol"), tint);
-    if let Some(shape) = gallery(ui, anchor) {
-        tag.shape = shape;
+    let tint = if artwork(tag).is_none() {
+        theme.text
+    } else {
+        [1.0; 4]
+    };
+    let anchor = picker(
+        ui,
+        "picker",
+        "Symbol",
+        Some(symbol),
+        None,
+        popup("symbol"),
+        tint,
+    );
+    match gallery(ui, popup("symbol"), anchor, true) {
+        Some(Pick::Symbol(shape)) => {
+            tag.shape = shape;
+            tag.art = None;
+        }
+        Some(Pick::Extra(extra)) => {
+            tag.shape = EXTRAS[extra].1;
+            tag.art = Some(extra_art()[extra].clone());
+        }
+        Some(Pick::Picture) => *picking = true,
+        None => {}
     }
     ui.close();
     column(ui, "color", "Font Color:");
@@ -546,6 +776,7 @@ fn tag_editor(
     let anchor = picker(
         ui,
         "picker",
+        "Font Color",
         Some(crate::art::FONT_COLOR),
         Some(bar),
         popup("color"),
@@ -560,6 +791,7 @@ fn tag_editor(
     let anchor = picker(
         ui,
         "picker",
+        "Highlight Color",
         Some(crate::art::HIGHLIGHTER),
         bar,
         popup("highlight"),
@@ -570,6 +802,45 @@ fn tag_editor(
     }
     ui.close();
     ui.close();
+    // A symbol of Snowbound's own names the one OneNote shows in its place.
+    if tag.art.is_some() {
+        ui.open(
+            "fallback-row",
+            Spec {
+                size: [fill(), children()],
+                gap: 10.0,
+                ..Spec::default()
+            },
+        );
+        column(ui, "fallback", "In OneNote:");
+        let anchor = picker(
+            ui,
+            "picker",
+            "In OneNote",
+            TagIcon::of(tag.shape, false).map(tag_sources),
+            None,
+            popup("fallback"),
+            [1.0; 4],
+        );
+        if let Some(Pick::Symbol(shape)) = gallery(ui, popup("fallback"), anchor, false)
+            && shape != 0
+        {
+            tag.shape = shape;
+        }
+        ui.close();
+        ui.leaf(
+            "onenote",
+            Spec {
+                size: [fill(), fit()],
+                text: Some("OneNote shows this symbol in place of the art."),
+                color: Some(theme.text_dim),
+                overflow: ui::Overflow::Wrap,
+                pad: [0.0, ROW],
+                ..Spec::default()
+            },
+        );
+        ui.close();
+    }
     caption(ui, "preview-label", "Preview");
     ui.open(
         "preview",
@@ -629,9 +900,10 @@ fn tag_editor(
     None
 }
 
-/// Symbol's gallery below `anchor` while it is open. Returns the symbol picked, 0 for None.
-fn gallery(ui: &mut Ui, anchor: Anchor) -> Option<u16> {
-    let id = popup("symbol");
+/// Popup `id`, a gallery of OneNote's symbols below `anchor`, while it is open; with
+/// `snowbound`, also None, Snowbound's own symbols and Custom Image…. Returns the pick,
+/// symbol 0 for None.
+fn gallery(ui: &mut Ui, id: Id, anchor: Anchor, snowbound: bool) -> Option<Pick> {
     if !ui.popup_open(id) {
         return None;
     }
@@ -647,9 +919,13 @@ fn gallery(ui: &mut Ui, anchor: Anchor) -> Option<u16> {
             radius: 6.0,
             pad: [6.0, 6.0],
             anchor: Some(anchor),
+            role: Some(Role::Dialog),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_label("Symbol");
+    }
     let mut picked = None;
     for (row, shapes) in GALLERY.iter().enumerate() {
         ui.open(
@@ -678,7 +954,7 @@ fn gallery(ui: &mut Ui, anchor: Anchor) -> Option<u16> {
             if shape == 0 && row == 0 && column > 0 {
                 continue;
             }
-            let none = shape == 0 && row == 0;
+            let none = shape == 0 && row == 0 && snowbound;
             let spec = if none {
                 Spec {
                     flags: Flags::CLICKABLE,
@@ -687,11 +963,12 @@ fn gallery(ui: &mut Ui, anchor: Anchor) -> Option<u16> {
                     hover_fill: Some(theme.hover()),
                     radius: 3.0,
                     center: true,
+                    role: Some(Role::Button),
                     ..Spec::default()
                 }
             } else if shape == 0 {
                 Spec {
-                    size: [px(CELL), px(CELL)],
+                    size: [px(if row == 0 { CELL * 3.0 } else { CELL }), px(CELL)],
                     ..Spec::default()
                 }
             } else {
@@ -703,17 +980,76 @@ fn gallery(ui: &mut Ui, anchor: Anchor) -> Option<u16> {
                     hover_fill: Some(theme.hover()),
                     radius: 3.0,
                     center: true,
+                    role: Some(Role::Button),
                     ..Spec::default()
                 }
             };
             if ui.leaf(("cell", column), spec).clicked && (none || shape != 0) {
-                picked = Some(shape);
+                picked = Some(Pick::Symbol(shape));
             }
             if let Some(name) = symbol_name(shape) {
                 ui::popup::tooltip(ui, name, "", None);
             }
         }
         ui.close();
+    }
+    if snowbound {
+        ui.leaf(
+            "snowbound",
+            Spec {
+                size: [fit(), px(ROW + 4.0)],
+                text: Some("Snowbound Symbols"),
+                color: Some(theme.text_dim),
+                role: Some(Role::Heading),
+                ..Spec::default()
+            },
+        );
+        ui.open(
+            "extras",
+            Spec {
+                size: [children(), px(CELL)],
+                ..Spec::default()
+            },
+        );
+        for (extra, (name, _, _)) in EXTRAS.iter().enumerate() {
+            if extra % 3 == 0 && extra > 0 {
+                ui.leaf(
+                    ("gap", extra),
+                    Spec {
+                        size: [px(8.0), px(CELL)],
+                        ..Spec::default()
+                    },
+                );
+            }
+            let art = &extra_art()[extra];
+            let icon = canvas::gpu::art_sources(art, || art_bytes(art)).map(|[plain, _]| plain);
+            let cell = Spec {
+                flags: Flags::CLICKABLE,
+                size: [px(CELL), px(CELL)],
+                icon,
+                color: Some([1.0; 4]),
+                hover_fill: Some(theme.hover()),
+                radius: 3.0,
+                center: true,
+                role: Some(Role::Button),
+                ..Spec::default()
+            };
+            if ui.leaf(("extra", extra), cell).clicked {
+                picked = Some(Pick::Extra(extra));
+            }
+            ui::popup::tooltip(ui, name, "", None);
+        }
+        ui.close();
+        ui.leaf(
+            "space",
+            Spec {
+                size: [px(1.0), px(6.0)],
+                ..Spec::default()
+            },
+        );
+        if ui::button(ui, "picture", "Custom Image…").clicked {
+            picked = Some(Pick::Picture);
+        }
     }
     ui.close();
     if picked.is_some() {
@@ -729,17 +1065,20 @@ fn swatch(
     name: &str,
     anchor: Anchor,
     none: &str,
-    swatches: &[u32],
+    swatches: &[(u32, &str)],
     columns: usize,
 ) -> Option<Option<u32>> {
-    let colors: Vec<_> = swatches.iter().map(|color| colorref(*color)).collect();
+    let colors: Vec<_> = swatches
+        .iter()
+        .map(|&(color, name)| (colorref(color), name))
+        .collect();
     let chosen = ui::popup::colors(ui, popup(name), anchor, none, &colors, columns)?;
     Some(chosen.and_then(|chosen| {
         swatches
             .iter()
             .zip(&colors)
-            .find(|(_, color)| **color == chosen)
-            .map(|(stored, _)| *stored)
+            .find(|(_, (color, _))| *color == chosen)
+            .map(|((stored, _), _)| *stored)
     }))
 }
 
@@ -747,11 +1086,238 @@ fn swatch(
 mod tests {
     use super::*;
 
+    /// A 48-pixel picture as a PNG: a violet disc ringed in gold, standing for one a user
+    /// chose.
+    fn picture() -> Vec<u8> {
+        let mut pixels = Vec::new();
+        for y in 0..48 {
+            for x in 0..48 {
+                let distance = ((x as f32 - 23.5).powi(2) + (y as f32 - 23.5).powi(2)).sqrt();
+                pixels.extend_from_slice(match distance {
+                    ..16.0 => &[120, 60, 220, 255],
+                    ..22.0 => &[240, 190, 40, 255],
+                    _ => &[0, 0, 0, 0],
+                });
+            }
+        }
+        let mut encoded = Vec::new();
+        let mut encoder = png::Encoder::new(&mut encoded, 48, 48);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+        encoded
+    }
+
+    /// Tags with Snowbound's art keep OneNote's definition, name and fallback symbol, on the
+    /// page, and their art in the notebook's `.snowbound` folder, from which the page draws
+    /// them (`corpus/custom-art`). `SNOWBOUND_CUSTOM_ART_EXPORT` names a new directory
+    /// receiving the notebook for a cold reopen.
+    #[test]
+    fn tags_with_art_keep_it_beside_the_page() {
+        use canvas::{
+            document::TextPosition,
+            editor::{CanvasEditor, Formatting},
+            layout::TextEngine,
+        };
+        use onestore::{RevisionIndex, Store, document::Document, op, page::Page};
+        let page = |bytes: &[u8]| {
+            let store = Store::parse(bytes).unwrap();
+            let index = RevisionIndex::parse(&store).unwrap();
+            let document = Document::parse(&index).unwrap();
+            let (space, _) = document.pages().unwrap()[0];
+            (space, Page::from_space(&document, space).unwrap())
+        };
+        let (picture, extension) = canvas::gpu::import_tag_art(&picture()).unwrap();
+        let rocket = EXTRAS
+            .iter()
+            .position(|(name, ..)| *name == "Rocket")
+            .unwrap();
+        let tag = |label: &str, shape, art: Option<String>| NoteTag {
+            label: label.into(),
+            shape,
+            color: None,
+            highlight: None,
+            art,
+        };
+        let list = [
+            tag("Launch", 13, Some(art_name(&picture, extension))),
+            tag(
+                "Ship it",
+                EXTRAS[rocket].1,
+                Some(extra_art()[rocket].clone()),
+            ),
+            tag("Done", 3, Some(extra_art()[rocket].clone())),
+            NoteTag::defaults()[1].clone(),
+        ];
+        let lines = [
+            "Launch day",
+            "Ship the release",
+            "Checked off",
+            "Plain OneNote tag",
+        ];
+        let source = onestore::create_section("Custom art.one", "", "Author").unwrap();
+        let (space, before) = page(&source);
+        let mut engine = TextEngine::default();
+        let mut editor = CanvasEditor::from_page(before, &mut engine).unwrap();
+        let body = editor.outlines()[0].id;
+        editor.focus_outline(body).unwrap();
+        for (paragraph, text) in lines.iter().enumerate() {
+            if paragraph > 0 {
+                editor.enter(&mut engine, false).unwrap();
+            }
+            editor.insert(&mut engine, text).unwrap();
+            editor
+                .select(
+                    [TextPosition {
+                        paragraph,
+                        offset: 0,
+                    }; 2]
+                        .into(),
+                )
+                .unwrap();
+            let formatting = Formatting::Tag(list[paragraph].clone(), paragraph as u16);
+            editor.format(&mut engine, formatting).unwrap();
+            if paragraph == 2 {
+                editor.format(&mut engine, Formatting::Check).unwrap();
+            }
+            let offset = text.len() as u32;
+            editor
+                .select([TextPosition { paragraph, offset }; 2].into())
+                .unwrap();
+        }
+        let arena = onestore::Arena::default();
+        let mut section = onestore::Section::open(&arena, source.to_vec()).unwrap();
+        let ops = editor
+            .take_ops()
+            .unwrap()
+            .into_iter()
+            .map(|op| op::Op::Page { space, op })
+            .collect();
+        let edit = op::Edit {
+            at: 134_000_000_000_000_000,
+            ops,
+        };
+        section.apply("Author", &edit).unwrap();
+        section.seal().unwrap();
+        let written = section.image();
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-custom-art-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        let root = temporary.join("Custom Art");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Custom art.one"), &written).unwrap();
+        let file_id = Store::parse(&written).unwrap().header.file_id;
+        let toc = onestore::create_table_of_contents(
+            "Open Notebook.onetoc2",
+            &[("Custom art.one", file_id)],
+        );
+        std::fs::write(root.join("Open Notebook.onetoc2"), toc.unwrap()).unwrap();
+        let notebook = notebook::session::Notebook::open(&root, temporary.join("cache"));
+        let notebook = notebook.unwrap();
+        for tag in &list[..3] {
+            let art = tag.art.as_deref().unwrap();
+            let bytes = art_bytes(art).unwrap_or_else(|| picture.clone());
+            let extension = art.rsplit('.').next().unwrap();
+            notebook
+                .map_tag_art(&tag.label, tag.shape, &bytes, extension)
+                .unwrap();
+        }
+        // The page as OneNote stores it, drawn with the notebook's art.
+        let mut art = canvas::gpu::TagArt::default();
+        for mapping in notebook.tag_art().unwrap() {
+            let bytes = || notebook.tag_art_file(&mapping.art).ok();
+            let sources = canvas::gpu::art_sources(&mapping.art, bytes).unwrap();
+            art.map(&mapping.name, mapping.shape, &mapping.art, sources);
+        }
+        let (_, stored) = page(&written);
+        let reread = CanvasEditor::from_page(stored, &mut engine).unwrap();
+        let outline = reread.outlines().iter().find(|outline| outline.id == body);
+        let drawn: Vec<_> = outline
+            .unwrap()
+            .layouts()
+            .flat_map(|(_, paragraph)| &paragraph.tags)
+            .map(|tag| (tag.label.clone(), art.sources(tag)))
+            .collect();
+        let picture_art = canvas::gpu::art_sources(list[0].art.as_ref().unwrap(), || None);
+        let rocket_art = canvas::gpu::art_sources(&extra_art()[rocket], || None).unwrap();
+        let important = tag_sources(TagIcon::of(13, false).unwrap());
+        assert_eq!(
+            drawn,
+            [
+                ("Launch".to_owned(), picture_art.unwrap()[0]),
+                ("Ship it".to_owned(), rocket_art[0]),
+                ("Done".to_owned(), rocket_art[1]),
+                ("Important".to_owned(), important),
+            ]
+        );
+        if let Some(directory) = std::env::var_os("SNOWBOUND_CUSTOM_ART_EXPORT") {
+            let status = std::process::Command::new("cp")
+                .arg("-R")
+                .arg(&root)
+                .arg(directory)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        std::fs::remove_dir_all(&temporary).unwrap();
+    }
+
     /// The gallery offers each symbol OneNote 2010's does once: every one MS-ONE lists but
     /// the follow-up flags it keeps for Outlook tasks.
     /// OneNote 2010's gallery, cell by cell: its page "Cells" tags a paragraph with a tag
     /// named for each cell's row and column, its symbol picked from that cell
     /// (`corpus/custom-tags/native`).
+    /// OneNote 2010 edited the page of `corpus/custom-art` (new text on one tagged paragraph,
+    /// another's check box cleared); the notebook's art still draws each tag it mapped.
+    #[test]
+    fn art_outlasts_onenote_editing_the_page() {
+        use canvas::{editor::CanvasEditor, layout::TextEngine};
+        use onestore::{RevisionIndex, Store, document::Document, page::Page};
+        let corpus =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/custom-art");
+        let cache =
+            std::env::temp_dir().join(format!("snowbound-custom-art-read-{}", std::process::id()));
+        let notebook = notebook::session::Notebook::open(corpus.join("candidate"), &cache).unwrap();
+        let mut art = canvas::gpu::TagArt::default();
+        for mapping in notebook.tag_art().unwrap() {
+            let bytes = || notebook.tag_art_file(&mapping.art).ok();
+            let sources = canvas::gpu::art_sources(&mapping.art, bytes).unwrap();
+            art.map(&mapping.name, mapping.shape, &mapping.art, sources);
+        }
+        std::fs::remove_dir_all(&cache).unwrap();
+        let bytes = std::fs::read(corpus.join("cold/notebook/Custom art.one")).unwrap();
+        let store = Store::parse(&bytes).unwrap();
+        let index = RevisionIndex::parse(&store).unwrap();
+        let document = Document::parse(&index).unwrap();
+        let (space, _) = document.pages().unwrap()[0];
+        let page = Page::from_space(&document, space).unwrap();
+        let editor = CanvasEditor::from_page(page, &mut TextEngine::default()).unwrap();
+        let drawn: Vec<_> = editor
+            .outlines()
+            .iter()
+            .flat_map(|outline| outline.layouts())
+            .flat_map(|(_, paragraph)| &paragraph.tags)
+            .map(|tag| {
+                (
+                    tag.label.as_str(),
+                    art.sources(tag) != tag_sources(tag.icon),
+                )
+            })
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("Launch", true),
+                ("Ship it", true),
+                ("Done", true),
+                ("Important", false),
+            ]
+        );
+    }
+
     #[test]
     fn the_gallery_lays_symbols_out_as_onenotes_does() {
         use onestore::{

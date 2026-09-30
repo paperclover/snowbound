@@ -20,16 +20,13 @@ Edits save to the notebook folder as you type. Settings live in
 `~/.config/snowbound` and sync state in `~/.cache/snowbound`; `--cache DIR`
 puts the latter elsewhere.
 
-Run `./install.sh` to add Snowbound to your app launcher; it copies the app
-into `~/.local`. On Wayland the taskbar, dock and KDE's title bar find
-Snowbound's icon only through this launcher entry, so without it they show a
-generic icon.
+**Install Snowbound**, shown while no notebook is open, adds Snowbound to your app menu and
+copies it to `~/.local/bin/snowbound`. Options, next to the update settings,
+uninstalls it again; your notebooks stay where they are.
 
 The window's title bar is your desktop's own: KDE's on KDE, and on GNOME and
 other desktops without server-side decorations an Adwaita-style one drawn by
 Snowbound.
-`./install.sh ~/Notebooks/MyNotebook` makes the launcher open that notebook as
-well.
 
 ## Requirements
 

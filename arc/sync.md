@@ -159,6 +159,13 @@ A notebook on a share that macOS has mounted is opened through the embedded
 client with the account the system keeps for that mount. It falls back to the
 mount only when it can't sign in that way.
 
+A notebook can also be opened from its server's address, with no mount at all (File ▸
+Open Notebook from Server…), which is how Mac OS X 10.6 reaches a server that no longer
+speaks SMB1, the only version its Finder has. The notebook is kept by that address
+(`smb://[domain;]user@server/share/folder`), never with a password; the password lives in
+the keychain (the Secret Service on Linux) when the user asks to remember it, and
+otherwise the sign-in asks again at the next launch.
+
 A file's identity is its root object space, not its server file ID, which
 changes when maintenance replaces the file. A check opens by path each time
 for the same reason.
@@ -228,6 +235,46 @@ copies and learns of other apps' writes through file coordination (`NSFilePresen
 file provider keeps elsewhere, as iCloud Drive does, keeps copies and is checked every 15
 seconds. Closing a notebook deletes its copies, except any with edits still waiting.
 
+## iCloud Drive
+
+A cloud drive syncs whole files with no lock and no compare-and-swap. The stamp check still runs
+before each append, but only against this device's copy; when two devices append to the same
+base, iCloud keeps one as the file and the other beside it as a **conflict version**
+(`NSFileVersion`), on every device. A conflict version is a stamp check that failed after the
+fact, and each sync step merges the versions it finds before anything else:
+
+```text
+for each version V the remote lists (Remote::versions)
+  C := the file, read coordinated
+  per space of V: a := its newest revision C holds, or holds merged
+  ancestor := V opened at those revisions (Section::open_at)
+  ops := lower_page(ancestor[S], V[S]) per page V changed, V's new pages imported under their
+         identities, its deletions, moves and conflict pages
+  replay ops on C through merge.rs (conflict pages where they clash), seal_as the named
+  revisions, publish on C's stamp; then retire V (resolved, removed)
+```
+
+Each revision the merge writes is named after the version's revision it merged (a hash of it),
+so "holds merged" is a lookup by revision identity. A version merged once, by this device or
+another, merges as nothing the next time; two devices merging one version at once write the
+same names, and the merge of their two results finds everything held. Any device merges any
+version at once; nothing waits for the device that wrote it. A version of another section, or
+one that cannot be read, is kept beside the file as `Name (Device).one` instead.
+
+On a cloud drive every read and write of a section file runs under `NSFileCoordinator`, so the
+iCloud daemon never swaps a file between the stamp check and the append. A file iCloud evicted is
+asked for and read later; the replica serves it meanwhile. Each publication is an upload and a
+chance to conflict, so edits wait for a 3 second pause in typing (at most 30 seconds,
+`Section::set_pause`), and publish at once when the app leaves the foreground, the screen locks,
+the Mac's window loses focus or the app quits. A folder presenter reports other devices'
+changes and conflict versions, which change no file, and every section is checked every 15
+seconds besides. Signing out of iCloud closes its notebooks; replicas holding edits stay.
+
+`crates/notebook/tests/cloud.rs` runs devices against a fake iCloud (uploads without
+compare-and-swap, either side of a race winning, late deliveries, offline spans) and checks that
+every device ends on the same file with each typed string once. OneNote 2010 cold-opens a
+merged section with its conflict page as its own (`corpus/icloud-merge`).
+
 ## Notebook structure
 
 Sections, groups and the notebook's own colour live in the `.onetoc2` files,
@@ -236,6 +283,13 @@ renaming a file also rewrites two header fields OneNote checks on open (the
 parent TOC's identity and a CRC of the file's name). Without them OneNote
 treats the file as a stranger and re-identifies it. Deleting sends sections and
 pages to `OneNote_RecycleBin`, as OneNote does.
+
+What only Snowbound reads lives in the notebook's `.snowbound` folder, which carries the
+Windows hidden attribute so that OneNote never makes a section group of it. Its files are
+plain files, not revision stores: pictures named by their content, and small JSON
+mappings that every writer merges before replacing. The first is tag art: a tag keeps
+OneNote's definition and a fallback symbol on the page, and `tags.json` maps its name and
+symbol to a picture that Snowbound draws in the symbol's place.
 
 ## Recovery and migration
 

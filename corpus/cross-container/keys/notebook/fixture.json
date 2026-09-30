@@ -1,0 +1,23 @@
+{
+ "sections": [
+  "Cross.one"
+ ],
+ "pages": [
+  {
+   "section": "Cross.one",
+   "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:Title><one:OE><one:T><![CDATA[Delete into a table]]></one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"300\" height=\"100\"/><one:OEChildren><one:OE><one:T><![CDATA[Before text]]></one:T></one:OE><one:OE><one:Table bordersVisible=\"true\"><one:Columns><one:Column index=\"0\" width=\"100\"/><one:Column index=\"1\" width=\"100\"/></one:Columns><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row></one:Table></one:OE><one:OE><one:T><![CDATA[After text]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+  },
+  {
+   "section": "Cross.one",
+   "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:Title><one:OE><one:T><![CDATA[Delete out of a table]]></one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"300\" height=\"100\"/><one:OEChildren><one:OE><one:T><![CDATA[Before text]]></one:T></one:OE><one:OE><one:Table bordersVisible=\"true\"><one:Columns><one:Column index=\"0\" width=\"100\"/><one:Column index=\"1\" width=\"100\"/></one:Columns><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row></one:Table></one:OE><one:OE><one:T><![CDATA[After text]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+  },
+  {
+   "section": "Cross.one",
+   "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:Title><one:OE><one:T><![CDATA[Type over a row]]></one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"300\" height=\"100\"/><one:OEChildren><one:OE><one:T><![CDATA[Before text]]></one:T></one:OE><one:OE><one:Table bordersVisible=\"true\"><one:Columns><one:Column index=\"0\" width=\"100\"/><one:Column index=\"1\" width=\"100\"/></one:Columns><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row></one:Table></one:OE><one:OE><one:T><![CDATA[After text]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+  },
+  {
+   "section": "Cross.one",
+   "xml": "<one:Page xmlns:one=\"http://schemas.microsoft.com/office/onenote/2010/onenote\"><one:Title><one:OE><one:T><![CDATA[Delete a whole table]]></one:T></one:OE></one:Title><one:Outline><one:Position x=\"72\" y=\"108\"/><one:Size width=\"300\" height=\"100\"/><one:OEChildren><one:OE><one:T><![CDATA[Before text]]></one:T></one:OE><one:OE><one:Table bordersVisible=\"true\"><one:Columns><one:Column index=\"0\" width=\"100\"/><one:Column index=\"1\" width=\"100\"/></one:Columns><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Alpha two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row><one:Row><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta one]]></one:T></one:OE></one:OEChildren></one:Cell><one:Cell><one:OEChildren><one:OE><one:T><![CDATA[Beta two]]></one:T></one:OE></one:OEChildren></one:Cell></one:Row></one:Table></one:OE><one:OE><one:T><![CDATA[After text]]></one:T></one:OE></one:OEChildren></one:Outline></one:Page>"
+  }
+ ]
+}

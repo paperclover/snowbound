@@ -8,6 +8,8 @@
 //! the host redraws and rereads `sb_view_content`.
 
 mod library;
+#[cfg(target_os = "ios")]
+mod spell;
 
 use library::Shared;
 pub use library::{Library, Section, Share};
@@ -512,8 +514,10 @@ impl Canvas {
             },
             size: Some(size),
             bytes: Some(bytes.into()),
+            display: None,
             alt: None,
             background: false,
+            printout: None,
         };
         let page = &mut self.page;
         page.editor.insert_picture(&mut page.engine, image)?;
@@ -681,11 +685,21 @@ impl View {
             .ok_or("No supported surface configuration")?;
         surface.configure(&gpu.renderer.device, &config);
         let (page, read_only) = section.shared.page(space)?;
+        let frame = Arc::<Frame>::default();
+        #[cfg_attr(not(target_os = "ios"), expect(unused_mut))]
+        let mut canvas = Canvas::new(space, page, pixels, scale)?;
+        #[cfg(target_os = "ios")]
+        {
+            canvas.page.spelling = Some(canvas::spelling::Spelling::new(
+                spell::dictionary(),
+                Waker::from(frame.clone()),
+            ));
+        }
         Ok(Self {
-            canvas: ManuallyDrop::new(Canvas::new(space, page, pixels, scale)?),
+            canvas: ManuallyDrop::new(canvas),
             surface,
             config,
-            frame: Arc::default(),
+            frame,
             section: Arc::clone(&section.shared),
             read_only,
         })
@@ -916,6 +930,15 @@ pub extern "C" fn sb_view_press(view: &mut View, x: f32, y: f32) -> bool {
     view.stored(result)
 }
 
+/// The Pencil's pressure at the touch's next point, from 0 to 1; below 0 for a finger, whose
+/// strokes keep their pen's width.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_pressure(view: &mut View, pressure: f32) {
+    view.canvas
+        .page
+        .set_pressure((pressure >= 0.0).then_some(pressure));
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_drag(view: &mut View, x: f32, y: f32) -> bool {
     report(view.canvas.drag([x, y])).unwrap_or(false)
@@ -958,6 +981,60 @@ pub extern "C" fn sb_view_format(view: &View) -> u64 {
 pub extern "C" fn sb_view_apply(view: &mut View, command: u8) -> bool {
     let result = view.canvas.format(command);
     view.stored(result)
+}
+
+/// The marked word at the caret, or selected, as JSON `{"word", "suggestions",
+/// "repeated"}`; null where there is none.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_correction(view: &View) -> *mut c_char {
+    #[derive(serde::Serialize)]
+    struct Shown {
+        word: String,
+        suggestions: Vec<String>,
+        repeated: bool,
+    }
+    view.canvas
+        .page
+        .selected_correction()
+        .map_or(std::ptr::null_mut(), |correction| {
+            library::json(Ok(Shown {
+                word: correction.word,
+                suggestions: correction.suggestions,
+                repeated: correction.repeated,
+            }))
+        })
+}
+
+/// Acts on the word `sb_view_correction` names: 0 replaces it with `text`, empty to delete a
+/// repeated word; 1 ignores it; 2 adds it to the dictionary. True where the text changed.
+///
+/// # Safety
+/// `text` is NUL-terminated UTF-8, or null for 1 and 2.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_view_correct(
+    view: &mut View,
+    command: u8,
+    text: *const c_char,
+) -> bool {
+    let page = &mut view.canvas.page;
+    let (Some(correction), Some(spelling)) = (page.selected_correction(), page.spelling.clone())
+    else {
+        return false;
+    };
+    match command {
+        0 => {
+            let result = page.correct(&correction, &string(text));
+            view.stored(result.map(moved))
+        }
+        1 => {
+            spelling.ignore(&correction.word);
+            false
+        }
+        _ => {
+            spelling.learn(&correction.word);
+            false
+        }
+    }
 }
 
 /// The page title's text; null on a page without an editable title.

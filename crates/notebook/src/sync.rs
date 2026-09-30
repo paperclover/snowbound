@@ -1,5 +1,8 @@
 use super::*;
-use crate::working::{Request, Sealed};
+use crate::{
+    resolve::{Merged, Version},
+    working::{Request, Sealed},
+};
 use onestore::{CommitError, CommitState, RevisionIndex, Stamp, Store, Transaction};
 use rusqlite::OptionalExtension;
 use std::{
@@ -18,6 +21,25 @@ pub trait Remote {
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError>;
     /// Confirms that the file still has `base`'s stamp and is durable (`onestore::confirm`).
     fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError>;
+    /// The versions a file provider keeps beside the file, as iCloud Drive keeps the commits
+    /// that lost to another device's (unresolved conflict versions); none by default.
+    /// Synchronization merges each into the file, then retires it.
+    fn versions(&mut self) -> io::Result<Vec<Version>> {
+        Ok(Vec::new())
+    }
+    /// A version's image.
+    fn version(&mut self, id: &str) -> io::Result<Vec<u8>> {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("No version {id}"),
+        ))
+    }
+    /// Retires a version the file now holds everything of; with `keep`, one that is another
+    /// section or cannot be read, kept first as a file of its own beside this one.
+    fn retire(&mut self, id: &str, keep: bool) -> io::Result<()> {
+        let _ = (id, keep);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,8 +178,26 @@ impl Replica {
     /// changed. Reads the remote image only when its stamp moved; network I/O holds
     /// synchronization ownership without holding the cache mutex. Uncertain attempts are
     /// never replayed.
+    /// Versions the remote keeps beside the file merge into it first, each published as one
+    /// more revision and then retired (`resolve.rs`).
     pub fn sync_once(&self, remote: &mut impl Remote) -> Result<Synced> {
         let _owner = self.sync_owner()?;
+        for version in remote.versions().map_err(Error::RemoteIo)? {
+            let image = remote.version(&version.id).map_err(Error::RemoteIo)?;
+            let current = remote.read().map_err(Error::RemoteIo)?;
+            let device = version.device.as_deref().unwrap_or("Another device");
+            let keep = match crate::resolve::merge(&current, &image, device) {
+                Ok(Merged::Held) => false,
+                Ok(Merged::Publish(transaction)) => {
+                    remote.publish(&transaction)?;
+                    false
+                }
+                // A version this cannot merge is kept whole rather than lost.
+                Ok(Merged::Foreign) | Err(Error::Document(_) | Error::Rejected(_)) => true,
+                Err(error) => return Err(error),
+            };
+            remote.retire(&version.id, keep).map_err(Error::RemoteIo)?;
+        }
         let state = state(&*self.lock()?)?;
         let observed = remote.stamp().map_err(Error::RemoteIo)?;
         if let Some(blocked) = &state.blocked
@@ -482,7 +522,8 @@ impl Replica {
             None if !state.queued => state.base,
             None => return Ok(false),
         };
-        Ok(remote.stamp().map_err(Error::RemoteIo)? == expected)
+        Ok(remote.stamp().map_err(Error::RemoteIo)? == expected
+            && remote.versions().map_err(Error::RemoteIo)?.is_empty())
     }
 }
 

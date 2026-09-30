@@ -166,9 +166,11 @@ fn strip(
                     border: Some(theme.chip),
                     hover_border: Some(theme.accent),
                     radius: 4.0,
+                    role: Some(accesskit::Role::Button),
                     ..Spec::default()
                 },
             );
+            crate::name(ui, ui.id((index, *name)), name);
             if swatch.clicked {
                 chosen = Some(Choice::Color(index));
             }
@@ -191,9 +193,11 @@ fn strip(
             hover_fill: Some(theme.hover()),
             radius: 11.0,
             center: true,
+            role: Some(accesskit::Role::Button),
             ..Spec::default()
         },
     );
+    crate::name(ui, ui.id("dismiss"), "Close");
     if close.clicked {
         chosen = Some(Choice::Dismiss);
     }
@@ -244,9 +248,10 @@ fn gallery(
             ..Spec::default()
         },
     );
-    if ui::shell::tool_button(ui, "close", art::CLOSE, theme.text_dim, false).clicked {
+    if ui::shell::tool_button(ui, "close", art::CLOSE, theme.text_dim, None).clicked {
         chosen = Some(Choice::Dismiss);
     }
+    crate::name(ui, ui.id("close"), "Close");
     ui.close();
     ui.open(
         "grid",
@@ -351,9 +356,11 @@ fn tile(
             icon: (choice == Choice::More).then_some(art::PLUS),
             color: Some(theme.text_dim),
             center: true,
+            role: Some(accesskit::Role::Button),
             ..Spec::default()
         },
     );
+    crate::name(ui, id, label);
     match choice {
         Choice::Template(name) => {
             if let Some(template) = canvas::template::find(name) {

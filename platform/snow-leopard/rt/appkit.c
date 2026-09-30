@@ -22,6 +22,13 @@ const CFStringRef NSAccessibilityTabButtonSubrole = CFSTR("AXTabButton");
 const CFStringRef NSAccessibilityTextAlignmentAttribute = CFSTR("AXTextAlignment");
 const CFStringRef NSAccessibilityToggleSubrole = CFSTR("AXToggle");
 
+// NSURL resource keys from 10.7 to 10.9 for iCloud files, which the app asks about; 10.6
+// knows none of them, so a file there reads as not in iCloud.
+const CFStringRef NSURLIsUbiquitousItemKey = CFSTR("NSURLIsUbiquitousItemKey");
+const CFStringRef NSURLUbiquitousItemDownloadingStatusKey = CFSTR("NSURLUbiquitousItemDownloadingStatusKey");
+const CFStringRef NSURLUbiquitousItemDownloadingStatusNotDownloaded =
+    CFSTR("NSURLUbiquitousItemDownloadingStatusNotDownloaded");
+
 extern void NSAccessibilityPostNotification(id element, CFStringRef notification);
 
 void NSAccessibilityPostNotificationWithUserInfo(id element, CFStringRef notification, id info) {

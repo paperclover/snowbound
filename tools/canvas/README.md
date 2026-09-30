@@ -14,13 +14,13 @@ cargo test -p draw -- --ignored
 cargo test -p canvas --features gpu gpu:: -- --ignored
 ```
 
-The builder ad-hoc signs and verifies the local bundle. To preserve an existing app during review, provide a new bundle path and a distinct identifier together:
+The builder signs and verifies the local bundle: with team `9R7DPNW28H`'s Developer ID Application identity (found in the keychain by team, chosen by SHA-1, or `--sign-identity SHA1`) and a Developer ID provisioning profile for `net.paperclover.snowbound` naming `iCloud.net.paperclover.snowbound` (found in Xcode's profile folders, or `--profile PATH`), with hardened runtime and the iCloud container, which Use iCloud Drive needs; without both, ad hoc. To preserve an existing app during review, provide a new bundle path and a distinct identifier together:
 
 ```sh
-python3 tools/canvas/build_macos.py --release --output '/PATH/Snowbound Review.app' --bundle-id dev.snowbound.review
+python3 tools/canvas/build_macos.py --release --output '/PATH/Snowbound Review.app' --bundle-id net.paperclover.snowbound.review
 ```
 
-The explicit output path must not exist. Its filename supplies the bundle's display name; the default build continues to update `target/Snowbound.app`. Local ad-hoc signing does not provide a Developer ID or notarization.
+The explicit output path must not exist. Its filename supplies the bundle's display name; the default build continues to update `target/Snowbound.app`. A separate identifier is signed ad hoc, without the container. Nothing here notarizes.
 
 Control-Command-Space opens the macOS character picker for the active text field.
 
@@ -54,7 +54,7 @@ Launched without a file, the app reopens the notebooks open when it last closed,
 
 The `ui` crate builds every frame from the application's state. A cache keyed by stable box ids keeps hover, press, focus, scroll and animation values, and the previous frame's layout routes the frame's input before building, so a frame answers input one layout late and paints with its own. Sizes are solved per axis after building: fixed, label-sized, a fraction of an ancestor, or the sum of children, with overflow shared out by each box's strictness. The page is a custom box: `ui` routes it the pointer, wheel, key and input-method events that land on it, in order, and the host hands them to `PageView` and paints the page in a clipped layer of the same frame. Page scrollbars are `ui` widgets over that box; the canvas reports only its scroll bounds. Text fields edit through `draw::edit`, as the page does, so keys, clicks and drags select and move the same way in both. Work the frame asks for (page requests, saving) runs after the frame is painted and requests the frame that shows it. Opening a section or page reads and lays it out on a thread of its own while the current page stays live; the newest replaces the page once the pictures it shows first are drawn, or after 200 ms.
 
-A covered window receives no redraws, so interaction can be scripted: `SNOWBOUND_REPLAY` names a file of `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `key NAME`, `type TEXT`, `modifiers [shift] [command]`, `wait MS`, `snapshot PNG_PATH`, `appearance light|dark` and `quit` lines in logical pixels, and each step and every 16 ms of a wait draws a frame. With `--screenshot` as well, the window stays hidden and only the replay's snapshots capture it. Snapshots wait for the page's pictures, file icons and background art to finish rasterizing; `SNOWBOUND_FRAMES` frames never wait, so art appears in the first frame drawn after it is ready. Snapshots omit the window's traffic lights, which AppKit draws. Replays edit and save like a user, so point them at a copy of a notebook. Their edits carry the settings' user name, so give fixture runs a `--settings` file holding `{"user_name": "Snowbound Test"}`.
+A covered window receives no redraws, so interaction can be scripted: `SNOWBOUND_REPLAY` names a file of `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `key NAME`, `type TEXT`, `modifiers [shift] [command]`, `wait MS`, `snapshot PNG_PATH`, `accessibility TEXT_PATH` (the window's accessibility tree, a node a line, as the platform shows it), `appearance light|dark`, `resize WIDTH HEIGHT` and `quit` lines in logical pixels, and each step and every 16 ms of a wait draws a frame. With `--screenshot` as well, the window stays hidden and only the replay's snapshots capture it. Snapshots wait for the page's pictures, file icons and background art to finish rasterizing; `SNOWBOUND_FRAMES` frames never wait, so art appears in the first frame drawn after it is ready. Snapshots omit the window's traffic lights, which AppKit draws. Replays edit and save like a user, so point them at a copy of a notebook. Their edits carry the settings' user name, so give fixture runs a `--settings` file holding `{"user_name": "Snowbound Test"}`.
 
 ```sh
 cp -RL SOURCE_NOTEBOOK /tmp/notebook-copy && chmod u+w /tmp/notebook-copy/*.one

@@ -109,6 +109,8 @@ enum Source: Codable, Equatable {
     case files(bookmark: Data)
     /// A folder in the app's Documents, which Files shows as Snowbound's.
     case documents(path: String)
+    /// A folder in Snowbound's folder in iCloud Drive (`ICloud.documents`).
+    case icloud(path: String)
     /// A notebook folder on an SMB share, opened through Snowbound's own client.
     case server(Server)
     /// A folder or section at an absolute path, for scripted runs.
@@ -124,6 +126,12 @@ struct Tab: Decodable, Equatable {
     let group: String
     let color: [UInt8]
     let readable: Bool
+    /// Not on this device yet; `Notebook` asks iCloud Drive for it.
+    let downloading: Bool
+    /// The section this file copies, which opens instead.
+    let copy: String?
+    /// Why the file could not be read, where retrying or repair may help.
+    let problem: String?
 
     var uiColor: UIColor {
         UIColor(red: CGFloat(color[0]) / 255, green: CGFloat(color[1]) / 255, blue: CGFloat(color[2]) / 255, alpha: 1)
@@ -150,7 +158,8 @@ let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .
 
 /// An open notebook: its Rust library and the sections it lists.
 final class Notebook {
-    let id: UUID
+    /// A UUID, or `Documents/` and the folder's name for a notebook On My iPhone.
+    let id: String
     let source: Source
     private(set) var name: String
     private(set) var handle: OpaquePointer?
@@ -161,8 +170,12 @@ final class Notebook {
     private var accessed: URL?
     /// Reports other apps' changes to a folder on this device to the library.
     private var presenter: FolderPresenter?
+    /// Lists the sections again while iCloud Drive downloads some.
+    private var recheck: DispatchWorkItem?
+    /// Posted on the main thread when the sections list again on their own.
+    static let listed = Notification.Name("NotebookListed")
 
-    init(id: UUID = UUID(), name: String, source: Source) {
+    init(id: String = UUID().uuidString, name: String, source: Source) {
         self.id = id
         self.name = name
         self.source = source
@@ -205,6 +218,16 @@ final class Notebook {
                 let url = documentsDirectory.appendingPathComponent(path)
                 let library = sb_library_open(url.path, cacheDirectory.path, true, &error)
                 return (library, nil, take(error), url)
+            case .icloud(let path):
+                guard let url = ICloud.documents?.appendingPathComponent(path) else {
+                    return (nil, nil, "Turn on iCloud Drive in Settings to open this notebook.", nil)
+                }
+                var library: OpaquePointer?
+                var coordination: NSError?
+                NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordination) { url in
+                    library = sb_library_open(url.path, cacheDirectory.path, false, &error)
+                }
+                return (library, nil, take(error) ?? coordination?.localizedDescription, url)
             case .path(let path):
                 let url = URL(fileURLWithPath: path)
                 let local = onThisDevice(url)
@@ -233,7 +256,8 @@ final class Notebook {
     var location: String {
         switch source {
         case .files: "In Files"
-        case .documents: "On this \(UIDevice.current.model), in Snowbound’s folder"
+        case .documents: "On My \(UIDevice.current.model), in Snowbound’s folder"
+        case .icloud: "In iCloud Drive"
         case .server(let server):
             "smb://\(server.host)/\([server.share, server.root].filter { !$0.isEmpty }.joined(separator: "/"))"
         case .path(let path): path
@@ -249,8 +273,50 @@ final class Notebook {
         let pointer = Int(bitPattern: handle)
         background({ decode([Tab].self, sb_library_sections(OpaquePointer(bitPattern: pointer))) }) { [self] tabs in
             if let tabs { self.tabs = tabs }
+            download()
             done()
         }
+    }
+
+    /// Asks iCloud Drive for the notebook files it keeps elsewhere, which iOS lists as
+    /// `.Name.icloud`, and lists the sections again until they arrive.
+    private func download() {
+        let folder: URL? =
+            switch source {
+            case .files: accessed
+            case .documents(let path): documentsDirectory.appendingPathComponent(path)
+            case .icloud(let path): ICloud.documents?.appendingPathComponent(path)
+            case .path(let path): URL(fileURLWithPath: path)
+            case .server: nil
+            }
+        guard let folder, recheck == nil,
+            let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil)
+        else { return }
+        var waiting = false
+        for case let stub as URL in files where stub.lastPathComponent.hasPrefix(".") && stub.pathExtension == "icloud" {
+            let name = String(stub.deletingPathExtension().lastPathComponent.dropFirst())
+            let file = stub.deletingLastPathComponent().appendingPathComponent(name)
+            try? FileManager.default.startDownloadingUbiquitousItem(at: file)
+            waiting = true
+        }
+        guard waiting else { return }
+        let recheck = DispatchWorkItem { [weak self] in
+            self?.recheck = nil
+            self?.reload { NotificationCenter.default.post(name: Self.listed, object: self) }
+        }
+        self.recheck = recheck
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: recheck)
+    }
+
+    /// Stops hearing other apps' writes while in the background, where a suspended presenter
+    /// can deadlock their coordinated writes.
+    func pause() { presenter?.stop() }
+
+    /// Hears other apps' writes again, and checks the sections and their list for those
+    /// missed meanwhile.
+    func resume() {
+        presenter?.resume()
+        reload { NotificationCenter.default.post(name: Self.listed, object: self) }
     }
 }
 
@@ -281,7 +347,12 @@ final class FolderPresenter: NSObject, NSFilePresenter {
         NSFileCoordinator.addFilePresenter(self)
     }
 
-    /// Stops reporting, before the library goes.
+    func resume() {
+        NSFileCoordinator.addFilePresenter(self)
+        touched("")
+    }
+
+    /// Stops reporting, before the library goes or the app leaves the foreground.
     func stop() {
         NSFileCoordinator.removeFilePresenter(self)
         presentedItemOperationQueue.waitUntilAllOperationsAreFinished()
@@ -290,6 +361,8 @@ final class FolderPresenter: NSObject, NSFilePresenter {
     func presentedItemDidChange() { touched("") }
     func presentedSubitemDidChange(at url: URL) { touched(url) }
     func presentedSubitemDidAppear(at url: URL) { touched(url) }
+    /// Another device's commit that lost in iCloud Drive, which changes no file.
+    func presentedSubitem(at url: URL, didGain version: NSFileVersion) { touched(url) }
     func presentedSubitem(at oldURL: URL, didMoveTo newURL: URL) {
         touched(oldURL)
         touched(newURL)
@@ -309,59 +382,132 @@ final class FolderPresenter: NSObject, NSFilePresenter {
     }
 }
 
-/// The notebooks the list shows, kept across launches.
+/// The notebooks the list shows: those in Documents, and those opened from elsewhere, kept
+/// across launches.
 enum Notebooks {
     private struct Entry: Codable {
-        let id: UUID
+        let id: String
         let name: String
         let source: Source
     }
 
     private static let key = "notebooks"
-    private(set) static var all: [Notebook] = []
+    private static let hidden = "hidesOnDevice"
+    private static let scripted = ProcessInfo.processInfo.environment["SNOWBOUND_NOTEBOOK"]
+    /// The folders and sections in Documents, as On My iPhone lists them.
+    private(set) static var onDevice: [Notebook] = []
+    /// The folders in Snowbound's folder in iCloud Drive.
+    private(set) static var inCloud: [Notebook] = []
+    private(set) static var elsewhere: [Notebook] = []
+    static var all: [Notebook] { inCloud + onDevice + elsewhere }
 
-    /// The kept notebooks, or on first launch a copy of the bundled sample in Documents.
+    /// Whether the list shows On My iPhone, as Files lets a location be hidden.
+    static var showsOnDevice: Bool {
+        get { scripted == nil && !UserDefaults.standard.bool(forKey: hidden) }
+        set { UserDefaults.standard.set(!newValue, forKey: hidden) }
+    }
+
+    /// The kept notebooks and those in Documents, where the bundled sample goes on first launch.
     static func load() {
-        if let path = ProcessInfo.processInfo.environment["SNOWBOUND_NOTEBOOK"] {
-            all = [Notebook(name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, source: .path(path))]
+        if let scripted {
+            elsewhere = [
+                Notebook(
+                    name: URL(fileURLWithPath: scripted).deletingPathExtension().lastPathComponent,
+                    source: .path(scripted))
+            ]
             return
         }
         if let data = UserDefaults.standard.data(forKey: key),
             let entries = try? JSONDecoder().decode([Entry].self, from: data)
         {
-            all = entries.map { Notebook(id: $0.id, name: $0.name, source: $0.source) }
-            return
+            elsewhere = entries.compactMap { entry in
+                switch entry.source {
+                case .documents, .icloud: return nil
+                default: break
+                }
+                return Notebook(id: entry.id, name: entry.name, source: entry.source)
+            }
+        } else {
+            let sample = documentsDirectory.appendingPathComponent("Sample")
+            if !FileManager.default.fileExists(atPath: sample.path),
+                let bundled = Bundle.main.url(forResource: "notebook", withExtension: nil)
+            {
+                try? FileManager.default.copyItem(at: bundled, to: sample)
+            }
+            // The notebook the first version remembered from Files.
+            if let bookmark = UserDefaults.standard.data(forKey: "notebook") {
+                var stale = false
+                let name = (try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale))?
+                    .deletingPathExtension().lastPathComponent
+                elsewhere.append(Notebook(name: name ?? "Notebook", source: .files(bookmark: bookmark)))
+            }
+            save()
         }
-        let sample = documentsDirectory.appendingPathComponent("Sample")
-        if !FileManager.default.fileExists(atPath: sample.path),
-            let bundled = Bundle.main.url(forResource: "notebook", withExtension: nil)
-        {
-            try? FileManager.default.copyItem(at: bundled, to: sample)
+        scan()
+    }
+
+    /// Lists Documents again, keeping the notebooks still there; returns those new to the list.
+    @discardableResult
+    static func scan() -> [Notebook] {
+        guard showsOnDevice else {
+            onDevice = []
+            return []
         }
-        all = [Notebook(name: "Sample", source: .documents(path: "Sample"))]
-        // The notebook the first version remembered from Files.
-        if let bookmark = UserDefaults.standard.data(forKey: "notebook") {
-            var stale = false
-            let name = (try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale))?
-                .deletingPathExtension().lastPathComponent
-            all.append(Notebook(name: name ?? "Notebook", source: .files(bookmark: bookmark)))
+        var added: [Notebook] = []
+        onDevice = notebooks(in: documentsDirectory).map { name in
+            if let kept = onDevice.first(where: { $0.id == "Documents/" + name }) { return kept }
+            let notebook = Notebook(
+                id: "Documents/" + name, name: (name as NSString).deletingPathExtension, source: .documents(path: name))
+            added.append(notebook)
+            return notebook
         }
-        save()
+        return added
+    }
+
+    /// Lists Snowbound's folder in iCloud Drive again, as `scan` lists Documents; none while
+    /// iCloud Drive is off.
+    @discardableResult
+    static func scanICloud() -> [Notebook] {
+        guard let folder = ICloud.documents, scripted == nil else {
+            inCloud = []
+            return []
+        }
+        var added: [Notebook] = []
+        inCloud = notebooks(in: folder).map { name in
+            if let kept = inCloud.first(where: { $0.id == "iCloud/" + name }) { return kept }
+            let notebook = Notebook(
+                id: "iCloud/" + name, name: (name as NSString).deletingPathExtension, source: .icloud(path: name))
+            added.append(notebook)
+            return notebook
+        }
+        return added
+    }
+
+    /// The notebook folders and section files in `folder`, by name, as Files orders them.
+    private static func notebooks(in folder: URL) -> [String] {
+        let listed = try? FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)
+        return (listed ?? []).filter { url in
+            (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+                || url.pathExtension.lowercased() == "one"
+        }
+        .map(\.lastPathComponent)
+        .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     static func add(_ notebook: Notebook) {
-        all.append(notebook)
+        elsewhere.append(notebook)
         save()
     }
 
     static func remove(_ notebook: Notebook) {
-        all.removeAll { $0 === notebook }
+        elsewhere.removeAll { $0 === notebook }
         save()
     }
 
     private static func save() {
-        guard ProcessInfo.processInfo.environment["SNOWBOUND_NOTEBOOK"] == nil else { return }
-        let entries = all.map { Entry(id: $0.id, name: $0.name, source: $0.source) }
+        guard scripted == nil else { return }
+        let entries = elsewhere.map { Entry(id: $0.id, name: $0.name, source: $0.source) }
         UserDefaults.standard.set(try? JSONEncoder().encode(entries), forKey: key)
     }
 }

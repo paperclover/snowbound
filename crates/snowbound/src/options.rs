@@ -1,7 +1,8 @@
 //! OneNote's Options dialog: pages of settings listed on the left as OneNote 2010 lists
 //! them, grouped under the same headings, each kept when OK is chosen.
 
-use crate::{State, platform, settings::ColorScheme};
+use crate::{State, platform, settings::ColorScheme, update};
+use accesskit::Role;
 use ui::{Anchor, Axis, Flags, Id, Spec, Theme, Ui, children, fill, popup::Item, px};
 use winit::keyboard::NamedKey;
 
@@ -38,6 +39,7 @@ pub struct Options {
     user_name: String,
     color_scheme: ColorScheme,
     light_pages: bool,
+    automatic_updates: bool,
 }
 
 fn id() -> Id {
@@ -59,6 +61,7 @@ impl State {
             user_name: self.author.clone(),
             color_scheme: self.color_scheme,
             light_pages: self.light_pages,
+            automatic_updates: self.updates.automatic(),
         });
         self.ui.open_popup(id());
         self.ui.set_focus(Some(user_name()));
@@ -90,9 +93,13 @@ impl State {
                 radius: 8.0,
                 pad: [6.0, 6.0],
                 anchor: Some(Anchor::Dialog),
+                role: Some(Role::Dialog),
                 ..Spec::default()
             },
         );
+        if let Some(node) = ui.access(id()) {
+            node.set_label("Options");
+        }
         ui.open(
             "body",
             Spec {
@@ -100,7 +107,7 @@ impl State {
                 ..Spec::default()
             },
         );
-        ui.open(
+        let pages = ui.open(
             "pages",
             Spec {
                 axis: Axis::Y,
@@ -109,9 +116,13 @@ impl State {
                 radius: 5.0,
                 pad: [6.0, 6.0],
                 gap: 2.0,
+                role: Some(Role::TabList),
                 ..Spec::default()
             },
         );
+        if let Some(node) = ui.access(pages) {
+            node.set_orientation(accesskit::Orientation::Vertical);
+        }
         for (page, name) in Page::ALL {
             let shown = page == options.page;
             let spec = Spec {
@@ -123,9 +134,15 @@ impl State {
                 hover_fill: Some(theme.hover()),
                 radius: 4.0,
                 pad: [8.0, 0.0],
+                role: Some(Role::Tab),
                 ..Spec::default()
             };
-            if ui.leaf(name, spec).clicked {
+            let tab = ui.open(name, spec);
+            if let Some(node) = ui.access(tab) {
+                node.set_selected(shown);
+            }
+            ui.close();
+            if ui.signal(tab).clicked {
                 options.page = page;
             }
         }
@@ -149,12 +166,11 @@ impl State {
                         .iter()
                         .find(|(scheme, _)| *scheme == options.color_scheme)
                         .map_or("", |(_, name)| name);
-                    if ui::shell::combo(ui, "combo", current, 140.0).pressed {
-                        ui.open_popup(schemes());
-                    }
+                    ui::shell::combo(ui, "combo", "Color scheme", current, 140.0, schemes(), true);
                     let items = SCHEMES.map(|(scheme, name)| Item {
                         text: name,
-                        checked: scheme == options.color_scheme,
+                        checked: Some(scheme == options.color_scheme),
+                        current: scheme == options.color_scheme,
                         ..Item::default()
                     });
                     let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
@@ -178,7 +194,49 @@ impl State {
                             ..Spec::default()
                         },
                     );
+                    if let Some(node) = ui.access(user_name()) {
+                        node.set_label("User name");
+                    }
                 });
+                heading(ui, &theme, "Updates");
+                ui.leaf(
+                    "version",
+                    Spec {
+                        size: [fill(), px(row)],
+                        text: Some(&update::describe_running()),
+                        pad: [8.0, 0.0],
+                        ..Spec::default()
+                    },
+                );
+                if ui::check_box(
+                    ui,
+                    "automatic-updates",
+                    "Check for updates automatically",
+                    options.automatic_updates,
+                )
+                .clicked
+                {
+                    options.automatic_updates = !options.automatic_updates;
+                }
+                #[cfg(target_os = "linux")]
+                if crate::desktop::uninstallable() {
+                    field(ui, "Installed:", |ui| {
+                        let binary = crate::desktop::binary().unwrap_or_default();
+                        ui.leaf(
+                            "path",
+                            Spec {
+                                flags: Flags::CLIP,
+                                size: [fill(), px(row)],
+                                text: Some(&binary.to_string_lossy()),
+                                color: Some(theme.text_dim),
+                                ..Spec::default()
+                            },
+                        );
+                        if ui::button(ui, "uninstall", "Uninstall…").clicked {
+                            crate::desktop::uninstall();
+                        }
+                    });
+                }
             }
             Page::Display => {
                 heading(ui, &theme, "Display");
@@ -246,6 +304,7 @@ impl State {
             self.author = name.to_owned();
             self.color_scheme = options.color_scheme;
             self.light_pages = options.light_pages;
+            self.updates.set_automatic(options.automatic_updates);
             self.follow_color_scheme();
             self.save_settings();
         } else if !cancel {
@@ -267,6 +326,7 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
             fill: Some(ui::mix(theme.panel, theme.chip, 0.4)),
             radius: 4.0,
             pad: [8.0, 0.0],
+            role: Some(Role::Heading),
             ..Spec::default()
         },
     );

@@ -22,7 +22,8 @@ page inside it. `snowbound` picks a platform module at compile time
 (`macos.rs` or `linux.rs`, both mounted as `platform`), and everything else
 in the crate is shared: library and settings, the sidebar, menus, page and
 section management, templates, and screenshot and replay support.
-Accessibility for the page goes through AccessKit's winit adapter on both.
+Accessibility goes through AccessKit's winit adapter on both: the interface's
+tree, with the page's grafted into it.
 `commands.rs` is the one table of commands: each one's title, its chords on
 macOS and elsewhere, when it is enabled or checked, and what it does. The
 keyboard, the toolbar and the macOS menu bar all run commands from it.
@@ -41,13 +42,16 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   sidebar take the system's desktop tint, appearance and focus state exactly.
 - AppKit supplies the open and save panels, alerts, the date picker, date
   formatting for new page titles and conflict labels, the account's full name
-  (used as the author, as OneNote uses Office's user name), and the caret and
-  selection colours.
+  (used as the author, as OneNote uses Office's user name), the caret and
+  selection colours, and the spell checker, `NSSpellChecker`, which the
+  spelling thread calls on the main thread (10.6 has it too).
 - Frames present inside Core Animation's transaction, so a resize pairs each
   frame with the window's new size instead of stretching the last one.
 - A notebook on a mounted SMB share is opened through the embedded SMB client,
   signed in with the password the keychain keeps for that mount (see
-  [sync](sync.md) for why the mount itself isn't enough).
+  [sync](sync.md) for why the mount itself isn't enough). Open Notebook from Server… reaches one
+  by address instead, and keeps a password it asks to remember as the Finder does, an
+  SMB internet password.
 - The menu bar (`menubar.rs`) is laid out as OneNote for Mac's. Its items are
   the command table's, validated from the statuses each frame publishes, and
   their key equivalents are the table's chords, so AppKit takes a chord the
@@ -75,11 +79,20 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   The desktop is read once from `XDG_CURRENT_DESKTOP`; elsewhere the kit's own.
 - zenity or kdialog provide the pickers and alerts. The XDG settings portal
   provides the colour scheme. Text conventions come from the C library's
-  locale. Fontconfig is loaded at run time, so builds need no headers for it.
+  locale. Fontconfig is loaded at run time, so builds need no headers for it,
+  and so is Enchant, which checks spelling with whatever dictionaries its
+  providers have; without it, words go unmarked.
 - Wayland's clipboard goes through the window's own connection, since not every
   compositor offers a clipboard to clients without a window.
-- `crates/snowbound/linux` packages a tarball, plus an installer that adds the
-  launcher entry the Wayland desktop needs to find the icon.
+- The executable carries its desktop entry and icon (`desktop_linux.rs`). The
+  window is `net.paperclover.snowbound` to Wayland and X11 alike. Where a
+  Wayland compositor lacks xdg-toplevel-icon, as GNOME's does, it finds the
+  icon only through an entry of that name, so a run that isn't installed
+  writes a hidden one pointing at an icon in the runtime folder, marked with
+  its process ID, and removes both on exit or at the next start after a crash.
+  KWin takes the icon from the window. Install on the welcome copies the
+  executable to `~/.local/bin` and writes the visible entry under the same
+  name, so the menu never lists two; Uninstall in Options removes it.
 
 ### Windows and older macOS
 
@@ -114,7 +127,8 @@ owns everything around the page:
 No `ui` crate ships on iOS. Everything below the view is the desktop's code:
 `notebook::session` with its replica and background publishing, the embedded
 SMB client (credentials kept in the Keychain, as Files keeps its own), conflict
-pages, search, and page management through the same ops. Notebooks from Files
+pages, search, spelling (through `UITextChecker`), and page management through
+the same ops. Notebooks from Files
 are read and written under `NSFileCoordinator`, so file providers see every
 change.
 

@@ -187,8 +187,9 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
 /// applies it to `new`, the merged section: a conflict page under the remote's page
 /// marking `objects` where `page` holds them, or, where the remote removed the page, the
 /// page put back as a copy before the next page after it in `local`, the section as the
-/// queue leaves it, that the remote did not move (`moved`). Content outside the page model
-/// stays on the remote's page only; `at` is now.
+/// queue leaves it, that the remote did not move (`moved`). The page it makes is in the space
+/// `guid` names, or a fresh one. Content outside the page model stays on the remote's page
+/// only; `at` is now.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn conflict_page(
     new: &mut Section<'_>,
@@ -199,7 +200,12 @@ pub(crate) fn conflict_page(
     author: &str,
     objects: &BTreeSet<ExGuid>,
     at: u64,
+    guid: Option<[u8; 16]>,
 ) -> Result<Edit> {
+    let placed = |creation: PageCreation| match guid {
+        Some(guid) => creation.in_space(guid),
+        None => Ok(creation),
+    };
     let mut page = page.clone();
     page.objects
         .retain(|object| !matches!(object, PageObject::Unsupported(_)));
@@ -218,7 +224,11 @@ pub(crate) fn conflict_page(
             .any(|object| matches!(object, PageObject::Title(_)));
         vec![Op::Section(SectionOp::Conflict {
             of: space,
-            creation: PageCreation::new(None, titled.then_some(page.title.as_str()), author)?,
+            creation: placed(PageCreation::new(
+                None,
+                titled.then_some(page.title.as_str()),
+                author,
+            )?)?,
             page: copy,
             objects: marked,
         })]
@@ -231,7 +241,8 @@ pub(crate) fn conflict_page(
             .iter()
             .map(|(next, _)| *next)
             .find(|next| !moved.contains(next) && listed.iter().any(|(listed, _)| listed == next));
-        let creation = PageCreation::new(before, Some(&page.title), author)?;
+        let before = series_start(new, before)?;
+        let creation = placed(PageCreation::new(before, Some(&page.title), author)?)?;
         let mut ops = vec![Op::Section(SectionOp::Import {
             creation: creation.clone(),
             page: page.copy()?,
@@ -252,7 +263,7 @@ pub(crate) fn conflict_page(
 /// Pages the base and the remote both list that the remote moved: into another series or
 /// level, or out of base order among the rest. OneNote 2010 and this writer give a moved
 /// page a series of its own; older builds of this writer moved a page within its series.
-fn moved(old: &mut Section<'_>, new: &mut Section<'_>) -> Result<BTreeSet<ExGuid>> {
+pub(crate) fn moved(old: &mut Section<'_>, new: &mut Section<'_>) -> Result<BTreeSet<ExGuid>> {
     let series = (old.series()?, new.series()?);
     let base: BTreeMap<ExGuid, (usize, u32)> = order(old)?
         .into_iter()
@@ -291,6 +302,26 @@ fn moved(old: &mut Section<'_>, new: &mut Section<'_>) -> Result<BTreeSet<ExGuid
         .map(|(space, _)| space)
         .filter(|space| base.contains_key(space) && !unmoved.contains(space))
         .collect())
+}
+
+/// Where a page made before `before` goes in `section`: before it where it starts a page
+/// series, else before the next page that starts one, or last; a page is made only before a
+/// series' first page.
+fn series_start(section: &mut Section<'_>, before: Option<ExGuid>) -> Result<Option<ExGuid>> {
+    Ok(starting(&order(section)?, &section.series()?, before))
+}
+
+fn starting(
+    listed: &Order,
+    series: &BTreeMap<ExGuid, ExGuid>,
+    before: Option<ExGuid>,
+) -> Option<ExGuid> {
+    let at = listed
+        .iter()
+        .position(|(space, _)| Some(*space) == before)?;
+    (at..listed.len())
+        .find(|&k| k == 0 || series.get(&listed[k - 1].0) != series.get(&listed[k].0))
+        .map(|k| listed[k].0)
 }
 
 /// Applies a queued page-list edit to `local`, the page order as the queue leaves it.
@@ -444,8 +475,10 @@ impl Replay {
             .flat_map(|(_, pages)| pages.into_iter().map(|page| page.space))
             .collect();
         let listed = order(new)?;
+        let series = new.series()?;
         let anchored = |creation: &PageCreation| {
-            creation.reposition(self.anchor(&listed, creation.space(), creation.before()))
+            let anchor = self.anchor(&listed, creation.space(), creation.before());
+            creation.reposition(starting(&listed, &series, anchor))
         };
         Ok(match op {
             SectionOp::Create(creation) => Some(SectionOp::Create(anchored(creation)?)),

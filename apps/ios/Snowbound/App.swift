@@ -19,6 +19,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         sb_set_coordinator(coordinate)
+        ICloud.start()
         sb_set_sync_wake { DispatchQueue.main.async { NotificationCenter.default.post(name: Sync.changed, object: nil) } }
         #if DEBUG
         Presenter.watch()
@@ -45,7 +46,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
 
 /// Where the reader was, reopened on the next launch as Notes reopens its last note.
 private struct Place: Codable {
-    let notebook: UUID
+    let notebook: String
     let section: String
     let page: String?
 
@@ -89,6 +90,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
                 self?.notebooks.reload()
                 self?.restore(notebook)
             }
+        }
+        // iCloud Drive's notebooks list once its folder is found, and again when the account
+        // changes.
+        NotificationCenter.default.addObserver(forName: ICloud.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.notebooks.rescan { self?.restore($0) }
         }
     }
 
@@ -171,6 +177,15 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         Place.saved = Place(notebook: section.notebook.id, section: section.tab.path, page: page)
     }
 
+    /// Returns to the list from any section of `notebook` shown, as before its folder moves.
+    func close(_ notebook: Notebook) {
+        guard pages.section?.notebook === notebook else { return }
+        pages.clear()
+        showingPage = false
+        split.setViewController(UIViewController(), for: .secondary)
+        split.show(.primary)
+    }
+
     /// Adds a page to the open section and opens it, its title ready for typing.
     func newPage(subpage: Bool = false) {
         guard let section = pages.section else { return }
@@ -194,6 +209,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
     /// Composition ends and every edit is stored and published while the system allows.
     func sceneDidEnterBackground(_ scene: UIScene) {
         NotificationCenter.default.post(name: PageViewController.leaving, object: nil)
+        for notebook in Notebooks.all { notebook.pause() }
         let sections = Section.all
         guard !sections.isEmpty, background == .invalid else { return }
         background = UIApplication.shared.beginBackgroundTask(withName: "Saving") { [weak self] in
@@ -211,8 +227,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         background = .invalid
     }
 
+    /// Someone moving to another device finds their edits there: they publish now rather than
+    /// after a pause in typing.
+    func sceneWillResignActive(_ scene: UIScene) {
+        for section in Section.all { section.wake() }
+    }
+
     /// Changes made elsewhere while away show at once.
     func sceneWillEnterForeground(_ scene: UIScene) {
+        for notebook in Notebooks.all { notebook.resume() }
+        notebooks.rescan()
         for section in Section.all { section.wake() }
     }
 }

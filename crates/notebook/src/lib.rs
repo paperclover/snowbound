@@ -22,13 +22,17 @@ use std::{
 mod assets;
 mod background;
 mod base;
+pub mod location;
 mod merge;
 mod migrate;
 mod queue;
 mod recovery;
+mod resolve;
+pub use resolve::Version;
 mod schema;
 pub mod session;
 pub use recovery::{Recovery, RecoverySummary};
+pub mod sidecar;
 mod sync;
 pub use sync::{EditStatus, Remote, Synced};
 mod worker;
@@ -339,6 +343,15 @@ fn lock(connection: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>> {
     connection
         .lock()
         .map_err(|_| io::Error::other("Cache owner panicked").into())
+}
+
+/// Tells the worker a burst of local edits is durable.
+fn edited(worker: &Mutex<std::sync::Weak<worker::Signal>>) {
+    if let Ok(worker) = worker.lock()
+        && let Some(worker) = worker.upgrade()
+    {
+        worker.edited();
+    }
 }
 
 fn wake(worker: &Mutex<std::sync::Weak<worker::Signal>>) {

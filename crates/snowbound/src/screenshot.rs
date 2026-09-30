@@ -1,6 +1,10 @@
 //! `--screenshot`: the window drawn offscreen at a fixed size in each appearance. On macOS
 //! the parts AppKit draws over it, the traffic lights and the rounded corners, are painted
-//! in; elsewhere the app draws its whole window.
+//! in; elsewhere the app draws its whole window. On macOS `SNOWBOUND_SCREENSHOT_SYSTEM=
+//! snow-leopard` draws it as a Mac OS X 10.6 window instead.
+
+#[cfg(target_os = "macos")]
+mod snow_leopard;
 
 use super::*;
 use winit::window::Theme as Appearance;
@@ -9,6 +13,8 @@ use winit::window::Theme as Appearance;
 /// drawn at `SCALE` pixels per point or fewer where the GPU caps textures.
 const SIZE: [f32; 2] = [1440.0, 900.0];
 const SCALE: f32 = 2.0;
+/// The window's content as a Snow Leopard window, its default size.
+const SNOW_LEOPARD_SIZE: [f32; 2] = [1180.0, 760.0];
 /// The close, minimize and zoom buttons' fill and rim.
 #[cfg(target_os = "macos")]
 const LIGHTS: [([u8; 3], [u8; 3]); 3] = [
@@ -17,18 +23,40 @@ const LIGHTS: [([u8; 3], [u8; 3]); 3] = [
     ([0x28, 0xc8, 0x40], [0x12, 0xac, 0x28]),
 ];
 
+/// Whether `SNOWBOUND_SCREENSHOT_SYSTEM` asks for a Snow Leopard window.
+fn snow_leopard() -> bool {
+    cfg!(target_os = "macos")
+        && std::env::var_os("SNOWBOUND_SCREENSHOT_SYSTEM")
+            .is_some_and(|system| system == "snow-leopard")
+}
+
+/// Before the window opens: a Snow Leopard window lays the app out as on 10.6.
+pub(crate) fn prepare() {
+    #[cfg(target_os = "macos")]
+    if snow_leopard() {
+        crate::aqua::pretend();
+    }
+}
+
 impl State {
-    /// Writes `PREFIX-light.png` and `PREFIX-dark.png`, the page unfocused so no caret shows.
+    /// Writes `PREFIX-light.png` and `PREFIX-dark.png`, the page unfocused so no caret shows;
+    /// as a Snow Leopard window, `PREFIX-snow-leopard.png` and, not key,
+    /// `PREFIX-snow-leopard-other.png`, at 10.6's one pixel per point.
     pub(crate) fn screenshot(&mut self, prefix: &Path) -> Result<(), Box<dyn Error>> {
         let size = match std::env::var("SNOWBOUND_SCREENSHOT_SIZE") {
             Ok(size) => size
                 .split_once('x')
                 .and_then(|(width, height)| Some([width.parse().ok()?, height.parse().ok()?]))
                 .ok_or("SNOWBOUND_SCREENSHOT_SIZE must be WIDTHxHEIGHT in points.")?,
+            Err(_) if snow_leopard() => SNOW_LEOPARD_SIZE,
             Err(_) => SIZE,
         };
         let most = self.renderer.max_texture_dimension() as f32;
-        let scale = SCALE.min(most / size[0].max(size[1]));
+        let scale = if snow_leopard() {
+            1.0
+        } else {
+            SCALE.min(most / size[0].max(size[1]))
+        };
         self.surface.size = size.map(|side| (side * scale).max(1.0) as u32);
         self.renderer.clear_glyph_cache();
         let response = self.view.scale_factor_changed(scale)?;
@@ -43,24 +71,14 @@ impl State {
         {
             self.view.editor.focus_outline(title.id)?;
         }
+        #[cfg(target_os = "macos")]
+        if snow_leopard() {
+            return snow_leopard::screenshot(self, prefix, size);
+        }
         for (name, appearance) in [("light", Appearance::Light), ("dark", Appearance::Dark)] {
             self.window.set_theme(Some(appearance));
             self.set_appearance(appearance);
-            // The page's box sizes the view whose pictures settle.
-            self.layout(size, scale)?;
-            let paper = self.paper();
-            if let Some((scene, _)) = &mut self.view.scene {
-                scene.settle(Some(&self.view.editor), self.view.viewport.scale, paper);
-            }
-            // Later frames lay out with earlier frames' measurements while colours ease.
-            let deadline = Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                self.layout(size, scale)?;
-                if !self.ui.wants_frame() || Instant::now() > deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(16));
-            }
+            self.settle_frame(size, scale)?;
             let path = PathBuf::from(format!("{}-{name}.png", prefix.display()));
             self.snapshot(&path)?;
             #[cfg(target_os = "macos")]
@@ -72,6 +90,27 @@ impl State {
             )?;
         }
         Ok(())
+    }
+}
+
+impl State {
+    /// Lays the frame out until pictures and eased colours settle.
+    fn settle_frame(&mut self, size: [f32; 2], scale: f32) -> Result<(), Box<dyn Error>> {
+        // The page's box sizes the view whose pictures settle.
+        self.layout(size, scale)?;
+        let paper = self.paper();
+        if let Some((scene, _)) = &mut self.view.scene {
+            scene.settle(Some(&self.view.editor), self.view.viewport.scale, paper);
+        }
+        // Later frames lay out with earlier frames' measurements while colours ease.
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            self.layout(size, scale)?;
+            if !self.ui.wants_frame() || Instant::now() > deadline {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
     }
 }
 

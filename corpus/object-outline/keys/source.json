@@ -1,0 +1,38 @@
+[
+  {
+    "path": "Alone.one",
+    "bytes": 20784,
+    "sha256": "5fe3413bdd11788de729b1b8b375b5174af7acfcf5624b1f13e43b19334d4c3b",
+    "mtime_ns": 1790744804347247366
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 3980,
+    "sha256": "49e914844513913cd4c3ec5e8fe3a237aa4d10a8575da1f2af1a9c3f97515656",
+    "mtime_ns": 1790744804345074117
+  },
+  {
+    "path": "fixture-data/Open Notebook.onetoc2",
+    "bytes": 3656,
+    "sha256": "e4f66353f0be442324927f1b4a158b8daad7900da2cc25f82a971605d1770a3e",
+    "mtime_ns": 1790744804346997658
+  },
+  {
+    "path": "fixture-data/notes.txt",
+    "bytes": 23,
+    "sha256": "93d5f94f89aaa8a154fd3f4b8ee770706ee075bda149fb5b68d4038ab5488259",
+    "mtime_ns": 1790744804346747949
+  },
+  {
+    "path": "fixture.json",
+    "bytes": 1240,
+    "sha256": "2b40bc72f2d9aefa7235fcb8f11a905904e6df46c6caa8f25444ce2d31b82457",
+    "mtime_ns": 1790744804344731700
+  },
+  {
+    "path": "synthetic.one",
+    "bytes": 5892,
+    "sha256": "a91822e4b09999a7f57435856ea754185d0e37079db20e52a62b417017a6a8e5",
+    "mtime_ns": 1790744804347492408
+  }
+]

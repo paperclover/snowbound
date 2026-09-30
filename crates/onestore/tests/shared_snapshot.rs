@@ -83,7 +83,7 @@ fn storage_inspection_preserves_opaque_images_without_claiming_edit_readiness() 
         let mut broken = source.clone();
         let offset = usize::try_from(Store::parse(&source).unwrap().header.root.offset).unwrap();
         broken[offset] ^= 1;
-        assert!(
+        assert_eq!(
             onestore::read_storage_snapshot(
                 |offset, output| {
                     let offset = usize::try_from(offset).unwrap();
@@ -93,8 +93,9 @@ fn storage_inspection_preserves_opaque_images_without_claiming_edit_readiness() 
                 },
                 broken.len()
             )
-            .unwrap()
-            .is_none()
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::InvalidData
         );
     }
 }

@@ -156,7 +156,10 @@ fn links_and_equations_save_as_the_editor_shows_them() {
     let at = line(&mut editor, engine);
     typed(&mut editor, engine, "Read the Rust book today");
     select(&mut editor, at, 9..18);
-    assert_eq!(editor.link_prefill(), ("Rust book".into(), String::new()));
+    assert_eq!(
+        editor.link_prefill(),
+        Some(("Rust book".into(), String::new()))
+    );
     editor
         .set_link(engine, "Rust book", "https://doc.rust-lang.org/book/")
         .unwrap();
@@ -498,6 +501,265 @@ fn enter_at_and_inside_equations_and_links_stores_what_onenote_stored() {
         .map(runs)
         .collect();
     assert_eq!(written, native);
+}
+
+/// Enter and Shift+Enter inside a link's label leave it whole, as in OneNote 2010, where
+/// Shift+Enter does nothing and Enter follows the link; at its end Enter splits as anywhere
+/// else.
+#[test]
+fn enter_inside_a_link_is_ignored() {
+    let mut engine = TextEngine::default();
+    let engine = &mut engine;
+    let mut editor = CanvasEditor::new(
+        engine,
+        canvas::document::TextDocument::new(vec![onestore::page::Paragraph::new(
+            String::new(),
+            Default::default(),
+        )])
+        .unwrap(),
+        400.0,
+    )
+    .unwrap();
+    typed(&mut editor, engine, "Visit the example site today");
+    select(&mut editor, 0, 10..22);
+    editor
+        .set_link(engine, "example site", "https://example.com/")
+        .unwrap();
+    editor.take_ops().unwrap();
+    let document = editor.active_outline().document().clone();
+    let text = document.paragraphs().next().unwrap();
+    let end = text
+        .utf16_offset(text.text().find(" today").unwrap())
+        .unwrap();
+    let label = editor
+        .link_at(TextPosition {
+            paragraph: 0,
+            offset: end,
+        })
+        .unwrap()
+        .label;
+    let inside = label.start + 7;
+    for soft in [false, true] {
+        select(&mut editor, 0, inside..inside);
+        editor.enter(engine, soft).unwrap();
+        assert_eq!(*editor.active_outline().document(), document);
+        assert!(editor.take_ops().unwrap().is_empty());
+    }
+    select(&mut editor, 0, label.end..label.end);
+    editor.enter(engine, false).unwrap();
+    assert_eq!(editor.active_outline().document().paragraphs().count(), 2);
+}
+
+/// Link over a selection across paragraphs does nothing, as OneNote 2010's does.
+#[test]
+fn link_over_paragraphs_does_nothing() {
+    let mut engine = TextEngine::default();
+    let engine = &mut engine;
+    let mut editor = CanvasEditor::new(
+        engine,
+        canvas::document::TextDocument::new(vec![
+            onestore::page::Paragraph::new("One two".into(), Default::default()),
+            onestore::page::Paragraph::new("Three four".into(), Default::default()),
+        ])
+        .unwrap(),
+        400.0,
+    )
+    .unwrap();
+    let document = editor.active_outline().document().clone();
+    editor
+        .select(
+            [
+                TextPosition {
+                    paragraph: 0,
+                    offset: 4,
+                },
+                TextPosition {
+                    paragraph: 1,
+                    offset: 5,
+                },
+            ]
+            .into(),
+        )
+        .unwrap();
+    assert_eq!(editor.link_prefill(), None);
+    editor.set_link(engine, "", "https://example.com/").unwrap();
+    assert_eq!(*editor.active_outline().document(), document);
+    assert!(editor.take_ops().unwrap().is_empty());
+}
+
+/// Deleting from inside one equation into the next joins them into one, as OneNote 2010
+/// joined "aa+bb" and "cc+dd" to "aa++dd" in the lab; the section it stores reopens in OneNote
+/// (`corpus/equation-join`, exported to `CANVAS_EQUATION_JOIN_EXPORT`).
+#[test]
+fn deleting_between_equations_joins_them() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source = std::fs::read(root.join("corpus/link-edit/candidate/links.one")).unwrap();
+    let (space, page) = pages(&source).remove(0);
+    let mut engine = TextEngine::default();
+    let engine = &mut engine;
+    let mut editor = CanvasEditor::from_page(page, engine).unwrap();
+    let body = editor
+        .outlines()
+        .iter()
+        .find(|outline| !outline.title)
+        .unwrap()
+        .id;
+    editor.focus_outline(body).unwrap();
+    let first = line(&mut editor, engine);
+    editor.insert_equation(engine).unwrap();
+    typed(&mut editor, engine, "aa+bb ");
+    let second = line(&mut editor, engine);
+    editor.insert_equation(engine).unwrap();
+    typed(&mut editor, engine, "cc+dd ");
+    let text = |editor: &CanvasEditor, paragraph: usize| {
+        editor
+            .active_outline()
+            .document()
+            .paragraphs()
+            .nth(paragraph)
+            .unwrap()
+            .clone()
+    };
+    let before = |editor: &CanvasEditor, paragraph: usize, needle: &str| {
+        let text = text(editor, paragraph);
+        text.utf16_offset(text.text().find(needle).unwrap())
+            .unwrap()
+    };
+    let (from, to) = (before(&editor, first, "𝑏𝑏"), before(&editor, second, "+𝑑"));
+    editor
+        .select(
+            [
+                TextPosition {
+                    paragraph: first,
+                    offset: from,
+                },
+                TextPosition {
+                    paragraph: second,
+                    offset: to,
+                },
+            ]
+            .into(),
+        )
+        .unwrap();
+    editor.delete(engine, false).unwrap();
+    let joined = text(&editor, first);
+    assert_eq!(joined.text().trim_end(), "𝑎𝑎++𝑑𝑑");
+    assert!(
+        joined
+            .spans()
+            .iter()
+            .all(|span| span.format.math == Some(true))
+    );
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source).unwrap();
+    let ops = editor
+        .take_ops()
+        .unwrap()
+        .into_iter()
+        .map(|op| onestore::op::Op::Page { space, op })
+        .collect();
+    section
+        .apply(
+            "Author",
+            &onestore::op::Edit {
+                at: 134_000_000_000_000_000,
+                ops,
+            },
+        )
+        .unwrap();
+    section.seal().unwrap();
+    let written = section.image();
+    let (_, stored) = pages(&written).remove(0);
+    let equations: Vec<String> = stored
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => Some(outline),
+            _ => None,
+        })
+        .flat_map(|outline| &outline.paragraphs)
+        .filter_map(|paragraph| paragraph.text())
+        .filter(|text| {
+            text.text
+                .spans()
+                .iter()
+                .any(|span| span.format.math == Some(true))
+        })
+        .map(|text| text.text.text().trim_end().to_owned())
+        .collect();
+    assert_eq!(equations, ["𝑎𝑎++𝑑𝑑"]);
+    if let Some(directory) = std::env::var_os("CANVAS_EQUATION_JOIN_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("links.one"), &written).unwrap();
+        let file_id = Store::parse(&written).unwrap().header.file_id;
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents("Open Notebook.onetoc2", &[("links.one", file_id)])
+                .unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+/// Alt+= over a selection across paragraphs makes each paragraph's part an equation of its
+/// own, as OneNote 2010 does, and one undo takes them back.
+#[test]
+fn equation_over_paragraphs_makes_one_each() {
+    let mut engine = TextEngine::default();
+    let engine = &mut engine;
+    let mut editor = CanvasEditor::new(
+        engine,
+        canvas::document::TextDocument::new(vec![
+            onestore::page::Paragraph::new("One two".into(), Default::default()),
+            onestore::page::Paragraph::new("Three four".into(), Default::default()),
+        ])
+        .unwrap(),
+        400.0,
+    )
+    .unwrap();
+    let document = editor.active_outline().document().clone();
+    editor
+        .select(
+            [
+                TextPosition {
+                    paragraph: 0,
+                    offset: 4,
+                },
+                TextPosition {
+                    paragraph: 1,
+                    offset: 5,
+                },
+            ]
+            .into(),
+        )
+        .unwrap();
+    editor.insert_equation(engine).unwrap();
+    let math: Vec<Vec<(String, bool)>> = editor
+        .active_outline()
+        .document()
+        .paragraphs()
+        .map(|text| {
+            let mut start = 0;
+            text.spans()
+                .iter()
+                .map(|span| {
+                    let part = text.text()[start..span.end].to_owned();
+                    start = span.end;
+                    (part, span.format.math == Some(true))
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        math,
+        [
+            vec![("One ".to_owned(), false), ("𝑡𝑤𝑜".to_owned(), true)],
+            vec![("𝑇ℎ𝑟𝑒𝑒".to_owned(), true), (" four".to_owned(), false)],
+        ]
+    );
+    assert!(editor.undo(engine).unwrap());
+    assert_eq!(*editor.active_outline().document(), document);
 }
 
 /// An equation among text draws in its line, which grows to hold it, and URL text shows as a

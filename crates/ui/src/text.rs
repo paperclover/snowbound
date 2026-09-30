@@ -47,17 +47,12 @@ impl Texts {
             .context
             .ranged_builder(&mut self.fonts, text, 1.0, false);
         // Fontconfig configurations without a system-ui alias still have a sans-serif.
-        // Before 10.10 macOS's interface font is Lucida Grande, which fontique's system-ui
-        // doesn't name.
-        let system = [
-            Some(FontFamilyName::Generic(GenericFamily::SystemUi)),
-            cfg!(target_os = "macos").then(|| FontFamilyName::named("Lucida Grande")),
-            Some(FontFamilyName::Generic(GenericFamily::SansSerif)),
-        ];
+        let system =
+            [GenericFamily::SystemUi, GenericFamily::SansSerif].map(FontFamilyName::Generic);
         let families: Vec<_> = font
             .into_iter()
             .map(FontFamilyName::named)
-            .chain(system.into_iter().flatten())
+            .chain(system)
             .collect();
         builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(
             families,
@@ -97,6 +92,15 @@ impl Texts {
         }
         let cut = format!("{}…", text[..end].trim_end());
         self.label(&cut, size, *bold, font, frame)
+    }
+
+    /// Makes `family` the interface's font, where fontique doesn't know the system's.
+    pub fn set_system_font(&mut self, family: &str) {
+        let collection = &mut self.fonts.collection;
+        if let Some(id) = collection.family_id(family) {
+            collection.set_generic_families(GenericFamily::SystemUi, std::iter::once(id));
+            self.cache.clear();
+        }
     }
 
     pub fn preview_font(&mut self, data: Blob<u8>, family: &str) {

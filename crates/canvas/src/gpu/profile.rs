@@ -243,8 +243,10 @@ fn frame_cost() {
                     },
                     size: None,
                     bytes: None,
+                    display: None,
                     alt: None,
                     background: false,
+                    printout: None,
                 });
                 let cell = || TableCell {
                     id: new_id().unwrap(),

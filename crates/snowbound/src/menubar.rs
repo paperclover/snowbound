@@ -33,6 +33,7 @@ const MENUS: &[Item] = &[
         "Snowbound",
         &[
             Item::System("About Snowbound", "orderFrontStandardAboutPanel:", None),
+            C(Id::CheckForUpdates),
             S,
             C(Id::Settings),
             S,
@@ -54,6 +55,7 @@ const MENUS: &[Item] = &[
         &[
             C(Id::NewNotebook),
             C(Id::OpenNotebook),
+            C(Id::OpenFromServer),
             C(Id::CloseNotebook),
             S,
             C(Id::NewSection),
@@ -94,6 +96,7 @@ const MENUS: &[Item] = &[
     Item::Menu(
         "View",
         &[
+            C(Id::GoTo),
             C(Id::CommandPalette),
             S,
             C(Id::Back),
@@ -109,6 +112,8 @@ const MENUS: &[Item] = &[
             S,
             C(Id::PageColor),
             C(Id::DarkPages),
+            C(Id::HideSpelling),
+            C(Id::Spelling),
         ],
     ),
     Item::Menu(
@@ -390,6 +395,7 @@ mod tests {
                     " " => "Space".to_owned(),
                     "\u{f702}" => "←".to_owned(),
                     "\u{f703}" => "→".to_owned(),
+                    "\u{f70a}" => "F7".to_owned(),
                     key => key.to_uppercase(),
                 };
                 format!("{held}{key}")

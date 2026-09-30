@@ -1,0 +1,20 @@
+[
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 1612,
+    "sha256": "fafa5dcb3cd827c7edd30c8ea2fbc957a59fb4d2a8b28b667a3c551c8261ab86",
+    "mtime_ns": 1790740542526906926
+  },
+  {
+    "path": "fixture.json",
+    "bytes": 4461,
+    "sha256": "f5b2f03775b73d8359d05549134e795cb66f8930990922495003add1a786821c",
+    "mtime_ns": 1790740700488051772
+  },
+  {
+    "path": "synthetic.one",
+    "bytes": 3348,
+    "sha256": "b0662387c3fdc256d8dbe809e3b8f73b3586559696467fb1fff8f589095fa797",
+    "mtime_ns": 1790740542527105843
+  }
+]

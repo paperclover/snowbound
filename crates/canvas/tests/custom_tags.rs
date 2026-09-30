@@ -24,6 +24,7 @@ fn list() -> Vec<NoteTag> {
         shape,
         color,
         highlight,
+        art: None,
     };
     vec![
         tag("Snow check", 61, Some(0x0000_0080), Some(0x00ff_cc00)),
@@ -173,6 +174,7 @@ fn onenotes_custom_tags_read_back() {
         shape: 61,
         color: Some(0x0000_0080),
         highlight: Some(0x00ff_cc00),
+        art: None,
     };
     let to_do = NoteTag::defaults()[0].clone();
     // Snow check went in at the top of the list, then moved below To Do.
