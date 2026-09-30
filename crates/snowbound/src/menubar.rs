@@ -2,6 +2,7 @@
 //! AppKit's own items where the system provides them.
 
 use crate::commands::{self, Choice, Chord, Id, cmd, named};
+use crate::recording::Transport;
 use canvas::editor::{Alignment, NoteTag, Toggle};
 use draw::edit::NamedKey;
 use objc2::{
@@ -124,6 +125,24 @@ const MENUS: &[Item] = &[
             C(Id::Date),
             C(Id::Time),
             C(Id::DateTime),
+            S,
+            C(Id::RecordAudio),
+            C(Id::RecordVideo),
+            Item::Menu(
+                "Audio & Video",
+                &[
+                    C(Id::Transport(Transport::Pause)),
+                    C(Id::Transport(Transport::Stop)),
+                    S,
+                    C(Id::Transport(Transport::Skip(-600))),
+                    C(Id::Transport(Transport::Skip(-10))),
+                    C(Id::Transport(Transport::Skip(10))),
+                    C(Id::Transport(Transport::Skip(600))),
+                    C(Id::Transport(Transport::SeekTo)),
+                    S,
+                    C(Id::Transport(Transport::SeePlayback)),
+                ],
+            ),
         ],
     ),
     Item::Menu(

@@ -3,7 +3,7 @@
 //! as OneNote 2010 has them (`corpus/ink-tools`).
 
 use super::{PageView, Response, Result, snap_to_grid};
-use crate::editor::Pen;
+use crate::editor::{FAVORITES, Pen};
 use crate::gpu::colorref;
 use draw::{
     Primitive, Stroke,
@@ -13,6 +13,18 @@ use onestore::{
     ExGuid,
     page::{Ink, InkStroke, ink::ShapeKind, text::new_id},
 };
+
+/// The pen gallery under a section of tab colour `section` (linear RGBA): a pen in the
+/// section's accent, then OneNote's favourites. The accent takes the light theme's shade in
+/// either theme, so a stroke stores one colour and shows it in both.
+pub fn pens(section: [f32; 4]) -> [Pen; 15] {
+    let [red, green, blue] = draw::srgb_bytes({
+        let [saturation, lightness] = draw::LIGHT_ACCENT;
+        draw::hsl(draw::hue(section), saturation, lightness)
+    });
+    let accent = Pen::new(35.0, Some(u32::from_le_bytes([red, green, blue, 0])));
+    std::array::from_fn(|place| place.checked_sub(1).map_or(accent, |at| FAVORITES[at]))
+}
 
 /// What a press on the page does.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -40,9 +52,16 @@ pub(super) struct State {
 enum Gesture {
     Stroke(Vec<[f32; 2]>),
     Shape([f32; 2]),
-    Erase { last: [f32; 2], erased: bool },
+    /// `mark` counts the ops waiting when the sweep began.
+    Erase {
+        last: [f32; 2],
+        erased: bool,
+        mark: usize,
+    },
     Lasso(Vec<[f32; 2]>),
-    Move { press: [f32; 2] },
+    Move {
+        press: [f32; 2],
+    },
 }
 
 /// The eraser's reach either side of its path, in logical pixels.
@@ -64,6 +83,21 @@ impl PageView {
     /// Drawings the lasso or a click picked.
     pub fn ink_selection(&self) -> &[ExGuid] {
         &self.ink.selection
+    }
+
+    /// Ends a gesture as though it never began, as a second finger landing does on a touch
+    /// screen: a sweep of the eraser gives back what it erased. The sweep's ops must not have
+    /// been taken since it began.
+    pub fn cancel_ink(&mut self) -> Result<Response> {
+        let gesture = self.ink.gesture.take();
+        self.editor.drag_ink(None);
+        if let Some(Gesture::Erase {
+            erased: true, mark, ..
+        }) = gesture
+        {
+            self.editor.retract_erasing(&mut self.engine, mark)?;
+        }
+        self.changed()
     }
 
     /// Ends a gesture unfinished, as a lost focus does.
@@ -123,10 +157,12 @@ impl PageView {
             Tool::Pen(_) => Gesture::Stroke(vec![point]),
             Tool::Shape(..) => Gesture::Shape(self.grid(point)),
             Tool::Eraser => {
+                let mark = self.editor.pending_ops();
                 let erased = self.editor.erase(point, point, self.reach(), false)?;
                 Gesture::Erase {
                     last: point,
                     erased,
+                    mark,
                 }
             }
             Tool::Lasso => {
@@ -158,7 +194,7 @@ impl PageView {
                 }
                 Ok(Response::redraw())
             }
-            Some(Gesture::Erase { last, erased }) => {
+            Some(Gesture::Erase { last, erased, .. }) => {
                 let from = std::mem::replace(last, point);
                 let join = *erased;
                 if self.editor.erase(from, point, self.reach(), join)? {
@@ -255,7 +291,7 @@ impl PageView {
     }
 
     /// Whether a press on the page began a gesture of the drawing tools.
-    pub(super) fn inking(&self) -> bool {
+    pub fn inking(&self) -> bool {
         self.ink.gesture.is_some()
     }
 

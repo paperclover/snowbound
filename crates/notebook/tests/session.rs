@@ -1034,7 +1034,7 @@ fn until(what: &str, mut accept: impl FnMut() -> bool) {
 #[test]
 fn a_closed_sections_queued_edits_publish_in_the_background_when_online() {
     let directory = tempfile::tempdir().unwrap();
-    let notebook = two_sections(directory.path());
+    let mut notebook = two_sections(directory.path());
     let file = directory.path().join("Shared/Second.one");
     let background = notebook.background(false, false, || {}).unwrap();
     background.set_offline(true);
@@ -1079,7 +1079,7 @@ fn a_closed_sections_queued_edits_publish_in_the_background_when_online() {
 #[test]
 fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
     let directory = tempfile::tempdir().unwrap();
-    let notebook = two_sections(directory.path());
+    let mut notebook = two_sections(directory.path());
     // Second has a replica from being opened once; First has never been opened.
     notebook
         .section("Second.one", || {})
@@ -1137,7 +1137,7 @@ fn a_remote_change_to_a_closed_section_is_noticed_and_rebases_its_replica() {
 #[test]
 fn a_reported_change_wakes_its_section_without_polling() {
     let directory = tempfile::tempdir().unwrap();
-    let notebook = two_sections(directory.path());
+    let mut notebook = two_sections(directory.path());
     let background = notebook.background(true, false, || {}).unwrap();
     background.watch(notebook.replicas());
     until("both sections were reached", || {
@@ -1171,7 +1171,7 @@ fn a_reported_change_wakes_its_section_without_polling() {
 #[test]
 fn every_section_gets_an_offline_copy_that_closing_the_notebook_discards() {
     let directory = tempfile::tempdir().unwrap();
-    let notebook = two_sections(directory.path());
+    let mut notebook = two_sections(directory.path());
     let replicas: Vec<_> = notebook
         .replicas()
         .into_iter()
@@ -1232,7 +1232,7 @@ impl notebook::Remote for Counted {
 #[test]
 fn an_open_section_the_background_holds_checks_its_file_when_the_watch_reports_it() {
     let directory = tempfile::tempdir().unwrap();
-    let notebook = two_sections(directory.path());
+    let mut notebook = two_sections(directory.path());
     let background = notebook.background(true, false, || {}).unwrap();
     background.watch(notebook.replicas());
     until("both sections were reached", || {
@@ -1296,4 +1296,75 @@ fn an_open_section_the_background_holds_checks_its_file_when_the_watch_reports_i
         after.title = stored.title.clone();
         stored == after
     });
+}
+
+/// A section file whose whole reads are counted.
+struct Reads(std::path::PathBuf, Arc<AtomicUsize>);
+
+impl notebook::Remote for Reads {
+    fn read(&mut self) -> std::io::Result<Vec<u8>> {
+        self.1.fetch_add(1, Ordering::SeqCst);
+        onestore::read_file(&self.0)
+    }
+
+    fn stamp(&mut self) -> std::io::Result<onestore::Stamp> {
+        onestore::Stamp::of(&onestore::read_file(&self.0)?).map_err(std::io::Error::other)
+    }
+
+    fn publish(
+        &mut self,
+        transaction: &onestore::Transaction,
+    ) -> Result<(), onestore::CommitError> {
+        transaction.commit_file(&self.0)
+    }
+
+    fn confirm(&mut self, base: &onestore::Stamp) -> Result<(), onestore::CommitError> {
+        onestore::confirm_file(&self.0, base)
+    }
+}
+
+#[test]
+fn the_background_takes_each_file_discovery_read_rather_than_reading_it_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut notebook = two_sections(directory.path());
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&reads);
+    let remote = move |file: &Path| Reads(file.to_owned(), Arc::clone(&counter));
+    let synced = |background: &notebook::session::Background| {
+        let status = background.status();
+        status.len() == 2 && status.iter().all(|(_, status)| status.synced.is_some())
+    };
+    // A cold launch makes each offline copy from the file as discovery read it.
+    let background = notebook
+        .background_with(true, true, remote.clone(), || {})
+        .unwrap();
+    background.watch(notebook.replicas());
+    until("both sections have offline copies", || synced(&background));
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    drop(background);
+    let replica = notebook.replica_path("First.one").unwrap();
+    drop(notebook);
+
+    // Another client changes a section while the notebook is closed.
+    let root = directory.path().join("Shared");
+    let file = root.join("First.one");
+    let bytes = onestore::read_file(&file).unwrap();
+    let space = notebook::session::stored_pages(&bytes).unwrap()[0].space;
+    let native = edited(&model_ops::page_of(&bytes, space), "Native ");
+    ops::save(&bytes, space, &native)
+        .unwrap()
+        .commit_file(&file)
+        .unwrap();
+    let mut notebook = Notebook::open(&root, directory.path().join("cache")).unwrap();
+    let background = notebook.background_with(true, true, remote, || {}).unwrap();
+    background.watch(notebook.replicas());
+    until("both sections were checked", || synced(&background));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "the rebase takes the image discovery read"
+    );
+    drop(background);
+    let rebased = notebook::Replica::open(&replica).unwrap();
+    assert_eq!(rebased.page(space).unwrap(), stored_page(&file, space));
 }

@@ -1,7 +1,9 @@
-//! Audio through GStreamer, loaded at run time so builds need neither its headers nor its
-//! library: `playbin` plays whatever the installed plugins decode (Windows Media with
-//! gst-libav), and the default source records as PCM WAV.
+//! Audio and video through GStreamer, loaded at run time so builds need neither its headers
+//! nor its library: `playbin` plays whatever the installed plugins decode (Windows Media
+//! with gst-libav), the default microphone records as PCM WAV, and the default camera with
+//! it as the Motion JPEG AVI file OneNote plays. Recording needs the Base and Good plug-ins.
 
+use crate::video;
 use std::{
     cell::Cell,
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -41,6 +43,7 @@ struct Gst {
     pop: unsafe extern "C" fn(*mut c_void, u64, c_int) -> *mut c_void,
     unref_message: unsafe extern "C" fn(*mut c_void),
     unref: unsafe extern "C" fn(*mut c_void),
+    find_factory: unsafe extern "C" fn(*const c_char) -> *mut c_void,
 }
 
 // SAFETY: GStreamer's entry points are thread-safe once initialized.
@@ -75,6 +78,7 @@ fn gst() -> Option<&'static Gst> {
             pop: symbol(library, c"gst_bus_timed_pop_filtered")?,
             unref_message: symbol(library, c"gst_mini_object_unref")?,
             unref: symbol(library, c"gst_object_unref")?,
+            find_factory: symbol(library, c"gst_element_factory_find")?,
         })
     })
     .as_ref()
@@ -177,10 +181,16 @@ pub struct Player {
 }
 
 impl Player {
-    /// The file at `path`, ready to play; none when GStreamer is missing or cannot decode it.
-    pub fn open(path: &Path) -> Option<Self> {
+    /// The file at `path`, ready to play, silent unless `audible`; none when GStreamer is
+    /// missing or cannot decode it.
+    pub fn open(path: &Path, audible: bool) -> Option<Self> {
+        let silent = if audible {
+            ""
+        } else {
+            " audio-sink=\"fakesink sync=true\""
+        };
         let pipeline = Pipeline::launch(&format!(
-            "playbin uri=\"{}\" video-sink=fakesink",
+            "playbin uri=\"{}\" video-sink=fakesink{silent}",
             uri(path)
         ))?;
         // Prerolling reports a file no plugin decodes as an error.
@@ -235,36 +245,245 @@ impl Player {
     }
 }
 
-/// The default microphone recording to a file.
-pub struct Microphone(Pipeline);
+/// The default microphone, or camera and microphone, recording to a file.
+pub struct Recorder(Pipeline);
 
-impl Microphone {
+/// The elements recording takes, all in GStreamer's Base and Good plug-ins.
+const AUDIO: &[&CStr] = &[
+    c"autoaudiosrc",
+    c"audioconvert",
+    c"audioresample",
+    c"wavenc",
+    c"filesink",
+];
+const VIDEO: &[&CStr] = &[
+    c"autovideosrc",
+    c"videoconvert",
+    c"videoscale",
+    c"videorate",
+    c"jpegenc",
+    c"avimux",
+    c"queue",
+];
+
+/// Whether the plug-ins giving `elements` are installed.
+fn installed(elements: &[&CStr]) -> bool {
+    gst().is_some_and(|gst| {
+        elements.iter().all(|name| unsafe {
+            let factory = (gst.find_factory)(name.as_ptr());
+            if !factory.is_null() {
+                (gst.unref)(factory);
+            }
+            !factory.is_null()
+        })
+    })
+}
+
+/// `location` quoted for a pipeline description; none where a quote would end it early.
+fn quoted(location: &Path) -> Option<&str> {
+    location.to_str().filter(|location| !location.contains('"'))
+}
+
+/// The sound a recording takes from `source`: mono 16-bit PCM at `rate`.
+fn sound(source: &str, rate: u32) -> String {
+    format!(
+        "{source} ! audioconvert ! audioresample ! \
+         audio/x-raw,format=S16LE,rate={rate},channels=1"
+    )
+}
+
+/// A Motion JPEG AVI file at `location` of `camera` and `microphone`: OneNote's 15 pictures a
+/// second at 320 by 240, and the sound at `rate`.
+fn movie(camera: &str, microphone: &str, rate: u32, location: &str) -> String {
+    let [width, height] = video::SIZE;
+    format!(
+        "avimux name=mux ! filesink location=\"{location}\" \
+         {camera} ! videoconvert ! videorate ! videoscale add-borders=true ! \
+         video/x-raw,width={width},height={height},pixel-aspect-ratio=1/1,framerate={fps}/1 ! \
+         jpegenc quality=70 ! queue ! mux. \
+         {sound} ! queue ! mux.",
+        fps = video::FPS,
+        sound = sound(microphone, rate),
+    )
+}
+
+impl Recorder {
     /// Records mono 16-bit PCM at `rate` into a WAV file at `path`.
-    pub fn start(path: &Path, rate: u32) -> Result<Self, String> {
-        let location = path
-            .to_str()
-            .filter(|location| !location.contains('"'))
-            .ok_or("Try recording again.")?;
-        let pipeline = Pipeline::launch(&format!(
-            "autoaudiosrc ! audioconvert ! audioresample ! \
-             audio/x-raw,format=S16LE,rate={rate},channels=1 ! wavenc ! \
-             filesink location=\"{location}\""
+    pub fn audio(path: &Path, rate: u32) -> Result<Self, String> {
+        if !installed(AUDIO) {
+            return Err(
+                "Install GStreamer with its Base and Good plug-ins to record audio.".into(),
+            );
+        }
+        let location = quoted(path).ok_or("Try recording again.")?;
+        Self::start(&format!(
+            "{} ! wavenc ! filesink location=\"{location}\"",
+            sound("autoaudiosrc", rate)
         ))
-        .ok_or("Install GStreamer and its base plugins to record audio.")?;
+    }
+
+    /// Records the default camera and microphone as a Motion JPEG AVI file at `path`.
+    pub fn video(path: &Path) -> Result<Self, String> {
+        if !installed(&[AUDIO, VIDEO].concat()) {
+            return Err(
+                "Install GStreamer with its Base and Good plug-ins to record video.".into(),
+            );
+        }
+        let location = quoted(path).ok_or("Try recording again.")?;
+        Self::start(&movie(
+            "autovideosrc",
+            "autoaudiosrc",
+            crate::recording::RATE,
+            location,
+        ))
+    }
+
+    fn start(description: &str) -> Result<Self, String> {
+        let pipeline = Pipeline::launch(description).ok_or("Try recording again.")?;
         if !pipeline.set(PLAYING) {
-            return Err("Connect a microphone and try again.".into());
+            return Err("Connect a microphone and camera and try again.".into());
         }
         Ok(Self(pipeline))
     }
 
-    /// Ends the recording, its file complete: the end travels down the pipeline so the WAV
-    /// header is written.
+    /// Pauses or resumes recording; a live source's timestamps leave the pause out.
+    pub fn pause(&mut self, paused: bool) {
+        self.0.set(if paused { PAUSED } else { PLAYING });
+    }
+
+    /// Ends the recording, its file complete: the end travels down the pipeline so the
+    /// file's header and index are written.
     pub fn stop(self) -> Result<(), String> {
         let pipeline = &self.0;
+        pipeline.set(PLAYING);
         unsafe { (pipeline.gst.send_event)(pipeline.element, (pipeline.gst.new_eos)()) };
         match pipeline.wait(PATIENCE, EOS | ERROR) {
             Some(EOS) => Ok(()),
             _ => Err("The recording stopped early. Try recording again.".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch folder for one test, removed when dropped.
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("snowbound-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Runs `description` for `seconds`, pausing a second in the middle when `pause`, then
+    /// stops it as Stop does.
+    fn record(description: &str, seconds: u64, pause: bool) {
+        let mut recorder = Recorder::start(description).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(seconds * 500));
+        if pause {
+            recorder.pause(true);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            recorder.pause(false);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(seconds * 500));
+        recorder.stop().unwrap();
+    }
+
+    /// The live test sources stand in for a microphone and camera.
+    #[test]
+    fn gstreamer_records_audio_that_compresses_and_plays_back_silently() {
+        assert!(
+            installed(AUDIO),
+            "GStreamer's Base and Good plug-ins are installed"
+        );
+        let scratch = Scratch::new("audio");
+        let path = scratch.0.join("recorded.wav");
+        let location = quoted(&path).unwrap();
+        record(
+            &format!(
+                "{} ! wavenc ! filesink location=\"{location}\"",
+                sound(
+                    "audiotestsrc is-live=true wave=sine",
+                    crate::recording::RATE
+                )
+            ),
+            2,
+            true,
+        );
+        let (bytes, duration) = crate::recording::compress(&std::fs::read(&path).unwrap()).unwrap();
+        // Two seconds recorded; the paused one is left out.
+        assert!(duration.abs_diff(2000) < 300, "{duration}");
+        // Snowbound's IMA ADPCM, decoded as playback decodes it, plays at its length.
+        let wave = crate::recording::decompress(&bytes).unwrap();
+        let played = scratch.0.join("played.wav");
+        std::fs::write(&played, wave).unwrap();
+        let mut player = Player::open(&played, false).unwrap();
+        assert!(
+            player.duration_ms().abs_diff(duration) < 50,
+            "{}",
+            player.duration_ms()
+        );
+        player.seek(500);
+        player.play();
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let at = player.position_ms();
+        assert!((800..1500).contains(&at), "{at}");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!player.playing());
+    }
+
+    #[test]
+    fn gstreamer_records_the_motion_jpeg_avi_onenote_plays() {
+        assert!(installed(&[AUDIO, VIDEO].concat()));
+        let scratch = Scratch::new("video");
+        let path = scratch.0.join("recorded.avi");
+        record(
+            &movie(
+                "videotestsrc is-live=true pattern=smpte",
+                "audiotestsrc is-live=true wave=sine",
+                crate::recording::RATE,
+                quoted(&path).unwrap(),
+            ),
+            2,
+            false,
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let movie = video::Movie::parse(&bytes).unwrap();
+        assert_eq!(movie.frame_us, 1_000_000 / video::FPS);
+        assert!(
+            movie.duration_ms().abs_diff(2000) < 300,
+            "{}",
+            movie.duration_ms()
+        );
+        let picture =
+            draw::RasterImage::decode(&bytes[movie.frame(1000).unwrap()], [1000, 1000]).unwrap();
+        assert_eq!(picture.size(), video::SIZE);
+        let wave = movie.wave(&bytes).unwrap();
+        let played = scratch.0.join("sound.wav");
+        std::fs::write(&played, wave).unwrap();
+        let player = Player::open(&played, false).unwrap();
+        assert!(
+            player.duration_ms().abs_diff(2000) < 300,
+            "{}",
+            player.duration_ms()
+        );
+        if let Some(directory) = std::env::var_os("SNOWBOUND_GSTREAMER_EXPORT") {
+            std::fs::write(
+                std::path::Path::new(&directory).join("gstreamer.avi"),
+                &bytes,
+            )
+            .unwrap();
         }
     }
 }

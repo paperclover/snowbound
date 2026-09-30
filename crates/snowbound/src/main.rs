@@ -35,6 +35,7 @@ mod surface;
 mod sync;
 mod tags;
 mod templates;
+mod video;
 mod watch;
 
 use canvas::gpu::page::PageScene;
@@ -557,6 +558,8 @@ struct State {
     /// What the template strip shows over a blank page.
     templates: templates::View,
     media: recording::Media,
+    /// Whether playback highlights the notes linked to the moment playing.
+    see_playback: bool,
     thumbnails: templates::Thumbnails,
     search: search::Search,
     /// Whether the page list is shown beside the page.
@@ -843,6 +846,7 @@ impl State {
             drag: None,
             templates: templates::View::Strip,
             media: Default::default(),
+            see_playback: true,
             thumbnails: templates::Thumbnails::default(),
             search,
             pages_open: true,
@@ -4642,7 +4646,6 @@ impl ApplicationHandler<UserEvent> for App {
         let next = [
             blink,
             wake.filter(|wake| *wake > now),
-            state.media_wake(now),
         ]
         .into_iter()
         .flatten()

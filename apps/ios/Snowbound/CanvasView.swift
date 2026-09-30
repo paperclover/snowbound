@@ -63,7 +63,8 @@ private final class CanvasUndoManager: UndoManager {
 /// behind `UITextInput` so the system keyboard, marked text, autocorrection, dictation, text
 /// interaction, loupe and edit menu work on it.
 final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextInteractionDelegate,
-    UITextSelectionDisplayInteractionDelegate, UIGestureRecognizerDelegate
+    UITextSelectionDisplayInteractionDelegate, UIGestureRecognizerDelegate, UIEditMenuInteractionDelegate,
+    UIPencilInteractionDelegate, UIScribbleInteractionDelegate
 {
     /// The zoom a page opens at once the reader has pinched one.
     private static let zoomKey = "zoom"
@@ -100,13 +101,28 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// The selection end a handle drag keeps, and the loupe following the other.
     private var handleAnchor = 0
     private var loupe: UITextLoupeSession?
-    private lazy var editMenu = UIEditMenuInteraction(delegate: nil)
+    private lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private let interaction = UITextInteraction(for: .editable)
     /// Draws the caret, selection highlight and handles, which the text interaction's
     /// gestures move; the canvas paints neither.
     private lazy var display = UITextSelectionDisplayInteraction(textInput: self, delegate: self)
     private let history = CanvasUndoManager()
     private let spaceHint = Hint()
+    /// The Pencil's strokes, and a finger's while `fingerInks`.
+    private lazy var ink = InkGesture(target: self, action: #selector(inked))
+    /// The tool the canvas has, which touches switch between.
+    private var appliedTool = InkTool.select
+    /// The tool the Pencil draws with; the Pencil's double tap swaps it with the one before.
+    private(set) var inkTool = InkTool.pen(0)
+    private var previousInkTool = InkTool.eraser
+    /// A tool is picked for a finger too, from picking it until Select & Type or closing the
+    /// picker.
+    private var fingerDraws = false
+    /// The section's tab colour as a COLORREF, which its pen gallery and shapes follow.
+    private var sectionColor: UInt32 {
+        section.tab.color.enumerated().reduce(0) { $0 | UInt32($1.element) << (8 * UInt32($1.offset)) }
+    }
+    private lazy var picker = InkPicker(pens: Pen.gallery(sectionColor))
 
     weak var inputDelegate: UITextInputDelegate?
     lazy var tokenizer: UITextInputTokenizer = LineTokenizer(canvas: self)
@@ -146,10 +162,22 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         layer.isOpaque = true
         // Frames reach the screen with the transaction that moves UIKit's caret and handles.
         layer.presentsWithTransaction = true
-        for recognizer in [tap, doubleTap, grip, handleDrag] {
+        for recognizer in [tap, doubleTap, grip, handleDrag, ink] {
             recognizer.delegate = self
             addGestureRecognizer(recognizer)
         }
+        // The Pencil draws; fingers, a trackpad and a mouse scroll and select.
+        let hands = [UITouch.TouchType.direct, .indirectPointer].map { NSNumber(value: $0.rawValue) }
+        let recognizers: [UIGestureRecognizer?] = [tap, doubleTap, grip, handleDrag, panGestureRecognizer, pinchGestureRecognizer]
+        for recognizer in recognizers {
+            recognizer?.allowedTouchTypes = hands
+        }
+        let pencil = UIPencilInteraction()
+        pencil.delegate = self
+        addInteraction(pencil)
+        addInteraction(UIScribbleInteraction(delegate: self))
+        picker.onPick = { [weak self] tool in self?.pick(tool) }
+        picker.onClose = { [weak self] in self?.showPicker(false) }
         tap.require(toFail: doubleTap)
         panGestureRecognizer.require(toFail: grip)
         panGestureRecognizer.require(toFail: handleDrag)
@@ -365,8 +393,9 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     }
 
     func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if recognizer === ink { return !readOnly && (touch.type == .pencil || fingerInks && touch.type == .direct) }
         if recognizer === grip || recognizer === handleDrag { touchStart = touch.location(in: self) }
-        return true
+        return !fingerInks || ![tap, doubleTap, grip, handleDrag].contains(recognizer)
     }
 
     override func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
@@ -384,7 +413,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// The system's text interaction works in the outline taking input; a touch on another
     /// outline's text focuses it first, as a tap there would.
     func interactionShouldBegin(_ interaction: UITextInteraction, at point: CGPoint) -> Bool {
-        if readOnly { return false }
+        if readOnly || fingerInks || ink.state != .possible { return false }
         if onHandle(point) { return true }
         switch target(point) {
         case .activeText: break
@@ -408,12 +437,14 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     }
 
     /// A tap at `point` in the scroll view's bounds: places the caret, focuses an outline or
-    /// starts a new one.
+    /// starts a new one, or picks a drawing.
     func tap(at point: CGPoint) {
         press(at: point)
         var seconds: Int64 = 0
         if let handle, let field = DateField(rawValue: sb_view_date_request(handle, &seconds)) {
             onDate?(field, Date(timeIntervalSince1970: TimeInterval(seconds)))
+        } else if inkFrame != nil {
+            showInkMenu()
         } else if !isFirstResponder {
             _ = becomeFirstResponder()
         }
@@ -428,6 +459,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
 
     private func press(at point: CGPoint) {
         guard let handle else { return }
+        fingerTool(at: point)
         let point = visible(point)
         edit(external: true) {
             let pressed = sb_view_press(handle, Float(point.x), Float(point.y))
@@ -477,6 +509,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         let point = visible(recognizer.location(in: self))
         switch recognizer.state {
         case .began:
+            fingerTool(at: touchStart)
             let start = visible(touchStart)
             _ = sb_view_press(handle, Float(start.x), Float(start.y))
             _ = sb_view_drag(handle, Float(point.x), Float(point.y))
@@ -492,6 +525,163 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             edit(external: true) { sb_view_release(handle) }
             spaceHint.hide()
         }
+    }
+
+    // MARK: Drawing tools
+
+    /// Gives the canvas `tool` for the touch starting, where it has another: switching lets
+    /// picked drawings go.
+    private func use(_ tool: InkTool) {
+        guard let handle, tool != appliedTool else { return }
+        appliedTool = tool
+        sb_view_set_tool(handle, tool.code.tool, tool.code.detail, sectionColor)
+        dirty = true
+    }
+
+    /// A finger draws with the picked tool, unless the system keeps drawing to the Pencil.
+    private var fingerInks: Bool { fingerDraws && !UIPencilInteraction.prefersPencilOnlyDrawing }
+
+    /// A finger scrolls, selects and types, and drags what the lasso picked with the lasso.
+    private func fingerTool(at point: CGPoint) {
+        if inkFrame?.contains(point) != true { use(.select) }
+    }
+
+    /// The frame of the drawings the lasso or a tap picked, in the scroll view's bounds.
+    private var inkFrame: CGRect? {
+        guard let handle else { return nil }
+        var rect: [Float] = [0, 0, 0, 0]
+        return sb_view_ink_selection(handle, &rect) ? bounded(rect) : nil
+    }
+
+    /// The Pencil's tool, and a finger's while `fingerInks`.
+    func setInkTool(_ tool: InkTool) {
+        guard tool != .select else { return }
+        if tool != inkTool { previousInkTool = inkTool }
+        inkTool = tool
+        picker.show(inkTool, fingerDraws: fingerInks)
+    }
+
+    /// A tool picked in the picker, which a finger draws with too, or Select & Type as nil.
+    private func pick(_ tool: InkTool?) {
+        if let tool { setInkTool(tool) }
+        setFingerDraws(tool != nil)
+    }
+
+    private func setFingerDraws(_ draws: Bool) {
+        fingerDraws = draws
+        // Two fingers scroll while one draws.
+        panGestureRecognizer.minimumNumberOfTouches = fingerInks ? 2 : 1
+        if fingerInks { _ = resignFirstResponder() }
+        picker.show(inkTool, fingerDraws: fingerInks)
+        onChange?()
+    }
+
+    var pickerShown: Bool { picker.superview != nil }
+
+    /// Shows the drawing tools over the bottom of the page, or puts them away. Showing them from
+    /// the bar picks the Pencil's tool for a finger too; closing them returns it to Select & Type.
+    func showPicker(_ shown: Bool, fingerDraws draws: Bool = true) {
+        guard shown != pickerShown, let host = superview else { return }
+        if shown {
+            picker.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(picker)
+            NSLayoutConstraint.activate([
+                picker.centerXAnchor.constraint(equalTo: host.centerXAnchor),
+                picker.widthAnchor.constraint(lessThanOrEqualTo: host.safeAreaLayoutGuide.widthAnchor, constant: -16),
+                picker.bottomAnchor.constraint(equalTo: host.keyboardLayoutGuide.topAnchor, constant: -12),
+            ])
+            setFingerDraws(draws)
+        } else {
+            picker.removeFromSuperview()
+            setFingerDraws(false)
+        }
+    }
+
+    /// The Pencil's double tap, as the reader set it in Settings.
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        switch UIPencilInteraction.preferredTapAction {
+        case .switchEraser: setInkTool(inkTool == .eraser ? previousInkTool : .eraser)
+        case .switchPrevious: setInkTool(previousInkTool)
+        case .showColorPalette, .showInkAttributes: showPicker(!pickerShown, fingerDraws: fingerDraws)
+        default: break
+        }
+    }
+
+    /// Writing with the Pencil draws ink on the page rather than typing.
+    func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool { false }
+
+    @objc private func inked(_ gesture: InkGesture) {
+        let points = gesture.points
+        gesture.points = []
+        switch gesture.state {
+        case .began:
+            inkPressed(points[0])
+            inkMoved(points.dropFirst())
+        case .changed: inkMoved(points[...])
+        case .ended:
+            inkMoved(points[...])
+            inkReleased()
+        default:
+            // A second finger scrolls instead: the gesture under way goes, storing nothing.
+            guard let handle else { return }
+            edit { sb_view_cancel(handle) }
+        }
+    }
+
+    /// The Pencil, or a drawing finger, comes down at `point` in the scroll view's bounds.
+    func inkPressed(_ point: CGPoint) {
+        guard let handle else { return }
+        // Drawing puts the keyboard away, as Notes does.
+        if isFirstResponder { _ = resignFirstResponder() }
+        use(inkTool)
+        editMenu.dismissMenu()
+        let point = visible(point)
+        edit { sb_view_press(handle, Float(point.x), Float(point.y)) }
+    }
+
+    func inkMoved(_ points: ArraySlice<CGPoint>) {
+        guard let handle else { return }
+        for point in points.map(visible) { _ = sb_view_drag(handle, Float(point.x), Float(point.y)) }
+        dirty = true
+    }
+
+    /// The stroke, erasure, lasso or drag ends: one edit, and the menu for what the lasso picked.
+    func inkReleased() {
+        guard let handle else { return }
+        edit { sb_view_release(handle) }
+        showInkMenu()
+    }
+
+    private static let inkMenu = "ink" as NSString
+
+    private func showInkMenu() {
+        guard let frame = inkFrame else { return }
+        editMenu.presentEditMenu(
+            with: UIEditMenuConfiguration(identifier: Self.inkMenu, sourcePoint: CGPoint(x: frame.midX, y: frame.minY)))
+    }
+
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction, menuFor configuration: UIEditMenuConfiguration,
+        suggestedActions: [UIMenuElement]
+    ) -> UIMenu? {
+        guard configuration.identifier as? NSString == Self.inkMenu else { return UIMenu(children: suggestedActions) }
+        return UIMenu(children: [
+            UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                self?.deleteInk()
+            }
+        ])
+    }
+
+    func editMenuInteraction(
+        _ interaction: UIEditMenuInteraction, targetRectFor configuration: UIEditMenuConfiguration
+    ) -> CGRect {
+        configuration.identifier as? NSString == Self.inkMenu ? inkFrame ?? .null : .null
+    }
+
+    /// Deletes the drawings the lasso or a tap picked.
+    func deleteInk() {
+        guard let handle, inkFrame != nil else { return }
+        edit(external: true) { sb_delete_backward(handle) }
     }
 
     /// Runs a change to the page, telling the system when it did not ask for it.

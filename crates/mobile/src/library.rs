@@ -272,7 +272,7 @@ impl Library {
         let (notebook, place, background) = if path.is_file() {
             (None, Place::File(path.to_owned()), None)
         } else {
-            let notebook = Notebook::open(path, cache)?;
+            let mut notebook = Notebook::open(path, cache)?;
             let background = notebook.background_with(
                 local,
                 !local,
@@ -337,6 +337,7 @@ impl Library {
                     path: path.clone(),
                     replica: Some(smb.join(format!("{identity}.sqlite"))),
                     found: None,
+                    image: None,
                 })
                 .collect(),
         );

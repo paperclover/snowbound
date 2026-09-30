@@ -10,7 +10,10 @@ extension CanvasView {
     /// `tap` and `doubletap` take points from the view's corner, `select` text offsets,
     /// `scroll` a content offset; `format:N` applies `sb_view_apply` formatting, `find:word`
     /// selects a match, `title` edits the title, `picture` inserts a drawn picture, `selectall`
-    /// is the Select All command; `rotate:landscape` or `rotate:portrait` turns the device; `done`
+    /// is the Select All command; `pencil:x,y;x,y;…` draws through points as the Pencil does,
+    /// `tool:pen:N`, `tool:shape:N`, `tool:eraser` or `tool:lasso` gives it a tool, `picker` shows or hides the
+    /// drawing tools, `pencildoubletap` is the Pencil's double tap, and `deleteink` deletes
+    /// what the lasso picked; `rotate:landscape` or `rotate:portrait` turns the device; `done`
     /// ends editing, `tree` saves the view hierarchy to
     /// Documents/tree.txt, and `shot:a` the window to Documents/a.png, as a device has no
     /// screenshot command.
@@ -34,6 +37,26 @@ extension CanvasView {
         case "tap":
             let values = argument.split(separator: ",").compactMap { Double($0) }
             tap(at: CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y))
+        case "pencil":
+            let points = argument.split(separator: ";").map {
+                let values = $0.split(separator: ",").compactMap { Double($0) }
+                return CGPoint(x: values[0] + contentOffset.x, y: values[1] + contentOffset.y)
+            }
+            inkPressed(points[0])
+            inkMoved(points.dropFirst())
+            inkReleased()
+        case "tool":
+            let parts = argument.split(separator: ":")
+            switch parts.first {
+            case "pen": setInkTool(.pen(UInt8(parts.last ?? "") ?? 0))
+            case "eraser": setInkTool(.eraser)
+            case "lasso": setInkTool(.lasso)
+            case "shape": setInkTool(.shape(UInt8(parts.last ?? "") ?? 0))
+            default: break
+            }
+        case "picker": showPicker(!pickerShown)
+        case "pencildoubletap": pencilInteractionDidTap(UIPencilInteraction())
+        case "deleteink": deleteInk()
         case "type": insertText(argument)
         case "return": insertText("\n")
         case "delete": deleteBackward()

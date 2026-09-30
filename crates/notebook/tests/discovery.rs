@@ -436,3 +436,138 @@ fn a_cached_discovery_reads_only_the_files_listed_otherwise() {
     assert!(kept.discover(&mut source, limits()).is_err());
     assert!(kept.found("two.one").is_some());
 }
+
+/// A share in memory, as a Mac's SMB client leaves it, that notes each file read. Finder
+/// writes another AppleDouble file into the root while discovery is under way.
+struct Share {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    read: Vec<String>,
+    listings: usize,
+}
+
+impl Source for Share {
+    fn entries(&mut self, path: &str, _: usize) -> io::Result<Vec<Entry>> {
+        if path.is_empty() {
+            self.listings += 1;
+            if self.listings > 1 {
+                self.files
+                    .insert("._Later.one".into(), b"\0\x05\x16\x07".to_vec());
+            }
+        }
+        let prefix = if path.is_empty() {
+            String::new()
+        } else {
+            format!("{path}/")
+        };
+        let mut entries: Vec<Entry> = Vec::new();
+        for (file, bytes) in &self.files {
+            let Some(rest) = file.strip_prefix(&prefix) else {
+                continue;
+            };
+            let (name, kind) = match rest.split_once('/') {
+                Some((folder, _)) => (folder, notebook::discover::EntryKind::Directory),
+                None => (rest, notebook::discover::EntryKind::File),
+            };
+            if entries.last().is_some_and(|last| last.name == name) {
+                continue;
+            }
+            entries.push(Entry {
+                name: name.into(),
+                kind,
+                listed: notebook::discover::Listed {
+                    size: bytes.len() as u64,
+                    modified: 1,
+                },
+            });
+        }
+        Ok(entries)
+    }
+
+    fn read(&mut self, path: &str, _: usize) -> io::Result<Vec<u8>> {
+        self.read.push(path.to_owned());
+        self.files
+            .get(path)
+            .cloned()
+            .ok_or_else(|| io::ErrorKind::NotFound.into())
+    }
+}
+
+#[test]
+fn metadata_other_systems_leave_on_a_share_is_not_the_notebook() {
+    let section = onestore::create_section("Section 003.one", "Kept", "Fixture").unwrap();
+    let identity = onestore::Store::parse(&section).unwrap().header.file_id;
+    let toc = onestore::create_table_of_contents(
+        "Open Notebook.onetoc2",
+        &[("Section 003.one", identity)],
+    )
+    .unwrap();
+    let inner = onestore::create_section("Inner.one", "Inner", "Fixture").unwrap();
+    // AppleDouble companions and `.DS_Store` begin with their own magic, not a OneNote header.
+    let apple_double = [&b"\0\x05\x16\x07\0\x02\0\0Mac OS X        "[..], &[0; 4064]].concat();
+    let junk = [
+        ("._Section 003.one", apple_double.clone()),
+        ("._Open Notebook.onetoc2", apple_double.clone()),
+        (".DS_Store", b"\0\0\0\x01Bud1".to_vec()),
+        ("Thumbs.db", vec![0xd0, 0xcf, 0x11, 0xe0]),
+        ("desktop.ini", b"[.ShellClassInfo]".to_vec()),
+        ("~$Section 003.one", vec![7; 162]),
+        (".snowbound/tags.one", b"{}".to_vec()),
+        (".snowbound/Open Notebook.onetoc2", b"{}".to_vec()),
+        ("Group/._Inner.one", apple_double),
+        ("Group/.DS_Store", b"\0\0\0\x01Bud1".to_vec()),
+    ];
+    let mut source = Share {
+        files: [
+            ("Section 003.one", section),
+            ("Open Notebook.onetoc2", toc),
+            ("Group/Inner.one", inner),
+        ]
+        .into_iter()
+        .chain(junk)
+        .map(|(path, bytes)| (path.to_owned(), bytes))
+        .collect(),
+        read: Vec::new(),
+        listings: 0,
+    };
+    let catalog = discover(&mut source, limits()).unwrap();
+    assert_eq!(
+        catalog
+            .sections
+            .iter()
+            .map(|section| &section.path[..])
+            .collect::<Vec<_>>(),
+        ["Section 003.one"]
+    );
+    assert!(catalog.toc.unwrap().unresolved.is_empty());
+    assert_eq!(catalog.groups.len(), 1);
+    assert_eq!(catalog.groups[0].sections[0].path, "Group/Inner.one");
+    assert_eq!(catalog.groups[0].sections.len(), 1);
+    source.read.sort();
+    assert_eq!(
+        source.read,
+        [
+            "Group/Inner.one",
+            "Open Notebook.onetoc2",
+            "Section 003.one"
+        ]
+    );
+}
+
+#[test]
+fn a_discovery_holds_each_section_it_read_once() {
+    let root = tempfile::tempdir().unwrap();
+    let section = fixture(root.path());
+    let mut cache = Cache::default();
+    cache
+        .discover(&mut Local::open(root.path()).unwrap(), limits())
+        .unwrap();
+    let images = cache.take();
+    assert_eq!(images.keys().collect::<Vec<_>>(), ["one.one"]);
+    assert_eq!(images["one.one"], section);
+    assert!(cache.take().is_empty(), "taken once");
+    // Nothing read, nothing held.
+    cache
+        .discover(&mut Local::open(root.path()).unwrap(), limits())
+        .unwrap();
+    assert!(cache.take().is_empty());
+}

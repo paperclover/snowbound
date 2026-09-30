@@ -16,7 +16,7 @@ typedef void (*sb_coordinator)(const char *path, bool write, void (*body)(void *
 void sb_set_coordinator(sb_coordinator coordinator);
 void sb_set_sync_wake(void (*wake)(void));
 char *sb_tags(void);
-char *sb_pens(void);
+char *sb_pens(uint32_t section);
 bool sb_tag_icon(uint16_t shape, bool checked, uint32_t pixels, uint8_t *rgba);
 
 const Library *sb_library_open(const char *path, const char *cache, bool local, char **error);
@@ -75,7 +75,8 @@ bool sb_view_find(View *view, const char *query);
 bool sb_view_select_paragraph(View *view, const char *id);
 char *sb_view_copy(View *view, bool cut);
 void sb_view_insert_space(View *view);
-void sb_view_set_tool(View *view, uint8_t tool, uint8_t pen);
+void sb_view_set_tool(View *view, uint8_t tool, uint8_t detail, uint32_t section);
+bool sb_view_cancel(View *view);
 bool sb_view_ink_selection(const View *view, float rect[4]);
 char *sb_view_paper(const View *view);
 bool sb_view_set_paper(View *view, int16_t red, uint8_t green, uint8_t blue, int8_t ruled);

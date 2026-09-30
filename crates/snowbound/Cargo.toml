@@ -14,6 +14,8 @@ canvas = { path = "../canvas", features = ["interaction"] }
 draw = { path = "../draw", default-features = false, features = ["render"] }
 ui = { path = "../ui" }
 png = "0.18"
+# Encodes a video recording's pictures as JPEG, which OneNote 2010 plays.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 onestore = { path = "../onestore" }
 notebook = { path = "../notebook", features = ["smb"] }
 serde = { version = "1", features = ["derive"] }

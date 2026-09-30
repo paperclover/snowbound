@@ -195,7 +195,11 @@ Snowbound does the same. Opening a notebook lists its folders and reads only the
 listed size or last write time changed since it last read them, keeping what it took from
 each, with the file's stamp, in the cache (`discover::Cache`). On a share, a changed section
 whose replica already holds it as it stands, as after its own edits published, costs just a
-stamp read. `session::Background` then keeps the sections in sync, one thread per notebook:
+stamp read. Each section it did read is handed on with its image, which makes the offline copy
+or rebases the replica while the file's stamp is still the image's, so a launch reads each file
+once, as OneNote does. Dot files (macOS's `.DS_Store` and AppleDouble `._` companions, the
+`.snowbound` folder) and Office's `~$` files are not the notebook's and are skipped.
+`session::Background` then keeps the sections in sync, one thread per notebook:
 
 ```text
 connect:  arm the watch, list every folder

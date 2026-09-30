@@ -15,16 +15,19 @@ pub use library::{Library, Section, Share};
 use canvas::{
     date::DateField,
     document::TextPosition,
-    editor::{FAVORITES, Formatting, NoteTag, Selection, TextOutline, Toggle},
+    editor::{Formatting, NoteTag, Selection, TextOutline, Toggle},
     gpu::{Paper, Viewport, page::PageScene},
-    interaction::{Hit, ObjectFocus, PageView, Request, Response, TextColors, ink::Tool},
+    interaction::{
+        Hit, ObjectFocus, PageView, Request, Response, TextColors,
+        ink::{Tool, pens},
+    },
     layout::TextEngine,
 };
 use draw::edit::{Key, NamedKey, SelectionUnit};
 use onestore::{
     ExGuid,
     op::{Edit, Op, PageOp},
-    page::{Image, Page},
+    page::{Image, Page, ink::ShapeKind},
 };
 use parley::{Affinity, BoundingBox};
 use std::{
@@ -94,6 +97,14 @@ const FORMATS: [Formatting; 11] = [
     Formatting::Clear,
     // OneNote's first highlighter colour, yellow.
     Formatting::Highlight(Some(0x0000_ffff)),
+];
+
+/// The shape tools, by number in `sb_view_set_tool`.
+const SHAPES: [ShapeKind; 4] = [
+    ShapeKind::Line,
+    ShapeKind::Arrow,
+    ShapeKind::Rectangle,
+    ShapeKind::Ellipse,
 ];
 
 /// The page and its text model, apart from the surface it is drawn on.
@@ -521,12 +532,17 @@ impl Canvas {
     }
 
     /// Picks what touches on the page do; see `sb_view_set_tool`.
-    fn set_tool(&mut self, tool: u8, pen: u8) -> Result<()> {
+    fn set_tool(&mut self, tool: u8, detail: u8, section: u32) -> Result<()> {
+        let pens = pens(canvas::gpu::colorref(section));
         let tool = match tool {
             0 => Tool::Select,
-            1 => Tool::Pen(*FAVORITES.get(usize::from(pen)).ok_or("No such pen")?),
+            1 => Tool::Pen(*pens.get(usize::from(detail)).ok_or("No such pen")?),
             2 => Tool::Eraser,
             3 => Tool::Lasso,
+            4 => Tool::Shape(
+                *SHAPES.get(usize::from(detail)).ok_or("No such shape")?,
+                pens[0].shape(),
+            ),
             _ => return Err("No such tool".into()),
         };
         let _ = self.page.set_tool(tool);
@@ -893,6 +909,10 @@ pub extern "C" fn sb_view_target(view: &View, x: f32, y: f32) -> u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_press(view: &mut View, x: f32, y: f32) -> bool {
     let result = view.canvas.press([x, y]);
+    // A drawing gesture is one edit, stored when it ends, or nothing when cancelled.
+    if view.canvas.page.inking() {
+        return report(result).unwrap_or(false);
+    }
     view.stored(result)
 }
 
@@ -991,14 +1011,23 @@ pub extern "C" fn sb_view_copy(view: &mut View, cut: bool) -> *mut c_char {
     copied.map_or(std::ptr::null_mut(), owned)
 }
 
-/// Picks what touches do, as OneNote's Draw tab does: 0 Select & Type, where a tap on a
-/// drawing picks it; 1 pen `pen` of `sb_pens`, a stroke per press, drag and release; 2 the
-/// stroke eraser; 3 the lasso. Picked drawings move with a drag and go with
-/// `sb_delete_backward`. Setting a tool, even the same one, drops a stroke under way and
-/// lets picked drawings go.
+/// Picks what touches do, as OneNote's Draw tab does, in a section of tab colour `section`
+/// (a COLORREF): 0 Select & Type, where a tap on a drawing picks it; 1 pen `detail` of
+/// `sb_pens`, a stroke per press, drag and release; 2 the stroke eraser; 3 the lasso; 4
+/// shape `detail` (line, arrow, rectangle, oval) dragged out on the grid with the section's
+/// shape pen. Picked drawings move with a drag and go with `sb_delete_backward`. Setting a
+/// tool, even the same one, drops a stroke under way and lets picked drawings go.
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_view_set_tool(view: &mut View, tool: u8, pen: u8) {
-    let _ = report(view.canvas.set_tool(tool, pen));
+pub extern "C" fn sb_view_set_tool(view: &mut View, tool: u8, detail: u8, section: u32) {
+    let _ = report(view.canvas.set_tool(tool, detail, section));
+}
+
+/// Ends a drawing gesture as though it never began, as a second finger landing does; an
+/// eraser's sweep gives back what it erased, storing nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_cancel(view: &mut View) -> bool {
+    let result = view.canvas.page.cancel_ink().map(moved);
+    view.stored(result)
 }
 
 /// The frame of the drawings the lasso or a tap picked, as `[x, y, width, height]` in the
@@ -1011,11 +1040,13 @@ pub extern "C" fn sb_view_ink_selection(view: &View, rect: &mut [f32; 4]) -> boo
         .is_some()
 }
 
-/// OneNote 2010's favourite pens as JSON, in its gallery's order: each `[color, width,
-/// highlighter]`, the colour sRGB or null for the paper's ink and the width in HIMETRIC.
+/// The pen gallery under a section of tab colour `section` (a COLORREF) as JSON, as the
+/// desktop's: a pen in the section's accent, then OneNote 2010's favourites, each `[color,
+/// width, highlighter]`, the colour sRGB or null for the paper's ink and the width in
+/// HIMETRIC.
 #[unsafe(no_mangle)]
-pub extern "C" fn sb_pens() -> *mut c_char {
-    library::json(Ok(FAVORITES
+pub extern "C" fn sb_pens(section: u32) -> *mut c_char {
+    library::json(Ok(pens(canvas::gpu::colorref(section))
         .iter()
         .map(|pen| (pen.color.map(srgb), pen.width, pen.highlighter))
         .collect::<Vec<_>>()))

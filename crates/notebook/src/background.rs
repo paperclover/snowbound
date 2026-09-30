@@ -52,6 +52,9 @@ pub struct Known {
     pub replica: Option<PathBuf>,
     /// How the notebook's discovery last found the file: its listing, and its stamp then.
     pub found: Option<(Listed, Stamp)>,
+    /// The file as that discovery read it, if it did, which the first check takes in place
+    /// of reading the file again while its stamp still matches.
+    pub image: Option<Vec<u8>>,
 }
 
 /// What the background thread and whatever reports changes to it share.
@@ -98,6 +101,8 @@ struct Watch {
     /// A watch reported the file changed since its folder's listing began.
     reported: bool,
     status: SyncStatus,
+    /// The file as discovery read it, until the next check takes it.
+    image: Option<Vec<u8>>,
     /// When the section is next checked.
     due: Instant,
     /// The worker of the session that holds the section.
@@ -166,7 +171,7 @@ impl Background {
                         }
                         watched.next(now, bound.is_some())
                     };
-                    let (path, replica, seen, current) = match next {
+                    let (path, replica, seen, current, image) = match next {
                         Next::Wait(wait) => {
                             signal.requested.store(false, Ordering::Release);
                             if std::mem::take(&mut news) {
@@ -230,7 +235,8 @@ impl Background {
                             replica,
                             seen,
                             current,
-                        } => (path, replica, seen, current),
+                            image,
+                        } => (path, replica, seen, current, image),
                     };
                     let Some((bind, _)) = &mut bound else {
                         continue;
@@ -240,6 +246,7 @@ impl Background {
                         replica.as_deref(),
                         seen.as_deref(),
                         current,
+                        image,
                         copies,
                     );
                     if outcome.as_ref().is_err_and(disconnected) {
@@ -513,6 +520,7 @@ enum Next {
         replica: Option<PathBuf>,
         seen: Option<Box<Stamp>>,
         current: bool,
+        image: Option<Vec<u8>>,
     },
 }
 
@@ -526,6 +534,7 @@ impl Watched {
                 |known| match previous.iter().position(|watch| watch.path == known.path) {
                     Some(index) => Watch {
                         replica: known.replica,
+                        image: known.image,
                         ..previous.swap_remove(index)
                     },
                     None => {
@@ -543,6 +552,7 @@ impl Watched {
                                 error: None,
                                 queued: 0,
                             },
+                            image: known.image,
                             due: now + STAGGER * (new - 1),
                             held: None,
                         }
@@ -652,6 +662,7 @@ impl Watched {
                     watch.current = unchanged;
                     let read = !unchanged
                         || copies
+                            && watch.image.is_none()
                             && watch
                                 .replica
                                 .as_ref()
@@ -707,6 +718,7 @@ impl Watched {
                 replica: watch.replica.clone(),
                 seen: watch.stamp.clone().map(Box::new),
                 current: watch.current,
+                image: watch.image.take(),
             };
         }
     }
@@ -790,12 +802,14 @@ fn summary(status: &SyncStatus) -> (bool, Option<io::ErrorKind>, u64) {
 /// One section's step: how many of its edits wait (`None` while unknown, as while a session
 /// holds its replica), then the file's stamp now and whether it changed since `seen`, which
 /// with `current` is the stamp now, unread. With `copies`, a section without a replica gets
-/// one from the file as it is now.
+/// one from the file as it is now. `image`, the file as discovery read it, stands in for
+/// reading it while the stamp is still its own.
 fn step<R: Remote>(
     remote: &mut R,
     replica: Option<&Path>,
     seen: Option<&Stamp>,
     current: bool,
+    image: Option<Vec<u8>>,
     copies: bool,
 ) -> (Option<u64>, Result<(Stamp, bool)>) {
     let stamp = match seen.filter(|_| current) {
@@ -804,6 +818,11 @@ fn step<R: Remote>(
             Ok(stamp) => stamp,
             Err(error) => return (None, Err(Error::RemoteIo(error))),
         },
+    };
+    let remote = &mut Discovered {
+        image: image.and_then(|image| Some((Stamp::of(&image).ok()?, image))),
+        stamp: stamp.clone(),
+        remote,
     };
     let moved = seen.is_some_and(|seen| *seen != stamp);
     let Some(replica) = replica else {
@@ -857,6 +876,39 @@ fn step<R: Remote>(
     (queued, synced)
 }
 
+/// A remote whose first read, while the file's stamp is still `image`'s, answers `image`.
+struct Discovered<'a, R> {
+    remote: &'a mut R,
+    image: Option<(Stamp, Vec<u8>)>,
+    /// The stamp last read.
+    stamp: Stamp,
+}
+
+impl<R: Remote> Remote for Discovered<'_, R> {
+    fn read(&mut self) -> io::Result<Vec<u8>> {
+        match self.image.take() {
+            Some((stamp, image)) if stamp == self.stamp => Ok(image),
+            _ => self.remote.read(),
+        }
+    }
+
+    fn stamp(&mut self) -> io::Result<Stamp> {
+        self.stamp = self.remote.stamp()?;
+        Ok(self.stamp.clone())
+    }
+
+    fn publish(
+        &mut self,
+        transaction: &onestore::Transaction,
+    ) -> std::result::Result<(), onestore::CommitError> {
+        self.remote.publish(transaction)
+    }
+
+    fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), onestore::CommitError> {
+        self.remote.confirm(base)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,6 +946,7 @@ mod tests {
                 path: path(n),
                 replica: None,
                 found: warm.then(|| (listed(n), stamp(n))),
+                image: None,
             })
             .collect()
     }
@@ -1115,6 +1168,7 @@ mod tests {
                     },
                     Stamp::of(&image).unwrap(),
                 )),
+                image: None,
             }
         }
     }
@@ -1184,6 +1238,7 @@ mod tests {
             path: paths[0].clone(),
             replica: None,
             found: None,
+            image: None,
         });
         background.watch(known);
         assert_eq!(quiet(&stamps, STAGGER * 4), vec![paths[0].clone()]);

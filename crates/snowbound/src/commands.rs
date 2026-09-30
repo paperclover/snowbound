@@ -1,8 +1,9 @@
 //! The commands the menu bar, the toolbar and the keyboard share: each one's title, its
 //! chords on each platform, when it applies and what it does.
 
+use crate::recording::{Media, Transport};
 use crate::{Command as Work, FONTS, HIGHLIGHTS, SIZES, State, page, platform, search};
-use canvas::editor::{Alignment, FAVORITES, FormatState, Formatting, ListStyle, Pen, Toggle};
+use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, Pen, Toggle};
 use canvas::interaction::{Request, ink::Tool};
 use draw::edit::{Key, Modifiers, NamedKey, Platform};
 use onestore::page::ink::ShapeKind;
@@ -55,6 +56,7 @@ pub enum Id {
     DateTime,
     RecordAudio,
     RecordVideo,
+    Transport(crate::recording::Transport),
     /// The Draw tab's tools.
     SelectType,
     Pen,
@@ -308,6 +310,50 @@ pub const COMMANDS: &[Command] = &[
     ),
     row!(Id::RecordAudio, "Record Audio", NONE, NONE),
     row!(Id::RecordVideo, "Record Video", NONE, NONE),
+    // OneNote 2010's playback chords, Control-Alt with P, S, Y and U.
+    row!(
+        Id::Transport(Transport::Pause),
+        "Pause",
+        &[cmd('p').option()],
+        &[cmd('p').option()]
+    ),
+    row!(
+        Id::Transport(Transport::Stop),
+        "Stop",
+        &[cmd('s').option()],
+        &[cmd('s').option()]
+    ),
+    row!(
+        Id::Transport(Transport::Skip(-600)),
+        "Rewind 10 Minutes",
+        NONE,
+        NONE
+    ),
+    row!(
+        Id::Transport(Transport::Skip(-10)),
+        "Rewind 10 Seconds",
+        &[cmd('y').option()],
+        &[cmd('y').option()]
+    ),
+    row!(
+        Id::Transport(Transport::Skip(10)),
+        "Fast Forward 10 Seconds",
+        &[cmd('u').option()],
+        &[cmd('u').option()]
+    ),
+    row!(
+        Id::Transport(Transport::Skip(600)),
+        "Fast Forward 10 Minutes",
+        NONE,
+        NONE
+    ),
+    row!(Id::Transport(Transport::SeekTo), "Seek To…", NONE, NONE),
+    row!(
+        Id::Transport(Transport::SeePlayback),
+        "See Playback",
+        NONE,
+        NONE
+    ),
     row!(Id::SelectType, "Select & Type", NONE, NONE),
     row!(Id::Pen, "Pen", NONE, NONE),
     row!(Id::Eraser, "Eraser", NONE, NONE),
@@ -614,18 +660,13 @@ pub fn shortcut(id: Id) -> String {
 }
 
 impl State {
-    /// The pen gallery: a pen in the open section's accent, then OneNote's favourites. The
-    /// accent takes the light theme's shade in either theme, so a stroke stores one colour
-    /// and shows it in both.
+    /// The open section's pen gallery.
     pub(crate) fn pens(&self) -> [Pen; 15] {
-        let section = crate::section_color(
+        canvas::interaction::ink::pens(crate::section_color(
             self.session
                 .as_ref()
                 .and_then(|session| session.tabs[session.tab].color),
-        );
-        let [red, green, blue] = draw::srgb_bytes(ui::Theme::light().section(section).accent);
-        let accent = Pen::new(35.0, Some(u32::from_le_bytes([red, green, blue, 0])));
-        std::array::from_fn(|place| place.checked_sub(1).map_or(accent, |at| FAVORITES[at]))
+        ))
     }
 
     pub(crate) fn format_state(&self) -> FormatState {
@@ -742,13 +783,17 @@ impl State {
             },
             Id::PageColor => enabled(writable && session.is_some()),
             Id::ScreenClipping => enabled(text && cfg!(target_os = "macos")),
-            Id::RecordAudio => Status {
-                enabled: matches!(self.media, crate::recording::Media::Recording { .. })
-                    || text && !modal,
-                checked: matches!(self.media, crate::recording::Media::Recording { .. }),
-            },
-            // Recording video would need a camera pipeline and an encoder OneNote 2010 plays.
-            Id::RecordVideo => enabled(false),
+            Id::RecordAudio | Id::RecordVideo => {
+                let recording = match self.media {
+                    Media::Recording { video, .. } => Some(video),
+                    _ => None,
+                };
+                Status {
+                    enabled: recording.is_some() || text && !modal,
+                    checked: recording == Some(id == Id::RecordVideo),
+                }
+            }
+            Id::Transport(transport) => self.transport_status(transport),
             Id::InsertSpace => Status {
                 enabled: writable,
                 checked: self.view.inserting_space(),
@@ -1038,8 +1083,8 @@ impl State {
                 self.save_settings();
                 return Ok(());
             }
-            Id::RecordAudio => return self.record_audio(),
-            Id::RecordVideo => return Ok(()),
+            Id::RecordAudio | Id::RecordVideo => return self.record(id == Id::RecordVideo),
+            Id::Transport(transport) => return self.run_transport(transport),
             Id::InsertSpace => {
                 let response = self.view.insert_space();
                 self.respond(response);
@@ -1051,14 +1096,7 @@ impl State {
                     Id::Pen => Tool::Pen(pens[self.toolbar.pen.min(pens.len() - 1)]),
                     Id::Eraser => Tool::Eraser,
                     Id::Lasso => Tool::Lasso,
-                    // Shapes draw with a pen a little thicker, as OneNote's do.
-                    Id::Shape(kind) => Tool::Shape(
-                        kind,
-                        Pen {
-                            width: 50.0,
-                            ..pens[0]
-                        },
-                    ),
+                    Id::Shape(kind) => Tool::Shape(kind, pens[0].shape()),
                     _ => Tool::Select,
                 };
                 let response = self.view.set_tool(tool);
@@ -1122,6 +1160,18 @@ mod tests {
     use super::*;
 
     const PLATFORMS: [Platform; 3] = [Platform::MacOs, Platform::Gtk, Platform::Windows];
+
+    #[test]
+    fn section_pen_inks_in_the_light_accent() {
+        let section = draw::hsl(200.0, 0.6, 0.6);
+        let [red, green, blue] = draw::srgb_bytes(ui::Theme::light().section(section).accent);
+        let expected = u32::from_le_bytes([red, green, blue, 0]);
+        assert_eq!(
+            canvas::interaction::ink::pens(section)[0].color,
+            Some(expected)
+        );
+        assert_eq!(expected, 0x00_b8_89_2e);
+    }
 
     #[test]
     fn each_chord_runs_one_command_on_each_platform() {

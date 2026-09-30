@@ -97,7 +97,16 @@ pub struct Listed {
 /// Each file a discovery read, with the listing it was read under, so that the next discovery
 /// reads only the files listed otherwise, as OneNote 2010 reopens a notebook it has cached.
 #[derive(Default, Serialize, Deserialize)]
-pub struct Cache(BTreeMap<String, Read>);
+#[serde(transparent)]
+pub struct Cache {
+    read: BTreeMap<String, Read>,
+    /// The sections the last discovery read from its source, up to `HELD` bytes, until taken.
+    #[serde(skip)]
+    images: BTreeMap<String, Vec<u8>>,
+}
+
+/// The most bytes of images a cache holds for `Cache::take`.
+const HELD: usize = 64 << 20;
 
 /// A notebook file as discovery read it.
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,7 +136,7 @@ impl Cache {
     pub fn discover(&mut self, source: &mut impl Source, limits: Limits) -> Result<Folder, Error> {
         let mut remaining = limits.entries;
         let mut identities = BTreeMap::new();
-        let mut read = BTreeMap::new();
+        let mut found = Cache::default();
         let folder = scan(
             source,
             "",
@@ -135,16 +144,22 @@ impl Cache {
             0,
             &mut remaining,
             &mut identities,
-            (&self.0, &mut read),
+            (&self.read, &mut found),
         )?;
-        self.0 = read;
+        *self = found;
         Ok(folder)
     }
 
     /// How the file at `path` was listed when last read, and its stamp then.
     pub fn found(&self, path: &str) -> Option<(Listed, Stamp)> {
-        let read = self.0.get(path)?;
+        let read = self.read.get(path)?;
         Some((read.listed, read.stamp()?))
+    }
+
+    /// The readable sections the last discovery read from its source, by path, once, so that
+    /// what reads them next need not read them again.
+    pub fn take(&mut self) -> BTreeMap<String, Vec<u8>> {
+        std::mem::take(&mut self.images)
     }
 }
 
@@ -265,7 +280,7 @@ fn scan(
     depth: usize,
     remaining: &mut usize,
     identities: &mut BTreeMap<[u8; 16], String>,
-    (cached, read): (&BTreeMap<String, Read>, &mut BTreeMap<String, Read>),
+    (cached, found): (&BTreeMap<String, Read>, &mut Cache),
 ) -> Result<Folder, Error> {
     if depth > limits.depth {
         return Err(Error::Limit { path: path.into() });
@@ -279,6 +294,7 @@ fn scan(
     *remaining = remaining
         .checked_sub(listing.len())
         .ok_or_else(|| Error::Limit { path: path.into() })?;
+    listing.retain(|entry| !foreign(&entry.name));
     listing.sort();
     let mut names = BTreeSet::new();
     for entry in &listing {
@@ -309,7 +325,7 @@ fn scan(
                 depth + 1,
                 remaining,
                 identities,
-                (cached, read),
+                (cached, found),
             ) {
                 Ok(group) => result.groups.push(group),
                 Err(error @ Error::Io { .. }) if unavailable(&error) => {
@@ -342,7 +358,7 @@ fn scan(
             .and_then(|known| Some((known.file_id()?, known)));
         let (file_id, held) = match reused {
             Some((file_id, known)) => {
-                read.insert(child.clone(), known.clone());
+                found.read.insert(child.clone(), known.clone());
                 (file_id, Ok(known.held.clone()))
             }
             None => {
@@ -350,6 +366,7 @@ fn scan(
                     .get(&child)
                     .and_then(Read::file_id)
                     .and_then(|known| source.copy(&child, known));
+                let fetched = copied.is_none();
                 let bytes =
                     match copied.map_or_else(|| source.read(&child, limits.bytes_per_file), Ok) {
                         Ok(bytes) => bytes,
@@ -386,8 +403,9 @@ fn scan(
                     });
                 }
                 let held = held(&store, expected);
+                let file_id = store.header.file_id;
                 if let Ok(held) = &held {
-                    read.insert(
+                    found.read.insert(
                         child.clone(),
                         Read {
                             listed: entry.listed,
@@ -396,8 +414,15 @@ fn scan(
                             held: held.clone(),
                         },
                     );
+                    let holding: usize = found.images.values().map(Vec::len).sum();
+                    if fetched
+                        && matches!(held, Held::Section { .. })
+                        && holding + bytes.len() <= HELD
+                    {
+                        found.images.insert(child.clone(), bytes);
+                    }
                 }
-                (store.header.file_id, held)
+                (file_id, held)
             }
         };
         match held {
@@ -483,11 +508,12 @@ fn scan(
             .retain(|entry| !present.contains(&entry.file));
     }
     let mut observed = source
-        .entries(path, listing.len())
+        .entries(path, limits.entries)
         .map_err(|error| Error::Io {
             path: path.into(),
             error,
         })?;
+    observed.retain(|entry| !foreign(&entry.name));
     observed.sort();
     let names = |entries: &[Entry]| {
         entries
@@ -572,6 +598,12 @@ fn unavailable(error: &Error) -> bool {
         error.kind(),
         io::ErrorKind::PermissionDenied | io::ErrorKind::NotFound
     ))
+}
+
+/// Not the notebook's: dot files, among them macOS's `.DS_Store` and AppleDouble `._`
+/// companions and Snowbound's `.snowbound` folder, and Office's `~$` owner files.
+fn foreign(name: &str) -> bool {
+    name.starts_with('.') || name.starts_with("~$")
 }
 
 fn component(name: &str) -> bool {

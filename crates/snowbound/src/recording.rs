@@ -1,18 +1,15 @@
-//! Record Audio and playback, as OneNote 2010 records and plays (`corpus/recording`): a
-//! recording starts at the caret and goes on the page when stopped, as a WAV file OneNote
-//! plays; a recording, or a note linked to a moment in one, plays in a small transport over
-//! the page. What the platform cannot decode opens in the system's player.
+//! Record Audio, Record Video and playback, as OneNote 2010 records and plays
+//! (`corpus/recording`): a recording starts at the caret and goes on the page when stopped,
+//! as a file OneNote plays; a recording, or a note linked to a moment in one, plays in a
+//! transport over the page. What Snowbound cannot play opens in the system's player.
 
-use crate::{State, media, platform};
+use crate::{State, media, platform, video};
 use onestore::page::{Attachment, Recording};
-use std::{
-    error::Error,
-    path::{Path, PathBuf},
-    time::{Duration, Instant},
-};
-use ui::{Axis, Flags, Spec, Theme, fit, px};
+use std::{error::Error, ops::Range, path::Path, sync::Arc, time::Duration};
+use ui::{Axis, Flags, Spec, Theme, children, fit, px};
+use winit::keyboard::NamedKey;
 
-/// The rate recordings are made at: wideband speech, as OneNote's own 8 kHz WMA is narrowband.
+/// The rate audio is recorded at: wideband speech, as OneNote's own 8 kHz WMA is narrowband.
 pub(crate) const RATE: u32 = 16_000;
 
 /// What records or plays now.
@@ -21,47 +18,87 @@ pub(crate) enum Media {
     #[default]
     Idle,
     Recording {
-        microphone: media::Microphone,
-        id: [u8; 16],
-        path: PathBuf,
-        started: Instant,
+        recorder: media::Recorder,
+        video: bool,
+        path: std::path::PathBuf,
     },
-    Playing {
-        player: media::Player,
-        name: String,
-    },
+    Playing(Box<Playback>),
+}
+
+pub(crate) struct Playback {
+    player: media::Player,
+    name: String,
+    /// The recording's identity, whose linked notes See Playback follows.
+    recording: Option<[u8; 16]>,
+    video: Option<Video>,
+    /// The moment Seek To is taking, as typed.
+    seeking: Option<String>,
+}
+
+/// A video recording's pictures, and the one last shown.
+struct Video {
+    bytes: Arc<[u8]>,
+    movie: video::Movie,
+    shown: Option<(Range<usize>, draw::RasterImage)>,
+}
+
+/// The Recording and Playback tabs' commands besides Record Audio and Record Video.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Pause,
+    Stop,
+    /// Seconds to rewind or fast forward.
+    Skip(i32),
+    SeekTo,
+    SeePlayback,
+}
+
+fn seek_field() -> ui::Id {
+    crate::page().child("transport").child("seek")
 }
 
 impl State {
-    /// Record Audio: starts recording at the caret, or stops the recording under way.
-    pub(crate) fn record_audio(&mut self) -> Result<(), Box<dyn Error>> {
+    /// Record Audio or Record Video: starts recording at the caret, or stops the recording
+    /// under way.
+    pub(crate) fn record(&mut self, video: bool) -> Result<(), Box<dyn Error>> {
         if matches!(self.media, Media::Recording { .. }) {
             return self.stop_recording();
         }
         self.media = Media::Idle;
         let folder = std::env::temp_dir().join("Snowbound Recordings");
         std::fs::create_dir_all(&folder)?;
-        let path = folder.join(format!("{}.wav", std::process::id()));
-        let microphone = match media::Microphone::start(&path, RATE) {
-            Ok(microphone) => microphone,
+        let extension = if video { "avi" } else { "wav" };
+        let path = folder.join(format!("{}.{extension}", std::process::id()));
+        let recorder = if video {
+            media::Recorder::video(&path)
+        } else {
+            media::Recorder::audio(&path, RATE)
+        };
+        let recorder = match recorder {
+            Ok(recorder) => recorder,
             Err(detail) => {
-                platform::alert("Couldn't record audio", &detail);
+                let title = if video {
+                    "Couldn't record video"
+                } else {
+                    "Couldn't record audio"
+                };
+                platform::alert(title, &detail);
                 return Ok(());
             }
         };
         let [date, time] = platform::date_text(crate::filetime());
-        let label = format!("Audio recording started: {time} {date}");
+        let kind = if video { "Video" } else { "Audio" };
+        let label = format!("{kind} recording started: {time} {date}");
         let (id, response) = self.view.start_recording(&label)?;
         self.respond(response);
-        let Some(id) = id else {
-            microphone.stop()?;
+        if id.is_none() {
+            recorder.stop()?;
             return Ok(());
-        };
+        }
         self.media = Media::Recording {
-            microphone,
-            id,
+            recorder,
+            video,
             path,
-            started: Instant::now(),
         };
         Ok(())
     }
@@ -69,22 +106,29 @@ impl State {
     /// Stop: the recording under way goes on the page where it started.
     pub(crate) fn stop_recording(&mut self) -> Result<(), Box<dyn Error>> {
         let Media::Recording {
-            microphone,
-            id,
+            recorder,
+            video,
             path,
-            ..
         } = std::mem::take(&mut self.media)
         else {
             return Ok(());
         };
-        if let Err(detail) = microphone.stop() {
+        let Some(id) = self.view.editor.recording() else {
+            return Ok(());
+        };
+        if let Err(detail) = recorder.stop() {
             platform::alert("Couldn't finish the recording", &detail);
             return Ok(());
         }
         let recorded = std::fs::read(&path)?;
-        let (bytes, duration_ms) = match compress(&recorded) {
-            Some((bytes, duration)) => (bytes, Some(duration)),
-            None => (recorded, None),
+        let (bytes, duration_ms) = if video {
+            let duration = video::Movie::parse(&recorded).map(|movie| movie.duration_ms());
+            (recorded, duration)
+        } else {
+            match compress(&recorded) {
+                Some((bytes, duration)) => (bytes, Some(duration)),
+                None => (recorded, None),
+            }
         };
         let preview = platform::file_icon(&path);
         std::fs::remove_file(&path)?;
@@ -100,13 +144,19 @@ impl State {
             })
             .collect();
         let name = if name.trim().is_empty() {
-            "Audio recording".to_owned()
+            if video {
+                "Video recording"
+            } else {
+                "Audio recording"
+            }
+            .to_owned()
         } else {
             name
         };
+        let extension = if video { "avi" } else { "wav" };
         let file = Attachment {
             id: onestore::page::text::new_id()?,
-            filename: format!("{name}.wav"),
+            filename: format!("{name}.{extension}"),
             source_path: None,
             size: Some(crate::attachment::ICON_SIZE),
             layout: Default::default(),
@@ -114,7 +164,7 @@ impl State {
             preview: preview.map(Into::into),
             recording: Some(Recording {
                 id,
-                kind: 1,
+                kind: if video { 2 } else { 1 },
                 duration_ms,
             }),
         };
@@ -124,105 +174,94 @@ impl State {
     }
 
     /// Plays recording `file` from `at_ms` in the transport, or opens it in the system's
-    /// player where the platform cannot decode it.
+    /// player where Snowbound cannot play it.
     pub(crate) fn play(&mut self, file: &Attachment, at_ms: u32) -> Result<(), Box<dyn Error>> {
         if matches!(self.media, Media::Recording { .. }) {
             return Ok(());
         }
         self.media = Media::Idle;
-        let Some(path) = self.copy_attachment(file)? else {
+        let Some(bytes) = file.bytes.clone() else {
+            self.copy_attachment(file)?;
             return Ok(());
         };
-        let Some(mut player) = media::Player::open(&path) else {
-            platform::open_file(&path);
+        let name = Path::new(&file.filename)
+            .file_stem()
+            .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+        let movie = video::Movie::parse(&bytes);
+        // The sound as a WAV file every platform plays: IMA ADPCM decoded, a video's sound
+        // taken out of it.
+        let sound = movie.as_ref().map(|movie| {
+            movie
+                .wave(&bytes)
+                .unwrap_or_else(|| silence(movie.duration_ms()))
+        });
+        let sound = sound.map_or_else(|| decompress(&bytes), Some);
+        let playable = match sound {
+            Some(wave) => Attachment {
+                filename: format!("{name}.wav"),
+                bytes: Some(decompress(&wave).unwrap_or(wave).into()),
+                ..file.clone()
+            },
+            None => file.clone(),
+        };
+        let Some(path) = self.copy_attachment(&playable)? else {
+            return Ok(());
+        };
+        // Scripted runs stay silent.
+        let audible = std::env::var_os("SNOWBOUND_REPLAY").is_none();
+        let Some(mut player) = media::Player::open(&path, audible) else {
+            if let Some(path) = self.copy_attachment(file)? {
+                platform::open_file(&path);
+            }
             return Ok(());
         };
         player.seek(at_ms);
         player.play();
-        let name = Path::new(&file.filename)
-            .file_stem()
-            .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
-        self.media = Media::Playing { player, name };
+        self.media = Media::Playing(Box::new(Playback {
+            player,
+            name,
+            recording: file.recording.map(|recording| recording.id),
+            video: movie.map(|movie| Video {
+                bytes,
+                movie,
+                shown: None,
+            }),
+            seeking: None,
+        }));
         Ok(())
     }
 
-    /// When the transport's clock next changes what it shows.
-    pub(crate) fn media_wake(&self, now: Instant) -> Option<Instant> {
-        match &self.media {
-            Media::Idle => None,
-            Media::Playing { player, .. } if !player.playing() => None,
-            _ => Some(now + Duration::from_millis(250)),
-        }
+    pub(crate) fn transport_status(&self, transport: Transport) -> crate::commands::Status {
+        let (recording, playing) = match &self.media {
+            Media::Idle => (false, None),
+            Media::Recording { .. } => (true, None),
+            Media::Playing(playback) => (false, Some(playback.player.playing())),
+        };
+        let (enabled, checked) = match transport {
+            Transport::Pause => (
+                recording || playing.is_some(),
+                self.view.editor.recording_paused() || playing == Some(false),
+            ),
+            Transport::Stop => (recording || playing.is_some(), false),
+            Transport::Skip(_) | Transport::SeekTo => (playing.is_some(), false),
+            Transport::SeePlayback => (true, self.see_playback),
+        };
+        crate::commands::Status { enabled, checked }
     }
 
-    /// The transport over the page's foot while something records or plays: OneNote's
-    /// Recording and Playback tabs, cut to what a note taker reaches for.
-    pub(crate) fn transport(
-        &mut self,
-        theme: &Theme,
-        page: [f32; 4],
-    ) -> Result<(), Box<dyn Error>> {
-        let (clock, playing) = match &self.media {
-            Media::Idle => return Ok(()),
-            Media::Recording { started, .. } => (
-                format!("Recording  {}", clock(started.elapsed().as_millis() as u32)),
-                None,
-            ),
-            Media::Playing { player, name } => (
-                format!(
-                    "{name}  {} / {}",
-                    clock(player.position_ms()),
-                    clock(player.duration_ms())
-                ),
-                Some(player.playing()),
-            ),
-        };
-        let height = theme.font_size * 2.0 + 16.0;
-        self.ui.open(
-            "transport",
-            Spec {
-                flags: Flags::FLOAT | Flags::CLICKABLE,
-                axis: Axis::X,
-                size: [ui::children(), px(height)],
-                position: [16.0, page[3] - page[1] - height - 16.0],
-                fill: Some(theme.popup),
-                shadow: Some(theme.shadow),
-                radius: 8.0,
-                pad: [8.0, 8.0],
-                gap: 6.0,
-                ..Spec::default()
-            },
-        );
-        let mut chosen = None;
-        if let Some(playing) = playing {
-            if ui::button(&mut self.ui, "play", if playing { "Pause" } else { "Play" }).clicked {
-                chosen = Some(Control::Toggle);
+    /// Runs a transport command: Pause pauses or resumes what records or plays.
+    pub(crate) fn run_transport(&mut self, transport: Transport) -> Result<(), Box<dyn Error>> {
+        match (transport, &mut self.media) {
+            (Transport::SeePlayback, _) => self.see_playback = !self.see_playback,
+            (Transport::Stop, Media::Recording { .. }) => self.stop_recording()?,
+            (Transport::Stop, _) => self.media = Media::Idle,
+            (Transport::Pause, Media::Recording { recorder, .. }) => {
+                let paused = !self.view.editor.recording_paused();
+                recorder.pause(paused);
+                self.view.editor.pause_recording(paused);
             }
-            if ui::button(&mut self.ui, "back", "−10 s").clicked {
-                chosen = Some(Control::Skip(-10_000));
-            }
-            if ui::button(&mut self.ui, "forward", "+10 s").clicked {
-                chosen = Some(Control::Skip(10_000));
-            }
-        }
-        if ui::button(&mut self.ui, "stop", "Stop").clicked {
-            chosen = Some(Control::Stop);
-        }
-        self.ui.leaf(
-            "clock",
-            Spec {
-                size: [fit(), px(theme.font_size * 2.0)],
-                text: Some(&clock),
-                pad: [6.0, 0.0],
-                center: true,
-                ..Spec::default()
-            },
-        );
-        self.ui.close();
-        match (chosen, &mut self.media) {
-            (Some(Control::Stop), Media::Recording { .. }) => self.stop_recording()?,
-            (Some(Control::Stop), _) => self.media = Media::Idle,
-            (Some(Control::Toggle), Media::Playing { player, .. }) => {
+            (Transport::Pause, Media::Playing(playback)) => {
+                let player = &mut playback.player;
                 if player.playing() {
                     player.pause();
                 } else {
@@ -232,20 +271,239 @@ impl State {
                     player.play();
                 }
             }
-            (Some(Control::Skip(delta)), Media::Playing { player, .. }) => {
-                let at = i64::from(player.position_ms()) + delta;
+            (Transport::Skip(seconds), Media::Playing(playback)) => {
+                let player = &mut playback.player;
+                let at = i64::from(player.position_ms()) + i64::from(seconds) * 1000;
                 player.seek(at.clamp(0, i64::from(player.duration_ms())) as u32);
+            }
+            (Transport::SeekTo, Media::Playing(playback)) => {
+                playback.seeking = Some(clock(playback.player.position_ms()));
+                self.ui.set_focus(Some(seek_field()));
+                self.ui.focus_all(seek_field());
             }
             _ => {}
         }
         Ok(())
     }
-}
 
-enum Control {
-    Toggle,
-    Stop,
-    Skip(i64),
+    /// The transport over the page's foot while something records or plays: OneNote's
+    /// Recording and Playback tabs, with a video's pictures above.
+    pub(crate) fn transport(
+        &mut self,
+        theme: &Theme,
+        page: [f32; 4],
+    ) -> Result<(), Box<dyn Error>> {
+        let row = theme.font_size * 2.0;
+        let (clock_text, picture) = match &mut self.media {
+            Media::Idle => {
+                self.view.played = None;
+                return Ok(());
+            }
+            Media::Recording { video, .. } => {
+                let at = self.view.editor.recording_ms().unwrap_or(0);
+                let state = if self.view.editor.recording_paused() {
+                    "Paused"
+                } else if *video {
+                    "Recording video"
+                } else {
+                    "Recording"
+                };
+                self.ui.wake_after(Duration::from_millis(250));
+                (format!("{state}  {}", clock(at)), None)
+            }
+            Media::Playing(playback) => {
+                let at = playback.player.position_ms();
+                self.view.played = playback
+                    .recording
+                    .filter(|_| self.see_playback)
+                    .and_then(|id| self.view.editor.played_note(id, at))
+                    .and_then(|note| canvas::search::paragraph_match(&self.view.editor, note));
+                let mut picture = None;
+                if let Some(video) = &mut playback.video {
+                    let frame = video.movie.frame(at);
+                    if video.shown.as_ref().map(|(range, _)| range) != frame.as_ref()
+                        && let Some(frame) = frame
+                    {
+                        let image =
+                            draw::RasterImage::decode(&video.bytes[frame.clone()], video::SIZE);
+                        video.shown = image.ok().map(|image| (frame, image));
+                    }
+                    picture = video.shown.as_ref().map(|(_, image)| image.clone());
+                }
+                if playback.player.playing() {
+                    let interval = if playback.video.is_some() {
+                        1000 / u64::from(video::FPS)
+                    } else {
+                        250
+                    };
+                    self.ui.wake_after(Duration::from_millis(interval));
+                }
+                (
+                    format!(
+                        "{}  {} / {}",
+                        playback.name,
+                        clock(at),
+                        clock(playback.player.duration_ms())
+                    ),
+                    picture,
+                )
+            }
+        };
+        let picture_height = picture
+            .as_ref()
+            .map_or(0.0, |image| image.size()[1] as f32 + 6.0);
+        let height = row + 16.0 + picture_height;
+        self.ui.open(
+            "transport",
+            Spec {
+                flags: Flags::FLOAT | Flags::CLICKABLE,
+                axis: Axis::Y,
+                size: [children(), px(height)],
+                position: [16.0, page[3] - page[1] - height - 16.0],
+                fill: Some(theme.popup),
+                shadow: Some(theme.shadow),
+                radius: 8.0,
+                pad: [8.0, 8.0],
+                gap: 6.0,
+                ..Spec::default()
+            },
+        );
+        if let Some(image) = &picture {
+            let [width, height] = image.size().map(|side| side as f32);
+            self.ui.leaf(
+                "picture",
+                Spec {
+                    size: [px(width), px(height)],
+                    image: Some(image),
+                    ..Spec::default()
+                },
+            );
+        }
+        self.ui.open(
+            "controls",
+            Spec {
+                axis: Axis::X,
+                size: [children(), px(row)],
+                gap: 6.0,
+                ..Spec::default()
+            },
+        );
+        let paused = self.transport_status(Transport::Pause).checked;
+        let playing = matches!(self.media, Media::Playing(_));
+        let pause = match (playing, paused) {
+            (true, true) => "Play",
+            (false, true) => "Resume",
+            _ => "Pause",
+        };
+        let mut buttons = vec![(pause, Transport::Pause)];
+        if playing {
+            buttons.extend([
+                ("−10 min", Transport::Skip(-600)),
+                ("−10 s", Transport::Skip(-10)),
+            ]);
+        }
+        let mut chosen = buttons
+            .into_iter()
+            .filter(|(label, _)| ui::button(&mut self.ui, label, label).clicked)
+            .last()
+            .map(|(_, transport)| transport);
+        let seek = self.seek(theme, &clock_text);
+        let mut after = Vec::new();
+        if playing {
+            after.extend([
+                ("+10 s", Transport::Skip(10)),
+                ("+10 min", Transport::Skip(600)),
+            ]);
+        }
+        for (label, transport) in after {
+            if ui::button(&mut self.ui, label, label).clicked {
+                chosen = Some(transport);
+            }
+        }
+        if playing && ui::check_box(&mut self.ui, "see", "See Playback", self.see_playback).clicked
+        {
+            chosen = Some(Transport::SeePlayback);
+        }
+        if ui::button(&mut self.ui, "stop", "Stop").clicked {
+            chosen = Some(Transport::Stop);
+        }
+        self.ui.close();
+        self.ui.close();
+        if let Some(at) = seek
+            && let Media::Playing(playback) = &mut self.media
+        {
+            playback.player.seek(at.min(playback.player.duration_ms()));
+        }
+        if let Some(transport) = chosen {
+            self.run_transport(transport)?;
+        }
+        Ok(())
+    }
+
+    /// The transport's clock, or while seeking the field taking the moment: Enter goes
+    /// there, Escape or leaving the field keeps playing where it was. A click on the clock
+    /// seeks as Seek To does.
+    fn seek(&mut self, theme: &Theme, clock_text: &str) -> Option<u32> {
+        let seeking = match &mut self.media {
+            Media::Playing(playback) => &mut playback.seeking,
+            _ => &mut None,
+        };
+        let focused = self.ui.focused() == Some(seek_field());
+        let Some(text) = seeking.as_mut().filter(|_| focused) else {
+            *seeking = None;
+            let playing = matches!(self.media, Media::Playing(_));
+            let clicked = self
+                .ui
+                .leaf(
+                    "clock",
+                    Spec {
+                        flags: if playing {
+                            Flags::CLICKABLE
+                        } else {
+                            Flags::default()
+                        },
+                        size: [fit(), px(theme.font_size * 2.0)],
+                        text: Some(clock_text),
+                        pad: [6.0, 0.0],
+                        center: true,
+                        ..Spec::default()
+                    },
+                )
+                .clicked;
+            if clicked {
+                let _ = self.run_transport(Transport::SeekTo);
+            }
+            return None;
+        };
+        let keys = ui::popup::navigation(
+            &mut self.ui,
+            &[seek_field()],
+            &[NamedKey::Enter, NamedKey::Escape],
+        );
+        ui::text_field(
+            &mut self.ui,
+            seek_field(),
+            text,
+            "m:ss",
+            Spec {
+                size: [px(theme.font_size * 6.0), px(theme.font_size * 2.0)],
+                fill: Some(theme.base),
+                border: Some(theme.accent),
+                radius: 4.0,
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+        let at = keys
+            .contains(&NamedKey::Enter)
+            .then(|| moment(text))
+            .flatten();
+        if !keys.is_empty() {
+            *seeking = None;
+            self.ui.set_focus(Some(crate::page()));
+        }
+        at
+    }
 }
 
 /// `ms` as the transport shows a moment: minutes and seconds, hours when there are some.
@@ -255,6 +513,42 @@ fn clock(ms: u32) -> String {
         0 => format!("{}:{:02}", seconds / 60, seconds % 60),
         hours => format!("{hours}:{:02}:{:02}", seconds / 60 % 60, seconds % 60),
     }
+}
+
+/// A moment typed as the clock shows one, in milliseconds: seconds, m:ss or h:mm:ss.
+fn moment(text: &str) -> Option<u32> {
+    let mut seconds = 0u32;
+    for part in text.trim().split(':') {
+        let part: u32 = part.trim().parse().ok()?;
+        seconds = seconds.checked_mul(60)?.checked_add(part)?;
+    }
+    seconds.checked_mul(1000)
+}
+
+/// Silence as long as `ms`, the clock of a video without sound.
+fn silence(ms: u32) -> Vec<u8> {
+    wave(8_000, &vec![0; ms as usize * 8])
+}
+
+/// A mono 16-bit PCM WAV file of `samples` at `rate`, as the platform recorders write.
+pub(crate) fn wave(rate: u32, samples: &[i16]) -> Vec<u8> {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    [
+        &b"RIFF"[..],
+        &(36 + data.len() as u32).to_le_bytes(),
+        b"WAVEfmt ",
+        &16_u32.to_le_bytes(),
+        &1_u16.to_le_bytes(),
+        &1_u16.to_le_bytes(),
+        &rate.to_le_bytes(),
+        &(rate * 2).to_le_bytes(),
+        &2_u16.to_le_bytes(),
+        &16_u16.to_le_bytes(),
+        b"data",
+        &(data.len() as u32).to_le_bytes(),
+        &data,
+    ]
+    .concat()
 }
 
 /// A recording for a file attached under `filename`, as OneNote 2010 makes one of every
@@ -273,6 +567,7 @@ struct Wave<'a> {
     channels: u16,
     rate: u32,
     bytes_per_second: u32,
+    block: u16,
     bits: u16,
     /// The sample count a compressed file's `fact` chunk states.
     samples: Option<u32>,
@@ -309,6 +604,7 @@ impl<'a> Wave<'a> {
             channels: u16_at(fmt, 2)?,
             rate: u32_at(fmt, 4)?,
             bytes_per_second: u32_at(fmt, 8)?,
+            block: u16_at(fmt, 12)?,
             bits: u16_at(fmt, 14)?,
             samples,
             data: data?,
@@ -432,30 +728,53 @@ fn encode(sample: i32, predicted: &mut i32, index: &mut i32) -> u8 {
     code
 }
 
+/// A mono IMA ADPCM WAV file as 16-bit PCM, which every platform's player decodes; none
+/// for other files.
+pub(crate) fn decompress(wav: &[u8]) -> Option<Vec<u8>> {
+    let wave = Wave::parse(wav).filter(|wave| wave.format == 0x11 && wave.channels == 1)?;
+    Some(self::wave(wave.rate, &decode(&wave)))
+}
+
+/// Each block's header sample and index, then its codes.
+fn decode(wave: &Wave<'_>) -> Vec<i16> {
+    let mut out = Vec::new();
+    for block in wave.data.chunks(usize::from(wave.block.max(4))) {
+        let Some(header) = block.get(..4) else {
+            break;
+        };
+        let mut predicted = i32::from(i16::from_le_bytes([header[0], header[1]]));
+        let mut index = i32::from(header[2]).clamp(0, 88);
+        out.push(predicted as i16);
+        for byte in &block[4..] {
+            for code in [byte & 15, byte >> 4] {
+                let step = STEPS[index as usize];
+                let mut delta = step >> 3;
+                for (bit, part) in [(4, step), (2, step >> 1), (1, step >> 2)] {
+                    if code & bit != 0 {
+                        delta += part;
+                    }
+                }
+                predicted = if code & 8 != 0 {
+                    predicted - delta
+                } else {
+                    predicted + delta
+                }
+                .clamp(-32768, 32767);
+                index = (index + INDEX_STEPS[usize::from(code & 7)]).clamp(0, 88);
+                out.push(predicted as i16);
+            }
+        }
+    }
+    if let Some(samples) = wave.samples {
+        out.truncate(samples as usize);
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    /// A mono 16-bit PCM WAV file of `samples` at `rate`, as the platform recorder writes.
-    pub(crate) fn pcm(rate: u32, samples: &[i16]) -> Vec<u8> {
-        let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        [
-            &b"RIFF"[..],
-            &(36 + data.len() as u32).to_le_bytes(),
-            b"WAVEfmt ",
-            &16_u32.to_le_bytes(),
-            &1_u16.to_le_bytes(),
-            &1_u16.to_le_bytes(),
-            &rate.to_le_bytes(),
-            &(rate * 2).to_le_bytes(),
-            &2_u16.to_le_bytes(),
-            &16_u16.to_le_bytes(),
-            b"data",
-            &(data.len() as u32).to_le_bytes(),
-            &data,
-        ]
-        .concat()
-    }
+    use std::path::PathBuf;
 
     /// Two seconds of a spoken-pitch chord.
     pub(crate) fn tone() -> Vec<i16> {
@@ -469,41 +788,10 @@ pub(crate) mod tests {
             .collect()
     }
 
-    /// The reference decoder: each block's header sample and index, then its codes.
-    fn decode(wave: &Wave<'_>) -> Vec<i16> {
-        let mut out = Vec::new();
-        for block in wave.data.chunks(BLOCK) {
-            let mut predicted = i32::from(i16::from_le_bytes([block[0], block[1]]));
-            let mut index = i32::from(block[2]);
-            out.push(predicted as i16);
-            for byte in &block[4..] {
-                for code in [byte & 15, byte >> 4] {
-                    let step = STEPS[index as usize];
-                    let mut delta = step >> 3;
-                    for (bit, part) in [(4, step), (2, step >> 1), (1, step >> 2)] {
-                        if code & bit != 0 {
-                            delta += part;
-                        }
-                    }
-                    predicted = if code & 8 != 0 {
-                        predicted - delta
-                    } else {
-                        predicted + delta
-                    }
-                    .clamp(-32768, 32767);
-                    index = (index + INDEX_STEPS[usize::from(code & 7)]).clamp(0, 88);
-                    out.push(predicted as i16);
-                }
-            }
-        }
-        out.truncate(wave.samples.unwrap() as usize);
-        out
-    }
-
     #[test]
     fn a_recording_compresses_to_ima_adpcm_that_decodes_close_to_what_was_heard() {
         let samples = tone();
-        let (bytes, duration) = compress(&pcm(RATE, &samples)).unwrap();
+        let (bytes, duration) = compress(&wave(RATE, &samples)).unwrap();
         assert_eq!(duration, 2000);
         let wave = Wave::parse(&bytes).unwrap();
         assert_eq!(
@@ -514,6 +802,13 @@ pub(crate) mod tests {
         assert_eq!(wave.duration_ms(), 2000);
         assert!(bytes.len() * 3 < samples.len() * 2);
         let decoded = decode(&wave);
+        assert_eq!(
+            Wave::parse(&decompress(&bytes).unwrap())
+                .unwrap()
+                .data
+                .len(),
+            decoded.len() * 2
+        );
         assert_eq!(decoded.len(), samples.len());
         let noise: f64 = samples
             .iter()
@@ -528,7 +823,7 @@ pub(crate) mod tests {
     #[test]
     fn only_mono_16_bit_pcm_compresses_and_attached_wav_files_know_their_length() {
         let stereo = {
-            let mut bytes = pcm(RATE, &[0; 64]);
+            let mut bytes = wave(RATE, &[0; 64]);
             bytes[22] = 2;
             bytes
         };
@@ -544,11 +839,17 @@ pub(crate) mod tests {
         assert!(attached("notes.txt", b"").is_none());
     }
 
-    /// A recording made through the editor, stored as the host stores it:
-    /// `SNOWBOUND_RECORDING_EXPORT` names a directory receiving the notebook for a cold
-    /// read in OneNote 2010 (`corpus/recording/candidate`).
-    #[test]
-    fn a_recording_stores_its_file_line_and_linked_notes_for_onenote() {
+    /// A recording made through the editor at the end of "Before recording", two notes
+    /// written while it records, stored as the host stores it; `export` names a variable
+    /// naming a directory receiving the notebook for a cold read in OneNote 2010.
+    fn record_through_the_editor(
+        label: &str,
+        filename: &str,
+        kind: u32,
+        bytes: &[u8],
+        duration: u32,
+        export: &str,
+    ) {
         use canvas::{editor::CanvasEditor, layout::TextEngine};
         use onestore::{
             Arena, Section, Store,
@@ -580,12 +881,7 @@ pub(crate) mod tests {
             let ops = ops.into_iter().map(|op| Op::Page { space, op }).collect();
             section.apply("Snowbound", &Edit { at, ops }).unwrap();
         };
-        let id = editor
-            .start_recording(
-                &mut engine,
-                "Audio recording started: 5:18 PM Tuesday, September 29, 2026",
-            )
-            .unwrap();
+        let id = editor.start_recording(&mut engine, label).unwrap();
         store(&mut editor);
         std::thread::sleep(Duration::from_millis(40));
         editor.insert(&mut engine, "First linked note").unwrap();
@@ -594,18 +890,17 @@ pub(crate) mod tests {
         std::thread::sleep(Duration::from_millis(40));
         editor.insert(&mut engine, "Second linked note").unwrap();
         store(&mut editor);
-        let (bytes, duration) = compress(&pcm(RATE, &tone())).unwrap();
         let file = Attachment {
             id: onestore::page::text::new_id().unwrap(),
-            filename: "Recorded.wav".into(),
+            filename: filename.into(),
             source_path: None,
             size: Some(crate::attachment::ICON_SIZE),
             layout: Default::default(),
-            bytes: Some(bytes.clone().into()),
+            bytes: Some(bytes.into()),
             preview: Some(canvas::gpu::page::file_icon().into()),
             recording: Some(Recording {
                 id,
-                kind: 1,
+                kind,
                 duration_ms: Some(duration),
             }),
         };
@@ -634,7 +929,8 @@ pub(crate) mod tests {
                 let text = match &paragraph.content {
                     ParagraphContent::Text(text) => text.text.text().to_owned(),
                     ParagraphContent::Attachment(file) => {
-                        assert_eq!(file.bytes.as_deref(), Some(bytes.as_slice()));
+                        assert_eq!(file.bytes.as_deref(), Some(bytes));
+                        assert_eq!(file.recording.unwrap().kind, kind);
                         format!("[{}]", file.filename)
                     }
                     _ => unreachable!(),
@@ -646,13 +942,14 @@ pub(crate) mod tests {
             })
             .collect();
         let texts: Vec<&str> = shown.iter().map(|(text, _)| text.as_str()).collect();
+        let file = format!("[{filename}]");
         assert_eq!(
             texts,
             [
                 "Before recording",
-                "[Recorded.wav]",
+                &file,
                 "",
-                "Audio recording started: 5:18 PM Tuesday, September 29, 2026",
+                label,
                 "First linked note",
                 "Second linked note",
             ]
@@ -661,7 +958,7 @@ pub(crate) mod tests {
         assert_eq!(shown[3].1, Some(0));
         assert!(shown[4].1.unwrap() >= 40 && shown[5].1.unwrap() > shown[4].1.unwrap());
 
-        if let Some(directory) = std::env::var_os("SNOWBOUND_RECORDING_EXPORT") {
+        if let Some(directory) = std::env::var_os(export) {
             let directory = PathBuf::from(directory);
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::write(directory.join("Recorded.one"), &image).unwrap();
@@ -676,6 +973,71 @@ pub(crate) mod tests {
             )
             .unwrap();
         }
+    }
+
+    /// `SNOWBOUND_RECORDING_EXPORT`: `corpus/recording/candidate`.
+    #[test]
+    fn a_recording_stores_its_file_line_and_linked_notes_for_onenote() {
+        let (bytes, duration) = compress(&wave(RATE, &tone())).unwrap();
+        record_through_the_editor(
+            "Audio recording started: 5:18 PM Tuesday, September 29, 2026",
+            "Recorded.wav",
+            1,
+            &bytes,
+            duration,
+            "SNOWBOUND_RECORDING_EXPORT",
+        );
+    }
+
+    /// Two seconds of moving colour bars with the chord, as a video recording is stored.
+    pub(crate) fn clip() -> Vec<u8> {
+        let mut pictures = video::Pictures::default();
+        // A camera's uneven 20 pictures a second, which the file shows at 15.
+        for index in 0..40u32 {
+            let picture = image::RgbImage::from_fn(640, 480, |x, y| {
+                let bar = (x + index * 16) / 80 % 6;
+                let [r, g, b] = [
+                    [255, 255, 0],
+                    [0, 255, 255],
+                    [0, 255, 0],
+                    [255, 0, 255],
+                    [255, 0, 0],
+                    [0, 0, 255],
+                ][bar as usize];
+                image::Rgb(if y > 400 {
+                    [index as u8 * 6; 3]
+                } else {
+                    [r, g, b]
+                })
+            });
+            pictures.take(u64::from(index) * 50_000, picture);
+        }
+        let data = tone()
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        let sound = video::Pcm {
+            rate: RATE,
+            channels: 1,
+            data,
+        };
+        video::write(video::SIZE, &pictures.finish(2_000_000), &sound).unwrap()
+    }
+
+    /// `SNOWBOUND_VIDEO_EXPORT`: `corpus/recording/video/candidate`.
+    #[test]
+    fn a_video_recording_stores_its_file_line_and_linked_notes_for_onenote() {
+        let bytes = clip();
+        let movie = video::Movie::parse(&bytes).unwrap();
+        assert_eq!((movie.frames.len(), movie.duration_ms()), (30, 2000));
+        record_through_the_editor(
+            "Video recording started: 5:18 PM Tuesday, September 29, 2026",
+            "Recorded.avi",
+            2,
+            &bytes,
+            movie.duration_ms(),
+            "SNOWBOUND_VIDEO_EXPORT",
+        );
     }
 
     #[test]

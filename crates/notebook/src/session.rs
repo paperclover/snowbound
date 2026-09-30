@@ -959,8 +959,10 @@ impl Notebook {
         })
     }
 
-    /// Every readable section, for `Background::watch`.
-    pub fn replicas(&self) -> Vec<Known> {
+    /// Every readable section, for `Background::watch`, handing on the files the last
+    /// discovery read so that each is read once.
+    pub fn replicas(&mut self) -> Vec<Known> {
+        let mut images = self.read.take();
         let mut sections = Vec::new();
         let mut folders = vec![&self.catalog];
         while let Some(folder) = folders.pop() {
@@ -970,6 +972,7 @@ impl Notebook {
                         path: section.path.clone(),
                         replica: self.replica_path(&section.path).ok(),
                         found: self.read.found(&section.path),
+                        image: images.remove(&section.path),
                     });
                 }
             }

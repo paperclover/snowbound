@@ -863,10 +863,16 @@ fn line(from: [f32; 2], to: [f32; 2]) -> Vec<[f32; 2]> {
     (0..=20)
         .map(|step| {
             let t = step as f32 / 20.0;
-            [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t]
+            [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+            ]
         })
         .collect()
 }
+
+/// The tab colour of a section that stores none.
+const SECTION: u32 = 0x00e4_a88a;
 
 #[test]
 fn pencil_tools_draw_pick_move_delete_and_erase_drawings_as_edits() {
@@ -874,8 +880,8 @@ fn pencil_tools_draw_pick_move_delete_and_erase_drawings_as_edits() {
     let mut canvas = canvas(&section, "Paragraph controls");
     let space = canvas.space;
     let before = stored_ink(&section, space).len();
-    // The red pen, second in OneNote's gallery.
-    canvas.set_tool(1, 1).unwrap();
+    // The red pen, second in OneNote's gallery after the section's accent.
+    canvas.set_tool(1, 2, SECTION).unwrap();
     trace(&mut canvas, &section, &line([100.0, 600.0], [300.0, 660.0]));
     let drawn = stored_ink(&section, space);
     assert_eq!(drawn.len(), before + 1);
@@ -883,13 +889,13 @@ fn pencil_tools_draw_pick_move_delete_and_erase_drawings_as_edits() {
     assert_eq!(stroke.color, Some(0x241ced));
     assert!(stroke.points.len() > 2);
     // A highlighter stroke is a drawing of its own.
-    canvas.set_tool(1, 5).unwrap();
+    canvas.set_tool(1, 6, SECTION).unwrap();
     trace(&mut canvas, &section, &line([100.0, 760.0], [300.0, 760.0]));
     assert_eq!(stored_ink(&section, space).len(), before + 2);
     assert!(stored_ink(&section, space).last().unwrap().strokes[0].raster_operation == Some(9));
 
     // The lasso picks the pen stroke; a touch on it then drags it.
-    canvas.set_tool(3, 0).unwrap();
+    canvas.set_tool(3, 0, SECTION).unwrap();
     let lasso = [
         [80.0, 580.0],
         [320.0, 580.0],
@@ -918,7 +924,7 @@ fn pencil_tools_draw_pick_move_delete_and_erase_drawings_as_edits() {
     assert!(canvas.ink_selection().is_none());
 
     // The eraser takes the highlighter's stroke it crosses; undo brings it back.
-    canvas.set_tool(2, 0).unwrap();
+    canvas.set_tool(2, 0, SECTION).unwrap();
     trace(&mut canvas, &section, &line([200.0, 720.0], [200.0, 800.0]));
     assert_eq!(stored_ink(&section, space).len(), before);
     let _ = canvas.page.undo(false).unwrap();
@@ -927,4 +933,35 @@ fn pencil_tools_draw_pick_move_delete_and_erase_drawings_as_edits() {
         .apply(canvas.edit().unwrap().unwrap())
         .unwrap();
     assert_eq!(stored_ink(&section, space).len(), before + 1);
+}
+
+#[test]
+fn the_accent_pen_and_shapes_draw_as_the_desktop_and_a_cancelled_sweep_stores_nothing() {
+    let (_directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    let space = canvas.space;
+    let before = stored_ink(&section, space).len();
+    let accent = pens(canvas::gpu::colorref(SECTION))[0];
+    canvas.set_tool(1, 0, SECTION).unwrap();
+    trace(&mut canvas, &section, &line([100.0, 600.0], [300.0, 600.0]));
+    let drawn = stored_ink(&section, space);
+    assert_eq!(drawn.last().unwrap().strokes[0].color, accent.color);
+    assert!(accent.color.is_some());
+    // An oval dragged out is one drawing that keeps its shape.
+    canvas.set_tool(4, 3, SECTION).unwrap();
+    trace(&mut canvas, &section, &line([100.0, 700.0], [300.0, 800.0]));
+    let drawn = stored_ink(&section, space);
+    assert_eq!(drawn.len(), before + 2);
+    assert!(drawn.last().unwrap().shape.is_some());
+
+    // An eraser sweep a second finger cancels gives back what it took and stores nothing.
+    canvas.set_tool(2, 0, SECTION).unwrap();
+    canvas.press([200.0, 580.0]).unwrap();
+    canvas.drag([200.0, 620.0]).unwrap();
+    assert!(canvas.page.editor.ink_extent(&[drawn[before].id]).is_none());
+    let _ = canvas.page.cancel_ink().unwrap();
+    assert!(canvas.edit().unwrap().is_none());
+    assert!(canvas.page.editor.ink_extent(&[drawn[before].id]).is_some());
+    assert!(!canvas.page.editor.can_redo());
+    assert_eq!(stored_ink(&section, space).len(), before + 2);
 }

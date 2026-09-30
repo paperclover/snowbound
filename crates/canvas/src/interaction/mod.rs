@@ -145,6 +145,8 @@ struct Paint<'a> {
     chrome: bool,
     /// Search matches, marked as OneNote marks them.
     found: &'a [crate::search::PageMatch],
+    /// The note See Playback highlights.
+    played: Option<&'a crate::search::PageMatch>,
 }
 
 enum Drag {
@@ -239,6 +241,8 @@ pub struct PageView {
     pub host_viewport: bool,
     /// Matches of the search shown on the page, marked under their text.
     pub found: Vec<crate::search::PageMatch>,
+    /// The note playing, highlighted as See Playback highlights it.
+    pub played: Option<crate::search::PageMatch>,
     /// The caret's opacity in its blink.
     caret: f32,
     /// When the caret last moved, which restarts its blink.
@@ -300,6 +304,7 @@ impl PageView {
             touch: false,
             host_viewport: false,
             found: Vec::new(),
+            played: None,
             caret: 1.0,
             blink_from: Instant::now(),
             ink: Default::default(),
@@ -316,6 +321,7 @@ impl PageView {
         self.space = false;
         self.object_focus = None;
         self.found.clear();
+        self.played = None;
         self.leave_ink();
     }
 
@@ -868,6 +874,7 @@ impl PageView {
                     .map(|y| (y - self.viewport.origin[1]) / self.viewport.scale),
                 chrome: !self.touch || self.focused,
                 found: &self.found,
+                played: self.played.as_ref(),
             },
         )?);
         if self.drag.is_none()
@@ -1903,7 +1910,7 @@ fn append_play_button(rect: [f32; 4], paper: Paper, primitives: &mut Vec<Primiti
     primitives.push(Primitive::Gradient {
         rect,
         radius: [side / 2.0; 2],
-        colors: [0x00e6a56e, 0x00c8783a].map(|color| paper.shade(crate::gpu::colorref(color))),
+        colors: [0x00e6a56e, 0x00c8783a].map(|color| paper.tint(crate::gpu::colorref(color))),
     });
     primitives.push(Primitive::Path {
         data: "M4 3L8 5.25L4 7.5Z",
@@ -2605,6 +2612,7 @@ fn append_outline<'a>(
         colors,
         visible,
         found,
+        played,
         ..
     } = paint;
     let rows = [visible[0] - y, visible[1] - y];
@@ -2634,11 +2642,15 @@ fn append_outline<'a>(
             });
         }
     }
-    let highlight = match editor {
+    let mut highlight = match editor {
         Some(editor) => editor.selection_rects()?,
         None if selected => outline.range_rects(outline.whole())?,
         None => Vec::new(),
     };
+    // OneNote highlights the note playing as it highlights a selection.
+    if let Some((_, selection)) = played.filter(|(id, _)| *id == outline.id) {
+        highlight.extend(outline.range_rects(*selection)?);
+    }
     for rect in highlight {
         primitives.push(Primitive::Rect {
             rect: [

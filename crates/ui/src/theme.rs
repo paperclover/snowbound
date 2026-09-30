@@ -1,4 +1,4 @@
-use draw::srgb;
+use draw::{hsl, hue, srgb};
 
 /// Colours are linear RGBA; sizes are logical pixels.
 #[derive(Clone, Debug)]
@@ -184,7 +184,7 @@ impl Theme {
                 frame: [[0.55, 0.82], [0.55, 0.76]],
                 tab: [0.45, 0.70],
                 edge: [0.30, 0.52],
-                accent: [0.60, 0.45],
+                accent: draw::LIGHT_ACCENT,
             },
             desktop_menu: None,
         }
@@ -296,41 +296,6 @@ impl Theme {
 
 /// Least OKLab lightness difference between icons' accent marks and the toolbar.
 const ICON_CONTRAST: f32 = 0.4;
-
-/// The hue in degrees of a linear colour, as it looks in sRGB.
-fn hue(color: [f32; 4]) -> f32 {
-    let [r, g, b] = [color[0], color[1], color[2]].map(|value| {
-        if value <= 0.003_130_8 {
-            value * 12.92
-        } else {
-            1.055 * value.powf(1.0 / 2.4) - 0.055
-        }
-    });
-    let max = r.max(g).max(b);
-    let range = max - r.min(g).min(b);
-    if range == 0.0 {
-        return 0.0;
-    }
-    let sector = if max == r {
-        (g - b) / range
-    } else if max == g {
-        (b - r) / range + 2.0
-    } else {
-        (r - g) / range + 4.0
-    };
-    (sector * 60.0).rem_euclid(360.0)
-}
-
-/// An sRGB hue, saturation and lightness as linear RGBA.
-fn hsl(hue: f32, saturation: f32, lightness: f32) -> [f32; 4] {
-    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
-    let channel = |offset: f32| {
-        let k = (offset + hue / 30.0).rem_euclid(12.0);
-        let value = lightness - chroma / 2.0 * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0);
-        (value * 255.0).round().clamp(0.0, 255.0) as u8
-    };
-    srgb(channel(0.0), channel(8.0), channel(4.0))
-}
 
 #[cfg(test)]
 mod tests {

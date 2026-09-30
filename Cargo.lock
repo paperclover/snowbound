@@ -3237,6 +3237,7 @@ dependencies = [
  "canvas",
  "draw",
  "fontique",
+ "image",
  "libc",
  "notebook",
  "objc2 0.5.2",

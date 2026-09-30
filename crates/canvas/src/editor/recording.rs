@@ -10,7 +10,9 @@ use std::time::Instant;
 /// A recording in progress.
 pub(super) struct Live {
     id: [u8; 16],
+    /// When the recording would have started had it never paused.
     started: Instant,
+    paused: Option<Instant>,
     /// The blank paragraph before the line saying when, which the file goes before.
     place: ExGuid,
 }
@@ -44,6 +46,34 @@ impl CanvasEditor {
     /// The recording that text written now links to.
     pub fn recording(&self) -> Option<[u8; 16]> {
         self.recording.as_ref().map(|live| live.id)
+    }
+
+    /// How far the recording has got, its pauses left out.
+    pub fn recording_ms(&self) -> Option<u32> {
+        let live = self.recording.as_ref()?;
+        let now = live.paused.unwrap_or_else(Instant::now);
+        Some(u32::try_from((now - live.started).as_millis()).unwrap_or(u32::MAX))
+    }
+
+    /// Pauses or resumes the recording. OneNote links nothing written while it is paused.
+    pub fn pause_recording(&mut self, paused: bool) {
+        let Some(live) = &mut self.recording else {
+            return;
+        };
+        match (live.paused, paused) {
+            (None, true) => live.paused = Some(Instant::now()),
+            (Some(since), false) => {
+                live.started += since.elapsed();
+                live.paused = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn recording_paused(&self) -> bool {
+        self.recording
+            .as_ref()
+            .is_some_and(|live| live.paused.is_some())
     }
 
     /// Starts a recording at the caret, returning its identity: the caret's paragraph splits
@@ -119,6 +149,7 @@ impl CanvasEditor {
         self.recording = Some(Live {
             id,
             started: Instant::now(),
+            paused: None,
             place,
         });
         Ok(id)
@@ -179,14 +210,14 @@ impl CanvasEditor {
     /// Links text `edit` writes while recording to the moment it is written, as OneNote
     /// links notes taken then; blank paragraphs and those already linked stay as they are.
     pub(super) fn link_notes(&self, edit: &mut DocumentEdit) -> Result<(), EditError> {
-        let Some(live) = &self.recording else {
+        let Some(time) = self.recording_ms().filter(|_| !self.recording_paused()) else {
             return Ok(());
         };
+        let id = self.recording().expect("a recording is live");
         let nodes = &self.active_outline().document.container(edit.container)?[edit.range.clone()];
         let before: BTreeMap<ExGuid, &str> = descendants(nodes, None)
             .filter_map(|(_, _, node)| Some((node.id, node.text()?.text.text())))
             .collect();
-        let time = u32::try_from(live.started.elapsed().as_millis()).unwrap_or(u32::MAX);
         let mut pending: Vec<&mut PageParagraph> = edit.replacement.iter_mut().collect();
         while let Some(node) = pending.pop() {
             let written = node.text().is_some_and(|text| {
@@ -194,7 +225,7 @@ impl CanvasEditor {
             });
             if written && node.media == MediaIndex::default() {
                 node.media = MediaIndex {
-                    recordings: vec![live.id],
+                    recordings: vec![id],
                     time_ms: Some(time),
                 };
             }
@@ -211,6 +242,10 @@ impl CanvasEditor {
         Ok(())
     }
 }
+
+/// How far before a linked note's moment it plays from: OneNote 2010's default (Options,
+/// Audio & Video, `corpus/recording/native/read/onenote-audio-video-options.png`).
+const REWIND_MS: u32 = 5_000;
 
 /// A play button's side, and how far its right edge stands before the text it plays from,
 /// in points, as OneNote 2010 draws it at 100%.
@@ -233,6 +268,20 @@ impl CanvasEditor {
                     })
                     .find(named)
             })
+    }
+
+    /// The note See Playback highlights `at_ms` into recording `id`: the text last linked at
+    /// or before then. The line saying when recording started, linked at its start, is none.
+    pub fn played_note(&self, id: [u8; 16], at_ms: u32) -> Option<ExGuid> {
+        self.visible_outlines()
+            .flat_map(|outline| descendants(outline.document.nodes(), None))
+            .filter(|(_, _, node)| {
+                node.text().is_some() && node.media.recordings.first() == Some(&id)
+            })
+            .filter_map(|(_, _, node)| Some((node.media.time_ms?, node.id)))
+            .filter(|(time, _)| (1..=at_ms).contains(time))
+            .max_by_key(|(time, _)| *time)
+            .map(|(_, id)| id)
     }
 
     /// The play button OneNote shows for document point `point`: beside the linked note or
@@ -267,7 +316,7 @@ impl CanvasEditor {
             (
                 square(paragraph.origin[0], paragraph.origin[1], line),
                 *node.media.recordings.first()?,
-                node.media.time_ms?,
+                node.media.time_ms?.saturating_sub(REWIND_MS),
             )
         } else {
             let object = shaped.objects.iter().find(|object| {

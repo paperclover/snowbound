@@ -48,8 +48,10 @@ these pieces meet.
 A `.one` file is a revision store. Every client, OneNote included, commits by
 appending a revision and then rewriting the 1024-byte header, which makes the
 header plus the file length a cheap *stamp* of the committed state. Snowbound
-queues edits as ops in a local SQLite replica, then a background thread polls
-the stamp. If the stamp is unchanged, it publishes the queued batch as one
+queues edits as ops in a local SQLite replica. A background thread checks the
+stamp when an edit is queued or the share reports a change (SMB change
+notifications or the OS file watcher, as OneNote does; it polls only where
+nothing can watch). If the stamp is unchanged, it publishes the queued batch as one
 appended revision. If it has changed, it reads the file once and replays the
 queue on top. Where an op can't merge, the result is what OneNote 2010 makes: a
 read-only conflict page under the page. OneNote coordinates writers through

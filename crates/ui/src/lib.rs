@@ -744,6 +744,12 @@ impl Ui {
         self.wake
     }
 
+    /// Asks for a frame `after` this one, as a running clock does.
+    pub fn wake_after(&mut self, after: std::time::Duration) {
+        let due = self.now + after;
+        self.wake = Some(self.wake.map_or(due, |wake| wake.min(due)));
+    }
+
     pub fn scale(&self) -> f32 {
         self.scale
     }

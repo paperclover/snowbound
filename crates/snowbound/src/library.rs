@@ -189,8 +189,8 @@ impl Library {
                 }
             }
         }
-        let notebook = Notebook::open(location, cache);
-        let (background, watch) = match &notebook {
+        let mut notebook = Notebook::open(location, cache);
+        let (background, watch) = match &mut notebook {
             Ok(notebook) => local_background(notebook, location),
             Err(_) => (None, None),
         };
@@ -216,7 +216,7 @@ impl Library {
     ) -> Result<Self, String> {
         let server = Arc::new(Server { mount, login });
         let client = server.connect().map_err(|error| error.to_string())?;
-        let notebook = Notebook::open_smb(Arc::new(client), &server.mount.root, cache)
+        let mut notebook = Notebook::open_smb(Arc::new(client), &server.mount.root, cache)
             .map_err(|error| error.to_string())?;
         let connect = Arc::clone(&server);
         let background = Background::smb(
@@ -251,7 +251,7 @@ impl Library {
     }
 
     /// This notebook as `notebook`, read again after a change.
-    pub fn with(&self, notebook: Notebook) -> Self {
+    pub fn with(&self, mut notebook: Notebook) -> Self {
         if let Some(background) = &self.background {
             background.watch(notebook.replicas());
         }
@@ -278,8 +278,8 @@ impl Library {
     }
 
     /// A notebook `Notebook::create` just made in the folder at `location`.
-    pub fn created(location: &str, notebook: Notebook, cache: &Path) -> Self {
-        let (background, watch) = local_background(&notebook, location);
+    pub fn created(location: &str, mut notebook: Notebook, cache: &Path) -> Self {
+        let (background, watch) = local_background(&mut notebook, location);
         Self {
             location: location.to_owned(),
             name: file_name(Path::new(location)),
@@ -476,7 +476,7 @@ pub fn recycle_bin(path: &str) -> bool {
 /// the folder's changes to it. A folder on a network volume is kept in offline copies, as on a
 /// share, and where the system does not report its server's changes, checked more often.
 fn local_background(
-    notebook: &Notebook,
+    notebook: &mut Notebook,
     location: &str,
 ) -> (Option<Arc<Background>>, Option<Arc<crate::watch::Watch>>) {
     let reports = Arc::new(OnceLock::new());

@@ -39,6 +39,14 @@ impl Pen {
         }
     }
 
+    /// The pen shapes draw with: a little thicker, as OneNote's are.
+    pub const fn shape(self) -> Self {
+        Self {
+            width: 50.0,
+            ..self
+        }
+    }
+
     /// A stroke of this pen through `points`, snapped to the HIMETRIC grid stored.
     pub fn stroke(&self, points: &[[f32; 2]]) -> Result<InkStroke, EditError> {
         let points_of = |himetric: f32| snap(himetric * 72.0 / 2540.0);
@@ -176,6 +184,28 @@ impl CanvasEditor {
         }
         self.redo.clear();
         Ok(true)
+    }
+
+    /// How many ops wait for `take_ops`.
+    pub(crate) fn pending_ops(&self) -> usize {
+        self.ops.as_ref().map_or(0, Vec::len)
+    }
+
+    /// Takes back an eraser's sweep as though it never happened: its undo step, and the ops
+    /// recorded since there were `mark`, none of which were taken since.
+    pub(crate) fn retract_erasing(
+        &mut self,
+        engine: &mut crate::layout::TextEngine,
+        mark: usize,
+    ) -> Result<(), EditorError> {
+        if let Some(step) = self.undo.pop() {
+            self.apply_history(engine, step)
+                .map_err(|(_, error)| error)?;
+        }
+        if let Ok(ops) = &mut self.ops {
+            ops.truncate(mark);
+        }
+        Ok(())
     }
 
     /// The page's drawings, on top first, with most of their points inside `lasso`, a

@@ -29,6 +29,13 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         systemItem: .undo, primaryAction: UIAction { [weak self] _ in self?.canvas.undo(redo: false) })
     private lazy var redo = UIBarButtonItem(
         systemItem: .redo, primaryAction: UIAction { [weak self] _ in self?.canvas.undo(redo: true) })
+    /// Shows the drawing tools, which a finger then draws with too.
+    private lazy var draw = UIBarButtonItem(
+        title: "Draw", image: UIImage(systemName: "pencil.tip.crop.circle"),
+        primaryAction: UIAction { [weak self] _ in
+            guard let canvas = self?.canvas else { return }
+            canvas.showPicker(!canvas.pickerShown)
+        })
     private lazy var more = UIBarButtonItem(
         title: "Page", image: UIImage(systemName: "ellipsis.circle"),
         menu: UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in done(self?.pageMenu() ?? []) }]))
@@ -40,7 +47,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         self.titleFocus = titleFocus
         super.init(nibName: nil, bundle: nil)
         navigationItem.largeTitleDisplayMode = .never
-        navigationItem.rightBarButtonItems = [more]
+        navigationItem.rightBarButtonItems = [more, draw]
         showTitle(section.row(of: page)?.row.title ?? "")
     }
 
@@ -109,14 +116,20 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
             section.retitle(page, title)
         }
         fitTitle()
-        guard canvas.isFirstResponder else {
-            if navigationItem.rightBarButtonItems?.first !== more { navigationItem.rightBarButtonItems = [more] }
-            return
-        }
+        draw.isSelected = canvas.pickerShown
+        draw.isEnabled = !canvas.readOnly
         undo.isEnabled = canvas.canUndo(redo: false)
         redo.isEnabled = canvas.canUndo(redo: true)
-        if navigationItem.rightBarButtonItems?.first !== done {
-            navigationItem.rightBarButtonItems = [done, more, redo, undo]
+        // Drawing keeps undo at hand, as typing does.
+        guard canvas.isFirstResponder || canvas.pickerShown else {
+            if navigationItem.rightBarButtonItems?.first !== more { navigationItem.rightBarButtonItems = [more, draw] }
+            return
+        }
+        let items = canvas.isFirstResponder ? [done, more, draw, redo, undo] : [more, draw, redo, undo]
+        if navigationItem.rightBarButtonItems?.first !== items.first
+            || navigationItem.rightBarButtonItems?.count != items.count
+        {
+            navigationItem.rightBarButtonItems = items
         }
     }
 

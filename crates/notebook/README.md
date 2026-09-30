@@ -253,6 +253,8 @@ names. TOC references whose identities are absent from the directory remain
 inspectable; a cached filename never substitutes for an identity match.
 Reserved `_onefiles` directories are excluded from section-group traversal;
 OneNote's `OneNote_RecycleBin` is listed as the section group OneNote shows.
+Dot files and folders (`.DS_Store`, AppleDouble `._` companions, `.snowbound`) and Office's
+`~$` owner files are skipped wherever they are, never read as sections.
 Encrypted sections and valid storage with an unreadable document graph retain
 their identity as `Locked` or `Unreadable`, without being presented as empty pages.
 A child folder or section file that is denied or gone while listing (a folder
@@ -263,8 +265,11 @@ reads and ambiguous identities reject the discovery.
 `Cache::discover` keeps each file's listing (size and last write time), stamp and what
 discovery took from it; the next discovery reads only the files listed otherwise, taking one
 from a copy where `Source::copy` has it as it stands (on a share, a replica whose base has the
-file's stamp), and `found(path)` gives a section's listing and stamp for `Background::watch`. A file written
-during discovery is read again next time; a failed discovery leaves the cache as it was.
+file's stamp), and `found(path)` gives a section's listing and stamp for `Background::watch`.
+`take` hands on, once, the sections it read from the source, up to a memory bound, which
+`Notebook::replicas` gives `Background::watch` so that its first check need not read them
+again. A file written during discovery is read again next time; a failed discovery leaves the
+cache as it was.
 
 Each file read must be a consistent, bounded snapshot. The result is an
 observation across multiple files, not an atomic notebook transaction or

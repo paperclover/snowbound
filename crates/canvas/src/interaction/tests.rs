@@ -24,6 +24,7 @@ pub(super) fn paint(show_caret: bool, scale: f32, display_scale: f32) -> Paint<'
         visible: [f32::NEG_INFINITY, f32::INFINITY],
         chrome: true,
         found: &[],
+        played: None,
     }
 }
 
@@ -889,6 +890,7 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
             visible: [f32::NEG_INFINITY, f32::INFINITY],
             chrome: true,
             found: &[],
+            played: None,
         },
         &mut primitives,
     )
@@ -963,6 +965,7 @@ fn editable_tables_paint_borders_before_selection_and_cell_text() {
             visible: [f32::NEG_INFINITY, f32::INFINITY],
             chrome: true,
             found: &[],
+            played: None,
         },
         &mut primitives,
     )
