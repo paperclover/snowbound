@@ -235,7 +235,7 @@ def main():
         os.replace(partial, latest_file)
     print(f'{latest_file}: {json.dumps(moved, sort_keys=True)}')
     # Stable names for the readme's download links, always the newest build of each platform.
-    downloads = published / 'download'
+    downloads = published / 'latest'
     downloads.mkdir(exist_ok=True)
     for platform, newest_name in moved.items():
         if newest_name != name(version):

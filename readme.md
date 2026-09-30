@@ -12,7 +12,7 @@ pen and drawing tools [(WIP)](https://shale.paperclover.net/snowbound/issues/21)
 [(WIP)](https://shale.paperclover.net/snowbound/issues/36), revision
 history, multi-machine live collaboration, and much more.
 
-**Download**: macOS: [Silicon](https://file.paperclover.net/shr/snowbound/download/Snowbound-macos-aarch64.zip) • Linux: [x86_64](https://file.paperclover.net/shr/snowbound/download/snowbound-linux-x86_64), [aarch64](https://file.paperclover.net/shr/snowbound/download/snowbound-linux-aarch64) • Windows: [x64](https://file.paperclover.net/shr/snowbound/download/snowbound-windows-x86_64.exe), [Arm](https://file.paperclover.net/shr/snowbound/download/snowbound-windows-aarch64.exe) • [OS X](https://file.paperclover.net/shr/snowbound/download/Snowbound-macos-10.6.zip)
+**Download**: macOS: [Silicon](https://file.paperclover.net/shr/snowbound/latest/Snowbound-macos-aarch64.zip) • Linux: [x86_64](https://file.paperclover.net/shr/snowbound/latest/snowbound-linux-x86_64), [aarch64](https://file.paperclover.net/shr/snowbound/latest/snowbound-linux-aarch64) • Windows: [x64](https://file.paperclover.net/shr/snowbound/latest/snowbound-windows-x86_64.exe), [Arm](https://file.paperclover.net/shr/snowbound/latest/snowbound-windows-aarch64.exe) • [OS X](https://file.paperclover.net/shr/snowbound/latest/Snowbound-macos-10.6.zip)
 
 <!-- Regenerate from the sample notebook (edit it freely in OneNote or Snowbound):
 python3 tools/canvas/build_macos.py --release && d=$(mktemp -d) && cp -R docs/sample-notebook/Personal "$d" && target/Snowbound.app/Contents/MacOS/Snowbound --notebook "$d/Personal" --cache "$d/cache" --settings "$d/settings.json" --screenshot docs/screenshot
