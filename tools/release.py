@@ -27,8 +27,8 @@ CHECKS = [
 # Clover's Developer ID Application certificate, by its SHA-1 hash: its name is the account
 # holder's legal name, which nothing here prints or stores.
 IDENTITY = 'BA308AA3591299E053E8824CEF1651F686F8908E'
-# The notarytool keychain profile that notarizes it, once `xcrun notarytool store-credentials` makes it.
-NOTARY = 'snowbound'
+# The App Store Connect API key that notarizes it: {"key": P8 PATH, "key_id": ID, "issuer": ID}.
+NOTARY = Path('~/.config/snowbound/notary.json').expanduser()
 # What hardened runtime needs for Record Audio and Record Video.
 ENTITLEMENTS = {
     'com.apple.security.device.audio-input': True,
@@ -98,10 +98,14 @@ def zip_bundle(bundle, archive):
     run(['ditto', '-c', '-k', '--norsrc', '--noextattr', '--noqtn', '--noacl', '--keepParent', bundle, archive])
 
 
-def notarizes():
-    """Whether the NOTARY profile exists and signs in."""
-    return subprocess.run(['xcrun', 'notarytool', 'history', '--keychain-profile', NOTARY],
-                          capture_output=True).returncode == 0
+def notary():
+    """notarytool's credential arguments from NOTARY, if they sign in."""
+    if not NOTARY.exists():
+        return None
+    key = json.loads(NOTARY.read_text())
+    arguments = ['--key', str(Path(key['key']).expanduser()), '--key-id', key['key_id'], '--issuer', key['issuer']]
+    signs_in = subprocess.run(['xcrun', 'notarytool', 'history', *arguments], capture_output=True).returncode == 0
+    return arguments if signs_in else None
 
 
 def build_mac(platform, folder, developer_id, notarize):
@@ -117,7 +121,7 @@ def build_mac(platform, folder, developer_id, notarize):
              '--sign', IDENTITY, bundle])
         if notarize:
             zip_bundle(bundle, archive)
-            run(['xcrun', 'notarytool', 'submit', archive, '--keychain-profile', NOTARY, '--wait'])
+            run(['xcrun', 'notarytool', 'submit', archive, *notarize, '--wait'])
             run(['xcrun', 'stapler', 'staple', bundle])
             archive.unlink()
     zip_bundle(bundle, archive)
@@ -143,9 +147,9 @@ def main():
                                 capture_output=True, text=True).stdout
     if developer_id and IDENTITY not in identities:
         sys.exit(f'The keychain has no signing identity {IDENTITY}; release with --ad-hoc, or add it.')
-    notarize = developer_id and notarizes()
+    notarize = notary() if developer_id else None
     if developer_id and not notarize:
-        print(f'Not notarizing: no notarytool profile "{NOTARY}" that signs in (see tools/RELEASE.md).',
+        print(f'Not notarizing: no API key in {NOTARY} that signs in (see tools/RELEASE.md).',
               file=sys.stderr)
 
     commit = jj('log', '--no-graph', '-r', 'main', '-T', 'commit_id').strip()
@@ -174,9 +178,9 @@ def main():
         built = {}
         for platform in args.platforms:
             if platform.startswith('macos'):
-                folder = stage / platform
-                folder.mkdir()
-                built[platform] = build_mac(platform, folder, developer_id, notarize)
+                work = stage / platform
+                work.mkdir()
+                built[platform] = build_mac(platform, work, developer_id, notarize)
         linux = [platform.removeprefix('linux-') for platform in args.platforms if platform.startswith('linux')]
         if linux:
             built |= build_linux(linux)

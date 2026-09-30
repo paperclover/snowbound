@@ -56,10 +56,11 @@ agent's shell; `security set-key-partition-list -S apple-tool:,apple:,codesign:
 -s -k PASSWORD ~/Library/Keychains/login.keychain-db` lets it sign without
 asking.
 
-Notarization runs when the keychain profile `snowbound` exists and signs in,
-and is skipped with a note otherwise. Make the profile once, with an App Store
-Connect API key (Users and Access, Integrations, Team Keys: a key with the
-Developer role; its `.p8`, key ID and issuer ID):
+Notarization runs when `~/.config/snowbound/notary.json` names an App Store
+Connect API key that signs in (`{"key": "~/.config/snowbound/AuthKey_ID.p8",
+"key_id": "ID", "issuer": "ISSUER"}`, mode 600), and is skipped with a note
+otherwise. A notarytool keychain profile would do, but storing one fails from an
+agent's shell, where the keychain refuses new items.
 
 ```sh
 xcrun notarytool store-credentials snowbound --key AuthKey_KEYID.p8 --key-id KEYID --issuer ISSUER-UUID
