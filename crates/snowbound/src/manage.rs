@@ -7,7 +7,7 @@ use notebook::session::Notebook;
 use onestore::{
     ExGuid, PageCreation, PageEdit,
     op::{Edit, Op, PageOp, SectionOp},
-    page::{Page, PageObject},
+    page::{Image, Page, PageObject},
 };
 use std::{error::Error, sync::Arc};
 
@@ -124,24 +124,59 @@ impl State {
         &mut self,
         choice: crate::templates::Choice,
     ) -> Result<(), Box<dyn Error>> {
-        self.persist()?;
-        let session = self.session.as_ref().ok_or("No section is open")?;
-        let ops = template_ops(&session.section.page(session.space)?, choice)?;
-        self.edit_page(ops)
+        use crate::templates::Choice;
+        let template = match choice {
+            Choice::Template(name) => {
+                Some(canvas::template::find(name).ok_or("That template is not available")?)
+            }
+            _ => None,
+        };
+        self.with_art(template, move |state, art| {
+            state.persist()?;
+            let session = state.session.as_ref().ok_or("No section is open")?;
+            let ops = template_ops(&session.section.page(session.space)?, choice, art)?;
+            state.edit_page(ops)
+        })
+    }
+
+    /// Calls `then` with `template`'s pictures, or none without one. Rasterizing and encoding
+    /// them takes seconds on a slow machine, so they are made on a thread of their own, and
+    /// `then` runs on this one after if the page they were chosen for is still open.
+    pub(crate) fn with_art(
+        &mut self,
+        template: Option<&'static Template>,
+        then: impl FnOnce(&mut State, Vec<Image>) -> Result<(), Box<dyn Error>> + Send + 'static,
+    ) -> Result<(), Box<dyn Error>> {
+        let Some(template) = template else {
+            return then(self, Vec::new());
+        };
+        let space = self.session.as_ref().ok_or("No section is open")?.space;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let art = template.pictures().map_err(|error| error.to_string());
+            let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                if state
+                    .session
+                    .as_ref()
+                    .is_some_and(|open| open.space == space)
+                {
+                    then(state, art?)
+                } else {
+                    Ok(())
+                }
+            })));
+        });
+        Ok(())
     }
 
     /// View, Page Color and Rule Lines: gives the open page `color`, a COLORREF,
-    /// `rule_lines` and, when given, `template`'s art or none in place of the art it had, as
-    /// one undo step.
+    /// `rule_lines` and, when given, `art` in place of the art it had, as one undo step.
     pub(crate) fn paper_page(
         &mut self,
         color: Option<u32>,
         rule_lines: Option<onestore::page::RuleLines>,
-        art: Option<Option<&Template>>,
+        art: Option<Vec<Image>>,
     ) -> Result<(), Box<dyn Error>> {
-        let art = art
-            .map(|template| template.map_or(Ok(Vec::new()), Template::pictures))
-            .transpose()?;
         let response = self.view.set_paper(color, rule_lines, art)?;
         self.respond(response);
         Ok(())
@@ -507,14 +542,11 @@ impl State {
 pub fn template_ops(
     page: &Page,
     choice: crate::templates::Choice,
+    art: Vec<Image>,
 ) -> Result<Vec<PageOp>, Box<dyn Error>> {
     use crate::templates::Choice;
     let mut ops = match choice {
-        Choice::Template(name) => art_ops(
-            page,
-            Some(canvas::template::find(name).ok_or("That template is not available")?),
-        )?,
-        Choice::Color(_) => art_ops(page, None)?,
+        Choice::Template(_) | Choice::Color(_) => art_ops(page, art),
         Choice::More | Choice::Dismiss | Choice::Colors => return Ok(Vec::new()),
     };
     match choice {
@@ -538,9 +570,9 @@ pub fn template_ops(
     Ok(ops)
 }
 
-/// The ops giving `page` `template`'s art (OneNote's pictures' places, our recreations'
-/// bytes), or none, in place of the background pictures it had.
-pub fn art_ops(page: &Page, template: Option<&Template>) -> Result<Vec<PageOp>, Box<dyn Error>> {
+/// The ops giving `page` `art`, a template's pictures, in place of the background pictures
+/// it had.
+fn art_ops(page: &Page, art: Vec<Image>) -> Vec<PageOp> {
     let mut ops: Vec<PageOp> = page
         .objects
         .iter()
@@ -560,13 +592,11 @@ pub fn art_ops(page: &Page, template: Option<&Template>) -> Result<Vec<PageOp>, 
             _ => true,
         })
         .map(PageObject::id);
-    for image in template.map_or(Ok(Vec::new()), Template::pictures)? {
-        ops.push(PageOp::Add {
-            object: PageObject::Image(image),
-            before: under,
-        });
-    }
-    Ok(ops)
+    ops.extend(art.into_iter().map(|image| PageOp::Add {
+        object: PageObject::Image(image),
+        before: under,
+    }));
+    ops
 }
 
 #[cfg(test)]
@@ -695,7 +725,11 @@ mod tests {
             unreachable!()
         };
         let background = |space: ExGuid, choice: Choice| {
-            template_ops(&page(&file, space), choice)
+            let art = match choice {
+                Choice::Template(name) => canvas::template::find(name).unwrap().pictures().unwrap(),
+                _ => Vec::new(),
+            };
+            template_ops(&page(&file, space), choice, art)
                 .unwrap()
                 .into_iter()
                 .map(|op| Op::Page { space, op })

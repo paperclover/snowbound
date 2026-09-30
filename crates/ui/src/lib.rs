@@ -827,6 +827,13 @@ impl Ui {
         self.hit(point, Flags::CLICKABLE | Flags::CUSTOM)
     }
 
+    /// The least width the box's children fit in, with its padding, as built this frame or
+    /// last: each row's groups folded, and each box yielding all its strictness lets it.
+    pub fn narrowest(&self, id: Id) -> Option<f32> {
+        let index = self.nodes.iter().position(|node| node.id == id)?;
+        Some(layout::narrowest(&self.nodes, index))
+    }
+
     /// The box's rectangle from the latest layout.
     pub fn rect(&self, id: Id) -> Option<[f32; 4]> {
         self.states.get(&id).map(|state| state.rect)

@@ -1074,7 +1074,7 @@ impl crate::State {
     }
 
     /// The window below the title bar on the first run, or once every notebook is closed:
-    /// what is missing, and the two ways to start.
+    /// what is missing, and the ways to start.
     pub(crate) fn welcome(&mut self, theme: &Theme) {
         let id = self.ui.id("welcome");
         #[cfg(target_os = "linux")]
@@ -1121,6 +1121,12 @@ impl crate::State {
                         crate::Command::OpenFromServer(None),
                     ),
                 ])
+                .chain(crate::guide::OFFERED.then_some((
+                    "guide",
+                    art::PAGE,
+                    "Open the Snowbound Guide",
+                    crate::Command::OpenGuide,
+                )))
                 .chain(install)
                 .collect(),
         );

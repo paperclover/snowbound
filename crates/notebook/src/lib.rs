@@ -1,4 +1,5 @@
-#![forbid(unsafe_code)]
+// One Win32 call, where std has no safe form: `session`'s hidden attribute.
+#![deny(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
 pub mod discover;

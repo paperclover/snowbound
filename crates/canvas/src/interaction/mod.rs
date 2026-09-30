@@ -258,6 +258,9 @@ pub struct PageView {
     /// A platform scroll view owns the viewport: changes neither clamp it nor reveal the
     /// caret, which the host does knowing its bars and keyboard.
     pub host_viewport: bool,
+    /// OneNote's Snap to Grid: clicks, drags and shapes land on the placement grid unless
+    /// Option (Alt) is held. Off, they land where the pointer is.
+    pub snap_to_grid: bool,
     /// Matches of the search shown on the page, marked under their text.
     pub found: Vec<crate::search::PageMatch>,
     /// The note playing, highlighted as See Playback highlights it.
@@ -271,6 +274,9 @@ pub struct PageView {
     /// When the caret last moved, which restarts its blink.
     blink_from: Instant,
     ink: ink::State,
+    /// What the view showed before each zoom since the page opened, in document points:
+    /// scrolling still reaches it, so a zoom keeps the point under the pointer in place.
+    reach: Option<[f32; 4]>,
 }
 
 /// Room, in OneNote pixels, the view leaves beyond content it scrolls to.
@@ -326,6 +332,7 @@ impl PageView {
             focused: true,
             touch: false,
             host_viewport: false,
+            snap_to_grid: true,
             found: Vec::new(),
             played: None,
             spelling: None,
@@ -333,6 +340,7 @@ impl PageView {
             caret: 1.0,
             blink_from: Instant::now(),
             ink: Default::default(),
+            reach: None,
         };
         view.place_opened();
         view
@@ -376,6 +384,7 @@ impl PageView {
         place: Option<Place>,
     ) {
         self.replace(editor, scene);
+        self.reach = None;
         let Some(place) = place else {
             return self.place_opened();
         };
@@ -461,14 +470,7 @@ impl PageView {
         }
         let point = self.viewport.document_point(self.pointer);
         let position = [point[0] - grab[0], point[1] - grab[1]];
-        Some((
-            *id,
-            if self.modifiers.option {
-                position
-            } else {
-                snap_to_grid(position, self.editor.margin_origin())
-            },
-        ))
+        Some((*id, self.grid(position)))
     }
 
     /// The dragged outline and how far it would move.
@@ -505,12 +507,16 @@ impl PageView {
             return Some((*id, origin, size));
         }
         let origin = [origin[0] + delta[0], origin[1] + delta[1]];
-        let origin = if self.modifiers.option {
-            origin
+        Some((*id, self.grid(origin), size))
+    }
+
+    /// `point` on the placement grid, where Snap to Grid is on and Option isn't held.
+    fn grid(&self, point: [f32; 2]) -> [f32; 2] {
+        if self.snap_to_grid && !self.modifiers.option {
+            snap_to_grid(point, self.editor.margin_origin())
         } else {
-            snap_to_grid(origin, self.editor.margin_origin())
-        };
-        Some((*id, origin, size))
+            point
+        }
     }
 
     fn pixel(&self) -> f32 {
@@ -786,14 +792,27 @@ impl PageView {
         self.moved()
     }
 
-    /// Scales the view by `factor` about the pointer, as a trackpad pinch does.
-    pub fn pinch(&mut self, factor: f32) -> Result<Response> {
-        self.zoom_about(factor, self.pointer);
+    /// Scales the view by `factor` about `anchor`, in device pixels from the view's
+    /// top-left, as a trackpad pinch does about the pointer.
+    pub fn pinch(&mut self, factor: f32, anchor: [f32; 2]) -> Result<Response> {
+        self.zoom_about(factor, anchor);
         self.moved()
     }
 
     /// Scales the view by `factor`, keeping the document point under `anchor` in place.
     fn zoom_about(&mut self, factor: f32, anchor: [f32; 2]) {
+        let [x0, y0] = self.viewport.document_point([0.0; 2]);
+        let [x1, y1] = self
+            .viewport
+            .document_point(self.viewport.size.map(|size| size as f32));
+        self.reach = Some(self.reach.map_or([x0, y0, x1, y1], |reach| {
+            [
+                reach[0].min(x0),
+                reach[1].min(y0),
+                reach[2].max(x1),
+                reach[3].max(y1),
+            ]
+        }));
         let point = self.viewport.document_point(anchor);
         let dpr = self.display_scale;
         self.viewport.scale = (self.viewport.scale * factor).clamp(dpr / 3.0, dpr * 16.0 / 3.0);
@@ -841,7 +860,16 @@ impl PageView {
                     )
                 })
         });
-        scroll::Scroll::new(self.viewport, editable.map(|rect| (rect, pad)).chain(fixed))
+        let mut scroll =
+            scroll::Scroll::new(self.viewport, editable.map(|rect| (rect, pad)).chain(fixed));
+        if let Some(reach) = self.reach {
+            for axis in 0..2 {
+                scroll.min[axis] = scroll.min[axis].min(reach[axis] * self.viewport.scale);
+                scroll.max[axis] = scroll.max[axis]
+                    .max(reach[axis + 2] * self.viewport.scale - self.viewport.size[axis] as f32);
+            }
+        }
+        scroll
     }
 
     /// Scrolls the view's corner `offset` device pixels from the page origin along `axis`,
@@ -1263,11 +1291,7 @@ impl PageView {
     /// A fresh click places text 7 px above the pointer, on the grid.
     fn place_caret(&mut self, point: [f32; 2]) -> Result<()> {
         let position = [point[0], point[1] - 7.0 * self.pixel()];
-        let position = if self.modifiers.option {
-            position
-        } else {
-            snap_to_grid(position, self.editor.margin_origin())
-        };
+        let position = self.grid(position);
         self.editor
             .place_caret(&mut self.engine, position, DEFAULT_OUTLINE_WIDTH)?;
         Ok(())
@@ -1662,7 +1686,8 @@ impl PageView {
         self.edited()
     }
 
-    /// Insert, Picture: a PNG, JPEG or GIF `size` points large after the caret's paragraph.
+    /// Insert, Picture, or a pasted one: a PNG, JPEG or GIF `size` points large; see
+    /// [`CanvasEditor::insert_picture`].
     pub fn insert_picture(&mut self, bytes: Vec<u8>, size: [f32; 2]) -> Result<Response> {
         if !self.accepts_text() || self.editor.marked_range().is_some() {
             return Ok(Response::default());
@@ -1682,6 +1707,7 @@ impl PageView {
             printout: None,
         };
         self.editor.insert_picture(&mut self.engine, image)?;
+        self.follow_pictures()?;
         self.edited()
     }
 
@@ -2269,7 +2295,7 @@ fn page_hit(
 /// The page's rule lines over `visible`, a document rectangle, as OneNote 2010 draws them:
 /// 1/96 inch wide, or a device pixel where that is wider, horizontal lines from the margin
 /// origin down, and a grid's vertical lines through it or a margin line 1/96 inch left of it.
-fn rule_primitives(
+pub(crate) fn rule_primitives(
     lines: Option<onestore::page::RuleLines>,
     [x, y]: [f32; 2],
     [left, top, right, bottom]: [f32; 4],

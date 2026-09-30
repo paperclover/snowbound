@@ -36,6 +36,107 @@ pub(crate) fn zone(text: &Paragraph, offset: u32) -> Option<Range<u32>> {
     current.filter(|zone| zone.start <= offset && offset <= zone.end)
 }
 
+/// An object of an equation holding a position: its range, from its opening control to past
+/// its closing one, and the argument the position lies in.
+#[derive(PartialEq)]
+struct Holder {
+    range: Range<u32>,
+    argument: usize,
+    placeholder: bool,
+}
+
+/// The objects of `text` holding UTF-16 `offset` strictly inside, outermost first.
+fn holders(text: &Paragraph, offset: u32) -> Vec<Holder> {
+    // Each object's range and whether it is a placeholder; open objects and held ones by
+    // index, with the argument reached.
+    let mut objects: Vec<(Range<u32>, bool)> = Vec::new();
+    let (mut open, mut held) = (Vec::new(), None);
+    let mut unit = 0;
+    for c in text.text().chars() {
+        if unit == offset {
+            held = Some(open.clone());
+        }
+        match c {
+            OBJECT_START => {
+                // An equation's empty placeholder, "Type equation here.", is a box OneNote
+                // marks with this symbol.
+                let placeholder = text.format_at(unit + 1).is_ok_and(|format| {
+                    format
+                        .math_object
+                        .as_ref()
+                        .is_some_and(|object| object.kind == 11 && object.symbols == ['⬚'])
+                });
+                open.push((objects.len(), 0));
+                objects.push((unit..unit, placeholder));
+            }
+            ARGUMENT_SEPARATOR => {
+                if let Some((_, argument)) = open.last_mut() {
+                    *argument += 1;
+                }
+            }
+            OBJECT_END => {
+                if let Some((index, _)) = open.pop() {
+                    objects[index].0.end = unit + 1;
+                }
+            }
+            _ => {}
+        }
+        unit += c.len_utf16() as u32;
+    }
+    held.unwrap_or(open)
+        .into_iter()
+        .map(|(index, argument)| Holder {
+            range: objects[index].0.clone(),
+            argument,
+            placeholder: objects[index].1,
+        })
+        .collect()
+}
+
+/// `range` as OneNote 2010's equation editor selects it (`corpus/equation-select`): an end
+/// inside an object not holding the other end in the same argument takes the whole object, as
+/// does an end inside a placeholder, and across paragraphs an object so taken at the end of
+/// its paragraph takes the paragraph's end with it.
+pub(crate) fn widen(
+    document: &TextDocument,
+    range: Range<TextPosition>,
+) -> Result<Range<TextPosition>, EditError> {
+    let text = |paragraph| document.paragraph(paragraph).ok_or(EditError::InvalidRange);
+    let last = text(range.end.paragraph)?;
+    let starts = holders(text(range.start.paragraph)?, range.start.offset);
+    let ends = holders(last, range.end.offset);
+    let common = if range.start.paragraph == range.end.paragraph {
+        starts.iter().zip(&ends).take_while(|(a, b)| a == b).count()
+    } else {
+        0
+    };
+    let level = |holders: &[Holder]| {
+        holders
+            .iter()
+            .position(|holder| holder.placeholder)
+            .map_or(common, |placeholder| placeholder.min(common))
+    };
+    let mut widened = range.clone();
+    if let Some(holder) = starts.get(level(&starts)) {
+        widened.start.offset = holder.range.start;
+    }
+    if let Some(holder) = ends.get(level(&ends)) {
+        widened.end.offset = holder.range.end;
+        let next = range.end.paragraph + 1;
+        let container = |paragraph| document.leaf(paragraph).map(|(container, ..)| container);
+        if range.start.paragraph != range.end.paragraph
+            && widened.end.offset == last.utf16_offset(last.text().len())?
+            && container(next).is_some_and(|next| Some(next) == container(range.end.paragraph))
+        {
+            widened.end = TextPosition {
+                paragraph: next,
+                offset: 0,
+            };
+        }
+    }
+    Ok(widened)
+}
+
 /// The format text typed after an equation in `text` takes: the paragraph's last text's, or
 /// its first run's without the equation editor's.
 pub(super) fn text_after(text: &Paragraph) -> Format {
@@ -68,6 +169,20 @@ impl CanvasEditor {
         let caret = anchor.min(focus);
         let text = self.active_outline().document.paragraph(caret.paragraph)?;
         Some((caret.paragraph, zone(text, caret.offset)?))
+    }
+
+    /// Widens the selection an edit is about to replace as the equation editor selects.
+    pub(super) fn take_objects(&mut self) -> Result<(), EditError> {
+        let [anchor, focus] = self.active_outline().selection.positions;
+        let range = anchor.min(focus)..anchor.max(focus);
+        let widened = widen(&self.active_outline().document, range.clone())?;
+        if widened != range {
+            self.active_outline_mut().selection = Selection {
+                positions: [widened.start, widened.end],
+                affinities: [Affinity::Downstream, Affinity::Upstream],
+            };
+        }
+        Ok(())
     }
 
     /// Whether the caret is in an equation, which Linear and Professional act on.
@@ -373,13 +488,10 @@ impl CanvasEditor {
         for part in parts {
             broken.append(part)?;
         }
-        let Some(linear) = Math::parse(&broken)
-            .ok()
-            .and_then(|nodes| Math::linear(&nodes))
-        else {
+        let Ok(nodes) = Math::parse(&broken) else {
             return Ok(false);
         };
-        let built = Math::paragraph(&Math::from_linear(&linear), &math.spans()[0].format);
+        let built = Math::paragraph(&nodes, &math.spans()[0].format);
         // The caret starts the new row: after as many characters other than spaces as came
         // before it.
         let before = broken

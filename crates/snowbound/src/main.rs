@@ -10,6 +10,7 @@ mod conflict_render;
 #[cfg(target_os = "linux")]
 #[path = "desktop_linux.rs"]
 mod desktop;
+mod guide;
 mod history;
 #[cfg_attr(not(target_os = "macos"), path = "icloud_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "icloud_macos.rs")]
@@ -29,10 +30,16 @@ mod navigation;
 mod options;
 mod palette;
 mod pane;
+mod paste;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
 #[cfg_attr(windows, path = "windows.rs")]
 mod platform;
+mod print;
+#[cfg_attr(target_os = "linux", path = "print_linux.rs")]
+#[cfg_attr(target_os = "macos", path = "print_macos.rs")]
+#[cfg_attr(windows, path = "print_windows.rs")]
+mod printer;
 mod recording;
 mod rename;
 mod screenshot;
@@ -96,6 +103,9 @@ const TAB_ROW: f32 = 28.0;
 /// Width of the section colour around the page, and the rows' margin at the window's sides.
 const FRAME: f32 = 6.0;
 const PAGE_LIST: f32 = 240.0;
+/// The least window: the page list and a page beside it. The window widens past it to the
+/// toolbar's narrowest row, the window's controls beside it.
+const MIN_SIZE: [f32; 2] = [600.0, 400.0];
 /// Extensions of the pictures Insert, Picture offers: those the page both stores and draws.
 const PICTURE_TYPES: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
 /// Font sizes the size box offers, OneNote's list in points.
@@ -163,7 +173,8 @@ const PILL_MARGIN: f32 = 3.0;
 const DATE_UNCHOSEN: &str = "Choose another date or time.";
 const DATE_OUT_OF_RANGE: &str = "This date is outside the notebook's supported range.";
 
-#[derive(Debug)]
+type Continuation = Box<dyn FnOnce(&mut State) -> Result<(), Box<dyn Error>> + Send>;
+
 enum UserEvent {
     Quit,
     /// Text AppKit inserts outside key events, such as the character palette's.
@@ -187,6 +198,8 @@ enum UserEvent {
     /// The desktop's colours changed, where the window system doesn't say so itself.
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     Appearance,
+    /// What follows work a thread of its own finished, run on the event loop's.
+    Then(Continuation),
     /// The iCloud account signed out, signed in or switched, or iCloud Drive was turned off.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ICloudAccount,
@@ -209,11 +222,21 @@ impl Clipboard {
         Ok(())
     }
 
-    fn get_text(&mut self) -> Result<String, Box<dyn Error>> {
-        Ok(match self {
-            Self::System(clipboard) => clipboard.get_text()?,
-            Self::Memory(held) => held.clone(),
-        })
+    fn pasted(&mut self) -> Option<paste::Pasted> {
+        match self {
+            Self::System(clipboard) => {
+                let files = clipboard.get_files();
+                if !files.is_empty() {
+                    Some(paste::Pasted::Files(files))
+                } else if let Some(text) = clipboard.get_text().ok().filter(|text| !text.is_empty())
+                {
+                    Some(paste::Pasted::Text(text))
+                } else {
+                    clipboard.get_picture().map(paste::Pasted::Picture)
+                }
+            }
+            Self::Memory(held) => Some(paste::Pasted::Text(held.clone())),
+        }
     }
 }
 
@@ -226,6 +249,8 @@ impl std::task::Wake for Redraw {
 #[derive(Debug)]
 enum Replay {
     Input(ui::Event),
+    /// A trackpad pinch scaling the page by the factor.
+    Pinch(f32),
     /// Paints the next frame into a PNG as well as the window.
     Snapshot(PathBuf),
     /// Writes the window's accessibility tree as text.
@@ -496,6 +521,8 @@ enum Command {
     NewNotebook,
     /// Opens the notebooks in the app's iCloud Drive folder, making one there if it has none.
     UseICloud,
+    /// Opens the Snowbound Guide from the user's documents, copying it there first.
+    OpenGuide,
     /// Adds Snowbound to the app menu.
     #[cfg(target_os = "linux")]
     Install,
@@ -622,6 +649,14 @@ struct State {
     hide_spelling: bool,
     /// Options' "Use pen pressure sensitivity": a tablet pen's strokes follow its pressure.
     pen_pressure: bool,
+    /// Options' Default font, which new text and titles take.
+    default_font: settings::DefaultFont,
+    /// Options' "Page tabs appear on the left".
+    page_tabs_left: bool,
+    /// Options' "Navigation bar appears on the left" off: the notebooks on the right.
+    navigation_bar_right: bool,
+    /// Servers Open Notebook from Server signed in to, latest first.
+    servers: Vec<String>,
     /// The word the Spelling pane shows.
     correction: Option<canvas::interaction::Correction>,
     /// The strip's fill with the window focused and not, continuing the system's title bar.
@@ -681,6 +716,8 @@ struct State {
     initial_layouts: Vec<(onestore::ExGuid, onestore::document::Layout)>,
     initial_date: Option<u64>,
     occluded: bool,
+    /// The least width last given the window.
+    min_width: f32,
     ime_allowed: bool,
     clipboard: Clipboard,
     access_adapter: accesskit_winit::Adapter,
@@ -746,8 +783,7 @@ impl State {
                         Input::Notebooks { .. } => "Snowbound".into(),
                     })
                     .with_inner_size(LogicalSize::new(1180.0, 760.0))
-                    // The page list and a page beside it, under the toolbar's text group.
-                    .with_min_inner_size(LogicalSize::new(600.0, 400.0)),
+                    .with_min_inner_size(LogicalSize::new(MIN_SIZE[0], MIN_SIZE[1])),
             )?,
         );
         platform::install_title_bar(&window);
@@ -872,6 +908,7 @@ impl State {
             .color_scheme
             .theme()
             .unwrap_or_else(|| platform::appearance(&window));
+        platform::follow_appearance(&window, appearance);
         let mut ui = Ui::new(
             theme(appearance, stored.light_pages, backdrop),
             platform::double_click_interval(),
@@ -975,6 +1012,7 @@ impl State {
             initial_date,
             initial_layouts,
             occluded: false,
+            min_width: MIN_SIZE[0],
             ime_allowed: true,
             clipboard,
             loads: mpsc::channel(),
@@ -991,8 +1029,13 @@ impl State {
             spelling,
             hide_spelling: stored.hide_spelling,
             pen_pressure: !stored.ignore_pen_pressure,
+            default_font: stored.default_font,
+            page_tabs_left: stored.page_tabs_left,
+            navigation_bar_right: stored.navigation_bar_right,
+            servers: stored.servers,
             correction: None,
         };
+        state.view.snap_to_grid = !stored.ignore_grid;
         // A notebook opened from its server that couldn't sign in asks to, as the Finder does.
         let unsigned = state.notebooks.iter().find(|library| {
             library.notebook.is_err() && library::server_address(&library.location).is_some()
@@ -1119,6 +1162,7 @@ impl State {
 
     /// Takes `appearance`'s colours.
     fn set_appearance(&mut self, appearance: winit::window::Theme) {
+        platform::follow_appearance(&self.window, appearance);
         self.ui.theme = theme(appearance, self.light_pages, self.surface.translucent());
         self.titlebar = platform::titlebar(appearance)
             .filter(|_| !self.surface.translucent())
@@ -1619,11 +1663,11 @@ impl State {
             role: Some(accesskit::Role::Toolbar),
             ..Spec::default()
         };
-        if strip_row {
-            self.ui.open_as(strip(), spec);
+        let row = if strip_row {
+            self.ui.open_as(strip(), spec)
         } else {
-            self.ui.open("toolbar", spec);
-        }
+            self.ui.open("toolbar", spec)
+        };
         let lead = if title { platform::LEADING } else { FRAME };
         self.ui.leaf(
             "lead",
@@ -1633,7 +1677,22 @@ impl State {
             },
         );
         if tools {
+            // The groups fold in the room the window's controls leave, and whatever still
+            // overflows is cut there, so the controls always show.
+            let edge = (TITLE - ui::shell::TOOL) / 2.0;
+            self.ui.open(
+                "tools",
+                Spec {
+                    flags: Flags::CLIP,
+                    size: [fill(), px(TITLE)],
+                    pad: [0.0, edge],
+                    offset: [0.0, -edge],
+                    gap: GAP,
+                    ..Spec::default()
+                },
+            );
             self.tools(theme);
+            self.ui.close();
         } else {
             self.ui.leaf(
                 "space",
@@ -1654,6 +1713,15 @@ impl State {
             },
         );
         self.ui.close();
+        let narrowest = self
+            .ui
+            .narrowest(row)
+            .map_or(MIN_SIZE[0], |row| row.ceil().max(MIN_SIZE[0]));
+        if narrowest != self.min_width {
+            self.min_width = narrowest;
+            self.window
+                .set_min_inner_size(Some(LogicalSize::new(narrowest, MIN_SIZE[1])));
+        }
         Ok(())
     }
 
@@ -2146,13 +2214,17 @@ impl State {
         )
         .or(choice);
         // The Draw tab's tools, which Insert's menus list for when they fold, before Insert.
+        // OneNote's shape gallery ends with Snap To Grid.
         let shapes = [
             ShapeKind::Line,
             ShapeKind::Arrow,
             ShapeKind::Rectangle,
             ShapeKind::Ellipse,
         ]
-        .map(|kind| Run(Cmd::Shape(kind)));
+        .map(|kind| Run(Cmd::Shape(kind)))
+        .into_iter()
+        .chain([Rule, Run(Cmd::SnapToGrid)])
+        .collect::<Vec<_>>();
         let drawing = [
             Run(Cmd::SelectType),
             Open("pen", Cmd::Pen),
@@ -2161,7 +2233,7 @@ impl State {
             Rule,
         ]
         .into_iter()
-        .chain(shapes);
+        .chain(shapes.iter().copied());
         let inserted = [Cmd::Picture, Cmd::Link, Cmd::Date, Cmd::Equation];
         let more = [
             Cmd::ScreenClipping,
@@ -2320,7 +2392,7 @@ impl State {
         let views = [
             Run(Cmd::Sidebar),
             Run(Cmd::PageList),
-            Run(Cmd::DarkPages),
+            Run(Cmd::PagesMatchTheme),
             Run(Cmd::FullPageView),
             Rule,
             Run(Cmd::HideSpelling),
@@ -2702,6 +2774,7 @@ impl State {
             Command::OpenFromServer(location) => self.open_server(location.as_deref()),
             Command::NewNotebook => self.new_notebook()?,
             Command::UseICloud => self.use_icloud()?,
+            Command::OpenGuide => self.open_guide()?,
             #[cfg(target_os = "linux")]
             Command::Install => desktop::install(),
             Command::CloseNotebook(library) => self.close_notebook(&library),
@@ -2723,12 +2796,7 @@ impl State {
             Command::Template(choice) => self.apply_template(choice)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
             Command::Page(Request::Copy(text)) => self.clipboard.set_text(text)?,
-            Command::Page(Request::Paste) => {
-                let text = self.clipboard.get_text()?;
-                let language = canvas::language::lcid(&platform::input_language());
-                let response = self.view.paste(&text, language)?;
-                self.respond(response);
-            }
+            Command::Page(Request::Paste) => self.paste()?,
             Command::Page(Request::OpenLink(address)) => self.open_link(&address)?,
             Command::Page(Request::OpenAttachment(file)) => self.open_attachment(&file)?,
             Command::Page(Request::Play { file, at_ms }) => self.play(&file, at_ms)?,
@@ -3608,7 +3676,14 @@ impl State {
     /// Zooms the page by `factor` about the pointer, when it is over the page.
     fn pinch(&mut self, factor: f32) -> Result<(), Box<dyn Error>> {
         if self.over_page() {
-            let response = self.view.pinch(factor)?;
+            // The pointer here, as the page's own lags by the moves queued for the next frame.
+            let [left, top, ..] = self.ui.rect(page()).unwrap_or_default();
+            let scale = self.ui.scale();
+            let anchor = [
+                (self.pointer[0] - left) * scale,
+                (self.pointer[1] - top) * scale,
+            ];
+            let response = self.view.pinch(factor, anchor)?;
             self.respond(response);
         }
         Ok(())
@@ -3706,7 +3781,7 @@ fn theme(appearance: winit::window::Theme, light_pages: bool, backdrop: bool) ->
         [theme.paper, theme.paper_ink] = [light.paper, light.paper_ink];
     }
     if backdrop {
-        platform::over_backdrop(theme)
+        platform::over_backdrop(theme, appearance)
     } else {
         theme
     }
@@ -4921,6 +4996,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.close(event_loop);
                 return;
             }
+            UserEvent::Then(then) => {
+                if let Some(state) = &mut self.state {
+                    if let Err(error) = then(state) {
+                        eprintln!("{error}");
+                    }
+                    state.window.request_redraw();
+                }
+                return;
+            }
             UserEvent::ICloudAccount => {
                 if let Some(state) = &mut self.state {
                     state.icloud_account_changed();
@@ -4966,6 +5050,11 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(state) = &mut self.state {
                     match replay {
                         Replay::Input(event) => state.input(event),
+                        Replay::Pinch(factor) => {
+                            if let Err(error) = state.pinch(factor) {
+                                eprintln!("{error}");
+                            }
+                        }
                         Replay::Snapshot(path) => state.snapshot = Some(path),
                         Replay::Accessibility(path) => {
                             if let Err(error) = state.write_accessibility(&path) {
@@ -5202,16 +5291,13 @@ impl ApplicationHandler<UserEvent> for App {
 
 fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn Error>> {
     let partial = path.with_extension("partial");
-    let mut encoder = png::Encoder::new(std::fs::File::create(&partial)?, size[0], size[1]);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.write_header()?.write_image_data(pixels)?;
+    std::fs::write(&partial, paste::png(size, pixels)?)?;
     std::fs::rename(partial, path)?;
     Ok(())
 }
 
 /// Feeds a development script to the window from another thread, one command per line
-/// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `key NAME`, `type
+/// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `pinch FACTOR`, `key NAME`, `type
 /// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`,
 /// `accessibility TEXT_PATH`, `appearance light|dark`, `resize WIDTH HEIGHT` and `quit`.
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
@@ -5241,6 +5327,7 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                 "none" => None,
                 level => Some(level.parse()?),
             }))),
+            "pinch" => Ok(Replay::Pinch(rest.parse()?)),
             "press" => Ok(Replay::Input(button(true))),
             "release" => Ok(Replay::Input(button(false))),
             "key" => Ok(Replay::Input(ui::Event::Key {

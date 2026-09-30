@@ -127,11 +127,6 @@ static CGFloat red(id self, SEL _cmd) { return component(self, 0); }
 static CGFloat green(id self, SEL _cmd) { return component(self, 1); }
 static CGFloat blue(id self, SEL _cmd) { return component(self, 2); }
 
-static id black(id self, SEL _cmd) { return SEND(objc_getClass("NSColor"), "blackColor"); }
-static id secondary_selection(id self, SEL _cmd) {
-    return SEND(objc_getClass("NSColor"), "secondarySelectedControlColor");
-}
-
 #define RECT "{CGRect={CGPoint=dd}{CGSize=dd}}"
 
 static void add(const char *class_name, int meta, const char *selector, void *imp, const char *types) {
@@ -153,7 +148,6 @@ __attribute__((constructor)) static void polyfill(void) {
     add("NSWindow", 0, "setTitlebarAppearsTransparent:", ignore, "v@:c");
     add("NSView", 0, "setWantsBestResolutionOpenGLSurface:", ignore, "v@:c");
     add("NSView", 0, "setAccessibilityLabel:", set_accessibility_label, "v@:@");
-    add("NSDatePicker", 0, "setPresentsCalendarOverlay:", ignore, "v@:c");
     add("NSEvent", 0, "hasPreciseScrollingDeltas", no, "c@:");
     add("NSEvent", 0, "scrollingDeltaX", delta_x, "d@:");
     add("NSEvent", 0, "scrollingDeltaY", delta_y, "d@:");
@@ -163,8 +157,6 @@ __attribute__((constructor)) static void polyfill(void) {
     add("NSColorSpaceColor", 0, "greenComponent", green, "d@:");
     add("NSColorSpaceColor", 0, "blueComponent", blue, "d@:");
     add("NSColor", 1, "colorWithSRGBRed:green:blue:alpha:", srgb_color, "@@:dddd");
-    add("NSColor", 1, "textInsertionPointColor", black, "@@:");
-    add("NSColor", 1, "unemphasizedSelectedTextBackgroundColor", secondary_selection, "@@:");
 
     // One appearance, Aqua, which windows have and nothing changes.
     appearance_class = (id)objc_getClass("NSAppearance");

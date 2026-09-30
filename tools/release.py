@@ -17,8 +17,8 @@ PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound')
 URL = 'https://file.paperclover.net/shr/snowbound/'
 KEY = Path.home() / '.config/snowbound/release-key'
 ZONE = ZoneInfo('America/Los_Angeles')
-PLATFORMS = ['macos-aarch64', 'macos-10.6', 'linux-x86_64', 'linux-aarch64', 'windows-x86_64',
-             'windows-aarch64']
+PLATFORMS = ['macos-aarch64', 'macos-x86_64', 'macos-10.6', 'linux-x86_64', 'linux-aarch64',
+             'windows-x86_64', 'windows-aarch64']
 # Windows 7 to 11 on x86_64 (nightly's tier-3 win7 target), and Windows 11 on Arm.
 WINDOWS = {'x86_64': 'x86_64-win7-windows-gnu', 'aarch64': 'aarch64-pc-windows-gnullvm'}
 CHECKS = [
@@ -114,6 +114,8 @@ def build_mac(platform, folder, developer_id, notarize):
         signing = ['--sign', 'developer-id', '--sign-identity', IDENTITY]
     else:
         signing = ['--sign', 'ad-hoc']
+    if platform != 'macos-10.6':
+        signing += ['--arch', platform.removeprefix('macos-')]
     run([sys.executable, ROOT / 'tools/canvas/build_macos.py', '--release', '--output', bundle, *signing])
     archive = folder / 'archive.zip'
     if notarize and platform != 'macos-10.6':
@@ -150,7 +152,7 @@ def main():
     parser.add_argument('--ad-hoc', action='store_true',
                         help='Sign the macOS app ad hoc instead of with Developer ID, unnotarized')
     args = parser.parse_args()
-    developer_id = not args.ad_hoc and any(platform == 'macos-aarch64' for platform in args.platforms)
+    developer_id = not args.ad_hoc and any(platform in ('macos-aarch64', 'macos-x86_64') for platform in args.platforms)
     identities = subprocess.run(['security', 'find-identity', '-v', '-p', 'codesigning'],
                                 capture_output=True, text=True).stdout
     if developer_id and IDENTITY not in identities:

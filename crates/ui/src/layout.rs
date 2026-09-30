@@ -265,6 +265,40 @@ fn flow(nodes: &[Built], index: usize, axis: usize) -> f32 {
     }
 }
 
+/// The least width `index`'s children fit in, with its padding: each row's groups folded, and
+/// each box sized on its own yielding all its strictness lets it.
+pub(crate) fn narrowest(nodes: &[Built], index: usize) -> f32 {
+    let node = &nodes[index];
+    let sizes = node
+        .children
+        .iter()
+        .filter(|child| {
+            !nodes[**child].flags.contains(Flags::FLOAT) && nodes[**child].anchor.is_none()
+        })
+        .map(|child| least(nodes, *child));
+    let content = if along(node, 0) {
+        let (sum, count) = sizes.fold((0.0, 0), |(sum, count), size| (sum + size, count + 1));
+        sum + node.gap * (count.max(1) - 1) as f32
+    } else {
+        sizes.fold(0.0, f32::max)
+    };
+    content + 2.0 * node.pad[0]
+}
+
+/// The least width `index` takes without clipping its children.
+fn least(nodes: &[Built], index: usize) -> f32 {
+    let node = &nodes[index];
+    if node.fold.is_some() {
+        return least(nodes, node.children[1]) + 2.0 * node.pad[0];
+    }
+    let own = match node.size[0].size {
+        Size::Pixels(pixels) => pixels,
+        Size::Text => node.content_width() + 2.0 * node.pad[0],
+        Size::Fraction(_) | Size::Children => return narrowest(nodes, index),
+    };
+    own * node.size[0].strictness.clamp(0.0, 1.0)
+}
+
 fn fit_labels(nodes: &mut [Built], texts: &mut Texts, frame: u64) {
     for node in nodes.iter_mut() {
         let Some(label) = node.label.clone() else {

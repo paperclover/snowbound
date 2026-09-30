@@ -17,15 +17,15 @@ for arch do
     triple=$arch-unknown-linux-gnu
     variable=$(echo "$triple" | tr 'a-z-' 'A-Z_')
     linker="$tools/cc-$arch"
-    # glibc 2.31 reaches back to Debian 11 and Ubuntu 20.04; zig rejects rustc's
-    # --target, --no-undefined-version and -O1.
+    # glibc 2.17, Rust's own floor, reaches back to RHEL 7, Debian 8 and Ubuntu 14.04; zig
+    # rejects rustc's --target, --no-undefined-version and -O1.
     cat > "$linker" <<EOF
 #!/bin/sh
 for arg do
     shift
     case "\$arg" in --target=*|-Wl,--no-undefined-version|-Wl,-O1) ;; *) set -- "\$@" "\$arg" ;; esac
 done
-exec zig cc -target $arch-linux-gnu.2.31 "\$@"
+exec zig cc -target $arch-linux-gnu.2.17 "\$@"
 EOF
     chmod +x "$linker"
     rustup target add "$triple" >/dev/null

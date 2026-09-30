@@ -44,6 +44,32 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 }
 
+/// The desktop's Appearance option: the system's, or light or dark regardless of it.
+enum Appearance {
+    static let key = "appearance"
+
+    static var style: UIUserInterfaceStyle {
+        get { UIUserInterfaceStyle(rawValue: UserDefaults.standard.integer(forKey: key)) ?? .unspecified }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: key)
+            for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+                for window in scene.windows { window.overrideUserInterfaceStyle = newValue }
+            }
+        }
+    }
+
+    static func menu() -> UIMenu {
+        let choices: [(String, UIUserInterfaceStyle)] = [("System", .unspecified), ("Light", .light), ("Dark", .dark)]
+        return UIMenu(
+            title: "Appearance", image: UIImage(systemName: "circle.lefthalf.filled"),
+            children: choices.map { title, style in
+                let action = UIAction(title: title) { _ in Appearance.style = style }
+                action.state = Appearance.style == style ? .on : .off
+                return action
+            })
+    }
+}
+
 /// Where the reader was, reopened on the next launch as Notes reopens its last note.
 private struct Place: Codable {
     let notebook: String
@@ -71,6 +97,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let scene = scene as? UIWindowScene else { return }
         let window = UIWindow(windowScene: scene)
+        window.overrideUserInterfaceStyle = Appearance.style
         split.delegate = self
         split.scene = self
         split.preferredDisplayMode = .oneBesideSecondary

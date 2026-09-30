@@ -23,6 +23,9 @@ pub enum Id {
     PageVersions,
     CopyPageLink,
     ShowNotebook,
+    ExportPdf,
+    ExportSectionPdf,
+    Print,
     Undo,
     Redo,
     Cut,
@@ -44,7 +47,7 @@ pub enum Id {
     ActualSize,
     Sidebar,
     PageList,
-    DarkPages,
+    PagesMatchTheme,
     FullPageView,
     /// OneNote's Hide Spelling Errors, which leaves misspelled words unmarked.
     HideSpelling,
@@ -71,6 +74,7 @@ pub enum Id {
     Eraser,
     Lasso,
     Shape(ShapeKind),
+    SnapToGrid,
     Toggle(Toggle),
     Highlight,
     FontColor,
@@ -235,6 +239,15 @@ pub const COMMANDS: &[Command] = &[
         NONE,
         NONE,
     ),
+    row!(Id::ExportPdf, "Export as PDF…", NONE, NONE),
+    row!(Id::ExportSectionPdf, "Export Section as PDF…", NONE, NONE),
+    // Go to takes OneNote's Ctrl+P, and Pause its Ctrl+Alt+P.
+    row!(
+        Id::Print,
+        "Print…",
+        &[cmd('p').option().shift()],
+        &[cmd('p').option().shift()]
+    ),
     row!(Id::Undo, "Undo", &[cmd('z')], &[cmd('z')]),
     row!(
         Id::Redo,
@@ -296,7 +309,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     row!(Id::Sidebar, "Notebook List", &[cmd('s').control()], NONE),
     row!(Id::PageList, "Page List", NONE, NONE),
-    row!(Id::DarkPages, "Dark Pages", NONE, NONE),
+    row!(Id::PagesMatchTheme, "Pages Match UI Theme", NONE, NONE),
     row!(Id::HideSpelling, "Hide Spelling Errors", NONE, NONE),
     row!(
         Id::Spelling,
@@ -387,6 +400,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Shape(ShapeKind::Arrow), "Arrow", NONE, NONE),
     row!(Id::Shape(ShapeKind::Rectangle), "Rectangle", NONE, NONE),
     row!(Id::Shape(ShapeKind::Ellipse), "Oval", NONE, NONE),
+    row!(Id::SnapToGrid, "Snap To Grid", NONE, NONE),
     row!(Id::Toggle(Toggle::Bold), "Bold", &[cmd('b')], &[cmd('b')]),
     row!(
         Id::Toggle(Toggle::Italic),
@@ -773,9 +787,14 @@ impl State {
                         .notebook()
                         .is_some_and(|library| library.catalog().is_some()),
             ),
-            Id::NewPage | Id::NewSubpage | Id::CopyPageLink | Id::Find | Id::Search => {
-                enabled(!modal && session.is_some())
-            }
+            Id::NewPage
+            | Id::NewSubpage
+            | Id::CopyPageLink
+            | Id::Find
+            | Id::Search
+            | Id::ExportPdf
+            | Id::ExportSectionPdf
+            | Id::Print => enabled(!modal && session.is_some()),
             Id::PageVersions => session.filter(|_| !modal).map_or(
                 Status {
                     enabled: false,
@@ -821,9 +840,13 @@ impl State {
                     Some(crate::pane::Pane::Tags { .. })
                 )),
             },
-            Id::DarkPages => Status {
+            Id::PagesMatchTheme => Status {
                 enabled: !modal,
                 checked: Some(!self.light_pages),
+            },
+            Id::SnapToGrid => Status {
+                enabled: !modal,
+                checked: Some(self.view.snap_to_grid),
             },
             Id::HideSpelling => Status {
                 enabled: !modal && self.spelling.is_some(),
@@ -917,26 +940,6 @@ impl State {
         Ok(())
     }
 
-    /// Puts an encoded picture after the caret's paragraph at its size on a 96 dpi screen,
-    /// as OneNote 2010 inserts one.
-    pub(crate) fn insert_picture(&mut self, bytes: Vec<u8>) -> Result<(), Box<dyn Error>> {
-        let pixels = match draw::RasterImage::measure(&bytes) {
-            Ok(pixels) => pixels,
-            Err(_) => {
-                platform::alert(
-                    "Couldn't insert the picture",
-                    "Choose a PNG, JPEG or GIF picture.",
-                );
-                return Ok(());
-            }
-        };
-        let response = self
-            .view
-            .insert_picture(bytes, pixels.map(|side| side as f32 * 0.75))?;
-        self.respond(response);
-        Ok(())
-    }
-
     /// The notebook the open section, or the notebook showing none, belongs to.
     fn notebook(&self) -> Option<&Arc<crate::Library>> {
         self.session
@@ -967,12 +970,10 @@ impl State {
                 return self.paper_page(color, self.view.editor.rule_lines(), None);
             }
             Choice::Art(name) => {
-                let editor = &self.view.editor;
-                return self.paper_page(
-                    editor.page_color(),
-                    editor.rule_lines(),
-                    Some(name.and_then(canvas::template::find)),
-                );
+                return self.with_art(name.and_then(canvas::template::find), |state, art| {
+                    let editor = &state.view.editor;
+                    state.paper_page(editor.page_color(), editor.rule_lines(), Some(art))
+                });
             }
             Choice::RuleLines(lines) => {
                 let lines = lines.map(|index| canvas::template::RULE_LINES[index].1);
@@ -1030,6 +1031,14 @@ impl State {
             Id::ShowNotebook => {
                 platform::reveal(&self.notebook().ok_or("No notebook is open")?.location);
                 return Ok(());
+            }
+            Id::ExportPdf | Id::ExportSectionPdf | Id::Print => {
+                let scope = if id == Id::ExportSectionPdf {
+                    crate::print::Scope::Section
+                } else {
+                    crate::print::Scope::Page
+                };
+                return self.print(scope, id != Id::Print);
             }
             Id::Undo | Id::Redo => {
                 let response = self.view.undo(id == Id::Redo)?;
@@ -1147,7 +1156,12 @@ impl State {
                 self.save_settings();
                 return Ok(());
             }
-            Id::DarkPages => {
+            Id::SnapToGrid => {
+                self.view.snap_to_grid = !self.view.snap_to_grid;
+                self.save_settings();
+                return Ok(());
+            }
+            Id::PagesMatchTheme => {
                 self.light_pages = !self.light_pages;
                 self.follow_color_scheme();
                 self.save_settings();

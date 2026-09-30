@@ -330,7 +330,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         guard let provider = results.first?.itemProvider, provider.canLoadObject(ofClass: UIImage.self) else { return }
         provider.loadObject(ofClass: UIImage.self) { [weak self] image, _ in
             guard let image = image as? UIImage else { return }
-            DispatchQueue.main.async { self?.insert(image) }
+            DispatchQueue.main.async { self?.canvas.insertPicture(image) }
         }
     }
 
@@ -338,27 +338,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         _ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
     ) {
         picker.dismiss(animated: true)
-        if let image = info[.originalImage] as? UIImage { insert(image) }
-    }
-
-    /// A photo as OneNote 2010 can read it: JPEG, at most 2048 pixels across, shown at most
-    /// 220 points wide.
-    private func insert(_ image: UIImage) {
-        let longest: CGFloat = 2048
-        let scale = min(1, longest / max(image.size.width * image.scale, image.size.height * image.scale))
-        let pixels = CGSize(
-            width: (image.size.width * image.scale * scale).rounded(),
-            height: (image.size.height * image.scale * scale).rounded())
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        let drawn = UIGraphicsImageRenderer(size: pixels, format: format).image { _ in
-            image.draw(in: CGRect(origin: .zero, size: pixels))
-        }
-        guard let data = drawn.jpegData(compressionQuality: 0.85) else { return }
-        // OneNote shows a picture's pixels at 96 per inch.
-        var size = CGSize(width: pixels.width * 0.75, height: pixels.height * 0.75)
-        if size.width > 220 { size = CGSize(width: 220, height: size.height * 220 / size.width) }
-        canvas.insertPicture(data, size: size)
+        if let image = info[.originalImage] as? UIImage { canvas.insertPicture(image) }
     }
 }
 

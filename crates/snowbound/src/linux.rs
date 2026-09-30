@@ -75,6 +75,9 @@ pub fn corner_radius(window: &Window) -> f32 {
 /// Whether the window erases its own bottom corners to transparent pixels: under winit's
 /// Adwaita frame on GNOME's Wayland, which draws libadwaita's window edge. Mutter's X11
 /// frames stay square at the bottom, as libadwaita's own `ssd-frame` style has them.
+/// Winit's theme already holds the window to the app's appearance.
+pub fn follow_appearance(_: &Window, _: Theme) {}
+
 pub fn cuts_corners() -> bool {
     sctk_adwaita::LIBADWAITA_EDGE.load(Ordering::Relaxed)
 }
@@ -197,6 +200,26 @@ impl Clipboard {
             Self::X11(clipboard) => clipboard.get_text()?,
         })
     }
+
+    pub fn get_files(&mut self) -> Vec<std::path::PathBuf> {
+        self.through_x11(|clipboard| clipboard.get().file_list().ok())
+            .unwrap_or_default()
+    }
+
+    pub fn get_picture(&mut self) -> Option<Vec<u8>> {
+        self.through_x11(|clipboard| crate::paste::bitmap(clipboard.get_image().ok()?))
+    }
+
+    /// Files and pictures come through X11 on Wayland too, whose clipboard Xwayland shares.
+    fn through_x11<T>(
+        &mut self,
+        read: impl FnOnce(&mut arboard::Clipboard) -> Option<T>,
+    ) -> Option<T> {
+        match self {
+            Self::Wayland(_) => read(&mut arboard::Clipboard::new().ok()?),
+            Self::X11(clipboard) => read(clipboard),
+        }
+    }
 }
 
 /// Whether the system draws the title bar: the window manager, or on Wayland the compositor.
@@ -254,7 +277,7 @@ fn desktop() -> Desktop {
 }
 
 /// The theme over the window's backdrop, as the kit draws it.
-pub fn over_backdrop(theme: ui::Theme) -> ui::Theme {
+pub fn over_backdrop(theme: ui::Theme, _: Theme) -> ui::Theme {
     theme.over_backdrop()
 }
 
@@ -767,7 +790,7 @@ pub fn cache_dir() -> Option<PathBuf> {
 pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
     let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
     // The mount holding the path is the one at its longest ancestor.
-    let (source, point, options, within) = mounts
+    let (source, _, options, within) = mounts
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
@@ -871,6 +894,25 @@ pub fn save_login(
 
 pub fn settings_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CONFIG_HOME", ".config")
+}
+
+/// The XDG documents folder `user-dirs.dirs` names, or `~/Documents`.
+pub fn documents_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let dirs = xdg_base("XDG_CONFIG_HOME", ".config")?.join("user-dirs.dirs");
+    let named = std::fs::read_to_string(dirs).ok().and_then(|text| {
+        text.lines().find_map(|line| {
+            let value = line
+                .strip_prefix("XDG_DOCUMENTS_DIR=")?
+                .trim()
+                .trim_matches('"');
+            match value.strip_prefix("$HOME") {
+                Some(rest) => Some(home.join(rest.trim_start_matches('/'))),
+                None => Some(PathBuf::from(value)).filter(|path| path.is_absolute()),
+            }
+        })
+    });
+    Some(named.unwrap_or_else(|| home.join("Documents")))
 }
 
 /// The app's folder in the XDG base directory `variable` names, or in `fallback` under home.

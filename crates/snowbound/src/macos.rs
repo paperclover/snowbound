@@ -109,6 +109,9 @@ pub fn corner_radius(_: &Window) -> f32 {
 
 /// AppKit clips the window's corners itself, except where the OpenGL surface covers
 /// 10.6's textured window, whose rounded bottom corners the app leaves transparent.
+/// Winit's theme already holds the window to the app's appearance.
+pub fn follow_appearance(_: &Window, _: winit::window::Theme) {}
+
 pub fn cuts_corners() -> bool {
     crate::aqua::before_lion()
 }
@@ -185,6 +188,50 @@ impl Clipboard {
     pub fn get_text(&mut self) -> Result<String, arboard::Error> {
         self.0.get_text()
     }
+
+    pub fn get_files(&mut self) -> Vec<std::path::PathBuf> {
+        self.0.get().file_list().unwrap_or_default()
+    }
+
+    /// The pasteboard's PNG as copied, keeping its resolution, or else its TIFF as a PNG.
+    pub fn get_picture(&mut self) -> Option<Vec<u8>> {
+        unsafe {
+            let board: Retained<AnyObject> =
+                msg_send_id![AnyClass::get("NSPasteboard")?, generalPasteboard];
+            let data = |kind: &str| -> Option<Retained<AnyObject>> {
+                msg_send_id![&board, dataForType: &*NSString::from_str(kind)]
+            };
+            let png = match data("public.png") {
+                Some(png) => png,
+                None => tiff_png(&*data("public.tiff")?)?,
+            };
+            Some(ns_data_bytes(&png))
+        }
+    }
+}
+
+/// TIFF `data` as PNG data, keeping its resolution.
+unsafe fn tiff_png(data: &AnyObject) -> Option<Retained<AnyObject>> {
+    const PNG: usize = 4; // NSBitmapImageFileTypePNG
+    unsafe {
+        let rep: Option<Retained<AnyObject>> =
+            msg_send_id![AnyClass::get("NSBitmapImageRep")?, imageRepWithData: data];
+        let rep = rep?;
+        let properties: Retained<AnyObject> =
+            msg_send_id![AnyClass::get("NSDictionary")?, dictionary];
+        msg_send_id![&rep, representationUsingType: PNG, properties: &*properties]
+    }
+}
+
+unsafe fn ns_data_bytes(data: &AnyObject) -> Vec<u8> {
+    unsafe {
+        let length: usize = msg_send![data, length];
+        if length == 0 {
+            return Vec::new();
+        }
+        let bytes: *const u8 = msg_send![data, bytes];
+        std::slice::from_raw_parts(bytes, length).to_vec()
+    }
 }
 
 /// AppKit draws the traffic lights.
@@ -246,9 +293,14 @@ pub fn represent(window: &Window, file: Option<&std::path::Path>) {
     }
 }
 
-/// The theme over the window's backdrop, as the kit draws it.
-pub fn over_backdrop(theme: ui::Theme) -> ui::Theme {
-    theme.over_backdrop()
+/// The theme over the window's backdrop, as the kit draws it. 10.6's textured gradient is
+/// light only, so a dark theme paints over it.
+pub fn over_backdrop(theme: ui::Theme, appearance: winit::window::Theme) -> ui::Theme {
+    if crate::aqua::before_lion() && appearance == winit::window::Theme::Dark {
+        theme
+    } else {
+        theme.over_backdrop()
+    }
 }
 
 /// None: the kit's own menus stand in for AppKit's.
@@ -634,6 +686,10 @@ pub fn settings_dir() -> Option<std::path::PathBuf> {
     )
 }
 
+pub fn documents_dir() -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join("Documents"))
+}
+
 /// Asks for a notebook folder or a notebook file with the system's open panel, titled
 /// `title`.
 pub fn pick_notebook(title: &str) -> Option<std::path::PathBuf> {
@@ -899,7 +955,10 @@ pub fn edit_date(
             DateField::Date => NSDatePickerElementFlags::NSDatePickerElementFlagYearMonthDay,
             DateField::Time => NSDatePickerElementFlags::NSDatePickerElementFlagHourMinute,
         });
-        picker.setPresentsCalendarOverlay(true);
+        // macOS 10.15's.
+        if msg_send![&picker, respondsToSelector: sel!(setPresentsCalendarOverlay:)] {
+            picker.setPresentsCalendarOverlay(true);
+        }
         picker.setCalendar(Some(&calendar));
         picker.setTimeZone(Some(&calendar.timeZone()));
         picker.setDateValue(&NSDate::dateWithTimeIntervalSince1970(
@@ -1106,10 +1165,21 @@ pub fn text_colors(window: &Window) -> [[f32; 4]; 3] {
         let previous: Option<Retained<AnyObject>> = msg_send_id![class, currentAppearance];
         let _: () = msg_send![class, setCurrentAppearance: &*appearance];
         let space = NSColorSpace::sRGBColorSpace();
+        let responds =
+            |selector: Sel| -> bool { msg_send![NSColor::class(), respondsToSelector: selector] };
+        // macOS 14 and 10.14 introduced the first and last.
         let colors = [
-            NSColor::textInsertionPointColor(),
+            if responds(sel!(textInsertionPointColor)) {
+                NSColor::textInsertionPointColor()
+            } else {
+                NSColor::textColor()
+            },
             NSColor::selectedTextBackgroundColor(),
-            NSColor::unemphasizedSelectedTextBackgroundColor(),
+            if responds(sel!(unemphasizedSelectedTextBackgroundColor)) {
+                NSColor::unemphasizedSelectedTextBackgroundColor()
+            } else {
+                msg_send_id![NSColor::class(), secondarySelectedControlColor]
+            },
         ]
         .map(|color| {
             let color = color

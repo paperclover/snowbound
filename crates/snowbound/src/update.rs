@@ -31,13 +31,37 @@ fn running() -> Option<Version> {
     Version::parse(option_env!("SNOWBOUND_BUILD")?)
 }
 
-/// This build's platform, as `latest.json` and `build.json` key their entries.
+/// This build's platform, as `latest.json` and `build.json` key their entries; Apple
+/// silicon's for an Intel build Rosetta runs.
 fn platform() -> String {
-    if cfg!(target_os = "macos") && !cfg!(feature = "wgpu") {
+    if translated() {
+        "macos-aarch64".to_owned()
+    } else if cfg!(target_os = "macos") && !cfg!(feature = "wgpu") {
         "macos-10.6".to_owned()
     } else {
         format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
     }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn translated() -> bool {
+    let mut translated: libc::c_int = 0;
+    let mut size = std::mem::size_of_val(&translated);
+    let found = unsafe {
+        libc::sysctlbyname(
+            c"sysctl.proc_translated".as_ptr(),
+            (&raw mut translated).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    found == 0 && translated == 1
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn translated() -> bool {
+    false
 }
 
 /// A published build: the day of its commit on `main`, in Los Angeles, and how many of that
@@ -302,6 +326,8 @@ fn check(
     progress: &dyn Fn(Status),
 ) -> Status {
     let platform = platform();
+    // Under Rosetta the native build of the same version is still the update.
+    let running = running.filter(|_| !translated());
     let fetch = |path: &str, limit| {
         get(path, limit).map_err(|error| {
             eprintln!("Cannot fetch {BASE}{path}: {error}");

@@ -766,6 +766,91 @@ impl PageScene {
         None
     }
 
+    /// Where the page read without an editor lies, in page coordinates: the rectangle all
+    /// its content covers, and the top and bottom of each line of text and each picture, which
+    /// a sheet of paper does not cut through where it can help it.
+    pub(crate) fn printed_extent(&self) -> Result<([f32; 4], Vec<[f32; 2]>), SceneError> {
+        let mut bounds = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let mut rows = Vec::new();
+        let mut cover = |[x0, y0, x1, y1]: [f32; 4], row: bool| {
+            bounds = [
+                bounds[0].min(x0),
+                bounds[1].min(y0),
+                bounds[2].max(x1),
+                bounds[3].max(y1),
+            ];
+            if row {
+                rows.push([y0, y1]);
+            }
+        };
+        for content in self.objects(None)? {
+            match content {
+                Content::Outline {
+                    source,
+                    layout,
+                    below_title,
+                } => {
+                    let [x, y] = outline_origin(
+                        [
+                            source.layout.x.unwrap_or(0.0),
+                            source.layout.y.unwrap_or(0.0),
+                        ],
+                        *below_title,
+                        None,
+                    )?;
+                    cover([x, y, x + layout.size[0], y + layout.size[1]], false);
+                    for paragraph in &layout.paragraphs {
+                        let [px, py] = [x + paragraph.origin[0], y + paragraph.origin[1]];
+                        for (line, bounds) in paragraph.text.lines() {
+                            let top = py + bounds.top;
+                            let right = px + line.metrics().advance;
+                            cover([px, top, right, top + bounds.height], true);
+                        }
+                    }
+                    for object in &layout.objects {
+                        let [x0, y0, x1, y1] = object.rect;
+                        cover([x + x0, y + y0, x + x1, y + object.bottom.max(y1)], true);
+                    }
+                }
+                Content::Image(source) => {
+                    let [x, y] = [
+                        source.layout.x.unwrap_or(0.0),
+                        source.layout.y.unwrap_or(0.0),
+                    ];
+                    let size = match self.backgrounds.get(&source.id) {
+                        Some(art) => Some(art.size),
+                        None => source
+                            .layout
+                            .max_width
+                            .zip(source.layout.max_height)
+                            .map(|(width, height)| [width, height]),
+                    };
+                    if let Some([width, height]) = size {
+                        cover([x, y, x + width, y + height], !source.background);
+                    }
+                }
+                Content::File { .. } => {
+                    if let Some((_, rect)) = content.file() {
+                        cover(rect, true);
+                    }
+                }
+                Content::Ink(ink) => {
+                    if let Some(rect) = crate::editor::page::ink_bounds(ink) {
+                        cover(rect, false);
+                    }
+                }
+                Content::ReadOnly(object) => cover(object.rect(), true),
+                Content::Date { .. } | Content::Editable(_) => {}
+            }
+        }
+        Ok((bounds, rows))
+    }
+
     /// The offset is in document points.
     pub fn append_primitives<'a>(
         &'a self,

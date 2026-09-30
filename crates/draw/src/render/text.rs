@@ -1,5 +1,6 @@
 use crate::RenderError;
 use parley::fontique::Blob;
+use std::ops::Range;
 
 /// Text the renderer can paint, as glyph runs in layer units. Owners recover their
 /// concrete text from a primitive through `Any`.
@@ -32,6 +33,11 @@ pub struct GlyphRun<'a> {
     pub glyphs: &'a mut dyn Iterator<Item = Glyph>,
     /// Underline and strikethrough, painted after the glyphs.
     pub decorations: &'a [Decoration],
+    /// The source the glyphs show, for a document's text layer; the renderer ignores it.
+    pub text: &'a str,
+    /// Each cluster's bytes of `text` and how many glyphs show it, in `glyphs`' order; a
+    /// ligature's later clusters take none.
+    pub clusters: &'a mut dyn Iterator<Item = (Range<usize>, usize)>,
 }
 
 /// A glyph's baseline position.
@@ -53,10 +59,12 @@ pub struct Decoration {
     pub color: Option<[f32; 4]>,
 }
 
-/// Paints one parley glyph run with its line's baseline moved to `baseline`, its glyphs
-/// raised by `rise` and `backdrop` behind them.
+/// Paints one parley glyph run of `text` laid out, with its line's baseline moved to
+/// `baseline`, its glyphs raised by `rise` and `backdrop` behind them.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_parley_run<B: parley::Brush>(
     run: &parley::GlyphRun<'_, B>,
+    text: &str,
     baseline: f32,
     rise: f32,
     line: [f32; 2],
@@ -104,6 +112,17 @@ pub fn paint_parley_run<B: parley::Brush>(
         x: glyph.x,
         y: glyph.y + baseline - line_baseline - rise,
     });
+    // The run's clusters are those of its style within its span of the line; walked only
+    // when a text layer asks.
+    let [start, end] = [run.offset(), run.offset() + run.advance()];
+    let mut at = None;
+    let mut clusters = run.run().visual_clusters().filter_map(|cluster| {
+        let x = *at.get_or_insert_with(|| cluster.visual_offset().unwrap_or(start));
+        at = Some(x + cluster.advance());
+        let within = x > start - 0.01 && x < end - 0.01;
+        (cluster.style_index() == run.style_index() && within)
+            .then(|| (cluster.text_range(), cluster.glyphs().count()))
+    });
     paint(GlyphRun {
         font: &font.data,
         index: font.index,
@@ -116,5 +135,7 @@ pub fn paint_parley_run<B: parley::Brush>(
         line,
         glyphs: &mut glyphs,
         decorations: &decorations,
+        text,
+        clusters: &mut clusters,
     })
 }

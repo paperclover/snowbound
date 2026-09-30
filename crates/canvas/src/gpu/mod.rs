@@ -110,6 +110,7 @@ impl Glyphs for TextLayout {
                 };
                 draw::paint_parley_run(
                     &run,
+                    &self.text,
                     bounds.baseline,
                     run.style().brush.rise,
                     [bounds.top, bounds.height],

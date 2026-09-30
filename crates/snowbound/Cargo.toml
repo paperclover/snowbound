@@ -10,7 +10,7 @@ default = ["wgpu"]
 wgpu = ["draw/wgpu", "dep:wgpu"]
 
 [dependencies]
-canvas = { path = "../canvas", features = ["interaction"] }
+canvas = { path = "../canvas", features = ["interaction", "pdf"] }
 draw = { path = "../draw", default-features = false, features = ["render"] }
 ui = { path = "../ui" }
 png = "0.18"
@@ -38,6 +38,10 @@ objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAlert", "NSButton", "NSCell", "NSControl", "NSView", "NSResponder", "NSWindow", "NSApplication", "NSEvent", "NSMenu", "NSMenuItem", "NSColor", "NSColorSpace", "NSDatePicker", "NSDatePickerCell", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSWorkspace"] }
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray", "NSRange", "NSError", "NSFileCoordinator", "NSFilePresenter", "NSFileVersion", "NSFileManager", "NSNotification", "NSOperation", "block2"] }
 block2 = "0.5.1"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# Clipboard bitmaps; macOS reads the pasteboard's PNG and TIFF itself.
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

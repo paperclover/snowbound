@@ -3,6 +3,8 @@ mod dual;
 #[cfg(any(windows, not(feature = "wgpu")))]
 mod gl;
 mod icon;
+#[cfg(feature = "pdf")]
+mod pdf;
 mod text;
 #[cfg(feature = "wgpu")]
 mod translucent;
@@ -20,6 +22,8 @@ pub use backend::Target;
 #[cfg(all(feature = "wgpu", windows))]
 pub use gl::Target as GlTarget;
 pub use icon::{Palette, picture_icon};
+#[cfg(feature = "pdf")]
+pub use pdf::{Sheet, pdf};
 pub use text::{Decoration, Glyph, GlyphRun, Glyphs, paint_parley_run};
 #[cfg(feature = "wgpu")]
 pub use translucent::Translucent;
@@ -1736,6 +1740,7 @@ mod tests {
                     if let PositionedLayoutItem::GlyphRun(run) = item {
                         paint_parley_run(
                             &run,
+                            "",
                             metrics.baseline,
                             0.0,
                             [metrics.block_min_coord, metrics.line_height],

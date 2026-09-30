@@ -771,7 +771,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         case #selector(copy(_:)), #selector(cut(_:)), #selector(delete(_:)),
             #selector(toggleBoldface(_:)), #selector(toggleItalics(_:)), #selector(toggleUnderline(_:)):
             return lo < hi
-        case #selector(paste(_:)): return UIPasteboard.general.hasStrings
+        case #selector(paste(_:)): return UIPasteboard.general.hasStrings || UIPasteboard.general.hasImages
         case #selector(select(_:)): return lo == hi && hasText
         case #selector(selectAll(_:)): return hasText && (lo > 0 || hi < endOfDocument.offset)
         default: return super.canPerformAction(action, withSender: sender)
@@ -799,10 +799,15 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         edit(external: true) { replacing(range, with: "") }
     }
 
-    /// Pasted text takes the keyboard's language, as Windows gives the clipboard.
+    /// Pasted text takes the keyboard's language, as Windows gives the clipboard. Text wins
+    /// over a picture, which apps put beside copied text.
     override func paste(_ sender: Any?) {
-        guard let handle, let text = UIPasteboard.general.string else { return }
-        edit(external: true) { sb_paste(handle, text, textInputMode?.primaryLanguage ?? "") }
+        guard let handle else { return }
+        if let text = UIPasteboard.general.string {
+            edit(external: true) { sb_paste(handle, text, textInputMode?.primaryLanguage ?? "") }
+        } else if let image = UIPasteboard.general.image {
+            insertPicture(image)
+        }
     }
 
     override func select(_ sender: Any?) {
@@ -958,7 +963,27 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         return focused
     }
 
-    /// Puts a JPEG or PNG after the caret's paragraph at `size` points.
+    /// A photo as OneNote 2010 can read it: JPEG, at most 2048 pixels across, shown at most
+    /// 220 points wide.
+    func insertPicture(_ image: UIImage) {
+        let longest: CGFloat = 2048
+        let scale = min(1, longest / max(image.size.width * image.scale, image.size.height * image.scale))
+        let pixels = CGSize(
+            width: (image.size.width * image.scale * scale).rounded(),
+            height: (image.size.height * image.scale * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let drawn = UIGraphicsImageRenderer(size: pixels, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: pixels))
+        }
+        guard let data = drawn.jpegData(compressionQuality: 0.85) else { return }
+        // OneNote shows a picture's pixels at 96 per inch.
+        var size = CGSize(width: pixels.width * 0.75, height: pixels.height * 0.75)
+        if size.width > 220 { size = CGSize(width: 220, height: size.height * 220 / size.width) }
+        insertPicture(data, size: size)
+    }
+
+    /// Puts a JPEG or PNG at the caret at `size` points.
     func insertPicture(_ data: Data, size: CGSize) {
         guard let handle else { return }
         edit(external: true) {

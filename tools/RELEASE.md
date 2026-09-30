@@ -18,16 +18,17 @@ development builds, which never update themselves.
 ## The published folder
 
 ```text
-latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-10.6": ..., "linux-x86_64": ..., "windows-x86_64": ..., ...}
+latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-x86_64": ..., "macos-10.6": ..., "linux-x86_64": ..., ...}
 2026-09-29.r10/
   build.json                   version, commit, and per platform: file, size, sha256, signature
   build.json.sig               ed25519 signature of build.json, hex
   Snowbound-2026-09-29-r10-macos-aarch64.zip
+  Snowbound-2026-09-29-r10-macos-x86_64.zip
   Snowbound-2026-09-29-r10-macos-10.6.zip
   snowbound-2026-09-29-r10-linux-x86_64         the executable itself
   snowbound-2026-09-29-r10-linux-aarch64
-  snowbound-2026-09-29-r10-windows-x86_64.exe   Windows 7 SP1 to 11
-  snowbound-2026-09-29-r10-windows-aarch64.exe  Windows 11 on Arm
+  snowbound-2026-09-29-r10-windows-x86_64.exe
+  snowbound-2026-09-29-r10-windows-aarch64.exe
 ```
 
 A build folder is written once, under a hidden `.2026-09-29.r10.partial` name renamed into
@@ -82,7 +83,7 @@ quarantine and open directly.
 ## Publishing
 
 ```sh
-python3 tools/release.py              # all six platforms
+python3 tools/release.py              # all seven platforms
 python3 tools/release.py --ad-hoc     # the macOS app without Developer ID
 python3 tools/release.py --dry-run    # the same into a new temporary folder
 python3 tools/release.py --platforms macos-aarch64 linux-x86_64
@@ -99,9 +100,30 @@ publishes as above. Run again for the same commit, it only brings
 `latest.json` up to date; a different commit that derives the same version is
 refused. The 10.6 build needs the SDK and nightly toolchain
 `platform/snow-leopard/cargo.sh` names; the Linux builds need `zig`, as the
-cross linker against glibc 2.31; the Windows builds need llvm-mingw, which
+cross linker against glibc 2.17; the Windows builds need llvm-mingw, which
 `platform/windows/toolchain.sh` fetches, and nightly with `rust-src` for
-x86_64. All six build from an Apple silicon Mac.
+x86_64. All seven build from an Apple silicon Mac.
+
+## Minimum systems
+
+Each build runs as far back as its dependencies allow, and newer calls are
+checked at run time (`respondsToSelector:`, `available!`, `dlsym`).
+
+| Platform | Oldest system | Set by |
+| --- | --- | --- |
+| `macos-aarch64` | macOS 11 | Apple silicon's first; rustc's default |
+| `macos-x86_64` | macOS 10.13 | wgpu's Metal floor; `MACOSX_DEPLOYMENT_TARGET` |
+| `macos-10.6` | Mac OS X 10.6 | its own SDK, runtime shims and OpenGL renderer |
+| `linux-*` | glibc 2.17 (RHEL 7, Debian 8, Ubuntu 14.04) | Rust's floor; zig's glibc target |
+| `windows-x86_64` | Windows 7 SP1 | nightly's `x86_64-win7-windows-gnu` |
+| `windows-aarch64` | Windows 11 on Arm | `aarch64-pc-windows-gnullvm` |
+
+`build_macos.py` writes the minimum as `LSMinimumSystemVersion`; the binary
+carries it as `LC_BUILD_VERSION` `minos` (`LC_VERSION_MIN_MACOSX` below 10.14),
+which `otool -l` shows. `objdump -T` of a Linux executable names no `GLIBC_`
+version above 2.17. The Linux executable links only libc, libm, libpthread and
+libdl; Wayland, X11, xkbcommon, EGL, Vulkan, fontconfig, GStreamer and Enchant
+are loaded at run time.
 
 ## In the app
 
@@ -111,7 +133,8 @@ Work Offline is on; Check for Updates… (the app menu on macOS, the command
 palette elsewhere) checks at once and reports what it found. A check reads
 `latest.json`, then the named build's `build.json` and signature, and
 downloads the archive for this platform, verifying size, SHA-256 and
-signature. It stages the update beside the install, so the swap is a rename:
+signature. An Intel build that Rosetta runs takes `macos-aarch64`'s, even at
+its own version. It stages the update beside the install, so the swap is a rename:
 the app unpacked into `.Snowbound.app.update` next to the bundle on macOS, the
 executable into `.snowbound.update` next to it on Linux (`.snowbound.exe.update` on
 Windows). The sync status icon gets a dot, and its popup offers

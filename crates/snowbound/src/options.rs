@@ -164,13 +164,13 @@ impl State {
         match options.page {
             Page::General => {
                 heading(ui, &theme, "User Interface Options");
-                field(ui, "Color scheme:", |ui| {
+                field(ui, "Appearance:", |ui| {
                     let combo = ui.id("combo");
                     let current = SCHEMES
                         .iter()
                         .find(|(scheme, _)| *scheme == options.color_scheme)
                         .map_or("", |(_, name)| name);
-                    ui::shell::combo(ui, "combo", "Color scheme", current, 140.0, schemes(), true);
+                    ui::shell::combo(ui, "combo", "Appearance", current, 140.0, schemes(), true);
                     let items = SCHEMES.map(|(scheme, name)| Item {
                         text: name,
                         checked: Some(scheme == options.color_scheme),
@@ -244,16 +244,10 @@ impl State {
             }
             Page::Display => {
                 heading(ui, &theme, "Display");
-                let dark = !options.light_pages;
-                if ui::check_box(
-                    ui,
-                    "dark-pages",
-                    "Pages appear dark in the Dark color scheme",
-                    dark,
-                )
-                .clicked
+                let matching = !options.light_pages;
+                if ui::check_box(ui, "pages-match-theme", "Pages match UI theme", matching).clicked
                 {
-                    options.light_pages = dark;
+                    options.light_pages = matching;
                 }
             }
             Page::Advanced => {

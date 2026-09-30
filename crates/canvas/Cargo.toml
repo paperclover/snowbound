@@ -8,6 +8,8 @@ publish = false
 gpu = ["draw/render", "dep:color_quant", "dep:image", "dep:png", "dep:resvg", "dep:sha2"]
 # How a page responds to input and presents itself to assistive technology.
 interaction = ["gpu", "dep:accesskit"]
+# Pages printed as PDF, as OneNote prints them.
+pdf = ["interaction", "draw/pdf"]
 
 [dependencies]
 draw = { path = "../draw", default-features = false }
@@ -35,6 +37,7 @@ path = "src/bin/page_probe.rs"
 
 [dev-dependencies]
 draw = { path = "../draw", features = ["wgpu"] }
+miniz_oxide = "0.8"
 accesskit_consumer = "0.39.0"
 pollster = "0.4"
 wgpu.workspace = true
@@ -42,3 +45,7 @@ wgpu.workspace = true
 [[example]]
 name = "render_page"
 required-features = ["gpu"]
+
+[[example]]
+name = "print_pdf"
+required-features = ["pdf"]

@@ -20,7 +20,7 @@ pub struct Settings {
     /// first saved.
     pub user_name: Option<String>,
     pub color_scheme: ColorScheme,
-    /// Keeps pages white in the Dark color scheme.
+    /// Keeps pages white in a dark appearance: Pages Match UI Theme off.
     pub light_pages: bool,
     /// Leaves misspelled words unmarked, as OneNote's Hide Spelling Errors.
     pub hide_spelling: bool,
@@ -33,6 +33,35 @@ pub struct Settings {
     /// Draws a tablet pen's strokes at its width, as OneNote 2010 with "Use pen pressure
     /// sensitivity" off.
     pub ignore_pen_pressure: bool,
+    /// Places and moves things where they are dropped, as OneNote's Snap To Grid off.
+    pub ignore_grid: bool,
+    /// Options' Default font: new text's font and size, and new titles' font.
+    pub default_font: DefaultFont,
+    /// OneNote's "Page tabs appear on the left".
+    pub page_tabs_left: bool,
+    /// OneNote's "Navigation bar appears on the left" turned off: the notebooks on the right.
+    pub navigation_bar_right: bool,
+    /// Servers Open Notebook from Server signed in to, latest first, as addresses without a
+    /// password.
+    pub servers: Vec<String>,
+}
+
+/// The font and size OneNote's Default font gives new text.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefaultFont {
+    pub face: String,
+    pub size: f32,
+}
+
+impl Default for DefaultFont {
+    /// OneNote 2010's: Calibri 11.
+    fn default() -> Self {
+        Self {
+            face: "Calibri".into(),
+            size: 11.0,
+        }
+    }
 }
 
 /// What the toolbar's buttons apply from their menus' last picks.
@@ -144,6 +173,11 @@ impl crate::State {
             tags: (self.tags != canvas::editor::NoteTag::defaults()).then(|| self.tags.clone()),
             manual_updates: !self.updates.automatic(),
             ignore_pen_pressure: !self.pen_pressure,
+            ignore_grid: !self.view.snap_to_grid,
+            default_font: self.default_font.clone(),
+            page_tabs_left: self.page_tabs_left,
+            navigation_bar_right: self.navigation_bar_right,
+            servers: self.servers.clone(),
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -204,6 +238,14 @@ mod tests {
             }]),
             manual_updates: true,
             ignore_pen_pressure: true,
+            ignore_grid: true,
+            default_font: DefaultFont {
+                face: "Georgia".into(),
+                size: 14.0,
+            },
+            page_tabs_left: true,
+            navigation_bar_right: true,
+            servers: vec!["smb://clover@nas/Notes".into()],
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

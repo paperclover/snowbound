@@ -175,6 +175,9 @@ pub fn window_attributes() -> WindowAttributes {
         .with_taskbar_icon(icon(32).ok())
         .with_decorations(caption() != Caption::Drawn)
         .with_undecorated_shadow(true)
+        // What GDI paints under the material would show through the row; every 10 draws
+        // with Direct3D 12, which needs no such bitmap.
+        .with_no_redirection_bitmap(caption() == Caption::Drawn && version().0 >= 10)
 }
 
 /// Takes the window's frame messages ahead of winit's: over glass or Mica, the caption
@@ -236,9 +239,6 @@ unsafe extern "system" fn frame_procedure(
         wm::WM_SETTINGCHANGE | wm::WM_DWMCOLORIZATIONCOLORCHANGED => {
             if message == wm::WM_SETTINGCHANGE && setting(lparam) == "ImmersiveColorSet" {
                 refresh_color_policy();
-                if ACRYLIC.load(Ordering::Relaxed) {
-                    accent(hwnd, Accent::Acrylic);
-                }
             }
             if let Some(proxy) = QUIT.get() {
                 let _ = proxy.send_event(crate::UserEvent::Appearance);
@@ -445,6 +445,26 @@ pub fn cuts_corners() -> bool {
 /// Whether Windows 10 shows acrylic under the window, which a drag swaps for plain blur.
 static ACRYLIC: AtomicBool = AtomicBool::new(false);
 
+/// Whether the app's appearance is dark, which Options can set apart from the system's.
+static DARK: AtomicBool = AtomicBool::new(false);
+
+/// Holds the frame, its caption buttons and its material to the app's `appearance`.
+pub fn follow_appearance(window: &Window, appearance: Theme) {
+    let dark = appearance == Theme::Dark;
+    DARK.store(dark, Ordering::Relaxed);
+    let (major, _, build) = version();
+    if major < 10 {
+        return;
+    }
+    let hwnd = hwnd(window);
+    // DWMWA_USE_IMMERSIVE_DARK_MODE, 19 before build 18985.
+    let attribute = if build >= 18985 { 20 } else { 19 };
+    set_attribute(hwnd, attribute, &BOOL::from(dark));
+    if ACRYLIC.load(Ordering::Relaxed) {
+        accent(hwnd, Accent::Acrylic);
+    }
+}
+
 enum Accent {
     Blur,
     /// Acrylic in the shell's own tints: Windows 10's light and dark flyouts.
@@ -482,8 +502,8 @@ fn accent(hwnd: HWND, accent: Accent) -> bool {
         Accent::Acrylic => Policy {
             state: 4,
             flags: 2,
-            // 0xAABBGGRR, after the apps' colour mode.
-            tint: if registry_dword(PERSONALIZE, "AppsUseLightTheme") == Some(0) {
+            // 0xAABBGGRR, after the app's appearance.
+            tint: if DARK.load(Ordering::Relaxed) {
                 0xcc20_2020
             } else {
                 0xccf3_f3f3
@@ -577,7 +597,7 @@ pub fn titlebar(appearance: Theme) -> Option<[[f32; 4]; 2]> {
 /// The theme over the window's material. Over Windows 7's glass, fields and tool buttons
 /// take white faces, as Internet Explorer's do there, so their text and icons stay legible,
 /// and the sidebar stays opaque.
-pub fn over_backdrop(theme: ui::Theme) -> ui::Theme {
+pub fn over_backdrop(theme: ui::Theme, _: Theme) -> ui::Theme {
     let sidebar = theme.sidebar;
     let theme = theme.over_backdrop();
     if caption() != Caption::Glass || eleven() {
@@ -795,6 +815,15 @@ impl Clipboard {
     pub fn get_text(&mut self) -> Result<String, arboard::Error> {
         self.0.get_text()
     }
+
+    pub fn get_files(&mut self) -> Vec<std::path::PathBuf> {
+        self.0.get().file_list().unwrap_or_default()
+    }
+
+    /// The clipboard's PNG, or else its device-independent bitmap.
+    pub fn get_picture(&mut self) -> Option<Vec<u8>> {
+        crate::paste::bitmap(self.0.get_image().ok()?)
+    }
 }
 
 /// The DWORD `value` under `key` in the user's registry hive.
@@ -882,6 +911,32 @@ pub fn cache_dir() -> Option<PathBuf> {
 
 pub fn settings_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("APPDATA")?).join("Snowbound"))
+}
+
+/// The user's Documents known folder, wherever it was moved.
+pub fn documents_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_Documents, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+    };
+    let mut path = std::ptr::null_mut();
+    let found = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_Documents,
+            KF_FLAG_DEFAULT as u32,
+            std::ptr::null_mut(),
+            &mut path,
+        )
+    } == 0;
+    let folder = found.then(|| unsafe {
+        let length = (0..).take_while(|&at| *path.add(at) != 0).count();
+        PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
+            path, length,
+        )))
+    });
+    unsafe { CoTaskMemFree(path as _) };
+    folder
 }
 
 /// None: Windows reaches a share by its UNC path with the share modes and byte-range

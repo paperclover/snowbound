@@ -291,8 +291,15 @@ pub fn set_toplevel_icon(window: &Window) -> Option<()> {
             ]);
         }
     }
-    // Safety: memfd_create returns a new descriptor this File then owns.
-    let fd = unsafe { libc::memfd_create(c"snowbound-icon".as_ptr(), libc::MFD_CLOEXEC) };
+    // Safety: memfd_create returns a new descriptor this File then owns. A system call, as
+    // glibc wraps it only from 2.27.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_memfd_create,
+            c"snowbound-icon".as_ptr(),
+            libc::MFD_CLOEXEC,
+        )
+    } as i32;
     if fd < 0 {
         return None;
     }

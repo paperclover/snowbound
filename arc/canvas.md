@@ -117,6 +117,14 @@ package. The page draws the PNG OneNote rendered of each
 pictures. Snowbound does not write XPS, so a printout page deleted and brought
 back by undo returns as that picture (`corpus/printout`).
 
+Pictures go in as OneNote 2010 pastes and inserts them. At a caret in text the
+paragraph splits around the picture, as around a file. On blank page the picture
+lies on the page at the caret, and the caret moves to the grid row below it. A
+picture takes the size its resolution gives it, or 96 dpi without one. Paste
+takes files first (a picture file as its picture), then text, then a picture:
+Finder offers a copied file's name and icon beside it, and other apps a picture
+of copied text.
+
 ## Recordings
 
 Record Audio and Record Video work as OneNote 2010's do. The caret's paragraph
@@ -221,6 +229,19 @@ pixels, except the word still being typed. The context menu (the edit menu on
 iOS) offers the dictionary's corrections, Ignore and Add to Dictionary, and the
 Spelling pane (F7) walks the page's marked words. A correction is an ordinary
 edit, one revision. Nothing about spelling is stored in the page.
+
+## Printing and PDF
+
+`canvas::print` lays pages on paper as OneNote 2010 prints them (`corpus/print`): between
+half-inch top and bottom margins with the margin origin an inch in, the whole page shrunk
+when its content reaches past the paper's right edge, and each sheet after the first
+starting at the line of text or picture the one before would have cut. Rule lines and
+template art print across the paper; the page colour does not. The footer names the
+section and numbers the sheets. `draw::pdf` writes the same primitives the screen paints
+as PDF: text in subset fonts whose ToUnicode maps come from the laid-out text, so it
+selects and searches, ligatures included; ink and shapes as paths; pictures and tag
+icons as images. The desktop's Print hands that PDF to AppKit's print panel, the XDG print
+portal or the shell's print verb for PDFs; Export as PDF saves it.
 
 ## Search, dates, conflicts
 

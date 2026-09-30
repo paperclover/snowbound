@@ -232,9 +232,14 @@ fn refused(device: &str, pane: &str) -> String {
 }
 
 /// Whether the system refused media of `kind`: AVAuthorizationStatusRestricted or Denied.
+/// Before macOS 10.14 it never asks, and nothing is refused.
 fn denied(kind: &NSString) -> bool {
-    let status: isize =
-        unsafe { msg_send![class("AVCaptureDevice"), authorizationStatusForMediaType: kind] };
+    let device = class("AVCaptureDevice");
+    let selector = sel!(authorizationStatusForMediaType:);
+    if !unsafe { msg_send![device, respondsToSelector: selector] } {
+        return false;
+    }
+    let status: isize = unsafe { msg_send![device, authorizationStatusForMediaType: kind] };
     matches!(status, 1 | 2)
 }
 

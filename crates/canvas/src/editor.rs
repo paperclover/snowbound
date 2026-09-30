@@ -2178,39 +2178,29 @@ impl CanvasEditor {
         Ok(true)
     }
 
-    /// Puts `image` in the active outline's flow after the caret's paragraph, as OneNote
-    /// inserts a picture into an outline; the caret stays.
+    /// Puts `image` at the caret as OneNote 2010 pastes and inserts a picture: in an outline
+    /// as [`Self::insert_attachment`] puts a file, and on blank page at the caret with the
+    /// caret moving to the grid row below it, where typing starts a new outline.
     pub fn insert_picture(
         &mut self,
         engine: &mut TextEngine,
-        image: onestore::page::Image,
+        mut image: onestore::page::Image,
     ) -> Result<(), EditorError> {
-        let selection = self.selection();
-        let caret = selection.positions[0].max(selection.positions[1]);
-        let (container, index, node) = self
-            .active_outline()
-            .document
-            .leaf(caret.paragraph)
-            .ok_or(EditError::InvalidRange)?;
-        let picture = PageParagraph {
-            id: onestore::page::text::new_id()?,
-            content: ParagraphContent::Image(image),
-            style: None,
-            lists: Vec::new(),
-            tags: Vec::new(),
-            collapsed: false,
-            ..node.clone()
+        let Focus::Caret { outline, .. } = &self.active else {
+            return self.insert_in_flow(engine, ParagraphContent::Image(image));
         };
-        self.commit(
-            engine,
-            DocumentEdit {
-                columns: BTreeMap::new(),
-                container,
-                range: index + 1..index + 1,
-                replacement: vec![picture],
-            },
-            selection,
-        )
+        let [x, y] = outline.origin();
+        [image.layout.x, image.layout.y] = [Some(x), Some(y)];
+        image.layout.width_set_by_user = Some(false);
+        let height = image.layout.max_height.unwrap_or_default();
+        self.finish_composition();
+        let index = self.objects.len();
+        self.add_picture(index, image);
+        self.undo.push(History::Picture { index, image: None });
+        self.redo.clear();
+        let margin = self.margin_origin()[1];
+        let row = ((y + height - margin) / 18.0).floor() + 1.0;
+        self.place_caret(engine, [x, margin + row * 18.0], DEFAULT_OUTLINE_WIDTH)
     }
 
     /// Attaches `file` at the caret as OneNote 2010 does (`corpus/attachment-insert`): the
@@ -2241,11 +2231,21 @@ impl CanvasEditor {
             self.redo.clear();
             return Ok(());
         }
-        let file = match self.across(engine, |editor, engine| {
-            editor.insert_attachment(engine, file.clone())
+        self.insert_in_flow(engine, ParagraphContent::Attachment(file))
+    }
+
+    /// Splits the caret's paragraph around `content`, which takes the place of an empty first
+    /// half; the caret starts the second.
+    fn insert_in_flow(
+        &mut self,
+        engine: &mut TextEngine,
+        content: ParagraphContent,
+    ) -> Result<(), EditorError> {
+        let content = match self.across(engine, |editor, engine| {
+            editor.insert_in_flow(engine, content.clone())
         })? {
             Some(()) => return Ok(()),
-            None => file,
+            None => content,
         };
         let [anchor, focus] = self.selection().positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
@@ -2260,7 +2260,7 @@ impl CanvasEditor {
         };
         let node = PageParagraph {
             id: onestore::page::text::new_id()?,
-            content: ParagraphContent::Attachment(file),
+            content,
             style: None,
             lists: Vec::new(),
             tags: Vec::new(),
@@ -3209,6 +3209,7 @@ impl CanvasEditor {
         engine: &mut TextEngine,
         replacement: Vec<Paragraph>,
     ) -> Result<(), EditorError> {
+        self.take_objects()?;
         let start = self.active_outline().selection.positions[0]
             .min(self.active_outline().selection.positions[1]);
         let end = self.active_outline().selection.positions[0]
@@ -3308,6 +3309,7 @@ impl CanvasEditor {
                 editor.paste(engine, text, language)
             });
         }
+        self.take_objects()?;
         let lines = text
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line))
@@ -3569,6 +3571,7 @@ impl CanvasEditor {
             self.grouped(|editor| editor.remove_page(engine, false))?;
             return Ok(true);
         }
+        self.take_objects()?;
         let selection = self.active_outline().selection;
         let [anchor, focus] = selection.positions;
         let mut range = anchor.min(focus)..anchor.max(focus);

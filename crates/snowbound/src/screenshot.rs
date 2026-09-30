@@ -40,8 +40,8 @@ pub(crate) fn prepare() {
 
 impl State {
     /// Writes `PREFIX-light.png` and `PREFIX-dark.png`, the page unfocused so no caret shows;
-    /// as a Snow Leopard window, `PREFIX-snow-leopard.png` and, not key,
-    /// `PREFIX-snow-leopard-other.png`, at 10.6's one pixel per point.
+    /// as a Snow Leopard window, at 10.6's one pixel per point, also `PREFIX-light-other.png`
+    /// and `PREFIX-dark-other.png` as the window looks when not key.
     pub(crate) fn screenshot(&mut self, prefix: &Path) -> Result<(), Box<dyn Error>> {
         let size = match std::env::var("SNOWBOUND_SCREENSHOT_SIZE") {
             Ok(size) => size

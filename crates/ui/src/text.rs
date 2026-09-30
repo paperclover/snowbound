@@ -149,6 +149,7 @@ impl Glyphs for Label {
                 if let PositionedLayoutItem::GlyphRun(run) = item {
                     draw::paint_parley_run(
                         &run,
+                        "",
                         metrics.baseline,
                         0.0,
                         [metrics.block_min_coord, metrics.line_height],

@@ -217,6 +217,17 @@ fn a_row_squeezes_its_boxes_only_once_every_group_is_folded() {
 }
 
 #[test]
+fn a_row_is_narrowest_with_every_group_folded_and_every_box_squeezed() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    folding_row(&mut ui, 300.0, &[0, 1]);
+    let row = Id::ROOT.child("row");
+    // The space gives all, the loose box 60 of 80, each group 80 of 100.
+    assert_eq!(ui.narrowest(row), Some(60.0));
+    let rects = folding_row(&mut ui, 60.0, &[0, 1]);
+    assert_eq!(rects[4], Some([40.0, 0.0, 60.0, 20.0]));
+}
+
+#[test]
 fn a_box_sized_by_its_children_yields_what_they_yield() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut combo = None;

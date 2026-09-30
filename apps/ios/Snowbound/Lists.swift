@@ -22,6 +22,8 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         /// Opening, or why the notebook cannot be.
         case status(notebook: String)
         case newNotebook, openFolder, connect
+        /// Copies the Snowbound Guide to On My iPhone and opens it, until it is there.
+        case guide
         /// New Notebook in iCloud Drive, and the way to it while iCloud Drive is off.
         case newInCloud, turnOnICloud
     }
@@ -101,6 +103,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                         guard let self else { return }
                         Author.ask(from: self) {}
                     })
+                more.append(Appearance.menu())
                 provide(actions + [UIMenu(options: .displayInline, children: more)])
             }
         ])
@@ -128,13 +131,15 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
 
     func reload() {
         guard isViewLoaded else { return }
+        let copied = Notebooks.onDevice.contains { $0.source == .documents(path: Notebooks.guide) }
+        let guide: [Item] = Notebooks.guideOffered && !copied ? [.guide] : []
         let cloud: [(Location, [Notebook], [Item])] =
             ICloud.documents != nil
             ? [(.icloud, Notebooks.inCloud, [.newInCloud])]
             : ICloud.signedIn ? [] : [(.icloud, [], [.turnOnICloud])]
         let locations: [(Location, [Notebook], [Item])] =
             cloud + (Notebooks.showsOnDevice ? [(.onDevice, Notebooks.onDevice, [.newNotebook])] : [])
-            + [(.elsewhere, Notebooks.elsewhere, [.openFolder, .connect])]
+            + [(.elsewhere, Notebooks.elsewhere, [.openFolder, .connect] + guide)]
         var sections = NSDiffableDataSourceSnapshot<Location, Item>()
         sections.appendSections(locations.map(\.0))
         dataSource.apply(sections, animatingDifferences: false)
@@ -259,6 +264,10 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         case .newInCloud:
             content.text = "New Notebook…"
             content.image = UIImage(systemName: "plus")
+            content.textProperties.color = .tintColor
+        case .guide:
+            content.text = "Open the Snowbound Guide"
+            content.image = UIImage(systemName: "book")
             content.textProperties.color = .tintColor
         case .newNotebook, .openFolder, .connect:
             content.text =
@@ -511,6 +520,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             if let settings = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(settings) }
         case .openFolder: openFolder()
         case .connect: connect()
+        case .guide: openGuide()
         case .location: break
         }
         return false
@@ -579,6 +589,30 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             if !inCloud && !Notebooks.showsOnDevice { Notebooks.showsOnDevice = true }
             rescan { [weak self] notebook in
                 guard notebook.source == (inCloud ? .icloud(path: name) : .documents(path: name)),
+                    let tab = notebook.tabs.first(where: \.readable)
+                else { return }
+                self?.onOpen?(tab, notebook)
+            }
+        }
+    }
+
+    /// Copies the guide the app carries to On My iPhone and opens the copy, so the carried one
+    /// stays as shipped.
+    private func openGuide() {
+        let copy = documentsDirectory.appendingPathComponent(Notebooks.guide)
+        background({ () -> String? in
+            guard !FileManager.default.fileExists(atPath: copy.path) else { return nil }
+            guard let carried = Bundle.main.url(forResource: Notebooks.guide, withExtension: nil) else {
+                return "The guide is missing from this copy of Snowbound."
+            }
+            do { try FileManager.default.copyItem(at: carried, to: copy) } catch { return error.localizedDescription }
+            return nil
+        }) { [weak self] problem in
+            guard let self else { return }
+            if let problem { return refuse("Can’t Open the Guide", problem) }
+            if !Notebooks.showsOnDevice { Notebooks.showsOnDevice = true }
+            rescan { [weak self] notebook in
+                guard notebook.source == .documents(path: Notebooks.guide),
                     let tab = notebook.tabs.first(where: \.readable)
                 else { return }
                 self?.onOpen?(tab, notebook)

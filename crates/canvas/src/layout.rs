@@ -61,6 +61,8 @@ pub struct LineBox {
 pub struct TextLayout {
     id: u64,
     pub(crate) shaped: Arc<Layout<TextBrush>>,
+    /// The paragraph text laid out, which a PDF's text layer maps glyphs back to.
+    pub(crate) text: Arc<str>,
     lines: Vec<LineBox>,
     /// Where each inline space lies: its index in the spaces laid out, its x, and its line.
     spaces: Vec<(usize, f32, usize)>,
@@ -518,6 +520,7 @@ impl TextEngine {
         Ok(TextLayout {
             id,
             shaped: Arc::new(shaped),
+            text: text.into(),
             lines,
             spaces: placed,
         })

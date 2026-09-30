@@ -30,21 +30,23 @@ pub(super) fn screenshot(
     size: [f32; 2],
 ) -> Result<(), Box<dyn Error>> {
     let title = state.window.title();
-    for (name, key) in [("snow-leopard", true), ("snow-leopard-other", false)] {
-        state.window.set_theme(Some(Appearance::Light));
-        state.set_appearance(Appearance::Light);
-        // Over the textured window's gradient, as `install_backdrop` leaves it on 10.6.
-        state.ui.theme = theme(Appearance::Light, state.light_pages, true);
-        state.titlebar = [state.ui.theme.strip; 2];
-        state.ui.window_focused = key;
-        state.settle_frame(size, 1.0)?;
-        let content = state.capture()?;
-        let bar = title_bar(state, &title, size[0], key)?;
-        let [width, height] = [size[0] as usize, size[1] as usize];
-        let window = window(&content, &bar, [width, height], key)?;
-        let (canvas, shadowed) = shadow(&window, [width, height + TITLE_LINE], key);
-        let path = PathBuf::from(format!("{}-{name}.png", prefix.display()));
-        write_png(&path, canvas.map(|side| side as u32), &shadowed)?;
+    for (name, appearance) in [("light", Appearance::Light), ("dark", Appearance::Dark)] {
+        for (suffix, key) in [("", true), ("-other", false)] {
+            state.window.set_theme(Some(appearance));
+            state.set_appearance(appearance);
+            // Over the textured window's gradient, as `install_backdrop` leaves it on 10.6.
+            state.ui.theme = theme(appearance, state.light_pages, true);
+            state.titlebar = [state.ui.theme.strip; 2];
+            state.ui.window_focused = key;
+            state.settle_frame(size, 1.0)?;
+            let content = state.capture()?;
+            let bar = title_bar(state, &title, size[0], key)?;
+            let [width, height] = [size[0] as usize, size[1] as usize];
+            let window = window(&content, &bar, [width, height], key)?;
+            let (canvas, shadowed) = shadow(&window, [width, height + TITLE_LINE], key);
+            let path = PathBuf::from(format!("{}-{name}{suffix}.png", prefix.display()));
+            write_png(&path, canvas.map(|side| side as u32), &shadowed)?;
+        }
     }
     Ok(())
 }

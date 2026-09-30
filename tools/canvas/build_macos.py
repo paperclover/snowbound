@@ -16,6 +16,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--release', action='store_true')
 parser.add_argument('--output', type=Path, help='Create a separate bundle at a new .app path')
 parser.add_argument('--bundle-id', help="Bundle identifier for the separate app; the app's own otherwise")
+host = 'aarch64' if platform.machine() == 'arm64' else 'x86_64'
+parser.add_argument('--arch', choices=['aarch64', 'x86_64'], default=host, help="The app's architecture; this Mac's by default")
 parser.add_argument('--snow-leopard', action='store_true',
                     help='Build with platform/snow-leopard/cargo.sh into target/snow-leopard')
 parser.add_argument('--sign-identity', metavar='SHA1',
@@ -29,6 +31,9 @@ if args.bundle_id and not args.output:
     parser.error('Use --bundle-id with --output.')
 if args.sign and args.snow_leopard:
     parser.error('The 10.6 bundle stays unsigned.')
+# The oldest macOS each build runs on: 10.6's own build, wgpu's floor on Intel, and Apple
+# silicon's first, which rustc also defaults to.
+minimum = '10.6' if args.snow_leopard else {'x86_64': '10.13', 'aarch64': '11.0'}[args.arch]
 if args.output and (args.output.suffix != '.app' or args.output.exists()):
     parser.error('Choose a new output path ending in .app.')
 root = Path(__file__).resolve().parents[2]
@@ -83,9 +88,13 @@ if args.snow_leopard:
     target = root / 'target/snow-leopard'
     built = target / 'x86_64-apple-macosx10.6'
 else:
-    subprocess.run(['cargo', 'build', '-p', 'snowbound'] + profile, cwd=root, check=True)
     metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--format-version=1', '--no-deps'], cwd=root))
     target = built = Path(metadata['target_directory'])
+    cross = [] if args.arch == host else ['--target', f'{args.arch}-apple-darwin']
+    if cross:
+        built = target / cross[1]
+    subprocess.run(['cargo', 'build', '-p', 'snowbound'] + profile + cross, cwd=root, check=True,
+                   env={**os.environ, 'MACOSX_DEPLOYMENT_TARGET': minimum} if args.arch == 'x86_64' else None)
 bundle = args.output.resolve() if args.output else target / 'Snowbound.app'
 if args.output:
     bundle.mkdir(parents=True, exist_ok=False)
@@ -107,8 +116,10 @@ if args.snow_leopard:
                             '--out', iconset / f'icon_{side}x{side}.png'], check=True, capture_output=True)
         subprocess.run(['iconutil', '-c', 'icns', iconset, '-o', resources / 'Snowbound.icns'], check=True)
 else:
-    icon = 'Snowbound-Tahoe' if int(platform.mac_ver()[0].split('.')[0] or 0) >= 26 else 'Snowbound-Sequoia'
-    shutil.copy2(icons / f'{icon}.icns', resources / 'Snowbound.icns')
+    # macOS 26 draws the Liquid Glass icon from the catalog; it holds no flattened renditions
+    # (see the icon folder's README), so earlier versions fall back to the icns.
+    shutil.copy2(icons / 'Snowbound-Sequoia.icns', resources / 'Snowbound.icns')
+    shutil.copy2(icons / 'Assets.car', resources)
 # tools/release.py names the build, as 2026-09-29-r10, which About shows.
 build = os.environ.get('SNOWBOUND_BUILD')
 versions = {}
@@ -126,6 +137,7 @@ if build:
     'NSHighResolutionCapable': True,
     'NSPrincipalClass': 'NSApplication',
     'CFBundleIconFile': 'Snowbound',
+    'CFBundleIconName': 'Snowbound-Tahoe',
     'NSLocalNetworkUsageDescription': 'Snowbound connects to file servers on your network to open and sync shared notebooks.',
     'NSMicrophoneUsageDescription':'Snowbound records audio into your notes when you choose Record Audio or Record Video.',
     'NSCameraUsageDescription': 'Snowbound records video into your notes when you choose Record Video.',
@@ -134,7 +146,8 @@ if build:
         'NSUbiquitousContainerName': 'Snowbound',
         'NSUbiquitousContainerSupportedFolderLevels': 'Any',
     }},
-} | versions | ({'LSMinimumSystemVersion': '10.6'} if args.snow_leopard else {})))
+    'LSMinimumSystemVersion': minimum,
+} | versions))
 # 10.6 runs the bundle unsigned.
 if not args.snow_leopard:
     identity = args.sign != 'ad-hoc' and (args.sign_identity or developer_id())

@@ -797,3 +797,190 @@ fn equations_draw_inline_and_url_text_shows_as_a_link() {
     assert_eq!(canvas::editor::shown_urls(&url), vec![5..22]);
     assert!(url.spans()[0].format.hyperlink.is_none());
 }
+
+/// Selections reaching into equation objects, and Enter in a placeholder and in a limit, act
+/// as OneNote 2010's equation editor acted on the same page (`corpus/equation-select`): an
+/// end inside an object the other end is outside takes the whole object, and across
+/// paragraphs the end of the paragraph with it; a placeholder is taken whole; Enter inside a
+/// limit makes its argument an equation array. Each action saves as one revision.
+#[test]
+fn selections_into_equation_objects_take_them_whole() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source =
+        std::fs::read(root.join("corpus/math-edit/native-editor-4/notebook/links.one")).unwrap();
+    let (space, page) = pages(&source).remove(0);
+    let mut engine = TextEngine::default();
+    let engine = &mut engine;
+    let mut editor = CanvasEditor::from_page(page, engine).unwrap();
+    let body = editor
+        .outlines()
+        .iter()
+        .find(|outline| !outline.title)
+        .unwrap()
+        .id;
+    editor.focus_outline(body).unwrap();
+    let texts = |editor: &CanvasEditor| -> Vec<String> {
+        editor
+            .active_outline()
+            .document()
+            .paragraphs()
+            .map(|text| text.text().to_owned())
+            .collect()
+    };
+    let original = texts(&editor);
+    let find = |editor: &CanvasEditor, needle: &str| {
+        let paragraph = texts(editor)
+            .iter()
+            .position(|text| text.contains(needle))
+            .unwrap();
+        let text = editor
+            .active_outline()
+            .document()
+            .paragraphs()
+            .nth(paragraph)
+            .unwrap()
+            .clone();
+        TextPosition {
+            paragraph,
+            offset: text
+                .utf16_offset(text.text().find(needle).unwrap())
+                .unwrap(),
+        }
+    };
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source).unwrap();
+    let mut save = |editor: &mut CanvasEditor| {
+        let ops = editor
+            .take_ops()
+            .unwrap()
+            .into_iter()
+            .map(|op| onestore::op::Op::Page { space, op })
+            .collect();
+        section
+            .apply(
+                "Author",
+                &onestore::op::Edit {
+                    at: 134_000_000_000_000_000,
+                    ops,
+                },
+            )
+            .unwrap();
+        section.seal().unwrap().unwrap();
+    };
+    let delete = |editor: &mut CanvasEditor, engine: &mut TextEngine, from, to| {
+        editor.select([from, to].into()).unwrap();
+        assert!(editor.delete(engine, true).unwrap());
+    };
+
+    // Enter in "Type equation here." leaves the placeholder's paragraph empty above a new one.
+    let placeholder = find(&editor, "equation here");
+    select(&mut editor, placeholder.paragraph, placeholder.offset..placeholder.offset);
+    editor.enter(engine, false).unwrap();
+    save(&mut editor);
+    let after = texts(&editor);
+    assert_eq!(after[placeholder.paragraph..=placeholder.paragraph + 1], ["", ""]);
+    assert_eq!(caret(&editor).paragraph, placeholder.paragraph + 1);
+
+    // From inside a square root into a cube root: both paragraphs go whole.
+    let (from, to) = (find(&editor, "\u{fdef}+1"), find(&editor, "3\u{fdee}𝑥"));
+    let to = TextPosition {
+        offset: to.offset + 4,
+        ..to
+    };
+    delete(&mut editor, engine, from, to);
+    save(&mut editor);
+    let mut expected = after.clone();
+    expected.drain(from.paragraph..=to.paragraph);
+    assert_eq!(texts(&editor), expected);
+
+    // From after a₁ into a sum: the sum goes whole with its paragraph's end, joining the
+    // integral below it.
+    let from = find(&editor, "+\u{fdd0}𝑏");
+    let to = find(&editor, "𝑖 \u{fdef}");
+    let to = TextPosition {
+        offset: to.offset + 2,
+        ..to
+    };
+    delete(&mut editor, engine, from, to);
+    save(&mut editor);
+    assert_eq!(
+        texts(&editor)[from.paragraph],
+        "\u{fdd0}𝑎\u{fdee}1\u{fdef}\u{fdd0}0\u{fdee}1\u{fdee}𝑥 𝑑𝑥 \u{fdef}"
+    );
+
+    // Enter inside a limit's argument makes it an equation array.
+    let limit = find(&editor, "∞");
+    select(&mut editor, limit.paragraph, limit.offset..limit.offset);
+    editor.enter(engine, false).unwrap();
+    save(&mut editor);
+    assert!(texts(&editor)[limit.paragraph].contains("𝑛→\u{fdee}∞\u{fdef}"));
+
+    // Text around equations: from a fraction's numerator into a root, both taken whole.
+    let end = texts(&editor).len() - 1;
+    let offset = editor
+        .active_outline()
+        .document()
+        .paragraphs()
+        .nth(end)
+        .unwrap()
+        .utf16_offset(texts(&editor)[end].len())
+        .unwrap();
+    select(&mut editor, end, offset..offset);
+    for (before, linear, after) in [("One ", "a/b+c ", " two"), ("Three ", "\\sqrt x+y ", " four")] {
+        typed(&mut editor, engine, before);
+        editor.insert_equation(engine).unwrap();
+        typed(&mut editor, engine, linear);
+        editor
+            .move_selection(engine, draw::edit::Movement::Right, false)
+            .unwrap();
+        typed(&mut editor, engine, after);
+        line(&mut editor, engine);
+    }
+    save(&mut editor);
+    let from = find(&editor, "𝑎\u{fdee}𝑏\u{fdef}+𝑐");
+    let to = find(&editor, "𝑥\u{fdef}+𝑦");
+    let (from, to) = (
+        TextPosition {
+            offset: from.offset + 2,
+            ..from
+        },
+        TextPosition {
+            offset: to.offset + 2,
+            ..to
+        },
+    );
+    delete(&mut editor, engine, from, to);
+    save(&mut editor);
+    let joined = &texts(&editor)[from.paragraph];
+    assert!(joined.starts_with("One +𝑦"), "{joined:?}");
+    assert!(joined.ends_with(" four"), "{joined:?}");
+
+    let written = section.image();
+    let (_, stored) = pages(&written).remove(0);
+    let stored: Vec<String> = stored
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => Some(outline),
+            _ => None,
+        })
+        .flat_map(|outline| &outline.paragraphs)
+        .filter_map(|paragraph| paragraph.text())
+        .map(|text| text.text.text().to_owned())
+        .collect();
+    assert_eq!(stored, texts(&editor));
+    if let Some(directory) = std::env::var_os("CANVAS_EQUATION_SELECT_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("links.one"), &written).unwrap();
+        let file_id = Store::parse(&written).unwrap().header.file_id;
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents("Open Notebook.onetoc2", &[("links.one", file_id)])
+                .unwrap(),
+        )
+        .unwrap();
+    }
+    while editor.undo(engine).unwrap() {}
+    assert_eq!(texts(&editor), original);
+}

@@ -2,7 +2,7 @@
 //! dragged out on the grid, the stroke eraser, and the lasso whose drawings move and delete,
 //! as OneNote 2010 has them (`corpus/ink-tools`).
 
-use super::{PageView, Response, Result, snap_to_grid};
+use super::{PageView, Response, Result};
 use crate::editor::{FAVORITES, Pen};
 use crate::gpu::colorref;
 use draw::{
@@ -182,14 +182,6 @@ impl PageView {
         self.drag = None;
         self.ink.gesture = Some(gesture);
         Ok(Some(self.changed()?))
-    }
-
-    fn grid(&self, point: [f32; 2]) -> [f32; 2] {
-        if self.modifiers.option {
-            point
-        } else {
-            snap_to_grid(point, self.editor.margin_origin())
-        }
     }
 
     /// The pointer moved to page point `point` during a gesture.

@@ -168,7 +168,9 @@ impl Storage for Directory {
         Ok(std::fs::create_dir(self.path(path))?)
     }
 
-    /// macOS keeps the attribute as `UF_HIDDEN`, and passes it on to a share it mounted.
+    /// macOS keeps the attribute as `UF_HIDDEN`, and passes it on to a share it mounted;
+    /// Linux has no attribute to set, a dot folder being hidden there already.
+    #[cfg_attr(windows, allow(unsafe_code))]
     fn hide(&self, path: &str) -> Result<()> {
         #[cfg(target_vendor = "apple")]
         {
@@ -181,7 +183,29 @@ impl Storage for Directory {
                     .map_err(io::Error::from)?;
             }
         }
-        #[cfg(not(target_vendor = "apple"))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+                SetFileAttributesW,
+            };
+            let path: Vec<u16> = self
+                .path(path)
+                .as_os_str()
+                .encode_wide()
+                .chain([0])
+                .collect();
+            // SAFETY: `path` is a NUL-terminated UTF-16 string that outlives both calls.
+            let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+            if attributes == INVALID_FILE_ATTRIBUTES
+                || unsafe { SetFileAttributesW(path.as_ptr(), attributes | FILE_ATTRIBUTE_HIDDEN) }
+                    == 0
+            {
+                return Err(io::Error::last_os_error().into());
+            }
+        }
+        #[cfg(not(any(target_vendor = "apple", windows)))]
         let _ = path;
         Ok(())
     }

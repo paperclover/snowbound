@@ -50,9 +50,12 @@ class ReleaseTest(unittest.TestCase):
                             [command[1] for command in commands[1:]])
 
             self.assertEqual(signing('macos-aarch64', True, ['--key-id', 'K']),
-                             (['--sign', 'developer-id', '--sign-identity', release['IDENTITY']],
+                             (['--sign', 'developer-id', '--sign-identity', release['IDENTITY'], '--arch', 'aarch64'],
                               ['-c', 'notarytool', 'stapler', '-c']))
-            self.assertEqual(signing('macos-aarch64', False, None), (['--sign', 'ad-hoc'], ['-c']))
+            self.assertEqual(signing('macos-x86_64', True, ['--key-id', 'K']),
+                             (['--sign', 'developer-id', '--sign-identity', release['IDENTITY'], '--arch', 'x86_64'],
+                              ['-c', 'notarytool', 'stapler', '-c']))
+            self.assertEqual(signing('macos-aarch64', False, None), (['--sign', 'ad-hoc', '--arch', 'aarch64'], ['-c']))
             self.assertEqual(signing('macos-10.6', True, ['--key-id', 'K']), (['--snow-leopard'], ['-c']))
         finally:
             scope['run'] = run

@@ -391,6 +391,10 @@ enum Notebooks {
 
     private static let key = "notebooks"
     private static let hidden = "hidesOnDevice"
+    /// The Snowbound Guide's folder, in the app and in Documents once copied there.
+    static let guide = "Snowbound Guide"
+    /// Whether the list offers the guide; off until Clover has read it through.
+    static let guideOffered = false
     private static let scripted = ProcessInfo.processInfo.environment["SNOWBOUND_NOTEBOOK"]
     /// The folders and sections in Documents, as On My iPhone lists them.
     private(set) static var onDevice: [Notebook] = []

@@ -398,6 +398,7 @@ impl CanvasEditor {
         if soft {
             return self.insert(engine, "\u{000b}");
         }
+        self.take_objects()?;
         if self.active_outline().title {
             return self.leave_title(engine);
         }

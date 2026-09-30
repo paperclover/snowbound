@@ -29,7 +29,7 @@ use draw::edit::{Key, NamedKey, SelectionUnit};
 use onestore::{
     ExGuid,
     op::{Edit, Op, PageOp},
-    page::{Image, Page, ink::ShapeKind},
+    page::{Page, ink::ShapeKind},
 };
 use parley::{Affinity, BoundingBox};
 use std::{
@@ -503,25 +503,9 @@ impl Canvas {
         Ok(moved(self.page.set_paper(color, rules, Some(art))?))
     }
 
-    /// Puts a picture of `size` points after the caret's paragraph.
+    /// Puts a picture of `size` points at the caret.
     fn insert_picture(&mut self, bytes: &[u8], size: [f32; 2]) -> Result<bool> {
-        let image = Image {
-            id: onestore::page::text::new_id()?,
-            layout: onestore::document::Layout {
-                max_width: Some(size[0]),
-                max_height: Some(size[1]),
-                ..Default::default()
-            },
-            size: Some(size),
-            bytes: Some(bytes.into()),
-            display: None,
-            alt: None,
-            background: false,
-            printout: None,
-        };
-        let page = &mut self.page;
-        page.editor.insert_picture(&mut page.engine, image)?;
-        Ok(true)
+        Ok(moved(self.page.insert_picture(bytes.to_vec(), size)?))
     }
 
     /// Gives the page date `seconds` since 1970 (keeping the stored fraction of a second),
@@ -1257,8 +1241,8 @@ pub extern "C" fn sb_view_page_text(view: &View) -> *mut c_char {
     owned(view.canvas.page_text())
 }
 
-/// Puts the picture file `bytes` (JPEG or PNG), `width` × `height` points, after the
-/// caret's paragraph.
+/// Puts the picture file `bytes` (JPEG or PNG), `width` × `height` points, at the caret:
+/// splitting its paragraph, or on the page at a caret on blank page.
 ///
 /// # Safety
 /// `bytes` holds `length` bytes.

@@ -23,6 +23,9 @@ zeroize = { version = "1.9.0", optional = true }
 [target.'cfg(target_vendor = "apple")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["fs"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 libc = "0.2"
 serde_json = "1"

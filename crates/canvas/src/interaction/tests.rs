@@ -1753,6 +1753,12 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
     click(&mut view, [400.0, 300.0], now + Duration::from_secs(3));
     let caret = view.editor.caret_outline().unwrap().origin();
     assert_eq!(caret, snap_to_grid([400.0, 293.0], [36.0, 14.4]));
+
+    // With Snap to Grid off it lands where the pointer is, as OneNote 2010 places it.
+    view.snap_to_grid = false;
+    click(&mut view, [410.0, 330.0], now + Duration::from_secs(5));
+    let caret = view.editor.caret_outline().unwrap().origin();
+    assert_eq!(caret, [410.0, 323.0]);
 }
 
 #[test]
@@ -2471,6 +2477,8 @@ fn the_page_selection_does_not_return_with_its_text_selection() {
     assert_eq!(view.editor.whole(), None);
 }
 
+/// The point under the pointer stays put through a pinch, as in Safari, even where the
+/// page's content is too small to scroll that far; scrolling afterwards still reaches it.
 #[test]
 fn pinch_zooms_about_the_pointer_within_range() {
     let mut engine = TextEngine::default();
@@ -2488,17 +2496,28 @@ fn pinch_zooms_about_the_pointer_within_range() {
         1.0,
         Duration::from_millis(500),
     );
-    // The host's own scrolling leaves the anchor unclamped, as iOS's does.
-    view.host_viewport = true;
-    let pointer = [300.0, 200.0];
-    let _ = view.pointer_moved(pointer).unwrap();
+    let pointer = [700.0, 500.0];
     let under = view.viewport.document_point(pointer);
+    let shown = view.viewport.document_point([800.0, 600.0]);
+    let stays = |view: &PageView| {
+        let after = view.viewport.document_point(pointer);
+        assert!(
+            (after[0] - under[0]).abs() < 1e-3 && (after[1] - under[1]).abs() < 1e-3,
+            "{under:?} moved to {after:?}"
+        );
+    };
     let zoom = view.zoom();
-    assert!(view.pinch(1.5).unwrap().moved);
-    assert!((view.zoom() / zoom - 1.5).abs() < 1e-5);
-    let after = view.viewport.document_point(pointer);
-    assert!((after[0] - under[0]).abs() < 1e-3 && (after[1] - under[1]).abs() < 1e-3);
-    let _ = view.pinch(100.0).unwrap();
+    for factor in [1.05, 1.0 / 1.05, 1.05] {
+        for _ in 0..10 {
+            assert!(view.pinch(factor, pointer).unwrap().moved);
+            stays(&view);
+        }
+    }
+    assert!((view.zoom() / zoom - 1.05_f32.powi(10)).abs() < 1e-4);
+    let _ = view.wheel([-5000.0; 2]).unwrap();
+    let corner = view.viewport.document_point([800.0, 600.0]);
+    assert!((corner[0] - shown[0]).abs() < 1e-3 && (corner[1] - shown[1]).abs() < 1e-3);
+    let _ = view.pinch(100.0, pointer).unwrap();
     assert!((view.zoom() - 4.0).abs() < 1e-5);
 }
 

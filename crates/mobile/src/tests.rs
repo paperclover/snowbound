@@ -430,7 +430,7 @@ fn find_selects_the_match_and_formatting_reports_and_toggles() {
 }
 
 #[test]
-fn a_picture_goes_after_the_caret_paragraph_and_undoes() {
+fn a_picture_goes_in_at_the_caret_and_undoes() {
     let (_directory, section) = features();
     let mut canvas = canvas(&section, "Paragraph controls");
     focus(&mut canvas, "Collapsed parent");

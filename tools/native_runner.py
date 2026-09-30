@@ -151,7 +151,7 @@ def capture(notebook, output, expected_pages=-1, author=None, screenshots=False,
         'author_timeout_seconds': author_timeout,
         'inspect': inspect,
         'collect_notebook': collect_notebook,
-        'base': json.loads(vm.BASE_MANIFEST.read_text()),
+        'base': json.loads(vm.base_manifest('win7').read_text()),
         'scripts': {name: hashlib.sha256((scripts / name).read_bytes()).hexdigest()
                     for name in sorted(p.name for p in scripts.iterdir())},
     }, indent=2) + '\n')
