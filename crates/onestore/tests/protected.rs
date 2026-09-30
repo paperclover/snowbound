@@ -179,6 +179,7 @@ fn a_protected_page_edit_is_stored_under_the_section_key() {
                     bytes: Some(std::sync::Arc::from(&b"A payload that stays sealed"[..])),
                     preview: None,
                     recording: None,
+                    tags: Vec::new(),
                 });
             paragraphs.insert(at + 1, file);
             let text = paragraphs[at].text_mut().unwrap();

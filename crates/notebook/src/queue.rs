@@ -282,6 +282,9 @@ mod tests {
                 alt: None,
                 background: false,
                 printout: None,
+                tags: Vec::new(),
+                link: None,
+                text: None,
             })
         };
         let space = ExGuid {

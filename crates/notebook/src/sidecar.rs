@@ -162,5 +162,7 @@ fn temporary(path: &str) -> String {
     format!("{path}.{unique:016x}.tmp")
 }
 
+pub mod themes;
+
 #[cfg(test)]
 mod tests;

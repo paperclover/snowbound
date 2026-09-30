@@ -36,6 +36,8 @@ use winit::{
 /// Wayland's app ID and X11's WM_CLASS, which name the desktop entry and the icon.
 pub const APP_ID: &str = "net.paperclover.snowbound";
 const TEMPLATE: &str = include_str!("../linux/snowbound.desktop");
+/// The type of `.one` and `.onetoc2` files, which no shared-mime-info release names.
+const MIME_TYPES: &str = include_str!("../linux/onenote.xml");
 /// 512 pixels square; the smaller sizes are scaled from it.
 const ICON: &[u8] = include_bytes!("../linux/snowbound.png");
 const SIZES: [u32; 8] = [16, 24, 32, 48, 64, 128, 256, 512];
@@ -73,6 +75,10 @@ fn data_home() -> Option<PathBuf> {
 
 fn entry(data: &Path) -> PathBuf {
     data.join(format!("applications/{APP_ID}.desktop"))
+}
+
+fn mime_types(data: &Path) -> PathBuf {
+    data.join(format!("mime/packages/{APP_ID}.xml"))
 }
 
 fn theme_icon(data: &Path, side: u32) -> PathBuf {
@@ -163,7 +169,12 @@ fn entry_text(exec: &Path, icon: &str) -> String {
     TEMPLATE
         .lines()
         .map(|line| match line.split_once('=') {
-            Some(("Exec", _)) => format!("Exec={}\n", quote(exec)),
+            Some(("Exec", command)) => {
+                let arguments = command
+                    .split_once(' ')
+                    .map_or("", |(_, arguments)| arguments);
+                format!("Exec={} {arguments}\n", quote(exec))
+            }
             Some(("Icon", _)) => format!("Icon={icon}\n"),
             _ => format!("{line}\n"),
         })
@@ -339,7 +350,7 @@ pub fn set_toplevel_icon(window: &Window) -> Option<()> {
 }
 
 /// Copies this executable to `~/.local/bin` unless it runs from there, adds Snowbound to the
-/// app menu, and says where Uninstall is.
+/// app menu and to the apps opening OneNote's files, and says where Uninstall is.
 pub fn install() {
     match try_install() {
         Ok(()) => {
@@ -377,10 +388,13 @@ fn try_install() -> io::Result<()> {
             .write_header()?
             .write_image_data(&scaled(&icon, side))?;
     }
+    let types = mime_types(&data);
+    fs::create_dir_all(types.parent().ok_or(io::ErrorKind::NotFound)?)?;
+    fs::write(types, MIME_TYPES)?;
     // Replaces this run's hidden entry, which exiting then leaves alone.
     write_entry(&entry(&data), &entry_text(&binary, APP_ID))?;
     let _ = runtime_icon().map(fs::remove_file);
-    refresh_icon_cache(&data);
+    refresh_caches(&data);
     Ok(())
 }
 
@@ -398,7 +412,10 @@ pub fn uninstall() {
     }
     let mut failed = None;
     let icons = SIZES.map(|side| theme_icon(&data, side));
-    for path in [entry(&data), binary].iter().chain(&icons) {
+    for path in [entry(&data), mime_types(&data), binary]
+        .iter()
+        .chain(&icons)
+    {
         if let Err(error) = fs::remove_file(path)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -411,21 +428,27 @@ pub fn uninstall() {
             let _ = fs::remove_dir(folder);
         }
     }
-    refresh_icon_cache(&data);
+    refresh_caches(&data);
     match failed {
         Some(error) => crate::platform::alert("Couldn't uninstall Snowbound", &error.to_string()),
         None => *INSTALLED.lock().unwrap() = Installed::No,
     }
 }
 
-/// Brings the icon theme's cache up to date where the user keeps one.
-fn refresh_icon_cache(data: &Path) {
-    let _ = Command::new("gtk-update-icon-cache")
-        .arg("-q")
-        .arg(data.join("icons/hicolor"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+/// Brings the icon theme's cache, the file types and the apps opening them up to date, where
+/// the desktop has the tools.
+fn refresh_caches(data: &Path) {
+    for (tool, folder) in [
+        ("gtk-update-icon-cache", "icons/hicolor"),
+        ("update-mime-database", "mime"),
+        ("update-desktop-database", "applications"),
+    ] {
+        let _ = Command::new(tool)
+            .arg(data.join(folder))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(test)]
@@ -444,7 +467,7 @@ mod tests {
     #[test]
     fn only_the_hidden_entry_names_an_owner() {
         let installed = entry_text(Path::new("/bin/snowbound"), APP_ID);
-        assert!(installed.contains("\nExec=\"/bin/snowbound\"\n"));
+        assert!(installed.contains("\nExec=\"/bin/snowbound\" %F\n"));
         assert!(installed.contains(&format!("\nIcon={APP_ID}\n")));
         assert_eq!(portable_owner(&installed), None);
         let hidden = installed + &format!("NoDisplay=true\n{PORTABLE}=42\n");

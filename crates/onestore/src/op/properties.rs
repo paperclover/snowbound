@@ -2,7 +2,7 @@
 
 use super::Values;
 use crate::{
-    Error, ExGuid, PropertySets, Value,
+    Error, ExGuid, ObjectData, PropertySets, Value,
     active::{ActivePage, Changes},
     document::{Kind, Tag},
     page::{Definition, MediaIndex},
@@ -293,26 +293,7 @@ pub(crate) fn style_changes(
     if !raw.objects.contains_key(&style) {
         let definition = definition
             .ok_or_else(|| invalid("A paragraph references a missing style definition"))?;
-        let Kind::Style { name } = &definition.kind else {
-            return Err(invalid("A paragraph style must be a style definition"));
-        };
-        let format = &definition.format;
-        let mut values = super::content::style_values(format);
-        if let Some(name) = name {
-            values.push((0x1c00345a, crate::create::string(name)));
-        }
-        if let Some(alignment) = format.alignment {
-            values.push((0x0c003477, vec![alignment]));
-        }
-        for (property, value) in [
-            (0x1400342e, format.space_before),
-            (0x1400342f, format.space_after),
-            (0x14003430, format.line_spacing),
-        ] {
-            if let Some(points) = value {
-                values.push((property, (points / 36.0).to_le_bytes().to_vec()));
-            }
-        }
+        let values = style_object_values(definition)?;
         let mut node = PropertyObject {
             jcid: 0x12004d,
             bytes: crate::create::properties(&values)?,
@@ -326,6 +307,170 @@ pub(crate) fn style_changes(
     target.set(&[(0x2000342c, &reference)])?;
     changed.insert(text, target);
     Ok(changed)
+}
+
+/// Run properties to clear, by text and run range.
+pub(crate) type Clears = Vec<(ExGuid, std::ops::Range<u32>, Vec<super::TextProperty>)>;
+/// Paragraph properties to remove, by text.
+pub(crate) type Spacing = Vec<(ExGuid, Vec<u32>)>;
+
+/// Style-level values the texts of paragraph style `style` (or only text `only`) repeat:
+/// run properties equal to the style's, by run range, and each text's paragraph properties
+/// equal to the style's. Texts whose runs carry objects of their own stay as they are.
+pub(crate) fn restyle_plan(
+    active: &ActivePage<'_>,
+    style: ExGuid,
+    only: Option<ExGuid>,
+) -> Result<(Clears, Spacing), Error> {
+    use super::TextProperty::*;
+    const CHARACTER: [super::TextProperty; 10] = [
+        Bold,
+        Italic,
+        Underline,
+        Strike,
+        Superscript,
+        Subscript,
+        Font,
+        FontSize,
+        Color,
+        Highlight,
+    ];
+    const PARAGRAPH: [u32; 4] = [0x0c003477, 0x1400342e, 0x1400342f, 0x14003430];
+    let raw = &active.live.revision;
+    let values = |id: ExGuid| -> Result<BTreeMap<u32, (u32, Vec<u8>)>, Error> {
+        let ObjectData::Properties(bytes) = raw.objects[&id].data else {
+            return Err(invalid("A style holds no properties"));
+        };
+        Ok(PropertySets::parse(bytes)?.sets[0]
+            .iter()
+            .map(|property| {
+                let value = match property.value {
+                    Value::Bytes(bytes) => bytes.to_vec(),
+                    _ => Vec::new(),
+                };
+                (property.id & 0x7fffffff, (property.id, value))
+            })
+            .collect())
+    };
+    let stored = values(style)?;
+    let repeats = |own: &BTreeMap<u32, (u32, Vec<u8>)>, key: u32| {
+        own.get(&key)
+            .is_some_and(|value| stored.get(&key) == Some(value))
+    };
+    let mut clears = Vec::new();
+    let mut spacing = Vec::new();
+    for (&text, node) in &active.view.nodes {
+        let Kind::RichText {
+            text: characters,
+            runs,
+            paragraph_style: Some(paragraph_style),
+            boilerplate: false,
+        } = &node.kind
+        else {
+            continue;
+        };
+        if *paragraph_style != style || only.is_some_and(|only| only != text) {
+            continue;
+        }
+        let own = values(text)?;
+        if own.contains_key(&0x24003458) {
+            continue;
+        }
+        let repeated: Vec<u32> = PARAGRAPH
+            .into_iter()
+            .filter(|key| repeats(&own, *key))
+            .collect();
+        if !repeated.is_empty() {
+            spacing.push((text, repeated));
+        }
+        let mut pending: Option<(std::ops::Range<u32>, Vec<super::TextProperty>)> = None;
+        for run in runs {
+            let cleared: Vec<super::TextProperty> = match run.format {
+                Some(id) => {
+                    let own = values(id)?;
+                    CHARACTER
+                        .into_iter()
+                        .filter(|property| repeats(&own, property.id()))
+                        .collect()
+                }
+                None => Vec::new(),
+            };
+            let range = if characters.is_empty() {
+                0..0
+            } else {
+                run.start..run.end
+            };
+            match &mut pending {
+                Some((open, kept)) if *kept == cleared && open.end == range.start => {
+                    open.end = range.end;
+                }
+                _ => {
+                    if let Some((range, clear)) = pending.take() {
+                        clears.push((text, range, clear));
+                    }
+                    pending = Some((range, cleared));
+                }
+            }
+        }
+        clears.extend(pending.map(|(range, clear)| (text, range, clear)));
+    }
+    clears.retain(|(_, _, clear)| !clear.is_empty());
+    Ok((clears, spacing))
+}
+
+/// The texts of paragraph style `style` moved to style `into`, created from `definition`
+/// where the page lacks it, each without its `spacing` properties.
+pub(crate) fn restyle_changes(
+    active: &ActivePage<'_>,
+    style: ExGuid,
+    into: ExGuid,
+    definition: &Definition,
+    spacing: &[(ExGuid, Vec<u32>)],
+) -> Result<Changes, Error> {
+    let mut changed = BTreeMap::new();
+    for (&text, node) in &active.view.nodes {
+        if !matches!(node.kind, Kind::RichText { paragraph_style: Some(id), .. } if id == style) {
+            continue;
+        }
+        let mut moved = style_changes(active, text, into, Some(definition))?;
+        let mut target = moved.remove(&text).expect("the text is restyled");
+        if let Some((_, ids)) = spacing.iter().find(|(id, _)| *id == text) {
+            target.remove(ids)?;
+        }
+        changed.insert(text, target);
+        changed.extend(moved);
+    }
+    Ok(changed)
+}
+
+/// The properties of a paragraph style object holding `definition`: NextStyle first, as
+/// OneNote 2010 writes it, then the character formatting, the name and paragraph spacing.
+pub(crate) fn style_object_values(definition: &Definition) -> Result<Values, Error> {
+    let Kind::Style { name, next } = &definition.kind else {
+        return Err(invalid("A paragraph style must be a style definition"));
+    };
+    let format = &definition.format;
+    let mut values = Values::new();
+    if let Some(next) = next {
+        values.push((0x1c00348a, crate::create::string(next)));
+    }
+    values.extend(super::content::style_values(format));
+    if let Some(name) = name {
+        values.push((0x1c00345a, crate::create::string(name)));
+    }
+    if let Some(alignment) = format.alignment {
+        values.push((0x0c003477, vec![alignment]));
+    }
+    for (property, value) in [
+        (0x1400342e, format.space_before),
+        (0x1400342f, format.space_after),
+        (0x14003430, format.line_spacing),
+    ] {
+        if let Some(points) = value {
+            values.push((property, (points / 36.0).to_le_bytes().to_vec()));
+        }
+    }
+    Ok(values)
 }
 
 /// The text-object properties of paragraph formatting, in the order they are written.

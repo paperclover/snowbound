@@ -448,12 +448,14 @@ pub enum Primitive<'a> {
         round: bool,
         color: [f32; 4],
     },
-    /// A round pen's stroke between two points, `widths` units across at each, joined by the
-    /// lines touching both ends, as a pressure pen's width changes along a stroke.
+    /// A pen's stroke between two points, `widths` units across at each, joined by the
+    /// lines touching both ends, as a pressure pen's width changes along a stroke. A square
+    /// pen tip (not `round`) squares the ends in a PDF; the screen rounds them either way.
     Taper {
         from: [f32; 2],
         to: [f32; 2],
         widths: [f32; 2],
+        round: bool,
         color: [f32; 4],
     },
     /// A highlighter's stroke between two points, `width` units across with square ends:
@@ -897,6 +899,7 @@ impl Renderer {
                 to,
                 widths,
                 color,
+                ..
             } => self.segment(space, *from, *to, *widths, true, *color)?,
             Primitive::Highlight {
                 from,

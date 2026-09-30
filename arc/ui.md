@@ -13,7 +13,8 @@ with a faint highlight along their tops. The open tab lies on top, in its
 section's colour, and frames the page. That colour shades gently down the
 window and becomes the accent for the whole interface, easing to the next
 section's colour when you switch. Page tabs sit on the right, and the open
-one joins the page with rounded inside corners. It is OneNote 2010's layout,
+one joins the page with rounded inside corners; OneNote's Display options move
+them to the left and the notebooks to the right. It is OneNote 2010's layout,
 drawn with soft shadows, concentric corner radii and a dark appearance. Call
 it half-skeuomorphic: the shapes that made OneNote's notebook metaphor
 legible, without the 2010 chrome.
@@ -81,7 +82,9 @@ frame N
   *folds* its groups, boxes with a full and a folded form (`Spec::fold`), by
   priority. Only then do boxes give up room by their *strictness*, the least
   strict first. That one knob covers most of what flexbox is usually needed
-  for.
+  for. A box filling across a parent sized by its children stretches to what
+  its siblings make it, and a popup that isn't strict gives way to the window,
+  so a dialog is as tall as its contents up to the window and scrolls within.
 - **The toolbar is one row that never overflows.** Both forms of every group
   are built each frame and the solver picks, so a group folds in the frame the
   window narrows, with no widths remembered or worked out by the app. A folded

@@ -206,11 +206,16 @@ impl Clipboard {
             .unwrap_or_default()
     }
 
+    pub fn get_html(&mut self) -> Option<String> {
+        self.through_x11(|clipboard| clipboard.get().html().ok())
+    }
+
     pub fn get_picture(&mut self) -> Option<Vec<u8>> {
         self.through_x11(|clipboard| crate::paste::bitmap(clipboard.get_image().ok()?))
     }
 
-    /// Files and pictures come through X11 on Wayland too, whose clipboard Xwayland shares.
+    /// Files, pages and pictures come through X11 on Wayland too, whose clipboard Xwayland
+    /// shares.
     fn through_x11<T>(
         &mut self,
         read: impl FnOnce(&mut arboard::Clipboard) -> Option<T>,

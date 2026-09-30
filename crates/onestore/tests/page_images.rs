@@ -119,6 +119,9 @@ fn a_picture_inserted_on_a_fresh_page_reads_back_and_can_be_removed() {
         alt: None,
         background: false,
         printout: None,
+        tags: Vec::new(),
+        link: None,
+        text: None,
     };
     holder.content = ParagraphContent::Image(image.clone());
     body_paragraphs(&mut after).push(holder.clone());
@@ -299,6 +302,9 @@ fn a_page_level_picture_is_inserted_moved_and_removed() {
         alt: Some("Placed in Rust".into()),
         background: false,
         printout: None,
+        tags: Vec::new(),
+        link: None,
+        text: None,
     };
     after.objects.push(PageObject::Image(image.clone()));
     let written = ops::saved(&source, space, &after).unwrap();
@@ -366,6 +372,9 @@ fn pictures_need_a_recognised_payload_and_stored_ones_stay_fixed() {
         alt: None,
         background: false,
         printout: None,
+        tags: Vec::new(),
+        link: None,
+        text: None,
     });
     body_paragraphs(&mut after).push(holder);
     assert!(ops::saved(&source, space, &after).is_err());

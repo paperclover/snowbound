@@ -265,8 +265,8 @@ fn unreadable_mappings_and_pictures_are_passed_over() {
     assert!(map(&folder, "Tag", 13, b"x", "gif").is_err());
 }
 
-/// On this computer the folder takes the attribute macOS keeps, and the notebook's catalog
-/// never lists it.
+/// On this computer the folder takes the hidden attribute Windows or macOS keeps, and the
+/// notebook's catalog never lists it.
 #[test]
 fn a_notebook_folder_keeps_the_art_hidden() {
     let temporary = tempfile::tempdir().unwrap();
@@ -288,7 +288,48 @@ fn a_notebook_folder_keeps_the_art_hidden() {
         let flags = FileFlag::from_bits_retain(stat(&folder).unwrap().st_flags);
         assert!(flags.contains(FileFlag::UF_HIDDEN));
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        // FILE_ATTRIBUTE_HIDDEN.
+        assert_ne!(folder.metadata().unwrap().file_attributes() & 2, 0);
+    }
     notebook.refresh().unwrap();
     assert!(notebook.catalog().groups.is_empty());
     assert_eq!(notebook.catalog().sections.len(), 1);
+}
+
+/// Themes go in the hidden folder beside the tag art, and a writer another overtook merges
+/// again until its change holds; entries it can't read are passed over, built-ins refused.
+#[test]
+fn themes_merge_into_the_hidden_folder() {
+    use themes::{Assignment, Scope, Themes};
+    let folder = Folder::default();
+    let assign = |scope, theme: &str, assigned| Themes {
+        assignments: vec![Assignment {
+            scope,
+            theme: Some(theme.into()),
+            assigned,
+        }],
+        ..Default::default()
+    };
+    let theirs = assign(Scope::Notebook, "modern", 1);
+    *folder.race.lock().unwrap() = Some(serde_json::to_vec(&theirs).unwrap());
+    let kept = themes::write(&folder, assign(Scope::section([7; 16]), "editorial", 2)).unwrap();
+    assert!(folder.hidden.lock().unwrap().contains(".snowbound"));
+    assert_eq!(kept.assignments.len(), 2);
+    assert_eq!(kept, themes::read(&folder).unwrap());
+    assert_eq!(kept.effective(Some([7; 16]), None).unwrap().id, "editorial");
+    folder.files.lock().unwrap().insert(
+        ".snowbound/themes.json".into(),
+        br#"{"themes": [{"id": 3}], "assignments": [{"scope": "notebook", "theme": "manuscript", "assigned": 4}, "junk"]}"#.to_vec(),
+    );
+    let read = themes::read(&folder).unwrap();
+    assert!(read.themes.is_empty());
+    assert_eq!(read.effective(None, None).unwrap().id, "manuscript");
+    let built_in = Themes {
+        themes: vec![themes::built_in().remove(0)],
+        ..Default::default()
+    };
+    assert!(themes::write(&folder, built_in).is_err());
 }

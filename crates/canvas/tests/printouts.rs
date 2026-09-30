@@ -1,7 +1,7 @@
 //! A file printout, whose pictures OneNote 2010 stores as pages of an XPS package with a PNG
 //! rendering of each beside it (WebPictureContainer14), shows that rendering and edits like
 //! any picture: its pages stay printouts when moved, and a page deleted comes back on undo
-//! as the picture OneNote showed of it (`corpus/printout`).
+//! as the printout page it was (`corpus/printout`).
 
 use canvas::{document::TextPosition, editor::CanvasEditor, layout::TextEngine};
 use onestore::{
@@ -100,9 +100,16 @@ fn printouts_show_onenotes_rendering_and_move_as_pictures() {
     let moved = after.iter().find(|picture| picture.id == moved).unwrap();
     assert_eq!([moved.layout.x, moved.layout.y], origin.map(Some));
     assert!(moved.printout.is_some() && moved.display.is_some());
+    // The page deleted and brought back by undo is the printout page it was: its package,
+    // page number and the raster OneNote showed of it.
+    let original = printed
+        .iter()
+        .find(|picture| picture.id == restored)
+        .unwrap();
     let restored = after.iter().find(|picture| picture.id == restored).unwrap();
-    assert_eq!(restored.printout, None);
-    assert_eq!(restored.bytes, printed[0].display);
+    assert_eq!(restored.printout, original.printout);
+    assert_eq!(restored.bytes, original.bytes);
+    assert_eq!(restored.display, original.display);
     if let Some(directory) = std::env::var_os("SNOWBOUND_PRINTOUT_EXPORT") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir(&directory).unwrap();
@@ -118,4 +125,49 @@ fn printouts_show_onenotes_rendering_and_move_as_pictures() {
         )
         .unwrap();
     }
+}
+
+/// A copy of a printout's page keeps its pages printouts, as a page copied in OneNote does.
+#[test]
+fn a_copied_printout_page_keeps_its_printouts() {
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, PRINTOUTS.to_vec()).unwrap();
+    let (space, ..) = section
+        .pages()
+        .unwrap()
+        .into_iter()
+        .find(|page| page.1 == "Printout")
+        .unwrap();
+    let page = section.page(space).unwrap();
+    let creation = onestore::PageCreation::new(None, Some("Copied"), "Author").unwrap();
+    let edit = Edit {
+        at: 134_000_000_000_000_000,
+        ops: vec![Op::Section(onestore::op::SectionOp::Import {
+            creation,
+            page: page.copy().unwrap(),
+        })],
+    };
+    section.apply("Author", &edit).unwrap();
+    section.seal().unwrap();
+    let (copied, ..) = section
+        .pages()
+        .unwrap()
+        .into_iter()
+        .find(|page| page.1 == "Copied")
+        .unwrap();
+    let copy = section.page(copied).unwrap();
+    let shown = |page: &Page| -> Vec<_> {
+        pictures(page)
+            .into_iter()
+            .map(|picture| {
+                (
+                    picture.printout.clone(),
+                    picture.bytes.clone(),
+                    picture.display.clone(),
+                    picture.text.clone(),
+                )
+            })
+            .collect()
+    };
+    assert_eq!(shown(&copy), shown(&page));
 }

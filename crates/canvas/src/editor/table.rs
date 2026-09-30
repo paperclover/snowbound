@@ -1,6 +1,6 @@
 use super::*;
 use onestore::page::text::new_id;
-use onestore::page::{ParagraphContent, TableCell, TableColumn, TableRow};
+use onestore::page::{ParagraphContent, Table, TableCell, TableColumn, TableRow};
 
 struct CellLocation<'a> {
     container: Option<ExGuid>,
@@ -33,6 +33,18 @@ fn locate(document: &TextDocument, id: ExGuid) -> Option<CellLocation<'_>> {
         }
     }
     None
+}
+
+/// Table `id`'s paragraph, its container and its index there.
+fn table_node(
+    document: &TextDocument,
+    id: ExGuid,
+) -> Result<(Option<ExGuid>, usize, &PageParagraph), EditError> {
+    descendants(document.nodes(), None)
+        .find(|(_, _, node)| {
+            matches!(&node.content, ParagraphContent::Table(table) if table.id == id)
+        })
+        .ok_or(EditError::InvalidRange)
 }
 
 /// A new cell like `source`, one empty paragraph in its first text's format; a cell holding
@@ -85,7 +97,270 @@ fn cell_range(document: &TextDocument, cell: &TableCell) -> Result<Range<TextPos
     })
 }
 
+/// OneNote 2010's width for a new column, and the narrowest it fits or drags one to.
+const COLUMN_WIDTH: f32 = 37.11;
+/// What OneNote 2010 fits an unlocked column to beyond its widest line (lab, 2026-09-30).
+const COLUMN_ROOM: f32 = 4.347;
+
+/// `width` as it reads back from the file, which stores it in half inches.
+fn stored(width: f32) -> f32 {
+    width / 36.0 * 36.0
+}
+
+/// `table`'s widths with its unlocked columns in `only`, or all, fit to their widest cell
+/// as `natural` measures it, the table no wider than `room` unless its narrowest columns are.
+fn fitted(
+    table: &Table,
+    only: Option<usize>,
+    room: f32,
+    mut natural: impl FnMut(&TableCell) -> Result<f32, LayoutError>,
+) -> Result<Vec<f32>, LayoutError> {
+    let mut widths = table
+        .columns
+        .iter()
+        .map(|column| column.width)
+        .collect::<Vec<_>>();
+    for (index, column) in table.columns.iter().enumerate() {
+        if column.locked || only.is_some_and(|only| only != index) {
+            continue;
+        }
+        let mut widest = 0.0_f32;
+        for row in &table.rows {
+            widest = widest.max(natural(
+                row.cells.get(index).ok_or(LayoutError::InvalidWidth)?,
+            )?);
+        }
+        // Columns sit 4.98 pt apart, and the table ends 3.15 pt past the last one.
+        let others = widths.iter().map(|width| width + 4.98).sum::<f32>() - widths[index] - 1.83;
+        widths[index] = stored((widest + COLUMN_ROOM).min(room - others).max(COLUMN_WIDTH));
+    }
+    Ok(widths)
+}
+
+/// Fits the tables in `nodes`, innermost first, placed by `indents` in an outline `wrap` wide.
+fn fit_tables(
+    nodes: &mut [PageParagraph],
+    indents: &[f32],
+    wrap: f32,
+    natural: &mut impl FnMut(&TableCell) -> Result<f32, LayoutError>,
+) -> Result<(), LayoutError> {
+    for node in nodes {
+        let level = node.level;
+        if let ParagraphContent::Table(table) = &mut node.content {
+            for TableCell {
+                paragraphs,
+                indents,
+                ..
+            } in table.rows.iter_mut().flat_map(|row| &mut row.cells)
+            {
+                fit_tables(paragraphs, indents, wrap, natural)?;
+            }
+            let room = wrap - crate::outline::indentation(level, indents, wrap)?;
+            let widths = fitted(table, None, room, &mut *natural)?;
+            for (column, width) in table.columns.iter_mut().zip(widths) {
+                column.width = width;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl CanvasEditor {
+    /// Fits the unlocked columns `edit` writes in to their content, as OneNote 2010 widens
+    /// and narrows them while typing: the tables it adds or rewrites, and the column of each
+    /// table around the cell it edits. A table stops at the outline's width and wraps there.
+    pub(super) fn fit_columns(
+        &self,
+        engine: &mut TextEngine,
+        edit: &mut DocumentEdit,
+    ) -> Result<(), EditorError> {
+        let outline = self.active_outline();
+        if outline.title {
+            return Ok(());
+        }
+        let wrap = outline.wrap_width();
+        let mut natural = |cell: &TableCell, edit: Option<&DocumentEdit>| {
+            let flow = OutlineLayout::flow(
+                crate::document::edited_nodes(&cell.paragraphs, Some(cell.id), edit),
+                &cell.indents,
+                f32::from(u16::MAX),
+                false,
+                1,
+                edit,
+                &mut |node, previous, width, indents| {
+                    ParagraphLayout::shape(
+                        engine,
+                        node,
+                        previous,
+                        width,
+                        indents,
+                        &self.definitions,
+                    )
+                },
+            )?;
+            Ok::<_, LayoutError>(flow.content_width())
+        };
+        let indents = |container: Option<ExGuid>| match container {
+            Some(cell) => {
+                let location =
+                    locate(&outline.document, cell).ok_or(EditError::InvalidStructure)?;
+                let ParagraphContent::Table(table) = &location.node.content else {
+                    unreachable!()
+                };
+                Ok::<_, EditError>(&table.rows[location.row].cells[location.column].indents)
+            }
+            None => Ok(&outline.indents),
+        };
+        fit_tables(
+            &mut edit.replacement,
+            indents(edit.container)?,
+            wrap,
+            &mut |cell| natural(cell, None),
+        )?;
+        let mut container = edit.container;
+        while let Some(cell) = container {
+            let location = locate(&outline.document, cell).ok_or(EditError::InvalidStructure)?;
+            let ParagraphContent::Table(table) = &location.node.content else {
+                unreachable!()
+            };
+            if !edit.columns.contains_key(&table.id) {
+                let room = wrap
+                    - crate::outline::indentation(
+                        location.node.level,
+                        indents(location.container)?,
+                        wrap,
+                    )?;
+                let widths = fitted(table, Some(location.column), room, |cell| {
+                    natural(cell, Some(edit))
+                })?;
+                if widths
+                    .iter()
+                    .zip(&table.columns)
+                    .any(|(width, column)| *width != column.width)
+                {
+                    edit.columns.insert(table.id, widths);
+                }
+            }
+            container = location.container;
+        }
+        Ok(())
+    }
+}
+
+impl TextOutline {
+    /// The table column whose right border lies within `reach` of outline-local `point`, as
+    /// `(table, column, width)`.
+    pub fn column_border(&self, point: [f32; 2], reach: f32) -> Option<(ExGuid, usize, f32)> {
+        let columns = descendants(self.document.nodes(), None)
+            .filter_map(|(_, _, node)| match &node.content {
+                ParagraphContent::Table(table) => Some((table.id, table.columns.len())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        // Nested tables follow the tables holding them.
+        self.shaped.tables.iter().rev().find_map(|table| {
+            let (first, last) = (table.cells.first()?, table.cells.last()?);
+            if !(first.rect[1]..=last.rect[3]).contains(&point[1]) {
+                return None;
+            }
+            let row = table.cells.get(..*columns.get(&table.id)?)?;
+            row.iter().enumerate().find_map(|(column, cell)| {
+                // A cell's box reaches 3.6 pt before its column and 1.38 pt past it.
+                ((point[0] - cell.rect[2]).abs() <= reach)
+                    .then(|| (table.id, column, cell.rect[2] - cell.rect[0] - 4.98))
+            })
+        })
+    }
+}
+
+impl CanvasEditor {
+    /// The active outline with column `column` of `table` `width` wide, as a border drag
+    /// shows it before release.
+    pub fn preview_column(
+        &self,
+        engine: &mut TextEngine,
+        table: ExGuid,
+        column: usize,
+        width: f32,
+    ) -> Result<TextOutline, EditorError> {
+        let outline = self.active_outline();
+        let (_, _, node) = table_node(&outline.document, table)?;
+        let ParagraphContent::Table(source) = &node.content else {
+            unreachable!()
+        };
+        let mut widths = source
+            .columns
+            .iter()
+            .map(|column| column.width)
+            .collect::<Vec<_>>();
+        *widths.get_mut(column).ok_or(EditError::InvalidRange)? = width.max(COLUMN_WIDTH);
+        let edit = DocumentEdit {
+            container: None,
+            range: 0..0,
+            replacement: Vec::new(),
+            columns: [(table, widths)].into(),
+        };
+        let shaped = OutlineLayout::flow(
+            outline.document.nodes().iter(),
+            &outline.indents,
+            outline.wrap_width(),
+            outline.layout.width_set_by_user == Some(true),
+            0,
+            Some(&edit),
+            &mut |node, previous, width, indents| {
+                ParagraphLayout::shape(engine, node, previous, width, indents, &self.definitions)
+            },
+        )?;
+        let mut preview = outline.clone();
+        preview.document.apply(edit)?;
+        preview.shaped = shaped;
+        Ok(preview)
+    }
+
+    /// Drags a border to make column `column` of `table` `width` wide, as OneNote 2010 does:
+    /// no narrower than a new column, locked against fitting, the columns after it moving
+    /// with it. One edit and one undo step.
+    pub fn resize_column(
+        &mut self,
+        engine: &mut TextEngine,
+        table: ExGuid,
+        column: usize,
+        width: f32,
+    ) -> Result<(), EditorError> {
+        if !width.is_finite() {
+            return Err(LayoutError::InvalidWidth.into());
+        }
+        let outline = self.active_outline();
+        let (container, index, node) = table_node(&outline.document, table)?;
+        let mut node = node.clone();
+        let ParagraphContent::Table(source) = &mut node.content else {
+            unreachable!()
+        };
+        let resized = TableColumn {
+            width: stored(width.max(COLUMN_WIDTH)),
+            locked: true,
+        };
+        let slot = source
+            .columns
+            .get_mut(column)
+            .ok_or(EditError::InvalidRange)?;
+        if *slot == resized {
+            return Ok(());
+        }
+        *slot = resized;
+        let selection = outline.selection;
+        self.finish_composition();
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index..index + 1,
+                replacement: vec![node],
+            },
+            selection,
+        )
+    }
     /// Insert, Table: an empty table of `rows` by `columns` at the caret with the caret in
     /// its first cell, as OneNote 2010 inserts one: in place of an empty paragraph, before
     /// or after the caret's paragraph at its start or end, and between its halves otherwise.
@@ -137,7 +412,7 @@ impl CanvasEditor {
                 id: new_id()?,
                 columns: vec![
                     TableColumn {
-                        width: 37.11,
+                        width: COLUMN_WIDTH,
                         locked: false
                     };
                     columns
@@ -260,7 +535,7 @@ impl CanvasEditor {
                     id: new_id()?,
                     columns: vec![
                         TableColumn {
-                            width: 37.11,
+                            width: COLUMN_WIDTH,
                             locked: false
                         };
                         2
@@ -341,7 +616,7 @@ impl CanvasEditor {
             };
             table.rows[0].cells.push(target);
             table.columns.push(TableColumn {
-                width: 37.11,
+                width: COLUMN_WIDTH,
                 locked: false,
             });
             TextPosition {
@@ -713,7 +988,9 @@ mod tests {
             };
             assert_eq!(after.rows.len(), 3);
             assert_eq!(&after.rows[..2], &before.rows);
-            assert_eq!(after.columns, before.columns);
+            // The first column widens to the table placed in it unfitted.
+            assert!(after.columns[0].width > before.columns[0].width + 40.0);
+            assert_eq!(after.columns[1], before.columns[1]);
             for cell in &after.rows[2].cells {
                 assert_eq!(cell.paragraphs.len(), 1);
                 assert!(cell.paragraphs[0].text().unwrap().text.text().is_empty());
@@ -911,5 +1188,245 @@ mod tests {
             1
         );
         assert_eq!(editor.active_outline().shaped.paragraphs[0].origin[0], 27.0);
+    }
+
+    fn calibri(engine: &mut TextEngine) -> CanvasEditor {
+        let format = Format {
+            font: Some("Calibri".into()),
+            font_size: Some(11.0),
+            ..Format::default()
+        };
+        CanvasEditor::new(
+            engine,
+            TextDocument::new(vec![Paragraph::new(String::new(), format)]).unwrap(),
+            468.0,
+        )
+        .unwrap()
+    }
+
+    fn table(editor: &CanvasEditor) -> &onestore::page::Table {
+        let ParagraphContent::Table(table) = &editor.active_outline().document.nodes()[0].content
+        else {
+            panic!()
+        };
+        table
+    }
+
+    fn widths(editor: &CanvasEditor) -> Vec<f32> {
+        table(editor)
+            .columns
+            .iter()
+            .map(|column| column.width)
+            .collect()
+    }
+
+    fn type_rows(editor: &mut CanvasEditor, engine: &mut TextEngine, rows: &[&[&str]]) {
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
+                editor.enter(engine, false).unwrap();
+            }
+            for (column, text) in row.iter().enumerate() {
+                if column > 0 {
+                    editor.tab(engine, false).unwrap();
+                }
+                editor.insert(engine, text).unwrap();
+            }
+        }
+    }
+
+    /// OneNote 2010's widths for the same table typed the same way (lab, 2026-09-30).
+    #[test]
+    fn typing_fits_unlocked_columns_to_their_widest_line() {
+        let mut engine = TextEngine::default();
+        let mut editor = calibri(&mut engine);
+        type_rows(
+            &mut editor,
+            &mut engine,
+            &[
+                &["Fruit", "Colour", "Notes"],
+                &["Apple", "Red", "Crisp and sweet, good for pies"],
+                &["Watermelon", "Green", "Summer"],
+            ],
+        );
+        for (width, onenote) in widths(&editor)
+            .into_iter()
+            .zip([60.75945, 37.11, 139.08636])
+        {
+            assert!((width - onenote).abs() < 0.01, "{width} against {onenote}");
+        }
+        // Deleting the widest line narrows the column to the next widest, here the minimum.
+        let end = TextPosition {
+            paragraph: 6,
+            offset: 10,
+        };
+        editor
+            .select([TextPosition { offset: 0, ..end }, end].into())
+            .unwrap();
+        editor.delete(&mut engine, true).unwrap();
+        assert_eq!(widths(&editor)[0], COLUMN_WIDTH);
+        assert!(editor.undo(&mut engine).unwrap());
+        assert!((widths(&editor)[0] - 60.75945).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_widening_keystroke_stores_its_width_with_its_text() {
+        let mut engine = TextEngine::default();
+        let mut editor = calibri(&mut engine);
+        type_rows(&mut editor, &mut engine, &[&["A", ""]]);
+        editor.take_ops().unwrap();
+        let before = widths(&editor);
+        editor.insert(&mut engine, "Watermelon").unwrap();
+        let ops = editor.take_ops().unwrap();
+        let columns = ops
+            .iter()
+            .filter_map(|op| match op {
+                PageOp::Table {
+                    edit: onestore::op::TableEdit::Columns(columns),
+                    ..
+                } => Some(
+                    columns
+                        .iter()
+                        .map(|column| column.width)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(columns, [widths(&editor)]);
+        assert!(ops.len() > 1);
+        assert!(widths(&editor)[1] > before[1]);
+        // A keystroke the column already holds stores no width.
+        editor.delete(&mut engine, true).unwrap();
+        editor.insert(&mut engine, "n").unwrap();
+        editor.take_ops().unwrap();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 1,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, "!").unwrap();
+        assert!(!editor.take_ops().unwrap().iter().any(|op| matches!(
+            op,
+            PageOp::Table {
+                edit: onestore::op::TableEdit::Columns(_),
+                ..
+            }
+        )));
+    }
+
+    /// OneNote 2010 stops a table at the outline's width and wraps the cell from there.
+    #[test]
+    fn a_table_stops_widening_at_the_outline_width() {
+        let mut engine = TextEngine::default();
+        let mut editor = calibri(&mut engine);
+        type_rows(&mut editor, &mut engine, &[&["A", ""]]);
+        for _ in 0..40 {
+            editor.insert(&mut engine, "word ").unwrap();
+        }
+        let widths = widths(&editor);
+        let table = widths.iter().map(|width| width + 4.98).sum::<f32>() - 1.83;
+        assert!((table - 468.0).abs() < 0.01, "{table}");
+        assert!(
+            editor.active_outline().shaped.paragraphs[1]
+                .text
+                .lines()
+                .count()
+                > 1
+        );
+    }
+
+    #[test]
+    fn a_dragged_column_locks_moves_the_columns_after_it_and_undoes_in_one_step() {
+        let mut engine = TextEngine::default();
+        let mut editor = calibri(&mut engine);
+        type_rows(&mut editor, &mut engine, &[&["B", "Word"]]);
+        let id = table(&editor).id;
+        let fitted = widths(&editor);
+        let cells = |editor: &CanvasEditor| {
+            editor.active_outline().shaped.tables[0]
+                .cells
+                .iter()
+                .map(|cell| cell.rect)
+                .collect::<Vec<_>>()
+        };
+        let before = cells(&editor);
+        // The border of the first column, from its cell's right edge.
+        let border = [before[0][2], (before[0][1] + before[0][3]) / 2.0];
+        assert_eq!(
+            editor.active_outline().column_border(border, 2.0),
+            Some((id, 0, fitted[0]))
+        );
+        assert_eq!(
+            editor
+                .active_outline()
+                .column_border([border[0] - 10.0, border[1]], 2.0),
+            None
+        );
+        let preview = editor.preview_column(&mut engine, id, 0, 88.86).unwrap();
+        assert_eq!(widths(&editor), fitted);
+        editor.take_ops().unwrap();
+        let history = editor.undo.len();
+        editor.resize_column(&mut engine, id, 0, 88.86).unwrap();
+        assert_eq!(editor.undo.len(), history + 1);
+        assert_eq!(
+            table(&editor).columns[0],
+            TableColumn {
+                width: 88.86,
+                locked: true
+            }
+        );
+        assert_eq!(
+            table(&editor).columns[1],
+            TableColumn {
+                width: fitted[1],
+                locked: false
+            }
+        );
+        assert_eq!(cells(&editor), {
+            let ParagraphContent::Table(_) = &preview.document.nodes()[0].content else {
+                panic!()
+            };
+            preview.shaped.tables[0]
+                .cells
+                .iter()
+                .map(|cell| cell.rect)
+                .collect::<Vec<_>>()
+        });
+        let moved = cells(&editor);
+        assert!((moved[1][0] - before[1][0] - (88.86 - fitted[0])).abs() < 0.001);
+        let ops = editor.take_ops().unwrap();
+        assert!(
+            matches!(
+                ops.as_slice(),
+                [PageOp::Table {
+                    edit: onestore::op::TableEdit::Columns(_),
+                    ..
+                }]
+            ),
+            "{ops:?}"
+        );
+        // A locked column keeps its width while typing; dragging stops at a new column's width.
+        editor
+            .insert(&mut engine, " and a long line of text")
+            .unwrap();
+        assert_eq!(table(&editor).columns[0].width, 88.86);
+        editor.resize_column(&mut engine, id, 1, 5.0).unwrap();
+        assert_eq!(
+            table(&editor).columns[1],
+            TableColumn {
+                width: COLUMN_WIDTH,
+                locked: true
+            }
+        );
+        for _ in 0..3 {
+            editor.undo(&mut engine).unwrap();
+        }
+        assert_eq!(widths(&editor), fitted);
+        assert!(table(&editor).columns.iter().all(|column| !column.locked));
+        assert_eq!(cells(&editor), before);
     }
 }

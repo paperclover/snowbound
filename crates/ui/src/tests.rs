@@ -15,14 +15,19 @@ thread_local! {
     static FRAMES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// Builds a frame 16 ms after this thread's previous one.
+/// Builds a frame in a 400 by 300 window, 16 ms after this thread's previous one.
 fn frame(ui: &mut Ui, build: impl FnOnce(&mut Ui)) {
+    sized_frame(ui, [400.0, 300.0], build);
+}
+
+/// Builds a frame in a window `size` large, 16 ms after this thread's previous one.
+fn sized_frame(ui: &mut Ui, size: [f32; 2], build: impl FnOnce(&mut Ui)) {
     let frames = FRAMES.with(|frames| {
         frames.set(frames.get() + 1);
         frames.get()
     });
     let now = START.with(|start| *start) + Duration::from_millis(16) * frames;
-    ui.begin([400.0, 300.0], 2.0, now);
+    ui.begin(size, 2.0, now);
     build(ui);
     ui.end();
 }
@@ -1087,13 +1092,17 @@ fn tooltips_wait_then_switch_at_once_and_hide_on_press_until_left() {
     let [Some(first), None] = rest(&mut ui, 200) else {
         panic!("the first tooltip shows after its delay");
     };
-    assert_eq!(first[..2], [0.0, 20.0 + popup::PAD]);
+    assert_eq!(
+        first[..2],
+        [POPUP_MARGIN, 20.0 + popup::PAD],
+        "off the window's edge"
+    );
 
     ui.event(Event::PointerMoved([390.0, 10.0]));
     let [None, Some(second)] = tip_frame(&mut ui) else {
         panic!("moving to another shows its tooltip at once");
     };
-    assert_eq!(second[2], 400.0, "kept inside the window");
+    assert_eq!(second[2], 400.0 - POPUP_MARGIN, "kept inside the window");
 
     press(&mut ui, Instant::now(), true);
     press(&mut ui, Instant::now(), false);
@@ -1138,6 +1147,96 @@ fn popups_open_beside_their_anchor_and_flip_to_stay_in_the_window() {
         Some([210.0, 96.0, 350.0, 96.0 + height]),
         "a submenu that cannot fit to the right opens to the left, its first row level"
     );
+}
+
+#[test]
+fn popups_too_large_for_a_narrow_window_shrink_inside_its_margin() {
+    let inside = |rect: [f32; 4], window: [f32; 2]| {
+        rect[0] >= POPUP_MARGIN
+            && rect[1] >= POPUP_MARGIN
+            && rect[2] <= window[0] - POPUP_MARGIN
+            && rect[3] <= window[1] - POPUP_MARGIN
+    };
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let narrow = [100.0, 300.0];
+    let menu = |ui: &mut Ui| {
+        sized_frame(ui, narrow, |ui| {
+            popup::menu(ui, menu_id(), BELOW, &items(), None);
+        });
+    };
+    menu(&mut ui);
+    ui.open_popup(menu_id());
+    for _ in 0..40 {
+        menu(&mut ui);
+    }
+    let rect = ui.rect(menu_id()).unwrap();
+    assert!(inside(rect, narrow), "{rect:?} leaves the window's margin");
+    assert_eq!(
+        rect[2] - rect[0],
+        100.0 - 2.0 * POPUP_MARGIN,
+        "as wide as fits"
+    );
+    let row = ui.rect(menu_id().child("rows").child(0_u64)).unwrap();
+    assert!(row[2] <= rect[2], "its rows narrow with it");
+
+    // A dialog taller than a short window scrolls what it holds.
+    let short = [400.0, 120.0];
+    let dialog = Id::ROOT.child("dialog");
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let build = |ui: &mut Ui| {
+        sized_frame(ui, short, |ui| {
+            ui.open_as(
+                dialog,
+                Spec {
+                    axis: Axis::Y,
+                    size: [px(600.0), children()],
+                    anchor: Some(Anchor::Dialog),
+                    ..Spec::default()
+                },
+            );
+            for line in 0..10 {
+                ui.leaf(
+                    line,
+                    Spec {
+                        size: [fill(), px(30.0)],
+                        text: Some("Line"),
+                        // Wider than the squeezed dialog leaves it.
+                        pad: [250.0, 0.0],
+                        ..Spec::default()
+                    },
+                );
+            }
+            ui.close();
+        });
+    };
+    build(&mut ui);
+    ui.open_popup(dialog);
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    let rect = ui.rect(dialog).unwrap();
+    assert!(inside(rect, short), "{rect:?} leaves the window's margin");
+    let first = ui.rect(dialog.child(0)).unwrap();
+    ui.event(Event::PointerMoved([200.0, 60.0]));
+    ui.event(Event::Wheel([0.0, -100.0]));
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    let scrolled = ui.rect(dialog.child(0)).unwrap();
+    assert!(scrolled[1] < first[1], "the wheel scrolls it");
+    for layer in ui.layers() {
+        let Layer::Primitives(layer) = layer else {
+            continue;
+        };
+        for primitive in &layer.primitives {
+            if let draw::Primitive::Text {
+                clip: Some(clip), ..
+            } = primitive
+            {
+                assert!(clip[0] <= clip[2], "{clip:?} is inverted");
+            }
+        }
+    }
 }
 
 #[test]
@@ -1348,7 +1447,10 @@ fn the_palette_centres_near_the_windows_top_and_chooses_the_best_match() {
         frame(ui, |ui| {
             chosen = popup::palette(ui, palette, &[("", &commands)], "Search commands")
         });
-        chosen.map(|(_, index)| index)
+        match chosen {
+            Some(popup::Pick::Run(_, index)) => Some(index),
+            _ => None,
+        }
     };
     build(&mut ui);
     ui.open_popup(palette);
@@ -1385,7 +1487,11 @@ fn a_prefix_typed_in_the_palette_switches_what_it_lists() {
     build(&mut ui);
     ui.event(typed("sel"));
     ui.event(key(NamedKey::Enter));
-    assert_eq!(build(&mut ui), Some((0, 3)), "typed after the prefix");
+    assert_eq!(
+        build(&mut ui),
+        Some(popup::Pick::Run(0, 3)),
+        "typed after the prefix"
+    );
     popup::open_with(&mut ui, palette, ">");
     build(&mut ui);
     ui.event(key(NamedKey::Backspace));
@@ -1393,7 +1499,75 @@ fn a_prefix_typed_in_the_palette_switches_what_it_lists() {
     assert_eq!(popup::query(&ui, palette), Some(""));
     ui.event(typed("tnr"));
     ui.event(key(NamedKey::Enter));
-    assert_eq!(build(&mut ui), Some((1, 42)), "back among the places");
+    assert_eq!(
+        build(&mut ui),
+        Some(popup::Pick::Run(1, 42)),
+        "back among the places"
+    );
+}
+
+#[test]
+fn the_palette_opens_an_items_actions_on_command_k_or_a_right_click() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let palette = Id::ROOT.child("palette");
+    let actions = popup::actions(palette);
+    let mut places = items();
+    // The first repeats an item further on, as a recent page does.
+    places[0].repeated = true;
+    let build = |ui: &mut Ui| {
+        let mut picked = None;
+        frame(ui, |ui| {
+            picked = popup::palette(ui, palette, &[("", &places)], "Go to");
+            popup::menu(
+                ui,
+                actions,
+                Anchor::Point([0.0; 2]),
+                &items(),
+                Some("Actions"),
+            );
+        });
+        picked
+    };
+    build(&mut ui);
+    ui.open_popup(palette);
+    build(&mut ui);
+    ui.event(key(NamedKey::ArrowDown));
+    build(&mut ui);
+    ui.event(Event::Modifiers(SHORTCUT));
+    ui.event(typed("k"));
+    assert_eq!(build(&mut ui), Some(popup::Pick::Actions(0, 0)));
+    assert!(ui.popup_open(actions));
+    assert_eq!(
+        popup::query(&ui, palette),
+        Some(""),
+        "the chord types nothing"
+    );
+    ui.event(Event::Modifiers(ModifiersState::empty()));
+    build(&mut ui);
+    ui.event(key(NamedKey::Escape));
+    build(&mut ui);
+    assert!(
+        ui.popup_open(palette) && !ui.popup_open(actions),
+        "Escape goes back to the palette"
+    );
+    let row = ui.rect(palette.child("rows").child(3_u64)).unwrap();
+    ui.event(Event::PointerMoved([row[0] + 4.0, row[1] + 4.0]));
+    ui.event(Event::Button {
+        button: MouseButton::Right,
+        pressed: true,
+        at: Instant::now(),
+    });
+    assert_eq!(build(&mut ui), Some(popup::Pick::Actions(0, 3)));
+    assert!(ui.popup_open(actions));
+    ui.event(key(NamedKey::Escape));
+    build(&mut ui);
+    ui.event(typed("c"));
+    build(&mut ui);
+    assert_eq!(
+        ui.rect(palette.child("rows").child(0_u64)),
+        None,
+        "a repeated item shows only while unfiltered"
+    );
 }
 
 #[test]
@@ -2297,11 +2471,21 @@ fn every_control_in_an_open_dialog_takes_clicks_where_it_rests() {
 fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_clicks() {
     let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
     let fonts = fonts();
-    let combo = Id::ROOT.child("combo");
+    // Inset, as a popup keeps off the window's edges.
+    let combo = Id::ROOT.child("inset").child("combo");
     let mut chosen = None;
     let mut build = |ui: &mut Ui| {
         frame(ui, |ui| {
+            ui.open(
+                "inset",
+                Spec {
+                    size: [children(), children()],
+                    pad: [10.0, 10.0],
+                    ..Spec::default()
+                },
+            );
             shell::combo(ui, "combo", "Font", "Calibri", 120.0, menu_id(), true);
+            ui.close();
             let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
             chosen = popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"));
         });
@@ -2753,4 +2937,107 @@ fn password_fields_edit_the_characters_behind_their_bullets() {
     ui.event(key(NamedKey::Backspace));
     edit(&mut ui, &mut text);
     assert_eq!(text, "pß");
+}
+
+#[test]
+fn a_loose_dialog_fits_its_contents_to_the_window_and_its_side_stretches_to_its_list() {
+    let dialog = Id::ROOT.child("dialog");
+    let side = dialog.child("body").child("side");
+    let list = dialog.child("body").child("list");
+    let loose = Extent {
+        size: Size::Children,
+        strictness: 0.0,
+    };
+    let build = |ui: &mut Ui, rows: usize| {
+        frame(ui, |ui| {
+            ui.open_as(
+                dialog,
+                Spec {
+                    axis: Axis::Y,
+                    size: [px(300.0), loose],
+                    anchor: Some(Anchor::Dialog),
+                    ..Spec::default()
+                },
+            );
+            ui.leaf(
+                "header",
+                Spec {
+                    size: [fill(), px(30.0)],
+                    ..Spec::default()
+                },
+            );
+            ui.open(
+                "body",
+                Spec {
+                    size: [fill(), loose],
+                    ..Spec::default()
+                },
+            );
+            ui.leaf(
+                "side",
+                Spec {
+                    size: [px(100.0), fill()],
+                    ..Spec::default()
+                },
+            );
+            ui.open(
+                "list",
+                Spec {
+                    flags: Flags::SCROLL | Flags::CLIP,
+                    axis: Axis::Y,
+                    size: [fill(), loose],
+                    ..Spec::default()
+                },
+            );
+            for row in 0..rows {
+                ui.leaf(
+                    row,
+                    Spec {
+                        size: [fill(), px(30.0)],
+                        ..Spec::default()
+                    },
+                );
+            }
+            ui.close();
+            ui.close();
+            ui.leaf(
+                "footer",
+                Spec {
+                    size: [fill(), px(30.0)],
+                    ..Spec::default()
+                },
+            );
+            ui.close();
+        });
+    };
+    let height = |ui: &Ui, id: Id| ui.rect(id).map(|rect| rect[3] - rect[1]).unwrap();
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui, 2);
+    ui.open_popup(dialog);
+    for _ in 0..40 {
+        build(&mut ui, 2);
+    }
+    assert_eq!(height(&ui, dialog), 120.0, "as tall as what it holds");
+    assert_eq!(height(&ui, side), 60.0, "the side as tall as the list");
+
+    for _ in 0..40 {
+        build(&mut ui, 20);
+    }
+    assert_eq!(
+        height(&ui, dialog),
+        225.0,
+        "no taller than the window lets a dialog be"
+    );
+    assert_eq!(height(&ui, list), 165.0, "the list gives way");
+    assert_eq!(height(&ui, side), 165.0);
+
+    ui.scroll_to(list, list.child(10_usize));
+    for _ in 0..60 {
+        build(&mut ui, 20);
+    }
+    let [top, row] = [list, list.child(10_usize)].map(|id| ui.rect(id).unwrap()[1]);
+    assert!(
+        (row - top).abs() < 0.5,
+        "row 10 at {row}, the list's top at {top}"
+    );
 }

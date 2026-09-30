@@ -100,6 +100,22 @@ impl Content {
         Some((source, [x + x0, y + y0, x + x1, y + y1]))
     }
 
+    /// A tagged picture or file: its identity, note tags and bounds in page points.
+    pub(crate) fn tagged(
+        &self,
+    ) -> Option<(onestore::ExGuid, &[onestore::document::Tag], [f32; 4])> {
+        let (id, tags, bounds) = match self {
+            Self::Image(image) => {
+                let [x, y] = [image.layout.x, image.layout.y].map(|v| v.unwrap_or(0.0));
+                let [width, height] = crate::outline::image_size(image)?;
+                (image.id, &image.tags, [x, y, x + width, y + height])
+            }
+            Self::File { source, .. } => (source.id, &source.tags, self.file()?.1),
+            _ => return None,
+        };
+        (!tags.is_empty()).then_some((id, tags.as_slice(), bounds))
+    }
+
     pub(super) fn layout_mut(
         &mut self,
     ) -> Option<(onestore::ExGuid, &mut onestore::document::Layout)> {
@@ -354,26 +370,16 @@ pub(crate) fn build(
                 }
             }
             PageObject::Image(source) => {
-                if source.bytes.is_none()
-                    || source.layout.max_width.is_none()
-                    || source.layout.max_height.is_none()
-                {
+                // A picture without a layout size shows at its own, as COM inserts them.
+                let Some(size) =
+                    crate::outline::image_size(source).filter(|_| source.bytes.is_some())
+                else {
                     objects.push(Content::unavailable(object, engine)?);
                     continue;
-                }
+                };
                 let origin = [
                     source.layout.x.unwrap_or(0.0),
                     source.layout.y.unwrap_or(0.0),
-                ];
-                let size = [
-                    source
-                        .layout
-                        .max_width
-                        .ok_or(EditorError::InvalidGeometry)?,
-                    source
-                        .layout
-                        .max_height
-                        .ok_or(EditorError::InvalidGeometry)?,
                 ];
                 if origin.iter().any(|v| !v.is_finite())
                     || size.iter().any(|v| !v.is_finite() || *v <= 0.0)

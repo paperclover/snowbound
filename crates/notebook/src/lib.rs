@@ -313,8 +313,14 @@ impl Replica {
     /// The section image the queued edits leave, the unsealed ones sealed as one more
     /// revision whose identities differ per call: O(section).
     pub(crate) fn snapshot(&self) -> Result<Vec<u8>> {
-        self.ask(|reply| working::Request::Flush { reply })?;
+        self.written()?;
         working::image(&*self.lock()?)
+    }
+
+    /// Waits until the edits applied before it are written to the queue, as reads answer
+    /// before an open burst of edits is.
+    pub fn written(&self) -> Result<()> {
+        self.ask(|reply| working::Request::Flush { reply })
     }
 
     /// The section file's identity, which internal links name as `section-id`.

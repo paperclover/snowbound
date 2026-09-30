@@ -158,12 +158,70 @@ fn composed() -> bool {
     unsafe { Dwm::DwmIsCompositionEnabled(&mut on) >= 0 && on != 0 }
 }
 
-pub fn event_loop(_headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
+pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
     let event_loop = EventLoop::with_user_event().build()?;
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     COMPOSED.store(composed(), Ordering::Relaxed);
+    if !headless {
+        offer_to_open();
+    }
     Ok(event_loop)
+}
+
+/// Lists this executable under Open with for OneNote's sections and tables of contents, for
+/// this user, leaving the app that opens them as it was; a moved executable lists its new
+/// path. One cargo built and runs where it put it, in a folder CACHEDIR.TAG marks, isn't listed.
+fn offer_to_open() {
+    use windows_sys::Win32::System::Registry;
+    const PROG_ID: &str = "Snowbound.OneNote";
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    if executable
+        .ancestors()
+        .any(|folder| folder.join("CACHEDIR.TAG").exists())
+    {
+        return;
+    }
+    let executable = executable.display();
+    let set = |key: &str, value: Option<&str>, data: &str| {
+        let (data, value) = (wide(data), value.map(wide));
+        let result = unsafe {
+            Registry::RegSetKeyValueW(
+                Registry::HKEY_CURRENT_USER,
+                wide(format!(r"Software\Classes\{key}")).as_ptr(),
+                value
+                    .as_ref()
+                    .map_or(std::ptr::null(), |value| value.as_ptr()),
+                Registry::REG_SZ,
+                data.as_ptr().cast(),
+                (data.len() * 2) as u32,
+            )
+        };
+        if result != 0 {
+            eprintln!("Cannot register {key}: error {result}");
+        }
+    };
+    set(PROG_ID, None, "OneNote File");
+    set(
+        &format!(r"{PROG_ID}\DefaultIcon"),
+        None,
+        &format!("{executable},0"),
+    );
+    set(
+        &format!(r"{PROG_ID}\shell\open"),
+        Some("FriendlyAppName"),
+        "Snowbound",
+    );
+    set(
+        &format!(r"{PROG_ID}\shell\open\command"),
+        None,
+        &format!("\"{executable}\" \"%1\""),
+    );
+    for extension in [".one", ".onetoc2"] {
+        set(&format!(r"{extension}\OpenWithProgids"), Some(PROG_ID), "");
+    }
 }
 
 /// The executable's icon, and where the row draws the caption buttons, no system frame:
@@ -760,8 +818,132 @@ pub fn move_cursor() -> winit::window::CursorIcon {
 /// No system border lies under the chrome.
 pub fn cover_border_line(_: &mut Ui, _: f32) {}
 
-pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
-    run()
+/// Runs the app. Where nothing reads stderr, as when Explorer starts it, stderr goes to a
+/// log, with panics' backtraces and the faults that end the process, and a run that ends
+/// in an error or a panic says where the log is.
+pub fn with_pool(
+    run: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::panic;
+    let log = log_stderr();
+    let (major, minor, build) = version();
+    eprintln!(
+        "Snowbound {} on Windows {major}.{minor}.{build}",
+        option_env!("SNOWBOUND_BUILD").unwrap_or("development")
+    );
+    panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        eprintln!(
+            "Thread {:?} {info}\n{backtrace}",
+            thread.name().unwrap_or("")
+        );
+    }));
+    unsafe {
+        windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(0, Some(fault))
+    };
+    let result = panic::catch_unwind(panic::AssertUnwindSafe(run));
+    let Some(log) = log else {
+        return result.unwrap_or_else(|payload| panic::resume_unwind(payload));
+    };
+    let details = format!("The log is at {}.", log.display());
+    // The window is gone, and a message box it owned wouldn't show.
+    WINDOW.store(0, Ordering::Relaxed);
+    match result {
+        Ok(Err(error)) => {
+            alert(&error.to_string(), &details);
+            Err(error)
+        }
+        Ok(done) => done,
+        Err(payload) => {
+            alert("Snowbound stopped because of a problem.", &details);
+            panic::resume_unwind(payload)
+        }
+    }
+}
+
+/// Points stderr at `snowbound.log` in the cache folder where it goes nowhere, keeping the
+/// last run's as `snowbound.old.log`.
+fn log_stderr() -> Option<PathBuf> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows_sys::Win32::{
+        Storage::FileSystem::{FILE_TYPE_UNKNOWN, GetFileType},
+        System::Console::{GetStdHandle, STD_ERROR_HANDLE, SetStdHandle},
+    };
+    // A console's handles inherited without the console are as good as none.
+    if unsafe { GetFileType(GetStdHandle(STD_ERROR_HANDLE)) } != FILE_TYPE_UNKNOWN {
+        return None;
+    }
+    let folder = cache_dir()?;
+    std::fs::create_dir_all(&folder).ok()?;
+    let log = folder.join("snowbound.log");
+    let _ = std::fs::rename(&log, folder.join("snowbound.old.log"));
+    let file = std::fs::File::create(&log).ok()?;
+    // Leaked: stderr writes to it until the process ends.
+    unsafe { SetStdHandle(STD_ERROR_HANDLE, file.into_raw_handle()) };
+    Some(log)
+}
+
+/// Logs an access violation or a bad instruction, such as a driver's, by the module it
+/// happened in. Seen before any handler, as Windows reports one from a window procedure
+/// to no unhandled-exception filter; it usually ends the process.
+unsafe extern "system" fn fault(
+    pointers: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
+) -> i32 {
+    use windows_sys::Win32::{
+        Foundation::{
+            EXCEPTION_ACCESS_VIOLATION, EXCEPTION_ILLEGAL_INSTRUCTION, EXCEPTION_PRIV_INSTRUCTION,
+        },
+        System::LibraryLoader::{
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            GetModuleFileNameW, GetModuleHandleExW,
+        },
+    };
+    let record = unsafe { &*(*pointers).ExceptionRecord };
+    if ![
+        EXCEPTION_ACCESS_VIOLATION,
+        EXCEPTION_ILLEGAL_INSTRUCTION,
+        EXCEPTION_PRIV_INSTRUCTION,
+    ]
+    .contains(&record.ExceptionCode)
+    {
+        return 0;
+    }
+    let place = |address: usize| {
+        let mut module = std::ptr::null_mut();
+        let mut name = [0u16; 260];
+        let found = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                address as *const u16,
+                &mut module,
+            ) != 0
+                && GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) != 0
+        };
+        if found {
+            format!("{} + {:#x}", narrow(&name), address - module as usize)
+        } else {
+            format!("{address:#x}, in no module")
+        }
+    };
+    // Where a call went to a bad address, the backtrace can't leave it: the return address
+    // names the caller.
+    let context = unsafe { &*(*pointers).ContextRecord };
+    #[cfg(target_arch = "x86_64")]
+    let caller = unsafe { *(context.Rsp as *const usize) };
+    #[cfg(target_arch = "aarch64")]
+    let caller = unsafe { context.Anonymous.Anonymous.Lr } as usize;
+    eprintln!(
+        "Fault {:#010x} at {}, on {:#x}, perhaps called from {}\n{}",
+        record.ExceptionCode as u32,
+        place(record.ExceptionAddress as usize),
+        record.ExceptionInformation[1],
+        place(caller),
+        std::backtrace::Backtrace::force_capture()
+    );
+    // EXCEPTION_CONTINUE_SEARCH.
+    0
 }
 
 /// The interface keeps its own font, which fontique finds as Segoe UI.
@@ -818,6 +1000,10 @@ impl Clipboard {
 
     pub fn get_files(&mut self) -> Vec<std::path::PathBuf> {
         self.0.get().file_list().unwrap_or_default()
+    }
+
+    pub fn get_html(&mut self) -> Option<String> {
+        self.0.get().html().ok()
     }
 
     /// The clipboard's PNG, or else its device-independent bitmap.

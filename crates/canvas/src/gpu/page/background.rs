@@ -429,6 +429,13 @@ struct Variant {
 }
 
 impl Background {
+    /// The rasters made so far, for light and for dark paper.
+    pub fn images(&self) -> impl Iterator<Item = &RasterImage> {
+        self.variants
+            .iter()
+            .filter_map(|variant| variant.shown.as_ref().map(|(image, _)| image))
+    }
+
     /// Whether both recreate the same template picture at the same size.
     pub fn same(&self, other: &Self) -> bool {
         self.svg == other.svg && self.size == other.size
@@ -757,6 +764,9 @@ mod tests {
             alt: None,
             background: true,
             printout: None,
+            tags: Vec::new(),
+            link: None,
+            text: None,
         }
     }
 

@@ -203,10 +203,48 @@ fn text_paragraphs<'a>(page: &'a Page, mut visit: impl FnMut(&'a PageParagraph, 
     }
 }
 
-/// A page's text outside its title, a paragraph to a line.
+/// The text OneNote recognised in each of the page's pictures, or printed on a printout's
+/// pages, in page order.
+fn picture_text(page: &Page) -> Vec<&str> {
+    fn walk<'a>(paragraphs: &'a [PageParagraph], out: &mut Vec<&'a str>) {
+        for paragraph in paragraphs {
+            match &paragraph.content {
+                ParagraphContent::Image(image) => {
+                    out.extend(image.text.as_ref().map(|text| text.text.as_str()))
+                }
+                ParagraphContent::Table(table) => {
+                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
+                        walk(&cell.paragraphs, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for object in &page.objects {
+        match object {
+            PageObject::Outline(outline) => walk(&outline.paragraphs, &mut out),
+            PageObject::Image(image) => {
+                out.extend(image.text.as_ref().map(|text| text.text.as_str()))
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A page's text outside its title, a paragraph to a line, then the text in its pictures,
+/// which OneNote searches too.
 pub fn page_text(page: &Page) -> String {
     let mut out = Vec::new();
     text_paragraphs(page, |_, text| out.push(shown(text)));
+    out.extend(
+        picture_text(page)
+            .into_iter()
+            .flat_map(str::lines)
+            .map(str::to_owned),
+    );
     out.retain(|line| !line.trim().is_empty());
     out.join("\n")
 }

@@ -68,7 +68,6 @@ const MENUS: &[Item] = &[
             C(Id::ShowNotebook),
             S,
             C(Id::ExportPdf),
-            C(Id::ExportSectionPdf),
             S,
             C(Id::Print),
         ],
@@ -158,6 +157,31 @@ const MENUS: &[Item] = &[
     Item::Menu(
         "Format",
         &[
+            Item::Menu(
+                "Style",
+                &[
+                    C(Id::Style(0)),
+                    C(Id::Style(1)),
+                    C(Id::Style(2)),
+                    C(Id::Style(3)),
+                    C(Id::Style(4)),
+                    C(Id::Style(5)),
+                    C(Id::Style(6)),
+                    C(Id::Style(7)),
+                    C(Id::Style(8)),
+                    C(Id::Style(9)),
+                    C(Id::Style(10)),
+                ],
+            ),
+            Item::Menu(
+                "Theme",
+                &[
+                    C(Id::Theme(crate::themes::Scope::Page)),
+                    C(Id::Theme(crate::themes::Scope::Section)),
+                    C(Id::Theme(crate::themes::Scope::Notebook)),
+                ],
+            ),
+            S,
             Item::Menu("Font", &[Item::Fonts]),
             Item::Menu("Size", &[Item::Sizes]),
             S,
@@ -264,11 +288,10 @@ fn menu(
     for item in items {
         match item {
             Item::Command(id) => {
-                let command = commands::command(*id);
                 choose(
                     &Choice::Command(*id),
-                    command.title,
-                    command.mac.first().copied(),
+                    commands::command(*id).title,
+                    commands::chords(*id).first().copied(),
                 );
             }
             Item::System(title, action, chord) => {
@@ -320,8 +343,12 @@ pub fn tags(mtm: MainThreadMarker, target: &AnyObject, menu: &NSMenu, tags: &[No
         menu.addItem(&NSMenuItem::separatorItem(mtm));
     }
     for id in [Id::CustomizeTags, Id::RemoveTags, Id::FindTags] {
-        let command = commands::command(id);
-        choose(menu, id, command.title, command.mac.first().copied());
+        choose(
+            menu,
+            id,
+            commands::command(id).title,
+            commands::chords(id).first().copied(),
+        );
     }
 }
 
@@ -451,7 +478,7 @@ mod tests {
         }
         // The keyboard's first chord for each command is on its menu item.
         for command in commands::COMMANDS {
-            let Some(chord) = command.mac.first() else {
+            let Some(chord) = commands::chords(command.id).first().copied() else {
                 continue;
             };
             let line = tree

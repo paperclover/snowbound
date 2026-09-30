@@ -73,23 +73,42 @@ impl Surface {
             unreachable!()
         };
         let device = unsafe { GetDC(handle.hwnd.get() as HWND) };
-        let alpha = if backdrop { 8 } else { 0 };
-        let format = gl::PIXELFORMATDESCRIPTOR {
+        let request = |alpha| gl::PIXELFORMATDESCRIPTOR {
             nSize: size_of::<gl::PIXELFORMATDESCRIPTOR>() as u16,
             nVersion: 1,
-            // PFD_SUPPORT_COMPOSITION: the desktop composes the window's alpha.
             dwFlags: gl::PFD_DRAW_TO_WINDOW
                 | gl::PFD_SUPPORT_OPENGL
                 | gl::PFD_DOUBLEBUFFER
-                | 0x8000,
+                | gl::PFD_SUPPORT_COMPOSITION,
             iPixelType: gl::PFD_TYPE_RGBA,
             cColorBits: 32,
             cAlphaBits: alpha,
             iLayerType: gl::PFD_MAIN_PLANE as u8,
             ..unsafe { std::mem::zeroed() }
         };
+        // A driver with no accelerated format that has alpha answers with Windows' own
+        // OpenGL 1.1; frames then go without the glass behind them.
+        let accelerated = |format: &gl::PIXELFORMATDESCRIPTOR| unsafe {
+            let chosen = gl::ChoosePixelFormat(device, format);
+            let mut found = std::mem::zeroed();
+            let size = size_of::<gl::PIXELFORMATDESCRIPTOR>() as u32;
+            (chosen != 0
+                && gl::DescribePixelFormat(device, chosen, size, &mut found) != 0
+                && (found.dwFlags & gl::PFD_GENERIC_FORMAT == 0
+                    || found.dwFlags & gl::PFD_GENERIC_ACCELERATED != 0))
+                .then_some(chosen)
+        };
+        let mut format = request(if backdrop { 8 } else { 0 });
+        let mut translucent = backdrop;
+        let mut chosen = accelerated(&format);
+        if chosen.is_none() && backdrop {
+            eprintln!("No accelerated OpenGL format with alpha; drawing opaque");
+            format = request(0);
+            translucent = false;
+            chosen = accelerated(&format);
+        }
         unsafe {
-            let chosen = gl::ChoosePixelFormat(device, &format);
+            let chosen = chosen.unwrap_or_else(|| gl::ChoosePixelFormat(device, &format));
             if chosen == 0 || gl::SetPixelFormat(device, chosen, &format) == 0 {
                 return Err("No OpenGL pixel format".into());
             }
@@ -105,15 +124,36 @@ impl Surface {
                 );
             }
         }
-        let renderer = Renderer::opengl()?;
-        eprintln!("Canvas GPU: OpenGL");
+        let string = |name| unsafe {
+            let text = gl::glGetString(name);
+            if text.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(text.cast())
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        let driver = format!(
+            "OpenGL {} ({}, {})",
+            string(gl::GL_VERSION),
+            string(gl::GL_RENDERER),
+            string(gl::GL_VENDOR)
+        );
+        eprintln!("Canvas GPU: {driver}");
+        let renderer = Renderer::opengl().map_err(|error| {
+            format!(
+                "Snowbound needs OpenGL 2.1, and this display driver has {driver}. Install \
+                 the driver from your graphics card's maker. ({error})"
+            )
+        })?;
         let size = window.inner_size();
         Ok((
             Self {
                 size: [size.width, size.height],
                 backend: Backend::Gl {
                     device,
-                    translucent: backdrop,
+                    translucent,
                     target: None,
                 },
             },

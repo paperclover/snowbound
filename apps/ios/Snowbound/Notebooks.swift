@@ -277,7 +277,8 @@ final class Notebook {
     }
 
     /// Asks iCloud Drive for the notebook files it keeps elsewhere, which iOS lists as
-    /// `.Name.icloud`, and lists the sections again until they arrive.
+    /// `.Name.icloud` or dataless under their names, and lists the sections again until they
+    /// arrive.
     private func download() {
         let folder: URL? =
             switch source {
@@ -288,13 +289,17 @@ final class Notebook {
             case .server: nil
             }
         guard let folder, recheck == nil,
-            let files = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil)
+            let files = FileManager.default.enumerator(
+                at: folder, includingPropertiesForKeys: [.ubiquitousItemDownloadingStatusKey])
         else { return }
         var waiting = false
-        for case let stub as URL in files where stub.lastPathComponent.hasPrefix(".") && stub.pathExtension == "icloud" {
-            let name = String(stub.deletingPathExtension().lastPathComponent.dropFirst())
-            let file = stub.deletingLastPathComponent().appendingPathComponent(name)
-            try? FileManager.default.startDownloadingUbiquitousItem(at: file)
+        for case let file as URL in files {
+            let stub = file.lastPathComponent.hasPrefix(".") && file.pathExtension == "icloud"
+            let status = try? file.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey])
+            guard stub || status?.ubiquitousItemDownloadingStatus == .notDownloaded else { continue }
+            let real = file.deletingLastPathComponent().appendingPathComponent(
+                String(file.deletingPathExtension().lastPathComponent.dropFirst()))
+            try? FileManager.default.startDownloadingUbiquitousItem(at: stub ? real : file)
             waiting = true
         }
         guard waiting else { return }
@@ -485,6 +490,13 @@ enum Notebooks {
         return added
     }
 
+    /// Whether Snowbound's folder in iCloud Drive holds other notebooks than the list shows, as
+    /// when another device added or removed one.
+    static var inCloudChanged: Bool {
+        guard let folder = ICloud.documents, scripted == nil else { return false }
+        return notebooks(in: folder).map { "iCloud/" + $0 } != inCloud.map(\.id)
+    }
+
     /// The notebook folders and section files in `folder`, by name, as Files orders them.
     private static func notebooks(in folder: URL) -> [String] {
         let listed = try? FileManager.default.contentsOfDirectory(
@@ -646,6 +658,27 @@ final class Section {
             NotificationCenter.default.post(name: Self.changed, object: self, userInfo: ["flags": Self.listed])
             done(deleted)
         }
+    }
+
+    /// The notebook's themes, and the one page `id`, its section and its notebook each name.
+    struct Themes: Decodable {
+        struct Listed: Decodable {
+            let id: String
+            let name: String
+        }
+        let themes: [Listed]
+        let page: String?
+        let section: String?
+        let notebook: String?
+    }
+
+    func themes(of id: String) -> Themes? { decode(Themes.self, sb_section_themes(handle, id)) }
+
+    /// Gives `theme`, or none of its own, to page `id` (scope 0), its section (1) or its
+    /// notebook (2).
+    func setTheme(_ theme: String?, scope: UInt8, of id: String, done: @escaping (Bool) -> Void) {
+        let pointer = Int(bitPattern: handle)
+        background({ sb_section_set_theme(OpaquePointer(bitPattern: pointer), id, scope, theme) }, done: done)
     }
 
     /// Stores every edit and publishes them within `seconds`; call off the main thread.

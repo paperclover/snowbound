@@ -343,6 +343,76 @@ fn id() -> Id {
     Id::ROOT.child("server")
 }
 
+/// The address a sign-in to `mount` is saved by: its server and account, without share or
+/// folder, and never a password.
+fn saved_address(mount: &Mount) -> String {
+    Mount {
+        share: String::new(),
+        root: String::new(),
+        ..mount.clone()
+    }
+    .url()
+}
+
+/// The saved servers under "Recent Servers", each a button that reconnects to it and one that
+/// removes it; returns the one picked and whether to remove it.
+pub(crate) fn saved_servers(ui: &mut Ui, servers: &[String]) -> Option<(usize, bool)> {
+    if servers.is_empty() {
+        return None;
+    }
+    let theme = ui.theme.clone();
+    let row = theme.font_size * 2.0;
+    ui.leaf(
+        "recent",
+        Spec {
+            size: [fill(), px(row)],
+            text: Some("Recent Servers"),
+            color: Some(theme.text_dim),
+            role: Some(Role::Heading),
+            ..Spec::default()
+        },
+    );
+    let mut picked = None;
+    for (index, address) in servers.iter().enumerate() {
+        ui.open(
+            ("saved", address),
+            Spec {
+                size: [fill(), px(row)],
+                gap: 4.0,
+                ..Spec::default()
+            },
+        );
+        let label = address.strip_prefix("smb://").unwrap_or(address);
+        if ui
+            .leaf(
+                "connect",
+                Spec {
+                    flags: Flags::CLICKABLE | Flags::CLIP,
+                    size: [fill(), px(row)],
+                    icon: Some(art::SERVER),
+                    text: Some(label),
+                    hover_fill: Some(theme.hover()),
+                    radius: 4.0,
+                    pad: [8.0, 0.0],
+                    gap: 6.0,
+                    role: Some(Role::Button),
+                    ..Spec::default()
+                },
+            )
+            .clicked
+        {
+            picked = Some((index, false));
+        }
+        let remove = ui.id("remove");
+        if ui::shell::tool_button(ui, "remove", art::CLOSE, theme.text_dim, None).clicked {
+            picked = Some((index, true));
+        }
+        name(ui, remove, &format!("Remove {label}"));
+        ui.close();
+    }
+    picked
+}
+
 fn address_field() -> Id {
     id().child("address")
 }
@@ -409,6 +479,33 @@ impl State {
         self.ui.focus_all(focus);
     }
 
+    /// Opens the dialog at saved server `address`, signing in with any password the keychain
+    /// keeps, to browse its shares.
+    pub(crate) fn reconnect(&mut self, address: &str) {
+        self.open_server(Some(address));
+        if let Some(connect) = &mut self.server {
+            connect.reopen = false;
+        }
+    }
+
+    /// Saves `address` first among the recent servers.
+    fn remember_server(&mut self, address: String) {
+        self.servers.retain(|saved| *saved != address);
+        self.servers.insert(0, address);
+        self.save_settings();
+    }
+
+    /// Picks from, or removes from, the recent servers `saved_servers` lists.
+    pub(crate) fn saved_server(&mut self, (index, remove): (usize, bool)) {
+        if remove {
+            self.servers.remove(index);
+            self.save_settings();
+        } else {
+            let address = self.servers[index].clone();
+            self.reconnect(&address);
+        }
+    }
+
     /// Runs `request` off the frame, which wakes when it is answered.
     fn ask(&mut self, request: Request) {
         let Some(connect) = &self.server else {
@@ -452,9 +549,13 @@ impl State {
             return;
         }
         let replies: Vec<Reply> = connect.replies.1.try_iter().collect();
+        let mut signed_in = None;
         for reply in replies {
-            if connect.receive(reply)
-                && connect.remember == Some(true)
+            if !connect.receive(reply) {
+                continue;
+            }
+            signed_in = connect.mount.as_ref().map(saved_address);
+            if connect.remember == Some(true)
                 && !connect.guest
                 && let (Some(mount), login) = (&connect.mount, connect.login())
                 && let Err(error) = platform::save_login(mount, &login)
@@ -462,6 +563,12 @@ impl State {
                 eprintln!("Keeping the password for {}: {error}", mount.host());
             }
         }
+        if let Some(address) = signed_in {
+            self.remember_server(address);
+        }
+        let Some(connect) = &mut self.server else {
+            return;
+        };
         if connect.reopen
             && let Some((mount, login)) = connect.opens()
         {
@@ -529,6 +636,7 @@ impl State {
         };
         let mut chosen = None;
         let mut back = false;
+        let mut saved = None;
         match connect.step {
             Step::Address => {
                 labelled(ui, "Server Address:", |ui| {
@@ -541,6 +649,7 @@ impl State {
                     );
                     name(ui, address_field(), "Server Address");
                 });
+                saved = saved_servers(ui, &self.servers);
             }
             Step::SignIn => {
                 if ui::check_box(ui, "guest", "Connect as guest", connect.guest).clicked {
@@ -743,6 +852,9 @@ impl State {
             self.ui.set_focus(Some(crate::page()));
             self.server = None;
             return;
+        }
+        if let Some(saved) = saved {
+            return self.saved_server(saved);
         }
         let connect = self.server.as_mut().expect("the dialog is open");
         let request = if let Some(index) = chosen {
@@ -1030,6 +1142,15 @@ mod tests {
         assert_eq!(connect.status, Status::Waiting("Loading\u{2026}"));
         connect.receive(current.run(&fake()));
         assert_eq!(connect.listing.folders, ["Notes", "public"]);
+    }
+
+    #[test]
+    fn a_saved_server_keeps_its_account_but_not_its_share_or_password() {
+        let mount =
+            Mount::from_address("smb://WORK;clover:secret@nas:1445/Notes/My Garden").unwrap();
+        assert_eq!(saved_address(&mount), "smb://WORK;clover@nas:1445");
+        let guest = Mount::from_address("nas/public").unwrap();
+        assert_eq!(saved_address(&guest), "smb://nas");
     }
 
     #[test]

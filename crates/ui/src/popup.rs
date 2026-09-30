@@ -75,6 +75,8 @@ pub struct Item<'a> {
     pub separated: bool,
     /// Names the group it starts: shown only while unfiltered, never chosen.
     pub heading: bool,
+    /// Repeats an item listed further on, so shows only while unfiltered.
+    pub repeated: bool,
 }
 
 impl Item<'_> {
@@ -327,22 +329,38 @@ fn tooltip_below(
     ui.close();
 }
 
+/// A palette's item picked, by mode and index: to run, or for its actions, which the menu
+/// `actions` names lists beside its row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Pick {
+    Run(usize, usize),
+    Actions(usize, usize),
+}
+
+/// The menu of the actions on palette `id`'s item, which Escape closes back to the palette.
+pub fn actions(id: Id) -> Id {
+    id.child("actions")
+}
+
 /// Builds popup `id` as a command palette across the top of the window while it is open,
 /// under a filter field showing `placeholder` while empty. What is typed picks the first of
 /// `modes` whose prefix it starts with, and the rest of it narrows that mode's items, most
-/// relevant first. Returns the mode and the index of the item chosen.
-pub fn palette(
-    ui: &mut Ui,
-    id: Id,
-    modes: &[(&str, &[Item])],
-    placeholder: &str,
-) -> Option<(usize, usize)> {
+/// relevant first. Enter or a click runs the item; ⌘K (Ctrl+K elsewhere) on the highlighted
+/// one or a right-click on any opens its `actions` menu.
+pub fn palette(ui: &mut Ui, id: Id, modes: &[(&str, &[Item])], placeholder: &str) -> Option<Pick> {
     if !ui.popup_open(id) {
         return None;
     }
+    let rows = id.child("rows");
+    let clicked = (ui.lists.get(&rows).into_iter())
+        .flat_map(crate::list::State::shown)
+        .find(|key| {
+            (ui.signals.get(&rows.child(*key))).is_some_and(|signal| signal.context.is_some())
+        });
+    let chord = chord(ui, id.child("filter"), "k");
     let window = ui.rect(Id::ROOT).unwrap_or_default();
     let width = PALETTE.min(window[2] - 8.0 * PAD).max(NARROWEST);
-    choose(
+    if let Some((mode, index)) = choose(
         ui,
         id,
         Role::Dialog,
@@ -351,7 +369,39 @@ pub fn palette(
         Some(placeholder),
         width,
         ROW,
-    )
+    ) {
+        return Some(Pick::Run(mode, index));
+    }
+    if !ui.popup_open(id) {
+        return None;
+    }
+    let popup = state(ui, id);
+    popup.highlight = clicked.or(popup.highlight);
+    let key = clicked.or(popup.highlight.filter(|_| chord))?;
+    let mode = modes
+        .iter()
+        .position(|(prefix, _)| popup.query.starts_with(prefix))?;
+    if modes[mode].1.get(key as usize)?.heading {
+        return None;
+    }
+    ui.open_submenu(actions(id), id, rows.child(key));
+    Some(Pick::Actions(mode, key as usize))
+}
+
+/// Takes a press of `character` with the shortcut modifier, ⌘ or Ctrl, routed to `owner`.
+fn chord(ui: &mut Ui, owner: Id, character: &str) -> bool {
+    if !crate::edit_modifiers(ui.modifiers).command {
+        return false;
+    }
+    let Some(signal) = ui.signals.get_mut(&owner) else {
+        return false;
+    };
+    let before = signal.events.len();
+    signal.events.retain(|event| {
+        !matches!(event, Event::Key { key: Key::Character(typed), .. }
+            if typed.eq_ignore_ascii_case(character))
+    });
+    signal.events.len() != before
 }
 
 /// Opens popup `id` with `query` typed in its filter field and the caret after it, or
@@ -1409,7 +1459,7 @@ impl<'a> Matches<'a> {
                 items
                     .iter()
                     .enumerate()
-                    .filter(|(_, item)| !item.heading)
+                    .filter(|(_, item)| !item.heading && !item.repeated)
                     .filter_map(|(index, item)| {
                         let text = Utf32Str::new(item.text, &mut chars);
                         Some((pattern.score(text, matcher)?, index))

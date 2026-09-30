@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/onenote">
+    <comment>OneNote notebook file</comment>
+    <alias type="application/msonenote"/>
+    <glob pattern="*.one"/>
+    <glob pattern="*.onetoc2"/>
+  </mime-type>
+</mime-info>

@@ -54,14 +54,26 @@ enum ICloud {
     /// Whether iCloud is signed in with iCloud Drive on, container or not.
     static var signedIn: Bool { FileManager.default.ubiquityIdentityToken != nil }
 
-    /// Has the library merge conflict versions, and follows the account; call once at launch.
+    /// Has the library merge conflict versions, follows the account, and hears of notebooks
+    /// another device adds or removes; call once at launch.
     static func start() {
         sb_set_versions(listVersions, retireVersion)
         NotificationCenter.default.addObserver(
             forName: .NSUbiquityIdentityDidChange, object: nil, queue: .main
         ) { _ in lookUp() }
         lookUp()
+        query.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
+        query.predicate = NSPredicate(format: "%K LIKE '*'", NSMetadataItemFSNameKey)
+        for name in [Notification.Name.NSMetadataQueryDidFinishGathering, .NSMetadataQueryDidUpdate] {
+            NotificationCenter.default.addObserver(forName: name, object: query, queue: .main) { _ in
+                if Notebooks.inCloudChanged { NotificationCenter.default.post(name: changed, object: nil) }
+            }
+        }
+        query.start()
     }
+
+    /// Reports what iCloud Drive syncs of the container, as files come from other devices.
+    private static let query = NSMetadataQuery()
 
     /// Looks the folder up off the main thread, as asking iCloud can take a while.
     static func lookUp() {
@@ -77,4 +89,5 @@ enum ICloud {
             NotificationCenter.default.post(name: changed, object: nil)
         }
     }
+
 }

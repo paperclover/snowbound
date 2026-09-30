@@ -634,6 +634,7 @@ fn with_file(source: &[u8], space: ExGuid) -> (Vec<u8>, ExGuid) {
         bytes: Some(std::sync::Arc::from(&b"Floating bytes"[..])),
         preview: None,
         recording: None,
+        tags: Vec::new(),
     };
     let image = remote_with(source, space, |page| {
         page.objects.push(PageObject::Attachment(file))

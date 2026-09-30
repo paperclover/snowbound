@@ -336,3 +336,55 @@ fn a_page_delete_lists_the_recycle_bin_it_finds_or_makes_and_leaves_an_unreadabl
         assert_eq!(names.len(), 2, "{names:?}");
     }
 }
+
+/// What the recycle bin holds goes for good once its pages last changed over 60 days
+/// before, as OneNote 2010 prunes it; a pruned section's TOC entry stays, as OneNote leaves it
+/// (`corpus/recycle-purge`). `NOTEBOOK_PURGE_EXPORT` names a new directory receiving the
+/// purged notebook for a cold reopen.
+#[test]
+fn the_recycle_bin_forgets_pages_and_sections_unchanged_for_sixty_days() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("notebook");
+    let bin = root.join("OneNote_RecycleBin");
+    let page = onestore::PageCreation::new(None, Some("Kept"), "Author").unwrap();
+    let mut notebook =
+        Notebook::create(&root, temporary.path().join("cache"), 0x00d7ff, &page).unwrap();
+    let old = onestore::PageCreation::new(None, Some("Old page"), "Author").unwrap();
+    notebook.create_section("", "Old", &old).unwrap();
+    let image = notebook.read_section("New Section 1.one").unwrap();
+    let pages = notebook::session::stored_pages(&image).unwrap();
+    notebook
+        .recycle_pages(&[pages[0].page.clone()], "Author")
+        .unwrap();
+    notebook.delete("Old.one").unwrap();
+    let toc = bin.join("Open Notebook.onetoc2");
+    let before = listed(&toc);
+    assert!(before.iter().any(|(name, _)| name == "Old.one"));
+    let deleted = bin.join("OneNote_DeletedPages.one");
+    let recycled = |notebook: &Notebook| {
+        let image = notebook
+            .read_section("OneNote_RecycleBin/OneNote_DeletedPages.one")
+            .unwrap();
+        notebook::session::stored_pages(&image).unwrap().len()
+    };
+    assert_eq!(recycled(&notebook), 1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32
+        - 315_532_800;
+    let day = 86_400;
+    assert_eq!(notebook.purge_recycle_bin(now + 59 * day).unwrap(), 0);
+    assert!(bin.join("Old.one").exists());
+    let length = std::fs::metadata(&deleted).unwrap().len();
+    assert_eq!(notebook.purge_recycle_bin(now + 61 * day).unwrap(), 2);
+    assert!(!bin.join("Old.one").exists());
+    assert_eq!(recycled(&notebook), 0);
+    // One appended revision; the bin's TOC untouched.
+    assert!(std::fs::metadata(&deleted).unwrap().len() > length);
+    assert_eq!(listed(&toc), before);
+    assert_eq!(notebook.purge_recycle_bin(now + 61 * day).unwrap(), 0);
+    if let Some(directory) = std::env::var_os("NOTEBOOK_PURGE_EXPORT") {
+        copy_dir(&root, std::path::Path::new(&directory));
+    }
+}

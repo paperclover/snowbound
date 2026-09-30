@@ -19,6 +19,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         sb_set_coordinator(coordinate)
+        Editing.apply()
         ICloud.start()
         sb_set_sync_wake { DispatchQueue.main.async { NotificationCenter.default.post(name: Sync.changed, object: nil) } }
         #if DEBUG
@@ -67,6 +68,63 @@ enum Appearance {
                 action.state = Appearance.style == style ? .on : .off
                 return action
             })
+    }
+}
+
+/// OneNote's Snap To Grid and Default font, kept between launches, which the pages opened
+/// from then on take.
+enum Editing {
+    /// OneNote 2010's Default font sizes, in points.
+    static let sizes: [Float] = [8, 9, 9.5, 10, 10.5, 11, 11.5, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
+    static let faces = ["Calibri", "Arial", "Times New Roman", "Courier New", "Georgia", "Verdana"]
+
+    static var snapToGrid: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ignoreGrid") }
+        set {
+            UserDefaults.standard.set(!newValue, forKey: "ignoreGrid")
+            apply()
+        }
+    }
+
+    static var face: String {
+        get { UserDefaults.standard.string(forKey: "defaultFontFace") ?? "Calibri" }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "defaultFontFace")
+            apply()
+        }
+    }
+
+    static var size: Float {
+        get { UserDefaults.standard.object(forKey: "defaultFontSize") as? Float ?? 11 }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "defaultFontSize")
+            apply()
+        }
+    }
+
+    static func apply() {
+        sb_set_snap_to_grid(snapToGrid)
+        sb_set_default_font(face, size)
+    }
+
+    /// Options' Default font: the face and size new text takes.
+    static func fontMenu() -> UIMenu {
+        let faces = faces.map { name in
+            let action = UIAction(title: name) { _ in face = name }
+            action.state = face == name ? .on : .off
+            return action
+        }
+        let sizes = sizes.map { points in
+            let action = UIAction(title: points.formatted()) { _ in size = points }
+            action.state = size == points ? .on : .off
+            return action
+        }
+        return UIMenu(
+            title: "Default Font", image: UIImage(systemName: "textformat"),
+            children: [
+                UIMenu(options: .displayInline, children: faces),
+                UIMenu(title: "Size", children: sizes),
+            ])
     }
 }
 
@@ -123,6 +181,12 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         NotificationCenter.default.addObserver(forName: ICloud.changed, object: nil, queue: .main) { [weak self] _ in
             self?.notebooks.rescan { self?.restore($0) }
         }
+        self.scene(scene, openURLContexts: options.urlContexts)
+    }
+
+    /// A section file Files opens in Snowbound, in place.
+    func scene(_ scene: UIScene, openURLContexts contexts: Set<UIOpenURLContext>) {
+        for context in contexts where context.url.isFileURL { notebooks.open(document: context.url) }
     }
 
     /// Reopens the section and page shown last, or the scripted one.

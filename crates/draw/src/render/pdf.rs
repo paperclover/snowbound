@@ -521,7 +521,45 @@ impl Document {
                 from,
                 to,
                 widths,
+                round: false,
                 color,
+            } => {
+                content.save_state();
+                self.paint(content, used, *color, false);
+                // Square ends reach half their width past each point, as a square tip does.
+                let [from_radius, to_radius] = widths.map(|width| width / 2.0);
+                let [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+                let length = dx.hypot(dy);
+                let [ux, uy] = if length > 0.0 {
+                    [dx / length, dy / length]
+                } else {
+                    [1.0, 0.0]
+                };
+                let corner = |center: &[f32; 2], radius: f32, ahead: f32, side: f32| {
+                    [
+                        center[0] + radius * (ux * ahead - uy * side),
+                        center[1] + radius * (uy * ahead + ux * side),
+                    ]
+                };
+                let corners = [
+                    corner(from, from_radius, -1.0, 1.0),
+                    corner(to, to_radius, 1.0, 1.0),
+                    corner(to, to_radius, 1.0, -1.0),
+                    corner(from, from_radius, -1.0, -1.0),
+                ];
+                content.move_to(corners[0][0], corners[0][1]);
+                for corner in &corners[1..] {
+                    content.line_to(corner[0], corner[1]);
+                }
+                content.close_path().fill_nonzero();
+                content.restore_state();
+            }
+            Primitive::Taper {
+                from,
+                to,
+                widths,
+                color,
+                ..
             } => {
                 content.save_state();
                 self.paint(content, used, *color, false);

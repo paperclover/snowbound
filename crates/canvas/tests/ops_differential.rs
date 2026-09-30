@@ -31,7 +31,7 @@ const ART: [u8; 67] = [
 #[path = "../../onestore/tests/support/sweep.rs"]
 mod sweep;
 
-const SECTIONS: [&str; 19] = [
+const SECTIONS: [&str; 20] = [
     "corpus/outline-edit/before/notebook/synthetic.one",
     "corpus/paragraph-edit/before/notebook/synthetic.one",
     "corpus/outline-edit/tree/before/notebook/synthetic.one",
@@ -51,6 +51,7 @@ const SECTIONS: [&str; 19] = [
     "corpus/math-edit/native-enter/notebook/links.one",
     "corpus/paragraph-format/cold/notebook/synthetic.one",
     "corpus/canvas/baseline-anchors.one",
+    "corpus/styles/onenote/Styles.one",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -130,6 +131,15 @@ enum Kind {
     /// Lassoed drawings moved or deleted.
     LassoMove,
     LassoDelete,
+    /// A style from the Styles gallery on the caret's paragraph or a selection.
+    Style,
+    /// The stored page's styles restyled to a theme, as a theme reaches a page, and the
+    /// editor refreshed from what is stored.
+    Theme,
+    /// A two-by-two table at the caret with a line typed into its first cell, widening it.
+    Table,
+    /// The first table's first column dragged 30 points wider, locking it.
+    ColumnResize,
     Undo,
     Redo,
 }
@@ -267,6 +277,74 @@ const INK_PLANS: [&[Kind]; 6] = [
     &[Kind::LassoMove, Kind::LassoDelete, Kind::Undo, Kind::Undo],
 ];
 
+/// Gallery styles and themes, in plans of their own so the random edits' sequences stay as
+/// they were.
+/// Tables whose columns fit as they are typed in and dragged, in plans of their own so the
+/// random edits' sequences stay as they were.
+const TABLE_PLANS: [&[Kind]; 2] = [
+    &[Kind::Table, Kind::Undo, Kind::Redo, Kind::TypeOn],
+    &[
+        Kind::Table,
+        Kind::ColumnResize,
+        Kind::TypeOn,
+        Kind::Undo,
+        Kind::Undo,
+        Kind::Redo,
+    ],
+];
+
+const STYLE_PLANS: [&[Kind]; 5] = [
+    &[Kind::Style, Kind::Undo, Kind::Redo],
+    &[Kind::Style, Kind::EnterEnd, Kind::Type, Kind::Undo],
+    &[Kind::Theme, Kind::Style, Kind::TypeEnd, Kind::Undo],
+    &[Kind::Style, Kind::Theme, Kind::EnterEnd, Kind::Type],
+    &[Kind::Theme, Kind::Theme, Kind::Style, Kind::Redo],
+];
+
+/// A theme's styles for the sweep: OneNote's names in another look, headings followed by
+/// Normal; `alternate` picks one of two, so a second restyle changes the page again.
+fn theme(alternate: bool) -> BTreeMap<String, onestore::page::Definition> {
+    use onestore::document::Format;
+    [
+        "h1",
+        "h2",
+        "h3",
+        "PageTitle",
+        "cite",
+        "blockquote",
+        "code",
+        "p",
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(at, name)| {
+        let definition = onestore::page::Definition {
+            kind: Node::Style {
+                name: Some(name.into()),
+                next: name.starts_with('h').then(|| "p".into()),
+            },
+            format: Format {
+                bold: Some(name.starts_with('h')),
+                italic: Some(name == "blockquote"),
+                underline: Some(false),
+                strike: Some(false),
+                superscript: Some(false),
+                subscript: Some(false),
+                font: Some(if alternate { "Georgia" } else { "Arial" }.into()),
+                font_size: Some(10.0 + at as f32),
+                color: Some(if alternate { 0x0022_3344 } else { 0xff00_0000 }),
+                highlight: Some(0xff00_0000),
+                space_before: Some(if alternate { 6.0 } else { 0.0 }),
+                space_after: Some(0.0),
+                line_spacing: Some(0.0),
+                ..Format::default()
+            },
+        };
+        (name.to_owned(), definition)
+    })
+    .collect()
+}
+
 /// Page colour, rule lines and art undone and redone across each other.
 const PAPER_PLANS: [&[Kind]; 3] = [
     &[Kind::Art, Kind::Art, Kind::Undo, Kind::Undo, Kind::Redo],
@@ -327,6 +405,7 @@ fn perform(
         Kind::Undo
             | Kind::Redo
             | Kind::TypeOn
+            | Kind::ColumnResize
             | Kind::PlaceImage
             | Kind::RemoveImage
             | Kind::CreateOutline
@@ -468,6 +547,29 @@ fn perform(
             let id = outline.id;
             editor.move_outline(id, [x + 36.0, y + 18.0]).is_ok()
         }
+        Kind::Table => {
+            place(editor, middle)
+                && editor.insert_table(engine, 2, 2).is_ok()
+                && editor
+                    .insert(engine, "A line long enough to widen its column")
+                    .is_ok()
+        }
+        Kind::ColumnResize => {
+            let table = editor
+                .active_outline()
+                .document()
+                .nodes()
+                .iter()
+                .find_map(|node| match &node.content {
+                    onestore::page::ParagraphContent::Table(table) => {
+                        Some((table.id, table.columns[0].width))
+                    }
+                    _ => None,
+                });
+            table.is_some_and(|(id, width)| {
+                editor.resize_column(engine, id, 0, width + 30.0).is_ok()
+            })
+        }
         Kind::ResizeOutline => {
             let width = editor.active_outline().wrap_width();
             editor.resize(engine, width + 72.0).is_ok()
@@ -602,6 +704,9 @@ fn perform(
                 alt: None,
                 background: true,
                 printout: None,
+                tags: Vec::new(),
+                link: None,
+                text: None,
             };
             let shown = editor.page().unwrap().objects.iter().any(|object| {
                 matches!(object, onestore::page::PageObject::Image(image) if image.background)
@@ -630,6 +735,7 @@ fn perform(
                                 kind: 1,
                                 duration_ms: Some(1000),
                             }),
+                            tags: Vec::new(),
                         };
                         editor.insert(engine, "noted").is_ok()
                             && editor.finish_recording(engine, file).is_ok()
@@ -645,6 +751,7 @@ fn perform(
                 bytes: Some(std::sync::Arc::from(b"notes".as_slice())),
                 preview: Some(std::sync::Arc::from(ART.as_slice())),
                 recording: None,
+                tags: Vec::new(),
             };
             place(editor, middle) && editor.insert_attachment(engine, file).is_ok()
         }
@@ -658,6 +765,7 @@ fn perform(
                 bytes: Some(std::sync::Arc::from(b"float".as_slice())),
                 preview: Some(std::sync::Arc::from(ART.as_slice())),
                 recording: None,
+                tags: Vec::new(),
             };
             let x = 36.0 + 18.0 * random.below(20) as f32;
             editor.place_caret(engine, [x, 1440.0], 240.0).is_ok()
@@ -778,6 +886,17 @@ fn perform(
                 _ => editor.delete_ink(&[ink.id]).is_ok(),
             }
         }
+        Kind::Style => {
+            let sheet = theme(random.below(2) == 0);
+            let names = ["h1", "h2", "blockquote", "code", "p"];
+            let style = sheet[names[random.below(names.len())]].clone();
+            (if random.below(2) == 0 {
+                place(editor, middle)
+            } else {
+                range(editor, random)
+            }) && editor.format(engine, Formatting::Style(style)).is_ok()
+        }
+        Kind::Theme => unreachable!("The sweep restyles what is stored"),
         Kind::Undo => editor.undo(engine).unwrap_or(false),
         Kind::Redo => editor.redo(engine).unwrap_or(false),
     }
@@ -843,6 +962,66 @@ fn comparable(page: &Page) -> serde_json::Value {
 }
 
 impl Stored<'_> {
+    /// Restyles the stored page to a theme, as opening a themed page does, checks it against
+    /// the model and the sealed image, and refreshes the editor from it, which then shows it.
+    fn theme(
+        &mut self,
+        editor: &mut CanvasEditor,
+        engine: &mut TextEngine,
+        alternate: bool,
+    ) -> Option<Outcome> {
+        self.at += 10_000_000;
+        let before = self.section.page(self.space).unwrap();
+        let sheet = theme(alternate);
+        let ops = onestore::op::restyle(&before, &sheet).unwrap();
+        if ops.is_empty() {
+            return None;
+        }
+        editor.styles = sheet;
+        let edit = Edit {
+            at: self.at,
+            ops: ops
+                .iter()
+                .map(|op| Op::Page {
+                    space: self.space,
+                    op: op.clone(),
+                })
+                .collect(),
+        };
+        if let Err(error) = self.section.apply("Sweep", &edit) {
+            return Some(Outcome::Differs(format!("a theme is refused: {error}")));
+        }
+        let stored = self.section.page(self.space).unwrap();
+        let mut predicted = before;
+        for op in &ops {
+            onestore::op::predict(&mut predicted, op).unwrap();
+        }
+        if comparable(&predicted) != comparable(&stored) {
+            return Some(Outcome::Differs(format!(
+                "the model predicts a theme otherwise: {}",
+                difference(&stored, &predicted)
+            )));
+        }
+        self.section.seal().unwrap();
+        let arena = Arena::default();
+        let reread = Section::open(&arena, self.section.image())
+            .unwrap()
+            .page(self.space)
+            .unwrap();
+        if reread != stored {
+            return Some(Outcome::Differs("a theme reads back otherwise".into()));
+        }
+        editor.refresh(stored.clone(), engine).unwrap();
+        Some(if reads_as(&stored, &editor.page().unwrap()) {
+            Outcome::Same
+        } else {
+            Outcome::Differs(format!(
+                "the refreshed editor shows otherwise: {}",
+                difference(&stored, &editor.page().unwrap())
+            ))
+        })
+    }
+
     /// Stores the editor's step as its ops, checks the stored page against what the model
     /// oracle predicts from them and against the sealed image reread, and, unless it is the
     /// editor's page, compares with that page lowered whole onto the section as it was
@@ -1071,6 +1250,8 @@ fn sweep(
             .chain(RECORD_PLANS.map(<[Kind]>::to_vec))
             .chain(FLOATING_PLANS.map(<[Kind]>::to_vec))
             .chain(TYPING_PLANS.map(<[Kind]>::to_vec))
+            .chain(STYLE_PLANS.map(<[Kind]>::to_vec))
+            .chain(TABLE_PLANS.map(<[Kind]>::to_vec))
             .collect::<Vec<Vec<Kind>>>();
         for plan in plans {
             let arena = Arena::default();
@@ -1082,13 +1263,20 @@ fn sweep(
             let mut editor = CanvasEditor::from_page(page.clone(), engine).unwrap();
             for kind in &plan {
                 let model = editor.page().unwrap();
-                if !perform(&mut editor, engine, *kind, random) {
-                    continue;
-                }
-                if std::env::var_os("OPS_SWEEP_DEBUG").is_some() {
-                    eprintln!("STEP {kind:?} of {plan:?} on {title:?}");
-                }
-                let outcome = stored.step(&mut editor, &model);
+                let outcome = if *kind == Kind::Theme {
+                    match stored.theme(&mut editor, engine, random.below(2) == 0) {
+                        Some(outcome) => outcome,
+                        None => continue,
+                    }
+                } else {
+                    if !perform(&mut editor, engine, *kind, random) {
+                        continue;
+                    }
+                    if std::env::var_os("OPS_SWEEP_DEBUG").is_some() {
+                        eprintln!("STEP {kind:?} of {plan:?} on {title:?}");
+                    }
+                    stored.step(&mut editor, &model)
+                };
                 *tally.outcomes.entry((*kind, outcome.clone())).or_default() += 1;
                 if let Outcome::Differs(reason) = &outcome {
                     tally

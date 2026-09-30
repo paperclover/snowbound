@@ -48,6 +48,17 @@ ops still reach storage as it is typed. Undoing a deletion
 brings back the original identities, so internal links to those paragraphs
 survive an undo.
 
+Each page keeps its history while the window is open, as in OneNote 2010: the
+desktop app parks a page's editor when it is left and takes it up again, through
+the same reload in place, when the page opens. Between those edits the app keeps
+what was done to pages and sections (new, deleted, moved and indented pages, page
+and section names, sections moved), and Undo takes back whichever came last: the
+open page's own step, or the last such action in its section or notebook,
+showing the page it changes. Unlike OneNote, an edit doesn't end what actions Undo
+can reach, so New Page, a typed title, Undo, Undo takes the title and then the
+page. Each step back is computed against the section as it is then, one edit of
+its own; a step whose page is gone, or holds work it didn't make, is passed over.
+
 Input-method composition (marked text) stays inside the editor until it
 commits, and only then becomes ops. When another client changes the open page,
 the editor compares the stored page with what it last read plus the ops it has
@@ -69,7 +80,8 @@ same line heights, same places. That took measuring, not guessing.
   New Roman or Courier New, bundled metric-compatible substitutes (Carlito,
   Arimo, Tinos, Cousine) stand in, under the stored font name.
 - **OneNote's constants are OneNote's.** New outlines take OneNote's default
-  width. Dragging snaps to its grid, anchored at the page's margin origin. Tags
+  width. Dragging snaps to its grid, anchored at the page's margin origin, unless
+  Snap To Grid (the shape gallery's last item, kept between launches) is off. Tags
   sit in a column to the left of the text with OneNote's spacing, and a tag's
   colour paints the whole paragraph as it does there.
 
@@ -106,6 +118,12 @@ on the page itself, as OneNote 2010 places it: the same column at the caret's
 grid point, outside any outline. It selects, drags on the grid, deletes and
 moves with Insert Space as a picture does, and opens and saves as above.
 
+A tag on a picture or file is stored on the object itself, as OneNote 2010 stores
+the tag Ctrl+1 gives a selected one, and drawn in a column left of it, centred on
+it; a click checks its box (`corpus/object-tags`). A picture's link follows on
+Ctrl+click, Command+click on macOS, while a click selects it, as OneNote's
+tooltip says (`corpus/picture-link`).
+
 An outline holding only pictures or files takes a paragraph after them where a
 click beside them lands, as OneNote 2010 adds one when typing there. It is
 stored with the first edit that reaches it, and undoing back to it empty takes it
@@ -114,16 +132,20 @@ out again (`corpus/object-outline`).
 A file printout's pages are pictures whose stored data is the printout's XPS
 package. The page draws the PNG OneNote rendered of each
 (WebPictureContainer14), framed in grey as OneNote frames them, and moves them as
-pictures. Snowbound does not write XPS, so a printout page deleted and brought
-back by undo returns as that picture (`corpus/printout`).
+pictures. A printout page deleted and brought back by undo returns as the page it
+was: its XPS package, the PNG and the properties tying it to the printout, written
+back as read (`corpus/printout`).
 
 Pictures go in as OneNote 2010 pastes and inserts them. At a caret in text the
 paragraph splits around the picture, as around a file. On blank page the picture
-lies on the page at the caret, and the caret moves to the grid row below it. A
-picture takes the size its resolution gives it, or 96 dpi without one. Paste
-takes files first (a picture file as its picture), then text, then a picture:
-Finder offers a copied file's name and icon beside it, and other apps a picture
-of copied text.
+lies on the page at the caret, and the caret moves to the grid row below it.
+From the title it joins the outline where the body starts, or lies two grid rows
+below the page's content when none starts there. A picture takes the size its
+resolution gives it, or 96 dpi without one. Paste takes files first (a picture
+file as its picture, as a dropped one goes in), then a web page holding
+pictures, its text and pictures in order as one undo step, then text, then a
+picture: Finder offers a copied file's name and icon beside it, and other apps a
+picture of copied text.
 
 ## Recordings
 
@@ -176,6 +198,14 @@ tablet pressure on Linux.
 
 ## Tables and selections across them
 
+Columns size as OneNote 2010 sizes them (`corpus/table-widths`). An unlocked
+column fits its widest line plus 4.347 pt, never under a new column's 37.11 pt,
+widening and narrowing with each edit, which stores the width in the same
+revision as its text. A table stops at the outline's width and its cells wrap
+from there. Dragging a column's right border resizes that column alone, the
+columns after it moving with it, down to 37.11 pt; on release it is one edit
+and one undo step, and the column is locked, so typing no longer fits it.
+
 Note tags on a table sit in the tag column centred on it, and a click checks its
 box (`corpus/table-tags`). A selection crossing a table's edge deletes as
 OneNote 2010 deletes one: nothing joins across the edge, cells inside are
@@ -185,6 +215,28 @@ table with them when all do. What replaces the selection goes in at its start
 Shift+Enter a caret inside a link, as OneNote's do; Alt+= across paragraphs
 makes each paragraph's part an equation, and a deletion between two equations
 joins them where neither seam lies inside an object (`corpus/equation-join`).
+An edit replacing a selection with an end inside an equation's object (a
+fraction, a script, a root) takes the whole object first, as OneNote's equation
+editor selects, and across paragraphs an object so taken at its paragraph's end
+takes that end too; a placeholder ("Type equation here.") is taken whole
+(`corpus/equation-select`).
+
+## Styles and themes
+
+The Styles gallery is OneNote 2010's: Heading 1 to 6, Page Title, Citation, Quote, Code
+and Normal, stored under OneNote's names (`h1`, `PageTitle`, `cite`, `blockquote`, `code`,
+`p`). Applying one gives the paragraph the page's style object of that definition and
+clears its character formatting but links, fields and language, as OneNote's does; Enter
+at a paragraph's end takes its style's NextStyle, so a heading is followed by Normal.
+Ctrl+Alt+1 to 6 apply the headings, and Clear Formatting at a caret applies Normal.
+
+A theme gives the eleven styles a look, and a page wears it as its style objects: OneNote
+draws a page by its own style objects, so OneNote users see the theme under the same
+names. Changing a theme moves each styled paragraph to a new style object of the same name
+(style objects are read-only) in one revision per page, and a page is brought to its
+theme when it opens, so a notebook-wide change costs each page only when someone looks at
+it. Which theme a notebook, section or page wears lives in the notebook's `.snowbound`
+folder, beside the tags' art (`corpus/styles`).
 
 ## Content the editor doesn't understand
 
@@ -240,13 +292,17 @@ template art print across the paper; the page colour does not. The footer names 
 section and numbers the sheets. `draw::pdf` writes the same primitives the screen paints
 as PDF: text in subset fonts whose ToUnicode maps come from the laid-out text, so it
 selects and searches, ligatures included; ink and shapes as paths; pictures and tag
-icons as images. The desktop's Print hands that PDF to AppKit's print panel, the XDG print
-portal or the shell's print verb for PDFs; Export as PDF saves it.
+icons as images. On the desktop, Print and Export as PDF first show OneNote's Print Preview
+and Settings, less the preview: the range (page, page group, section, and for a PDF the
+notebook), paper, orientation, fitting to the paper's width and the footer. Print then hands
+the PDF to AppKit's print panel, the XDG print portal or the shell's print verb for PDFs.
+On iOS the page menu prints the page through the print sheet or shares its PDF.
 
 ## Search, dates, conflicts
 
 Smaller modules follow the same pattern of reproducing OneNote's behaviour
 precisely. `search` matches the way OneNote 2010 searches: word prefixes,
-ignoring case and diacritics, title matches first. `date` edits the title's
+ignoring case and diacritics, title matches first, and the text OneNote recognised
+in pictures, which it stores in them, as OneNote's search finds it. `date` edits the title's
 date and time fields the way OneNote stores a changed page date. `conflict`
 shows conflict pages with OneNote's highlight.

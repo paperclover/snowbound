@@ -240,8 +240,9 @@ final class InkPicker: UIView {
         color.accessibilityLabel = "Colour, \(Self.name(shown.color))"
     }
 
+    /// The shapes, then OneNote's Snap To Grid.
     private func shapeMenu() -> [UIMenuElement] {
-        Self.shapes.enumerated().map { place, shape in
+        let shapes = Self.shapes.enumerated().map { place, shape in
             let kind = UInt8(place)
             let action = UIAction(title: shape.1, image: UIImage(systemName: shape.0)) { [weak self] _ in
                 self?.onPick?(.shape(kind))
@@ -249,6 +250,11 @@ final class InkPicker: UIView {
             action.state = tool == .shape(kind) ? .on : .off
             return action
         }
+        let snap = UIAction(title: "Snap To Grid", image: UIImage(systemName: "grid")) { _ in
+            Editing.snapToGrid.toggle()
+        }
+        snap.state = Editing.snapToGrid ? .on : .off
+        return [UIMenu(options: .displayInline, children: shapes), UIMenu(options: .displayInline, children: [snap])]
     }
 
     /// The colours of the kind of pen shown, and for a pen its two widths.

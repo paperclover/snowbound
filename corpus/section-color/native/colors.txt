@@ -1,0 +1,17 @@
+Blue #8AA8E4
+Yellow #FFD869
+Green #B7C997
+Red #EE9597
+Purple #B49EDE
+Cyan #91BAAE
+Orange #F6B078
+Magenta #D5A4BB
+Blue Mist #9BBBD2
+Purple Mist #AB9CB7
+Tan #E8D199
+Lemon #F5F96F
+Apple #ADE792
+Teal #4DBCCA
+Red Chalk #BA7575
+Silver #9595AA
+None none

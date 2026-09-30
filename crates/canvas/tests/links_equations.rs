@@ -874,11 +874,18 @@ fn selections_into_equation_objects_take_them_whole() {
 
     // Enter in "Type equation here." leaves the placeholder's paragraph empty above a new one.
     let placeholder = find(&editor, "equation here");
-    select(&mut editor, placeholder.paragraph, placeholder.offset..placeholder.offset);
+    select(
+        &mut editor,
+        placeholder.paragraph,
+        placeholder.offset..placeholder.offset,
+    );
     editor.enter(engine, false).unwrap();
     save(&mut editor);
     let after = texts(&editor);
-    assert_eq!(after[placeholder.paragraph..=placeholder.paragraph + 1], ["", ""]);
+    assert_eq!(
+        after[placeholder.paragraph..=placeholder.paragraph + 1],
+        ["", ""]
+    );
     assert_eq!(caret(&editor).paragraph, placeholder.paragraph + 1);
 
     // From inside a square root into a cube root: both paragraphs go whole.
@@ -926,7 +933,10 @@ fn selections_into_equation_objects_take_them_whole() {
         .utf16_offset(texts(&editor)[end].len())
         .unwrap();
     select(&mut editor, end, offset..offset);
-    for (before, linear, after) in [("One ", "a/b+c ", " two"), ("Three ", "\\sqrt x+y ", " four")] {
+    for (before, linear, after) in [
+        ("One ", "a/b+c ", " two"),
+        ("Three ", "\\sqrt x+y ", " four"),
+    ] {
         typed(&mut editor, engine, before);
         editor.insert_equation(engine).unwrap();
         typed(&mut editor, engine, linear);

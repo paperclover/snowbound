@@ -10,8 +10,8 @@ use super::{
     table::{self, Structure},
 };
 use crate::{
-    Error, ExGuid, Insertion, OutlineEdit, ParagraphJoin, ParagraphSplit, Section, TextAttribute,
-    TreeEdit,
+    Error, ExGuid, Insertion, ObjectData, OutlineEdit, ParagraphJoin, ParagraphSplit, Section,
+    TextAttribute, TreeEdit,
     active::{ActivePage, Changes},
     document::Kind,
     page::{
@@ -517,6 +517,16 @@ impl<'a> Writer<'_, 'a> {
     }
 
     /// Requires `id` reachable on the page.
+    /// Clears run properties over run ranges, fields and equations included.
+    fn clear_runs(&mut self, clears: &properties::Clears) -> Result<(), Failure> {
+        for (text, range, clear) in clears {
+            self.write(|page| {
+                crate::formatting::cleared_changes(page, *text, range.clone(), clear)
+            })?;
+        }
+        Ok(())
+    }
+
     fn target(&mut self, id: ExGuid) -> Result<(), Failure> {
         let page = self.page()?;
         if page.live.is_reachable(id) && page.view.nodes.contains_key(&id) {
@@ -786,7 +796,89 @@ impl<'a> Writer<'_, 'a> {
             } => {
                 self.target(*paragraph)?;
                 let text = self.text_of(*paragraph)?;
-                self.write(|page| properties::style_changes(page, text, *style, Some(definition)))
+                // What the old style gave, the new one gives instead.
+                let page = self.page()?;
+                let spacing = match page.view.nodes[&text].kind {
+                    Kind::RichText {
+                        paragraph_style: Some(old),
+                        ..
+                    } if old != *style => {
+                        let (clears, spacing) = properties::restyle_plan(page, old, Some(text))?;
+                        self.clear_runs(&clears)?;
+                        spacing
+                    }
+                    _ => Vec::new(),
+                };
+                self.write(|page| {
+                    let mut changes =
+                        properties::style_changes(page, text, *style, Some(definition))?;
+                    if let Some((_, ids)) = spacing.first() {
+                        changes
+                            .get_mut(&text)
+                            .expect("the text is restyled")
+                            .remove(ids)?;
+                    }
+                    Ok(changes)
+                })
+            }
+            PageOp::Unstyle { paragraph } => {
+                self.target(*paragraph)?;
+                let text = self.text_of(*paragraph)?;
+                let page = self.page()?;
+                let Kind::RichText {
+                    paragraph_style: Some(old),
+                    ..
+                } = page.view.nodes[&text].kind
+                else {
+                    return Ok(());
+                };
+                let (clears, spacing) = properties::restyle_plan(page, old, Some(text))?;
+                self.clear_runs(&clears)?;
+                self.write(|page| {
+                    let mut target = crate::write::PropertyObject::from_object(
+                        &page.live.revision.objects[&text],
+                    )?;
+                    let mut removed = vec![0x2000342c];
+                    removed.extend(spacing.into_iter().flat_map(|(_, ids)| ids));
+                    target.remove(&removed)?;
+                    Ok(std::collections::BTreeMap::from([(text, target)]))
+                })
+            }
+            PageOp::Restyle {
+                style,
+                into,
+                definition,
+            } => {
+                self.target(*style)?;
+                let page = self.page()?;
+                let (Kind::Style { name, .. }, Kind::Style { name: renamed, .. }) =
+                    (&page.view.nodes[style].kind, &definition.kind)
+                else {
+                    return Err(OpError::Unsupported("Restyle a paragraph style").into());
+                };
+                if name.is_none() || name != renamed {
+                    return Err(
+                        OpError::Unsupported("A restyled paragraph style keeps its name").into(),
+                    );
+                }
+                if page.live.is_reachable(*into) {
+                    let ObjectData::Properties(stored) = page.live.revision.objects[into].data
+                    else {
+                        return Err(OpError::DuplicateIdentity(*into).into());
+                    };
+                    let given =
+                        crate::create::properties(&properties::style_object_values(definition)?)?;
+                    if stored != given.as_slice() {
+                        return Err(OpError::DuplicateIdentity(*into).into());
+                    }
+                } else if into.guid == [0; 16] {
+                    return Err(OpError::DuplicateIdentity(*into).into());
+                }
+                let (clears, spacing) = properties::restyle_plan(page, *style, None)?;
+                self.clear_runs(&clears)?;
+                self.write(|page| {
+                    properties::restyle_changes(page, *style, *into, definition, &spacing)
+                })
             }
             PageOp::Media { paragraph, media } => {
                 self.target(*paragraph)?;
@@ -1179,10 +1271,22 @@ impl<'a> Writer<'_, 'a> {
         let Some(bytes) = &image.bytes else {
             return Err(OpError::Unsupported("A new picture needs its payload").into());
         };
+        if !image.tags.is_empty() {
+            return Err(OpError::Unsupported("Set a picture's tags with their own op").into());
+        }
         let (file, payload) = (fresh()?, crate::write::fresh_guid()?);
         let bytes: &[u8] = bytes;
-        self.write_with(&[(payload, bytes)], |page| {
-            content::picture_changes(page, image, image.id, file, payload, holder)
+        let mut payloads = vec![(payload, bytes)];
+        let shown = match &image.display {
+            Some(raster) => {
+                let shown = (fresh()?, crate::write::fresh_guid()?);
+                payloads.push((shown.1, raster));
+                Some(shown)
+            }
+            None => None,
+        };
+        self.write_with(&payloads, |page| {
+            content::picture_changes(page, image, (image.id, file, payload), shown, holder)
         })
     }
 
@@ -1194,6 +1298,9 @@ impl<'a> Writer<'_, 'a> {
         let Some(bytes) = &attachment.bytes else {
             return Err(OpError::Unsupported("A new attachment needs its payload").into());
         };
+        if !attachment.tags.is_empty() {
+            return Err(OpError::Unsupported("Set a file's tags with their own op").into());
+        }
         let ids = AttachmentIds {
             object: attachment.id,
             file: fresh()?,

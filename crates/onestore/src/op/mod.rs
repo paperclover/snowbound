@@ -151,6 +151,20 @@ pub enum PageOp {
         style: ExGuid,
         definition: Definition,
     },
+    /// Takes a paragraph's style away; values its style gave are cleared from its text, as
+    /// `Restyle` clears them.
+    Unstyle {
+        paragraph: ExGuid,
+    },
+    /// Moves every paragraph of style `style` to style `into`, created from `definition`
+    /// (the same name) where the page lacks it: style objects are read-only, so a restyled
+    /// style is a new one. Run and paragraph values equal to what `style` gave are cleared,
+    /// so they follow `into`; values set otherwise stay.
+    Restyle {
+        style: ExGuid,
+        into: ExGuid,
+        definition: Definition,
+    },
     /// Links a paragraph's text or file to a moment in recordings on the page, or with
     /// empty `media` unlinks it.
     Media {
@@ -268,6 +282,44 @@ pub enum SectionOp {
         page: ExGuid,
         versions: Vec<ExGuid>,
     },
+}
+
+/// The `Restyle` ops giving the paragraphs of every style of `page` named in `sheet`
+/// that definition instead, one per style that differs; styles sharing a name become one.
+pub fn restyle(
+    page: &Page,
+    sheet: &std::collections::BTreeMap<String, Definition>,
+) -> Result<Vec<PageOp>, crate::Error> {
+    let mut into = std::collections::BTreeMap::new();
+    let mut ops = Vec::new();
+    for (id, stored) in &page.definitions {
+        let crate::document::Kind::Style {
+            name: Some(name), ..
+        } = &stored.kind
+        else {
+            continue;
+        };
+        let Some(definition) = sheet.get(name).filter(|definition| *definition != stored) else {
+            continue;
+        };
+        let target = match into.get(name) {
+            Some(target) => *target,
+            None => {
+                let target = page
+                    .definitions
+                    .iter()
+                    .find(|(_, kept)| *kept == definition)
+                    .map_or_else(crate::page::text::new_id, |(id, _)| Ok(*id))?;
+                *into.entry(name.clone()).or_insert(target)
+            }
+        };
+        ops.push(PageOp::Restyle {
+            style: *id,
+            into: target,
+            definition: definition.clone(),
+        });
+    }
+    Ok(ops)
 }
 
 impl SectionOp {

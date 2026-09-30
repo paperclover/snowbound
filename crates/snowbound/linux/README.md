@@ -21,8 +21,9 @@ Edits save to the notebook folder as you type. Settings live in
 puts the latter elsewhere.
 
 **Install Snowbound**, shown while no notebook is open, adds Snowbound to your app menu and
-copies it to `~/.local/bin/snowbound`. Options, next to the update settings,
-uninstalls it again; your notebooks stay where they are.
+to the apps that open `.one` and `.onetoc2` files, and copies it to
+`~/.local/bin/snowbound`. Options, next to the update settings, uninstalls it
+again; your notebooks stay where they are.
 
 The window's title bar is your desktop's own: KDE's on KDE, and on GNOME and
 other desktops without server-side decorations an Adwaita-style one drawn by

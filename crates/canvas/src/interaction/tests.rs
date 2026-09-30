@@ -708,6 +708,9 @@ fn a_picture_in_an_outline_takes_the_click_over_its_text() {
         alt: None,
         background: false,
         printout: None,
+        tags: Vec::new(),
+        link: None,
+        text: None,
     });
     source.paragraphs.insert(1, picture);
     let editor = CanvasEditor::from_page(
@@ -882,6 +885,13 @@ fn table_glyphs_highlights_and_selection_share_cell_paint_bounds() {
         .unwrap();
     editor.tab(&mut engine, false).unwrap();
     editor.insert(&mut engine, "R").unwrap();
+    // Columns dragged narrower than the glyphs they hold.
+    let table = editor.active_outline().shaped().tables[0].id;
+    for column in 0..2 {
+        editor
+            .resize_column(&mut engine, table, column, 37.11)
+            .unwrap();
+    }
     editor.tab(&mut engine, true).unwrap();
     let mut primitives = Vec::new();
     append_outline(
@@ -1545,6 +1555,9 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
         alt: None,
         background: false,
         printout: None,
+        tags: Vec::new(),
+        link: None,
+        text: None,
     });
     source.paragraphs.insert(1, picture);
     let editor = CanvasEditor::from_page(
@@ -2768,6 +2781,7 @@ fn an_attached_file_selects_opens_on_a_double_click_and_deletes() {
         bytes: Some(Arc::from(b"notes".as_slice())),
         preview: None,
         recording: None,
+        tags: Vec::new(),
     };
     view.editor
         .move_selection(&mut view.engine, Movement::DocumentEnd, false)
@@ -2844,6 +2858,7 @@ fn a_file_dropped_on_blank_page_lies_on_the_page_and_drags() {
         bytes: Some(Arc::from(b"float".as_slice())),
         preview: None,
         recording: None,
+        tags: Vec::new(),
     };
     let _ = view.drop_attachment([400.0, 400.0], file.clone()).unwrap();
     assert_eq!(view.editor.outlines().len(), 1);
@@ -3153,4 +3168,178 @@ fn the_spelling_pane_walks_marked_words_from_the_caret() {
     assert_eq!(next(&mut view).as_deref(), Some("qwrt"));
     spelling.learn("qwrt");
     assert_eq!(next(&mut view), None);
+}
+
+/// Page `title` of `section`, with a view of it whose scene holds its pictures.
+fn scene_view(section: &[u8], title: &str) -> PageView {
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, section.to_vec()).unwrap();
+    let (space, ..) = section
+        .pages()
+        .unwrap()
+        .into_iter()
+        .find(|page| page.1 == title)
+        .unwrap();
+    let mut engine = TextEngine::default();
+    let (scene, editor) = PageScene::from_page(section.page(space).unwrap(), &mut engine).unwrap();
+    PageView::new(
+        editor,
+        engine,
+        Some((scene, [0.0; 2])),
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    )
+}
+
+fn device(view: &PageView, point: [f32; 2]) -> [f32; 2] {
+    [0, 1].map(|axis| point[axis] * view.viewport.scale + view.viewport.origin[axis])
+}
+
+/// A click selects a picture with a link and Ctrl+click (Command on macOS) follows it, as in
+/// OneNote 2010, whose tooltip says so (`corpus/picture-link`).
+#[test]
+fn ctrl_click_follows_a_pictures_link() {
+    let mut view = scene_view(
+        include_bytes!("../../../../corpus/m6/native-features-01/notebook/Features.one"),
+        "Image png",
+    );
+    let (id, [x, y], [width, height]) = view
+        .editor
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            crate::editor::page::Content::Image(image) => Some(image.id),
+            _ => None,
+        })
+        .and_then(|id| {
+            let (origin, size) = view.editor.image_placement(id)?;
+            Some((id, origin, size))
+        })
+        .unwrap();
+    assert_eq!(
+        view.editor.picture_link(id),
+        Some("https://example.invalid/image/png")
+    );
+    let _ = view
+        .pointer_moved(device(&view, [x + width / 2.0, y + height / 2.0]))
+        .unwrap();
+    let response = view.pointer_pressed(Instant::now()).unwrap();
+    let _ = view.pointer_released().unwrap();
+    assert_eq!(response.request, None);
+    assert_eq!(view.object_focus, Some(ObjectFocus::Image(id)));
+    let _ = view
+        .modifiers_changed(Modifiers {
+            control: true,
+            command: true,
+            ..Modifiers::default()
+        })
+        .unwrap();
+    assert_eq!(view.cursor(), Cursor::Pointer);
+    let response = view.pointer_pressed(Instant::now()).unwrap();
+    let _ = view.pointer_released().unwrap();
+    assert_eq!(
+        response.request,
+        Some(Request::OpenLink(
+            "https://example.invalid/image/png".into()
+        ))
+    );
+}
+
+/// A click on the check box OneNote 2010 draws beside a tagged picture on the page checks
+/// it, and undo clears it (`corpus/object-tags`).
+#[test]
+fn a_check_box_beside_a_page_picture_checks_it() {
+    let mut view = scene_view(
+        include_bytes!("../../../../corpus/object-tags/native/notebook/files.one"),
+        "Pictures and files",
+    );
+    let (id, [x, y], [_, height]) = view
+        .editor
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            crate::editor::page::Content::Image(image) if !image.tags.is_empty() => Some(image.id),
+            _ => None,
+        })
+        .and_then(|id| {
+            let (origin, size) = view.editor.image_placement(id)?;
+            Some((id, origin, size))
+        })
+        .unwrap();
+    let status = |view: &PageView| {
+        view.editor
+            .objects
+            .iter()
+            .find_map(|object| match object {
+                crate::editor::page::Content::Image(image) if image.id == id => {
+                    Some(image.tags[0].status)
+                }
+                _ => None,
+            })
+            .unwrap()
+    };
+    let _ = view
+        .pointer_moved(device(&view, [x - 18.0, y + height / 2.0]))
+        .unwrap();
+    assert_eq!(view.cursor(), Cursor::Default);
+    assert!(view.pointer_pressed(Instant::now()).unwrap().changed);
+    let _ = view.pointer_released().unwrap();
+    assert_eq!(status(&view) & 1, 1);
+    assert!(view.editor.undo(&mut view.engine).unwrap());
+    assert_eq!(status(&view) & 1, 0);
+}
+
+/// OneNote 2010 resizes a column from its right border: a column-resize pointer over it, the
+/// table redrawn as it moves, and one edit on release.
+#[test]
+fn a_column_border_drags_with_a_resize_pointer_and_stores_on_release() {
+    let mut engine = TextEngine::default();
+    let mut editor = CanvasEditor::new(
+        &mut engine,
+        TextDocument::new(vec![Paragraph::new(String::new(), Format::default())]).unwrap(),
+        468.0,
+    )
+    .unwrap();
+    editor.insert_table(&mut engine, 1, 2).unwrap();
+    let mut view = PageView::new(
+        editor,
+        engine,
+        None,
+        [800, 600],
+        1.0,
+        Duration::from_millis(500),
+    );
+    let _ = view.editor.take_ops().unwrap();
+    let outline = view.editor.active_outline();
+    let cell = outline.shaped().tables[0].cells[0].clone();
+    let origin = outline.origin();
+    let (scale, offset) = (view.viewport.scale, view.viewport.origin);
+    let device = |point: [f32; 2]| [0, 1].map(|axis| point[axis] * scale + offset[axis]);
+    let border = [
+        origin[0] + cell.rect[2],
+        origin[1] + (cell.rect[1] + cell.rect[3]) / 2.0,
+    ];
+    let _ = view.pointer_moved(device(border)).unwrap();
+    assert_eq!(view.cursor(), Cursor::ColResize);
+    let _ = view.pointer_pressed(Instant::now()).unwrap();
+    let to = device([border[0] + 50.0, border[1]]);
+    assert!(view.pointer_moved(to).unwrap().changed);
+    assert_eq!(view.cursor(), Cursor::ColResize);
+    view.primitives(COLORS).unwrap();
+    let onestore::page::ParagraphContent::Table(table) =
+        &view.editor.active_outline().document().nodes()[0].content
+    else {
+        panic!()
+    };
+    assert!(!table.columns[0].locked);
+    let _ = view.pointer_released().unwrap();
+    let onestore::page::ParagraphContent::Table(table) =
+        &view.editor.active_outline().document().nodes()[0].content
+    else {
+        panic!()
+    };
+    assert!(table.columns[0].locked);
+    assert!((table.columns[0].width - (37.11 + 50.0)).abs() < 0.01);
+    assert_eq!(view.editor.take_ops().unwrap().len(), 1);
 }

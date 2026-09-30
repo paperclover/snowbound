@@ -193,6 +193,10 @@ impl Clipboard {
         self.0.get().file_list().unwrap_or_default()
     }
 
+    pub fn get_html(&mut self) -> Option<String> {
+        self.0.get().html().ok()
+    }
+
     /// The pasteboard's PNG as copied, keeping its resolution, or else its TIFF as a PNG.
     pub fn get_picture(&mut self) -> Option<Vec<u8>> {
         unsafe {
@@ -1300,7 +1304,36 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLo
     let event_loop = builder.build()?;
     QUIT.set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
+    // Winit's delegate gains -application:openFiles:, which every macOS from 10.6 sends for
+    // the Finder's and `open`'s documents, before the launch finishes on a cold launch.
+    unsafe {
+        let app = NSApplication::sharedApplication(MainThreadMarker::new_unchecked());
+        let delegate: Retained<AnyObject> = msg_send_id![&app, delegate];
+        let mut class = ClassBuilder::new("SnowboundApplicationDelegate", delegate.class())
+            .expect("Unique application delegate class");
+        class.add_method(
+            sel!(application:openFiles:),
+            open_files as unsafe extern "C" fn(_, _, _, _),
+        );
+        let class = class.register();
+        // The subclass adds no ivars, so the existing allocation remains valid.
+        AnyObject::set_class(&delegate, class);
+    }
     Ok(event_loop)
+}
+
+unsafe extern "C" fn open_files(
+    _: &AnyObject,
+    _: Sel,
+    app: &NSApplication,
+    files: &objc2_foundation::NSArray<NSString>,
+) {
+    if let Some(proxy) = QUIT.get() {
+        let paths = files.iter().map(|file| file.to_string().into()).collect();
+        let _ = proxy.send_event(crate::UserEvent::Open(paths));
+    }
+    // NSApplicationDelegateReplySuccess.
+    let _: () = unsafe { msg_send![app, replyToOpenOrPrint: 0usize] };
 }
 
 /// Replaces Winit's application menu with the menu bar, whose items the table validates.

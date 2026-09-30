@@ -6,7 +6,7 @@ use crate::{Command, Library, State, manage::Structure};
 use onestore::{
     ExGuid,
     op::{Edit, Op, PageOp},
-    page::PageObject,
+    page::{Page, PageObject},
 };
 use std::{error::Error, sync::Arc};
 use ui::{Event, Id, Spec, Theme, Ui, fill, px};
@@ -170,32 +170,48 @@ impl State {
     fn retitle(&mut self, space: ExGuid, name: String) -> Result<(), Box<dyn Error>> {
         self.persist()?;
         let session = self.session.as_mut().ok_or("No section is open")?;
-        let page = session.section.page(space)?;
-        let title = page
-            .objects
+        let op = retitled(&session.section.page(space)?, space, name.clone())?;
+        let old = session
+            .pages
             .iter()
-            .find_map(|object| match object {
-                PageObject::Title(title) => title.outlines.first()?.paragraphs.first()?.text(),
-                _ => None,
-            })
-            .ok_or("The page has no title to rename")?;
-        let length = title.text.utf16_offset(title.text.text().len())?;
+            .find(|(page, ..)| *page == space)
+            .map(|(_, title, _)| title.clone())
+            .unwrap_or_default();
         session.section.apply(
             &self.author,
             Edit {
                 at: crate::filetime(),
-                ops: vec![Op::Page {
-                    space,
-                    op: PageOp::Text {
-                        text: title.id,
-                        range: 0..length,
-                        with: name,
-                    },
-                }],
+                ops: vec![op],
             },
         )?;
         session.pages = session.section.pages()?;
+        self.made(crate::undo::Change::Retitle {
+            page: space,
+            from: name,
+            to: old,
+        });
         self.edited(vec![space]);
         self.refresh()
     }
+}
+
+/// The op titling `page`, in `space`, `name`.
+pub fn retitled(page: &Page, space: ExGuid, name: String) -> Result<Op, Box<dyn Error>> {
+    let title = page
+        .objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Title(title) => title.outlines.first()?.paragraphs.first()?.text(),
+            _ => None,
+        })
+        .ok_or("The page has no title to rename")?;
+    let length = title.text.utf16_offset(title.text.text().len())?;
+    Ok(Op::Page {
+        space,
+        op: PageOp::Text {
+            text: title.id,
+            range: 0..length,
+            with: name,
+        },
+    })
 }

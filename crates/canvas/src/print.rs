@@ -5,8 +5,8 @@
 //! when its content reaches past the paper's right edge ("Scale content to paper width").
 //! A page longer than a sheet continues on the next, which starts at the first line of text
 //! or picture the sheet's foot would have cut. Rule lines and template art print across the
-//! paper's width; the page colour does not. Each sheet's footer names the section and
-//! numbers the sheet, counting from the first page printed, in Times New Roman.
+//! paper's width; the page colour does not. Each sheet's footer names the section, numbers
+//! the sheet counting from the first page printed, or both, in Times New Roman.
 
 use crate::gpu::{Paper, page::PageScene};
 use crate::layout::{LayoutError, TextEngine};
@@ -40,15 +40,17 @@ struct Pagination {
 
 impl Pagination {
     /// Lays content covering `bounds`, whose `rows` (lines of text, pictures) no sheet
-    /// should cut, on `paper` from the page's `margin_origin`.
+    /// should cut, on `paper` from the page's `margin_origin`, shrunk to the paper's width
+    /// with `fit_width`.
     fn new(
         bounds: [f32; 4],
         rows: &[[f32; 2]],
         margin_origin: [f32; 2],
         paper: [f32; 2],
+        fit_width: bool,
     ) -> Self {
         let left = margin_origin[0] - LEFT;
-        let scale = if bounds[2].is_finite() {
+        let scale = if fit_width && bounds[2].is_finite() {
             (paper[0] / (bounds[2] - left + RIGHT)).min(1.0)
         } else {
             1.0
@@ -113,29 +115,54 @@ impl fmt::Display for PrintError {
 
 impl std::error::Error for PrintError {}
 
-/// `pages` in order as a PDF on `paper` (points), each on as many sheets as it takes, the
-/// footers naming `section`.
+/// What each sheet's footer says, as OneNote's Print Preview offers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Footer {
+    /// "Section Page 3", OneNote's default.
+    #[default]
+    SectionAndPage,
+    Page,
+    Section,
+    None,
+}
+
+/// How pages go on paper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Setup {
+    /// Width and height in points, turned as the sheet prints.
+    pub paper: [f32; 2],
+    /// Shrinks a page whose content reaches past the paper's right edge to fit it.
+    pub fit_width: bool,
+    pub footer: Footer,
+}
+
+/// `sections`' pages in order as a PDF, each on as many sheets as it takes, the footers
+/// naming the section a page is in and numbering the sheets from the first.
 pub fn pdf(
-    pages: Vec<Page>,
+    sections: Vec<(String, Vec<Page>)>,
     engine: &mut TextEngine,
-    paper: [f32; 2],
-    section: &str,
+    setup: &Setup,
 ) -> Result<Vec<u8>, PrintError> {
-    let title = pages
-        .first()
+    let paper = setup.paper;
+    let title = sections
+        .iter()
+        .flat_map(|(_, pages)| pages.first())
+        .next()
         .map(|page| page.title.clone())
         .unwrap_or_default();
-    let mut printed = Vec::with_capacity(pages.len());
-    for page in pages {
-        let (margin_origin, rules) = (page.margin_origin, page.rule_lines);
-        let mut scene = PageScene::new(page, engine).map_err(PrintError::Scene)?;
-        scene.settle(None, DENSITY, Paper::WHITE);
-        let (bounds, rows) = scene.printed_extent().map_err(PrintError::Scene)?;
-        let pagination = Pagination::new(bounds, &rows, margin_origin, paper);
-        printed.push((scene, pagination, margin_origin, rules));
+    let mut printed = Vec::new();
+    for (section, pages) in sections {
+        for page in pages {
+            let (margin_origin, rules) = (page.margin_origin, page.rule_lines);
+            let mut scene = PageScene::new(page, engine).map_err(PrintError::Scene)?;
+            scene.settle(None, DENSITY, Paper::WHITE);
+            let (bounds, rows) = scene.printed_extent().map_err(PrintError::Scene)?;
+            let pagination = Pagination::new(bounds, &rows, margin_origin, paper, setup.fit_width);
+            printed.push((scene, pagination, margin_origin, rules, section.clone()));
+        }
     }
     let mut contents = Vec::with_capacity(printed.len());
-    for (scene, pagination, margin_origin, rules) in &printed {
+    for (scene, pagination, margin_origin, rules, _) in &printed {
         let mut primitives = Vec::new();
         scene
             .append_primitives(&mut primitives, [0.0; 2], Paper::WHITE)
@@ -161,14 +188,17 @@ pub fn pdf(
         ..Default::default()
     };
     let mut footers = Vec::new();
-    for (sheet, _) in printed
+    for (sheet, section) in printed
         .iter()
-        .flat_map(|(_, pagination, ..)| pagination.sheets())
+        .flat_map(|(_, pagination, .., section)| pagination.sheets().map(move |_| section))
         .enumerate()
     {
-        let text = match section {
-            "" => format!("Page {}", sheet + 1),
-            section => format!("{section} Page {}", sheet + 1),
+        let number = sheet + 1;
+        let text = match (setup.footer, section.as_str()) {
+            (Footer::None, _) => continue,
+            (Footer::Section, section) => section.to_owned(),
+            (Footer::Page, _) | (Footer::SectionAndPage, "") => format!("Page {number}"),
+            (Footer::SectionAndPage, section) => format!("{section} Page {number}"),
         };
         let layout = engine
             .layout(&Paragraph::new(text, format.clone()), f32::MAX)
@@ -193,37 +223,33 @@ pub fn pdf(
         let scale = pagination.scale;
         for ([top, bottom], rules) in pagination.sheets().zip(rules) {
             let origin = [-pagination.left * scale, MARGIN - top * scale];
-            // Rule lines run to the bottom margin, the page's content to where the next
-            // sheet takes it up.
-            let page = |primitives, bottom: f32| Layer {
+            let layer = |origin, clip, primitives| Layer {
                 scale,
                 origin,
-                clip: Some([0.0, MARGIN, paper[0], MARGIN + (bottom - top) * scale]),
+                clip,
                 backdrop: None,
                 round: None,
                 motion: None,
                 primitives,
             };
+            // Rule lines run to the bottom margin, the page's content to where the next
+            // sheet takes it up.
+            let page = |primitives, bottom: f32| {
+                let clip = [0.0, MARGIN, paper[0], MARGIN + (bottom - top) * scale];
+                layer(origin, Some(clip), primitives)
+            };
+            let mut layers = vec![page(rules, top + pagination.band), page(primitives, bottom)];
             // OneNote shrinks the footer with the page, towards the paper's bottom left.
-            let footer = Layer {
-                scale,
-                origin: [
+            if let Some(footer) = footer.next() {
+                let at = [
                     paper[0] / 2.0 * scale,
                     paper[1] - 2.0 - (1.0 - scale) * 16.0,
-                ],
-                clip: None,
-                backdrop: None,
-                round: None,
-                motion: None,
-                primitives: footer.next().expect("Each sheet has a footer"),
-            };
+                ];
+                layers.push(layer(at, None, footer));
+            }
             sheets.push(Sheet {
                 size: paper,
-                layers: vec![
-                    page(rules, top + pagination.band),
-                    page(primitives, bottom),
-                    footer,
-                ],
+                layers,
             });
         }
     }
@@ -235,6 +261,13 @@ mod tests {
     use super::*;
     use onestore::{RevisionIndex, Store, document::Document};
     use std::collections::HashMap;
+
+    /// OneNote 2010's defaults on Letter paper.
+    const ONENOTE: Setup = Setup {
+        paper: LETTER,
+        fit_width: true,
+        footer: Footer::SectionAndPage,
+    };
 
     fn section(path: &str) -> Vec<Page> {
         let bytes = std::fs::read(format!("{}/../../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap();
@@ -456,7 +489,13 @@ mod tests {
         let rows: Vec<[f32; 2]> = (0..60)
             .map(|line| [90.0 + line as f32 * 20.0, 110.0 + line as f32 * 20.0])
             .collect();
-        let pagination = Pagination::new([36.0, 14.4, 400.0, 1290.0], &rows, [36.0, 14.4], LETTER);
+        let pagination = Pagination::new(
+            [36.0, 14.4, 400.0, 1290.0],
+            &rows,
+            [36.0, 14.4],
+            LETTER,
+            true,
+        );
         assert_eq!(pagination.scale, 1.0);
         // 14.4 + 720 cuts the line from 730 to 750, which starts the next sheet.
         assert_eq!(pagination.tops, [14.4, 730.0]);
@@ -471,6 +510,7 @@ mod tests {
             &[[20.0, 1000.0]],
             [36.0, 14.4],
             LETTER,
+            true,
         );
         assert_eq!(pagination.tops, [14.4, 734.4]);
     }
@@ -490,6 +530,7 @@ mod tests {
                 &[],
                 [36.0, 14.4],
                 [612.36, 790.92],
+                true,
             )
             .scale;
             assert!(
@@ -504,10 +545,9 @@ mod tests {
     #[test]
     fn a_section_prints_on_onenotes_sheets() {
         let pdf = pdf(
-            section("corpus/print/native/Print.one"),
+            vec![("Print".into(), section("corpus/print/native/Print.one"))],
             &mut TextEngine::default(),
-            LETTER,
-            "Print",
+            &ONENOTE,
         )
         .unwrap();
         let sheets = sheets(&pdf);
@@ -538,10 +578,12 @@ mod tests {
     #[test]
     fn ruled_pages_and_art_print_on_onenotes_sheets() {
         let pdf = pdf(
-            section("corpus/page-background/candidate/Rules.one"),
+            vec![(
+                "Rules".into(),
+                section("corpus/page-background/candidate/Rules.one"),
+            )],
             &mut TextEngine::default(),
-            LETTER,
-            "Rules",
+            &ONENOTE,
         )
         .unwrap();
         let sheets = sheets(&pdf);
@@ -549,5 +591,45 @@ mod tests {
         assert!(sheets[8].1.contains("VeryLargeGrid"));
         assert!(sheets[9].1.contains("Rules Page 10"));
         assert!(!sheets[9].1.contains("VeryLargeGrid"));
+    }
+
+    #[test]
+    fn unscaled_pages_keep_their_size() {
+        let pagination = Pagination::new(
+            [36.0, 14.4, 1200.0, 100.0],
+            &[],
+            [36.0, 14.4],
+            LETTER,
+            false,
+        );
+        assert_eq!(pagination.scale, 1.0);
+    }
+
+    /// Sheets number on across sections, each footer naming its page's section, or say
+    /// what the footer choice asks for.
+    #[test]
+    fn footers_say_what_was_chosen() {
+        let print = section("corpus/print/native/Print.one");
+        let rules = section("corpus/page-background/candidate/Rules.one");
+        let two = vec![
+            ("Print".into(), print[2..3].to_vec()),
+            ("Rules".into(), rules[..1].to_vec()),
+        ];
+        let text = |footer| {
+            let setup = Setup { footer, ..ONENOTE };
+            sheets(&pdf(two.clone(), &mut TextEngine::default(), &setup).unwrap())
+                .into_iter()
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+        };
+        let both = text(Footer::SectionAndPage);
+        assert!(both[0].contains("Print Page 1") && both[1].contains("Rules Page 2"));
+        let pages = text(Footer::Page);
+        assert!(pages[1].contains("Page 2") && !pages[1].contains("Rules"));
+        assert!(
+            text(Footer::Section)[1].contains("Rules")
+                && !text(Footer::Section)[1].contains("Page 2")
+        );
+        assert!(!text(Footer::None)[1].contains("Rules"));
     }
 }

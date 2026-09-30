@@ -631,7 +631,7 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
             };
             let style = (family == Family::Style).then(|| {
                 let existing = page.definitions.iter().find_map(|(id, d)| {
-                    matches!(&d.kind, Kind::Style { name: Some(name) } if name == "Heading 2")
+                    matches!(&d.kind, Kind::Style { name: Some(name), .. } if name == "Heading 2")
                         .then_some(*id)
                 });
                 existing.unwrap_or_else(|| {
@@ -641,6 +641,7 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                         Definition {
                             kind: Kind::Style {
                                 name: Some("Heading 2".into()),
+                                next: None,
                             },
                             format: Format {
                                 font: Some("Calibri".into()),
@@ -1103,6 +1104,9 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     alt: Some("dot".into()),
                     background: false,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 }),
                 Family::Attachment => ParagraphContent::Attachment(Attachment {
                     id: id(),
@@ -1113,6 +1117,7 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     bytes: Some(b"attached bytes".as_slice().into()),
                     preview: None,
                     recording: None,
+                    tags: Vec::new(),
                 }),
                 _ => {
                     let Some(equation) = equation else {
@@ -1158,6 +1163,9 @@ pub(super) fn mutate(page: &mut Page, rng: &mut Rng, family: Family) -> bool {
                     alt: None,
                     background: false,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 })
             } else {
                 PageObject::Ink(Ink {
@@ -1816,6 +1824,7 @@ fn random_object_op(page: &Page, rng: &mut Rng) -> Option<PageOp> {
                 definition: Definition {
                     kind: Kind::Style {
                         name: Some("Heading 3".into()),
+                        next: None,
                     },
                     format: Format {
                         bold: Some(true),
@@ -3120,5 +3129,194 @@ fn deleted_objects_added_back_store_as_they_were() {
         let after = section.page(space).unwrap();
         assert_eq!(normalize(&after), normalize(&before), "{title}");
         assert_eq!(shape(&mut section, object), stored, "{title}");
+    }
+}
+
+/// A style definition named `name` in random formatting, as a theme gives one.
+fn random_style(name: &str, rng: &mut Rng) -> Definition {
+    let fonts = ["Georgia", "Arial", "Calibri", "Courier New"];
+    Definition {
+        kind: Kind::Style {
+            name: Some(name.into()),
+            next: rng.coin().then(|| "p".into()),
+        },
+        format: Format {
+            bold: Some(rng.coin()),
+            italic: Some(rng.coin()),
+            underline: Some(false),
+            strike: Some(false),
+            superscript: Some(false),
+            subscript: Some(false),
+            font: Some(fonts[rng.next() as usize % fonts.len()].into()),
+            font_size: Some(8.0 + (rng.next() % 30) as f32 / 2.0),
+            color: Some(if rng.coin() {
+                0xff00_0000
+            } else {
+                rng.next() as u32 & 0xff_ffff
+            }),
+            highlight: Some(0xff00_0000),
+            space_before: Some((rng.next() % 4) as f32 * 3.0),
+            space_after: Some((rng.next() % 3) as f32 * 2.0),
+            line_spacing: Some(0.0),
+            ..Default::default()
+        },
+    }
+}
+
+/// Restyling a page's paragraph styles, after runs were given values their style already
+/// gives, reads back as the model predicts; reopened, the section holds the same pages, and
+/// a second restyle to the same sheet has nothing left to do.
+#[test]
+fn restyles_read_back_as_the_model_predicts() {
+    let sources = SOURCES.iter().copied().chain([(
+        "styles",
+        &include_bytes!("../../../../corpus/styles/onenote/Styles.one")[..],
+    )]);
+    let mut restyled = 0;
+    for (name, source) in sources {
+        for space in pages(source) {
+            let arena = Arena::default();
+            let mut section = Section::open(&arena, source.to_vec()).unwrap();
+            let mut rng = Rng(space.n as u64 * 7919 + name.len() as u64);
+            let before = section.page(space).unwrap();
+            // Runs stating their style's font and size, which the restyle clears.
+            let mut ops = Vec::new();
+            for (_, _, list) in model::lists(&before) {
+                for paragraph in list {
+                    let (Some(style), Some(text)) = (paragraph.style, paragraph.text()) else {
+                        continue;
+                    };
+                    let format = &before.definitions[&style].format;
+                    let length = text.text.utf16_offset(text.text.text().len()).unwrap();
+                    if length == 0 || text.date_field.is_some() || !rng.coin() {
+                        continue;
+                    }
+                    let set: Vec<TextAttribute> = [
+                        format.font.clone().map(TextAttribute::Font),
+                        format.font_size.map(TextAttribute::FontSize),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    if !set.is_empty() && !crate::page::Math::is_equation(&text.text) {
+                        ops.push(PageOp::Format {
+                            text: text.id,
+                            range: 0..length,
+                            set,
+                            clear: Vec::new(),
+                        });
+                    }
+                }
+            }
+            let mut stated = before.clone();
+            for op in ops.clone() {
+                if section
+                    .apply(
+                        "Author",
+                        &Edit {
+                            at: AT,
+                            ops: vec![Op::Page {
+                                space,
+                                op: op.clone(),
+                            }],
+                        },
+                    )
+                    .is_ok()
+                {
+                    model::apply(&mut stated, &op).unwrap();
+                }
+            }
+            let names: BTreeSet<String> = stated
+                .definitions
+                .values()
+                .filter_map(|definition| match &definition.kind {
+                    Kind::Style { name, .. } => name.clone(),
+                    _ => None,
+                })
+                .collect();
+            let sheet: BTreeMap<String, Definition> = names
+                .iter()
+                .map(|style| (style.clone(), random_style(style, &mut rng)))
+                .collect();
+            let ops = restyle(&stated, &sheet).unwrap();
+            if ops.is_empty() {
+                continue;
+            }
+            restyled += ops.len();
+            let edit = Edit {
+                at: AT + 1,
+                ops: ops
+                    .iter()
+                    .map(|op| Op::Page {
+                        space,
+                        op: op.clone(),
+                    })
+                    .collect(),
+            };
+            section
+                .apply("Author", &edit)
+                .unwrap_or_else(|error| panic!("{name} {space:?}: {error:?}"));
+            let mut predicted = section.page(space).unwrap();
+            let stored = predicted.clone();
+            predicted.clone_from(&stated);
+            for op in &ops {
+                model::apply(&mut predicted, op).unwrap();
+            }
+            assert!(
+                normalize(&predicted) == normalize(&stored),
+                "{name} {space:?}: {}",
+                first_difference(&normalize(&stored), &normalize(&predicted))
+            );
+            assert!(
+                restyle(&stored, &sheet).unwrap().is_empty(),
+                "{name}: restyled twice"
+            );
+            section.seal().unwrap();
+            let reopened = Section::open(&arena, section.image()).unwrap();
+            assert!(reopened.page(space).unwrap() == stored, "{name}: reopened");
+        }
+    }
+    assert!(restyled > 20, "{restyled} styles restyled");
+}
+
+/// A restyle keeps the style's name and needs the page to hold the style.
+#[test]
+fn restyle_refuses_renames_and_missing_styles() {
+    let source = include_bytes!("../../../../corpus/styles/onenote/Styles.one");
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.to_vec()).unwrap();
+    let space = pages(source)[0];
+    let page = section.page(space).unwrap();
+    let (&h1, stored) = page
+        .definitions
+        .iter()
+        .find(|(_, d)| matches!(&d.kind, Kind::Style { name: Some(name), .. } if name == "h1"))
+        .unwrap();
+    assert_eq!(
+        stored.kind,
+        Kind::Style {
+            name: Some("h1".into()),
+            next: Some("p".into()),
+        }
+    );
+    let mut renamed = stored.clone();
+    renamed.kind = Kind::Style {
+        name: Some("h2".into()),
+        next: None,
+    };
+    for (style, definition) in [(h1, renamed), (id(), stored.clone())] {
+        let edit = Edit {
+            at: AT,
+            ops: vec![Op::Page {
+                space,
+                op: PageOp::Restyle {
+                    style,
+                    into: id(),
+                    definition,
+                },
+            }],
+        };
+        assert!(section.apply("Author", &edit).is_err());
+        assert!(section.page(space).unwrap() == page);
     }
 }

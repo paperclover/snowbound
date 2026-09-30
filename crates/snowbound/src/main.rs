@@ -15,6 +15,9 @@ mod history;
 #[cfg_attr(not(target_os = "macos"), path = "icloud_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "icloud_macos.rs")]
 mod icloud;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+mod instance;
+mod keys;
 mod library;
 mod link;
 mod manage;
@@ -35,7 +38,9 @@ mod paste;
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
 #[cfg_attr(windows, path = "windows.rs")]
 mod platform;
+mod prefetch;
 mod print;
+mod properties;
 #[cfg_attr(target_os = "linux", path = "print_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "print_macos.rs")]
 #[cfg_attr(windows, path = "print_windows.rs")]
@@ -57,6 +62,8 @@ mod surface;
 mod sync;
 mod tags;
 mod templates;
+mod themes;
+mod undo;
 mod update;
 mod video;
 mod watch;
@@ -203,6 +210,12 @@ enum UserEvent {
     /// The iCloud account signed out, signed in or switched, or iCloud Drive was turned off.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ICloudAccount,
+    /// The app's iCloud Drive folder was looked up, or a notebook came or went at its top.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ICloudFolder,
+    /// The system or a later launch asked to open notebook folders, tables of contents or
+    /// sections, as the Finder does with a double-clicked file; none brings the window forward.
+    Open(Vec<PathBuf>),
 }
 
 /// Asks the event loop for a frame from any thread.
@@ -228,6 +241,11 @@ impl Clipboard {
                 let files = clipboard.get_files();
                 if !files.is_empty() {
                     Some(paste::Pasted::Files(files))
+                } else if let Some(html) = clipboard
+                    .get_html()
+                    .filter(|html| html.to_ascii_lowercase().contains("<img"))
+                {
+                    Some(paste::Pasted::Page(html))
                 } else if let Some(text) = clipboard.get_text().ok().filter(|text| !text.is_empty())
                 {
                     Some(paste::Pasted::Text(text))
@@ -307,6 +325,8 @@ struct App {
     screenshot: Option<PathBuf>,
     /// What the window starts from besides its input, until it opens.
     launch: Option<settings::Launch>,
+    /// Files and folders to open, as File, Open does, once the window opens.
+    opening: Vec<PathBuf>,
     state: Option<State>,
     startup_error: Option<Box<dyn Error>>,
 }
@@ -330,10 +350,31 @@ enum Input {
     },
 }
 
+impl Input {
+    /// Lists the notebook folder `root` and shows it first, where the window shows notebooks.
+    fn show(&mut self, root: &Path) -> std::io::Result<()> {
+        if let Input::Notebooks { locations, current } = self {
+            let location = std::path::absolute(root)?.to_string_lossy().into_owned();
+            if !locations.contains(&location) {
+                locations.push(location.clone());
+            }
+            *current = Some(location);
+        }
+        Ok(())
+    }
+}
+
 /// Asks the event loop to poll sections when their synchronization reports.
 fn notify(proxy: EventLoopProxy<UserEvent>) -> impl Fn() + Send + 'static {
     move || {
         let _ = proxy.send_event(UserEvent::Sync);
+    }
+}
+
+/// Asks the event loop to list the app's iCloud Drive folder again.
+fn icloud_listed(proxy: EventLoopProxy<UserEvent>) -> impl Fn() + Send + Sync + 'static {
+    move || {
+        let _ = proxy.send_event(UserEvent::ICloudFolder);
     }
 }
 
@@ -501,6 +542,7 @@ struct Opening {
     scene: (PageScene, [f32; 2]),
     editor: CanvasEditor,
     since: Instant,
+    requested: Instant,
 }
 
 /// How long an opening page waits for its pictures before showing without them.
@@ -519,8 +561,8 @@ enum Command {
     OpenFromServer(Option<String>),
     /// Asks where to keep a new notebook and creates it.
     NewNotebook,
-    /// Opens the notebooks in the app's iCloud Drive folder, making one there if it has none.
-    UseICloud,
+    /// Asks for a name and creates a notebook at the top of the app's iCloud Drive folder.
+    NewICloudNotebook,
     /// Opens the Snowbound Guide from the user's documents, copying it there first.
     OpenGuide,
     /// Adds Snowbound to the app menu.
@@ -600,6 +642,9 @@ struct State {
     /// The newest read requested; older ones are dropped when they finish.
     loading: u64,
     opening: Option<Opening>,
+    /// The section tab, if another, that the newest read opens, and when it was asked for.
+    switching: Option<(Option<usize>, Instant)>,
+    prefetch: prefetch::Prefetch,
     /// Where each page was left this run, by `Library::key` and page space, as OneNote
     /// returns to it until the notebook closes.
     places: HashMap<(String, ExGuid), Place>,
@@ -607,6 +652,8 @@ struct State {
     last_pages: HashMap<String, ExGuid>,
     /// Pages visited, for Back and Forward.
     trail: navigation::Trail,
+    /// What Undo and Redo take back across pages and sections.
+    undo: undo::Timeline,
     swipe: navigation::Swipe,
     /// Asks for a frame when a worker thread finishes something the page shows.
     redraw: std::task::Waker,
@@ -629,13 +676,30 @@ struct State {
     folded: HashSet<String>,
     /// The open context menu: what it was opened on, and where.
     menu: Option<(menus::Target, [f32; 2])>,
+    /// The notebook the sync status popup shows, opened from its context menu at a point;
+    /// `None` shows the open section's, below the toolbar's button.
+    sync_notebook: Option<(Arc<Library>, [f32; 2])>,
+    /// What the palette's actions menu is on while it is open.
+    actions: Option<menus::Target>,
+    /// An action on a page of another section, done once that section opens on the page.
+    after_open: Option<(ExGuid, menus::Action)>,
     /// The Options dialog's choices while it is open.
     options: Option<options::Options>,
+    /// The Themes dialog while it is open.
+    themes: Option<themes::Dialog>,
+    /// Print Preview and Settings: the choices last made, and the dialog's while open.
+    printing: print::Printing,
     updates: update::Updates,
     /// The Link dialog's fields while it is open.
     link: Option<link::LinkDialog>,
+    properties: Option<properties::Properties>,
     /// Open Notebook from Server while it is open.
     server: Option<server::Connect>,
+    /// New iCloud Notebook while it is open.
+    new_icloud: Option<manage::Naming>,
+    /// Notebooks in iCloud Drive a thread is reading, or following the download of, by
+    /// location.
+    icloud_reading: HashSet<String>,
     /// The user's tag list, which the toolbar, menus and Ctrl+1 to Ctrl+9 apply.
     tags: Vec<canvas::editor::NoteTag>,
     /// The Customize Tags dialog's list while it is open.
@@ -649,8 +713,6 @@ struct State {
     hide_spelling: bool,
     /// Options' "Use pen pressure sensitivity": a tablet pen's strokes follow its pressure.
     pen_pressure: bool,
-    /// Options' Default font, which new text and titles take.
-    default_font: settings::DefaultFont,
     /// Options' "Page tabs appear on the left".
     page_tabs_left: bool,
     /// Options' "Navigation bar appears on the left" off: the notebooks on the right.
@@ -790,6 +852,7 @@ impl State {
         platform::install_text_input(&window);
         // Beneath the surface's layer, which is added over it.
         let backdrop = visible && platform::install_backdrop(&window);
+        commands::Keymap::from_saved(&stored.keys).install();
         platform::install_menu();
         let access_adapter =
             accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
@@ -812,7 +875,7 @@ impl State {
         icloud::on_account_change(move || {
             let _ = account.send_event(UserEvent::ICloudAccount);
         });
-        icloud::look_up(notify(proxy.clone()));
+        icloud::look_up(icloud_listed(proxy.clone()));
         let mut notebooks = Vec::new();
         let mut session = None;
         let mut sectionless = None;
@@ -858,6 +921,10 @@ impl State {
                 for library in &notebooks {
                     if let Err(error) = &library.notebook {
                         eprintln!("Cannot open the notebook at {}: {error}", library.location);
+                    }
+                    // Drawn offscreen, the app leaves the notebooks as they are.
+                    if visible {
+                        library.purge_recycle_bin();
                     }
                 }
                 let shown = notebooks
@@ -946,6 +1013,7 @@ impl State {
         let spelling = spell::dictionary()
             .map(|dictionary| canvas::spelling::Spelling::new(dictionary, redraw.clone()));
         let updates = update::Updates::start(visible && !stored.manual_updates, proxy.clone());
+        let prefetch = prefetch::Prefetch::new(Arc::clone(&layouts), redraw.clone());
         let mut state = Self {
             author: stored.user_name.unwrap_or_else(platform::user_name),
             window,
@@ -972,14 +1040,22 @@ impl State {
             dismissed: HashSet::new(),
             title_focus: None,
             menu: None,
+            sync_notebook: None,
+            actions: None,
+            after_open: None,
             link: None,
+            properties: None,
             server: None,
+            new_icloud: None,
+            icloud_reading: HashSet::new(),
             tags: stored
                 .tags
                 .unwrap_or_else(canvas::editor::NoteTag::defaults),
             tag_list: None,
             text_menu: None,
             options: None,
+            themes: None,
+            printing: print::Printing::default(),
             updates,
             color_scheme: stored.color_scheme,
             light_pages: stored.light_pages,
@@ -1016,12 +1092,19 @@ impl State {
             ime_allowed: true,
             clipboard,
             loads: mpsc::channel(),
+            prefetch,
             layouts,
             loading: 0,
             opening: None,
+            switching: None,
             places: HashMap::new(),
             last_pages: HashMap::new(),
-            trail: navigation::Trail::default(),
+            trail: {
+                let mut trail = navigation::Trail::default();
+                trail.recent = stored.recent;
+                trail
+            },
+            undo: undo::Timeline::default(),
             swipe: navigation::Swipe::default(),
             access_adapter,
             accessibility: accessibility::Accessibility::default(),
@@ -1029,13 +1112,13 @@ impl State {
             spelling,
             hide_spelling: stored.hide_spelling,
             pen_pressure: !stored.ignore_pen_pressure,
-            default_font: stored.default_font,
             page_tabs_left: stored.page_tabs_left,
             navigation_bar_right: stored.navigation_bar_right,
             servers: stored.servers,
             correction: None,
         };
         state.view.snap_to_grid = !stored.ignore_grid;
+        state.view.editor.default_font = stored.default_font;
         // A notebook opened from its server that couldn't sign in asks to, as the Finder does.
         let unsigned = state.notebooks.iter().find(|library| {
             library.notebook.is_err() && library::server_address(&library.location).is_some()
@@ -1044,6 +1127,7 @@ impl State {
             state.commands.push(Command::OpenFromServer(Some(location)));
         }
         state.visited();
+        state.prefetch_around();
         state.show_spelling();
         state.title();
         platform::update_tag_menu(&state.tags);
@@ -1090,7 +1174,10 @@ impl State {
         lap("drawn", start);
         self.sync_index(false, Vec::new());
         let commands = std::mem::take(&mut self.commands);
-        let follow = !commands.is_empty() || self.ui.wants_frame() || self.opening.is_some();
+        let follow = !commands.is_empty()
+            || self.ui.wants_frame()
+            || self.opening.is_some()
+            || self.switching.is_some();
         for command in commands {
             self.apply(command)?;
         }
@@ -1118,8 +1205,12 @@ impl State {
         platform::cover_border_line(&mut self.ui, size[0]);
         let (section, open_tab, open_page) = self.build()?;
         self.options_dialog();
+        self.themes_dialog();
+        self.print_dialog();
         self.server_dialog();
+        self.new_icloud_dialog();
         self.link_dialog()?;
+        self.properties_dialog();
         self.customize_tags();
         self.palette();
         self.sync_popup()?;
@@ -1185,7 +1276,8 @@ impl State {
         let target = self.ui.theme.section(section_color(
             self.session
                 .as_ref()
-                .and_then(|session| session.tabs[session.tab].color),
+                .zip(self.open_tab())
+                .and_then(|(session, tab)| session.tabs[tab].color),
         ));
         self.ui.icon_palette = self.ui.theme.icon_palette(
             target.accent,
@@ -1235,7 +1327,12 @@ impl State {
                 ..Spec::default()
             },
         );
-        let sidebar = self.sidebar(&theme);
+        let sidebar = self.sidebar_width();
+        if !self.navigation_bar_right {
+            self.sidebar(&theme, sidebar);
+        }
+        // Where the notebook button floats over the tab row while the sidebar is shut.
+        let beside = 1.0 - sidebar / sidebar::WIDTH;
         self.ui.open(
             "main",
             Spec {
@@ -1267,10 +1364,11 @@ impl State {
             // outlines start where the button's square ends; the room shrinks on the sidebar's
             // easing, so the tabs ease with it.
             let room = TAB_ROW - FRAME - self.rounding() - ui::SHADOW[0];
+            let room = if self.navigation_bar_right { 0.0 } else { room };
             self.ui.leaf(
                 "rail",
                 Spec {
-                    size: [px(room * (1.0 - sidebar / sidebar::WIDTH)), px(1.0)],
+                    size: [px(room * beside), px(1.0)],
                     ..Spec::default()
                 },
             );
@@ -1301,6 +1399,7 @@ impl State {
                     .collect();
                 let lit = self.page_drop(row);
                 let dragged = self.dragged_tab(row);
+                let shown = self.open_tab().unwrap_or(session.tab);
                 let ui::shell::Tabs {
                     clicked,
                     context,
@@ -1313,7 +1412,7 @@ impl State {
                     &mut self.ui,
                     row,
                     &tabs,
-                    session.tab,
+                    shown,
                     lit,
                     dragged,
                     &section,
@@ -1373,6 +1472,12 @@ impl State {
             }
         };
         self.commands.extend(clicked);
+        if let Some(count) = self.session.as_ref().map(|session| session.tabs.len())
+            && let Some(tab) =
+                (0..count).find(|tab| self.ui.signal(ui::shell::tab_id(row, *tab)).hovered)
+        {
+            self.prefetch_section(tab);
+        }
         self.ui.leaf(
             "space",
             Spec {
@@ -1383,10 +1488,15 @@ impl State {
         if self.session.is_some() {
             self.page_tools(&theme);
         }
+        let button = if self.navigation_bar_right && !self.temporary {
+            TAB_ROW * beside
+        } else {
+            0.0
+        };
         self.ui.leaf(
             "trail",
             Spec {
-                size: [px(self.trailing() - FRAME), px(1.0)],
+                size: [px(self.trailing() - FRAME + button), px(1.0)],
                 ..Spec::default()
             },
         );
@@ -1402,6 +1512,11 @@ impl State {
                 ..Spec::default()
             },
         );
+        // OneNote's "Page tabs appear on the left" lists them before the page.
+        let mut open_page = None;
+        if self.page_tabs_left {
+            open_page = self.page_list(&theme, &section, row);
+        }
         self.ui.open(
             "column",
             Spec {
@@ -1427,6 +1542,9 @@ impl State {
             self.ui.close();
             self.ui.close();
             self.ui.close();
+            if self.navigation_bar_right {
+                self.sidebar(&theme, sidebar);
+            }
             self.sidebar_button(&theme, height);
             self.ui.close();
             self.context_menu();
@@ -1445,12 +1563,20 @@ impl State {
         if let Some(node) = self.ui.access(page()) {
             node.set_tree_id(PAGE_TREE);
         }
-        self.template_strip(&theme);
+        // A page opening has neither the templates nor the scroll of the page leaving.
+        let opening = self.loading().is_some();
+        if !opening {
+            self.template_strip(&theme);
+        }
         if let Some(rect) = self.ui.rect(page()) {
             self.transport(&theme, rect)?;
         }
         let scroll = self.view.scroll();
-        for (index, axis) in [Axis::X, Axis::Y].into_iter().enumerate() {
+        for (index, axis) in [Axis::X, Axis::Y]
+            .into_iter()
+            .filter(|_| !opening)
+            .enumerate()
+        {
             if let Some(offset) = ui::scrollbar(
                 &mut self.ui,
                 index,
@@ -1491,9 +1617,14 @@ impl State {
         }
         self.page_events(signal.events)?;
         self.ui.close();
-        let open_page = self.page_list(&theme, &section, row);
+        if !self.page_tabs_left {
+            open_page = self.page_list(&theme, &section, row);
+        }
         self.ui.close();
         self.ui.close();
+        if self.navigation_bar_right {
+            self.sidebar(&theme, sidebar);
+        }
         self.task_pane(&theme);
         self.sidebar_button(&theme, height);
         self.ui.close();
@@ -1523,6 +1654,7 @@ impl State {
         // Where the open page tab meets the page, concentric with its neighbours.
         let join = PILL_MARGIN + rounding;
         let [left, top, right, bottom] = page;
+        let left_tabs = self.page_tabs_left;
         let tab = open_page
             .and_then(|id| self.ui.rect(id))
             .map(|row| [row[0], row[1], row[2], row[3] - ROW_GAP])
@@ -1532,8 +1664,12 @@ impl State {
                     row[1].max(panel[1]).max(top),
                     row[3].min(panel[3]).min(bottom),
                 ];
-                let reach = row[2].min(panel[2]);
-                (reach - right > 2.0 * join && end - start > 2.0 * rounding).then(|| {
+                // How far the tab reaches out from the page's side.
+                let (reach, out) = match left_tabs {
+                    true => (row[0].max(panel[0]), left - row[0].max(panel[0])),
+                    false => (row[2].min(panel[2]), row[2].min(panel[2]) - right),
+                };
+                (out > 2.0 * join && end - start > 2.0 * rounding).then(|| {
                     // A tab too near the page's corner joins it along the edge.
                     let start = if start < top + rounding + join {
                         top
@@ -1548,9 +1684,24 @@ impl State {
                     [start, end, reach]
                 })
             });
-        let mut outline = vec![([left, top], rounding)];
+        // Clockwise from the top left, the open tab's bump on the side it stands.
+        let mut outline = Vec::new();
         match tab {
+            Some([start, end, reach]) if left_tabs => {
+                if start > top {
+                    outline.push(([left, top], rounding));
+                }
+                outline.extend([([right, top], rounding), ([right, bottom], rounding)]);
+                if end < bottom {
+                    outline.extend([([left, bottom], rounding), ([left, end], join)]);
+                }
+                outline.extend([([reach, end], rounding), ([reach, start], rounding)]);
+                if start > top {
+                    outline.push(([left, start], join));
+                }
+            }
             Some([start, end, reach]) => {
+                outline.push(([left, top], rounding));
                 if start > top {
                     outline.extend([([right, top], rounding), ([right, start], join)]);
                 }
@@ -1558,10 +1709,15 @@ impl State {
                 if end < bottom {
                     outline.extend([([right, end], join), ([right, bottom], rounding)]);
                 }
+                outline.push(([left, bottom], rounding));
             }
-            None => outline.extend([([right, top], rounding), ([right, bottom], rounding)]),
+            None => outline.extend([
+                ([left, top], rounding),
+                ([right, top], rounding),
+                ([right, bottom], rounding),
+                ([left, bottom], rounding),
+            ]),
         }
-        outline.push(([left, bottom], rounding));
         let height = (frame[3] - frame[1]).max(1.0);
         let paper = self.paper().color;
         self.ui.round_corners(&outline, paper, |y| {
@@ -1573,7 +1729,9 @@ impl State {
         // the open tab stands on it.
         let [start, end] = [frame[0], frame[2]];
         let outer = platform::corner_radius(&self.window);
-        let beside = outer * start / sidebar::WIDTH;
+        let window = self.ui.rect(Id::ROOT).map_or(end, |root| root[2]);
+        let [beside, beside_right] =
+            [start, window - end].map(|gap| (outer * gap / sidebar::WIDTH).min(outer));
         let strip = self.ui.theme.strip;
         // The border runs half its width inside the frame, on whole device pixels at any
         // scale, its corners concentric with the fill's. The fill is cut at the border's
@@ -1585,7 +1743,7 @@ impl State {
                 &[
                     ([left, top], (outer - cut).max(0.0)),
                     ([right, top], (outer - cut).max(0.0)),
-                    ([right, frame[3]], 0.0),
+                    ([right, frame[3]], (beside_right - cut).max(0.0)),
                     ([left, frame[3]], (beside - cut).max(0.0)),
                 ],
                 paper,
@@ -1603,7 +1761,7 @@ impl State {
             .map_or([end; 2], |tab| ui::shell::tab_base(tab, TAB_ROW))
             .map(|x| x.clamp(left, right));
         // The border runs down both sides to the window's bottom, round the bottom corner
-        // beside the sidebar.
+        // beside the sidebar, on whichever side it stands.
         self.ui.border(
             &[
                 ([west + beside, frame[3]], 0.0),
@@ -1618,7 +1776,8 @@ impl State {
             &[
                 ([toe, north], 0.0),
                 ([east, north], inner(outer)),
-                ([east, frame[3]], 0.0),
+                ([east, frame[3]], inner(beside_right)),
+                ([east - beside_right, frame[3]], 0.0),
             ],
             false,
             section.edge,
@@ -1756,6 +1915,7 @@ impl State {
         let session = self.session.as_ref();
         let update = self.updates.status();
         let label = format!("{:.0}%", self.view.zoom() * 100.0);
+        let sheet = self.gallery_sheet();
         let drawing_pens = self.pens();
         let ui = &mut self.ui;
         let text = theme.text;
@@ -1850,6 +2010,22 @@ impl State {
             },
         );
         divider(ui, theme);
+        // Styles sits left of the font box (Clover, 2026-09-30), and like it never folds.
+        let styles = toolbar_popup("styles");
+        let anchor = if status_of(Cmd::Styles).enabled {
+            ui::shell::menu_button(ui, "styles", art::STYLES, None, styles)
+        } else {
+            ui::shell::unavailable(ui, "styles", art::STYLES, text, true);
+            ui::Anchor::Below(ui.rect(ui.id("styles")).unwrap_or_default())
+        };
+        let shown = notebook::sidecar::themes::STYLES
+            .iter()
+            .find(|(name, _)| state.style.as_deref() == Some(*name))
+            .map_or("Styles".to_owned(), |(_, label)| format!("Styles: {label}"));
+        ui::popup::tooltip(ui, &shown, "", None);
+        if let Some(id) = themes::gallery(ui, styles, anchor, &sheet, state.style.as_deref()) {
+            choice = Some(Choice::Command(id));
+        }
         let combo = ui.id("font");
         // It gives up room last of all, once every group has folded.
         let width = ui::Extent {
@@ -2546,8 +2722,9 @@ impl State {
         self.ui.close();
     }
 
-    /// The section's pages as tabs down the frame's right side, returning the open page's
-    /// tab, which is the page's colour and joins it.
+    /// The section's pages as tabs down the frame's right side, or its left with OneNote's
+    /// "Page tabs appear on the left", returning the open page's tab, which is the page's
+    /// colour and joins it.
     fn page_list(&mut self, theme: &Theme, section: &ui::Section, tabs: Id) -> Option<Id> {
         let session = self.session.as_ref()?;
         let panel = self.ui.id("panel");
@@ -2567,6 +2744,11 @@ impl State {
             node.set_label("Pages");
             node.set_orientation(accesskit::Orientation::Vertical);
         }
+        // Another section's pages are on their way.
+        if self.loading().is_some() && self.switching.is_some_and(|(tab, _)| tab.is_some()) {
+            self.ui.close();
+            return None;
+        }
         let found = self
             .search
             .found_in(&session.library.key(&session.tabs[session.tab].path));
@@ -2578,7 +2760,7 @@ impl State {
             section,
             session,
             &found,
-            rounding,
+            (rounding, self.page_tabs_left),
             self.renaming.as_mut(),
             dragged,
         );
@@ -2587,7 +2769,12 @@ impl State {
                 .map(|(page, version)| Command::OpenVersion { page, version }),
         );
         if let Some((space, point)) = rows.context {
-            self.menu = Some((menus::Target::Page(space), point));
+            let target = menus::Target::Page {
+                library: Arc::clone(&session.library),
+                path: session.tabs[session.tab].path.clone(),
+                space,
+            };
+            self.menu = Some((target, point));
             self.ui.open_popup(menus::id());
         }
         if let Some(space) = rows.renamed {
@@ -2600,12 +2787,19 @@ impl State {
         if !self.dragged() {
             self.commands.extend(rows.clicked.map(Command::OpenPage));
         }
+        if let Some(space) = rows.hovered {
+            self.prefetch_page(space);
+        }
         self.ui.close();
         rows.open
     }
 
     /// Hands the page the events routed to its box, in its device pixels.
     fn page_events(&mut self, events: Vec<ui::Event>) -> Result<(), Box<dyn Error>> {
+        // The page shown is on its way out.
+        if self.loading().is_some() {
+            return Ok(());
+        }
         let read_only = self.session.as_ref().is_some_and(Session::read_only);
         let scale = self.ui.scale();
         let corner = self.ui.rect(page()).unwrap_or_default();
@@ -2706,16 +2900,39 @@ impl State {
     fn apply(&mut self, command: Command) -> Result<(), Box<dyn Error>> {
         match command {
             Command::OpenSection(library, path) => {
+                let tab = match &self.session {
+                    // Back to the open section before another one opened.
+                    Some(session)
+                        if self.switching.is_some()
+                            && Arc::ptr_eq(&session.library, &library)
+                            && session.tabs[session.tab].path == path =>
+                    {
+                        self.stop_loading();
+                        return Ok(());
+                    }
+                    Some(session) if session.library.location == library.location => {
+                        session.tabs.iter().position(|tab| tab.path == path)
+                    }
+                    _ => None,
+                };
+                self.switching = Some((tab, Instant::now()));
                 let notify = notify(self.proxy.clone());
                 let last = self.last_pages.get(&library.key(&path)).copied();
                 self.load(move || {
+                    let start = Instant::now();
                     let section = library.open(&path, notify)?;
+                    lap("switch section open", start);
                     let (session, page) = read_session(section, library, path, last)?;
                     Ok(Loaded::Section(Box::new(session), page))
                 });
             }
             Command::OpenPage(space) => {
                 let session = self.session.as_ref().ok_or("No section is open")?;
+                if self.switching.is_some() && session.space == space && session.version.is_none() {
+                    self.stop_loading();
+                    return Ok(());
+                }
+                self.switching = Some((None, Instant::now()));
                 let read = session.reader(space);
                 self.load(move || Ok(Loaded::Page(space, read()?)));
             }
@@ -2773,12 +2990,17 @@ impl State {
             }
             Command::OpenFromServer(location) => self.open_server(location.as_deref()),
             Command::NewNotebook => self.new_notebook()?,
-            Command::UseICloud => self.use_icloud()?,
+            Command::NewICloudNotebook => self.new_icloud_notebook(),
             Command::OpenGuide => self.open_guide()?,
             #[cfg(target_os = "linux")]
             Command::Install => desktop::install(),
             Command::CloseNotebook(library) => self.close_notebook(&library),
-            Command::Structure(library, change) => self.restructure(library, change),
+            Command::Structure(library, change) => {
+                if let Some(undo) = undo::structure_undo(&library, &change) {
+                    self.undo.record(undo);
+                }
+                self.restructure(library, change);
+            }
             // The index follows the section's page list.
             Command::NewPage { under } => {
                 self.new_page(under)?;
@@ -2812,8 +3034,12 @@ impl State {
         self.loading += 1;
         let (id, sender, redraw) = (self.loading, self.loads.0.clone(), self.redraw.clone());
         let layouts = Arc::clone(&self.layouts);
+        let requested = Instant::now();
+        let scenes = Arc::clone(&self.prefetch.scenes);
+        let open = self.session.as_ref().map(Session::key);
         std::thread::spawn(move || {
             let laid = read().and_then(|loaded| {
+                lap("switch read", requested);
                 let (shown, page) = match loaded {
                     Loaded::Section(session, page) => (Shown::Section(session), page),
                     Loaded::Created(session, page) => (Shown::Created(session), page),
@@ -2822,8 +3048,28 @@ impl State {
                     Loaded::Library(library, path) => return Ok(Laid::Library(library, path)),
                 };
                 let mut engine = layouts.lock().map_err(|_| "Page layout failed")?;
-                let (scene, editor) = PageScene::from_page(page, &mut engine)?;
+                let start = Instant::now();
+                let key = match &shown {
+                    Shown::Section(session) | Shown::Created(session) => {
+                        Some((session.key(), session.space))
+                    }
+                    Shown::Page(space) => open.map(|open| (open, *space)),
+                    Shown::Version(..) => None,
+                };
+                // A page shown or prepared lately keeps the pictures it drew.
+                let kept =
+                    key.and_then(|(key, space)| prefetch::Prefetch::take(&scenes, &key, space));
+                let (scene, editor) = match kept {
+                    Some(mut scene) => {
+                        let mut editor = CanvasEditor::from_page(page, &mut engine)?;
+                        scene.refresh(&mut editor, &mut engine)?;
+                        (scene, editor)
+                    }
+                    None => PageScene::from_page(page, &mut engine)?,
+                };
+                lap("switch layout", start);
                 Ok(Laid::Page(Box::new(Opening {
+                    requested,
                     loaded: shown,
                     scene: (scene, [0.0; 2]),
                     editor,
@@ -2846,11 +3092,19 @@ impl State {
                 Ok(Laid::Page(opening)) => self.opening = Some(*opening),
                 Ok(Laid::Library(library, path)) => self.adopt(library, path.as_deref())?,
                 Err(error) => {
+                    if id == self.loading {
+                        self.switching = None;
+                    }
                     eprintln!("{error}");
                     platform::alert("Couldn't open", &error);
                 }
             }
         }
+        let paper = canvas::gpu::Paper {
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
+        };
+        self.prefetch.draw(&self.view, paper, &self.redraw);
         let Some(mut opening) = self.opening.take() else {
             return Ok(());
         };
@@ -2867,15 +3121,27 @@ impl State {
             self.opening = Some(opening);
             return Ok(());
         }
+        lap("switch pictures", opening.since);
+        let requested = opening.requested;
         // A recording goes on the page it started on.
         self.stop_recording(true)?;
         // The page shown so far keeps what was typed while the next one loaded.
         self.persist()?;
+        let mut leaving = self
+            .session
+            .as_ref()
+            .filter(|session| !session.read_only())
+            .map(|session| session.space);
         if let Some(session) = &self.session {
-            let key = session.library.key(&session.tabs[session.tab].path);
+            let key = session.key();
             self.places
                 .insert((key.clone(), session.space), self.view.place());
-            self.last_pages.insert(key, session.space);
+            self.last_pages.insert(key.clone(), session.space);
+            if session.version.is_none()
+                && let Some(scene) = self.view.scene.take()
+            {
+                self.prefetch.keep(key, session.space, scene);
+            }
         }
         let created = matches!(opening.loaded, Shown::Created(_));
         match opening.loaded {
@@ -2894,14 +3160,23 @@ impl State {
                     Some(library) => *library = Arc::clone(&session.library),
                     None => self.notebooks.push(Arc::clone(&session.library)),
                 }
-                // The notebook's background sync takes the section over once it is closed.
+                if session.library.in_icloud() && session.library.downloading() {
+                    self.fetch(Arc::clone(&session.library), None);
+                }
+                // The section left stays open a while for coming back to; the notebook's
+                // background sync takes it over once it is closed.
                 if let Some(previous) = self.session.replace(*session) {
-                    let section = previous.section;
-                    std::thread::spawn(move || {
-                        if let Err(error) = section.close() {
-                            eprintln!("Synchronization stopped: {error}");
-                        }
-                    });
+                    let library = &previous.library;
+                    if self.notebooks.iter().any(|open| Arc::ptr_eq(open, library)) {
+                        library.keep(&previous.tabs[previous.tab].path, previous.section);
+                    } else {
+                        let section = previous.section;
+                        std::thread::spawn(move || {
+                            if let Err(error) = section.close() {
+                                eprintln!("Synchronization stopped: {error}");
+                            }
+                        });
+                    }
                 }
                 self.sectionless = None;
                 if other_notebook {
@@ -2918,15 +3193,41 @@ impl State {
                 session.change = None;
                 // Pages created, moved or deleted since the list was read.
                 session.pages = session.section.pages()?;
+                leaving = leaving.filter(|left| session.pages.iter().any(|(s, ..)| s == left));
             }
         }
         let place = self.session.as_ref().and_then(|session| {
             let key = session.library.key(&session.tabs[session.tab].path);
             self.places.get(&(key, session.space)).copied()
         });
-        self.view.open(opening.editor, Some(opening.scene), place);
+        let left = self.view.open(opening.editor, Some(opening.scene), place);
+        // Each page takes up the history it was left with.
+        if let Some(leaving) = leaving {
+            self.undo.park(leaving, left);
+        }
+        let shown = self
+            .session
+            .as_ref()
+            .filter(|session| !session.read_only())
+            .map(|session| session.space);
+        if let Some(parked) = shown.and_then(|space| self.undo.resume(space)) {
+            self.view.resume(parked)?;
+        }
+        lap("switch shown", requested);
+        self.switching = None;
         self.visited();
+        if let Some((space, action)) = self.after_open.take()
+            && let Some(session) = self.session.as_ref().filter(|session| session.space == space)
+        {
+            let target = menus::Target::Page {
+                library: Arc::clone(&session.library),
+                path: session.tabs[session.tab].path.clone(),
+                space,
+            };
+            self.act_on(target, action);
+        }
         self.opened()?;
+        self.prefetch_around();
         self.refind(true)?;
         if self.title_focus.take().is_some_and(|space| {
             self.session
@@ -2958,6 +3259,9 @@ impl State {
     /// the open section, now at catalog `path` in it, stays open, reopened where it moved.
     /// Without `path` the notebook has no sections left, and one of its shows none.
     fn adopt(&mut self, library: Arc<Library>, path: Option<&str>) -> Result<(), Box<dyn Error>> {
+        if library.in_icloud() && library.downloading() {
+            self.fetch(Arc::clone(&library), None);
+        }
         match self
             .notebooks
             .iter_mut()
@@ -2978,9 +3282,10 @@ impl State {
                 if let Some(session) = self.session.take() {
                     session.section.close()?;
                 }
-                self.sectionless = Some(library);
+                self.sectionless = Some(Arc::clone(&library));
                 self.title();
             }
+            self.show_arrived(&library);
             return Ok(());
         };
         let Some(session) = &mut self.session else {
@@ -3014,6 +3319,9 @@ impl State {
 
     /// Follows a page shown in place of another.
     fn opened(&mut self) -> Result<(), Box<dyn Error>> {
+        if let Err(error) = self.wear_theme() {
+            eprintln!("Restyling the page failed: {error}");
+        }
         // A page a search result shows leaves the keys with the search.
         if !search::takes_text(self.ui.focused()) {
             self.ui.set_focus(Some(page()));
@@ -3220,6 +3528,9 @@ impl State {
             session.pages = session.section.pages()?;
         }
         self.edited(vec![space]);
+        let editor = &self.view.editor;
+        self.undo
+            .edited(space, editor.history_depth(), editor.typing().is_some());
         Ok(())
     }
 
@@ -3610,19 +3921,32 @@ impl State {
             self.view.tag_art = session.library.tag_art();
         }
         let theme = &self.ui.theme;
-        let page_primitives = self.view.primitives(TextColors {
-            caret: theme.caret,
-            selection: if self.page_focused {
-                theme.selection
-            } else {
-                theme.inactive_selection
-            },
-            paper,
-        })?;
-        lap("page primitives", start);
         let scale = self.ui.scale();
         let corner = self.ui.rect(page()).unwrap_or_default();
-        let viewport = self.view.viewport;
+        // A page taking a while to open shows its outline, drawn in points from the corner.
+        let (page_primitives, viewport) = match self.loading() {
+            Some(since) => (
+                prefetch::skeleton(paper, since),
+                canvas::gpu::Viewport {
+                    scale,
+                    origin: [0.0; 2],
+                    ..self.view.viewport
+                },
+            ),
+            None => (
+                self.view.primitives(TextColors {
+                    caret: theme.caret,
+                    selection: if self.page_focused {
+                        theme.selection
+                    } else {
+                        theme.inactive_selection
+                    },
+                    paper,
+                })?,
+                self.view.viewport,
+            ),
+        };
+        lap("page primitives", start);
         let interface = self.ui.layers();
         let layers: Vec<_> = interface
             .iter()
@@ -3673,17 +3997,18 @@ impl State {
         (x0..x1).contains(&x) && (y0..y1).contains(&y)
     }
 
+    /// Window point `point` in the page's device pixels.
+    fn page_point(&self, point: [f32; 2]) -> [f32; 2] {
+        let [left, top, ..] = self.ui.rect(page()).unwrap_or_default();
+        let scale = self.ui.scale();
+        [(point[0] - left) * scale, (point[1] - top) * scale]
+    }
+
     /// Zooms the page by `factor` about the pointer, when it is over the page.
     fn pinch(&mut self, factor: f32) -> Result<(), Box<dyn Error>> {
         if self.over_page() {
             // The pointer here, as the page's own lags by the moves queued for the next frame.
-            let [left, top, ..] = self.ui.rect(page()).unwrap_or_default();
-            let scale = self.ui.scale();
-            let anchor = [
-                (self.pointer[0] - left) * scale,
-                (self.pointer[1] - top) * scale,
-            ];
-            let response = self.view.pinch(factor, anchor)?;
+            let response = self.view.pinch(factor, self.page_point(self.pointer))?;
             self.respond(response);
         }
         Ok(())
@@ -3755,10 +4080,15 @@ impl State {
             }
             return;
         }
-        // On macOS the menu bar takes the chords of the items it enables first.
+        if self.record_chord(&event) {
+            return;
+        }
+        // On macOS the menu bar takes the chords of the items it enables first. The open
+        // palette takes ⌘K, Link's chord, for its actions.
         if let ui::Event::Key { key, .. } = &event
             && let Some(id) =
                 commands::find(&ui::edit_key(key), ui::edit_modifiers(self.ui.modifiers()))
+            && !(id == commands::Id::Link && self.ui.popup_open(palette::id()))
         {
             self.choose(commands::Choice::Command(id));
         } else {
@@ -3977,6 +4307,8 @@ struct Rows {
     context: Option<(ExGuid, [f32; 2])>,
     /// The page held down, which a drag moves.
     held: Option<ExGuid>,
+    /// A page other than the open one under the pointer.
+    hovered: Option<ExGuid>,
     /// A page version clicked: the page, and the version's context.
     version: Option<(ExGuid, ExGuid)>,
     /// The page whose tab was pressed twice in a row, which renames it.
@@ -4013,7 +4345,7 @@ fn page_rows(
     section: &ui::Section,
     session: &Session,
     found: &HashSet<ExGuid>,
-    rounding: f32,
+    shape: (f32, bool),
     mut renaming: Option<&mut rename::Renaming>,
     dragged: Option<PageDrag>,
 ) -> Rows {
@@ -4058,7 +4390,7 @@ fn page_rows(
             section,
             session,
             found,
-            rounding,
+            shape,
             renaming.as_deref_mut(),
             (space, title, *level),
             shift,
@@ -4085,7 +4417,7 @@ fn page_rows(
             section,
             session,
             found,
-            rounding,
+            shape,
             renaming,
             (space, title, *level),
             top - laid,
@@ -4106,7 +4438,7 @@ fn page_row(
     section: &ui::Section,
     session: &Session,
     found: &HashSet<ExGuid>,
-    rounding: f32,
+    shape: (f32, bool),
     renaming: Option<&mut rename::Renaming>,
     (space, title, level): (&ExGuid, &String, u32),
     shift: f32,
@@ -4135,8 +4467,11 @@ fn page_row(
     if selected && !lifted {
         rows.open = Some(ui.id(space));
     }
-    let (signal, kept) = page_tab(ui, theme, section, space, tab, selected, rounding);
+    let (signal, kept) = page_tab(ui, theme, section, space, tab, selected, shape);
     rows.kept = rows.kept.or(kept);
+    if signal.hovered && !selected {
+        rows.hovered = Some(*space);
+    }
     if signal.clicked && !selected {
         rows.clicked = Some(*space);
     }
@@ -4176,7 +4511,7 @@ fn page_row(
                 rows.open = Some(ui.id(version.context));
             }
             height += ROW;
-            if page_tab(ui, theme, &muted, &version.context, tab, selected, rounding)
+            if page_tab(ui, theme, &muted, &version.context, tab, selected, shape)
                 .0
                 .clicked
                 && !selected
@@ -4208,7 +4543,7 @@ fn page_row(
             rows.open = Some(ui.id(version.space));
         }
         height += ROW;
-        if page_tab(ui, theme, &muted, &version.space, tab, selected, rounding)
+        if page_tab(ui, theme, &muted, &version.space, tab, selected, shape)
             .0
             .clicked
             && !selected
@@ -4237,8 +4572,9 @@ struct PageTab<'a> {
     lifted: bool,
 }
 
-/// A page's tab down the frame's right side: the open one is the page's colour and joins
-/// it, the others float free of it as pills rounded like the page.
+/// A page's tab down the frame's side, the left where `shape` says so beside its `rounding`:
+/// the open one is the page's colour and joins it, the others float free of it as pills
+/// rounded like the page.
 fn page_tab(
     ui: &mut Ui,
     theme: &Theme,
@@ -4246,7 +4582,7 @@ fn page_tab(
     id: &ExGuid,
     tab: PageTab,
     selected: bool,
-    rounding: f32,
+    (rounding, left): (f32, bool),
 ) -> (ui::Signal, Option<bool>) {
     // A rename field's text stands where the label did.
     let pad = 10.0 + 16.0 * tab.indent as f32
@@ -4280,13 +4616,20 @@ fn page_tab(
                 fill
             }
         };
+        // A pill stands off the page by its margin and off the window's edge a little more.
+        let [page_side, edge_side] = [PILL_MARGIN, 6.0];
+        let [start, end] = if left {
+            [edge_side, page_side]
+        } else {
+            [page_side, edge_side]
+        };
         let spec = Spec {
             fill: Some(tint(section.tab)),
             hover_fill: Some(tint(section.hover())),
             radius: rounding,
-            inset: [PILL_MARGIN, 0.0, 6.0, ROW_GAP],
+            inset: [start, 0.0, end, ROW_GAP],
             // The label keeps its place as the tab opens and closes.
-            pad: [pad - PILL_MARGIN, 0.0],
+            pad: [if left { pad } else { pad - start }, 0.0],
             ..spec
         };
         let color = if tab.dim {
@@ -4743,6 +5086,7 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
         Cmd::Toggle(Toggle::Subscript) => art::SUBSCRIPT,
         Cmd::Toggle(Toggle::Superscript) => art::SUPERSCRIPT,
         Cmd::ClearFormatting => art::CLEAR_FORMATTING,
+        Cmd::Styles => art::STYLES,
         Cmd::Highlight => art::HIGHLIGHTER,
         Cmd::FontColor => art::FONT_COLOR,
         Cmd::Bullets => art::BULLETS,
@@ -4971,7 +5315,7 @@ impl ApplicationHandler<UserEvent> for App {
         let event = match event {
             UserEvent::Picture(bytes) => {
                 if let Some(state) = &mut self.state {
-                    if let Err(error) = state.insert_picture(bytes) {
+                    if let Err(error) = state.insert_picture(bytes, None) {
                         eprintln!("{error}");
                     }
                     state.window.request_redraw();
@@ -5005,10 +5349,31 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 return;
             }
+            UserEvent::ICloudFolder => {
+                if let Some(state) = &mut self.state {
+                    state.list_icloud();
+                }
+                return;
+            }
             UserEvent::ICloudAccount => {
                 if let Some(state) = &mut self.state {
                     state.icloud_account_changed();
                     state.window.request_redraw();
+                }
+                return;
+            }
+            UserEvent::Open(paths) => {
+                match &mut self.state {
+                    Some(state) => {
+                        for path in paths {
+                            state.open_path(&path);
+                        }
+                        state.window.set_minimized(false);
+                        state.window.focus_window();
+                        state.window.request_redraw();
+                    }
+                    // A cold launch's documents arrive before the window opens.
+                    None => self.opening.extend(paths),
                 }
                 return;
             }
@@ -5115,10 +5480,19 @@ impl ApplicationHandler<UserEvent> for App {
         if self.state.is_some() {
             return;
         }
+        let mut input = self.input.take().unwrap();
+        // The window starts at the notebook asked for rather than switching to it.
+        for path in &self.opening {
+            if let library::Located::Notebook { root, .. } = library::locate(path)
+                && let Err(error) = input.show(&root)
+            {
+                eprintln!("Cannot open {}: {error}", root.display());
+            }
+        }
         match pollster::block_on(State::new(
             event_loop,
             self.proxy.clone(),
-            self.input.take().unwrap(),
+            input,
             &self.substitutes,
             self.screenshot.is_none(),
             self.launch.take().expect("The window opens once"),
@@ -5129,7 +5503,12 @@ impl ApplicationHandler<UserEvent> for App {
                     self.startup_error = state.screenshot(prefix).err();
                     event_loop.exit();
                 }
-                _ => self.state = Some(state),
+                _ => {
+                    for path in self.opening.drain(..) {
+                        state.open_path(&path);
+                    }
+                    self.state = Some(state);
+                }
             },
             Err(error) => {
                 self.startup_error = Some(error);
@@ -5193,6 +5572,9 @@ impl ApplicationHandler<UserEvent> for App {
                     if !focused {
                         // Someone switching to another device finds their edits there.
                         state.publish_now(std::time::Duration::ZERO);
+                    } else {
+                        // Notebooks another device added or removed meanwhile.
+                        state.list_icloud();
                     }
                     state.window.request_redraw();
                 }
@@ -5247,7 +5629,7 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::Ime(ime) => state.input(ui::Event::Ime(ime)),
                 WindowEvent::DroppedFile(path) => {
                     let at = platform::drop_point(&state.window);
-                    state.attach(&path, at)?;
+                    state.place_file(&path, at)?;
                     state.window.request_redraw();
                 }
                 WindowEvent::PinchGesture { delta, .. } => state.pinch(1.0 + delta as f32)?,
@@ -5425,6 +5807,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
     let mut cache = None;
     let mut settings_file = None;
     let mut screenshot = None;
+    let mut opening = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--substitute-font" {
             substitutes.push(PathBuf::from(
@@ -5485,6 +5868,9 @@ fn launch() -> Result<(), Box<dyn Error>> {
                     .to_str()
                     .ok_or("The page title must be valid Unicode.")?,
             )?);
+        } else if library::locate(Path::new(&arg)) != library::Located::Nothing {
+            // A file the desktop opens with Snowbound, as a double-clicked section.
+            opening.push(std::path::absolute(arg)?);
         } else {
             positional.push(arg);
         }
@@ -5499,7 +5885,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
     }
     if positional.len() > 2 {
         return Err(
-            "Usage: snowbound [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--settings FILE] [--screenshot PNG_PREFIX] [--substitute-font FONT_FILE]..."
+            "Usage: snowbound [NOTEBOOK_FOLDER | SECTION.one | TOC.onetoc2]... [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--settings FILE] [--screenshot PNG_PREFIX] [--substitute-font FONT_FILE]..."
                 .into(),
         );
     }
@@ -5531,16 +5917,14 @@ fn launch() -> Result<(), Box<dyn Error>> {
     } else if editable {
         Input::Page(reference.unwrap())
     } else if positional.is_empty() && reference.is_none() {
-        let mut locations = saved.notebooks.clone();
-        let mut current = saved.current.clone();
+        let mut input = Input::Notebooks {
+            locations: saved.notebooks.clone(),
+            current: saved.current.clone(),
+        };
         if let Some(root) = notebook {
-            let location = std::path::absolute(root)?.to_string_lossy().into_owned();
-            if !locations.contains(&location) {
-                locations.push(location.clone());
-            }
-            current = Some(location);
+            input.show(&root)?;
         }
-        Input::Notebooks { locations, current }
+        input
     } else {
         Input::Notes {
             document: TextDocument::new(
@@ -5552,10 +5936,22 @@ fn launch() -> Result<(), Box<dyn Error>> {
             reference,
         }
     };
+    #[cfg(not(target_os = "macos"))]
+    let instance = match (&input, &screenshot) {
+        (Input::Notebooks { .. }, None) => match instance::claim(&cache, &opening) {
+            Some(instance) => Some(instance),
+            None => return Ok(()),
+        },
+        _ => None,
+    };
     if screenshot.is_some() {
         screenshot::prepare();
     }
     let event_loop = platform::event_loop(screenshot.is_some())?;
+    #[cfg(not(target_os = "macos"))]
+    if let Some(instance) = instance {
+        instance.serve(event_loop.create_proxy());
+    }
     if let Some(script) = std::env::var_os("SNOWBOUND_REPLAY") {
         replay(std::fs::read_to_string(script)?, event_loop.create_proxy())?;
     }
@@ -5568,6 +5964,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
             saved,
             cache,
         }),
+        opening,
         substitutes,
         screenshot,
         state: None,
@@ -5588,6 +5985,26 @@ fn launch() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use canvas::document::TextPosition;
+
+    /// A notebook opened from the desktop is listed once and shown first, whether it was
+    /// listed already or not.
+    #[test]
+    fn an_opened_notebook_is_listed_once_and_shown() {
+        let root = std::env::temp_dir();
+        let [listed, opened] = ["Listed", "Opened"].map(|name| root.join(name));
+        let location = |path: &Path| path.to_string_lossy().into_owned();
+        let mut input = Input::Notebooks {
+            locations: vec![location(&listed)],
+            current: None,
+        };
+        input.show(&opened).unwrap();
+        input.show(&listed).unwrap();
+        let Input::Notebooks { locations, current } = input else {
+            unreachable!()
+        };
+        assert_eq!(locations, [location(&listed), location(&opened)]);
+        assert_eq!(current, Some(location(&listed)));
+    }
 
     /// The ops an editing session records reach the section through `apply` and read back
     /// as the editor's page.
@@ -5777,5 +6194,81 @@ mod tests {
         ours.close().unwrap();
         theirs.close().unwrap();
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// Times opening each section of a notebook and each of its pages, phase by phase, as a
+    /// switch does: `SNOWBOUND_SWITCH_NOTEBOOK=FOLDER`, or a share through `ONESTORE_SMB_LAB`
+    /// (`HOST:PORT`, share `agent`) at `ONESTORE_SMB_LAB_ROOT` with `ONESTORE_SMB_LAB_USER`
+    /// and `ONESTORE_SMB_LAB_PASSWORD`. The first pass starts without replicas.
+    #[test]
+    #[ignore = "measures a notebook named by the environment"]
+    fn switch_timings() {
+        let cache = std::env::temp_dir().join(format!("snowbound-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cache);
+        let open = || match std::env::var("SNOWBOUND_SWITCH_NOTEBOOK") {
+            Ok(folder) => Library::notebook(&folder, &cache),
+            Err(_) => {
+                let user = std::env::var("ONESTORE_SMB_LAB_USER").ok();
+                let mount = library::Mount {
+                    server: std::env::var("ONESTORE_SMB_LAB").unwrap(),
+                    share: "agent".into(),
+                    user: user.clone(),
+                    domain: String::new(),
+                    root: std::env::var("ONESTORE_SMB_LAB_ROOT").unwrap(),
+                };
+                let login = library::Login {
+                    user: user.unwrap_or_default(),
+                    password: std::env::var("ONESTORE_SMB_LAB_PASSWORD").unwrap_or_default(),
+                    domain: String::new(),
+                };
+                Library::on_share(&mount.url(), mount, login, &cache).unwrap()
+            }
+        };
+        let ms = |start: Instant| start.elapsed().as_secs_f64() * 1e3;
+        let paper = canvas::gpu::Paper {
+            color: [1.0; 4],
+            ink: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut engine = TextEngine::default();
+        for pass in ["cold", "warm"] {
+            let start = Instant::now();
+            let library = Arc::new(open());
+            eprintln!("{pass}\tnotebook\t{:.1}", ms(start));
+            for tab in library.tabs("") {
+                let start = Instant::now();
+                let section = library.open(&tab.path, || {}).unwrap();
+                let opened = ms(start);
+                let start = Instant::now();
+                let (session, page) =
+                    read_session(section, Arc::clone(&library), tab.path.clone(), None).unwrap();
+                let read = ms(start);
+                let start = Instant::now();
+                let (mut scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+                let laid = ms(start);
+                let start = Instant::now();
+                scene.settle(Some(&editor), 2.0, paper);
+                eprintln!(
+                    "{pass}\tsection {}\topen {opened:.1}\tread {read:.1}\tlayout {laid:.1}\tpictures {:.1}",
+                    tab.name,
+                    ms(start)
+                );
+                for (space, title, _) in session.pages.iter().skip(1) {
+                    let start = Instant::now();
+                    let page = session.section.page(*space).unwrap();
+                    let read = ms(start);
+                    let start = Instant::now();
+                    let (mut scene, editor) = PageScene::from_page(page, &mut engine).unwrap();
+                    let laid = ms(start);
+                    let start = Instant::now();
+                    scene.settle(Some(&editor), 2.0, paper);
+                    eprintln!(
+                        "{pass}\tpage {title}\tread {read:.1}\tlayout {laid:.1}\tpictures {:.1}",
+                        ms(start)
+                    );
+                }
+                session.section.close().unwrap();
+            }
+        }
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }

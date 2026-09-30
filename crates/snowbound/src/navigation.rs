@@ -1,33 +1,42 @@
 //! Back and Forward through the pages visited, across sections and notebooks, as OneNote
-//! 2010's Quick Access Toolbar offers them.
+//! 2010's Quick Access Toolbar offers them, and the pages shown lately, which the palette
+//! lists first.
 
 use super::*;
-use std::time::Duration;
+use canvas::search::Index;
+use std::{collections::HashSet, time::Duration};
 use winit::event::TouchPhase;
 
 /// A page shown: its notebook's location, its section's catalog path and the page.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Place {
     pub notebook: String,
     pub section: String,
     pub page: ExGuid,
 }
 
-/// Pages visited before and after the one shown.
+/// Pages visited before and after the one shown, and those shown lately.
 #[derive(Default)]
 pub struct Trail {
     back: Vec<Place>,
     here: Option<Place>,
     forward: Vec<Place>,
+    /// Each page shown lately once, latest first, kept between launches.
+    pub recent: Vec<Place>,
 }
 
 /// Places Back keeps, at most.
 const KEPT: usize = 100;
+/// Pages `Trail::recent` keeps, at most.
+const RECENT: usize = 8;
 
 impl Trail {
     /// Notes `place` shown. Arriving anywhere but where Back or Forward went drops the pages
     /// ahead, as a browser does.
     pub fn visit(&mut self, place: Place) {
+        self.recent.retain(|recent| *recent != place);
+        self.recent.insert(0, place.clone());
+        self.recent.truncate(RECENT);
         if self.here.as_ref() == Some(&place) {
             return;
         }
@@ -59,17 +68,58 @@ impl Trail {
     pub fn open(&self) -> [bool; 2] {
         [!self.back.is_empty(), !self.forward.is_empty()]
     }
+
+    /// Drops the recent pages whose section `listed` refuses, and those whose section `index`
+    /// has read without them. Returns whether any went.
+    pub fn prune(&mut self, index: &Index, listed: impl Fn(&Place) -> bool) -> bool {
+        let read: HashSet<&str> = (index.entries().iter())
+            .map(|entry| entry.section.as_str())
+            .collect();
+        let before = self.recent.len();
+        self.recent.retain(|place| {
+            let key = crate::library::key(&place.notebook, &place.section);
+            listed(place)
+                && (!read.contains(key.as_str())
+                    || (index.entries().iter())
+                        .any(|entry| entry.space == place.page && entry.section == key))
+        });
+        self.recent.len() != before
+    }
 }
 
 impl State {
-    /// Notes the page just shown for Back and Forward.
+    /// Notes the page just shown for Back and Forward, and among the recent pages.
     pub(crate) fn visited(&mut self) {
-        if let Some(session) = &self.session {
-            self.trail.visit(Place {
-                notebook: session.library.location.clone(),
-                section: session.tabs[session.tab].path.clone(),
-                page: session.space,
-            });
+        let Some(session) = &self.session else {
+            return;
+        };
+        let place = Place {
+            notebook: session.library.location.clone(),
+            section: session.tabs[session.tab].path.clone(),
+            page: session.space,
+        };
+        let moved = self.trail.recent.first() != Some(&place);
+        self.trail.visit(place);
+        if moved {
+            self.save_settings();
+        }
+    }
+
+    /// Whether `library`'s section at `path` is the one open.
+    pub(crate) fn open(&self, library: &Library, path: &str) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session.library.location == library.location && session.tabs[session.tab].path == path
+        })
+    }
+
+    /// Shows page `space` of `library`'s section at `path`, opening the section on it where
+    /// it is not the one open.
+    pub(crate) fn go(&mut self, library: Arc<Library>, path: String, space: ExGuid) {
+        if self.open(&library, &path) {
+            self.commands.push(Command::OpenPage(space));
+        } else {
+            self.last_pages.insert(library.key(&path), space);
+            self.commands.push(Command::OpenSection(library, path));
         }
     }
 
@@ -87,13 +137,6 @@ impl State {
         let Some(place) = self.trail.step(forward, exists) else {
             return;
         };
-        if let Some(session) = &self.session
-            && session.library.location == place.notebook
-            && session.tabs[session.tab].path == place.section
-        {
-            self.commands.push(Command::OpenPage(place.page));
-            return;
-        }
         let Some(library) = self
             .notebooks
             .iter()
@@ -101,11 +144,7 @@ impl State {
         else {
             return;
         };
-        let library = Arc::clone(library);
-        self.last_pages
-            .insert(library.key(&place.section), place.page);
-        self.commands
-            .push(Command::OpenSection(library, place.section));
+        self.go(Arc::clone(library), place.section, place.page);
     }
 }
 
@@ -226,6 +265,57 @@ mod tests {
         assert_eq!(trail.step(false, kept), Some(place("A.one", 1)));
         assert_eq!(trail.step(true, kept), Some(place("A.one", 3)));
         assert_eq!(trail.open(), [true, false]);
+    }
+
+    #[test]
+    fn recent_pages_are_kept_once_latest_first_and_bounded() {
+        let mut trail = Trail::default();
+        for page in [1, 2, 1] {
+            trail.visit(place("A.one", page));
+        }
+        assert_eq!(trail.recent, [place("A.one", 1), place("A.one", 2)]);
+        for page in 0..20 {
+            trail.visit(place("B.one", page));
+        }
+        assert_eq!(trail.recent.len(), RECENT);
+        assert_eq!(trail.recent[0], place("B.one", 19));
+    }
+
+    #[test]
+    fn recent_pages_go_with_their_section_or_once_the_index_lacks_them() {
+        let page = |title: &str| onestore::page::Page {
+            title: title.into(),
+            identity: None,
+            created: None,
+            margin_origin: [0.0; 2],
+            color: None,
+            rule_lines: None,
+            objects: Vec::new(),
+            definitions: Default::default(),
+        };
+        let mut index = Index::default();
+        let section = crate::library::key("/notebooks/Personal", "A.one");
+        let kept = place("A.one", 1);
+        index.set(canvas::search::Entry::new(
+            &section,
+            kept.page,
+            &page("Kept"),
+            0,
+        ));
+        let mut trail = Trail::default();
+        // Visited oldest first: the index has read A without page 2, not yet B, and C is gone.
+        for gone in [
+            place("C.one", 1),
+            place("B.one", 1),
+            place("A.one", 2),
+            kept.clone(),
+        ] {
+            trail.visit(gone);
+        }
+        let listed = |place: &Place| place.section != "C.one";
+        assert!(trail.prune(&index, listed));
+        assert_eq!(trail.recent, [kept, place("B.one", 1)]);
+        assert!(!trail.prune(&index, listed), "nothing more goes");
     }
 
     #[test]

@@ -39,11 +39,14 @@ if args.output and (args.output.suffix != '.app' or args.output.exists()):
 root = Path(__file__).resolve().parents[2]
 # The Apple Developer team and what is registered under it. With the team's Developer ID
 # Application identity and a Developer ID profile for BUNDLE_ID naming CONTAINER, the app is
-# signed with hardened runtime and the iCloud container (Use iCloud Drive, NSUbiquitousContainers);
+# signed with hardened runtime and the iCloud container (iCloud notebooks, NSUbiquitousContainers);
 # without them, ad hoc, and iCloud Drive works through folders the user picks.
 TEAM = '9R7DPNW28H'
 BUNDLE_ID = 'net.paperclover.snowbound'
 CONTAINER = 'iCloud.net.paperclover.snowbound'
+# OneNote's sections and tables of contents, which no Mac app declares; OneNote may open them too.
+ONENOTE_TYPES = [('com.microsoft.onenote.section', 'OneNote Section', 'one'),
+                 ('com.microsoft.onenote.table-of-contents', 'OneNote Table of Contents', 'onetoc2')]
 
 
 def developer_id():
@@ -147,6 +150,20 @@ if build:
         'NSUbiquitousContainerSupportedFolderLevels': 'Any',
     }},
     'LSMinimumSystemVersion': minimum,
+    'CFBundleDocumentTypes': [{
+        'CFBundleTypeName': 'OneNote Notebook',
+        'CFBundleTypeRole': 'Editor',
+        'LSHandlerRank': 'Alternate',
+        'LSItemContentTypes': [identifier for identifier, _, _ in ONENOTE_TYPES],
+        'CFBundleTypeIconSystemGenerated': 1,
+    }],
+    'UTImportedTypeDeclarations': [{
+        'UTTypeIdentifier': identifier,
+        'UTTypeDescription': description,
+        'UTTypeConformsTo': ['public.data'],
+        'UTTypeTagSpecification': {'public.filename-extension': [extension],
+                                   'public.mime-type': 'application/onenote'},
+    } for identifier, description, extension in ONENOTE_TYPES],
 } | versions))
 # 10.6 runs the bundle unsigned.
 if not args.snow_leopard:

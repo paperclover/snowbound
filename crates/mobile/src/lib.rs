@@ -122,6 +122,26 @@ struct Canvas {
 }
 
 impl Canvas {
+    /// The page on `paper` as OneNote 2010 prints it, footers naming `section`.
+    fn pdf(&self, paper: [f32; 2], section: &str) -> Option<Vec<u8>> {
+        let page = self.page.editor.page().ok()?;
+        let mut engine = ENGINES
+            .lock()
+            .ok()
+            .and_then(|mut engines| engines.pop())
+            .unwrap_or_default();
+        let setup = canvas::print::Setup {
+            paper,
+            fit_width: true,
+            footer: canvas::print::Footer::SectionAndPage,
+        };
+        let pdf = canvas::print::pdf(vec![(section.to_owned(), vec![page])], &mut engine, &setup);
+        if let Ok(mut engines) = ENGINES.lock() {
+            engines.push(engine);
+        }
+        pdf.ok()
+    }
+
     fn new(space: ExGuid, page: Page, pixels: [u32; 2], scale: f32) -> Result<Self> {
         let mut engine = ENGINES
             .lock()
@@ -139,6 +159,7 @@ impl Canvas {
         );
         page.touch = true;
         page.host_viewport = true;
+        (page.snap_to_grid, page.editor.default_font) = options();
         Ok(Self {
             page,
             space,
@@ -235,7 +256,7 @@ impl Canvas {
             return Target::Grip;
         }
         match self.page.hit(device) {
-            Some(Hit::Handle { .. } | Hit::Resize { .. }) => Target::Grip,
+            Some(Hit::Handle { .. } | Hit::Resize { .. } | Hit::Column { .. }) => Target::Grip,
             Some(Hit::Image { id, .. })
                 if self.page.object_focus() == Some(ObjectFocus::Image(id)) =>
             {
@@ -612,6 +633,40 @@ fn gpu() -> std::sync::MutexGuard<'static, Option<Gpu>> {
 /// rather than enumerating the system's fonts again.
 static ENGINES: Mutex<Vec<TextEngine>> = Mutex::new(Vec::new());
 
+/// The reader's Snap To Grid and Default font, which every page opened from then on takes,
+/// and new pages' titles the font's face.
+static OPTIONS: Mutex<Option<(bool, canvas::editor::DefaultFont)>> = Mutex::new(None);
+
+fn options() -> (bool, canvas::editor::DefaultFont) {
+    OPTIONS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or((true, canvas::editor::DefaultFont::default()))
+}
+
+/// OneNote's Snap To Grid: taps, drags and shapes land on the placement grid.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_set_snap_to_grid(on: bool) {
+    let font = options().1;
+    *OPTIONS.lock().unwrap_or_else(|error| error.into_inner()) = Some((on, font));
+}
+
+/// OneNote's Default font: new text in `face` at `size` points, new titles in `face`.
+///
+/// # Safety
+/// `face` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_set_default_font(face: *const c_char, size: f32) {
+    let snap = options().0;
+    let font = canvas::editor::DefaultFont {
+        face: string(face),
+        size,
+        color: None,
+    };
+    *OPTIONS.lock().unwrap_or_else(|error| error.into_inner()) = Some((snap, font));
+}
+
 pub struct View {
     /// Taken apart on drop, which returns its text engine to `ENGINES`.
     canvas: ManuallyDrop<Canvas>,
@@ -668,9 +723,24 @@ impl View {
             .get_default_config(&gpu.adapter, pixels[0], pixels[1])
             .ok_or("No supported surface configuration")?;
         surface.configure(gpu.renderer.device(), &config);
-        let (page, read_only) = section.shared.page(space)?;
+        let (mut page, read_only) = section.shared.page(space)?;
+        // The page wears its theme: style objects it gives otherwise are restyled first.
+        let sheet = section
+            .theme(page.identity)
+            .map(|theme| theme.sheet())
+            .unwrap_or_default();
+        let restyle = onestore::op::restyle(&page, &sheet)?;
+        if !read_only && !restyle.is_empty() {
+            section.shared.apply(Edit {
+                at: library::filetime(),
+                ops: restyle
+                    .into_iter()
+                    .map(|op| Op::Page { space, op })
+                    .collect(),
+            })?;
+            page = section.shared.page(space)?.0;
+        }
         let frame = Arc::<Frame>::default();
-        #[cfg_attr(not(target_os = "ios"), expect(unused_mut))]
         let mut canvas = Canvas::new(space, page, pixels, scale)?;
         #[cfg(target_os = "ios")]
         {
@@ -679,6 +749,7 @@ impl View {
                 Waker::from(frame.clone()),
             ));
         }
+        canvas.page.editor.styles = sheet;
         Ok(Self {
             canvas: ManuallyDrop::new(canvas),
             surface,
@@ -967,6 +1038,37 @@ pub extern "C" fn sb_view_apply(view: &mut View, command: u8) -> bool {
     view.stored(result)
 }
 
+/// Gives the selected paragraphs style `place` of OneNote's Styles gallery (Heading 1 to 6,
+/// Page Title, Citation, Quote, Code, Normal) in the page's theme, or OneNote 2010's.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_style(view: &mut View, place: u8) -> bool {
+    use notebook::sidecar::themes::{STYLES, built_in, definition};
+    let Some((name, _)) = STYLES.get(usize::from(place)) else {
+        return false;
+    };
+    let editor = &view.canvas.page.editor;
+    let style = editor.styles.get(*name).cloned().unwrap_or_else(|| {
+        let theme = built_in().swap_remove(0);
+        definition(name, &theme.styles[*name])
+    });
+    let result = view
+        .canvas
+        .page
+        .format(canvas::editor::Formatting::Style(style))
+        .map(moved);
+    view.stored(result)
+}
+
+/// The place in the Styles gallery of the style every selected paragraph shares, or -1.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_style_place(view: &View) -> i32 {
+    let state = view.canvas.page.editor.format_state().unwrap_or_default();
+    notebook::sidecar::themes::STYLES
+        .iter()
+        .position(|(name, _)| state.style.as_deref() == Some(*name))
+        .map_or(-1, |place| place as i32)
+}
+
 /// The marked word at the caret, or selected, as JSON `{"word", "suggestions",
 /// "repeated"}`; null where there is none.
 #[unsafe(no_mangle)]
@@ -1239,6 +1341,33 @@ pub unsafe extern "C" fn sb_tag_icon(
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_page_text(view: &View) -> *mut c_char {
     owned(view.canvas.page_text())
+}
+
+/// The page on paper `width` × `height` points as OneNote 2010 prints it, each sheet's
+/// footer naming `section`: `length` bytes of PDF, freed with `sb_bytes_free`, or null.
+///
+/// # Safety
+/// `section` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_view_pdf(
+    view: &View,
+    width: f32,
+    height: f32,
+    section: *const c_char,
+    length: &mut usize,
+) -> *mut u8 {
+    let Some(pdf) = view.canvas.pdf([width, height], &string(section)) else {
+        return std::ptr::null_mut();
+    };
+    *length = pdf.len();
+    Box::into_raw(pdf.into_boxed_slice()).cast()
+}
+
+/// # Safety
+/// `bytes` and `length` came from this library and are not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_bytes_free(bytes: *mut u8, length: usize) {
+    drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(bytes, length)) });
 }
 
 /// Puts the picture file `bytes` (JPEG or PNG), `width` × `height` points, at the caret:

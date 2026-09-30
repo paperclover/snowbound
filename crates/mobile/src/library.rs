@@ -706,12 +706,62 @@ pub(crate) fn filetime() -> u64 {
 }
 
 /// A page OneNote 2010 would create now, titled `date` and `time` as the host formats
-/// them: the long date and the short time.
+/// them: the long date and the short time; titled in the Default font's face.
 fn dated(author: &str, date: &str, time: &str) -> Result<PageCreation> {
-    Ok(PageCreation::new(None, Some(""), author)?.dated(date, time)?)
+    let font = crate::options().1;
+    Ok(PageCreation::new(None, Some(""), author)?
+        .titled_in(&font.face, font.color)?
+        .dated(date, time)?)
 }
 
 impl Section {
+    /// The notebook's themes; none for a lone section.
+    pub(crate) fn themes(&self) -> notebook::sidecar::themes::Themes {
+        let notebook = self
+            .library
+            .notebook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        notebook
+            .as_ref()
+            .and_then(|notebook| crate::report(notebook.themes().map_err(Into::into)))
+            .unwrap_or_default()
+    }
+
+    /// Merges `change` into the notebook's themes.
+    pub(crate) fn save_themes(&self, change: notebook::sidecar::themes::Themes) -> Result<()> {
+        let notebook = self
+            .library
+            .notebook
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        notebook
+            .as_ref()
+            .ok_or("A section on its own keeps no themes")?
+            .save_themes(change)?;
+        Ok(())
+    }
+
+    /// The theme scopes of page `id`: the page, its section and the notebook, where known.
+    pub(crate) fn scopes(&self, id: &str) -> Result<[Option<notebook::sidecar::themes::Scope>; 3]> {
+        use notebook::sidecar::themes::Scope;
+        let (page, _) = self.shared.page(id.parse()?)?;
+        Ok([
+            page.identity.map(Scope::page),
+            self.shared.section.identity().ok().map(Scope::section),
+            Some(Scope::Notebook),
+        ])
+    }
+
+    /// The theme page `identity` of this section wears, if any scope names one.
+    pub(crate) fn theme(
+        &self,
+        identity: Option<[u8; 16]>,
+    ) -> Option<notebook::sidecar::themes::Theme> {
+        let section = self.shared.section.identity().ok();
+        self.themes().effective(section, identity)
+    }
+
     /// The section at catalog `path` of `library`, its edits naming `author`.
     pub(crate) fn open(
         library: Arc<Library>,
@@ -862,8 +912,7 @@ impl Section {
     /// nothing waits to be published.
     pub(crate) fn flush(&self, limit: Duration) -> bool {
         let section = &self.shared.section;
-        // The section thread answers in order, so an answer means earlier edits are stored.
-        if report(section.pages().map_err(Into::into)).is_none() {
+        if report(section.written().map_err(Into::into)).is_none() {
             return false;
         }
         let deadline = Instant::now() + limit;
@@ -1596,6 +1645,80 @@ pub unsafe extern "C" fn sb_section_new_page(
         .transpose()
         .and_then(|parent| section.new_page(parent, &string(date), &string(time)));
     report(page).map_or(std::ptr::null_mut(), |space| owned(space.to_string()))
+}
+
+/// The notebook's themes for page `id` as JSON: `themes`, each with `id` and `name`, then
+/// the id each of `page`, `section` and `notebook` names itself, or null.
+///
+/// # Safety
+/// `id` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_section_themes(section: &Section, id: *const c_char) -> *mut c_char {
+    use notebook::sidecar::themes::Scope;
+    #[derive(serde::Serialize)]
+    struct Listed {
+        id: String,
+        name: String,
+    }
+    #[derive(serde::Serialize)]
+    struct Shown {
+        themes: Vec<Listed>,
+        page: Option<String>,
+        section: Option<String>,
+        notebook: Option<String>,
+    }
+    let shown = (|| {
+        let scopes = section.scopes(&string(id))?;
+        let themes = section.themes();
+        let named = |scope: &Option<Scope>| themes.assigned(scope.as_ref()?).map(|theme| theme.id);
+        Ok(Shown {
+            themes: themes
+                .all()
+                .into_iter()
+                .map(|theme| Listed {
+                    id: theme.id,
+                    name: theme.name,
+                })
+                .collect(),
+            page: named(&scopes[0]),
+            section: named(&scopes[1]),
+            notebook: named(&scopes[2]),
+        })
+    })();
+    json(shown)
+}
+
+/// Gives theme `theme` (null for none of its own) to page `id` (`scope` 0), its section (1)
+/// or its notebook (2); the page wears it when next opened. Writes to the notebook, so call
+/// it off the main thread.
+///
+/// # Safety
+/// Every string is NUL-terminated UTF-8; `theme` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_section_set_theme(
+    section: &Section,
+    id: *const c_char,
+    scope: u8,
+    theme: *const c_char,
+) -> bool {
+    use notebook::sidecar::themes::{Assignment, Themes};
+    let set = (|| {
+        let scope = section
+            .scopes(&string(id))?
+            .into_iter()
+            .nth(usize::from(scope))
+            .flatten()
+            .ok_or("No such scope")?;
+        section.save_themes(Themes {
+            assignments: vec![Assignment {
+                scope,
+                theme: optional(theme),
+                assigned: filetime(),
+            }],
+            ..Default::default()
+        })
+    })();
+    report(set).is_some()
 }
 
 /// Deletes page `id` to the notebook's recycle bin, or a conflict page for good; a section

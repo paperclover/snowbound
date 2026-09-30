@@ -1,0 +1,33 @@
+{
+  "themes": [],
+  "assignments": [
+    {
+      "scope": {
+        "section": "125e8f01c6ee404b96cc675d00ceb659"
+      },
+      "theme": "onenote",
+      "assigned": 134000000000000000
+    },
+    {
+      "scope": {
+        "section": "af4f8ea23c5f7e41838ac7cbea473590"
+      },
+      "theme": "manuscript",
+      "assigned": 134000000000000000
+    },
+    {
+      "scope": {
+        "section": "18af2996b565454c971191d887028fc8"
+      },
+      "theme": "editorial",
+      "assigned": 134000000000000000
+    },
+    {
+      "scope": {
+        "section": "f0ca724b3a9d3d4b82bc6f28bd77966c"
+      },
+      "theme": "modern",
+      "assigned": 134000000000000000
+    }
+  ]
+}

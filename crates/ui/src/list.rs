@@ -55,6 +55,13 @@ pub(crate) struct State {
     selected: Option<u64>,
 }
 
+impl State {
+    /// The keys of the rows built last frame.
+    pub(crate) fn shown(&self) -> impl Iterator<Item = u64> + '_ {
+        self.shown.iter().map(|(key, _)| *key)
+    }
+}
+
 /// Builds `list` into a box of `spec`, calling `build` inside each row in view, and moves
 /// `selected` with the list's keys. Returns the index of the row clicked.
 pub fn list<R: Rows>(

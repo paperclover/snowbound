@@ -85,7 +85,8 @@ pub enum Size {
     Pixels(f32),
     /// The label and padding.
     Text,
-    /// A fraction of the nearest ancestor not sized by its children.
+    /// A fraction of the nearest ancestor not sized by its children; across a parent sized by
+    /// its children, a fraction of what the parent's other children make it.
     Fraction(f32),
     /// The children laid out along this axis, and padding.
     Children,
@@ -207,6 +208,14 @@ pub enum Overflow {
     Ellipsis,
 }
 
+/// The least a popup keeps between itself and each of the window's edges.
+const POPUP_MARGIN: f32 = 4.0;
+
+/// The longest a popup may be in a window `room` long; one longer scrolls or squeezes.
+fn fitting(room: f32) -> f32 {
+    (room - 2.0 * POPUP_MARGIN).max(0.0)
+}
+
 /// Where a popup opens, flipping to the far side of its anchor where the window ends first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
@@ -231,13 +240,18 @@ impl Anchor {
     /// anchor on the axis it opens along, level with it otherwise. Shown only `shown` long
     /// as it opens, it keeps the edge it would have at full size.
     fn place(self, axis: usize, size: f32, shown: f32, room: f32) -> f32 {
+        let size = size.min(fitting(room));
+        let shown = shown.min(size);
+        let most = (room - POPUP_MARGIN - size).max(POPUP_MARGIN);
         let (rect, along) = match self {
             Anchor::Below(rect) => (rect, Some(1)),
             Anchor::Right(rect) => (rect, Some(0)),
             Anchor::Over(rect) => (rect, None),
             Anchor::Point([x, y]) => ([x, y, x, y], Some(1)),
-            Anchor::Dialog | Anchor::Top if axis == 0 => return ((room - size) / 2.0).max(0.0),
-            Anchor::Dialog | Anchor::Top => return (room / 8.0).min(room - size).max(0.0),
+            Anchor::Dialog | Anchor::Top if axis == 0 => {
+                return ((room - size) / 2.0).max(POPUP_MARGIN);
+            }
+            Anchor::Dialog | Anchor::Top => return (room / 8.0).clamp(POPUP_MARGIN, most),
         };
         let [low, high] = [rect[axis], rect[axis + 2]];
         let (first, second) = if along == Some(axis) {
@@ -245,12 +259,12 @@ impl Anchor {
         } else {
             (low, high - size)
         };
-        if first + size <= room {
-            first
-        } else if second >= 0.0 {
-            second + size - shown
+        if first + size <= room - POPUP_MARGIN {
+            first.max(POPUP_MARGIN)
+        } else if second >= POPUP_MARGIN {
+            second.min(most) + size - shown
         } else {
-            first.min(room - size).max(0.0) + size - shown
+            first.clamp(POPUP_MARGIN, most) + size - shown
         }
     }
 
@@ -323,6 +337,8 @@ pub struct Spec<'a> {
     pub font_size: Option<f32>,
     /// Shapes the label semibold.
     pub bold: bool,
+    /// Shapes the label italic.
+    pub italic: bool,
     pub font: Option<&'a str>,
     pub overflow: Overflow,
     /// The label's colour; the theme's text colour otherwise.
@@ -548,6 +564,8 @@ struct State {
     held: Option<(ScrollerPart, Instant)>,
     /// An animated value and its target, for `Ui::animate`.
     tween: Option<[f32; 2]>,
+    /// When the condition `Ui::lasted` follows last became true.
+    since: Option<Instant>,
 }
 
 /// An open popup, above the one opened before it.
@@ -837,6 +855,18 @@ impl Ui {
     /// The box's rectangle from the latest layout.
     pub fn rect(&self, id: Id) -> Option<[f32; 4]> {
         self.states.get(&id).map(|state| state.rect)
+    }
+
+    /// Scrolls `scroller`, a scrolling box, until `target` within it starts at its top, both
+    /// as last laid out; the wheel's easing carries it there.
+    pub fn scroll_to(&mut self, scroller: Id, target: Id) {
+        let (Some(top), Some(start)) = (self.rect(target), self.rect(scroller)) else {
+            return;
+        };
+        let state = self.states.entry(scroller).or_default();
+        let most = (state.content - (state.rect[3] - state.rect[1])).max(0.0);
+        state.scroll_target = (state.scroll + top[1] - start[1]).clamp(0.0, most);
+        self.animating |= state.scroll != state.scroll_target;
     }
 
     /// The pointer's cursor, or None over a custom box, whose host chooses.
@@ -1180,7 +1210,7 @@ impl Ui {
         let label = spec.text.map(|text| {
             let size = spec.font_size.unwrap_or(self.theme.font_size);
             self.texts
-                .label(text, size, spec.bold, spec.font, self.frame)
+                .styled(text, size, spec.bold, spec.italic, spec.font, self.frame)
         });
         // Popups hang from the root, outside the clips and flow of where they are built.
         let parent = if spec.anchor.is_some() {
@@ -1234,6 +1264,18 @@ impl Ui {
         *goal = target;
         self.animating |= value != goal;
         *value
+    }
+
+    /// How long `held` has stayed true through the frames that ask of `id`; zero while
+    /// false, as a status waits before showing a state that may pass at once.
+    pub fn lasted(&mut self, id: Id, held: bool) -> Duration {
+        let now = self.now;
+        let state = self.states.entry(id).or_default();
+        state.touched = self.frame;
+        state.since = held.then(|| state.since.unwrap_or(now));
+        state
+            .since
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since))
     }
 
     /// Makes `family` the interface's font, where fontique doesn't know the system's, as
@@ -1627,10 +1669,12 @@ impl Ui {
                 radius: *radius,
             });
         }
+        // A box squeezed narrower than its padding keeps an empty inside, not an inverted one.
+        let left = (painted[0] + node.pad[0]).min(painted[2]);
         let inner = [
-            painted[0] + node.pad[0],
+            left,
             painted[1],
-            painted[2] - node.pad[0],
+            (painted[2] - node.pad[0]).max(left),
             painted[3],
         ];
         let mut x = if node.center {
@@ -1650,12 +1694,8 @@ impl Ui {
             let rect = if node.label.is_some() {
                 [x, top, x + ICON, top + ICON]
             } else {
-                [
-                    inner[0],
-                    painted[1] + node.pad[1],
-                    inner[2],
-                    painted[3] - node.pad[1],
-                ]
+                let top = (painted[1] + node.pad[1]).min(painted[3]);
+                [inner[0], top, inner[2], (painted[3] - node.pad[1]).max(top)]
             };
             self.display.push(Display::Image {
                 image: image.clone(),

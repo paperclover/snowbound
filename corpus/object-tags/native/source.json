@@ -1,0 +1,26 @@
+[
+  {
+    "path": "files.one",
+    "bytes": 21160,
+    "sha256": "d7d7688e86bae61505b96daf8af0d5d7adc1af3777ac13f2551cc8a339c1a182",
+    "mtime_ns": 1790805042299289270
+  },
+  {
+    "path": "notes.txt",
+    "bytes": 18,
+    "sha256": "33fdf6e43c05ed910d335eda3fa269ccbd1415336c17a4a5357d009ee495b3a6",
+    "mtime_ns": 1790805042459716143
+  },
+  {
+    "path": "ocr.png",
+    "bytes": 9598,
+    "sha256": "b81dc7dd998956abfc1394b45567140c178b7b4523d06726970f75f4a2b701db",
+    "mtime_ns": 1790805042459075351
+  },
+  {
+    "path": "photo.png",
+    "bytes": 659,
+    "sha256": "2a39fa803c359c78ce662012ae75b810a33b13647c0050c29176301dcad8eb3b",
+    "mtime_ns": 1790805042459606226
+  }
+]

@@ -46,6 +46,7 @@ fn reaches(op: &PageOp, outline: ExGuid, blank: &PageParagraph) -> bool {
         | PageOp::Outline { object: id, .. }
         | PageOp::Paragraph { paragraph: id, .. }
         | PageOp::Style { paragraph: id, .. }
+        | PageOp::Unstyle { paragraph: id }
         | PageOp::Media { paragraph: id, .. }
         | PageOp::List { paragraph: id, .. }
         | PageOp::Tags { target: id, .. } => own(id),
@@ -58,6 +59,8 @@ pub(super) fn references(node: &PageParagraph) -> impl Iterator<Item = ExGuid> +
     let content_tags = match &node.content {
         ParagraphContent::Text(text) => text.tags.as_slice(),
         ParagraphContent::Table(table) => table.tags.as_slice(),
+        ParagraphContent::Image(image) => image.tags.as_slice(),
+        ParagraphContent::Attachment(file) => file.tags.as_slice(),
         _ => &[],
     };
     node.lists.iter().copied().chain(node.style).chain(
@@ -283,6 +286,26 @@ pub(super) fn layout_ops(id: ExGuid, old: &Layout, new: &Layout) -> Lowered {
 }
 
 /// A page picture's stored position, size and description.
+/// The op giving `target` `tags`, with the definitions they name.
+pub(super) fn tags(
+    target: ExGuid,
+    tags: Vec<onestore::document::Tag>,
+    definitions: &BTreeMap<ExGuid, onestore::page::Definition>,
+) -> Vec<PageOp> {
+    let definitions = tags
+        .iter()
+        .filter_map(|tag| tag.definition)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|id| Some((id, definitions.get(&id)?.clone())))
+        .collect();
+    vec![PageOp::Tags {
+        target,
+        tags,
+        definitions,
+    }]
+}
+
 pub(super) fn picture_layout(image: &onestore::page::Image) -> Vec<PageOp> {
     vec![PageOp::Picture {
         picture: image.id,

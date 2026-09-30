@@ -93,6 +93,8 @@ pub struct Toc {
     pub file_id: [u8; 16],
     /// Stale or unavailable TOC references; these are not inferred active sections.
     pub unresolved: Vec<TocReference>,
+    /// The notebook's colour as a COLORREF, which only a notebook's own TOC holds.
+    pub color: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,8 +110,8 @@ pub enum EntryKind {
     File,
     Directory,
     Other,
-    /// A notebook file kept elsewhere and not yet on this device, as iOS lists one that
-    /// iCloud Drive evicted.
+    /// A notebook file kept elsewhere and not yet on this device, as iCloud Drive's evicted
+    /// files list: a `.Name.icloud` placeholder, or on macOS 14 and later a dataless file.
     Evicted,
 }
 
@@ -164,7 +166,10 @@ enum Held {
         document: [u8; 16],
     },
     Locked,
-    Toc(Vec<TocReference>),
+    Toc {
+        unresolved: Vec<TocReference>,
+        color: Option<u32>,
+    },
 }
 
 impl Cache {
@@ -380,9 +385,14 @@ fn scan(
         } else {
             continue;
         };
-        // Without an evicted TOC the folder lists in path order; nothing writes a second one,
-        // as its placeholder blocks creating it.
-        if entry.kind == EntryKind::Evicted {
+        let reused = cached
+            .get(&child)
+            .filter(|known| known.listed == entry.listed)
+            .and_then(|known| Some((known.file_id()?, known)));
+        // An evicted file listed as it was last read lists as then. Without an evicted TOC the
+        // folder lists in path order; nothing writes a second one, as its placeholder, or the
+        // dataless file itself, blocks creating it.
+        if entry.kind == EntryKind::Evicted && reused.is_none() {
             if expected == FileType::Section {
                 result.unavailable.push(Unavailable {
                     path: child,
@@ -393,15 +403,11 @@ fn scan(
             }
             continue;
         }
-        if entry.kind != EntryKind::File
+        if !matches!(entry.kind, EntryKind::File | EntryKind::Evicted)
             || (expected == FileType::TableOfContents && result.toc.is_some())
         {
             return Err(Error::Entry { path: child });
         }
-        let reused = cached
-            .get(&child)
-            .filter(|known| known.listed == entry.listed)
-            .and_then(|known| Some((known.file_id()?, known)));
         let (file_id, held) = match reused {
             Some((file_id, known)) => {
                 found.read.insert(child.clone(), known.clone());
@@ -522,11 +528,12 @@ fn scan(
                 state: SectionState::Locked,
                 copy: false,
             }),
-            Ok(Held::Toc(unresolved)) => {
+            Ok(Held::Toc { unresolved, color }) => {
                 result.toc = Some(Toc {
                     filename: entry.name.clone(),
                     file_id,
                     unresolved,
+                    color,
                 })
             }
             Err(error) if expected == FileType::Section => result.sections.push(Section {
@@ -751,7 +758,7 @@ fn held(store: &Store, expected: FileType) -> Result<Held, onestore::Error> {
         });
     }
     index.validate_current()?;
-    let Some(Kind::Toc { entries, .. }) = root(1).map(|node| &node.kind) else {
+    let Some(Kind::Toc { entries, color, .. }) = root(1).map(|node| &node.kind) else {
         return Err(onestore::Error {
             offset: 0,
             message: "Missing notebook TOC root",
@@ -784,7 +791,10 @@ fn held(store: &Store, expected: FileType) -> Result<Held, onestore::Error> {
             order: *order,
         });
     }
-    Ok(Held::Toc(unresolved))
+    Ok(Held::Toc {
+        unresolved,
+        color: *color,
+    })
 }
 
 /// Why a file or group that failed lists as unavailable; `None` fails the whole discovery,

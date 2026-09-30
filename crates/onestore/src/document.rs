@@ -527,6 +527,9 @@ pub enum Kind<'a> {
     },
     Style {
         name: Option<String>,
+        /// NextStyle: the style Enter gives the paragraph after this one's end.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
     },
     List {
         font: Option<String>,
@@ -1279,6 +1282,7 @@ impl<'a> Element<'a> {
             }
             0x12004d => Kind::Style {
                 name: f.text(0x1c00345a)?,
+                next: f.text(0x1c00348a)?,
             },
             0x60012 => {
                 let format = f

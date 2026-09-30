@@ -47,6 +47,9 @@ impl Template {
                     alt: None,
                     background: true,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 })
             })
             .collect()

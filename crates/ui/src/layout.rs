@@ -1,4 +1,6 @@
-use crate::{Anchor, Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, text::Texts};
+use crate::{
+    Anchor, Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, fitting, text::Texts,
+};
 use std::collections::HashMap;
 
 /// Sizes each box on both axes, then places it: standalone sizes, sizes taken from
@@ -49,8 +51,13 @@ pub(crate) fn solve(
                 Size::Fraction(_) | Size::Children => 0.0,
             };
         }
+        fit_popups(nodes, axis);
         for index in 1..nodes.len() {
             if let Size::Fraction(fraction) = nodes[index].size[axis].size {
+                if stretches(nodes, index, axis) {
+                    nodes[index].computed[axis] = 0.0;
+                    continue;
+                }
                 let mut ancestor = nodes[index].parent;
                 while ancestor != 0 && nodes[ancestor].size[axis].size == Size::Children {
                     ancestor = nodes[ancestor].parent;
@@ -65,6 +72,8 @@ pub(crate) fn solve(
                 nodes[index].computed[axis] = content + 2.0 * nodes[index].pad[axis];
             }
         }
+        yield_popups(nodes, axis);
+        fit_popups(nodes, axis);
         for index in 0..nodes.len() {
             let node = &nodes[index];
             if node.children.is_empty() || (axis == 1 && node.flags.contains(Flags::SCROLL)) {
@@ -118,6 +127,12 @@ pub(crate) fn solve(
                 for child in children {
                     let room =
                         (across(nodes, index, child, axis) - 2.0 * nodes[index].pad[axis]).max(0.0);
+                    if let Size::Fraction(fraction) = nodes[child].size[axis].size
+                        && stretches(nodes, child, axis)
+                    {
+                        nodes[child].computed[axis] = room * fraction;
+                        continue;
+                    }
                     let over = nodes[child].computed[axis] - room;
                     if over > 0.0 {
                         nodes[child].computed[axis] -=
@@ -197,6 +212,50 @@ pub(crate) fn solve(
     }
 }
 
+/// Whether `index`, sized from an ancestor, is across a parent sized by its children: it takes
+/// no room while the parent sums its other children, then that share of the parent's room.
+fn stretches(nodes: &[Built], index: usize, axis: usize) -> bool {
+    let node = &nodes[index];
+    let parent = &nodes[node.parent];
+    index != 0
+        && parent.size[axis].size == Size::Children
+        && !along(parent, axis)
+        && !(axis == 1 && parent.flags.contains(Flags::SCROLL))
+        && !node.flags.contains(Flags::FLOAT)
+        && node.anchor.is_none()
+}
+
+/// Lets each popup sized loosely give way to the window, as far as its strictness lets it:
+/// a dialog keeps below it the margin it opens under.
+fn yield_popups(nodes: &mut [Built], axis: usize) {
+    let window = nodes[0].computed[axis];
+    for node in &mut nodes[1..] {
+        let room = match node.anchor {
+            None => continue,
+            Some(Anchor::Dialog | Anchor::Top) if axis == 1 => window * 3.0 / 4.0,
+            Some(_) => fitting(window),
+        };
+        let over = node.computed[axis] - room;
+        if over > 0.0 {
+            node.computed[axis] -= over * (1.0 - node.size[axis].strictness.clamp(0.0, 1.0));
+        }
+    }
+}
+
+/// Shrinks each popup longer than the window lets it be on `axis`; one cut short vertically
+/// scrolls what it holds.
+fn fit_popups(nodes: &mut [Built], axis: usize) {
+    let most = fitting(nodes[0].computed[axis]);
+    for node in &mut nodes[1..] {
+        if node.anchor.is_some() && node.computed[axis] > most {
+            node.computed[axis] = most;
+            if axis == 1 {
+                node.flags = node.flags | Flags::SCROLL | Flags::CLIP;
+            }
+        }
+    }
+}
+
 /// The length `parent` lays `child` out across: a popup widening over its anchor lays its
 /// contents out at its full width, but for boxes standing in for the anchor, which widen with it.
 fn across(nodes: &[Built], parent: usize, child: usize, axis: usize) -> f32 {
@@ -205,7 +264,7 @@ fn across(nodes: &[Built], parent: usize, child: usize, axis: usize) -> f32 {
         (Some(Anchor::Over(_)), Size::Pixels(full))
             if axis == 0 && !nodes[child].flags.contains(Flags::STILL) =>
         {
-            full
+            full.min(fitting(nodes[0].computed[axis]))
         }
         _ => node.computed[axis],
     }

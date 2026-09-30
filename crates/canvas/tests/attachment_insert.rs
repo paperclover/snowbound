@@ -58,6 +58,7 @@ fn file(name: &str, bytes: Vec<u8>, preview: Option<Arc<[u8]>>) -> Attachment {
         bytes: Some(bytes.into()),
         preview,
         recording: None,
+        tags: Vec::new(),
     }
 }
 

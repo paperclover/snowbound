@@ -285,6 +285,10 @@ pub struct Attachment {
     /// Set when the file is audio or video OneNote plays; notes on the page refer to it by
     /// identity (`PageParagraph::media`).
     pub recording: Option<Recording>,
+    /// Note tags on the file itself, where OneNote stores a tagged file's, in a paragraph or
+    /// on the page.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
 }
 
 /// A recording's identity, whether it is audio (1) or video (2), and its length.
@@ -324,6 +328,7 @@ impl PartialEq for Attachment {
             && self.size == other.size
             && self.layout == other.layout
             && self.recording == other.recording
+            && self.tags == other.tags
     }
 }
 
@@ -376,6 +381,7 @@ impl Attachment {
                     .unwrap_or(1),
                 duration_ms: *recording_duration,
             }),
+            tags: node.tags.clone(),
         })
     }
 }
@@ -435,11 +441,51 @@ pub struct Image {
     pub display: Option<Arc<[u8]>>,
     pub alt: Option<String>,
     pub background: bool,
-    /// The page of a file printout the picture shows, zero-based (DisplayedPageNumber);
-    /// OneNote frames printout pages.
+    /// Set when the picture is a page of a file printout, which OneNote frames.
     #[serde(default)]
-    pub printout: Option<u32>,
+    pub printout: Option<Printout>,
+    /// Note tags on the picture itself, where OneNote stores a tagged picture's, in a
+    /// paragraph or on the page.
+    #[serde(default)]
+    pub tags: Vec<Tag>,
+    /// The address the picture links to (WzHyperlinkUrl).
+    #[serde(default)]
+    pub link: Option<String>,
+    /// Text OneNote recognised in the picture, or a printout page's text; OneNote searches
+    /// it.
+    #[serde(default)]
+    pub text: Option<Recognized>,
 }
+
+/// Text a picture holds (RichEditTextUnicode).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Recognized {
+    pub text: String,
+    /// Its language (RichEditTextLangID) and the undocumented layout of its words,
+    /// `RECOGNIZED_PROPERTIES`, written back as read.
+    pub stored: Vec<(u32, Vec<u8>)>,
+}
+
+/// RichEditTextLangID, and where OneNote 2010 found each word of a picture's text
+/// (`corpus/object-tags`), not in MS-ONE.
+pub(crate) const RECOGNIZED_PROPERTIES: [u32; 2] = [0x10001cfe, 0x1c001d61];
+
+/// A page of a file printout.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Printout {
+    /// The page shown, zero-based (DisplayedPageNumber).
+    pub page: u32,
+    /// The undocumented properties tying the page to its XPS package, `PRINTOUT_PROPERTIES`,
+    /// written back as read; without them OneNote does not draw a page it reads back.
+    pub stored: Vec<(u32, Vec<u8>)>,
+}
+
+/// The printout's identity, its file's index and the page's place in it, as OneNote 2010
+/// stores them on a printout page (`corpus/printout`), not in MS-ONE; with the picture's
+/// file name (ImageFilename) and the package's description and hash, also undocumented.
+pub(crate) const PRINTOUT_PROPERTIES: [u32; 6] = [
+    0x1c001d84, 0x14003480, 0x14003481, 0x1c001dd7, 0x1c001dfb, 0x1c001dfc,
+];
 
 impl PartialEq for Image {
     fn eq(&self, other: &Self) -> bool {
@@ -449,6 +495,9 @@ impl PartialEq for Image {
             && self.alt == other.alt
             && self.background == other.background
             && self.printout == other.printout
+            && self.tags == other.tags
+            && self.link == other.link
+            && self.text == other.text
     }
 }
 
@@ -466,6 +515,8 @@ impl Image {
             printout,
             picture_width,
             picture_height,
+            link,
+            filename,
             ..
         } = &node.kind
         else {
@@ -498,8 +549,8 @@ impl Image {
             display: payload(web)?,
             alt: alt.clone(),
             background: background.unwrap_or(false),
-            printout: printout.unwrap_or(false).then(|| {
-                fields
+            printout: printout.unwrap_or(false).then(|| Printout {
+                page: fields
                     .iter()
                     .find_map(|field| match field.value {
                         FieldValue::Bytes(&[a, b, c, d]) if field.id == 0x14001df9 => {
@@ -507,8 +558,50 @@ impl Image {
                         }
                         _ => None,
                     })
-                    .unwrap_or(0)
+                    .unwrap_or(0),
+                stored: filename
+                    .iter()
+                    .map(|name| (0x1c001dd7, crate::create::string(name)))
+                    .chain(fields.iter().filter_map(|field| match field.value {
+                        FieldValue::Bytes(bytes) if PRINTOUT_PROPERTIES.contains(&field.id) => {
+                            Some((field.id, bytes.to_vec()))
+                        }
+                        _ => None,
+                    }))
+                    .collect(),
             }),
+            tags: node.tags.clone(),
+            link: link.clone(),
+            text: fields
+                .iter()
+                .find_map(|field| match field.value {
+                    FieldValue::Bytes(bytes) if field.id == 0x1c001c22 => Some(bytes),
+                    _ => None,
+                })
+                .map(|bytes| {
+                    let units: Vec<u16> = bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect();
+                    String::from_utf16_lossy(&units)
+                        .trim_end_matches('\0')
+                        .to_owned()
+                })
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| Recognized {
+                    text,
+                    stored: fields
+                        .iter()
+                        .filter_map(|field| match field.value {
+                            FieldValue::Bytes(bytes)
+                                if RECOGNIZED_PROPERTIES.contains(&field.id) =>
+                            {
+                                Some((field.id, bytes.to_vec()))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                }),
         })
     }
 }
@@ -870,14 +963,14 @@ impl Page {
                         page.objects.push(PageObject::Outline(outline));
                     }
                 }
-                Kind::Image { .. } => {
-                    page.objects
-                        .push(PageObject::Image(Image::read(revision, id, node)?));
-                }
-                Kind::Attachment { .. } => {
-                    page.objects.push(PageObject::Attachment(Attachment::read(
-                        revision, id, node,
-                    )?));
+                Kind::Image { .. } | Kind::Attachment { .. } => {
+                    for tag in node.tags.iter().filter_map(|tag| tag.definition) {
+                        define(revision, tag, false, &mut page.definitions)?;
+                    }
+                    page.objects.push(match node.kind {
+                        Kind::Image { .. } => PageObject::Image(Image::read(revision, id, node)?),
+                        _ => PageObject::Attachment(Attachment::read(revision, id, node)?),
+                    });
                 }
                 Kind::Ink { .. } => {
                     page.objects
@@ -988,6 +1081,55 @@ pub(crate) fn text_of(
                 .map(|run| (run.text.to_owned(), run.format.inherit(&format))),
         )
     })
+}
+
+/// Adds list or tag definition `id` to `definitions`.
+fn define(
+    revision: &Revision<'_>,
+    id: ExGuid,
+    is_list: bool,
+    definitions: &mut BTreeMap<ExGuid, Definition>,
+) -> Result<(), Error> {
+    let invalid = |message| Error { offset: 0, message };
+    let definition = revision
+        .nodes
+        .get(&id)
+        .ok_or_else(|| invalid("Missing canvas list or tag definition"))?;
+    let kind = match &definition.kind {
+        Kind::List {
+            font,
+            format,
+            restart,
+            bullet,
+        } if is_list => Kind::List {
+            font: font.clone(),
+            format: format.clone(),
+            restart: *restart,
+            bullet: *bullet,
+        },
+        Kind::TagDefinition {
+            label,
+            action_type,
+            shape,
+            color,
+            highlight,
+        } if !is_list => Kind::TagDefinition {
+            label: label.clone(),
+            action_type: *action_type,
+            shape: *shape,
+            color: *color,
+            highlight: *highlight,
+        },
+        _ => return Err(invalid("Canvas list or tag definition has the wrong type")),
+    };
+    definitions.insert(
+        id,
+        Definition {
+            kind,
+            format: definition.format.clone(),
+        },
+    );
+    Ok(())
 }
 
 fn read_paragraphs(
@@ -1137,67 +1279,28 @@ fn read_paragraphs(
                         .chain(match &content {
                             ParagraphContent::Text(text) => text.tags.as_slice(),
                             ParagraphContent::Table(table) => table.tags.as_slice(),
-                            ParagraphContent::Image(_)
-                            | ParagraphContent::Attachment(_)
-                            | ParagraphContent::Ink(_)
-                            | ParagraphContent::Unsupported(_) => &[],
+                            ParagraphContent::Image(image) => image.tags.as_slice(),
+                            ParagraphContent::Attachment(file) => file.tags.as_slice(),
+                            ParagraphContent::Ink(_) | ParagraphContent::Unsupported(_) => &[],
                         })
                         .filter_map(|tag| tag.definition.as_ref())
                         .map(|id| (id, false)),
                 ) {
-                    let definition = revision
-                        .nodes
-                        .get(id)
-                        .ok_or_else(|| invalid("Missing canvas list or tag definition"))?;
-                    let kind = match &definition.kind {
-                        Kind::List {
-                            font,
-                            format,
-                            restart,
-                            bullet,
-                        } if is_list => Kind::List {
-                            font: font.clone(),
-                            format: format.clone(),
-                            restart: *restart,
-                            bullet: *bullet,
-                        },
-                        Kind::TagDefinition {
-                            label,
-                            action_type,
-                            shape,
-                            color,
-                            highlight,
-                        } if !is_list => Kind::TagDefinition {
-                            label: label.clone(),
-                            action_type: *action_type,
-                            shape: *shape,
-                            color: *color,
-                            highlight: *highlight,
-                        },
-                        _ => {
-                            return Err(invalid(
-                                "Canvas list or tag definition has the wrong type",
-                            ));
-                        }
-                    };
-                    definitions.insert(
-                        *id,
-                        Definition {
-                            kind,
-                            format: definition.format.clone(),
-                        },
-                    );
+                    define(revision, *id, is_list, definitions)?;
                 }
                 if let Some(id) = base_style {
                     let definition = revision
                         .nodes
                         .get(&id)
                         .ok_or_else(|| invalid("Missing canvas paragraph style"))?;
-                    let Kind::Style { name } = &definition.kind else {
+                    let Kind::Style { name, next } = &definition.kind else {
                         return Err(invalid("Canvas paragraph style has the wrong type"));
                     };
                     definitions.entry(id).or_insert_with(|| Definition {
-                        kind: Kind::Style { name: name.clone() },
+                        kind: Kind::Style {
+                            name: name.clone(),
+                            next: next.clone(),
+                        },
                         format: definition.format.clone(),
                     });
                 }
@@ -1445,6 +1548,7 @@ mod tests {
         });
         let mut style = element(Kind::Style {
             name: Some("Body".into()),
+            next: None,
         });
         style.format.font_size = Some(12.0);
         let mut metadata = element(Kind::Metadata {
@@ -1705,7 +1809,7 @@ mod tests {
         assert_eq!(paragraph.parent, None);
         assert_eq!(paragraph.style, Some(id(5)));
         assert!(matches!(&page.definitions[&id(5)].kind,
-            Kind::Style { name: Some(name) } if name == "Body"));
+            Kind::Style { name: Some(name), .. } if name == "Body"));
         assert_eq!(page.definitions[&id(5)].format.font_size, Some(12.0));
         let text = &paragraph.text().unwrap().text;
         assert_eq!(text.text(), "ab");

@@ -32,9 +32,9 @@ class PrintoutTest(unittest.TestCase):
         native = pictures(FIXTURE / 'native/read')
         self.assertEqual([(p, n) for p, n, _ in native], [('true', '0'), ('true', '1')])
         # The first page moved half an inch down stays a printout; the second, deleted and
-        # restored, is the picture OneNote showed of it.
+        # restored, is the printout page it was.
         cold = pictures(FIXTURE / 'cold/read')
-        self.assertEqual(cold, [('true', '0', str(float(native[0][2]) + 36)), (None, None, native[1][2])])
+        self.assertEqual(cold, [('true', '0', str(float(native[0][2]) + 36)), ('true', '1', native[1][2])])
 
 
 if __name__ == '__main__':

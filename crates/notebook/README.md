@@ -56,6 +56,9 @@ the files its folders list otherwise than when last opened (`discover::Cache`, k
 a replica named by the file's location and the section's document identity, so the same
 file reopens the same queue after a relaunch and a copy of it elsewhere has its own
 (`notebook::location`: `folder`, `local`, `smb`, and `moved` for a notebook the app moves).
+`Notebook::section(path, notify)` opens a mounted notebook's section; a replica already
+named by the identity its discovery read resumes without reading the file, which the
+worker checks next, as on a share.
 A section is `Send + Sync`: `apply(author, edit)` returns at once and reports a refusal as `Event::Rejected`; `events()` drains
 remote changes (`Changed(spaces)`), publication outcomes, unreachable files and
 failures; `notify` runs on a background thread whenever an event waits.
@@ -294,7 +297,8 @@ marked `copy`, have replicas of their own, and are never placed or listed anew b
 operations, which touch only a TOC entry OneNote gave the copy's name. Of several groups
 with one TOC identity, the one its parent's TOC names, else the newest, lists; the others
 list in `unavailable` as `Reason::Copy`. iOS's
-`.Name.one.icloud` placeholders list there under their real names as `Reason::Evicted`.
+`.Name.one.icloud` placeholders, and macOS's dataless files, list there under their real names
+as `Reason::Evicted`, unless listed unchanged since discovery last read them.
 Retain the last accepted catalog if discovery fails; a connection failure does not mean
 files were deleted.
 
@@ -307,16 +311,18 @@ directly from the core document model.
 ## Notebook structure
 
 `Notebook::create`, `create_section`, `create_group`, `rename`, `move_entry`,
-`set_section_color`, `reorder` and `delete` change a notebook the way OneNote does: the
+`set_section_color`, `set_color`, `reorder` and `delete` change a notebook the way OneNote does: the
 table of contents (`Open Notebook.onetoc2`, created when a folder has none) gains,
 renames, reorders or loses entries; a new notebook holds "New Section 1", and a new
 section an empty section's file plus the page its `PageCreation` makes, in OneNote's
-new-section colour order; a section's colour lives in its own metadata; a deleted
+new-section colour order; a section's colour lives in its own metadata, the notebook's
+in its root table of contents (`corpus/section-color`); a deleted
 section moves into `OneNote_RecycleBin`, a group with its own TOC, and a deleted group's
 sections move there too before its folders go. `recycle_pages` keeps copies of pages a
 section is about to delete in `OneNote_RecycleBin/OneNote_DeletedPages.one`, with their
 identities, titles, dates and creation times, as OneNote does
-(`corpus/notebook-management`). A bin or deleted-pages file its TOC does not list is
+(`corpus/notebook-management`); `unrecycle_pages` takes them out again by identity, as
+OneNote's Undo of a page delete does. A bin or deleted-pages file its TOC does not list is
 placed and listed again, a bin whose TOC OneNote named otherwise keeps it, and an
 unavailable bin refuses the delete (`corpus/recycle-bin-repair`). An entry a TOC still
 lists for a file gone from its folder gives way to the file an edit gives its name.
@@ -368,14 +374,16 @@ notebook.
 `sidecar` keeps Snowbound-only data in the notebook's `.snowbound` folder, which
 OneNote 2010 skips because it has the Windows hidden attribute: `Storage::hide` sets it
 through `smb::Client::hide` (SET_INFO FileBasicInformation, always, since Samba reports a
-dot name hidden without storing it) or macOS's `UF_HIDDEN`, which an smbfs mount passes
-to the share; Linux keeps no such attribute. Discovery skips dot names, and a notebook
+dot name hidden without storing it), `SetFileAttributesW` on Windows, or macOS's
+`UF_HIDDEN`, which an smbfs mount passes to the share; Linux keeps no such attribute. Discovery skips dot names, and a notebook
 without the folder is whole.
 
 ```text
 .snowbound/
 ├ tags.json   [{ name, shape, art, mapped }]: a tag's name and symbol → its art
-└ tags/       <SHA-256>.png | .svg, written through a temporary name, never rewritten
+├ tags/       <SHA-256>.png | .svg, written through a temporary name, never rewritten
+└ themes.json { themes: [{ id, name, styles, modified, deleted }],
+                assignments: [{ scope, theme, assigned }] }: style themes and who wears them
 ```
 
 `Notebook::map_tag_art(name, shape, bytes, extension)` makes the folder and hides it,
@@ -386,6 +394,17 @@ name. A mapping two writers replace within one round trip of each other can stil
 one side's new tag until that side maps it again. `tag_art` reads the mappings, passing
 over entries that name no picture, and `tag_art_file` returns a picture once its bytes
 match its name.
+
+`sidecar::themes` keeps style themes: each gives OneNote 2010's eleven gallery styles
+(`STYLES`: `h1`…`h6`, `PageTitle`, `cite`, `blockquote`, `code`, `p`) a font, size,
+weight, slant, colour and spacing, and `Theme::sheet` turns them into the paragraph style
+definitions a page stores. `built_in()` lists the shipped themes, which never change once
+shipped. A scope is the notebook, a section by file identity or a page by its
+notebook-management identity; `Themes::effective(section, page)` takes the page's, else the
+section's, else the notebook's. `Notebook::themes` reads the file and `save_themes(change)`
+merges a change in as `map_tag_art` does: themes by id and assignments by scope, the later
+timestamp winning, then the greater entry. `onestore::op::restyle(page, sheet)` gives the
+`Restyle` ops that put a page in a sheet.
 
 ## SMB (feature `smb`)
 

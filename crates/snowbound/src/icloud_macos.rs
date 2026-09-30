@@ -77,29 +77,45 @@ pub fn ubiquitous(path: &Path) -> bool {
     })
 }
 
-/// The app's own folder in iCloud Drive as `look_up` last found it.
-static FOLDER: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// The app's own folder in iCloud Drive as `look_up` last found it, and what reports its
+/// notebooks coming and going.
+static FOLDER: Mutex<Option<(PathBuf, Option<Presenter>)>> = Mutex::new(None);
 
 /// The app's own folder in iCloud Drive (its container's Documents, shown as iCloud Drive's
 /// Snowbound folder), as `look_up` last found it: while the app carries the container's
 /// entitlement and iCloud Drive is on.
 pub fn folder() -> Option<PathBuf> {
-    FOLDER.lock().ok()?.clone()
+    Some(FOLDER.lock().ok()?.as_ref()?.0.clone())
 }
 
 /// Looks for the app's own folder in iCloud Drive on a thread of its own, as asking the
-/// iCloud daemon can take a while, then calls `done`.
-pub fn look_up(done: impl Fn() + Send + 'static) {
+/// iCloud daemon can take a while, then calls `changed`, and again whenever a folder at its
+/// top comes or goes, as another device adds or removes a notebook.
+pub fn look_up(changed: impl Fn() + Send + Sync + 'static) {
     std::thread::spawn(move || {
-        let found = container();
+        let changed = std::sync::Arc::new(changed);
+        let found = container().map(|root| {
+            let report = std::sync::Arc::clone(&changed);
+            let presenter = presenter(&root, move |paths| {
+                if paths.iter().any(|path| !path.contains('/')) {
+                    report();
+                }
+            });
+            (root, presenter)
+        });
         if let Ok(mut folder) = FOLDER.lock() {
             *folder = found;
         }
-        done();
+        changed();
     });
 }
 
+/// The container's Documents, or for trying the app out without its entitlement, the folder
+/// `SNOWBOUND_ICLOUD_FOLDER` names in its place.
 fn container() -> Option<PathBuf> {
+    if let Some(folder) = std::env::var_os("SNOWBOUND_ICLOUD_FOLDER") {
+        return Some(folder.into());
+    }
     if !available() {
         return None;
     }
@@ -182,6 +198,43 @@ fn present(path: &Path) -> io::Result<()> {
         "Downloading from iCloud Drive",
     ))
 }
+
+/// Asks iCloud Drive for every file below `root` it keeps elsewhere, dataless or as a
+/// `.Name.icloud` placeholder: how many are not here yet.
+pub fn download(root: &Path) -> usize {
+    use std::os::macos::fs::MetadataExt;
+    let manager = unsafe { NSFileManager::defaultManager() };
+    let mut missing = 0;
+    let mut folders = vec![root.to_owned()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+            let (path, name) = (entry.path(), entry.file_name());
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            let placeholder = name
+                .to_str()
+                .and_then(|name| name.strip_prefix('.')?.strip_suffix(".icloud"));
+            let file = match placeholder {
+                Some(real) => path.with_file_name(real),
+                None if metadata.st_flags() & SF_DATALESS != 0 => path,
+                None => continue,
+            };
+            missing += 1;
+            if let Some(url) = url(&file) {
+                let _ = unsafe { manager.startDownloadingUbiquitousItemAtURL_error(&url) };
+            }
+        }
+    }
+    missing
+}
+
+/// `st_flags` of a file whose contents the system keeps elsewhere until read.
+const SF_DATALESS: u32 = 0x4000_0000;
 
 /// A section file in iCloud Drive, read and published under file coordination, with the
 /// conflict versions iCloud keeps beside it.
@@ -303,23 +356,39 @@ impl Remote for Coordinated {
     }
 }
 
-/// Opens the section at catalog `path` of a notebook in iCloud Drive.
+/// Opens the section at catalog `path` of the notebook in iCloud Drive's folder `root`. One
+/// without a replica here yet waits for iCloud Drive to bring its file down, which the sync
+/// thread's reads would not.
 pub fn section(
     notebook: &Notebook,
+    root: &Path,
     path: &str,
     notify: impl Fn() + Send + 'static,
 ) -> Result<Section, notebook::Error> {
+    if !notebook.replica_path(path)?.exists() {
+        fetch(&root.join(path))?;
+    }
     let section = notebook.section_with(path, |file| Ok(Coordinated(file.to_owned())), notify)?;
     section.set_pause(PAUSE);
     Ok(section)
 }
 
-/// Opens a section file in iCloud Drive on its own.
+/// Waits for iCloud Drive to bring down `file`, where it keeps it elsewhere.
+fn fetch(file: &Path) -> io::Result<()> {
+    // Reading any of a dataless file brings all of it down.
+    coordinated(file, false, || {
+        use std::io::Read;
+        std::fs::File::open(file)?.read(&mut [0]).map(drop)
+    })?
+}
+
+/// Opens a section file in iCloud Drive on its own, once here.
 pub fn lone_section(
     file: &Path,
     cache: &Path,
     notify: impl Fn() + Send + 'static,
 ) -> Result<Section, notebook::Error> {
+    fetch(file)?;
     let section = Section::open_with(file, cache, |file| Ok(Coordinated(file.to_owned())), notify)?;
     section.set_pause(PAUSE);
     Ok(section)
@@ -383,6 +452,22 @@ declare_class!(
         #[method(presentedSubitemAtURL:didGainVersion:)]
         unsafe fn subitem_did_gain_version(&self, url: &NSURL, _: &NSFileVersion) {
             self.report(url);
+        }
+
+        #[method(presentedSubitemAtURL:didMoveToURL:)]
+        unsafe fn subitem_did_move(&self, from: &NSURL, to: &NSURL) {
+            self.report(from);
+            self.report(to);
+        }
+
+        #[method(accommodatePresentedSubitemDeletionAtURL:completionHandler:)]
+        unsafe fn accommodate_subitem_deletion(
+            &self,
+            url: &NSURL,
+            done: &block2::Block<dyn Fn(*mut objc2_foundation::NSError)>,
+        ) {
+            self.report(url);
+            done.call((std::ptr::null_mut(),));
         }
 
         #[method(presentedSubitemAtURL:didResolveConflictVersion:)]
@@ -491,7 +576,7 @@ mod tests {
             let notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &page).unwrap();
             assert!(ubiquitous(&root));
             let path = notebook.catalog().sections[0].path.clone();
-            let section = section(&notebook, &path, || {}).unwrap();
+            let section = section(&notebook, &root, &path, || {}).unwrap();
             let (space, ..) = section.pages().unwrap()[0].clone();
             let title = section
                 .page(space)

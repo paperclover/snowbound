@@ -12,6 +12,22 @@ fn evicted(name: &str) -> Option<&str> {
     (lower.ends_with(".one") || lower.ends_with(".onetoc2")).then_some(real)
 }
 
+/// Whether the system keeps the file's contents elsewhere until it is read, as macOS 14 and
+/// later list a file iCloud Drive evicted (`SF_DATALESS`).
+fn dataless(metadata: &std::fs::Metadata) -> bool {
+    const SF_DATALESS: u32 = 0x4000_0000;
+    #[cfg(target_os = "macos")]
+    let flags = std::os::macos::fs::MetadataExt::st_flags(metadata);
+    #[cfg(target_os = "ios")]
+    let flags = std::os::ios::fs::MetadataExt::st_flags(metadata);
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    let flags = {
+        let _ = metadata;
+        0
+    };
+    flags & SF_DATALESS != 0
+}
+
 /// Where iOS lists the file at `path` while iCloud Drive keeps it elsewhere.
 pub(crate) fn placeholder(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?.to_str()?;
@@ -62,6 +78,8 @@ impl Source for Local {
                 name,
                 kind: if kind.is_dir() {
                     EntryKind::Directory
+                } else if kind.is_file() && dataless(&metadata) {
+                    EntryKind::Evicted
                 } else if kind.is_file() {
                     EntryKind::File
                 } else {

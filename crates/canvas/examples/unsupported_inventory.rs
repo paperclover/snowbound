@@ -468,6 +468,25 @@ fn page(engine: &mut TextEngine, page: Page, place: &str, inventory: &mut Invent
             _ => {}
         }
     }
+    // Pictures with pixels the scene still shows as placeholders, for want of a size or the
+    // like; undecodable ones are counted above.
+    #[cfg(feature = "gpu")]
+    if let Ok((scene, shown)) = canvas::gpu::page::PageScene::from_page(page.clone(), engine) {
+        for object in scene.read_only(Some(&shown)) {
+            if let PageObject::Image(image) = &object.source
+                && [image.bytes.as_ref(), image.display.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|bytes| draw::RasterImage::measure(bytes).is_ok())
+            {
+                inventory.add(
+                    Stage::Placeholder,
+                    "page picture with pixels drawn as \"Image unavailable\"",
+                    place,
+                );
+            }
+        }
+    }
     let mut editor = match CanvasEditor::from_page(page.clone(), engine) {
         Ok(editor) => editor,
         Err(error) => {

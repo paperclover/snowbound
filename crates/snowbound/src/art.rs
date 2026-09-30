@@ -41,6 +41,7 @@ pub const SERVER: &[&str] = art!("icons/server");
 pub const SIDEBAR_COLLAPSE: &[&str] = art!("icons/sidebar-collapse");
 pub const SIDEBAR_EXPAND: &[&str] = art!("icons/sidebar-expand");
 pub const STRIKETHROUGH: &[&str] = art!("icons/strikethrough");
+pub const STYLES: &[&str] = art!("icons/styles");
 pub const SUBSCRIPT: &[&str] = art!("icons/subscript");
 pub const SUPERSCRIPT: &[&str] = art!("icons/superscript");
 pub const TABLE: &[&str] = art!("icons/table");

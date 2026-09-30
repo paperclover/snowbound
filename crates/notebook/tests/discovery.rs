@@ -197,6 +197,46 @@ fn evicted_files_list_under_their_names_until_downloaded() {
     assert!(!root.join("Open Notebook.onetoc2").exists());
 }
 
+/// A source whose files list as macOS lists those iCloud Drive evicted: dataless, under their
+/// names and listings, and never read.
+struct Dataless(Local);
+
+impl Source for Dataless {
+    fn entries(&mut self, path: &str, limit: usize) -> io::Result<Vec<Entry>> {
+        let mut entries = self.0.entries(path, limit)?;
+        for entry in &mut entries {
+            entry.kind = notebook::discover::EntryKind::Evicted;
+        }
+        Ok(entries)
+    }
+
+    fn read(&mut self, path: &str, _: usize) -> io::Result<Vec<u8>> {
+        panic!("read {path}, which is not on this device");
+    }
+}
+
+/// A dataless file lists as its last read found it, where it lists unchanged since, and as not
+/// downloaded otherwise.
+#[test]
+fn dataless_files_list_as_last_read_or_wait_for_their_download() {
+    let root = tempfile::tempdir().unwrap();
+    fixture(root.path());
+    let mut cache = Cache::default();
+    cache
+        .discover(&mut Local::open(root.path()).unwrap(), limits())
+        .unwrap();
+    let catalog = cache
+        .discover(&mut Dataless(Local::open(root.path()).unwrap()), limits())
+        .unwrap();
+    assert_eq!(catalog.sections[0].path, "one.one");
+    assert!(catalog.toc.is_some() && catalog.unavailable.is_empty());
+
+    let catalog = discover(&mut Dataless(Local::open(root.path()).unwrap()), limits()).unwrap();
+    assert!(catalog.sections.is_empty() && catalog.toc.is_none());
+    assert_eq!(catalog.unavailable[0].path, "one.one");
+    assert_eq!(catalog.unavailable[0].reason, Reason::Evicted);
+}
+
 #[test]
 fn locked_and_unreadable_sections_retain_their_storage_identity() {
     let root = tempfile::tempdir().unwrap();

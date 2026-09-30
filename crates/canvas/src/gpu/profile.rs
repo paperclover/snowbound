@@ -247,6 +247,9 @@ fn frame_cost() {
                     alt: None,
                     background: false,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 });
                 let cell = || TableCell {
                     id: new_id().unwrap(),

@@ -104,6 +104,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                         Author.ask(from: self) {}
                     })
                 more.append(Appearance.menu())
+                more.append(Editing.fontMenu())
                 provide(actions + [UIMenu(options: .displayInline, children: more)])
             }
         ])
@@ -535,10 +536,13 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
 
     private func add(_ notebook: Notebook) {
         Notebooks.add(notebook)
+        openFirstSection(of: notebook)
+    }
+
+    private func openFirstSection(of notebook: Notebook) {
         reload()
         notebook.open { [weak self] in
             self?.reload()
-            // A notebook just added opens at its first section.
             if let tab = notebook.tabs.first(where: \.readable) { self?.onOpen?(tab, notebook) }
         }
     }
@@ -549,14 +553,21 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         guard let author = Author.name else {
             return Author.ask(from: self) { [weak self] in self?.newNotebook(inCloud: inCloud) }
         }
-        let alert = UIAlertController(title: "New Notebook", message: nil, preferredStyle: .alert)
+        let alert = UIAlertController(
+            title: inCloud ? "New iCloud Notebook" : "New Notebook", message: nil, preferredStyle: .alert)
         let create = UIAlertAction(title: "Create", style: .default) { [weak self, weak alert] _ in
             let name = alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespaces) ?? ""
             self?.create(name, by: author, inCloud: inCloud)
         }
-        create.isEnabled = false
         alert.addTextField { field in
             field.placeholder = "Name"
+            // A notebook in iCloud Drive starts named for it, so the list tells it apart.
+            if inCloud {
+                let taken = Set(Notebooks.inCloud.map(\.name))
+                field.text = (1...).lazy.map { $0 == 1 ? "iCloud Notebook" : "iCloud Notebook \($0)" }
+                    .first { !taken.contains($0) }
+            }
+            create.isEnabled = field.text?.isEmpty == false
             field.autocapitalizationType = .words
             NotificationCenter.default.addObserver(
                 forName: UITextField.textDidChangeNotification, object: field, queue: .main
@@ -634,9 +645,25 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        guard let url = urls.first else { return }
+        if let url = urls.first { open(document: url) }
+    }
+
+    /// Opens the folder or section file at `url`, chosen here or opened from Files, at its first
+    /// section, listing it unless it is listed.
+    func open(document url: URL) {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        let listed = Notebooks.all.first { notebook in
+            guard case .files(let bookmark) = notebook.source else { return false }
+            var stale = false
+            let location = try? URL(resolvingBookmarkData: bookmark, bookmarkDataIsStale: &stale)
+            return location?.standardizedFileURL == url.standardizedFileURL
+        }
+        if let listed {
+            // A notebook still opening at launch lists no sections yet.
+            if let tab = listed.tabs.first(where: \.readable) { onOpen?(tab, listed) } else { openFirstSection(of: listed) }
+            return
+        }
         guard let bookmark = try? url.bookmarkData() else { return }
         add(Notebook(name: url.deletingPathExtension().lastPathComponent, source: .files(bookmark: bookmark)))
     }

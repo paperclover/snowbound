@@ -33,8 +33,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
-    let paper = if a4 { print::A4 } else { print::LETTER };
-    let pdf = print::pdf(pages, &mut TextEngine::default(), paper, name)?;
+    let setup = print::Setup {
+        paper: if a4 { print::A4 } else { print::LETTER },
+        fit_width: true,
+        footer: print::Footer::SectionAndPage,
+    };
+    let pdf = print::pdf(
+        vec![(name.to_owned(), pages)],
+        &mut TextEngine::default(),
+        &setup,
+    )?;
     fs::write(destination, pdf)?;
     Ok(())
 }

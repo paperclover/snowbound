@@ -169,10 +169,19 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
             UIAction(title: "Page Background…", image: UIImage(systemName: "paintpalette"), attributes: editable) {
                 [weak self] _ in self?.showPaper()
             },
+            themeMenu(),
             UIAction(title: "Tags Summary", image: UIImage(systemName: "tag")) { [weak self] _ in
                 guard let self else { return }
                 scene?.showTags(of: section.notebook, from: self)
             },
+            UIMenu(options: .displayInline, children: [
+                UIAction(title: "Print…", image: UIImage(systemName: "printer")) { [weak self] _ in
+                    self?.printPage(export: false)
+                },
+                UIAction(title: "Export as PDF…", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
+                    self?.printPage(export: true)
+                },
+            ]),
             UIMenu(options: .displayInline, children: [
                 UIAction(title: "New Subpage", image: UIImage(systemName: "text.badge.plus")) { _ in
                     scene?.newPage(subpage: true)
@@ -184,6 +193,69 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
                 },
             ]),
         ]
+    }
+
+    /// The page's theme, its section's and its notebook's, each pickable; the page wears a
+    /// new one when it opens again.
+    private func themeMenu() -> UIMenu {
+        guard let themes = section.themes(of: page) else {
+            return UIMenu(title: "Theme", image: UIImage(systemName: "textformat"), children: [])
+        }
+        let scopes: [(String, String?)] = [
+            ("This Page", themes.page), ("This Section", themes.section), ("This Notebook", themes.notebook),
+        ]
+        let page = page
+        let menus = scopes.enumerated().map { scope, entry in
+            let (title, current) = entry
+            let choices = [(nil as String?, "None")] + themes.themes.map { ($0.id, $0.name) }
+            return UIMenu(title: title, children: choices.map { id, name in
+                UIAction(title: name, state: id == current ? .on : .off) { [weak self] _ in
+                    guard let self else { return }
+                    section.setTheme(id, scope: UInt8(scope), of: page) { [weak self] _ in
+                        self?.onOpen?(page)
+                    }
+                }
+            })
+        }
+        return UIMenu(title: "Theme", image: UIImage(systemName: "textformat"), children: menus)
+    }
+
+    /// Prints the page through the system's print sheet, or with `export` offers its PDF in
+    /// the share sheet, laid out as OneNote 2010 prints it on the region's paper.
+    private func printPage(export: Bool) {
+        let letter = ["US", "CA", "MX", "PR", "PH", "CL", "CO", "VE", "GT", "CR", "PA", "DO", "SV", "NI", "HN", "BZ"]
+            .contains(Locale.current.region?.identifier ?? "US")
+        let paper = letter ? CGSize(width: 612, height: 792) : CGSize(width: 595.276, height: 841.89)
+        let title = canvas.pageTitle ?? section.row(of: page)?.row.title ?? ""
+        guard let pdf = canvas.pdf(paper: paper, section: section.tab.name) else {
+            let alert = UIAlertController(
+                title: export ? "Couldn't Export the PDF" : "Couldn't Print",
+                message: "The page could not be laid out on paper.", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default))
+            present(alert, animated: true)
+            return
+        }
+        if export {
+            let name = title.components(separatedBy: CharacterSet(charactersIn: "/\\:")).joined(separator: "-")
+                .trimmingCharacters(in: .whitespaces)
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent((name.isEmpty ? "Untitled" : name) + ".pdf")
+            do {
+                try pdf.write(to: file)
+            } catch {
+                return
+            }
+            let share = UIActivityViewController(activityItems: [file], applicationActivities: nil)
+            share.popoverPresentationController?.barButtonItem = more
+            present(share, animated: true)
+        } else {
+            let info = UIPrintInfo.printInfo()
+            info.jobName = title
+            let printer = UIPrintInteractionController.shared
+            printer.printInfo = info
+            printer.printingItem = pdf
+            printer.present(from: more, animated: true)
+        }
     }
 
     private func showPaper() {

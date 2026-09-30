@@ -316,7 +316,9 @@ pub(crate) fn validate(
             Some(None) => paragraph.style,
             None => previous.style,
         };
-        if paragraph.style != style || paragraph.format != previous.format {
+        // `Style` and `Unstyle` give a paragraph of text a style and take it away.
+        let restyled = paragraph.style != style && paragraph.text().is_none();
+        if restyled || paragraph.format != previous.format {
             return Err(invalid(
                 "Paragraph styles and paragraph formatting cannot be edited",
             ));
@@ -743,6 +745,8 @@ fn bare(paragraph: &PageParagraph) -> PageParagraph {
     stripped.media = Default::default();
     match &mut stripped.content {
         ParagraphContent::Text(text) => text.tags.clear(),
+        ParagraphContent::Image(image) => image.tags.clear(),
+        ParagraphContent::Attachment(file) => file.tags.clear(),
         ParagraphContent::Table(table) => {
             table.tags.clear();
             for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
@@ -991,16 +995,18 @@ impl Lowering {
         };
         let stored = pictures(old.page);
         for (id, image) in pictures(new.page) {
-            if let Some(previous) = stored.get(&id)
-                && *previous != image
-            {
-                super::content::picture_fixed_fields(previous, &image)?;
+            let Some(previous) = stored.get(&id) else {
+                continue;
+            };
+            super::content::picture_fixed_fields(previous, &image)?;
+            if (&previous.layout, &previous.alt) != (&image.layout, &image.alt) {
                 self.emit(PageOp::Picture {
                     picture: id,
                     layout: image.layout.clone(),
                     alt: image.alt.clone(),
                 })?;
             }
+            self.set_tags(new.page, id, &image.tags, &previous.tags)?;
         }
         let files = |page: &Page| -> BTreeMap<ExGuid, crate::page::Attachment> {
             page.objects
@@ -1049,6 +1055,7 @@ impl Lowering {
                     size: file.size,
                 })?;
             }
+            self.set_tags(new.page, id, &file.tags, &previous.tags)?;
         }
         let inks = |page: &Page| -> BTreeMap<ExGuid, crate::page::Ink> {
             page.objects
@@ -1098,7 +1105,7 @@ impl Lowering {
                 if new.title_outlines.contains(&id) {
                     return Err(invalid("Title outlines cannot be added"));
                 }
-                let object = match object {
+                let added = match object {
                     PageObject::Outline(outline) => {
                         if outline
                             .paragraphs
@@ -1115,9 +1122,17 @@ impl Lowering {
                             ..(*outline).clone()
                         })
                     }
-                    PageObject::Image(_) | PageObject::Attachment(_) | PageObject::Ink(_) => {
-                        (*object).clone()
+                    PageObject::Image(image) => PageObject::Image(crate::page::Image {
+                        tags: Vec::new(),
+                        ..image.clone()
+                    }),
+                    PageObject::Attachment(file) => {
+                        PageObject::Attachment(crate::page::Attachment {
+                            tags: Vec::new(),
+                            ..file.clone()
+                        })
                     }
+                    PageObject::Ink(_) => (*object).clone(),
                     PageObject::Title(_) | PageObject::Unsupported(_) => {
                         return Err(invalid(
                             "Titles and unsupported objects cannot be edited through the page model",
@@ -1125,9 +1140,15 @@ impl Lowering {
                     }
                 };
                 self.emit(PageOp::Add {
-                    object,
+                    object: added,
                     before: next,
                 })?;
+                let tags = match object {
+                    PageObject::Image(image) => image.tags.as_slice(),
+                    PageObject::Attachment(file) => file.tags.as_slice(),
+                    _ => &[],
+                };
+                self.set_tags(new.page, id, tags, &[])?;
             } else if !kept.contains(&id) {
                 self.emit(PageOp::Move {
                     object: id,
@@ -1694,11 +1715,14 @@ impl Lowering {
 
     fn styles(&mut self, after: &Page, new: &View<'_>) -> Result<(), Error> {
         for (id, paragraph) in &new.paragraphs {
-            let Some(style) = paragraph.style else {
-                continue;
-            };
             let current = model::paragraph(&self.current, *id)
                 .ok_or_else(|| invalid("A paragraph is missing after text edits"))?;
+            let Some(style) = paragraph.style else {
+                if current.style.is_some() {
+                    self.emit(PageOp::Unstyle { paragraph: *id })?;
+                }
+                continue;
+            };
             if current.style == Some(style) {
                 continue;
             }
@@ -1771,31 +1795,48 @@ impl Lowering {
                 (ParagraphContent::Table(table), ParagraphContent::Table(stored)) => {
                     targets.push((table.id, &table.tags, stored.tags.clone()))
                 }
+                (ParagraphContent::Image(image), ParagraphContent::Image(stored)) => {
+                    targets.push((image.id, &image.tags, stored.tags.clone()))
+                }
+                (ParagraphContent::Attachment(file), ParagraphContent::Attachment(stored)) => {
+                    targets.push((file.id, &file.tags, stored.tags.clone()))
+                }
                 _ => {}
             }
             for (target, tags, stored) in targets {
-                if same_tags(tags, &stored) {
-                    continue;
-                }
-                let mut definitions = Vec::new();
-                for tag in tags {
-                    let Some(definition) = tag.definition else {
-                        continue;
-                    };
-                    if let Some(model) = after.definitions.get(&definition)
-                        && !definitions.iter().any(|(id, _)| *id == definition)
-                    {
-                        definitions.push((definition, model.clone()));
-                    }
-                }
-                self.emit(PageOp::Tags {
-                    target,
-                    tags: tags.clone(),
-                    definitions,
-                })?;
+                self.set_tags(after, target, tags, &stored)?;
             }
         }
         Ok(())
+    }
+
+    /// Emits the op giving `target` `tags` where it stores others.
+    fn set_tags(
+        &mut self,
+        after: &Page,
+        target: ExGuid,
+        tags: &[Tag],
+        stored: &[Tag],
+    ) -> Result<(), Error> {
+        if same_tags(tags, stored) {
+            return Ok(());
+        }
+        let mut definitions = Vec::new();
+        for tag in tags {
+            let Some(definition) = tag.definition else {
+                continue;
+            };
+            if let Some(model) = after.definitions.get(&definition)
+                && !definitions.iter().any(|(id, _)| *id == definition)
+            {
+                definitions.push((definition, model.clone()));
+            }
+        }
+        self.emit(PageOp::Tags {
+            target,
+            tags: tags.to_vec(),
+            definitions,
+        })
     }
 
     fn media(&mut self, new: &View<'_>) -> Result<(), Error> {

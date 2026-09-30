@@ -16,7 +16,10 @@ mod tests;
 use crate::gpu::{Paper, Viewport, page::PageScene};
 use crate::{
     date::DateField,
-    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, Formatting, Selection, TextOutline, Whole},
+    editor::{
+        Awaited, CanvasEditor, DEFAULT_OUTLINE_WIDTH, Formatting, Piece, Selection, TextOutline,
+        Whole,
+    },
     layout::TextEngine,
 };
 use draw::{
@@ -176,6 +179,15 @@ enum Drag {
     Resize {
         outline: Option<Box<TextOutline>>,
         grab: f32,
+    },
+    /// A table column's right border from document x `press`, where the column was `width`
+    /// wide; the preview holds the width it has reached.
+    Column {
+        table: onestore::ExGuid,
+        column: usize,
+        width: f32,
+        press: f32,
+        preview: Option<(f32, Box<TextOutline>)>,
     },
     Outline {
         id: onestore::ExGuid,
@@ -346,9 +358,14 @@ impl PageView {
         view
     }
 
-    /// Shows a page reloaded from storage in place of the edited one.
-    pub fn replace(&mut self, editor: CanvasEditor, scene: Option<(PageScene, [f32; 2])>) {
-        self.editor = editor;
+    /// Shows a page reloaded from storage in place of the edited one, whose editor it returns.
+    pub fn replace(
+        &mut self,
+        mut editor: CanvasEditor,
+        scene: Option<(PageScene, [f32; 2])>,
+    ) -> CanvasEditor {
+        editor.default_font = std::mem::take(&mut self.editor.default_font);
+        let left = std::mem::replace(&mut self.editor, editor);
         self.scene = scene;
         self.drag = None;
         self.space = false;
@@ -356,6 +373,7 @@ impl PageView {
         self.found.clear();
         self.played = None;
         self.leave_ink();
+        left
     }
 
     /// Shows the stored page after a change made elsewhere in place of the one shown,
@@ -376,23 +394,36 @@ impl PageView {
 
     /// Shows another page as OneNote opens one, keeping the zoom: at `place` if the page was
     /// left there earlier. OneNote keeps the scroll in device pixels across zoom changes and
-    /// does not reveal the restored selection.
+    /// does not reveal the restored selection. Returns the editor of the page left.
     pub fn open(
         &mut self,
         editor: CanvasEditor,
         scene: Option<(PageScene, [f32; 2])>,
         place: Option<Place>,
-    ) {
-        self.replace(editor, scene);
+    ) -> CanvasEditor {
+        let left = self.replace(editor, scene);
         self.reach = None;
-        let Some(place) = place else {
-            return self.place_opened();
-        };
-        self.viewport.origin = place.origin;
-        self.scroll().clamp(&mut self.viewport);
-        if self.editor.focus_outline(place.outline).is_ok() {
-            let _ = self.editor.select(place.selection);
+        match place {
+            Some(place) => {
+                self.viewport.origin = place.origin;
+                self.scroll().clamp(&mut self.viewport);
+                if self.editor.focus_outline(place.outline).is_ok() {
+                    let _ = self.editor.select(place.selection);
+                }
+            }
+            None => self.place_opened(),
         }
+        left
+    }
+
+    /// Takes up `parked`, the editor the page `open` just showed was left with, history and
+    /// all, in place of the one it opened with.
+    pub fn resume(&mut self, parked: CanvasEditor) -> Result<()> {
+        self.editor.resume(parked, &mut self.engine)?;
+        if let Some((scene, _)) = &mut self.scene {
+            scene.refresh(&mut self.editor, &mut self.engine)?;
+        }
+        Ok(())
     }
 
     /// Where the page is left, for `open` to return to.
@@ -907,10 +938,16 @@ impl PageView {
     /// Everything to draw this frame.
     pub fn primitives(&self, colors: TextColors) -> Result<Vec<Primitive<'_>>> {
         let preview = match &self.drag {
-            Some(Drag::Resize {
-                outline: Some(outline),
-                ..
-            }) => Some(PointerFeedback::Resize(outline)),
+            Some(
+                Drag::Resize {
+                    outline: Some(outline),
+                    ..
+                }
+                | Drag::Column {
+                    preview: Some((_, outline)),
+                    ..
+                },
+            ) => Some(PointerFeedback::Resize(outline)),
             _ => self
                 .drag_delta()
                 .map(|(id, delta)| PointerFeedback::Move(id, delta))
@@ -958,6 +995,7 @@ impl PageView {
                         Some(
                             Drag::Outline { .. }
                                 | Drag::Resize { .. }
+                                | Drag::Column { .. }
                                 | Drag::Image { .. }
                                 | Drag::Space { .. }
                         )
@@ -1038,8 +1076,14 @@ impl PageView {
         let hit = self.hit_test(point);
         match (&self.drag, hit) {
             (Some(Drag::Image { handle, .. }), _) => handle_cursor(*handle),
+            (None, Some(Hit::Image { id, handle: [0, 0] }))
+                if self.modifiers.command && self.editor.picture_link(id).is_some() =>
+            {
+                Cursor::Pointer
+            }
             (None, Some(Hit::Image { handle, .. })) => handle_cursor(handle),
             (Some(Drag::Resize { .. }), _) | (None, Some(Hit::Resize { .. })) => Cursor::EwResize,
+            (Some(Drag::Column { .. }), _) | (None, Some(Hit::Column { .. })) => Cursor::ColResize,
             (Some(Drag::Outline { .. }), _) | (None, Some(Hit::Handle { .. })) => Cursor::Move,
             (None, Some(Hit::Date(_))) => Cursor::Pointer,
             (None, Some(Hit::Text { id, point }))
@@ -1047,7 +1091,10 @@ impl PageView {
             {
                 Cursor::Pointer
             }
-            (None, Some(Hit::ReadOnly(_) | Hit::Check { .. } | Hit::File(_))) => Cursor::Default,
+            (
+                None,
+                Some(Hit::ReadOnly(_) | Hit::Check { .. } | Hit::ObjectCheck(_) | Hit::File(_)),
+            ) => Cursor::Default,
             _ => Cursor::Text,
         }
     }
@@ -1155,6 +1202,23 @@ impl PageView {
                 }
                 Ok(Response::default())
             }
+            Some(Drag::Column {
+                table,
+                column,
+                width,
+                press,
+                preview,
+            }) => {
+                let width = *width + self.viewport.document_point(self.pointer)[0] - *press;
+                if preview.as_ref().is_none_or(|(shown, _)| *shown != width) {
+                    let outline =
+                        self.editor
+                            .preview_column(&mut self.engine, *table, *column, width)?;
+                    *preview = Some((width, Box::new(outline)));
+                    return self.changed();
+                }
+                Ok(Response::default())
+            }
             None => Ok(Response::redraw()),
         }
     }
@@ -1195,6 +1259,12 @@ impl PageView {
                     .click_check(&mut self.engine, outline, paragraph)?;
                 return self.changed();
             }
+            Some(Hit::ObjectCheck(id)) => {
+                self.set_object_focus(None);
+                self.drag = None;
+                self.editor.click_object_check(id)?;
+                return self.changed();
+            }
             Some(Hit::File(id)) => {
                 self.set_object_focus(Some(ObjectFocus::File(id)));
                 self.drag = None;
@@ -1212,6 +1282,17 @@ impl PageView {
                         pending_press: Some(self.pointer),
                     });
                 }
+            }
+            // A click selects a linked picture; Ctrl+click follows its link, as in OneNote.
+            Some(Hit::Image { id, handle: [0, 0] })
+                if self.modifiers.command
+                    && let Some(address) = self.editor.picture_link(id) =>
+            {
+                self.drag = None;
+                return Ok(Response {
+                    request: Some(Request::OpenLink(address.to_owned())),
+                    ..Response::default()
+                });
             }
             Some(Hit::Image { id, handle }) => {
                 self.set_object_focus(Some(ObjectFocus::Image(id)));
@@ -1240,6 +1321,22 @@ impl PageView {
                 self.drag = Some(Drag::Resize {
                     outline: None,
                     grab,
+                });
+            }
+            Some(Hit::Column {
+                id,
+                table,
+                column,
+                width,
+            }) => {
+                self.set_object_focus(None);
+                self.editor.focus_outline(id)?;
+                self.drag = Some(Drag::Column {
+                    table,
+                    column,
+                    width,
+                    press: point[0],
+                    preview: None,
                 });
             }
             Some(Hit::Text { id, point })
@@ -1326,13 +1423,24 @@ impl PageView {
             self.editor
                 .place_image(&mut self.engine, id, origin, size)?;
         }
-        if let Some(Drag::Resize {
-            outline: Some(outline),
-            ..
-        }) = self.drag.take()
-        {
-            self.editor
-                .resize(&mut self.engine, outline.bounds().width() as f32)?;
+        match self.drag.take() {
+            Some(Drag::Resize {
+                outline: Some(outline),
+                ..
+            }) => {
+                self.editor
+                    .resize(&mut self.engine, outline.bounds().width() as f32)?;
+            }
+            Some(Drag::Column {
+                table,
+                column,
+                preview: Some((width, _)),
+                ..
+            }) => {
+                self.editor
+                    .resize_column(&mut self.engine, table, column, width)?;
+            }
+            _ => {}
         }
         if let Some(id) = clicked {
             // A click on an outline's handle selects it as OneNote does.
@@ -1421,6 +1529,11 @@ impl PageView {
     /// A toolbar command, ignored like other edits while an input method composes or an object
     /// holds focus.
     pub fn format(&mut self, command: Formatting) -> Result<Response> {
+        if let Some(ObjectFocus::Image(id) | ObjectFocus::File(id)) = self.object_focus
+            && self.editor.format_object(&mut self.engine, id, &command)?
+        {
+            return self.edited();
+        }
         if !self.accepts_text() || self.editor.marked_range().is_some() {
             return Ok(Response::default());
         }
@@ -1692,23 +1805,42 @@ impl PageView {
         if !self.accepts_text() || self.editor.marked_range().is_some() {
             return Ok(Response::default());
         }
-        let image = onestore::page::Image {
-            id: onestore::page::text::new_id()?,
-            layout: onestore::document::Layout {
-                max_width: Some(size[0]),
-                max_height: Some(size[1]),
-                ..Default::default()
-            },
-            size: Some(size),
-            bytes: Some(bytes.into()),
-            display: None,
-            alt: None,
-            background: false,
-            printout: None,
-        };
+        let image = crate::editor::picture(bytes, size)?;
         self.editor.insert_picture(&mut self.engine, image)?;
         self.follow_pictures()?;
         self.edited()
+    }
+
+    /// Pasted text in `language`, an LCID, and pictures, in order and as one undo step; see
+    /// [`CanvasEditor::paste_pieces`].
+    pub fn paste_pieces(
+        &mut self,
+        pieces: Vec<Piece>,
+        language: u32,
+    ) -> Result<(Vec<Awaited>, Response)> {
+        if !self.accepts_text() || self.editor.marked_range().is_some() {
+            return Ok((Vec::new(), Response::default()));
+        }
+        let awaited = self
+            .editor
+            .paste_pieces(&mut self.engine, pieces, language)?;
+        self.follow_pictures()?;
+        Ok((awaited, self.edited()?))
+    }
+
+    /// An awaited picture arrived: see [`CanvasEditor::insert_awaited`]. The view stays.
+    pub fn insert_awaited(
+        &mut self,
+        at: Awaited,
+        bytes: Vec<u8>,
+        size: [f32; 2],
+    ) -> Result<Response> {
+        let image = crate::editor::picture(bytes, size)?;
+        if !self.editor.insert_awaited(&mut self.engine, at, image)? {
+            return Ok(Response::default());
+        }
+        self.follow_pictures()?;
+        self.changed()
     }
 
     /// Record Audio: see [`CanvasEditor::start_recording`]; none where text cannot go.
@@ -1765,6 +1897,24 @@ impl PageView {
         position: [f32; 2],
         file: onestore::page::Attachment,
     ) -> Result<Response> {
+        self.drop_caret(position)?;
+        self.insert_attachment(file)
+    }
+
+    /// A picture file dropped at view point `position`, in device pixels, placed as
+    /// [`Self::drop_attachment`] places a file and sized as [`Self::insert_picture`].
+    pub fn drop_picture(
+        &mut self,
+        position: [f32; 2],
+        bytes: Vec<u8>,
+        size: [f32; 2],
+    ) -> Result<Response> {
+        self.drop_caret(position)?;
+        self.insert_picture(bytes, size)
+    }
+
+    /// Puts the caret where a drop at `position` lands, as a click there would.
+    fn drop_caret(&mut self, position: [f32; 2]) -> Result<()> {
         let point = self.viewport.document_point(position);
         self.set_object_focus(None);
         match self.hit_test(point) {
@@ -1779,7 +1929,7 @@ impl PageView {
             None => self.place_caret(point)?,
             _ => {}
         }
-        self.insert_attachment(file)
+        Ok(())
     }
 
     /// Professional, or Linear with `linear`, on the equation at the caret.
@@ -1906,6 +2056,7 @@ impl PageView {
             Some(
                 Drag::Outline { .. }
                     | Drag::Resize { .. }
+                    | Drag::Column { .. }
                     | Drag::Image { .. }
                     | Drag::Space { .. }
             )
@@ -2086,6 +2237,13 @@ pub enum Hit {
         id: onestore::ExGuid,
         grab: f32,
     },
+    /// The right border of `column` of `table`, which is `width` wide.
+    Column {
+        id: onestore::ExGuid,
+        table: onestore::ExGuid,
+        column: usize,
+        width: f32,
+    },
     Text {
         id: onestore::ExGuid,
         point: [f32; 2],
@@ -2107,6 +2265,8 @@ pub enum Hit {
     },
     /// A file in an outline's flow or on the page, its icon or name.
     File(onestore::ExGuid),
+    /// A check box tag on a picture or file on the page.
+    ObjectCheck(onestore::ExGuid),
 }
 
 /// What a document point lands on; `pixel` is document points per device pixel.
@@ -2231,6 +2391,14 @@ fn page_hit(
             }
         }
         let inner = [x - outline.origin()[0], y - outline.origin()[1]];
+        if let Some((table, column, width)) = outline.column_border(inner, 3.0 * pixel) {
+            return Some(Hit::Column {
+                id: outline.id,
+                table,
+                column,
+                width,
+            });
+        }
         if let Some(picture) = outline.shaped().objects.iter().find(|object| {
             matches!(object.kind, crate::outline::ObjectKind::Picture)
                 && (object.rect[0]..=object.rect[2]).contains(&inner[0])
@@ -2285,6 +2453,7 @@ fn page_hit(
             crate::gpu::page::SceneHit::ReadOnly(index) => Some(Hit::ReadOnly(index)),
             crate::gpu::page::SceneHit::Image(id) => Some(Hit::Image { id, handle: [0, 0] }),
             crate::gpu::page::SceneHit::File(id) => Some(Hit::File(id)),
+            crate::gpu::page::SceneHit::Check(id) => Some(Hit::ObjectCheck(id)),
         }
     };
     [Layer::Grips, Layer::Body, Layer::Below]

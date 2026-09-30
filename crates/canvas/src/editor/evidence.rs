@@ -47,6 +47,7 @@ fn open(engine: &mut TextEngine, summary: &str) -> CanvasEditor {
             Definition {
                 kind: Kind::Style {
                     name: Some(name.into()),
+                    next: (name == "h1").then(|| "p".into()),
                 },
                 format: calibri(if name == "p" { 11.0 } else { 16.0 }, name != "p"),
             },
@@ -182,7 +183,7 @@ fn render(editor: &CanvasEditor) -> String {
         let style = node
             .style
             .map(|style| match &editor.definitions[&style].kind {
-                Kind::Style { name } => {
+                Kind::Style { name, .. } => {
                     format!("qs{}", usize::from(name.as_deref() == Some("h1")))
                 }
                 kind => panic!("{kind:?}"),

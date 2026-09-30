@@ -35,19 +35,10 @@ impl State {
             preview: platform::file_icon(path).map(Into::into),
             recording: crate::recording::attached(name, &bytes),
             bytes: Some(bytes.into()),
+            tags: Vec::new(),
         };
         let response = match at {
-            Some(point) => {
-                let scale = self.ui.scale();
-                let corner = self.ui.rect(crate::page()).unwrap_or_default();
-                self.view.drop_attachment(
-                    [
-                        (point[0] - corner[0]) * scale,
-                        (point[1] - corner[1]) * scale,
-                    ],
-                    file,
-                )?
-            }
+            Some(point) => self.view.drop_attachment(self.page_point(point), file)?,
             None => self.view.insert_attachment(file)?,
         };
         self.respond(response);

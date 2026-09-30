@@ -11,7 +11,11 @@ pub fn folder() -> Option<PathBuf> {
     None
 }
 
-pub fn look_up(_: impl Fn() + Send + 'static) {}
+pub fn look_up(_: impl Fn() + Send + Sync + 'static) {}
+
+pub fn download(_: &Path) -> usize {
+    0
+}
 
 pub fn drive() -> Option<PathBuf> {
     None
@@ -19,6 +23,7 @@ pub fn drive() -> Option<PathBuf> {
 
 pub fn section(
     notebook: &Notebook,
+    _: &Path,
     path: &str,
     notify: impl Fn() + Send + 'static,
 ) -> Result<Section, notebook::Error> {

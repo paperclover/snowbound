@@ -204,6 +204,7 @@ impl State {
                 kind: if video { 2 } else { 1 },
                 duration_ms,
             }),
+            tags: Vec::new(),
         };
         let response = self.view.finish_recording(file)?;
         self.respond(response);
@@ -983,6 +984,7 @@ pub(crate) mod tests {
                 kind,
                 duration_ms: Some(duration),
             }),
+            tags: Vec::new(),
         };
         editor.finish_recording(&mut engine, file).unwrap();
         store(&mut editor);

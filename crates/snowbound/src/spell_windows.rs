@@ -45,7 +45,8 @@ type Out = *mut *mut *const usize;
 
 /// The object a method answered through `out`, where it answered one.
 fn answered(result: i32, out: *mut *const usize) -> Option<Object> {
-    (result >= 0 && !out.is_null()).then_some(Object(out))
+    // Lazily: an `Object` made for a failed call would release a null pointer when dropped.
+    (result >= 0 && !out.is_null()).then(|| Object(out))
 }
 
 /// The strings an IEnumString holds, freed as they are read.

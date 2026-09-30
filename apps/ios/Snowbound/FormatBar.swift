@@ -19,6 +19,14 @@ final class FormatBar: UIInputView {
     private var toggles: [(UIButton, UInt8)] = []
     private var bits: UInt64 = 0
     var onApply: ((UInt8) -> Void)?
+    /// Applies a style of OneNote's gallery, by place; `stylePlace` names the selection's.
+    var onStyle: ((UInt8) -> Void)?
+    var stylePlace: (() -> Int32)?
+    /// OneNote 2010's Styles gallery, in its order.
+    private static let styles = [
+        "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
+        "Page Title", "Citation", "Quote", "Code", "Normal",
+    ]
     /// Asks for a picture from the camera (true) or the photo library.
     var onPicture: ((Bool) -> Void)?
     var onDismiss: (() -> Void)?
@@ -33,6 +41,19 @@ final class FormatBar: UIInputView {
         addSubview(backdrop)
         let row = UIStackView()
         row.spacing = 2
+        let styles = Self.button("textformat", "Styles")
+        styles.menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] done in
+                let current = self?.stylePlace?() ?? -1
+                done(Self.styles.enumerated().map { place, name in
+                    UIAction(title: name, state: Int32(place) == current ? .on : .off) { _ in
+                        self?.onStyle?(UInt8(place))
+                    }
+                })
+            }
+        ])
+        styles.showsMenuAsPrimaryAction = true
+        row.addArrangedSubview(styles)
         for (symbol, label, command) in Self.buttons {
             let button = Self.button(symbol, label)
             button.addAction(UIAction { [weak self] _ in self?.onApply?(command) }, for: .primaryActionTriggered)

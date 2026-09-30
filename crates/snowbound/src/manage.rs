@@ -1,7 +1,7 @@
 //! Changes to notebooks, sections, section groups and pages, as OneNote 2010 makes them:
 //! structure through `notebook::session::Notebook`, pages as ops on the open section.
 
-use crate::{Command, Library, Loaded, State, notify, platform, read_session};
+use crate::{Command, Library, Loaded, State, notify, platform, read_session, undo::Change};
 use canvas::template::Template;
 use notebook::session::Notebook;
 use onestore::{
@@ -9,7 +9,7 @@ use onestore::{
     op::{Edit, Op, PageOp, SectionOp},
     page::{Image, Page, PageObject},
 };
-use std::{error::Error, sync::Arc};
+use std::{error::Error, path::Path, sync::Arc};
 
 /// A change to a notebook's sections and groups, by catalog path.
 pub enum Structure {
@@ -37,6 +37,44 @@ pub enum Structure {
         folder: String,
         paths: Vec<String>,
     },
+    /// Moves a section or group back into a folder, which then takes the order `paths`, as
+    /// Undo takes back a move.
+    Return {
+        path: String,
+        folder: String,
+        paths: Vec<String>,
+    },
+    /// Colours a section's tab (COLORREF); none is OneNote's None.
+    Color {
+        path: String,
+        color: Option<u32>,
+    },
+    /// Notebook Properties: the display name on this computer, and a colour picked for the
+    /// notebook.
+    Properties {
+        name: String,
+        color: Option<u32>,
+    },
+}
+
+/// New iCloud Notebook while it is open: the name typed, and why the last was refused.
+pub struct Naming {
+    name: String,
+    problem: Option<String>,
+}
+
+fn naming() -> ui::Id {
+    ui::Id::ROOT.child("new icloud notebook")
+}
+
+fn naming_field() -> ui::Id {
+    naming().child("name")
+}
+
+/// Whether the notebook at `location` is a folder at the top of the app's iCloud Drive folder,
+/// which the sidebar lists as long as it is there.
+pub fn in_icloud_folder(location: &str) -> bool {
+    crate::icloud::folder().is_some_and(|root| Path::new(location).parent() == Some(&root))
 }
 
 /// `current`, the path of a section, after `from` moved to `to`: a section moved itself,
@@ -69,9 +107,16 @@ fn unused(taken: &[String], base: &str, numbered: bool) -> String {
 }
 
 impl State {
-    /// A page OneNote 2010 would create now: titled, with its date and time.
-    fn dated_page(&self, before: Option<ExGuid>) -> Result<PageCreation, Box<dyn Error>> {
-        let creation = PageCreation::new(before, Some(""), &self.author)?;
+    /// A page OneNote 2010 would create now: titled in the Default font's face, with its date
+    /// and time.
+    pub(crate) fn dated_page(
+        &self,
+        before: Option<ExGuid>,
+    ) -> Result<PageCreation, Box<dyn Error>> {
+        let creation = PageCreation::new(before, Some(""), &self.author)?.titled_in(
+            &self.view.editor.default_font.face,
+            self.view.editor.default_font.color,
+        )?;
         let [date, time] = platform::date_text(creation.created());
         Ok(creation.dated(&date, &time)?)
     }
@@ -113,6 +158,12 @@ impl State {
                 ops,
             },
         )?;
+        let shown = session.space;
+        self.made(Change::Delete {
+            pages: vec![space],
+            show: Some(shown),
+            created: true,
+        });
         self.title_focus = Some(space);
         self.commands.push(Command::OpenPage(space));
         Ok(())
@@ -211,23 +262,292 @@ impl State {
         self.create_notebook(root)
     }
 
-    /// Opens the notebooks in the app's own iCloud Drive folder, or makes one there.
-    pub(crate) fn use_icloud(&mut self) -> Result<(), Box<dyn Error>> {
-        let folder = crate::icloud::folder().ok_or("iCloud Drive is off")?;
-        let mut notebooks: Vec<std::path::PathBuf> = std::fs::read_dir(&folder)?
-            .flatten()
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-            .map(|entry| entry.path())
+    /// New iCloud Notebook: asks for a name, the first free of "iCloud Notebook", "iCloud
+    /// Notebook 2"…, for a notebook at the top of the app's iCloud Drive folder.
+    pub(crate) fn new_icloud_notebook(&mut self) {
+        let taken: Vec<String> = self
+            .notebooks
+            .iter()
+            .map(|library| library.name.clone())
             .collect();
-        notebooks.sort();
-        if notebooks.is_empty() {
-            return self.create_notebook(folder.join("My Notebook"));
+        self.new_icloud = Some(Naming {
+            name: unused(&taken, "iCloud Notebook", false),
+            problem: None,
+        });
+        self.ui.open_popup(naming());
+        self.ui.focus_all(naming_field());
+    }
+
+    /// Builds New iCloud Notebook while it is open.
+    pub(crate) fn new_icloud_dialog(&mut self) {
+        use ui::{Anchor, Axis, Spec, children, fill, px};
+        let Some(dialog) = &mut self.new_icloud else {
+            return;
+        };
+        if !self.ui.popup_open(naming()) {
+            self.new_icloud = None;
+            return;
         }
-        for notebook in notebooks {
-            self.open_notebook(notebook.to_string_lossy().into_owned(), None);
+        let ui = &mut self.ui;
+        let theme = ui.theme.clone();
+        let row = theme.font_size * 2.0;
+        let entered =
+            ui::popup::navigation(ui, &[naming_field()], &[winit::keyboard::NamedKey::Enter])
+                .contains(&winit::keyboard::NamedKey::Enter);
+        ui.open_as(
+            naming(),
+            Spec {
+                axis: Axis::Y,
+                size: [px(320.0), children()],
+                fill: Some(theme.popup),
+                border: Some(theme.chip),
+                shadow: Some(theme.shadow),
+                radius: 8.0,
+                pad: [16.0, 12.0],
+                gap: 6.0,
+                anchor: Some(Anchor::Dialog),
+                role: Some(accesskit::Role::Dialog),
+                ..Spec::default()
+            },
+        );
+        if let Some(node) = ui.access(naming()) {
+            node.set_label("New iCloud Notebook");
         }
-        Ok(())
+        ui.leaf(
+            "title",
+            Spec {
+                size: [fill(), px(row)],
+                text: Some("New iCloud Notebook"),
+                bold: true,
+                role: Some(accesskit::Role::Heading),
+                ..Spec::default()
+            },
+        );
+        ui::text_field(
+            ui,
+            naming_field(),
+            &mut dialog.name,
+            "",
+            Spec {
+                size: [fill(), px(row)],
+                fill: Some(theme.base),
+                border: Some(theme.accent),
+                radius: 4.0,
+                pad: [6.0, 0.0],
+                ..Spec::default()
+            },
+        );
+        crate::name(ui, naming_field(), "Name");
+        if let Some(problem) = &dialog.problem {
+            ui.leaf(
+                "problem",
+                Spec {
+                    size: [fill(), ui::fit()],
+                    text: Some(problem),
+                    overflow: ui::Overflow::Wrap,
+                    pad: [0.0, 4.0],
+                    role: Some(accesskit::Role::Status),
+                    ..Spec::default()
+                },
+            );
+        }
+        ui.open(
+            "buttons",
+            Spec {
+                size: [fill(), children()],
+                pad: [0.0, 8.0],
+                gap: 8.0,
+                ..Spec::default()
+            },
+        );
+        ui.leaf(
+            "space",
+            Spec {
+                size: [fill(), px(1.0)],
+                ..Spec::default()
+            },
+        );
+        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
+        let create = ui::button(ui, "create", "Create").clicked || entered;
+        ui.close();
+        ui.close();
+        if cancel {
+            self.ui.close_popup(naming());
+            self.ui.set_focus(Some(crate::page()));
+            self.new_icloud = None;
+        } else if create {
+            let name = dialog.name.trim().to_owned();
+            let folder = crate::icloud::folder();
+            dialog.problem = match &folder {
+                None => Some("Turn on iCloud Drive in System Settings.".into()),
+                Some(_) if name.is_empty() => Some("Enter a name.".into()),
+                Some(_) if name.starts_with('.') || name.contains(['/', ':']) => {
+                    Some("Use a name without “/”, “:” or a leading “.”.".into())
+                }
+                Some(folder) if folder.join(&name).exists() => Some(format!(
+                    "“{name}” is already in iCloud Drive. Choose another name."
+                )),
+                Some(_) => None,
+            };
+            if let (None, Some(folder)) = (&dialog.problem, folder) {
+                self.ui.close_popup(naming());
+                self.new_icloud = None;
+                if let Err(error) = self.create_notebook(folder.join(name)) {
+                    platform::alert("Couldn't create the notebook", &error.to_string());
+                }
+            }
+        }
+    }
+
+    /// Lists the folders at the top of the app's iCloud Drive folder in the sidebar, each a
+    /// notebook, as they come and go, and brings down what iCloud Drive keeps elsewhere of
+    /// every notebook in it.
+    pub(crate) fn list_icloud(&mut self) {
+        let proxy = self.proxy.clone();
+        // Listing a folder iCloud Drive has not brought down yet waits for it.
+        std::thread::spawn(move || {
+            let listed = crate::icloud::folder().and_then(|root| {
+                let mut listed: Vec<String> = std::fs::read_dir(&root)
+                    .ok()?
+                    .flatten()
+                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                    .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+                    .map(|entry| entry.path().to_string_lossy().into_owned())
+                    .collect();
+                listed.sort();
+                Some(listed)
+            });
+            let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                if let Some(listed) = listed {
+                    state.listed_icloud(listed);
+                }
+                for library in state.notebooks.clone() {
+                    if library.in_icloud() {
+                        state.fetch(library, None);
+                    }
+                }
+                Ok(())
+            })));
+        });
+    }
+
+    /// Takes `listed`, the notebook folders at the top of the app's iCloud Drive folder, in
+    /// place of those the sidebar lists from it.
+    fn listed_icloud(&mut self, listed: Vec<String>) {
+        let gone: Vec<Arc<Library>> = self
+            .notebooks
+            .iter()
+            .filter(|library| {
+                in_icloud_folder(&library.location) && !listed.contains(&library.location)
+            })
+            .cloned()
+            .collect();
+        for library in gone {
+            eprintln!("DEBUG gone {} listed {listed:?}", library.location);
+            self.close_notebook(&library);
+        }
+        for location in listed {
+            if self.notebooks.iter().any(|open| open.location == location)
+                || !self.icloud_reading.insert(location.clone())
+            {
+                continue;
+            }
+            let (cache, proxy) = (self.cache.clone(), self.proxy.clone());
+            std::thread::spawn(move || {
+                let library = Arc::new(Library::notebook(&location, &cache));
+                let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                    state.icloud_reading.remove(&location);
+                    if state.notebooks.iter().any(|open| open.location == location) {
+                        return Ok(());
+                    }
+                    state.notebooks.push(Arc::clone(&library));
+                    state.save_settings();
+                    state.show_arrived(&library);
+                    state.fetch(library, None);
+                    Ok(())
+                })));
+            });
+        }
+    }
+
+    /// Shows `library`, a notebook that just arrived or whose sections did, where no other
+    /// notebook is shown: at its first section, or without one while none is here yet.
+    pub(crate) fn show_arrived(&mut self, library: &Arc<Library>) {
+        if self.session.is_some()
+            || self
+                .sectionless
+                .as_ref()
+                .is_some_and(|shown| shown.location != library.location)
+        {
+            return;
+        }
+        let first = library.first_section();
+        self.sectionless = Some(Arc::clone(library));
+        self.title();
+        if let Some(path) = first {
+            self.commands
+                .push(Command::OpenSection(Arc::clone(library), path));
+        }
+    }
+
+    /// Brings down the files of `library`, a notebook in iCloud Drive, that iCloud Drive keeps
+    /// elsewhere, `missing` of them when last asked, and reads the notebook again as they
+    /// arrive, until all have.
+    pub(crate) fn fetch(&mut self, library: Arc<Library>, missing: Option<usize>) {
+        let Some(root) = library.folder().map(Path::to_owned) else {
+            return;
+        };
+        if missing.is_none() && !self.icloud_reading.insert(library.location.clone()) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            if missing.is_some() {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+            let now = crate::icloud::download(&root);
+            let arrived = missing.map_or(now == 0 && library.downloading(), |before| now < before);
+            let read = arrived
+                .then(|| {
+                    library
+                        .reopen()
+                        .map(|notebook| Arc::new(library.with(notebook)))
+                })
+                .and_then(|read| {
+                    read.inspect_err(|error| eprintln!("{}: {error}", library.location))
+                        .ok()
+                });
+            let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                let Some(listed) = state
+                    .notebooks
+                    .iter()
+                    .find(|open| open.location == library.location)
+                    .cloned()
+                else {
+                    state.icloud_reading.remove(&library.location);
+                    return Ok(());
+                };
+                let current = match read {
+                    Some(read) => {
+                        let path = state
+                            .session
+                            .as_ref()
+                            .filter(|session| session.library.location == read.location)
+                            .map(|session| session.tabs[session.tab].path.clone())
+                            .filter(|path| read.contains(path));
+                        state.adopt(Arc::clone(&read), path.as_deref())?;
+                        read
+                    }
+                    None => listed,
+                };
+                if now == 0 {
+                    state.icloud_reading.remove(&current.location);
+                } else {
+                    state.fetch(current, Some(now));
+                }
+                Ok(())
+            })));
+        });
     }
 
     /// Creates a notebook in the new folder `root` and opens it.
@@ -252,6 +572,7 @@ impl State {
     /// folders go with the account. Replicas holding edits stay, the open section's also
     /// exported as a recovery archive; signing in again and reopening publishes them.
     pub(crate) fn icloud_account_changed(&mut self) {
+        eprintln!("DEBUG account changed");
         let closing: Vec<Arc<Library>> = self
             .notebooks
             .iter()
@@ -281,13 +602,14 @@ impl State {
         for library in closing {
             self.close_notebook(&library);
         }
-        crate::icloud::look_up(notify(self.proxy.clone()));
+        crate::icloud::look_up(crate::icloud_listed(self.proxy.clone()));
     }
 
     /// Closes `library`: its files stay, its offline copies go unless edits wait in them,
     /// and the sidebar and the next launch leave it out.
     pub(crate) fn close_notebook(&mut self, library: &Arc<Library>) {
         self.notebooks.retain(|open| !Arc::ptr_eq(open, library));
+        self.undo.close(&library.location);
         if let Some(background) = &library.background {
             background.discard();
         }
@@ -336,6 +658,8 @@ impl State {
             .map(|session| session.tabs[session.tab].path.clone());
         let notify = notify(self.proxy.clone());
         self.load(move || {
+            // A section kept open would hold a file the change moves.
+            library.close_kept();
             let mut notebook = library.reopen()?;
             let names = |notebook: &Notebook, folder: &str| -> Vec<String> {
                 let mut folders = vec![notebook.catalog()];
@@ -356,6 +680,11 @@ impl State {
                 }
                 Vec::new()
             };
+            // A notebook not shown stays so through a change of its colours or name.
+            let stays = matches!(
+                change,
+                Structure::Color { .. } | Structure::Properties { .. }
+            );
             // The open section where the change leaves it, and the section to show.
             let (followed, created) = match change {
                 Structure::NewSection { folder } => {
@@ -391,10 +720,36 @@ impl State {
                     notebook.reorder(&folder, &paths)?;
                     (current, None)
                 }
+                Structure::Return {
+                    path,
+                    folder,
+                    paths,
+                } => {
+                    let moved = notebook.move_entry(&path, &folder)?;
+                    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+                    notebook.reorder(&folder, &paths)?;
+                    (current.map(|current| follow(&current, &path, &moved)), None)
+                }
+                Structure::Color { path, color } => {
+                    notebook.set_section_color(&path, color)?;
+                    (current, None)
+                }
+                Structure::Properties { name, color } => {
+                    if name != library.name {
+                        library.set_display_name(&name)?;
+                    }
+                    if let Some(color) = color {
+                        notebook.set_color(color)?;
+                    }
+                    (current, None)
+                }
             };
             let fresh = created.is_some();
             let open = created.or(followed.clone());
             let library = Arc::new(library.with(notebook));
+            if stays && followed.is_none() {
+                return Ok(Loaded::Library(library, None));
+            }
             let Some(path) = shown(&library, open) else {
                 return Ok(Loaded::Library(library, None));
             };
@@ -416,115 +771,38 @@ impl State {
     /// Deletes pages of the open section as OneNote 2010 does: each goes to the notebook's
     /// recycle bin, then leaves the section. A section left without pages gains a new one.
     pub(crate) fn delete_pages(&mut self, spaces: Vec<ExGuid>) -> Result<(), Box<dyn Error>> {
-        self.persist()?;
-        let session = self.session.as_ref().ok_or("No section is open")?;
-        let pages: Vec<Page> = spaces
-            .iter()
-            .map(|space| session.section.page(*space))
-            .collect::<Result<_, _>>()?;
-        let remaining: Vec<ExGuid> = session
-            .pages
-            .iter()
-            .map(|(space, ..)| *space)
-            .filter(|space| !spaces.contains(space))
-            .collect();
-        // OneNote shows the page after the first deleted one, or the one before it.
-        let at = session
-            .pages
-            .iter()
-            .position(|(space, ..)| spaces.contains(space))
-            .unwrap_or_default();
-        let next = session.pages[at..]
-            .iter()
-            .chain(session.pages[..at].iter().rev())
-            .map(|(space, ..)| *space)
-            .find(|space| remaining.contains(space));
-        let mut ops = vec![Op::Section(SectionOp::Delete(spaces))];
-        let next = match next {
-            Some(next) => next,
-            None => {
-                let creation = self.dated_page(None)?;
-                let space = creation.space();
-                ops.push(Op::Section(SectionOp::Create(creation)));
-                space
-            }
-        };
-        let notebook =
-            matches!(session.library.notebook, Ok(Some(_))).then(|| Arc::clone(&session.library));
-        let replica = Arc::clone(session.section.replica());
-        let author = self.author.clone();
-        self.load(move || {
-            if let Some(library) = notebook {
-                library.reopen()?.recycle_pages(&pages, &author)?;
-            }
-            replica.apply(
-                &author,
-                Edit {
-                    at: crate::filetime(),
-                    ops,
-                },
-            )?;
-            Ok(Loaded::Page(next, replica.page(next)?))
-        });
-        Ok(())
+        self.change_pages(Change::Delete {
+            pages: spaces,
+            show: None,
+            created: false,
+        })
     }
 
     /// Moves page `space` of the open section to the end of the section at catalog `path`,
     /// as OneNote moves a page dropped on a section's tab: the page keeps its identity,
     /// title, date and content there and leaves this section.
     pub(crate) fn move_page(&mut self, space: ExGuid, path: String) -> Result<(), Box<dyn Error>> {
-        self.persist()?;
         let session = self.session.as_ref().ok_or("No section is open")?;
-        let import = notebook::session::moved(&session.section.page(space)?, &self.author)?;
-        let at = session
-            .pages
-            .iter()
-            .position(|(listed, ..)| *listed == space)
-            .unwrap_or_default();
-        let next = session.pages[at + 1..]
-            .iter()
-            .chain(session.pages[..at].iter().rev())
-            .map(|(listed, ..)| *listed)
-            .next();
-        let mut ops = vec![Op::Section(SectionOp::Delete(vec![space]))];
-        let next = match next {
-            Some(next) => next,
-            None => {
-                let fresh = self.dated_page(None)?;
-                let space = fresh.space();
-                ops.push(Op::Section(SectionOp::Create(fresh)));
-                space
-            }
-        };
-        let library = Arc::clone(&session.library);
-        let replica = Arc::clone(session.section.replica());
-        let author = self.author.clone();
-        self.load(move || {
-            let target = library.open(&path, || {})?;
-            target.replica().apply(
-                &author,
-                Edit {
-                    at: crate::filetime(),
-                    ops: vec![import],
-                },
-            )?;
-            target.close()?;
-            replica.apply(
-                &author,
-                Edit {
-                    at: crate::filetime(),
-                    ops,
-                },
-            )?;
-            Ok(Loaded::Page(next, replica.page(next)?))
-        });
-        Ok(())
+        let target = session
+            .library
+            .section_identity(&path)
+            .ok_or("That section is not in the notebook")?;
+        self.change_pages(Change::Send {
+            page: space,
+            target,
+        })
     }
 
     /// Moves or indents pages of the open section, in order.
     pub(crate) fn edit_pages(&mut self, edits: Vec<PageEdit>) -> Result<(), Box<dyn Error>> {
         self.persist()?;
         let session = self.session.as_mut().ok_or("No section is open")?;
+        let order = session
+            .pages
+            .iter()
+            .map(|(space, _, level)| (*space, *level))
+            .collect();
+        let moved = edits.iter().map(PageEdit::space).collect();
         session.section.apply(
             &self.author,
             Edit {
@@ -533,6 +811,7 @@ impl State {
             },
         )?;
         session.pages = session.section.pages()?;
+        self.made(Change::Arrange { order, moved });
         Ok(())
     }
 }

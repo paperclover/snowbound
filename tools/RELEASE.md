@@ -55,7 +55,7 @@ the account holder's legal name, which nothing here prints or stores.
 provisioning profile for `net.paperclover.snowbound` ("Snowbound Developer ID",
 found where Xcode keeps profiles) as `Contents/embedded.provisionprofile`, with
 hardened runtime, a secure timestamp, the production iCloud container
-`iCloud.net.paperclover.snowbound` that Use iCloud Drive needs, and the
+`iCloud.net.paperclover.snowbound` that iCloud notebooks need, and the
 microphone and camera entitlements recording needs. It fails rather than fall
 back to ad hoc. `--ad-hoc` signs ad hoc instead, without iCloud; the 10.6 bundle
 stays unsigned, as it predates Developer ID. codesign fails with

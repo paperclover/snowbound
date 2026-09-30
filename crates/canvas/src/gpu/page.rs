@@ -24,6 +24,8 @@ use std::{
 /// Retained drawing data in the source page's coordinate system.
 pub struct PageScene {
     reference: Option<Vec<Content>>,
+    /// The definitions a page read without an editor names, as its objects' tags do.
+    definitions: std::collections::BTreeMap<onestore::ExGuid, onestore::page::Definition>,
     /// Pictures and file icons, by the identity of the object that shows them.
     pictures: std::collections::BTreeMap<onestore::ExGuid, Picture>,
     /// Background pictures from OneNote's page templates, painted from their recreations.
@@ -80,6 +82,8 @@ pub enum SceneHit<T> {
     ReadOnly(usize),
     Image(onestore::ExGuid),
     File(onestore::ExGuid),
+    /// A check box tag on a picture or file on the page.
+    Check(onestore::ExGuid),
 }
 
 fn outline_origin(
@@ -116,11 +120,12 @@ pub(crate) fn append_ink(
         let size = stroke.width.max(stroke.height);
         let segment = |from: [f32; 2], to: [f32; 2], [t0, t1]: [f32; 2]| {
             if !highlighter {
-                if round && t0 != t1 {
+                if t0 != t1 {
                     return Primitive::Taper {
                         from,
                         to,
                         widths: [size * t0, size * t1],
+                        round,
                         color,
                     };
                 }
@@ -253,6 +258,7 @@ impl PageScene {
         pictures.mark_unavailable(&mut objects, engine)?;
         Ok(Self {
             reference: Some(objects),
+            definitions: std::mem::take(&mut page.definitions),
             ..pictures
         })
     }
@@ -398,6 +404,7 @@ impl PageScene {
         }
         Ok(Self {
             reference: None,
+            definitions: Default::default(),
             pictures,
             backgrounds,
         })
@@ -438,6 +445,17 @@ impl PageScene {
         }
     }
 
+    /// Bytes of the rasters the scene keeps decoded, for bounding what a cache of scenes holds.
+    pub fn raster_bytes(&self) -> u64 {
+        let size = |image: &draw::RasterImage| {
+            let [width, height] = image.size();
+            u64::from(width) * u64::from(height) * 4
+        };
+        let pictures = self.pictures.values().filter_map(Picture::image);
+        let art = self.backgrounds.values().flat_map(Background::images);
+        pictures.chain(art).map(size).sum()
+    }
+
     /// The raster a picture or file icon shows, once decoded.
     pub fn image(&self, id: onestore::ExGuid) -> Option<&draw::RasterImage> {
         self.pictures.get(&id)?.image()
@@ -463,9 +481,7 @@ impl PageScene {
                         source.layout.x.unwrap_or(0.0),
                         source.layout.y.unwrap_or(0.0),
                     ];
-                    if let (Some(width), Some(height)) =
-                        (source.layout.max_width, source.layout.max_height)
-                    {
+                    if let Some([width, height]) = crate::outline::image_size(source) {
                         rects.push((source.id, [x, y, x + width, y + height]));
                     }
                 }
@@ -581,6 +597,38 @@ impl PageScene {
             .ok_or(SceneError::MissingOutline)
     }
 
+    /// The note tags of the pictures and files on the page, each with the object it marks,
+    /// in page points; `moving` shows one at a previewed rectangle.
+    fn object_tags(
+        &self,
+        editor: Option<&CanvasEditor>,
+        moving: Option<(onestore::ExGuid, [f32; 4])>,
+    ) -> Vec<(onestore::ExGuid, crate::outline::ParagraphTag)> {
+        let definitions = match (&self.reference, editor) {
+            (None, Some(editor)) => &editor.definitions,
+            _ => &self.definitions,
+        };
+        let Ok(objects) = self.objects(editor) else {
+            return Vec::new();
+        };
+        objects
+            .iter()
+            .filter_map(|object| {
+                let (id, tags, bounds) = object.tagged()?;
+                let bounds = match moving {
+                    Some((moved, rect)) if moved == id => rect,
+                    _ => bounds,
+                };
+                Some(
+                    crate::outline::object_tags(tags, definitions, bounds)
+                        .into_iter()
+                        .map(move |tag| (id, tag)),
+                )
+            })
+            .flatten()
+            .collect()
+    }
+
     pub fn read_only<'a>(
         &'a self,
         editor: Option<&'a CanvasEditor>,
@@ -650,15 +698,11 @@ impl PageScene {
                         true,
                     ))
                 }
-                Content::Image(source) => Some((
-                    [
-                        source.layout.x.unwrap_or(0.0),
-                        source.layout.y.unwrap_or(0.0),
-                        source.layout.x.unwrap_or(0.0) + source.layout.max_width?,
-                        source.layout.y.unwrap_or(0.0) + source.layout.max_height?,
-                    ],
-                    false,
-                )),
+                Content::Image(source) => {
+                    let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
+                    let [width, height] = crate::outline::image_size(source)?;
+                    Some(([x, y, x + width, y + height], false))
+                }
                 Content::File { .. } => Some((object.file()?.1, true)),
                 Content::Ink(ink) => Some((crate::editor::page::ink_bounds(ink)?, true)),
                 Content::ReadOnly(object) => Some((object.rect(), true)),
@@ -716,6 +760,14 @@ impl PageScene {
         editor: Option<&CanvasEditor>,
         mut outline: impl FnMut(onestore::ExGuid) -> Option<T>,
     ) -> Option<SceneHit<T>> {
+        let check = self.object_tags(editor, None).into_iter().find(|(_, tag)| {
+            tag.icon.checkable()
+                && (tag.origin[0]..=tag.origin[0] + tag.size).contains(&point[0])
+                && (tag.origin[1]..=tag.origin[1] + tag.size).contains(&point[1])
+        });
+        if let Some((id, _)) = check {
+            return Some(SceneHit::Check(id));
+        }
         let mut readonly = self.read_only(editor).count();
         for object in self.objects(editor).ok()?.iter().rev() {
             match object {
@@ -746,8 +798,7 @@ impl PageScene {
                         source.layout.x.unwrap_or(0.0),
                         source.layout.y.unwrap_or(0.0),
                     ];
-                    if let (Some(width), Some(height)) =
-                        (source.layout.max_width, source.layout.max_height)
+                    if let Some([width, height]) = crate::outline::image_size(source)
                         && (x..=x + width).contains(&point[0])
                         && (y..=y + height).contains(&point[1])
                     {
@@ -824,11 +875,7 @@ impl PageScene {
                     ];
                     let size = match self.backgrounds.get(&source.id) {
                         Some(art) => Some(art.size),
-                        None => source
-                            .layout
-                            .max_width
-                            .zip(source.layout.max_height)
-                            .map(|(width, height)| [width, height]),
+                        None => crate::outline::image_size(source),
                     };
                     if let Some([width, height]) = size {
                         cover([x, y, x + width, y + height], !source.background);
@@ -975,10 +1022,8 @@ impl PageScene {
                                 .pictures
                                 .get(&source.id)
                                 .ok_or(SceneError::MissingImage)?;
-                            let size = [
-                                source.layout.max_width.ok_or(SceneError::MissingImage)?,
-                                source.layout.max_height.ok_or(SceneError::MissingImage)?,
-                            ];
+                            let size = crate::outline::image_size(source)
+                                .ok_or(SceneError::MissingImage)?;
                             if picture.failed() {
                                 append_placeholder(
                                     [
@@ -1058,6 +1103,16 @@ impl PageScene {
                 | Content::Ink(_)
                 | Content::File { .. } => unreachable!(),
             }
+        }
+        let art = super::TagArt::default();
+        for (_, tag) in self.object_tags(editor, moving) {
+            primitives.push(Primitive::Icon {
+                sources: art.sources(&tag),
+                origin: [tag.origin[0] + offset[0], tag.origin[1] + offset[1]],
+                size: tag.size,
+                tint: [1.0, 1.0, 1.0, if tag.disabled { 0.45 } else { 1.0 }],
+                palette: draw::Palette::default(),
+            });
         }
         Ok(())
     }
@@ -1547,6 +1602,7 @@ mod tests {
                     onestore::page::Definition {
                         kind: onestore::document::Kind::Style {
                             name: Some("p".into()),
+                            next: None,
                         },
                         format: onestore::document::Format {
                             font_size: Some(base_size),
@@ -1720,6 +1776,9 @@ mod tests {
                     alt: None,
                     background,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 }));
             }
             let (mut scene, mut editor) = PageScene::from_page(page, &mut engine).unwrap();
@@ -2082,6 +2141,9 @@ mod tests {
                     alt: Some("missing diagram".into()),
                     background: false,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 }),
                 PageObject::Unsupported(unknown.clone()),
             ],
@@ -2252,6 +2314,9 @@ mod tests {
                     alt: None,
                     background: false,
                     printout: None,
+                    tags: Vec::new(),
+                    link: None,
+                    text: None,
                 }),
                 outline(50.0, "last"),
             ],
@@ -2545,6 +2610,9 @@ mod tests {
                 alt: None,
                 background: false,
                 printout: None,
+                tags: Vec::new(),
+                link: None,
+                text: None,
             })],
         };
         let mut engine = TextEngine::default();
@@ -2610,6 +2678,9 @@ mod tests {
             alt: None,
             background,
             printout: None,
+            tags: Vec::new(),
+            link: None,
+            text: None,
         };
         let [background, picture] = [image(0.0, true), image(50.0, false)];
         let id = picture.id;
@@ -2681,6 +2752,9 @@ mod tests {
                 alt: None,
                 background: false,
                 printout: None,
+                tags: Vec::new(),
+                link: None,
+                text: None,
             })
             .collect();
         assert!(20 * u64::from(side * side) * 4 > draw::MAX_IMAGE_BYTES);

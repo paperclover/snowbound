@@ -31,6 +31,7 @@ pub enum Action {
     /// Folds or unfolds a notebook's or section group's rows, by `fold_key`.
     Fold(String),
     NewNotebook,
+    NewICloudNotebook,
     OpenNotebook,
     /// Signs in again to the notebook opened from its server at this location.
     SignIn(String),
@@ -137,7 +138,8 @@ pub fn header() -> Id {
 }
 
 /// The sidebar's header row, `header` tall and dragging the window when `drags`, then
-/// with `rows` the tree of `notebooks` with the open section marked.
+/// with `rows` the tree of `notebooks` with the open section marked. The notebook button
+/// floats over the header's end at the window's edge, the `right` one or the left.
 fn sidebar(
     ui: &mut Ui,
     tree: &mut Tree,
@@ -145,6 +147,7 @@ fn sidebar(
     header: f32,
     drags: bool,
     rows: bool,
+    right: bool,
 ) {
     let (theme, folded) = (tree.theme, tree.folded);
     ui.open_as(
@@ -162,13 +165,18 @@ fn sidebar(
         },
     );
     // The notebook button's square, which floats over this place.
-    ui.leaf(
-        "toggle",
-        Spec {
-            size: [px(RAIL - crate::FRAME), px(ui::shell::TOOL)],
-            ..Spec::default()
-        },
-    );
+    let toggle = |ui: &mut Ui| {
+        ui.leaf(
+            "toggle",
+            Spec {
+                size: [px(RAIL - crate::FRAME), px(ui::shell::TOOL)],
+                ..Spec::default()
+            },
+        );
+    };
+    if !right {
+        toggle(ui);
+    }
     ui.leaf(
         "title",
         Spec {
@@ -178,6 +186,9 @@ fn sidebar(
             ..Spec::default()
         },
     );
+    if right {
+        toggle(ui);
+    }
     ui.close();
     if !rows {
         return;
@@ -242,12 +253,21 @@ fn sidebar(
         },
     );
     let options = ("options", art::OPTIONS, "Options", Action::Options);
-    for (part, icon, label, chosen) in [
-        ("new", art::PLUS, "New Notebook", Action::NewNotebook),
-        ("open", art::NOTEBOOK, "Open Existing", Action::OpenNotebook),
-    ]
-    .into_iter()
-    .chain((!cfg!(target_os = "macos")).then_some(options))
+    let icloud = crate::icloud::folder().map(|_| {
+        (
+            "new icloud",
+            art::ICLOUD,
+            "New iCloud Notebook",
+            Action::NewICloudNotebook,
+        )
+    });
+    for (part, icon, label, chosen) in icloud
+        .into_iter()
+        .chain([
+            ("new", art::PLUS, "New Notebook", Action::NewNotebook),
+            ("open", art::NOTEBOOK, "Open Existing", Action::OpenNotebook),
+        ])
+        .chain((!cfg!(target_os = "macos")).then_some(options))
     {
         let (row, _) = tree_row(
             ui,
@@ -395,10 +415,10 @@ fn folder(
             ui.id(("unavailable", notebook, &entry.path)),
             Row {
                 label: &name,
-                icon: if entry.group {
-                    Leading::Icon(art::SECTION_GROUP)
-                } else {
-                    Leading::Section(section_color(None))
+                icon: match entry.reason {
+                    _ if entry.group => Leading::Icon(art::SECTION_GROUP),
+                    Reason::Evicted => Leading::Icon(art::ICLOUD),
+                    _ => Leading::Section(section_color(None)),
                 },
                 depth,
                 dim: true,
@@ -412,6 +432,10 @@ fn folder(
                 Reason::Denied => Action::Unavailable(
                     format!("Can't read \u{201c}{name}\u{201d}"),
                     format!("{}\n\nIt appears here once you have access.", entry.error),
+                ),
+                Reason::Evicted => Action::Unavailable(
+                    format!("Downloading \u{201c}{name}\u{201d}"),
+                    "It opens once iCloud Drive brings it to this computer.".into(),
                 ),
                 _ => Action::Unavailable(
                     format!("Can't open \u{201c}{name}\u{201d}"),
@@ -663,19 +687,27 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
 }
 
 impl crate::State {
-    /// The sidebar left of the section tabs, easing open and shut; returns its width.
-    pub(crate) fn sidebar(&mut self, theme: &Theme) -> f32 {
+    /// How wide the sidebar stands this frame as it eases open and shut.
+    pub(crate) fn sidebar_width(&mut self) -> f32 {
         if self.temporary {
             return 0.0;
         }
-        let width = self.ui.animate(
+        self.ui.animate(
             self.ui.id("sidebar"),
             if self.sidebar && !self.full_page {
                 WIDTH
             } else {
                 0.0
             },
-        );
+        )
+    }
+
+    /// The sidebar `width` wide beside the section tabs, on the left, or the right as
+    /// OneNote's "Navigation bar appears on the left" turned off puts it.
+    pub(crate) fn sidebar(&mut self, theme: &Theme, width: f32) {
+        if self.temporary {
+            return;
+        }
         self.ui.open(
             "sidebar",
             Spec {
@@ -721,6 +753,7 @@ impl crate::State {
             crate::TAB_ROW,
             drags,
             width > 0.5,
+            self.navigation_bar_right,
         );
         let Tree {
             action,
@@ -754,6 +787,9 @@ impl crate::State {
             }
             Some(Action::Renamed(keep)) => self.finish_renaming(keep),
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
+            Some(Action::NewICloudNotebook) => {
+                self.commands.push(crate::Command::NewICloudNotebook)
+            }
             Some(Action::OpenNotebook) => self.commands.push(crate::Command::OpenNotebook),
             Some(Action::SignIn(location)) => self
                 .commands
@@ -762,7 +798,6 @@ impl crate::State {
             Some(Action::Unavailable(title, message)) => crate::platform::alert(&title, &message),
             Some(Action::Open { .. }) | None => {}
         }
-        width
     }
 
     /// The sidebar's button in its square at the window's edge, and the room the section
@@ -774,11 +809,20 @@ impl crate::State {
         if self.temporary {
             return;
         }
+        // On the right it stands at the body's far edge, as laid out last frame.
+        let x = match self.navigation_bar_right {
+            true => self
+                .ui
+                .rect(self.ui.current())
+                .map_or(0.0, |[left, _, right, _]| right - left - RAIL),
+            false => 0.0,
+        };
         self.ui.open(
             "toggle",
             Spec {
                 flags: Flags::FLOAT | Flags::CLIP,
                 size: [px(RAIL), px(height)],
+                position: [x, 0.0],
                 pad: [
                     (RAIL - ui::shell::TOOL) / 2.0,
                     (RAIL - ui::shell::TOOL) / 2.0 + DROP,
@@ -1058,15 +1102,25 @@ impl crate::State {
         self.load(move || {
             let library = match open {
                 Some(library) => library,
-                None => Arc::new(read(&location, &cache)?),
+                None => {
+                    let library = Arc::new(read(&location, &cache)?);
+                    library.purge_recycle_bin();
+                    library
+                }
             };
             if let Err(error) = &library.notebook {
                 return Err(error.clone().into());
             }
-            let path = section
+            let Some(path) = section
                 .filter(|path| library.contains(path))
                 .or_else(|| library.first_section())
-                .ok_or("This folder holds no notebook sections.")?;
+            else {
+                // Shown once its sections arrive.
+                if library.downloading() {
+                    return Ok(crate::Loaded::Library(library, None));
+                }
+                return Err("This folder holds no notebook sections.".into());
+            };
             let section = library.open(&path, notify)?;
             let (session, page) = crate::read_session(section, library, path, None)?;
             Ok(crate::Loaded::Section(Box::new(session), page))
@@ -1086,18 +1140,20 @@ impl crate::State {
         ));
         #[cfg(not(target_os = "linux"))]
         let install = None;
+        let servers = self.servers.clone();
         self.notice(
             theme,
             id,
             theme.base,
             "No notebooks open",
+            &servers,
             crate::icloud::folder()
                 .map(|_| {
                     (
                         "icloud",
                         art::ICLOUD,
-                        "Use iCloud Drive",
-                        crate::Command::UseICloud,
+                        "New iCloud Notebook",
+                        crate::Command::NewICloudNotebook,
                     )
                 })
                 .into_iter()
@@ -1133,8 +1189,9 @@ impl crate::State {
     }
 
     /// The page's place while notebook `library` has no sections, as OneNote 2010 shows
-    /// it, with a button to add one.
+    /// it, with a button to add one; or while none is on this computer yet.
     pub(crate) fn no_sections(&mut self, theme: &Theme, library: Arc<Library>) {
+        let downloading = library.downloading();
         let new = crate::Command::Structure(
             library,
             crate::manage::Structure::NewSection {
@@ -1142,23 +1199,26 @@ impl crate::State {
             },
         );
         let id = self.ui.id("no sections");
-        self.notice(
-            theme,
-            id,
-            theme.strip,
-            "No sections in this notebook",
-            vec![("new", art::PLUS, "New Section", new)],
-        );
+        let (title, buttons) = if downloading {
+            ("Downloading from iCloud Drive…", Vec::new())
+        } else {
+            (
+                "No sections in this notebook",
+                vec![("new", art::PLUS, "New Section", new)],
+            )
+        };
+        self.notice(theme, id, theme.strip, title, &[], buttons);
     }
 
     /// A box `id` filled with `background`, showing `title` above `buttons` in its middle: each
-    /// a part, an icon, a label and what it does.
+    /// a part, an icon, a label and what it does; then the saved `servers` to reconnect to.
     fn notice(
         &mut self,
         theme: &Theme,
         id: ui::Id,
         background: [f32; 4],
         title: &str,
+        servers: &[String],
         buttons: Vec<(&str, &'static [&'static str], &str, crate::Command)>,
     ) {
         const BUTTON: [f32; 2] = [240.0, 32.0];
@@ -1217,8 +1277,12 @@ impl crate::State {
             }
         }
         self.commands.extend(chosen);
+        let saved = crate::server::saved_servers(&mut self.ui, servers);
         self.ui.close();
         self.ui.close();
+        if let Some(saved) = saved {
+            self.saved_server(saved);
+        }
     }
 }
 

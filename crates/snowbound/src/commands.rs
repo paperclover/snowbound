@@ -7,7 +7,11 @@ use canvas::editor::{Alignment, FormatState, Formatting, ListStyle, Pen, Toggle}
 use canvas::interaction::{Request, ink::Tool};
 use draw::edit::{Key, Modifiers, NamedKey, Platform};
 use onestore::page::ink::ShapeKind;
-use std::{error::Error, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    sync::{Arc, PoisonError, RwLock, RwLockReadGuard},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Id {
@@ -24,7 +28,6 @@ pub enum Id {
     CopyPageLink,
     ShowNotebook,
     ExportPdf,
-    ExportSectionPdf,
     Print,
     Undo,
     Redo,
@@ -84,6 +87,12 @@ pub enum Id {
     Indent,
     Outdent,
     ClearFormatting,
+    /// The style at this place in OneNote's Styles gallery (`notebook::sidecar::themes::STYLES`).
+    Style(usize),
+    /// The Styles gallery.
+    Styles,
+    /// The Themes dialog, assigning a theme to the page, its section or its notebook.
+    Theme(crate::themes::Scope),
     /// The tag at this place in the user's tag list.
     Tag(usize),
     CustomizeTags,
@@ -240,7 +249,6 @@ pub const COMMANDS: &[Command] = &[
         NONE,
     ),
     row!(Id::ExportPdf, "Export as PDF…", NONE, NONE),
-    row!(Id::ExportSectionPdf, "Export Section as PDF…", NONE, NONE),
     // Go to takes OneNote's Ctrl+P, and Pause its Ctrl+Alt+P.
     row!(
         Id::Print,
@@ -307,7 +315,8 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('0')],
         &[cmd('0').option()]
     ),
-    row!(Id::Sidebar, "Notebook List", &[cmd('s').control()], NONE),
+    // Sidebars toggle on Command-Backslash, as in Notion; OneNote 2010 leaves Ctrl+\ free.
+    row!(Id::Sidebar, "Notebook List", &[cmd('\\')], &[cmd('\\')]),
     row!(Id::PageList, "Page List", NONE, NONE),
     row!(Id::PagesMatchTheme, "Pages Match UI Theme", NONE, NONE),
     row!(Id::HideSpelling, "Hide Spelling Errors", NONE, NONE),
@@ -473,6 +482,67 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('n').shift()],
         &[cmd('n').shift()]
     ),
+    row!(Id::Styles, "Styles", NONE, NONE),
+    // OneNote 2010's Ctrl+Alt+1 to 6; OneNote for Mac's Option-Command ones.
+    row!(
+        Id::Style(0),
+        "Heading 1",
+        &[cmd('1').option()],
+        &[cmd('1').option()]
+    ),
+    row!(
+        Id::Style(1),
+        "Heading 2",
+        &[cmd('2').option()],
+        &[cmd('2').option()]
+    ),
+    row!(
+        Id::Style(2),
+        "Heading 3",
+        &[cmd('3').option()],
+        &[cmd('3').option()]
+    ),
+    row!(
+        Id::Style(3),
+        "Heading 4",
+        &[cmd('4').option()],
+        &[cmd('4').option()]
+    ),
+    row!(
+        Id::Style(4),
+        "Heading 5",
+        &[cmd('5').option()],
+        &[cmd('5').option()]
+    ),
+    row!(
+        Id::Style(5),
+        "Heading 6",
+        &[cmd('6').option()],
+        &[cmd('6').option()]
+    ),
+    row!(Id::Style(6), "Page Title", NONE, NONE),
+    row!(Id::Style(7), "Citation", NONE, NONE),
+    row!(Id::Style(8), "Quote", NONE, NONE),
+    row!(Id::Style(9), "Code", NONE, NONE),
+    row!(Id::Style(10), "Normal", NONE, NONE),
+    row!(
+        Id::Theme(crate::themes::Scope::Page),
+        "Page Theme…",
+        NONE,
+        NONE
+    ),
+    row!(
+        Id::Theme(crate::themes::Scope::Section),
+        "Section Theme…",
+        NONE,
+        NONE
+    ),
+    row!(
+        Id::Theme(crate::themes::Scope::Notebook),
+        "Notebook Theme…",
+        NONE,
+        NONE
+    ),
     row!(Id::CustomizeTags, "Customize Tags…", NONE, NONE),
     row!(
         Id::RemoveTags,
@@ -499,6 +569,7 @@ pub fn command(id: Id) -> &'static Command {
 }
 
 impl Command {
+    /// The table's chords on `platform`, which the user's may replace.
     pub fn chords(&self, platform: Platform) -> &'static [Chord] {
         match platform {
             Platform::MacOs => self.mac,
@@ -555,35 +626,118 @@ pub fn index(choice: &Choice) -> usize {
         .expect("Menus offer listed choices")
 }
 
+/// The chords set in Options' Keyboard here, each list in place of its command's defaults.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Keymap(Vec<(Id, Vec<Chord>)>);
+
+/// The keymap the keyboard, menus, palette and tooltips follow.
+static KEYMAP: RwLock<Keymap> = RwLock::new(Keymap(Vec::new()));
+
+fn keymap() -> RwLockReadGuard<'static, Keymap> {
+    KEYMAP.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl Keymap {
+    /// The keymap in use.
+    pub fn current() -> Self {
+        keymap().clone()
+    }
+
+    /// Puts `self` in use, reporting whether it differs from the one it replaces.
+    pub fn install(self) -> bool {
+        let mut installed = KEYMAP.write().unwrap_or_else(PoisonError::into_inner);
+        let changed = *installed != self;
+        *installed = self;
+        changed
+    }
+
+    /// Command `id`'s chords on `platform`: the user's, or the table's.
+    pub fn chords(&self, id: Id, platform: Platform) -> &[Chord] {
+        self.0
+            .iter()
+            .find(|(set, _)| *set == id)
+            .map_or_else(|| command(id).chords(platform), |(_, chords)| chords)
+    }
+
+    /// Gives command `id` `chords` here, forgetting them where they are its defaults.
+    pub fn set(&mut self, id: Id, chords: Vec<Chord>) {
+        self.0.retain(|(set, _)| *set != id);
+        if chords != command(id).chords(Platform::CURRENT) {
+            self.0.push((id, chords));
+        }
+    }
+
+    pub fn customized(&self, id: Id) -> bool {
+        self.0.iter().any(|(set, _)| *set == id)
+    }
+
+    /// The command `chord` runs on `platform`.
+    pub fn ran(&self, chord: Chord, platform: Platform) -> Option<Id> {
+        COMMANDS
+            .iter()
+            .find(|command| self.chords(command.id, platform).contains(&chord))
+            .map(|command| command.id)
+            .or_else(|| {
+                (0..9)
+                    .find(|&place| self.tag_chord(place, platform) == Some(chord))
+                    .map(Id::Tag)
+            })
+    }
+
+    /// The chord applying the tag at `place` in the list: the first nine take Ctrl+1 to
+    /// Ctrl+9, as OneNote's do, but for one a command was given.
+    fn tag_chord(&self, place: usize, platform: Platform) -> Option<Chord> {
+        let digit = u8::try_from(place).ok().filter(|place| *place < 9)?;
+        let chord = cmd(char::from(b'1' + digit));
+        let taken = COMMANDS
+            .iter()
+            .any(|command| self.chords(command.id, platform).contains(&chord));
+        (!taken).then_some(chord)
+    }
+
+    /// As settings keep it: each set command's chords by its name in the table.
+    pub fn saved(&self) -> BTreeMap<String, Vec<String>> {
+        (self.0.iter())
+            .map(|(id, chords)| (format!("{id:?}"), chords.iter().map(Chord::saved).collect()))
+            .collect()
+    }
+
+    /// The keymap settings kept, without commands or chords this build no longer has.
+    pub fn from_saved(saved: &BTreeMap<String, Vec<String>>) -> Self {
+        Self(
+            COMMANDS
+                .iter()
+                .filter_map(|command| {
+                    let chords = saved.get(&format!("{:?}", command.id))?;
+                    let chords = chords.iter().filter_map(|chord| Chord::read(chord));
+                    Some((command.id, chords.collect()))
+                })
+                .collect(),
+        )
+    }
+}
+
 /// The command `key` with `modifiers` runs here.
 pub fn find(key: &Key, modifiers: Modifiers) -> Option<Id> {
-    ran(
-        pressed(key, modifiers, Platform::CURRENT)?,
-        Platform::CURRENT,
-    )
+    keymap().ran(pressed(key, modifiers)?, Platform::CURRENT)
 }
 
-/// The command `chord` runs on `platform`.
-fn ran(chord: Chord, platform: Platform) -> Option<Id> {
-    COMMANDS
-        .iter()
-        .find(|command| command.chords(platform).contains(&chord))
-        .map(|command| command.id)
-        .or_else(|| {
-            (0..9)
-                .find(|&place| tag_chord(place) == Some(chord))
-                .map(Id::Tag)
-        })
+/// Command `id`'s chords here.
+pub fn chords(id: Id) -> Vec<Chord> {
+    keymap().chords(id, Platform::CURRENT).to_vec()
 }
 
-/// The chord applying the tag at `place` in the list: the first nine take Ctrl+1 to Ctrl+9,
-/// as OneNote's do.
+/// The chord applying the tag at `place` in the list here.
 pub fn tag_chord(place: usize) -> Option<Chord> {
-    let digit = u8::try_from(place).ok().filter(|place| *place < 9)?;
-    Some(cmd(char::from(b'1' + digit)))
+    keymap().tag_chord(place, Platform::CURRENT)
 }
 
-fn pressed(key: &Key, modifiers: Modifiers, platform: Platform) -> Option<Chord> {
+/// The chord `key` with `modifiers` makes here.
+pub fn pressed(key: &Key, modifiers: Modifiers) -> Option<Chord> {
+    chord_on(key, modifiers, Platform::CURRENT)
+}
+
+fn chord_on(key: &Key, modifiers: Modifiers, platform: Platform) -> Option<Chord> {
     let (key, shifted) = match key {
         Key::Named(named) => (Press::Named(*named), false),
         Key::Character(text) => {
@@ -630,6 +784,49 @@ const SHIFTED: [(char, char); 21] = [
     ('(', '9'),
 ];
 
+/// The named keys a chord may take: AppKit's key equivalent for each, and how macOS's and
+/// other desktops' menus show it.
+const NAMED: [(NamedKey, char, &str, &str); 15] = [
+    (NamedKey::Space, ' ', "Space", "Space"),
+    (NamedKey::Tab, '\t', "⇥", "Tab"),
+    (NamedKey::Enter, '\r', "↩", "Enter"),
+    (NamedKey::Backspace, '\u{8}', "⌫", "Backspace"),
+    (NamedKey::Delete, '\u{f728}', "⌦", "Delete"),
+    (NamedKey::ArrowLeft, '\u{f702}', "←", "Left"),
+    (NamedKey::ArrowRight, '\u{f703}', "→", "Right"),
+    (NamedKey::ArrowUp, '\u{f700}', "↑", "Up"),
+    (NamedKey::ArrowDown, '\u{f701}', "↓", "Down"),
+    (NamedKey::Home, '\u{f729}', "↖", "Home"),
+    (NamedKey::End, '\u{f72b}', "↘", "End"),
+    (NamedKey::PageUp, '\u{f72c}', "⇞", "Page Up"),
+    (NamedKey::PageDown, '\u{f72d}', "⇟", "Page Down"),
+    (NamedKey::F7, '\u{f70a}', "F7", "F7"),
+    (NamedKey::F11, '\u{f70e}', "F11", "F11"),
+];
+
+/// The chords AppKit's own menu items take on macOS, which no command may.
+const APPKIT: [(Chord, &str); 5] = [
+    (cmd('q'), "Quit Snowbound"),
+    (cmd('h'), "Hide Snowbound"),
+    (cmd('h').option(), "Hide Others"),
+    (cmd('m'), "Minimize"),
+    (
+        named(NamedKey::Space).command().control(),
+        "Emoji & Symbols",
+    ),
+];
+
+/// Why a chord can't run a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unusable {
+    /// A key no chord takes, or a character typed without a shortcut modifier.
+    Typing,
+    /// Moves or deletes text, as `draw::edit` reads it, and no command takes it by default.
+    Editing,
+    /// The system's: AppKit's item of this title.
+    System(&'static str),
+}
+
 impl Chord {
     /// The key AppKit matches and shows: a shifted symbol stands for Shift with its key.
     pub fn equivalent(self) -> (String, bool) {
@@ -641,26 +838,27 @@ impl Chord {
                 })
             }
             Press::Char(base) => (base.to_string(), self.shift),
-            Press::Named(NamedKey::Space) => (" ".to_owned(), self.shift),
-            Press::Named(NamedKey::ArrowLeft) => ('\u{f702}'.to_string(), self.shift),
-            Press::Named(NamedKey::ArrowRight) => ('\u{f703}'.to_string(), self.shift),
-            // AppKit's NSF7FunctionKey.
-            Press::Named(NamedKey::F7) => ('\u{f70a}'.to_string(), self.shift),
-            Press::Named(named) => unreachable!("No command takes {named:?}"),
+            Press::Named(named) => (
+                NAMED
+                    .iter()
+                    .find(|(listed, ..)| *listed == named)
+                    .map_or_else(String::new, |(_, key, ..)| key.to_string()),
+                self.shift,
+            ),
         }
     }
 
     /// As a menu shows it on `platform`: ⌃⌥⇧⌘K on macOS, Ctrl+Alt+Shift+K elsewhere.
     pub fn label(self, platform: Platform) -> String {
+        let named = |pick: fn(&(NamedKey, char, &'static str, &'static str)) -> &'static str| {
+            let Press::Named(named) = self.key else {
+                return None;
+            };
+            NAMED.iter().find(|(listed, ..)| *listed == named).map(pick)
+        };
         if platform == Platform::MacOs {
             let (key, shift) = self.equivalent();
-            let key = match self.key {
-                Press::Named(NamedKey::Space) => "Space".to_owned(),
-                Press::Named(NamedKey::ArrowLeft) => "←".to_owned(),
-                Press::Named(NamedKey::ArrowRight) => "→".to_owned(),
-                Press::Named(NamedKey::F7) => "F7".to_owned(),
-                _ => key.to_uppercase(),
-            };
+            let key = named(|(.., mac, _)| mac).map_or_else(|| key.to_uppercase(), str::to_owned);
             [
                 (self.control, "⌃"),
                 (self.option, "⌥"),
@@ -675,9 +873,9 @@ impl Chord {
         } else {
             let key = match self.key {
                 Press::Char(key) => key.to_uppercase().to_string(),
-                Press::Named(NamedKey::ArrowLeft) => "Left".to_owned(),
-                Press::Named(NamedKey::ArrowRight) => "Right".to_owned(),
-                Press::Named(named) => format!("{named:?}"),
+                Press::Named(key) => {
+                    named(|(.., pc)| pc).map_or_else(|| format!("{key:?}"), str::to_owned)
+                }
             };
             [
                 (self.command, "Ctrl+"),
@@ -691,13 +889,92 @@ impl Chord {
             .collect()
         }
     }
+
+    /// Why the chord can't be given a command on `platform`, if it can't.
+    pub fn unusable(self, platform: Platform) -> Option<Unusable> {
+        let modified = self.command || self.option || self.control;
+        let mac = platform == Platform::MacOs;
+        let typed = match self.key {
+            Press::Char(_) => !(self.command || self.control || !mac && self.option),
+            Press::Named(NamedKey::F7 | NamedKey::F11) => false,
+            Press::Named(named) => !modified || !NAMED.iter().any(|(listed, ..)| *listed == named),
+        };
+        let key = match self.key {
+            Press::Char(key) => Key::Character(key.to_string()),
+            Press::Named(named) => Key::Named(named),
+        };
+        let modifiers = Modifiers {
+            shift: self.shift,
+            option: self.option,
+            // Off macOS Control is the shortcut modifier, and comes with it.
+            control: self.control || !mac && self.command,
+            command: self.command,
+        };
+        if typed {
+            Some(Unusable::Typing)
+        } else if platform.command(&key, modifiers).is_some()
+            // The table's own chords already take theirs from text editing.
+            && !(COMMANDS.iter()).any(|command| command.chords(platform).contains(&self))
+        {
+            Some(Unusable::Editing)
+        } else {
+            (APPKIT.iter())
+                .find(|(chord, _)| mac && *chord == self)
+                .map(|(_, title)| Unusable::System(title))
+        }
+    }
+
+    /// As settings keep it, Command+Shift+K: the modifiers and the unshifted key, named.
+    fn saved(&self) -> String {
+        let key = match self.key {
+            Press::Char(key) => key.to_string(),
+            Press::Named(named) => format!("{named:?}"),
+        };
+        [
+            (self.control, "Control+"),
+            (self.option, "Option+"),
+            (self.shift, "Shift+"),
+            (self.command, "Command+"),
+        ]
+        .iter()
+        .filter(|(held, _)| *held)
+        .map(|(_, modifier)| *modifier)
+        .chain([key.as_str()])
+        .collect()
+    }
+
+    /// The chord `saved` wrote as `text`.
+    fn read(text: &str) -> Option<Self> {
+        let (modifiers, key) = text.rsplit_once('+').unwrap_or(("", text));
+        let mut chars = key.chars();
+        let key = match (chars.next(), chars.next()) {
+            (Some(key), None) => Press::Char(key),
+            _ => Press::Named(
+                NAMED
+                    .iter()
+                    .map(|(named, ..)| *named)
+                    .find(|named| format!("{named:?}") == key)?,
+            ),
+        };
+        let mut chord = press(key);
+        for modifier in modifiers.split('+').filter(|modifier| !modifier.is_empty()) {
+            match modifier {
+                "Control" => chord.control = true,
+                "Option" => chord.option = true,
+                "Shift" => chord.shift = true,
+                "Command" => chord.command = true,
+                _ => return None,
+            }
+        }
+        Some(chord)
+    }
 }
 
 /// The chord a menu or hint shows for `id` here, empty where it has none.
 pub fn shortcut(id: Id) -> String {
     let chord = match id {
         Id::Tag(place) => tag_chord(place),
-        id => command(id).chords(Platform::CURRENT).first().copied(),
+        id => chords(id).first().copied(),
     };
     chord.map_or_else(String::new, |chord| chord.label(Platform::CURRENT))
 }
@@ -722,11 +999,20 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// Every choice's status, in `choices` order, for the menu bar.
+    /// Every choice's status, in `choices` order, for the menu bar. Link gives up its chord,
+    /// ⌘K, to the open palette's actions.
     pub(crate) fn statuses(&self) -> Vec<Status> {
+        // A chord Options records reaches it past the menu bar's disabled items.
+        if self.recording_chord() {
+            return vec![Status::default(); choices().count()];
+        }
         let format = self.format_state();
+        let palette = self.ui.popup_open(crate::palette::id());
         choices()
-            .map(|choice| self.status(&choice, &format))
+            .map(|choice| match choice {
+                Choice::Command(Id::Link) if palette => Status::default(),
+                choice => self.status(&choice, &format),
+            })
             .collect()
     }
 
@@ -734,6 +1020,8 @@ impl State {
         let session = self.session.as_ref();
         let welcome = session.is_none() && !self.temporary && self.sectionless.is_none();
         let modal = self.options.is_some()
+            || self.themes.is_some()
+            || self.printing.open()
             || self.link.is_some()
             || self.tag_list.is_some()
             || self.server.is_some();
@@ -742,6 +1030,14 @@ impl State {
         // Picked drawings leave the text selection behind them unseen, so it takes no edits.
         let typing = self.view.accepts_text() && self.view.ink_selection().is_empty();
         let text = writable && typing;
+        let tagged = writable
+            && matches!(
+                self.view.object_focus(),
+                Some(
+                    canvas::interaction::ObjectFocus::Image(_)
+                        | canvas::interaction::ObjectFocus::File(_)
+                )
+            );
         // Edit commands act on a focused field instead of the page.
         let field = self.ui.focused_field().is_some();
         let [anchor, focus] = self.view.editor.selection().positions;
@@ -793,7 +1089,6 @@ impl State {
             | Id::Find
             | Id::Search
             | Id::ExportPdf
-            | Id::ExportSectionPdf
             | Id::Print => enabled(!modal && session.is_some()),
             Id::PageVersions => session.filter(|_| !modal).map_or(
                 Status {
@@ -809,8 +1104,7 @@ impl State {
                 enabled: !welcome && !modal,
                 checked: Some(self.full_page),
             },
-            Id::Undo => enabled(writable && !field && self.view.editor.can_undo()),
-            Id::Redo => enabled(writable && !field && self.view.editor.can_redo()),
+            Id::Undo | Id::Redo => enabled(writable && !field && self.can_step(id == Id::Redo)),
             Id::Cut => enabled(writable && selected),
             Id::Copy => enabled(selected),
             Id::Paste => enabled(text && !field),
@@ -903,13 +1197,25 @@ impl State {
             | Id::Indent
             | Id::Outdent
             | Id::ClearFormatting
-            | Id::RemoveTags => enabled(text),
+            | Id::Styles => enabled(text),
+            Id::Style(place) => checked(
+                format.style.as_deref()
+                    == notebook::sidecar::themes::STYLES
+                        .get(place)
+                        .map(|(name, _)| *name),
+            ),
+            Id::Theme(scope) => enabled(!modal && self.theme_target(scope).is_some()),
+            // A selected picture or file takes tags too, as in OneNote.
+            Id::RemoveTags => enabled(text || tagged),
             Id::Toggle(toggle) => checked(format.toggles.contains(&toggle)),
             Id::Bullets => checked(format.bullets),
             Id::Numbering => checked(format.numbering),
             Id::Align(alignment) => checked(format.alignment == Some(alignment)),
             Id::Tag(place) => match self.tags.get(place) {
-                Some(tag) => checked(format.tags.contains(&(tag.stored(), place as u16))),
+                Some(tag) => Status {
+                    enabled: text || tagged,
+                    checked: Some(format.tags.contains(&(tag.stored(), place as u16))),
+                },
                 None => Status::default(),
             },
         }
@@ -1032,19 +1338,11 @@ impl State {
                 platform::reveal(&self.notebook().ok_or("No notebook is open")?.location);
                 return Ok(());
             }
-            Id::ExportPdf | Id::ExportSectionPdf | Id::Print => {
-                let scope = if id == Id::ExportSectionPdf {
-                    crate::print::Scope::Section
-                } else {
-                    crate::print::Scope::Page
-                };
-                return self.print(scope, id != Id::Print);
-            }
-            Id::Undo | Id::Redo => {
-                let response = self.view.undo(id == Id::Redo)?;
-                self.respond(response);
+            Id::ExportPdf | Id::Print => {
+                self.open_print(id == Id::ExportPdf);
                 return Ok(());
             }
+            Id::Undo | Id::Redo => return self.step(id == Id::Redo),
             Id::Cut | Id::Copy => {
                 let response = self.view.copy(id == Id::Cut)?;
                 self.respond(response);
@@ -1133,7 +1431,7 @@ impl State {
                 else {
                     return Ok(());
                 };
-                return self.insert_picture(std::fs::read(path)?);
+                return self.insert_picture(std::fs::read(path)?, None);
             }
             Id::Attachment => {
                 let Some(path) = platform::pick_file("Attach File", &[]) else {
@@ -1227,7 +1525,27 @@ impl State {
             Id::Align(alignment) => return format(self, Formatting::Align(alignment)),
             Id::Indent => return format(self, Formatting::Indent),
             Id::Outdent => return format(self, Formatting::Outdent),
-            Id::ClearFormatting => return format(self, Formatting::Clear),
+            // Clear Formatting at a caret makes the paragraph Normal, as OneNote 2010's
+            // Ctrl+Shift+N does; over a selection it clears the characters' formatting.
+            Id::ClearFormatting => {
+                let [anchor, focus] = self.view.editor.selection().positions;
+                if anchor == focus {
+                    return format(self, Formatting::Style(self.gallery_style("p")));
+                }
+                return format(self, Formatting::Clear);
+            }
+            Id::Style(place) => {
+                let (name, _) = notebook::sidecar::themes::STYLES[place];
+                return format(self, Formatting::Style(self.gallery_style(name)));
+            }
+            Id::Styles => {
+                self.ui.open_popup(crate::toolbar_popup("styles"));
+                return Ok(());
+            }
+            Id::Theme(scope) => {
+                self.open_themes(scope);
+                return Ok(());
+            }
             Id::Tag(place) => {
                 let tag = self.tags[place].clone();
                 format(self, Formatting::Tag(tag, place as u16))?;
@@ -1315,8 +1633,8 @@ mod tests {
                 control,
                 command,
             };
-            ran(
-                pressed(&Key::Character(key.into()), modifiers, platform)?,
+            Keymap::default().ran(
+                chord_on(&Key::Character(key.into()), modifiers, platform)?,
                 platform,
             )
         };
@@ -1371,7 +1689,7 @@ mod tests {
             find(gtk, "y", false, false, true, true),
             cfg!(windows).then_some(Id::Redo)
         );
-        let indent = pressed(
+        let indent = chord_on(
             &Key::Named(NamedKey::ArrowRight),
             Modifiers {
                 shift: true,
@@ -1408,6 +1726,72 @@ mod tests {
         assert_eq!(label(Id::Date, Platform::Windows), "Alt+Shift+D");
     }
 
+    #[test]
+    fn keymaps_keep_chords_by_command_and_drop_the_unknown() {
+        let mut keymap = Keymap::default();
+        let chord = named(NamedKey::PageDown).command().option().shift();
+        keymap.set(Id::Sidebar, vec![chord, cmd('\\').control()]);
+        keymap.set(
+            Id::Toggle(Toggle::Bold),
+            command(Id::Toggle(Toggle::Bold))
+                .chords(Platform::CURRENT)
+                .to_vec(),
+        );
+        let mut saved = keymap.saved();
+        assert_eq!(
+            saved["Sidebar"],
+            ["Option+Shift+Command+PageDown", "Control+Command+\\"]
+        );
+        assert!(!saved.contains_key("Toggle(Bold)"), "defaults are not kept");
+        saved.insert("Retired".into(), vec!["Command+J".into()]);
+        saved.insert(
+            "PageList".into(),
+            vec!["Command+Hyper+J".into(), "Command+j".into()],
+        );
+        let read = Keymap::from_saved(&saved);
+        assert_eq!(
+            read.chords(Id::Sidebar, Platform::CURRENT),
+            [chord, cmd('\\').control()]
+        );
+        assert_eq!(read.chords(Id::PageList, Platform::CURRENT), [cmd('j')]);
+    }
+
+    #[test]
+    fn every_default_chord_is_one_a_user_could_record() {
+        for platform in PLATFORMS {
+            for command in COMMANDS {
+                for chord in command.chords(platform) {
+                    assert_eq!(
+                        chord.unusable(platform),
+                        None,
+                        "{platform:?}: {} for {}",
+                        chord.label(platform),
+                        command.title
+                    );
+                }
+            }
+        }
+        assert_eq!(key('j').unusable(Platform::MacOs), Some(Unusable::Typing));
+        assert_eq!(
+            cmd('q').unusable(Platform::MacOs),
+            Some(Unusable::System("Quit Snowbound"))
+        );
+        assert_eq!(cmd('q').unusable(Platform::Gtk), None);
+        assert_eq!(
+            named(NamedKey::ArrowLeft)
+                .command()
+                .unusable(Platform::MacOs),
+            Some(Unusable::Editing)
+        );
+        assert_eq!(
+            command(Id::Sidebar).chords(Platform::MacOs)[0].label(Platform::MacOs),
+            "⌘\\"
+        );
+        assert_eq!(
+            command(Id::Sidebar).chords(Platform::Windows)[0].label(Platform::Windows),
+            "Ctrl+\\"
+        );
+    }
     /// Each toolbar button chooses a command or a list's entry, so it runs, enables and
     /// checks as the menu bar and keyboard do.
     #[test]

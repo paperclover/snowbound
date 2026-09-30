@@ -22,6 +22,7 @@ fn cite() -> Definition {
     Definition {
         kind: Kind::Style {
             name: Some("cite".into()),
+            next: None,
         },
         format: Format {
             bold: Some(false),
@@ -107,7 +108,7 @@ impl CanvasEditor {
             vec![Paragraph::new(String::new(), format); parts],
         )?;
         let style = match self.definitions.iter().find(|(_, definition)| {
-            matches!(&definition.kind, Kind::Style { name: Some(name) } if name == "cite")
+            matches!(&definition.kind, Kind::Style { name: Some(name), .. } if name == "cite")
         }) {
             Some((style, _)) => *style,
             None => {

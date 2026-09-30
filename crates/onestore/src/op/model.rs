@@ -614,10 +614,20 @@ pub fn apply(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             let tags = paragraph.tags.iter().chain(match &paragraph.content {
                 ParagraphContent::Text(text) => text.tags.as_slice(),
                 ParagraphContent::Table(table) => table.tags.as_slice(),
+                ParagraphContent::Image(image) => image.tags.as_slice(),
+                ParagraphContent::Attachment(file) => file.tags.as_slice(),
                 _ => &[],
             });
             referenced.extend(tags.filter_map(|tag| tag.definition));
         }
+    }
+    for object in &page.objects {
+        let tags = match object {
+            PageObject::Image(image) => image.tags.as_slice(),
+            PageObject::Attachment(file) => file.tags.as_slice(),
+            _ => &[],
+        };
+        referenced.extend(tags.iter().filter_map(|tag| tag.definition));
     }
     page.definitions.retain(|id, _| referenced.contains(id));
     Ok(())
@@ -1000,54 +1010,59 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
             let paragraph = paragraph_mut(page, *paragraph)?;
             paragraph.style = Some(style);
             if let Some(text) = paragraph.text_mut() {
-                let mut previous = 0;
-                let runs: Vec<(String, Format)> = text
-                    .text
-                    .spans()
-                    .iter()
-                    .map(|span| {
-                        // What the old style gave, the new one gives instead.
-                        let mut format = span.format.clone();
-                        macro_rules! restyle {
-                            ($($field:ident),*) => {$(
-                                if old.$field.is_some() && format.$field == old.$field {
-                                    format.$field = new.$field.clone();
-                                } else if format.$field.is_none() {
-                                    format.$field = new.$field.clone();
-                                }
-                            )*};
+                text.text = restyled(&text.text, &old, &new);
+            }
+        }
+        PageOp::Unstyle { paragraph: id } => {
+            let Some(style) = paragraph_mut(page, *id)?.style.take() else {
+                return Ok(());
+            };
+            let old = page
+                .definitions
+                .get(&style)
+                .ok_or_else(|| invalid("The page has no such paragraph style"))?
+                .format
+                .clone();
+            if let Some(text) = paragraph_mut(page, *id)?.text_mut() {
+                text.text = restyled(&text.text, &old, &Format::default());
+            }
+        }
+        PageOp::Restyle {
+            style,
+            into,
+            definition,
+        } => {
+            let old = page
+                .definitions
+                .get(style)
+                .ok_or_else(|| invalid("The page has no such paragraph style"))?
+                .format
+                .clone();
+            let mut definition = definition.clone();
+            let format = &mut definition.format;
+            for points in [
+                &mut format.space_before,
+                &mut format.space_after,
+                &mut format.line_spacing,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                *points = stored(*points);
+            }
+            page.definitions
+                .entry(*into)
+                .or_insert_with(|| definition.clone());
+            let paths: Vec<Path> = lists(page).into_iter().map(|(path, ..)| path).collect();
+            for path in paths {
+                for paragraph in list_at(page, &path) {
+                    if paragraph.style == Some(*style) {
+                        paragraph.style = Some(*into);
+                        if let Some(text) = paragraph.text_mut() {
+                            text.text = restyled(&text.text, &old, &definition.format);
                         }
-                        restyle!(
-                            bold,
-                            italic,
-                            underline,
-                            strike,
-                            superscript,
-                            subscript,
-                            hidden,
-                            hyperlink,
-                            hyperlink_label,
-                            math,
-                            embedded_object,
-                            font,
-                            font_size,
-                            color,
-                            highlight,
-                            language,
-                            alignment,
-                            rtl,
-                            space_before,
-                            space_after,
-                            line_spacing,
-                            list_spacing,
-                            math_object
-                        );
-                        let run = (text.text.text()[previous..span.end].to_owned(), format);
-                        previous = span.end;
-                        run
-                    })
-                    .collect();
-                text.text = Paragraph::from_runs(runs);
+                    }
+                }
             }
         }
         PageOp::Media { paragraph, media } => {
@@ -1088,8 +1103,12 @@ fn interpret(page: &mut Page, op: &PageOp) -> Result<(), Error> {
                 paragraph.tags = tags;
             } else if let Ok(text) = text_mut(page, *target) {
                 text.tags = tags;
+            } else if let Ok(table) = table_mut(page, *target) {
+                table.tags = tags;
+            } else if let Ok(image) = image_mut(page, *target) {
+                image.tags = tags;
             } else {
-                table_mut(page, *target)?.tags = tags;
+                attachment_mut(page, *target)?.tags = tags;
             }
         }
         PageOp::Add { object, before } => {
@@ -1271,6 +1290,52 @@ fn drop_emptied(page: &mut Page) {
 
 /// The identity a read-only definition is stored under: an equal one the page holds, as
 /// the writers share identical read-only objects, else `id`.
+/// `text` moved from paragraph style `old` to `new`: what the old style gave, the new one
+/// gives instead.
+fn restyled(text: &Paragraph, old: &Format, new: &Format) -> Paragraph {
+    let mut previous = 0;
+    Paragraph::from_runs(text.spans().iter().map(|span| {
+        let mut format = span.format.clone();
+        macro_rules! restyle {
+            ($($field:ident),*) => {$(
+                if old.$field.is_some() && format.$field == old.$field {
+                    format.$field = new.$field.clone();
+                } else if format.$field.is_none() {
+                    format.$field = new.$field.clone();
+                }
+            )*};
+        }
+        restyle!(
+            bold,
+            italic,
+            underline,
+            strike,
+            superscript,
+            subscript,
+            hidden,
+            hyperlink,
+            hyperlink_label,
+            math,
+            embedded_object,
+            font,
+            font_size,
+            color,
+            highlight,
+            language,
+            alignment,
+            rtl,
+            space_before,
+            space_after,
+            line_spacing,
+            list_spacing,
+            math_object
+        );
+        let run = (text.text()[previous..span.end].to_owned(), format);
+        previous = span.end;
+        run
+    }))
+}
+
 fn define(page: &mut Page, id: ExGuid, definition: &crate::page::Definition) -> ExGuid {
     if page.definitions.contains_key(&id) {
         return id;

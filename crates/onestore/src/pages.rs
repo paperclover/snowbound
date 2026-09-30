@@ -506,6 +506,12 @@ pub struct PageCreation {
     /// The page identity and creation time (FILETIME) a page keeps from elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     kept: Option<([u8; 16], u64)>,
+    /// The title's font, OneNote's Default font face; none is Calibri.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title_font: Option<String>,
+    /// The title's colour, OneNote's Default font colour as COLORREF; none is automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title_color: Option<u32>,
 }
 
 impl PageCreation {
@@ -522,6 +528,8 @@ impl PageCreation {
             created: current_timestamps()?.0,
             date: None,
             kept: None,
+            title_font: None,
+            title_color: None,
         };
         page.validate()?;
         Ok(page)
@@ -534,6 +542,16 @@ impl PageCreation {
             return Err(invalid("Only a titled page shows its date"));
         }
         self.date = Some([date.to_owned(), time.to_owned()]);
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Sets the title in `font` and `color` (COLORREF; none is automatic), as OneNote 2010
+    /// sets a new page's `PageTitle` quick style in its Default font's face and colour,
+    /// keeping the size (`corpus/default-font`).
+    pub fn titled_in(mut self, font: &str, color: Option<u32>) -> Result<Self, Error> {
+        self.title_font = Some(font.to_owned());
+        self.title_color = color;
         self.validate()?;
         Ok(self)
     }
@@ -626,6 +644,10 @@ impl PageCreation {
                 .iter()
                 .chain(self.date.iter().flatten())
                 .any(|text| text.contains(['\0', '\r', '\n', '\u{fffc}', '\u{fddf}']))
+            || self
+                .title_font
+                .as_ref()
+                .is_some_and(|font| font.is_empty() || font.contains('\0'))
         {
             return Err(invalid(
                 "Use a new page identity, an existing page anchor, and ordinary single-line title text",
@@ -924,11 +946,20 @@ impl PageCreation {
                     (
                         18,
                         0x12004d,
-                        vec![
+                        [
                             (0x1c00345a, string("PageTitle")),
-                            (0x1c001c0a, string("Calibri")),
+                            (
+                                0x1c001c0a,
+                                string(self.title_font.as_deref().unwrap_or("Calibri")),
+                            ),
                             (0x10001c0b, 34_u16.to_le_bytes().to_vec()),
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(
+                            self.title_color
+                                .map(|color| (0x14001c0c, color.to_le_bytes().to_vec())),
+                        )
+                        .collect(),
                     ),
                     (19, 0x12004d, vec![(0x14001c3b, reference(0x409))]),
                 ] {

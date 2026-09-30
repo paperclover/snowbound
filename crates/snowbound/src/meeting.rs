@@ -102,6 +102,7 @@ pub fn content(page: &Page) -> Result<Page, Box<dyn Error>> {
         Definition {
             kind: Kind::Style {
                 name: Some("p".into()),
+                next: None,
             },
             format: Format {
                 language: None,

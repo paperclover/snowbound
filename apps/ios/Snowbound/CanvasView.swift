@@ -193,6 +193,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             object: nil)
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: CanvasView, _) in view.paper() }
         formatBar.onApply = { [weak self] command in self?.apply(command) }
+        formatBar.onStyle = { [weak self] place in self?.applyStyle(place) }
+        formatBar.stylePlace = { [weak self] in self?.stylePlace ?? -1 }
         formatBar.onDismiss = { [weak self] in _ = self?.resignFirstResponder() }
     }
 
@@ -879,6 +881,18 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
 
     var pageText: String { handle.flatMap { take(sb_view_page_text($0)) } ?? "" }
 
+    /// The page on `paper`, in points, as OneNote 2010 prints it, each sheet's footer naming
+    /// `section`.
+    func pdf(paper: CGSize, section: String) -> Data? {
+        guard let handle else { return nil }
+        var length = 0
+        guard let bytes = sb_view_pdf(handle, Float(paper.width), Float(paper.height), section, &length) else {
+            return nil
+        }
+        defer { sb_bytes_free(bytes, length) }
+        return Data(bytes: bytes, count: length)
+    }
+
     /// The selection's formatting, from `sb_view_format`.
     var format: UInt64 { handle.map(sb_view_format) ?? 0 }
 
@@ -933,6 +947,15 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         guard let handle else { return }
         edit(external: true) { sb_view_apply(handle, command) }
     }
+
+    /// Gives the selected paragraphs style `place` of OneNote's gallery, in the page's theme.
+    func applyStyle(_ place: UInt8) {
+        guard let handle else { return }
+        edit(external: true) { sb_view_style(handle, place) }
+    }
+
+    /// The selection's style's place in the gallery, or -1.
+    var stylePlace: Int32 { handle.map(sb_view_style_place) ?? -1 }
 
     /// Shows the page as stored; with `discard`, after an edit was refused.
     func reload(discard: Bool) {

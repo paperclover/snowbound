@@ -1,5 +1,5 @@
 use crate::{
-    document::{DocumentEdit, edited_nodes, leaves},
+    document::{DocumentEdit, descendants, edited_nodes, leaves},
     layout::{InlineSpace, LayoutError, TextEngine, TextLayout},
 };
 use onestore::page::text::{Paragraph, TextProjection};
@@ -527,6 +527,51 @@ impl ParagraphTag {
         let right = x - Self::INSET + Self::SIZE;
         marker.map_or(right, |marker| right.min(marker - Self::MARKER_GAP)) - side
     }
+}
+
+/// How far a 12 pt icon starts left of a picture or file on the page, as OneNote 2010 draws
+/// one (`corpus/object-tags`).
+const PAGE_INSET: f32 = 24.75;
+
+/// The note tags of a picture or file on the page, whose bounds are `bounds`: oldest first in
+/// a column ending left of it, centred on it; a tag whose definition is missing draws nothing.
+pub(crate) fn object_tags(
+    tags: &[onestore::document::Tag],
+    definitions: &BTreeMap<ExGuid, Definition>,
+    [x, top, _, bottom]: [f32; 4],
+) -> Vec<ParagraphTag> {
+    let side = ParagraphTag::side(crate::layout::DEFAULT_FONT_SIZE);
+    let mut drawn: Vec<ParagraphTag> = tags
+        .iter()
+        .rev()
+        .filter_map(|tag| {
+            let (icon, label) = if tag.status & 4 != 0 {
+                let shape = tag.shape.unwrap_or(0);
+                (TagIcon::Task { shape }, None)
+            } else {
+                let Kind::TagDefinition { shape, label, .. } =
+                    &definitions.get(tag.definition.as_ref()?)?.kind
+                else {
+                    return None;
+                };
+                let checked = tag.status & 1 != 0;
+                (TagIcon::of(shape.unwrap_or(0), checked)?, label.as_deref())
+            };
+            Some(ParagraphTag {
+                icon,
+                origin: [0.0, (top + bottom - side) / 2.0],
+                size: side,
+                label: label.unwrap_or_default().to_owned(),
+                disabled: tag.status & 2 != 0,
+            })
+        })
+        .collect();
+    let right = x - PAGE_INSET + ParagraphTag::SIZE;
+    let count = drawn.len() as f32;
+    for (index, tag) in drawn.iter_mut().enumerate() {
+        tag.origin[0] = right - side * (count - index as f32);
+    }
+    drawn
 }
 
 /// How much further than its list spacing OneNote 2010 sets a marker's advance from its text.
@@ -1519,7 +1564,12 @@ impl OutlineLayout {
                                 unreachable!("text and tables are not objects")
                             }
                         };
-                        object.tags = BlockTags::new(node, &[], x, shape)?;
+                        let tags = match content {
+                            ParagraphContent::Image(image) => image.tags.as_slice(),
+                            ParagraphContent::Attachment(file) => file.tags.as_slice(),
+                            _ => &[],
+                        };
+                        object.tags = BlockTags::new(node, tags, x, shape)?;
                         let flow = object.place(y, height);
                         result.objects.push(object);
                         (space, height, flow, extent)
@@ -1580,8 +1630,9 @@ impl OutlineLayout {
     }
 
     /// Lays out root nodes `range` of `nodes` once `edit` applies, the edit's own or the table
-    /// holding its cell, and works out where the nodes after them move. Resizing columns or
-    /// showing or hiding other nodes lays out every node; renumbering lays out the renumbered.
+    /// holding its cell, and works out where the nodes after them move. Resizing columns of
+    /// other nodes or showing or hiding them lays out every node; renumbering lays out the
+    /// renumbered.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn relayout(
         &self,
@@ -1598,7 +1649,15 @@ impl OutlineLayout {
             &[f32],
         ) -> Result<ParagraphLayout, LayoutError>,
     ) -> Result<Relayout, LayoutError> {
-        let mut range = if edit.columns.is_empty() {
+        let resized = |node: &PageParagraph| match &node.content {
+            ParagraphContent::Table(table) => edit.columns.contains_key(&table.id),
+            _ => false,
+        };
+        let mut range = if edit.columns.len()
+            == descendants(&nodes[range.clone()], None)
+                .filter(|(_, _, node)| resized(node))
+                .count()
+        {
             range
         } else {
             0..nodes.len()
@@ -1867,6 +1926,13 @@ impl OutlineLayout {
 
     pub(crate) fn table_width(&self) -> f32 {
         table_width(&self.tables)
+    }
+
+    /// How far the content reaches, without the 36-point floor of `size`.
+    pub(crate) fn content_width(&self) -> f32 {
+        let text = self.paragraphs.iter().map(|paragraph| paragraph.size()[0]);
+        let objects = self.objects.iter().map(|object| object.rect[2]);
+        text.chain(objects).fold(self.table_width(), f32::max)
     }
 
     fn table(
@@ -2747,6 +2813,7 @@ mod tests {
             bytes: None,
             preview: None,
             recording: None,
+            tags: Vec::new(),
         });
         let mut ink = paragraph(3, "", 1, None);
         ink.content = ParagraphContent::Ink(Ink {

@@ -116,6 +116,7 @@ fn insert_attachment(section: &str, preview: Option<Arc<[u8]>>) -> Vec<u8> {
         bytes: Some(Arc::from(PAYLOAD)),
         preview: preview.clone(),
         recording: None,
+        tags: Vec::new(),
     });
     body_paragraphs(&mut after).push(holder.clone());
     body_paragraphs(&mut after).push(plain_paragraph(&template, "After the file"));
@@ -187,6 +188,7 @@ fn attachments_need_a_file_name_and_stored_ones_are_renamed_in_place() {
         bytes: Some(Arc::from(PAYLOAD)),
         preview: None,
         recording: None,
+        tags: Vec::new(),
     });
     body_paragraphs(&mut after).push(holder);
     assert!(ops::saved(&source, space, &after).is_err());
@@ -302,6 +304,7 @@ fn a_file_on_the_page_is_attached_moved_renamed_and_removed_as_ops() {
         bytes: Some(Arc::from(PAYLOAD)),
         preview: attachments(&native)[0].preview.clone(),
         recording: None,
+        tags: Vec::new(),
     };
     let steps: [&dyn Fn(&mut Page); 4] = [
         &|page| page.objects.push(PageObject::Attachment(file.clone())),

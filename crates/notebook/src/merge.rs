@@ -153,7 +153,7 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
         | PageOp::Equation { text, .. }
         | PageOp::Split { text, .. } => vec![*text],
         PageOp::Date { fields, .. } => fields.iter().map(|(text, _)| *text).collect(),
-        PageOp::Color(_) | PageOp::RuleLines(_) => Vec::new(),
+        PageOp::Color(_) | PageOp::RuleLines(_) | PageOp::Restyle { .. } => Vec::new(),
         PageOp::Join { left, right } => vec![*left, *right],
         PageOp::Insert { container, .. } => vec![*container],
         PageOp::Move { object, .. }
@@ -164,6 +164,7 @@ fn named(op: &PageOp) -> Vec<ExGuid> {
         PageOp::Level { paragraph, .. }
         | PageOp::Paragraph { paragraph, .. }
         | PageOp::Style { paragraph, .. }
+        | PageOp::Unstyle { paragraph }
         | PageOp::Media { paragraph, .. }
         | PageOp::List { paragraph, .. } => vec![*paragraph],
         PageOp::Tags { target, .. } => vec![*target],
@@ -770,11 +771,19 @@ impl Diff {
             }
             PageOp::Paragraph { paragraph, .. }
             | PageOp::Style { paragraph, .. }
+            | PageOp::Unstyle { paragraph }
             | PageOp::Media { paragraph, .. }
             | PageOp::List { paragraph, .. } => {
                 require(self.kept(*paragraph) && self.new_has(*paragraph))?
             }
             PageOp::Tags { target, .. } => require(self.same_tags(*target))?,
+            // A theme reaches the style's paragraphs as the remote left them; a style the
+            // remote no longer uses is restyled when the page next opens.
+            PageOp::Restyle { style, .. } => {
+                if self.old.styles.contains(style) && !self.new.styles.contains(style) {
+                    return Ok(None);
+                }
+            }
             PageOp::Picture {
                 picture: object, ..
             }
@@ -1079,6 +1088,8 @@ impl Node {
 struct Index {
     nodes: BTreeMap<ExGuid, Node>,
     page: Vec<ExGuid>,
+    /// The paragraph styles the page's paragraphs use.
+    styles: BTreeSet<ExGuid>,
 }
 
 const PAGE: ExGuid = ExGuid {
@@ -1088,7 +1099,17 @@ const PAGE: ExGuid = ExGuid {
 
 impl Index {
     fn of(page: &Page) -> Self {
-        let mut index = Self::default();
+        let mut index = Self {
+            styles: page
+                .definitions
+                .iter()
+                .filter(|(_, definition)| {
+                    matches!(definition.kind, onestore::document::Kind::Style { .. })
+                })
+                .map(|(id, _)| *id)
+                .collect(),
+            ..Self::default()
+        };
         for object in &page.objects {
             index.page.push(object.id());
             match object {

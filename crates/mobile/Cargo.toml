@@ -9,7 +9,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-canvas = { path = "../canvas", features = ["interaction"] }
+canvas = { path = "../canvas", features = ["interaction", "pdf"] }
 draw = { path = "../draw" }
 notebook = { path = "../notebook", features = ["smb"] }
 onestore = { path = "../onestore" }

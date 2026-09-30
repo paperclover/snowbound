@@ -1,14 +1,14 @@
-//! OneNote's Options dialog: pages of settings listed on the left as OneNote 2010 lists
-//! them, grouped under the same headings, each kept when OK is chosen.
+//! OneNote's Options dialog as one scrolling list of sections (`resources/settings.md`):
+//! indexed on the left, filtered by the search field above, each choice kept when OK is
+//! chosen.
 
 use crate::{State, platform, settings::ColorScheme, update};
 use accesskit::Role;
-use ui::{Anchor, Axis, Flags, Id, Spec, Theme, Ui, children, fill, popup::Item, px};
+use canvas::editor::DefaultFont;
+use ui::{Anchor, Axis, Extent, Flags, Id, Size, Spec, Theme, Ui, fill, popup::Item, px};
 use winit::keyboard::NamedKey;
 
-const WIDTH: f32 = 640.0;
-/// The pages' area, the same for every page so the dialog keeps its size.
-const HEIGHT: f32 = 320.0;
+const WIDTH: f32 = 680.0;
 const NAV: f32 = 150.0;
 /// The column the fields' labels share.
 const LABEL: f32 = 104.0;
@@ -17,36 +17,212 @@ const SCHEMES: [(ColorScheme, &str); 3] = [
     (ColorScheme::Light, "Light"),
     (ColorScheme::Dark, "Dark"),
 ];
+/// The sizes Default font offers, OneNote 2010's list in points.
+const SIZES: [f32; 19] = [
+    8.0, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0,
+    36.0, 48.0, 72.0,
+];
 
-#[derive(Clone, Copy, PartialEq)]
-enum Page {
-    General,
-    Display,
-    SaveBackup,
-    Advanced,
+/// An entry of the index and its part of the list.
+struct Section {
+    name: &'static str,
+    groups: &'static [Group],
 }
 
-impl Page {
-    const ALL: [(Page, &str); 4] = [
-        (Page::General, "General"),
-        (Page::Display, "Display"),
-        (Page::SaveBackup, "Save & Backup"),
-        (Page::Advanced, "Advanced"),
-    ];
+/// Rows under a banded heading, as OneNote groups an Options page; an empty heading has no
+/// band.
+struct Group {
+    heading: &'static str,
+    rows: &'static [Row],
 }
 
-/// The page shown and what the fields hold until OK keeps them.
+struct Row {
+    label: &'static str,
+    /// Other words search finds the row by.
+    keywords: &'static str,
+    control: Control,
+}
+
+enum Control {
+    /// A check box before the label, bound to a choice.
+    Check(fn(&mut Options) -> &mut bool),
+    /// The label in the labels' column, then what the function builds.
+    Field(fn(&mut State, &mut Options)),
+    /// What `build` makes across the row, unlabelled, from the search's words; `finds` tells
+    /// whether they find anything in it. Words found in the row's own texts give it none.
+    Block {
+        build: fn(&mut State, &mut Options, &[String]),
+        finds: fn(&[String]) -> bool,
+    },
+}
+
+/// Every section, in the list's order.
+const SECTIONS: &[Section] = &[
+    Section {
+        name: "General",
+        groups: &[
+            Group {
+                heading: "User Interface Options",
+                rows: &[
+                    Row {
+                        label: "Appearance:",
+                        keywords: "color colour scheme dark light mode system theme",
+                        control: Control::Field(appearance),
+                    },
+                    Row {
+                        label: "Pages match UI theme",
+                        keywords: "dark white paper background",
+                        control: Control::Check(|options| &mut options.pages_match),
+                    },
+                ],
+            },
+            Group {
+                heading: "Personalize",
+                rows: &[Row {
+                    label: "User name:",
+                    keywords: "author name",
+                    control: Control::Field(user_name_field),
+                }],
+            },
+        ],
+    },
+    Section {
+        name: "Editing",
+        groups: &[
+            Group {
+                heading: "Default font",
+                rows: &[
+                    Row {
+                        label: "Font:",
+                        keywords: "typeface text new",
+                        control: Control::Field(font_face),
+                    },
+                    Row {
+                        label: "Size:",
+                        keywords: "font points text new",
+                        control: Control::Field(font_size),
+                    },
+                    Row {
+                        label: "Font color:",
+                        keywords: "colour text new automatic",
+                        control: Control::Field(font_color),
+                    },
+                ],
+            },
+            Group {
+                heading: "Proofing",
+                rows: &[Row {
+                    label: "Hide spelling errors",
+                    keywords: "spell check misspelled words",
+                    control: Control::Check(|options| &mut options.hide_spelling),
+                }],
+            },
+            Group {
+                heading: "Pen",
+                rows: &[Row {
+                    label: "Use pen pressure sensitivity",
+                    keywords: "tablet stylus ink stroke width drawing",
+                    control: Control::Check(|options| &mut options.pen_pressure),
+                }],
+            },
+        ],
+    },
+    Section {
+        name: "Display",
+        groups: &[Group {
+            heading: "",
+            rows: &[
+                Row {
+                    label: "Page tabs appear on the left",
+                    keywords: "pages list side layout",
+                    control: Control::Check(|options| &mut options.page_tabs_left),
+                },
+                Row {
+                    label: "Navigation bar appears on the left",
+                    keywords: "notebooks sidebar side right layout",
+                    control: Control::Check(|options| &mut options.navigation_bar_left),
+                },
+            ],
+        }],
+    },
+    Section {
+        name: "Sync & Storage",
+        groups: &[Group {
+            heading: "Cache file location",
+            rows: &[Row {
+                label: "Path:",
+                keywords: "folder replica data disk",
+                control: Control::Field(cache),
+            }],
+        }],
+    },
+    Section {
+        name: "Updates",
+        groups: &[Group {
+            heading: "",
+            rows: &[
+                Row {
+                    label: "Version:",
+                    keywords: "about build release",
+                    control: Control::Field(version),
+                },
+                Row {
+                    label: "Check for updates automatically",
+                    keywords: "update download",
+                    control: Control::Check(|options| &mut options.automatic_updates),
+                },
+                #[cfg(target_os = "linux")]
+                Row {
+                    label: "Installed:",
+                    keywords: "install uninstall app menu remove",
+                    control: Control::Field(installed),
+                },
+            ],
+        }],
+    },
+    Section {
+        name: "Keyboard",
+        groups: &[Group {
+            heading: "",
+            rows: &[Row {
+                label: "Shortcuts",
+                keywords: "keys chords hotkeys bindings commands menus",
+                control: Control::Block {
+                    build: |state, options, query| options.keyboard.build(&mut state.ui, query),
+                    finds: crate::keys::searched,
+                },
+            }],
+        }],
+    },
+];
+
+/// What the fields hold until OK keeps them, and where the list is.
 pub struct Options {
-    page: Page,
+    query: String,
+    /// The section last picked in the index, marked until the list is scrolled.
+    picked: Option<&'static str>,
     user_name: String,
     color_scheme: ColorScheme,
-    light_pages: bool,
+    pages_match: bool,
+    hide_spelling: bool,
     automatic_updates: bool,
     pen_pressure: bool,
+    default_font: DefaultFont,
+    page_tabs_left: bool,
+    navigation_bar_left: bool,
+    pub(crate) keyboard: crate::keys::Keyboard,
 }
 
 fn id() -> Id {
     Id::ROOT.child("options")
+}
+
+fn search() -> Id {
+    id().child("search")
+}
+
+fn list() -> Id {
+    id().child("list")
 }
 
 fn user_name() -> Id {
@@ -57,45 +233,107 @@ fn schemes() -> Id {
     id().child("color-schemes")
 }
 
+fn fonts() -> Id {
+    id().child("fonts")
+}
+
+fn sizes() -> Id {
+    id().child("sizes")
+}
+
+fn font_colors() -> Id {
+    id().child("font-colors")
+}
+
+/// Whether `word`, lowercase, starts a word of `text`: "pen" finds "Pen" and "pen-like",
+/// not "Open".
+fn starts_word(text: &str, word: &str) -> bool {
+    let text = text.to_lowercase();
+    text.match_indices(word).any(|(at, _)| {
+        text[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric())
+    })
+}
+
+/// Whether every word of `query`, lowercase, starts a word in one of `texts`.
+pub(crate) fn found(query: &[String], texts: &[&str]) -> bool {
+    query
+        .iter()
+        .all(|word| texts.iter().any(|text| starts_word(text, word)))
+}
+
+/// Whether any word of `query` starts a word of `text`, which search then highlights.
+fn lit(query: &[String], text: &str) -> bool {
+    query.iter().any(|word| starts_word(text, word))
+}
+
+/// Whether every word of the query is in `row`'s section name, group heading, label or
+/// keywords.
+fn titled(query: &[String], section: &Section, group: &Group, row: &Row) -> bool {
+    found(
+        query,
+        &[section.name, group.heading, row.label, row.keywords],
+    )
+}
+
+/// Whether search shows `row`: its own texts, or a block's contents, hold the query.
+fn shown(query: &[String], section: &Section, group: &Group, row: &Row) -> bool {
+    titled(query, section, group, row)
+        || matches!(row.control, Control::Block { finds, .. } if finds(query))
+}
+
 impl State {
     pub(crate) fn open_options(&mut self) {
         self.options = Some(Options {
-            page: Page::General,
+            query: String::new(),
+            picked: None,
             user_name: self.author.clone(),
             color_scheme: self.color_scheme,
-            light_pages: self.light_pages,
+            pages_match: !self.light_pages,
+            hide_spelling: self.hide_spelling,
             automatic_updates: self.updates.automatic(),
             pen_pressure: self.pen_pressure,
+            default_font: self.view.editor.default_font.clone(),
+            page_tabs_left: self.page_tabs_left,
+            navigation_bar_left: !self.navigation_bar_right,
+            keyboard: crate::keys::Keyboard::new(),
         });
         self.ui.open_popup(id());
-        self.ui.set_focus(Some(user_name()));
+        self.ui.set_focus(Some(search()));
     }
 
-    /// Builds the Options dialog while it is open. OK, or Enter in a field, keeps its choices
-    /// with a non-empty user name; Cancel, Escape or a press outside leave them.
+    /// Builds the Options dialog while it is open. OK, or Enter in the user name, keeps its
+    /// choices with a non-empty user name; Cancel, Escape or a press outside leave them.
     pub(crate) fn options_dialog(&mut self) {
-        let Some(options) = &mut self.options else {
+        let Some(mut options) = self.options.take() else {
             return;
         };
-        let ui = &mut self.ui;
-        if !ui.popup_open(id()) {
-            self.options = None;
+        if !self.ui.popup_open(id()) {
             return;
         }
-        let theme = ui.theme.clone();
-        let row = theme.font_size * 2.0;
+        let theme = self.ui.theme.clone();
+        let row = row_height(&theme);
+        let ui = &mut self.ui;
         let entered = ui::popup::navigation(ui, &[user_name()], &[NamedKey::Enter])
             .contains(&NamedKey::Enter);
+        // As tall as its contents up to the window, which the list then scrolls within.
+        let loose = Extent {
+            size: Size::Children,
+            strictness: 0.0,
+        };
         ui.open_as(
             id(),
             Spec {
                 axis: Axis::Y,
-                size: [px(WIDTH), children()],
+                size: [px(WIDTH), loose],
                 fill: Some(theme.popup),
                 border: Some(theme.chip),
                 shadow: Some(theme.shadow),
                 radius: 8.0,
                 pad: [6.0, 6.0],
+                gap: 6.0,
                 anchor: Some(Anchor::Dialog),
                 role: Some(Role::Dialog),
                 ..Spec::default()
@@ -104,15 +342,59 @@ impl State {
         if let Some(node) = ui.access(id()) {
             node.set_label("Options");
         }
-        ui.open(
-            "body",
+        let before = options.query.clone();
+        ui::text_field(
+            ui,
+            search(),
+            &mut options.query,
+            "Search options",
             Spec {
-                size: [fill(), px(HEIGHT)],
+                size: [fill(), px(row)],
+                fill: Some(theme.base),
+                border: Some(if ui.focused() == Some(search()) {
+                    theme.accent
+                } else {
+                    theme.chip
+                }),
+                radius: 4.0,
+                pad: [8.0, 0.0],
+                role: Some(Role::SearchInput),
                 ..Spec::default()
             },
         );
-        let pages = ui.open(
-            "pages",
+        if let Some(node) = ui.access(search()) {
+            node.set_label("Search options");
+        }
+        let query: Vec<String> = options
+            .query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        if options.query != before {
+            options.picked = None;
+            ui.scroll_to(list(), list().child("top"));
+        }
+        let sections: Vec<&Section> = SECTIONS
+            .iter()
+            .filter(|section| {
+                section.groups.iter().any(|group| {
+                    group
+                        .rows
+                        .iter()
+                        .any(|row| shown(&query, section, group, row))
+                })
+            })
+            .collect();
+        ui.open(
+            "body",
+            Spec {
+                size: [fill(), loose],
+                gap: 6.0,
+                ..Spec::default()
+            },
+        );
+        let index = ui.open(
+            "index",
             Spec {
                 axis: Axis::Y,
                 size: [px(NAV), fill()],
@@ -124,177 +406,175 @@ impl State {
                 ..Spec::default()
             },
         );
-        if let Some(node) = ui.access(pages) {
+        if let Some(node) = ui.access(index) {
             node.set_orientation(accesskit::Orientation::Vertical);
         }
-        for (page, name) in Page::ALL {
-            let shown = page == options.page;
-            let spec = Spec {
-                flags: Flags::CLICKABLE,
-                size: [fill(), px(row)],
-                text: Some(name),
-                bold: shown,
-                fill: shown.then(|| theme.hover()),
-                hover_fill: Some(theme.hover()),
-                radius: 4.0,
-                pad: [8.0, 0.0],
-                role: Some(Role::Tab),
-                ..Spec::default()
-            };
-            let tab = ui.open(name, spec);
+        // The section in the top quarter of the list, or the last once the list is scrolled to
+        // its end.
+        let current = options.picked.or_else(|| {
+            let [_, top, _, bottom] = ui.rect(list())?;
+            let starts = |id| ui.rect(id).map(|rect: [f32; 4]| rect[1]);
+            let end = starts(list().child("top")).is_some_and(|start| start < top - 1.0)
+                && starts(list().child("end")).is_some_and(|end| end <= bottom + 1.0);
+            sections
+                .iter()
+                .rfind(|section| {
+                    end || starts(section_id(section))
+                        .is_some_and(|start| start <= top + (bottom - top) / 4.0)
+                })
+                .or(sections.first())
+                .map(|section| section.name)
+        });
+        for section in &sections {
+            let marked = current == Some(section.name);
+            let tab = ui.open(
+                section.name,
+                Spec {
+                    flags: Flags::CLICKABLE,
+                    size: [fill(), px(row)],
+                    text: Some(section.name),
+                    bold: marked,
+                    fill: marked.then(|| theme.hover()),
+                    hover_fill: Some(theme.hover()),
+                    radius: 4.0,
+                    pad: [8.0, 0.0],
+                    role: Some(Role::Tab),
+                    ..Spec::default()
+                },
+            );
             if let Some(node) = ui.access(tab) {
-                node.set_selected(shown);
+                node.set_selected(marked);
             }
             ui.close();
             if ui.signal(tab).clicked {
-                options.page = page;
+                options.picked = Some(section.name);
+                ui.scroll_to(list(), section_id(section));
             }
         }
         ui.close();
-        ui.open(
-            "page",
+        ui.open_as(
+            list(),
             Spec {
+                flags: Flags::SCROLL | Flags::CLIP,
                 axis: Axis::Y,
-                size: [fill(), fill()],
-                pad: [16.0, 10.0],
-                gap: 6.0,
+                size: [fill(), loose],
+                pad: [10.0, 0.0],
                 ..Spec::default()
             },
         );
-        match options.page {
-            Page::General => {
-                heading(ui, &theme, "User Interface Options");
-                field(ui, "Appearance:", |ui| {
-                    let combo = ui.id("combo");
-                    let current = SCHEMES
-                        .iter()
-                        .find(|(scheme, _)| *scheme == options.color_scheme)
-                        .map_or("", |(_, name)| name);
-                    ui::shell::combo(ui, "combo", "Appearance", current, 140.0, schemes(), true);
-                    let items = SCHEMES.map(|(scheme, name)| Item {
-                        text: name,
-                        checked: Some(scheme == options.color_scheme),
-                        current: scheme == options.color_scheme,
-                        ..Item::default()
-                    });
-                    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
-                    if let Some(index) = ui::popup::menu(ui, schemes(), anchor, &items, None) {
-                        options.color_scheme = SCHEMES[index].0;
-                    }
-                });
-                heading(ui, &theme, "Personalize");
-                field(ui, "User name:", |ui| {
-                    ui::text_field(
-                        ui,
-                        user_name(),
-                        &mut options.user_name,
-                        "",
-                        Spec {
-                            size: [px(260.0), px(row)],
-                            fill: Some(theme.base),
-                            border: Some(theme.accent),
-                            radius: 4.0,
-                            pad: [6.0, 0.0],
-                            ..Spec::default()
-                        },
-                    );
-                    if let Some(node) = ui.access(user_name()) {
-                        node.set_label("User name");
-                    }
-                });
-                heading(ui, &theme, "Updates");
-                ui.leaf(
-                    "version",
-                    Spec {
-                        size: [fill(), px(row)],
-                        text: Some(&update::describe_running()),
-                        pad: [8.0, 0.0],
-                        ..Spec::default()
-                    },
-                );
-                if ui::check_box(
-                    ui,
-                    "automatic-updates",
-                    "Check for updates automatically",
-                    options.automatic_updates,
-                )
-                .clicked
-                {
-                    options.automatic_updates = !options.automatic_updates;
-                }
-                #[cfg(target_os = "linux")]
-                if crate::desktop::uninstallable() {
-                    field(ui, "Installed:", |ui| {
-                        let binary = crate::desktop::binary().unwrap_or_default();
-                        ui.leaf(
-                            "path",
-                            Spec {
-                                flags: Flags::CLIP,
-                                size: [fill(), px(row)],
-                                text: Some(&binary.to_string_lossy()),
-                                color: Some(theme.text_dim),
-                                ..Spec::default()
-                            },
-                        );
-                        if ui::button(ui, "uninstall", "Uninstall…").clicked {
-                            crate::desktop::uninstall();
-                        }
-                    });
-                }
-            }
-            Page::Display => {
-                heading(ui, &theme, "Display");
-                let matching = !options.light_pages;
-                if ui::check_box(ui, "pages-match-theme", "Pages match UI theme", matching).clicked
-                {
-                    options.light_pages = matching;
-                }
-            }
-            Page::Advanced => {
-                heading(ui, &theme, "Pen");
-                if ui::check_box(
-                    ui,
-                    "pen-pressure",
-                    "Use pen pressure sensitivity",
-                    options.pen_pressure,
-                )
-                .clicked
-                {
-                    options.pen_pressure = !options.pen_pressure;
-                }
-            }
-            Page::SaveBackup => {
-                heading(ui, &theme, "Cache file location");
-                let cache = &self.cache;
-                field(ui, "Path:", |ui| {
-                    ui.leaf(
-                        "path",
-                        Spec {
-                            flags: Flags::CLIP,
-                            size: [fill(), px(row)],
-                            text: Some(&cache.to_string_lossy()),
-                            color: Some(theme.text_dim),
-                            ..Spec::default()
-                        },
-                    );
-                    let label = if cfg!(target_os = "macos") {
-                        "Show in Finder"
-                    } else {
-                        "Open Folder"
-                    };
-                    if ui::button(ui, "reveal", label).clicked {
-                        platform::reveal(cache);
-                    }
-                });
-            }
+        if !ui.signal(list()).events.is_empty() {
+            options.picked = None;
         }
+        ui.leaf(
+            "top",
+            Spec {
+                size: [fill(), px(0.0)],
+                ..Spec::default()
+            },
+        );
+        if sections.is_empty() {
+            ui.leaf(
+                "none",
+                Spec {
+                    size: [fill(), px(row * 2.0)],
+                    text: Some("No options match"),
+                    color: Some(theme.text_dim),
+                    center: true,
+                    ..Spec::default()
+                },
+            );
+        }
+        for section in &sections {
+            self.ui.open_as(
+                section_id(section),
+                Spec {
+                    axis: Axis::Y,
+                    size: [fill(), ui::children()],
+                    pad: [0.0, 4.0],
+                    gap: 4.0,
+                    ..Spec::default()
+                },
+            );
+            title(
+                &mut self.ui,
+                &theme,
+                section.name,
+                lit(&query, section.name),
+            );
+            for group in section.groups {
+                let rows: Vec<&Row> = group
+                    .rows
+                    .iter()
+                    .filter(|row| shown(&query, section, group, row))
+                    .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                if !group.heading.is_empty() {
+                    heading(
+                        &mut self.ui,
+                        &theme,
+                        group.heading,
+                        lit(&query, group.heading),
+                    );
+                }
+                for row in rows {
+                    let highlight = !matches!(row.control, Control::Block { .. })
+                        && (lit(&query, row.label) || lit(&query, row.keywords));
+                    self.ui.open(
+                        row.label,
+                        Spec {
+                            size: [fill(), ui::children()],
+                            fill: highlight.then(|| ui::mix(theme.popup, theme.accent, 0.18)),
+                            radius: 4.0,
+                            pad: [8.0, 0.0],
+                            gap: 8.0,
+                            ..Spec::default()
+                        },
+                    );
+                    match row.control {
+                        Control::Check(choice) => {
+                            let checked = choice(&mut options);
+                            if ui::check_box(&mut self.ui, "check", row.label, *checked).clicked {
+                                *checked = !*checked;
+                            }
+                        }
+                        Control::Field(build) => {
+                            self.ui.leaf(
+                                "label",
+                                Spec {
+                                    size: [px(LABEL), px(row_height(&theme))],
+                                    text: Some(row.label),
+                                    ..Spec::default()
+                                },
+                            );
+                            build(self, &mut options);
+                        }
+                        Control::Block { build, .. } => {
+                            let titled = titled(&query, section, group, row);
+                            build(self, &mut options, if titled { &[] } else { &query });
+                        }
+                    }
+                    self.ui.close();
+                }
+            }
+            self.ui.close();
+        }
+        let ui = &mut self.ui;
+        ui.leaf(
+            "end",
+            Spec {
+                size: [fill(), px(6.0)],
+                ..Spec::default()
+            },
+        );
         ui.close();
         ui.close();
         ui.open(
             "buttons",
             Spec {
-                size: [fill(), children()],
-                pad: [10.0, 8.0],
+                size: [fill(), ui::children()],
+                pad: [10.0, 4.0],
                 gap: 8.0,
                 ..Spec::default()
             },
@@ -314,28 +594,63 @@ impl State {
         if ok && !name.is_empty() {
             self.author = name.to_owned();
             self.color_scheme = options.color_scheme;
-            self.light_pages = options.light_pages;
+            self.light_pages = !options.pages_match;
+            self.hide_spelling = options.hide_spelling;
             self.pen_pressure = options.pen_pressure;
+            self.view.editor.default_font = options.default_font;
+            self.page_tabs_left = options.page_tabs_left;
+            self.navigation_bar_right = !options.navigation_bar_left;
             self.updates.set_automatic(options.automatic_updates);
+            self.show_spelling();
             self.follow_color_scheme();
+            self.install_keymap(options.keyboard.keymap);
             self.save_settings();
         } else if !cancel {
+            self.options = Some(options);
             return;
         }
         self.ui.close_popup(id());
-        self.options = None;
     }
 }
 
+fn section_id(section: &Section) -> Id {
+    list().child(section.name)
+}
+
+fn row_height(theme: &Theme) -> f32 {
+    theme.font_size * 2.0
+}
+
+/// A section's name over its groups, tinted where search found it.
+fn title(ui: &mut Ui, theme: &Theme, text: &str, lit: bool) {
+    ui.leaf(
+        "title",
+        Spec {
+            size: [fill(), px(theme.font_size * 2.2)],
+            text: Some(text),
+            font_size: Some(theme.font_size * 1.25),
+            bold: true,
+            color: lit.then_some(theme.accent),
+            role: Some(Role::Heading),
+            ..Spec::default()
+        },
+    );
+}
+
 /// A group's heading on a band, as OneNote heads the groups of its Options pages.
-fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
+fn heading(ui: &mut Ui, theme: &Theme, text: &str, lit: bool) {
+    let band = ui::mix(theme.panel, theme.chip, 0.4);
     ui.leaf(
         text,
         Spec {
             size: [fill(), px(theme.font_size * 1.8)],
             text: Some(text),
             bold: true,
-            fill: Some(ui::mix(theme.panel, theme.chip, 0.4)),
+            fill: Some(if lit {
+                ui::mix(band, theme.accent, 0.3)
+            } else {
+                band
+            }),
             radius: 4.0,
             pad: [8.0, 0.0],
             role: Some(Role::Heading),
@@ -344,26 +659,179 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str) {
     );
 }
 
-/// A row of `label` in the labels' column and the controls `build` adds after it.
-fn field(ui: &mut Ui, label: &str, build: impl FnOnce(&mut Ui)) {
-    let row = ui.theme.font_size * 2.0;
-    ui.open(
-        label,
-        Spec {
-            size: [fill(), px(row)],
-            pad: [8.0, 0.0],
-            gap: 8.0,
-            ..Spec::default()
-        },
-    );
-    ui.leaf(
-        "label",
-        Spec {
-            size: [px(LABEL), px(row)],
-            text: Some(label),
-            ..Spec::default()
-        },
-    );
-    build(ui);
-    ui.close();
+fn appearance(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let combo = ui.id("combo");
+    let current = SCHEMES
+        .iter()
+        .find(|(scheme, _)| *scheme == options.color_scheme)
+        .map_or("", |(_, name)| name);
+    ui::shell::combo(ui, "combo", "Appearance", current, 140.0, schemes(), true);
+    let items = SCHEMES.map(|(scheme, name)| Item {
+        text: name,
+        checked: Some(scheme == options.color_scheme),
+        current: scheme == options.color_scheme,
+        ..Item::default()
+    });
+    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    if let Some(index) = ui::popup::menu(ui, schemes(), anchor, &items, None) {
+        options.color_scheme = SCHEMES[index].0;
+    }
+}
+
+fn user_name_field(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let theme = &ui.theme;
+    let width = Extent {
+        size: Size::Pixels(260.0),
+        strictness: 0.0,
+    };
+    let spec = Spec {
+        size: [width, px(row_height(theme))],
+        fill: Some(theme.base),
+        border: Some(theme.accent),
+        radius: 4.0,
+        pad: [6.0, 0.0],
+        ..Spec::default()
+    };
+    ui::text_field(ui, user_name(), &mut options.user_name, "", spec);
+    if let Some(node) = ui.access(user_name()) {
+        node.set_label("User name");
+    }
+}
+
+fn font_face(state: &mut State, options: &mut Options) {
+    let State { ui, fonts, .. } = state;
+    let font = &mut options.default_font;
+    let combo = ui.id("combo");
+    ui::shell::combo(ui, "combo", "Font", &font.face, 200.0, self::fonts(), true);
+    let items: Vec<_> = fonts
+        .iter()
+        .map(|name| Item {
+            text: name,
+            font: Some(name),
+            current: *name == font.face,
+            ..Item::default()
+        })
+        .collect();
+    let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+    if let Some(index) = ui::popup::menu(ui, self::fonts(), anchor, &items, Some("Font")) {
+        font.face = fonts[index].clone();
+    }
+}
+
+fn font_size(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let font = &mut options.default_font;
+    let combo = ui.id("combo");
+    let size = format!("{}", font.size);
+    ui::shell::combo(ui, "combo", "Size", &size, 60.0, sizes(), true);
+    let labels = SIZES.map(|size| format!("{size}"));
+    let items: Vec<_> = labels
+        .iter()
+        .map(|label| Item {
+            text: label,
+            checked: Some(*label == size),
+            current: *label == size,
+            ..Item::default()
+        })
+        .collect();
+    let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+    if let Some(index) = ui::popup::menu(ui, sizes(), anchor, &items, None) {
+        font.size = SIZES[index];
+    }
+}
+
+fn font_color(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let font = &mut options.default_font;
+    let combo = ui.id("combo");
+    let shown = crate::FONT_COLORS
+        .iter()
+        .find(|(color, _)| Some(*color) == font.color)
+        .map_or("Automatic", |(_, name)| name);
+    ui::shell::combo(ui, "combo", "Font color", shown, 200.0, font_colors(), true);
+    let swatches: Vec<_> = crate::FONT_COLORS
+        .iter()
+        .map(|&(color, name)| (canvas::gpu::colorref(color), name))
+        .collect();
+    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    if let Some(chosen) = ui::popup::colors(ui, font_colors(), anchor, "Automatic", &swatches, 10) {
+        font.color = chosen.and_then(|chosen| {
+            let at = swatches.iter().position(|(swatch, _)| *swatch == chosen)?;
+            Some(crate::FONT_COLORS[at].0)
+        });
+    }
+}
+
+/// A path shown dimmed and cut to the row.
+fn path(ui: &mut Ui, path: &std::path::Path) {
+    let spec = Spec {
+        flags: Flags::CLIP,
+        size: [fill(), px(row_height(&ui.theme))],
+        text: Some(&path.to_string_lossy()),
+        color: Some(ui.theme.text_dim),
+        ..Spec::default()
+    };
+    ui.leaf("path", spec);
+}
+
+fn cache(state: &mut State, _: &mut Options) {
+    path(&mut state.ui, &state.cache);
+    let label = if cfg!(target_os = "macos") {
+        "Show in Finder"
+    } else {
+        "Open Folder"
+    };
+    if ui::button(&mut state.ui, "reveal", label).clicked {
+        platform::reveal(&state.cache);
+    }
+}
+
+fn version(state: &mut State, _: &mut Options) {
+    let ui = &mut state.ui;
+    let spec = Spec {
+        size: [fill(), px(row_height(&ui.theme))],
+        text: Some(&update::describe_running()),
+        ..Spec::default()
+    };
+    ui.leaf("version", spec);
+}
+
+/// Where Install put Snowbound and Uninstall, or Install where it isn't in the app menu.
+#[cfg(target_os = "linux")]
+fn installed(state: &mut State, _: &mut Options) {
+    let ui = &mut state.ui;
+    if crate::desktop::uninstallable() {
+        path(ui, &crate::desktop::binary().unwrap_or_default());
+        if ui::button(ui, "uninstall", "Uninstall…").clicked {
+            crate::desktop::uninstall();
+        }
+    } else if crate::desktop::installable() {
+        path(ui, std::path::Path::new("Not in the app menu"));
+        if ui::button(ui, "install", "Install").clicked {
+            crate::desktop::install();
+        }
+    } else {
+        path(ui, std::path::Path::new("By your system's package manager"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::found;
+
+    #[test]
+    fn search_words_match_the_starts_of_words() {
+        let query = |text: &str| vec![text.to_owned()];
+        assert!(found(&query("pen"), &["Use pen pressure sensitivity"]));
+        assert!(found(&query("pen"), &["Pen"]));
+        assert!(!found(&query("pen"), &["Open Notebook"]));
+        assert!(found(&query("⌘b"), &["⌘B"]));
+        assert!(found(&query("storage"), &["Sync & Storage"]));
+        assert!(
+            !found(&["pen".into(), "zzz".into()], &["Pen"]),
+            "every word"
+        );
+    }
 }

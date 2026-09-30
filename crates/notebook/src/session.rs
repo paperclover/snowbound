@@ -332,6 +332,8 @@ const LIMITS: discover::Limits = discover::Limits {
 
 const TOC: &str = "Open Notebook.onetoc2";
 const RECYCLE_BIN: &str = "OneNote_RecycleBin";
+/// How long OneNote 2010 keeps what its recycle bin holds, its `DaysToKeepRecycledItems`.
+pub const RECYCLE_DAYS: u32 = 60;
 
 /// A notebook's files and the cache directory holding its section replicas.
 pub struct Notebook {
@@ -486,6 +488,20 @@ impl Notebook {
         extension: &str,
     ) -> Result<Vec<crate::sidecar::TagMapping>> {
         crate::sidecar::map(&*self.storage, name, shape, bytes, extension)
+    }
+
+    /// The notebook's style themes and which theme each scope takes (`sidecar::themes`).
+    pub fn themes(&self) -> Result<crate::sidecar::themes::Themes> {
+        crate::sidecar::themes::read(&*self.storage)
+    }
+
+    /// Merges `change` into the notebook's themes, making its hidden `.snowbound` folder
+    /// where it has none; returns the themes as they then stand.
+    pub fn save_themes(
+        &self,
+        change: crate::sidecar::themes::Themes,
+    ) -> Result<crate::sidecar::themes::Themes> {
+        crate::sidecar::themes::write(&*self.storage, change)
     }
 
     /// Rereads the notebook and reports what changed since the last catalog, keyed by
@@ -742,6 +758,13 @@ impl Notebook {
         Ok(())
     }
 
+    /// Sets the notebook's colour (COLORREF) in its root table of contents, as OneNote 2010's
+    /// Notebook Properties does (`corpus/section-color`).
+    pub fn set_color(&mut self, color: u32) -> Result<()> {
+        self.edit_toc("", &[onestore::TocEdit::Color(color)])?;
+        self.refresh().map(drop)
+    }
+
     /// Orders a folder's sections and groups; entries left out follow in their current order.
     pub fn reorder(&mut self, folder: &str, paths: &[&str]) -> Result<()> {
         let mut identities = Vec::new();
@@ -930,6 +953,102 @@ impl Notebook {
             self.storage.commit(&path, &transaction)?;
         }
         self.refresh().map(drop)
+    }
+
+    /// Takes the pages `identities` names out of the recycle bin's Deleted Pages in one
+    /// revision, as OneNote 2010 does when Undo brings deleted pages back. Pages not there
+    /// are passed over.
+    pub fn unrecycle_pages(&mut self, identities: &[[u8; 16]]) -> Result<()> {
+        let path = catalog_path(RECYCLE_BIN, "OneNote_DeletedPages.one");
+        if !self.storage.exists(&path) {
+            return Ok(());
+        }
+        let bytes = self.storage.read(&path)?;
+        let binned: Vec<ExGuid> = stored_pages(&bytes)?
+            .into_iter()
+            .filter(|stored| {
+                stored
+                    .page
+                    .identity
+                    .is_some_and(|id| identities.contains(&id))
+            })
+            .map(|stored| stored.space)
+            .collect();
+        if binned.is_empty() {
+            return Ok(());
+        }
+        let arena = onestore::Arena::default();
+        let mut section = onestore::Section::open(&arena, bytes)?;
+        section.apply(
+            "",
+            &Edit {
+                at: crate::now(),
+                ops: vec![Op::Section(SectionOp::Delete(binned))],
+            },
+        )?;
+        if let Some(transaction) = section.seal()? {
+            self.storage.commit(&path, &transaction)?;
+        }
+        self.refresh().map(drop)
+    }
+
+    /// Deletes for good what OneNote 2010 prunes from the recycle bin at `now`, Time32 seconds
+    /// since 1980: each page of Deleted Pages last changed over `RECYCLE_DAYS` before, in one
+    /// revision, and each binned section none of whose pages changed since
+    /// (`corpus/recycle-purge`). OneNote judges by the pages' own last change, not when they
+    /// were deleted, and leaves a pruned section's entry in the bin's TOC, as this does.
+    /// Returns how many pages and sections went.
+    pub fn purge_recycle_bin(&mut self, now: u32) -> Result<usize> {
+        const DELETED: &str = "OneNote_DeletedPages.one";
+        let expired = |modified: Option<u32>| {
+            modified.is_some_and(|modified| now.saturating_sub(modified) > RECYCLE_DAYS * 86_400)
+        };
+        let Ok(bin) = self.folder(RECYCLE_BIN) else {
+            return Ok(0);
+        };
+        let sections: Vec<String> = bin
+            .sections
+            .iter()
+            .map(|section| section.path.clone())
+            .collect();
+        let mut purged = 0;
+        for path in sections {
+            let bytes = self.storage.read(&path)?;
+            // A protected section, or one the model cannot read, stays.
+            let Ok(pages) = stored_pages(&bytes) else {
+                continue;
+            };
+            if split(&path).1.eq_ignore_ascii_case(DELETED) {
+                let old: Vec<ExGuid> = pages
+                    .iter()
+                    .filter(|page| expired(page.modified))
+                    .map(|page| page.space)
+                    .collect();
+                if old.is_empty() {
+                    continue;
+                }
+                let arena = onestore::Arena::default();
+                let mut section = onestore::Section::open(&arena, bytes)?;
+                section.apply(
+                    "",
+                    &Edit {
+                        at: crate::now(),
+                        ops: vec![Op::Section(SectionOp::Delete(old.clone()))],
+                    },
+                )?;
+                if let Some(transaction) = section.seal()? {
+                    self.storage.commit(&path, &transaction)?;
+                }
+                purged += old.len();
+            } else if !pages.is_empty() && pages.iter().all(|page| expired(page.modified)) {
+                self.storage.delete(&path)?;
+                purged += 1;
+            }
+        }
+        if purged > 0 {
+            self.refresh()?;
+        }
+        Ok(purged)
     }
 
     /// Moves a section or section group into the folder at catalog path `folder`, last, as
@@ -1221,6 +1340,16 @@ impl Notebook {
         let file = root.join(path).canonicalize()?;
         if !file.starts_with(root) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
+        }
+        // A replica the catalog's identity names resumes without reading the file, which its
+        // worker checks next, as a share's does.
+        if let discover::SectionState::Readable { document, .. } = &section.state {
+            let cache = replica_file(&replicas, document);
+            if cache.exists() {
+                let (replica, remote, mut connect) =
+                    (Replica::open(&cache)?, file.clone(), connect);
+                return Section::start(file, replica, move || connect(&remote), notify);
+            }
         }
         let replica = |identity: &[u8; 16], _: &[u8]| {
             std::fs::create_dir_all(&replicas)?;
@@ -1720,6 +1849,11 @@ impl Section {
 
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
         self.replica.pending()
+    }
+
+    /// See [`Replica::written`].
+    pub fn written(&self) -> Result<()> {
+        self.replica.written()
     }
 
     /// The conflict pages of each page that has them, as the local edits leave them

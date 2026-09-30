@@ -12,7 +12,7 @@ pub(crate) struct Label {
     pub key: LabelKey,
 }
 
-type LabelKey = (String, u32, bool, Option<String>);
+type LabelKey = (String, u32, bool, bool, Option<String>);
 
 /// Labels shaped this frame or the previous one, keyed by their text and size.
 #[derive(Default)]
@@ -33,10 +33,24 @@ impl Texts {
         font: Option<&str>,
         frame: u64,
     ) -> Rc<Label> {
+        self.styled(text, size, bold, false, font, frame)
+    }
+
+    /// `label`, slanted where `italic`.
+    pub fn styled(
+        &mut self,
+        text: &str,
+        size: f32,
+        bold: bool,
+        italic: bool,
+        font: Option<&str>,
+        frame: u64,
+    ) -> Rc<Label> {
         let key = (
             text.to_owned(),
             size.to_bits(),
             bold,
+            italic,
             font.map(str::to_owned),
         );
         if let Some((label, touched)) = self.cache.get_mut(&key) {
@@ -62,6 +76,9 @@ impl Texts {
         if bold {
             builder.push_default(StyleProperty::FontWeight(parley::FontWeight::SEMI_BOLD));
         }
+        if italic {
+            builder.push_default(StyleProperty::FontStyle(parley::FontStyle::Italic));
+        }
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
         let size = [layout.full_width(), layout.height()];
@@ -76,9 +93,9 @@ impl Texts {
 
     /// `label` cut short to fit `width` with an ellipsis.
     pub fn ellipsis(&mut self, label: &Label, width: f32, frame: u64) -> Rc<Label> {
-        let (text, size, bold, font) = &label.key;
+        let (text, size, bold, italic, font) = &label.key;
         let (size, font) = (f32::from_bits(*size), font.as_deref());
-        let room = width - self.label("…", size, *bold, font, frame).size[0];
+        let room = width - self.styled("…", size, *bold, *italic, font, frame).size[0];
         let mut end = 0;
         let mut advance = 0.0;
         let mut cluster = Cluster::from_byte_index(&label.layout, 0);
@@ -91,7 +108,7 @@ impl Texts {
             cluster = next.next_logical();
         }
         let cut = format!("{}…", text[..end].trim_end());
-        self.label(&cut, size, *bold, font, frame)
+        self.styled(&cut, size, *bold, *italic, font, frame)
     }
 
     /// Makes `family` the interface's font, where fontique doesn't know the system's.

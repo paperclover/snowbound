@@ -6,13 +6,13 @@
 
 use canvas::{
     document::TextPosition,
-    editor::{CanvasEditor, Selection},
+    editor::{CanvasEditor, Piece, Selection},
     layout::TextEngine,
 };
 use onestore::{
-    Arena, Section, Store,
+    Arena, PageCreation, Section, Store,
     document::Layout,
-    op::{Edit, Op},
+    op::{Edit, Op, SectionOp},
     page::{Image, PageObject, ParagraphContent},
 };
 use parley::Affinity;
@@ -35,6 +35,9 @@ fn picture(size: [f32; 2]) -> Image {
         alt: None,
         background: false,
         printout: None,
+        tags: Vec::new(),
+        link: None,
+        text: None,
     }
 }
 
@@ -123,6 +126,72 @@ fn pasted_pictures_split_the_text_or_lie_on_the_page_as_onenote_places_them() {
     store(&mut editor);
     assert_eq!(body(&editor), ["Pasted pictures"]);
 
+    // A web page's text and pictures in order, undone in one step.
+    editor.select(caret(0, 7)).unwrap();
+    let png = picture([1.0; 2]).bytes.unwrap().to_vec();
+    editor
+        .paste_pieces(
+            &mut engine,
+            vec![
+                Piece::Text("web ".into()),
+                Piece::Picture(png, [150.0, 75.0]),
+                Piece::Text("page\ntext ".into()),
+            ],
+            0x0409,
+        )
+        .unwrap();
+    store(&mut editor);
+    assert_eq!(
+        body(&editor),
+        [
+            "Pasted web ",
+            "[150.0, 75.0]",
+            "",
+            "page",
+            "text ",
+            "pictures"
+        ]
+    );
+    editor.undo(&mut engine).unwrap();
+    store(&mut editor);
+    assert_eq!(body(&editor), ["Pasted pictures"]);
+
+    // A web picture still on its way ends the paragraph and goes in when it arrives, an
+    // undo step of its own, while the caret stays.
+    editor.select(caret(0, 7)).unwrap();
+    let awaited = editor
+        .paste_pieces(
+            &mut engine,
+            vec![
+                Piece::Text("web".into()),
+                Piece::Awaited,
+                Piece::Text("page ".into()),
+            ],
+            0x0409,
+        )
+        .unwrap();
+    store(&mut editor);
+    assert_eq!(body(&editor), ["Pasted web", "page pictures"]);
+    let typing = editor.selection();
+    let arrived = picture([150.0, 75.0]);
+    assert!(
+        editor
+            .insert_awaited(&mut engine, awaited[0], arrived)
+            .unwrap()
+    );
+    store(&mut editor);
+    assert_eq!(
+        body(&editor),
+        ["Pasted web", "[150.0, 75.0]", "page pictures"]
+    );
+    assert_eq!(editor.selection(), typing);
+    editor.undo(&mut engine).unwrap();
+    store(&mut editor);
+    assert_eq!(body(&editor), ["Pasted web", "page pictures"]);
+    editor.undo(&mut engine).unwrap();
+    store(&mut editor);
+    assert_eq!(body(&editor), ["Pasted pictures"]);
+
     // At the end, an empty paragraph follows for the caret; at an empty paragraph's start
     // the picture takes its place.
     editor.select(caret(0, 15)).unwrap();
@@ -193,4 +262,74 @@ fn pasted_pictures_split_the_text_or_lie_on_the_page_as_onenote_places_them() {
         )
         .unwrap();
     }
+}
+
+/// From the title, OneNote 2010 (lab, 2026-09-30) put a pasted picture at the end of the
+/// outline where the body starts; on a page with no body, in a new outline there; and on a
+/// page whose content lay elsewhere, on the page two grid rows below it.
+#[test]
+fn a_picture_pasted_from_the_title_goes_into_the_body() {
+    let source = onestore::create_section("pictures.one", "First page", "Author").unwrap();
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source).unwrap();
+    let creation = PageCreation::new(None, Some("Title paste"), "Author").unwrap();
+    section
+        .apply(
+            "Author",
+            &Edit {
+                at: 133_000_000_000_000_000,
+                ops: vec![Op::Section(SectionOp::Create(creation))],
+            },
+        )
+        .unwrap();
+    let (space, ..) = section.pages().unwrap()[1].clone();
+    let page = section.page(space).unwrap();
+    let mut engine = TextEngine::default();
+    let opened = |engine: &mut TextEngine| {
+        let mut editor = CanvasEditor::from_page(page.clone(), engine).unwrap();
+        let title = editor.outlines().iter().find(|o| o.title).unwrap().id;
+        editor.focus_outline(title).unwrap();
+        editor
+    };
+
+    // No body: a new outline where it starts.
+    let mut editor = opened(&mut engine);
+    let start = editor.body_start().unwrap();
+    editor
+        .insert_picture(&mut engine, picture([150.0, 75.0]))
+        .unwrap();
+    assert_eq!(body(&editor), ["[150.0, 75.0]", ""]);
+    assert_eq!(editor.active_outline().origin(), start);
+
+    // A body where it starts: at its end.
+    let mut editor = opened(&mut engine);
+    editor.leave_title(&mut engine).unwrap();
+    editor.insert(&mut engine, "body").unwrap();
+    assert_eq!(editor.active_outline().origin(), start);
+    let title = editor.outlines().iter().find(|o| o.title).unwrap().id;
+    editor.focus_outline(title).unwrap();
+    editor
+        .insert_picture(&mut engine, picture([150.0, 75.0]))
+        .unwrap();
+    assert_eq!(body(&editor), ["body", "[150.0, 75.0]", ""]);
+
+    // Content elsewhere: on the page two grid rows below it.
+    let mut editor = opened(&mut engine);
+    let margin = editor.margin_origin();
+    editor
+        .place_caret(&mut engine, [start[0] + 270.0, start[1] + 72.0], 468.0)
+        .unwrap();
+    editor.insert(&mut engine, "far").unwrap();
+    let bottom = editor.active_outline().bounds().y1 as f32;
+    let title = editor.outlines().iter().find(|o| o.title).unwrap().id;
+    editor.focus_outline(title).unwrap();
+    editor
+        .insert_picture(&mut engine, picture([150.0, 75.0]))
+        .unwrap();
+    let placed = page_pictures(&editor).pop().unwrap();
+    let row = ((bottom - margin[1]) / 18.0).floor() + 2.0;
+    assert_eq!(
+        [placed.layout.x, placed.layout.y],
+        [Some(start[0]), Some(margin[1] + row * 18.0)]
+    );
 }

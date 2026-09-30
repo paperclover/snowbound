@@ -89,6 +89,7 @@ fn a_recording_stores_its_line_its_linked_notes_and_its_file() {
             kind: 1,
             duration_ms: Some(1000),
         }),
+        tags: Vec::new(),
     };
     editor.finish_recording(&mut engine, file).unwrap();
     assert_eq!(editor.recording(), None);
@@ -161,6 +162,7 @@ fn a_recording_from_the_title_goes_to_the_body_s_start() {
             kind: 1,
             duration_ms: None,
         }),
+        tags: Vec::new(),
     };
     editor.finish_recording(&mut engine, file).unwrap();
     let ops = editor.take_ops().unwrap();

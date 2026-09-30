@@ -109,6 +109,28 @@ pub(crate) fn format_changes(
     attributes: &[TextAttribute],
     cleared: &[crate::op::TextProperty],
 ) -> Result<Changes, Error> {
+    formatted(active, object, range, attributes, cleared, false)
+}
+
+/// `format_changes` clearing `cleared` from whole runs, fields and equations among them,
+/// so they inherit what their paragraph style gives, as a restyle does.
+pub(crate) fn cleared_changes(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    range: Range<u32>,
+    cleared: &[crate::op::TextProperty],
+) -> Result<Changes, Error> {
+    formatted(active, object, range, &[], cleared, true)
+}
+
+fn formatted(
+    active: &ActivePage<'_>,
+    object: ExGuid,
+    range: Range<u32>,
+    attributes: &[TextAttribute],
+    cleared: &[crate::op::TextProperty],
+    fields: bool,
+) -> Result<Changes, Error> {
     let cleared: Vec<u32> = cleared.iter().map(|property| property.id()).collect();
     if (attributes.is_empty() && cleared.is_empty()) || range.start > range.end {
         return Err(invalid(
@@ -163,8 +185,9 @@ pub(crate) fn format_changes(
         };
         if selected {
             let format = &resolved[i].format;
-            if [format.math, format.embedded_object].contains(&Some(true))
-                || resolved[i].text.contains('\u{fffc}')
+            if !fields
+                && ([format.math, format.embedded_object].contains(&Some(true))
+                    || resolved[i].text.contains('\u{fffc}'))
             {
                 return Err(invalid(
                     "This format range contains a field or embedded data",

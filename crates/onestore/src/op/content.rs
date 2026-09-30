@@ -132,9 +132,11 @@ pub(crate) fn picture_fixed_fields(stored: &Image, image: &Image) -> Result<(), 
         || stored.bytes != image.bytes
         || stored.size != image.size
         || stored.background != image.background
+        || stored.link != image.link
+        || stored.text != image.text
     {
         return Err(invalid(
-            "A stored picture keeps its payload, intrinsic size and background state",
+            "A stored picture keeps its payload, intrinsic size, background state, link and text",
         ));
     }
     Ok(())
@@ -201,13 +203,14 @@ fn icon_size(
 
 /// What OneNote stores for an inserted picture: a file-data object declaring payload
 /// `payload` by identity and extension, and picture object `id` that paragraph `holder`
-/// holds as content or the page lists as a child. The caller embeds the payload.
+/// holds as content or the page lists as a child; with `shown`, the file-data object and
+/// payload of the raster OneNote shows of it (WebPictureContainer14), as a printout page
+/// stores beside its XPS package. The caller embeds the payloads.
 pub(crate) fn picture_changes(
     active: &ActivePage<'_>,
     image: &Image,
-    id: ExGuid,
-    file: ExGuid,
-    payload: [u8; 16],
+    (id, file, payload): (ExGuid, ExGuid, [u8; 16]),
+    shown: Option<(ExGuid, [u8; 16])>,
     holder: Option<ExGuid>,
 ) -> Result<Changes, Error> {
     let Some(bytes) = &image.bytes else {
@@ -220,8 +223,19 @@ pub(crate) fn picture_changes(
         [b'B', b'M', ..] => ".bmp",
         // OneNote keeps an imported TIFF as it is (`corpus/m6/native-features-01`).
         [b'I', b'I', 0x2a, 0x00, ..] | [b'M', b'M', 0x00, 0x2a, ..] => ".tif",
+        // A file printout's page: its XPS package (`corpus/printout`).
+        [b'P', b'K', 3, 4, ..] if image.printout.is_some() && shown.is_some() => ".xps",
         _ => return Err(invalid("Choose a PNG, JPEG, GIF, BMP or TIFF picture")),
     };
+    if image
+        .display
+        .as_ref()
+        .is_some_and(|raster| !raster.starts_with(b"\x89PNG"))
+    {
+        return Err(invalid(
+            "A picture's shown raster is a PNG stored beside it",
+        ));
+    }
     let modified = crate::create::current_timestamps()?.0.to_le_bytes();
     let mut values: Values = vec![(0x14001d7a, modified.to_vec())];
     if let Some([width, height]) = image.size {
@@ -235,6 +249,18 @@ pub(crate) fn picture_changes(
     if let Some(alt) = &image.alt {
         values.push((0x1c001e58, crate::create::string(alt)));
     }
+    if let Some(link) = &image.link {
+        values.push((0x1c001e20, crate::create::string(link)));
+    }
+    if let Some(recognized) = &image.text {
+        values.push((0x1c001c22, crate::create::string(&recognized.text)));
+        for (id, value) in &recognized.stored {
+            if !crate::page::RECOGNIZED_PROPERTIES.contains(id) {
+                return Err(invalid("A picture's text stores only its known properties"));
+            }
+            values.push((*id, value.clone()));
+        }
+    }
     if image.background {
         values.push((0x08001d13 | (1 << 31), Vec::new()));
     }
@@ -244,14 +270,21 @@ pub(crate) fn picture_changes(
         0x08001d85 | (u32::from(image.printout.is_some()) << 31),
         Vec::new(),
     ));
-    if let Some(page) = image.printout {
-        values.push((0x14001df9, page.to_le_bytes().to_vec()));
+    if let Some(printout) = &image.printout {
+        values.push((0x14001df9, printout.page.to_le_bytes().to_vec()));
+        for (id, value) in &printout.stored {
+            if !crate::page::PRINTOUT_PROPERTIES.contains(id) {
+                return Err(invalid("A printout page stores only its known properties"));
+            }
+            values.push((*id, value.clone()));
+        }
     }
     let mut changed = BTreeMap::new();
-    changed.insert(
-        file,
-        PropertyObject::file(file, &payload_reference(payload), extension)?,
-    );
+    let mut container = PropertyObject::file(file, &payload_reference(payload), extension)?;
+    if extension == ".xps" {
+        container.jcid = crate::write::PRINTOUT_FILE_JCID;
+    }
+    changed.insert(file, container);
     let mut picture = PropertyObject {
         jcid: 0x60011,
         bytes: crate::create::properties(&values)?,
@@ -260,6 +293,14 @@ pub(crate) fn picture_changes(
     picture.reference(id)?;
     let container = picture.reference(file)?;
     picture.set(&[(0x20001c3f, &container)])?;
+    if let Some((raster, payload)) = shown {
+        changed.insert(
+            raster,
+            PropertyObject::file(raster, &payload_reference(payload), ".png")?,
+        );
+        let web = picture.reference(raster)?;
+        picture.set(&[(0x200034c8, &web)])?;
+    }
     changed.insert(id, picture);
     hold(active, &mut changed, id, holder, &modified)?;
     Ok(changed)

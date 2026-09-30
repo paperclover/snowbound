@@ -285,8 +285,13 @@ version at once; nothing waits for the device that wrote it. A version of anothe
 one that cannot be read, is kept beside the file as `Name (Device).one` instead.
 
 On a cloud drive every read and write of a section file runs under `NSFileCoordinator`, so the
-iCloud daemon never swaps a file between the stamp check and the append. A file iCloud evicted is
-asked for and read later; the replica serves it meanwhile. Each publication is an upload and a
+iCloud daemon never swaps a file between the stamp check and the append. A file iCloud evicted
+(a `.Name.icloud` placeholder, or on macOS 14 and later a dataless file under its own name) lists
+as last read, or as downloading; the host asks for it, and reads the notebook again as files
+arrive. The sync thread never waits for one: the replica serves it meanwhile. Opening a section
+with no replica yet waits for its file. macOS and iOS offer no public way to keep a file
+downloaded, as the Finder's Keep Downloaded does; evicted files are asked for again whenever
+seen. Each publication is an upload and a
 chance to conflict, so edits wait for a 3 second pause in typing (at most 30 seconds,
 `Section::set_pause`), and publish at once when the app leaves the foreground, the screen locks,
 the Mac's window loses focus or the app quits. A folder presenter reports other devices'
@@ -305,7 +310,10 @@ which are revision stores edited through the same transaction path. Moving or
 renaming a file also rewrites two header fields OneNote checks on open (the
 parent TOC's identity and a CRC of the file's name). Without them OneNote
 treats the file as a stranger and re-identifies it. Deleting sends sections and
-pages to `OneNote_RecycleBin`, as OneNote does.
+pages to `OneNote_RecycleBin`, as OneNote does, and opening a notebook empties
+what the bin has held unchanged for 60 days, as OneNote prunes it: judged by the
+content's last change, the pages in one revision, binned section files deleted
+with their TOC entries left (`corpus/recycle-purge`).
 
 What only Snowbound reads lives in the notebook's `.snowbound` folder, which carries the
 Windows hidden attribute so that OneNote never makes a section group of it. Its files are

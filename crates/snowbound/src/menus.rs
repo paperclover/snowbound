@@ -1,7 +1,12 @@
 //! Context menus on pages, sections, section groups and notebooks, with OneNote 2010's
 //! commands in its words, and moving pages by dragging their tabs.
 
-use crate::{Command, Library, State, manage::Structure, platform};
+use crate::{
+    Command, Library, State,
+    commands::{self, Choice},
+    manage::Structure,
+    platform,
+};
 use onestore::{ExGuid, PageEdit};
 use std::sync::Arc;
 use ui::{Anchor, Id, popup::Item};
@@ -46,12 +51,94 @@ impl Drag {
     }
 }
 
-/// What a context menu was opened on.
+/// What a context menu, or the palette's actions, are on.
+#[derive(Clone)]
 pub enum Target {
-    Page(ExGuid),
-    Section { library: Arc<Library>, path: String },
-    Group { library: Arc<Library>, path: String },
+    /// A page of a section, open or not.
+    Page {
+        library: Arc<Library>,
+        path: String,
+        space: ExGuid,
+    },
+    Section {
+        library: Arc<Library>,
+        path: String,
+    },
+    Group {
+        library: Arc<Library>,
+        path: String,
+    },
     Notebook(Arc<Library>),
+    /// A notebook shown lately but closed since, by location.
+    Closed(String),
+    /// A server saved to reconnect to, by address.
+    Server(String),
+    Command(commands::Id),
+}
+
+/// What can be done to a target, as its context menu and the palette's actions list it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    Open,
+    Run,
+    Rename,
+    Delete,
+    /// Opens the submenu of the places `MoveTo` takes it.
+    Move,
+    /// Moves it to a section, or into a folder, by catalog path.
+    MoveTo(String),
+    CopyLink,
+    NewPage,
+    NewSubpage,
+    MakeSubpage,
+    PromoteSubpage,
+    Versions(bool),
+    NewSection,
+    NewGroup,
+    Reveal,
+    Close,
+    /// Opens the Themes dialog for it.
+    Theme,
+    /// Opens the notebook's sync status.
+    SyncStatus,
+    /// Opens the submenu of the colours `Color` gives a section.
+    Colors,
+    /// A section's colour, COLORREF; none is OneNote's None.
+    Color(Option<u32>),
+    Sync,
+    NewNotebook,
+    /// Moves a notebook up the notebook list, or down.
+    Raise(bool),
+    Properties,
+}
+
+/// OneNote 2010's section and notebook colours, COLORREF, with their names in its Section
+/// Color menu's order (`corpus/section-color/native`).
+pub(crate) const SECTION_COLORS: [(u32, &str); 16] = [
+    (0xe4a88a, "Blue"),
+    (0x69d8ff, "Yellow"),
+    (0x97c9b7, "Green"),
+    (0x9795ee, "Red"),
+    (0xde9eb4, "Purple"),
+    (0xaeba91, "Cyan"),
+    (0x78b0f6, "Orange"),
+    (0xbba4d5, "Magenta"),
+    (0xd2bb9b, "Blue Mist"),
+    (0xb79cab, "Purple Mist"),
+    (0x99d1e8, "Tan"),
+    (0x6ff9f5, "Lemon"),
+    (0x92e7ad, "Apple"),
+    (0xcabc4d, "Teal"),
+    (0x7575ba, "Red Chalk"),
+    (0xaa9595, "Silver"),
+];
+
+/// A place Move offers.
+struct Destination {
+    name: String,
+    path: String,
+    icon: &'static [&'static str],
+    tint: Option<[f32; 4]>,
 }
 
 pub fn id() -> Id {
@@ -134,115 +221,328 @@ impl State {
             self.menu = None;
             return;
         }
-        let item = |text| Item {
-            text,
-            ..Default::default()
+        let (target, point) = (target.clone(), *point);
+        let mut actions: Vec<(Action, Item)> = self.actions(&target);
+        // A notebook's menu heads with its sync status in a line, which opens the whole.
+        let status = match &target {
+            Target::Notebook(library) => self.session.as_ref().map(|session| {
+                let (text, icon) = crate::sync::line(library, session);
+                (Arc::clone(library), text, icon)
+            }),
+            _ => None,
         };
-        let items: Vec<Item> = match target {
-            Target::Page(space) => {
-                let pages = self
-                    .session
-                    .as_ref()
-                    .map_or(&[][..], |session| &session.pages[..]);
+        if let Some((_, text, icon)) = &status {
+            actions[0].1.separated = true;
+            let item = Item {
+                text,
+                icon: Some(*icon),
+                ..Item::default()
+            };
+            actions.insert(0, (Action::SyncStatus, item));
+        }
+        let action = self.action_menu(id(), Anchor::Point(point), None, &target, &actions);
+        match (action, status) {
+            (Some(Action::SyncStatus), Some((library, ..))) => {
+                self.menu = None;
+                self.ui.close_popup(id());
+                self.show_sync(library, point);
+            }
+            (Some(action), _) => {
+                self.menu = None;
+                self.act_on(target, action);
+            }
+            (None, _) => {}
+        }
+    }
+
+    /// What can be done to `target`, in its context menu's order, as each shows there.
+    pub(crate) fn actions(&self, target: &Target) -> Vec<(Action, Item<'static>)> {
+        // An action, its label, whether it is disabled, and whether a rule starts its group.
+        let item = |action: Action, text, disabled, separated| {
+            let submenu = matches!(action, Action::Move | Action::Colors);
+            let item = Item {
+                text,
+                disabled,
+                separated,
+                submenu,
+                ..Item::default()
+            };
+            (action, item)
+        };
+        let nowhere = || self.destinations(target).is_empty();
+        match target {
+            Target::Page {
+                library,
+                path,
+                space,
+            } => {
+                let mut actions = vec![
+                    item(Action::Rename, "Rename", false, false),
+                    item(Action::Delete, "Delete", false, false),
+                    item(Action::Move, "Move to Section", nowhere(), false),
+                    item(Action::CopyLink, "Copy Link to Page", false, true),
+                    item(Action::NewPage, "New Page", false, true),
+                    // OneNote offers this beside New Page, which is a plain + here.
+                    item(Action::NewSubpage, "New Subpage", false, false),
+                    item(Action::Theme, "Theme…", false, true),
+                ];
+                // Levels and versions are known once the section is open.
+                let Some(session) = self.session.as_ref().filter(|_| self.open(library, path))
+                else {
+                    return actions;
+                };
+                let pages = &session.pages;
                 let at = pages.iter().position(|(listed, ..)| listed == space);
                 let level = at.map_or(1, |at| pages[at].2);
                 let above = at
                     .and_then(|at| at.checked_sub(1))
                     .map_or(0, |above| pages[above].2);
-                let (versions, shown) = self.session.as_ref().map_or((false, false), |session| {
-                    (
-                        !session.page_versions(*space).is_empty(),
-                        session.shown_history == Some(*space),
-                    )
-                });
+                let shown = session.shown_history == Some(*space);
+                let versions = if shown {
+                    "Hide Page Versions"
+                } else {
+                    "Show Page Versions"
+                };
+                actions.extend([
+                    item(
+                        Action::MakeSubpage,
+                        "Make Subpage",
+                        level > above || level >= 3,
+                        true,
+                    ),
+                    item(Action::PromoteSubpage, "Promote Subpage", level <= 1, false),
+                    item(
+                        Action::Versions(!shown),
+                        versions,
+                        session.page_versions(*space).is_empty(),
+                        true,
+                    ),
+                ]);
+                actions
+            }
+            Target::Section { library, path } | Target::Group { library, path } => {
+                let mut actions = vec![
+                    item(Action::Rename, "Rename", false, false),
+                    item(Action::Delete, "Delete", false, false),
+                    item(Action::Move, "Move", nowhere(), false),
+                    item(Action::NewSection, "New Section", false, true),
+                    item(Action::NewGroup, "New Section Group", false, false),
+                ];
+                if matches!(target, Target::Section { .. }) {
+                    actions.extend([
+                        item(Action::Colors, "Section Color", false, true),
+                        item(
+                            Action::Reveal,
+                            platform::SHOW_FILE,
+                            section_file(library, path).is_none(),
+                            false,
+                        ),
+                        item(Action::Theme, "Theme…", false, false),
+                    ]);
+                }
+                actions
+            }
+            Target::Notebook(library) => {
+                let listed = (self.notebooks.iter()).position(|open| Arc::ptr_eq(open, library));
+                let last = self.notebooks.len().saturating_sub(1);
                 vec![
-                    item("Delete"),
-                    Item {
-                        separated: true,
-                        ..item("Copy Link to Page")
-                    },
-                    Item {
-                        separated: true,
-                        ..item("New Page")
-                    },
-                    // OneNote offers this beside New Page, which is a plain + here.
-                    item("New Subpage"),
-                    Item {
-                        separated: true,
-                        disabled: level > above || level >= 3,
-                        ..item("Make Subpage")
-                    },
-                    Item {
-                        disabled: level <= 1,
-                        ..item("Promote Subpage")
-                    },
-                    Item {
-                        separated: true,
-                        disabled: !versions,
-                        ..item(if shown {
-                            "Hide Page Versions"
-                        } else {
-                            "Show Page Versions"
-                        })
-                    },
+                    item(Action::Rename, "Rename…", false, false),
+                    item(
+                        Action::Sync,
+                        "Sync This Notebook Now",
+                        library.background.is_none(),
+                        false,
+                    ),
+                    // The app's iCloud Drive folder lists every notebook in it.
+                    item(
+                        Action::Close,
+                        "Close This Notebook",
+                        crate::manage::in_icloud_folder(&library.location),
+                        false,
+                    ),
+                    item(Action::CopyLink, "Copy Link to Notebook", false, true),
+                    item(Action::NewSection, "New Section", false, true),
+                    item(Action::NewGroup, "New Section Group", false, false),
+                    item(
+                        Action::NewNotebook,
+                        commands::command(commands::Id::NewNotebook).title,
+                        false,
+                        false,
+                    ),
+                    item(
+                        Action::Raise(true),
+                        "Move Up",
+                        listed.is_none_or(|at| at == 0),
+                        true,
+                    ),
+                    item(
+                        Action::Raise(false),
+                        "Move Down",
+                        listed.is_none_or(|at| at == last),
+                        false,
+                    ),
+                    item(
+                        Action::Reveal,
+                        commands::command(commands::Id::ShowNotebook).title,
+                        library.folder().is_none(),
+                        true,
+                    ),
+                    item(Action::Theme, "Theme…", false, false),
+                    item(
+                        Action::Properties,
+                        "Properties…",
+                        library.catalog().is_none(),
+                        false,
+                    ),
                 ]
             }
-            Target::Section { .. } | Target::Group { .. } => vec![
-                item("Rename"),
-                item("Delete"),
-                Item {
+            Target::Closed(_) | Target::Server(_) => {
+                vec![item(Action::Delete, "Remove from Recent", false, false)]
+            }
+            Target::Command(_) => Vec::new(),
+        }
+    }
+
+    /// Builds menu `id` of `actions` on `target` at `anchor`, under a filter field showing
+    /// `filter` when given, with Move's places in its submenu: the action chosen.
+    pub(crate) fn action_menu(
+        &mut self,
+        id: Id,
+        anchor: Anchor,
+        filter: Option<&str>,
+        target: &Target,
+        actions: &[(Action, Item)],
+    ) -> Option<Action> {
+        let items: Vec<Item> = actions.iter().map(|(_, item)| *item).collect();
+        let chosen = ui::popup::menu(&mut self.ui, id, anchor, &items, filter);
+        let places = id.child("move");
+        let colors = id.child("colors");
+        ui::popup::submenus(&mut self.ui, id, &items, |index| match actions[index].0 {
+            Action::Move => Some(places),
+            Action::Colors => Some(colors),
+            _ => None,
+        });
+        let moved = if self.ui.popup_open(places) {
+            let destinations = self.destinations(target);
+            let items: Vec<Item> = (destinations.iter())
+                .map(|place| Item {
+                    text: &place.name,
+                    icon: Some(place.icon),
+                    tint: place.tint,
+                    ..Item::default()
+                })
+                .collect();
+            ui::popup::menu(&mut self.ui, places, anchor, &items, None)
+                .map(|index| Action::MoveTo(destinations[index].path.clone()))
+        } else {
+            None
+        };
+        let colored = match target {
+            Target::Section { library, path } if self.ui.popup_open(colors) => {
+                let current = (library.tabs(&folder(path)).into_iter())
+                    .find(|tab| tab.path == *path)
+                    .and_then(|tab| tab.color);
+                let theme = &self.ui.theme;
+                let mut items: Vec<Item> = (SECTION_COLORS.iter())
+                    .map(|&(color, text)| Item {
+                        text,
+                        icon: Some(crate::art::SECTION),
+                        tint: Some(theme.section(crate::section_color(Some(color))).accent),
+                        checked: Some(current == Some(color)),
+                        ..Item::default()
+                    })
+                    .collect();
+                items.push(Item {
+                    text: "None",
+                    checked: Some(current.is_none()),
                     separated: true,
-                    ..item("New Section")
-                },
-                item("New Section Group"),
-            ],
-            Target::Notebook(_) => vec![
-                item("New Section"),
-                item("New Section Group"),
-                Item {
-                    separated: true,
-                    ..item("Close This Notebook")
-                },
-            ],
+                    ..Item::default()
+                });
+                ui::popup::menu(&mut self.ui, colors, anchor, &items, None)
+                    .map(|index| Action::Color(SECTION_COLORS.get(index).map(|(color, _)| *color)))
+            }
+            _ => None,
         };
-        let Some(chosen) = ui::popup::menu(&mut self.ui, id(), Anchor::Point(*point), &items, None)
-        else {
-            return;
-        };
-        let Some((target, _)) = self.menu.take() else {
-            return;
-        };
-        let command = match (target, items[chosen].text) {
-            (Target::Page(space), "Delete") => Some(Command::DeletePages(vec![space])),
-            (Target::Page(space), "Copy Link to Page") => {
-                let copied = self
-                    .page_link(space, None)
-                    .and_then(|link| self.clipboard.set_text(link));
-                if let Err(error) = copied {
-                    eprintln!("Copying the link failed: {error}");
-                }
+        chosen
+            .map(|index| actions[index].0.clone())
+            .or(moved)
+            .or(colored)
+    }
+
+    /// Where Move takes `target`: the other sections of a page's folder, or the folders a
+    /// section or group may move into.
+    fn destinations(&self, target: &Target) -> Vec<Destination> {
+        let theme = &self.ui.theme;
+        match target {
+            Target::Page { library, path, .. } => (library.tabs(&folder(path)).into_iter())
+                .filter(|tab| tab.path != *path)
+                .map(|tab| Destination {
+                    tint: Some(theme.section(crate::section_color(tab.color)).accent),
+                    name: tab.name,
+                    path: tab.path,
+                    icon: crate::art::SECTION,
+                })
+                .collect(),
+            Target::Section { library, path } | Target::Group { library, path } => {
+                let within = format!("{path}/");
+                let home = folder(path);
+                (folders(library).into_iter())
+                    .filter(|place| {
+                        place.path != home
+                            && place.path != *path
+                            && !place.path.starts_with(&within)
+                    })
+                    .map(|place| Destination {
+                        name: match place.path.rsplit_once('/') {
+                            _ if place.path.is_empty() => library.name.clone(),
+                            Some((_, name)) => name.to_owned(),
+                            None => place.path.clone(),
+                        },
+                        path: place.path.clone(),
+                        icon: if place.path.is_empty() {
+                            crate::art::NOTEBOOK
+                        } else {
+                            crate::art::SECTION_GROUP
+                        },
+                        tint: None,
+                    })
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Does `action` to `target`. An action on a page of a section not open opens it there
+    /// first, then acts.
+    pub(crate) fn act_on(&mut self, target: Target, action: Action) {
+        let command = match (target, action) {
+            (Target::Command(id), _) => {
+                self.choose(Choice::Command(id));
                 None
             }
-            (Target::Page(_), "New Page") => Some(Command::NewPage { under: None }),
-            (Target::Page(space), "New Subpage") => Some(Command::NewPage { under: Some(space) }),
-            (Target::Page(page), "Show Page Versions") => Some(Command::History { page, show: true }),
-            (Target::Page(page), "Hide Page Versions") => Some(Command::History { page, show: false }),
-            (Target::Page(space), text) => self.session.as_ref().and_then(|session| {
-                let level = session
-                    .pages
-                    .iter()
-                    .find(|(listed, ..)| *listed == space)?
-                    .2;
-                let level = if text == "Make Subpage" {
-                    level + 1
-                } else {
-                    level - 1
-                };
-                Some(Command::Pages(vec![PageEdit::set_level(space, level).ok()?]))
-            }),
+            (
+                Target::Page {
+                    library,
+                    path,
+                    space,
+                },
+                action,
+            ) if action == Action::Open || !self.open(&library, &path) => {
+                self.go(library, path, space);
+                self.after_open = (action != Action::Open).then_some((space, action));
+                None
+            }
+            (Target::Page { space, .. }, action) => self.page_command(space, action),
+            (Target::Section { library, path }, Action::Open) => {
+                Some(Command::OpenSection(library, path))
+            }
+            (Target::Notebook(library), Action::Open) => {
+                self.open_notebook(library.location.clone(), None);
+                None
+            }
             (
                 Target::Section { library, path } | Target::Group { library, path },
-                "Rename",
+                Action::Rename,
             ) => {
                 self.rename(crate::rename::Target::Entry {
                     library,
@@ -251,35 +551,160 @@ impl State {
                 });
                 None
             }
-            (Target::Section { library, path }, "Delete") => platform::confirm(
+            (Target::Section { library, path }, Action::Delete) => platform::confirm(
                 "Are you sure you want to move this section to this notebook's Recycle Bin?",
                 &path,
                 "Cancel",
                 "Delete",
             )
             .then(|| Command::Structure(library, Structure::Delete { path })),
-            (Target::Group { library, path }, "Delete") => platform::confirm(
+            (Target::Group { library, path }, Action::Delete) => platform::confirm(
                 "Are you sure you want to move the sections in this section group to this notebook's Recycle Bin?",
                 path.rsplit('/').next().unwrap_or_default(),
                 "Cancel",
                 "Delete",
             )
             .then(|| Command::Structure(library, Structure::Delete { path })),
-            (Target::Section { library, path }, text) => {
-                let folder = folder(&path);
-                Some(Command::Structure(library, new(text, folder)))
+            (
+                Target::Section { library, path } | Target::Group { library, path },
+                Action::MoveTo(folder),
+            ) => Some(Command::Structure(library, Structure::Move { path, folder })),
+            (Target::Section { library, path }, Action::Theme) => {
+                if let Some(identity) = library.section_identity(&path) {
+                    let scope = notebook::sidecar::themes::Scope::section(identity);
+                    self.show_themes(crate::themes::Scope::Section, library, scope);
+                }
+                None
             }
-            (Target::Group { library, path }, text) => {
-                Some(Command::Structure(library, new(text, path)))
+            (Target::Notebook(library), Action::Theme) => {
+                let scope = notebook::sidecar::themes::Scope::Notebook;
+                self.show_themes(crate::themes::Scope::Notebook, library, scope);
+                None
             }
-            (Target::Notebook(library), "Close This Notebook") => {
-                Some(Command::CloseNotebook(library))
+            (Target::Section { library, path }, Action::Color(color)) => Some(Command::Structure(
+                library,
+                Structure::Color { path, color },
+            )),
+            (Target::Section { library, path }, Action::Reveal) => {
+                if let Some(file) = section_file(&library, &path) {
+                    platform::show_file(&file);
+                }
+                None
             }
-            (Target::Notebook(library), text) => {
-                Some(Command::Structure(library, new(text, String::new())))
+            (Target::Section { library, path }, action) => {
+                new(&action, folder(&path)).map(|structure| Command::Structure(library, structure))
+            }
+            (Target::Group { library, path }, action) => {
+                new(&action, path).map(|structure| Command::Structure(library, structure))
+            }
+            (Target::Notebook(library), Action::Reveal) => {
+                platform::reveal(&library.location);
+                None
+            }
+            (Target::Notebook(library), Action::Close) => Some(Command::CloseNotebook(library)),
+            (Target::Notebook(library), Action::Rename | Action::Properties) => {
+                self.open_properties(library);
+                None
+            }
+            (Target::Notebook(library), Action::Sync) => {
+                if let Some(session) = &self.session
+                    && Arc::ptr_eq(&session.library, &library)
+                {
+                    session.section.wake();
+                }
+                library.background.iter().for_each(|background| background.wake());
+                None
+            }
+            (Target::Notebook(library), Action::CopyLink) => {
+                // OneNote 2010's Copy Link to Notebook: the folder's path, spaces escaped.
+                let link = format!("onenote:///{}", library.location.replace(' ', "%20"));
+                if let Err(error) = self.clipboard.set_text(link) {
+                    eprintln!("Copying the link failed: {error}");
+                }
+                None
+            }
+            (Target::Notebook(_), Action::NewNotebook) => {
+                self.choose(Choice::Command(commands::Id::NewNotebook));
+                None
+            }
+            (Target::Notebook(library), Action::Raise(up)) => {
+                let at = (self.notebooks.iter()).position(|open| Arc::ptr_eq(open, &library));
+                let to = at.and_then(|at| if up { at.checked_sub(1) } else { Some(at + 1) });
+                if let (Some(at), Some(to)) = (at, to.filter(|to| *to < self.notebooks.len())) {
+                    self.notebooks.swap(at, to);
+                    self.save_settings();
+                }
+                None
+            }
+            (Target::Notebook(library), action) => {
+                new(&action, String::new()).map(|structure| Command::Structure(library, structure))
+            }
+            (Target::Closed(location), Action::Delete) => {
+                self.trail.recent.retain(|place| place.notebook != location);
+                self.save_settings();
+                None
+            }
+            (Target::Closed(location), _) => {
+                self.open_notebook(location, None);
+                None
+            }
+            (Target::Server(address), action) => {
+                if let Some(index) = self.servers.iter().position(|saved| *saved == address) {
+                    self.saved_server((index, action == Action::Delete));
+                }
+                None
             }
         };
         self.commands.extend(command);
+    }
+
+    /// What `action` on page `space` of the open section does.
+    fn page_command(&mut self, space: ExGuid, action: Action) -> Option<Command> {
+        match action {
+            Action::Rename => {
+                self.rename(crate::rename::Target::Page(space));
+                None
+            }
+            Action::Delete => Some(Command::DeletePages(vec![space])),
+            Action::MoveTo(path) => Some(Command::MovePage { space, path }),
+            Action::CopyLink => {
+                let copied = self
+                    .page_link(space, None)
+                    .and_then(|link| self.clipboard.set_text(link));
+                if let Err(error) = copied {
+                    eprintln!("Copying the link failed: {error}");
+                }
+                None
+            }
+            Action::NewPage => Some(Command::NewPage { under: None }),
+            Action::NewSubpage => Some(Command::NewPage { under: Some(space) }),
+            Action::Theme => {
+                let session = self.session.as_ref()?;
+                let identity = session.section.page(space).ok()?.identity?;
+                let library = Arc::clone(&session.library);
+                let scope = notebook::sidecar::themes::Scope::page(identity);
+                self.show_themes(crate::themes::Scope::Page, library, scope);
+                None
+            }
+            Action::Versions(show) => Some(Command::History { page: space, show }),
+            Action::MakeSubpage | Action::PromoteSubpage => {
+                let session = self.session.as_ref()?;
+                let level = session
+                    .pages
+                    .iter()
+                    .find(|(listed, ..)| *listed == space)?
+                    .2;
+                let level = if action == Action::MakeSubpage {
+                    level + 1
+                } else {
+                    level - 1
+                };
+                Some(Command::Pages(vec![
+                    PageEdit::set_level(space, level).ok()?,
+                ]))
+            }
+            _ => None,
+        }
     }
 
     /// The section tab, of those built as `row`, under the pointer while a page is dragged
@@ -472,11 +897,90 @@ impl State {
     }
 }
 
-/// The new section or group a menu's `text` asks for in `folder`.
-fn new(text: &str, folder: String) -> Structure {
-    if text == "New Section Group" {
-        Structure::NewGroup { folder }
-    } else {
-        Structure::NewSection { folder }
+/// The file of the section at catalog `path` on this computer; none on a server reached
+/// without a mount.
+fn section_file(library: &Library, path: &str) -> Option<std::path::PathBuf> {
+    Some(library.folder()?.join(path))
+}
+
+/// The new section or group `action` asks for in `folder`.
+fn new(action: &Action, folder: String) -> Option<Structure> {
+    match action {
+        Action::NewSection => Some(Structure::NewSection { folder }),
+        Action::NewGroup => Some(Structure::NewGroup { folder }),
+        _ => None,
+    }
+}
+
+/// `library`'s folders of sections, the notebook's first, then its section groups breadth
+/// first, but for the recycle bin; none for a section opened on its own.
+pub(crate) fn folders(library: &Library) -> Vec<&notebook::discover::Folder> {
+    let mut folders: Vec<_> = library.catalog().into_iter().collect();
+    let mut at = 0;
+    while let Some(&folder) = folders.get(at) {
+        folders.extend(
+            (folder.groups.iter()).filter(|group| !crate::library::recycle_bin(&group.path)),
+        );
+        at += 1;
+    }
+    folders
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SECTION_COLORS;
+    use notebook::{discover::SectionState, session::Notebook};
+
+    /// Section Color and Notebook Properties' colour as the app stores them: each of OneNote's
+    /// colours and None on a section of its own, and Teal on the notebook.
+    /// `SNOWBOUND_SECTION_COLOR_EXPORT` names a new directory receiving the notebook for a
+    /// cold reopen in OneNote 2010 (`corpus/section-color`).
+    #[test]
+    fn sections_and_the_notebook_take_onenotes_colours() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-colors-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        let root = temporary.join("Colors");
+        let cache = temporary.join("cache");
+        std::fs::create_dir_all(&temporary).unwrap();
+        let page = || onestore::PageCreation::new(None, Some(""), "Author").unwrap();
+        let mut notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &page()).unwrap();
+        let named: Vec<(Option<u32>, &str)> = (SECTION_COLORS.iter())
+            .map(|&(color, name)| (Some(color), name))
+            .chain([(None, "None")])
+            .collect();
+        for (color, name) in &named {
+            let path = notebook.create_section("", name, &page()).unwrap();
+            notebook.set_section_color(&path, *color).unwrap();
+        }
+        notebook.set_color(0xcabc4d).unwrap();
+
+        let reopened = Notebook::open(&root, &cache).unwrap();
+        let catalog = reopened.catalog();
+        assert_eq!(catalog.toc.as_ref().unwrap().color, Some(0xcabc4d));
+        let colors: Vec<(String, Option<u32>)> = (catalog.sections.iter())
+            .map(|section| match &section.state {
+                SectionState::Readable { color, .. } => (section.path.clone(), *color),
+                _ => panic!("{}", section.path),
+            })
+            .collect();
+        // The section a new notebook starts with keeps the colour it was made in.
+        let expected: Vec<(String, Option<u32>)> = [(Some(0xe4a88a), "New Section 1")]
+            .iter()
+            .chain(&named)
+            .map(|(color, name)| (format!("{name}.one"), *color))
+            .collect();
+        assert_eq!(colors, expected);
+        if let Some(directory) = std::env::var_os("SNOWBOUND_SECTION_COLOR_EXPORT") {
+            let directory = std::path::Path::new(&directory);
+            std::fs::create_dir_all(directory).unwrap();
+            for entry in std::fs::read_dir(&root).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_file() {
+                    std::fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
+                }
+            }
+        }
+        std::fs::remove_dir_all(&temporary).unwrap();
     }
 }

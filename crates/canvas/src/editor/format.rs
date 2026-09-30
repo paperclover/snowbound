@@ -43,6 +43,10 @@ pub enum Formatting {
     /// Format Painter: gives the selection the character formatting and alignment of text
     /// picked up with [`CanvasEditor::painted_format`], as OneNote's does.
     Paint(Format),
+    /// Gives the selected paragraphs a paragraph style, as OneNote 2010's Styles gallery
+    /// does: the page's style of that definition, made where it has none, and their text
+    /// loses its character formatting but links, fields and language.
+    Style(Definition),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,6 +164,57 @@ impl ListStyle {
                 .iter()
                 .position(|known| known == format)
                 .map(Self::Number),
+        }
+    }
+}
+
+/// OneNote's Default font (Options > General): what new outlines' text is set in, as the
+/// page's `p` quick style, and the face and colour new titles take.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DefaultFont {
+    pub face: String,
+    pub size: f32,
+    /// COLORREF; none is Automatic.
+    pub color: Option<u32>,
+}
+
+impl Default for DefaultFont {
+    /// OneNote 2010's: Calibri 11, Automatic.
+    fn default() -> Self {
+        Self {
+            face: "Calibri".into(),
+            size: 11.0,
+            color: None,
+        }
+    }
+}
+
+impl DefaultFont {
+    /// The `p` quick style OneNote 2010 stores for new text in this font
+    /// (`corpus/default-font`): plain, in its colour, no highlight or paragraph spacing.
+    pub(crate) fn body_style(&self) -> Definition {
+        Definition {
+            kind: Kind::Style {
+                name: Some("p".into()),
+                next: None,
+            },
+            format: Format {
+                bold: Some(false),
+                italic: Some(false),
+                underline: Some(false),
+                strike: Some(false),
+                superscript: Some(false),
+                subscript: Some(false),
+                font: Some(self.face.clone()),
+                font_size: Some(self.size),
+                color: Some(self.color.unwrap_or(0xff00_0000)),
+                highlight: Some(0xff00_0000),
+                space_before: Some(0.0),
+                space_after: Some(0.0),
+                line_spacing: Some(0.0),
+                ..Format::default()
+            },
         }
     }
 }
@@ -293,6 +348,8 @@ pub struct FormatState {
     pub list: Option<ListStyle>,
     /// Tags every selected paragraph has, with their action types.
     pub tags: Vec<(NoteTag, u16)>,
+    /// The stored name of the paragraph style every selected paragraph shares.
+    pub style: Option<String>,
 }
 
 impl Toggle {
@@ -477,6 +534,35 @@ fn common<T: PartialEq>(mut values: impl Iterator<Item = Option<T>>) -> Option<T
         .then_some(first)
 }
 
+/// `format` moved from paragraph style `old` to `new`: what the old style gave, or nothing
+/// did, the new one gives.
+fn followed(format: &Format, old: &Format, new: &Format) -> Format {
+    let mut format = format.clone();
+    macro_rules! follow {
+        ($($field:ident),*) => {$(
+            if format.$field.is_none() || old.$field.is_some() && format.$field == old.$field {
+                format.$field = new.$field.clone();
+            }
+        )*};
+    }
+    follow!(
+        bold,
+        italic,
+        underline,
+        strike,
+        superscript,
+        subscript,
+        font,
+        font_size,
+        color,
+        highlight,
+        space_before,
+        space_after,
+        line_spacing
+    );
+    format
+}
+
 /// Seconds since 1980, as note tags date themselves.
 fn time32() -> Option<u32> {
     let now = std::time::SystemTime::now()
@@ -629,6 +715,12 @@ impl CanvasEditor {
                 shared.sort_by_key(|(_, action_type)| *action_type);
                 shared
             }),
+            style: common(paragraphs.iter().map(|node| {
+                match &self.definitions.get(&node.style?)?.kind {
+                    Kind::Style { name, .. } => name.clone(),
+                    _ => None,
+                }
+            })),
         })
     }
 
@@ -765,36 +857,8 @@ impl CanvasEditor {
                     let ParagraphContent::Text(text) = &mut node.content else {
                         unreachable!()
                     };
-                    // An element holds one tag of each action type.
-                    for tags in [&mut node.tags, &mut text.tags] {
-                        tags.retain(|tag| match self.tag_kind(tag) {
-                            Some(kind) if remove => *kind != definition.kind,
-                            Some(Kind::TagDefinition {
-                                action_type: other, ..
-                            }) => *other != Some(*action_type),
-                            _ => true,
-                        });
-                    }
-                    if !remove {
-                        let checkable = crate::outline::checkable(tag.shape);
-                        // Stored newest first.
-                        text.tags.insert(
-                            0,
-                            Tag {
-                                definition: Some(id),
-                                action_type: None,
-                                shape: None,
-                                property_status: None,
-                                status: u16::from(!checkable),
-                                created,
-                                completed: if checkable { Some(0) } else { created },
-                                start: None,
-                                due: None,
-                                task_id: None,
-                                extra_set: 0,
-                            },
-                        );
-                    }
+                    let added = (!remove).then_some((id, tag.shape, created));
+                    self.retag([&mut node.tags, &mut text.tags], &definition.kind, added);
                 });
             }
             Formatting::RemoveTags => leaves_mut(&mut replacement, &mut |node| {
@@ -804,6 +868,39 @@ impl CanvasEditor {
                 }
             }),
             Formatting::Check => self.check(&mut replacement, ranges, ends),
+            Formatting::Style(_) if title => return Ok(()),
+            Formatting::Style(definition) => {
+                let olds = bases(&replacement)?;
+                let style = self.define_style(definition)?;
+                leaves_mut(&mut replacement, &mut |node| {
+                    if ranges.remove(&node.id).is_some() {
+                        node.style = Some(style);
+                        let old = &olds[&node.id];
+                        let text = &mut node.text_mut().unwrap().text;
+                        *text = restyle(text, 0..text.text().len(), |format| {
+                            // An equation keeps its own formatting; what it took from the
+                            // old style it takes from the new.
+                            if [format.math, format.embedded_object].contains(&Some(true)) {
+                                *format = followed(format, old, &definition.format);
+                                return;
+                            }
+                            *format = Format {
+                                hidden: format.hidden,
+                                hyperlink: format.hyperlink,
+                                hyperlink_label: format.hyperlink_label,
+                                math: format.math,
+                                embedded_object: format.embedded_object,
+                                language: format.language,
+                                alignment: format.alignment,
+                                rtl: format.rtl,
+                                list_spacing: format.list_spacing,
+                                math_object: format.math_object.clone(),
+                                ..definition.format.clone()
+                            };
+                        });
+                    }
+                });
+            }
             Formatting::Toggle(_)
             | Formatting::Font(_)
             | Formatting::FontSize(_)
@@ -907,6 +1004,43 @@ impl CanvasEditor {
 }
 
 impl CanvasEditor {
+    /// The page's paragraph style holding `definition`, made where it has none.
+    pub(super) fn define_style(&mut self, definition: &Definition) -> Result<ExGuid, EditError> {
+        if let Some((id, _)) = self
+            .definitions
+            .iter()
+            .find(|(_, kept)| *kept == definition)
+        {
+            return Ok(*id);
+        }
+        let id = new_id()?;
+        self.definitions.insert(id, definition.clone());
+        Ok(id)
+    }
+
+    /// A paragraph style named `name`: the page's in its theme's formatting, else the page's
+    /// first of that name, else the theme's made on the page; Normal falls back to the
+    /// Default font's. None where nothing names it.
+    pub(super) fn style_named(&mut self, name: &str) -> Result<Option<ExGuid>, EditError> {
+        let themed = self.styles.get(name).cloned();
+        let named = |definition: &Definition| matches!(&definition.kind, Kind::Style { name: Some(own), .. } if own == name);
+        let known = self
+            .definitions
+            .iter()
+            .filter(|(_, kept)| named(kept))
+            .min_by_key(|(_, kept)| Some(*kept) != themed.as_ref())
+            .map(|(id, _)| *id);
+        if known.is_some() {
+            return Ok(known);
+        }
+        let definition = themed.or_else(|| (name == "p").then(|| self.default_font.body_style()));
+        definition
+            .map(|definition| self.define_style(&definition))
+            .transpose()
+    }
+}
+
+impl CanvasEditor {
     /// A toolbar command on OneNote 2010's page selection: each outline takes it as if selected
     /// alone, but a toggle turns on everywhere unless every outline already has it.
     fn format_page(
@@ -991,29 +1125,13 @@ impl CanvasEditor {
             .find(|(_, _, node)| node.id == id)
             .ok_or(EditError::InvalidRange)?;
         let mut node = node.clone();
-        let checkable = |tag: &Tag| {
-            matches!(
-                self.tag_kind(tag),
-                Some(Kind::TagDefinition { shape: Some(shape), .. })
-                    if crate::outline::checkable(*shape)
-            )
-        };
         let content = match &mut node.content {
             ParagraphContent::Table(table) => table.tags.as_mut_slice(),
+            ParagraphContent::Image(image) => image.tags.as_mut_slice(),
+            ParagraphContent::Attachment(file) => file.tags.as_mut_slice(),
             _ => &mut [],
         };
-        let mut tags: Vec<&mut Tag> = node.tags.iter_mut().chain(content).collect();
-        let checked = tags
-            .iter()
-            .filter(|tag| checkable(tag))
-            .all(|tag| tag.status & 1 != 0);
-        let completed = if checked { Some(0) } else { time32() };
-        for tag in &mut tags {
-            if checkable(tag) && (tag.status & 1 != 0) == checked {
-                tag.status ^= 1;
-                tag.completed = completed;
-            }
-        }
+        self.toggle_checks(node.tags.iter_mut().chain(content).collect());
         let selection = outline.selection;
         self.commit(
             engine,
@@ -1025,6 +1143,167 @@ impl CanvasEditor {
             },
             selection,
         )
+    }
+
+    /// A tag command on selected picture or file `id`, which OneNote 2010 tags itself rather
+    /// than its paragraph (`corpus/object-tags`); false for other commands.
+    pub fn format_object(
+        &mut self,
+        engine: &mut TextEngine,
+        id: ExGuid,
+        command: &Formatting,
+    ) -> Result<bool, EditorError> {
+        if !matches!(
+            command,
+            Formatting::Tag(..) | Formatting::RemoveTags | Formatting::Check
+        ) {
+            return Ok(false);
+        }
+        let node = self
+            .outline_picture(id)
+            .map(|(outline, _, _, node)| (outline, node.clone()));
+        let mut tags = match &node {
+            Some((_, node)) => match &node.content {
+                ParagraphContent::Image(image) => image.tags.clone(),
+                ParagraphContent::Attachment(file) => file.tags.clone(),
+                _ => return Ok(false),
+            },
+            None => self
+                .object_tags_mut(id)
+                .ok_or(EditError::InvalidRange)?
+                .clone(),
+        };
+        match command {
+            Formatting::Tag(tag, action_type) => {
+                let definition = tag.definition(*action_type);
+                let existing = self
+                    .definitions
+                    .iter()
+                    .find(|(_, other)| other.kind == definition.kind)
+                    .map(|(id, _)| *id);
+                let defined = match existing {
+                    Some(id) => id,
+                    None => {
+                        let id = new_id()?;
+                        self.definitions.insert(id, definition.clone());
+                        id
+                    }
+                };
+                let has = tags
+                    .iter()
+                    .any(|tag| self.tag_kind(tag) == Some(&definition.kind));
+                let added = (!has).then_some((defined, tag.shape, time32()));
+                self.retag([&mut tags], &definition.kind, added);
+            }
+            Formatting::RemoveTags => tags.clear(),
+            _ => self.toggle_checks(tags.iter_mut().collect()),
+        }
+        self.finish_composition();
+        let Some((outline, mut node)) = node else {
+            self.set_object_tags(id, tags);
+            return Ok(true);
+        };
+        match &mut node.content {
+            ParagraphContent::Image(image) => image.tags = tags,
+            ParagraphContent::Attachment(file) => file.tags = tags,
+            _ => unreachable!(),
+        }
+        self.focus_outline(outline)?;
+        let (container, index, _) = descendants(self.active_outline().document.nodes(), None)
+            .find(|(_, _, other)| other.id == node.id)
+            .ok_or(EditError::InvalidRange)?;
+        let selection = self.active_outline().selection;
+        self.commit(
+            engine,
+            DocumentEdit {
+                columns: BTreeMap::new(),
+                container,
+                range: index..index + 1,
+                replacement: vec![node],
+            },
+            selection,
+        )?;
+        Ok(true)
+    }
+
+    /// A click on the check box of picture or file `id` on the page.
+    pub fn click_object_check(&mut self, id: ExGuid) -> Result<(), EditorError> {
+        let mut tags = self
+            .objects
+            .iter()
+            .find_map(|object| object.tagged().filter(|tagged| tagged.0 == id))
+            .ok_or(EditError::InvalidRange)?
+            .1
+            .to_vec();
+        self.toggle_checks(tags.iter_mut().collect());
+        self.finish_composition();
+        self.set_object_tags(id, tags);
+        Ok(())
+    }
+
+    /// Takes tags of `kind` from `lists`, or with `added`, the definition's identity, its
+    /// shape and when, gives the last list one in place of any of its action type; an element
+    /// holds one tag of each action type, stored newest first.
+    fn retag<const N: usize>(
+        &self,
+        mut lists: [&mut Vec<Tag>; N],
+        kind: &Kind<'static>,
+        added: Option<(ExGuid, u16, Option<u32>)>,
+    ) {
+        let Kind::TagDefinition { action_type, .. } = kind else {
+            return;
+        };
+        for tags in lists.iter_mut() {
+            tags.retain(|tag| match self.tag_kind(tag) {
+                Some(other) if added.is_none() => other != kind,
+                Some(Kind::TagDefinition {
+                    action_type: other, ..
+                }) => other != action_type,
+                _ => true,
+            });
+        }
+        let (Some((id, shape, created)), Some(tags)) = (added, lists.last_mut()) else {
+            return;
+        };
+        let checkable = crate::outline::checkable(shape);
+        tags.insert(
+            0,
+            Tag {
+                definition: Some(id),
+                action_type: None,
+                shape: None,
+                property_status: None,
+                status: u16::from(!checkable),
+                created,
+                completed: if checkable { Some(0) } else { created },
+                start: None,
+                due: None,
+                task_id: None,
+                extra_set: 0,
+            },
+        );
+    }
+
+    /// Checks the check boxes among `tags`, or clears them once all are checked.
+    fn toggle_checks(&self, mut tags: Vec<&mut Tag>) {
+        let checkable = |tag: &Tag| {
+            matches!(
+                self.tag_kind(tag),
+                Some(Kind::TagDefinition { shape: Some(shape), .. })
+                    if crate::outline::checkable(*shape)
+            )
+        };
+        let checked = tags
+            .iter()
+            .filter(|tag| checkable(tag))
+            .all(|tag| tag.status & 1 != 0);
+        let completed = if checked { Some(0) } else { time32() };
+        for tag in &mut tags {
+            if checkable(tag) && (tag.status & 1 != 0) == checked {
+                tag.status ^= 1;
+                tag.completed = completed;
+            }
+        }
     }
 
     /// Checks the check boxes of the `covered` paragraphs, or clears them once all are
@@ -1344,6 +1623,80 @@ mod tests {
         );
     }
 
+    /// A style from the gallery replaces the paragraph's character formatting but keeps its
+    /// language, as OneNote 2010's does; Enter at its end takes its NextStyle, from the
+    /// theme where the page has none (lab, 2026-09-30).
+    #[test]
+    fn a_gallery_style_clears_formatting_and_enter_takes_its_next_style() {
+        let mut engine = TextEngine::default();
+        let body = Format {
+            font: Some("Calibri".into()),
+            font_size: Some(11.0),
+            language: Some(0x40c),
+            ..Format::default()
+        };
+        let source = TextDocument::new(vec![Paragraph::from_runs([
+            ("Plain ".to_owned(), body.clone()),
+            (
+                "red".to_owned(),
+                Format {
+                    color: Some(0xff),
+                    italic: Some(true),
+                    ..body.clone()
+                },
+            ),
+        ])])
+        .unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source, 240.0).unwrap();
+        let style = |name: &str, size, next: Option<&str>| Definition {
+            kind: Kind::Style {
+                name: Some(name.into()),
+                next: next.map(Into::into),
+            },
+            format: Format {
+                bold: Some(name != "p"),
+                italic: Some(false),
+                font: Some("Georgia".into()),
+                font_size: Some(size),
+                color: Some(0x0033_2211),
+                space_before: Some(12.0),
+                ..Format::default()
+            },
+        };
+        let heading = style("h2", 16.0, Some("p"));
+        editor.styles = BTreeMap::from([("p".to_owned(), style("p", 12.0, None))]);
+        editor.select([at(0, 3); 2].into()).unwrap();
+        editor
+            .format(&mut engine, Formatting::Style(heading.clone()))
+            .unwrap();
+        let node = editor.active_outline().document.nodes()[0].clone();
+        assert_eq!(editor.definitions[&node.style.unwrap()], heading);
+        let spans = node.text().unwrap().text.spans().to_vec();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].format,
+            Format {
+                language: Some(0x40c),
+                ..heading.format.clone()
+            }
+        );
+        assert_eq!(editor.format_state().unwrap().style.as_deref(), Some("h2"));
+        let length = node.text().unwrap().text.text().len() as u32;
+        editor.select([at(0, length); 2].into()).unwrap();
+        editor.enter(&mut engine, false).unwrap();
+        let next = editor.active_outline().document.nodes()[1].style;
+        assert_eq!(editor.definitions[&next.unwrap()], editor.styles["p"]);
+        // Enter after Normal keeps Normal.
+        editor.insert(&mut engine, "body").unwrap();
+        editor.enter(&mut engine, false).unwrap();
+        assert_eq!(editor.active_outline().document.nodes()[2].style, next);
+        editor.undo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document.nodes()[0].style, None);
+    }
+
     #[test]
     fn clearing_and_removing_attributes_return_to_the_paragraph_style() {
         let mut engine = TextEngine::default();
@@ -1377,6 +1730,7 @@ mod tests {
             Definition {
                 kind: Kind::Style {
                     name: Some("h1".into()),
+                    next: None,
                 },
                 format: heading.clone(),
             },
@@ -2199,6 +2553,7 @@ mod tests {
                     (NoteTag::defaults()[0].clone(), 0),
                     (NoteTag::defaults()[2].clone(), 2)
                 ],
+                style: state.style.clone(),
             }
         );
         // Format Painter, a gallery tag and an inserted table write as well.

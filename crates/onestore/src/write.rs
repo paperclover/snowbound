@@ -419,9 +419,11 @@ pub(crate) fn replacement(id: ExGuid, object: &crate::Object<'_>) -> Result<Prop
 }
 
 /// The object type OneNote gives embedded picture payload declarations; embedded files
-/// use `EMBEDDED_FILE_JCID` with the same declaration shape.
+/// use `EMBEDDED_FILE_JCID` with the same declaration shape, and a printout's XPS package
+/// `PRINTOUT_FILE_JCID` (`corpus/printout`).
 pub(crate) const FILE_DATA_JCID: u32 = 0x80039;
 pub(crate) const EMBEDDED_FILE_JCID: u32 = 0x80036;
+pub(crate) const PRINTOUT_FILE_JCID: u32 = 0x8003a;
 
 /// The reference and extension of a file-data declaration built by `PropertyObject::file`.
 fn file_declaration(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
@@ -470,7 +472,10 @@ pub(crate) fn declared(
 }
 
 fn is_file_declaration(jcid: u32) -> bool {
-    jcid == FILE_DATA_JCID || jcid == EMBEDDED_FILE_JCID
+    matches!(
+        jcid,
+        FILE_DATA_JCID | EMBEDDED_FILE_JCID | PRINTOUT_FILE_JCID
+    )
 }
 
 #[derive(Clone)]

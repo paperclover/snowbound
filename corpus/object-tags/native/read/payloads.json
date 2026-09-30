@@ -1,0 +1,34 @@
+﻿[
+    {
+        "sha256":  "32a01b6d0a94deebc53c688868b14b6fccc4e18b3b64ea052823e3856cf35b89",
+        "name":  "float.txt",
+        "object":  "{EC8778C0-4C56-0389-38D4-AE4F82C56A97}{40}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{4CBEB8A4-07D4-03AC-22F4-A24579522E74}{1}{B0}",
+        "bytes":  38
+    },
+    {
+        "sha256":  "32a01b6d0a94deebc53c688868b14b6fccc4e18b3b64ea052823e3856cf35b89",
+        "name":  "float.txt",
+        "object":  "{267669B4-EEF5-0177-0E97-ACD527BFAD96}{18}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{4CBEB8A4-07D4-03AC-22F4-A24579522E74}{1}{B0}",
+        "bytes":  38
+    },
+    {
+        "sha256":  "33fdf6e43c05ed910d335eda3fa269ccbd1415336c17a4a5357d009ee495b3a6",
+        "name":  "notes.txt",
+        "object":  "{D2C7D1FC-8488-4AA6-B242-2C16A821B9A7}{48}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{75D42A8B-EA0B-4AD8-BDA1-727B844516CE}{1}{B0}",
+        "bytes":  18
+    },
+    {
+        "sha256":  "33fdf6e43c05ed910d335eda3fa269ccbd1415336c17a4a5357d009ee495b3a6",
+        "name":  "notes.txt",
+        "object":  "{D2C7D1FC-8488-4AA6-B242-2C16A821B9A7}{59}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{75D42A8B-EA0B-4AD8-BDA1-727B844516CE}{1}{B0}",
+        "bytes":  18
+    }
+]

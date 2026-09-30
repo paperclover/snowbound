@@ -1088,3 +1088,20 @@ fn closing_refuses_while_an_edit_cannot_publish_then_deletes_nothing_pending() {
     std::fs::remove_dir_all(&root).unwrap();
     assert!(eventually(|| replicas(&directory) == 0));
 }
+
+/// Print and Export as PDF make a PDF of the open page on the paper asked for.
+#[test]
+fn the_page_prints_as_a_pdf() {
+    let (_directory, section) = features();
+    let title = section.shared.section.pages().unwrap()[0].1.clone();
+    let pdf = canvas(&section, &title)
+        .pdf(canvas::print::A4, "Features")
+        .unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+    let text = String::from_utf8_lossy(&pdf);
+    assert!(
+        text.contains("/MediaBox [0 0 595.276 841.89]"),
+        "{}",
+        &text[..400]
+    );
+}
