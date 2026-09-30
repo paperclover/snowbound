@@ -876,7 +876,9 @@ impl State {
             theme(appearance, stored.light_pages, backdrop),
             platform::double_click_interval(),
         );
-        let titlebar = platform::titlebar(appearance).unwrap_or([ui.theme.strip; 2]);
+        let titlebar = platform::titlebar(appearance)
+            .filter(|_| !backdrop)
+            .unwrap_or([ui.theme.strip; 2]);
         // A window shown but never focused hears no focus event; a hidden one draws as focused.
         ui.window_focused = !visible || window.has_focus();
         platform::system_interface(&mut ui);
@@ -1118,7 +1120,9 @@ impl State {
     /// Takes `appearance`'s colours.
     fn set_appearance(&mut self, appearance: winit::window::Theme) {
         self.ui.theme = theme(appearance, self.light_pages, self.surface.translucent());
-        self.titlebar = platform::titlebar(appearance).unwrap_or([self.ui.theme.strip; 2]);
+        self.titlebar = platform::titlebar(appearance)
+            .filter(|_| !self.surface.translucent())
+            .unwrap_or([self.ui.theme.strip; 2]);
     }
 
     /// Takes the colour scheme chosen, or the system's where it follows the system.
@@ -3702,7 +3706,7 @@ fn theme(appearance: winit::window::Theme, light_pages: bool, backdrop: bool) ->
         [theme.paper, theme.paper_ink] = [light.paper, light.paper_ink];
     }
     if backdrop {
-        theme.over_backdrop()
+        platform::over_backdrop(theme)
     } else {
         theme
     }

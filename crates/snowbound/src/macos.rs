@@ -246,6 +246,11 @@ pub fn represent(window: &Window, file: Option<&std::path::Path>) {
     }
 }
 
+/// The theme over the window's backdrop, as the kit draws it.
+pub fn over_backdrop(theme: ui::Theme) -> ui::Theme {
+    theme.over_backdrop()
+}
+
 /// None: the kit's own menus stand in for AppKit's.
 pub fn menu(_: winit::window::Theme) -> Option<ui::Menu> {
     None

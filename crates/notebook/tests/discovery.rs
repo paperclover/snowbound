@@ -463,8 +463,10 @@ fn local_access_stays_inside_the_selected_root() {
 }
 
 /// Restores permissions a test took away, so the temporary directory can be removed.
+#[cfg(unix)]
 struct Restore(Vec<(std::path::PathBuf, u32)>);
 
+#[cfg(unix)]
 impl Drop for Restore {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;
@@ -474,6 +476,7 @@ impl Drop for Restore {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn unreadable_children_are_listed_as_unavailable_and_retried() {
     use std::os::unix::fs::PermissionsExt;

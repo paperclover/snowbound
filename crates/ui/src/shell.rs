@@ -270,7 +270,7 @@ pub fn tool_button(
             size: [px(TOOL), px(TOOL)],
             icon: Some(icon),
             color: Some(tint),
-            fill: (on == Some(true)).then_some(hover),
+            fill: (on == Some(true)).then_some(hover).or(rest(&ui.theme)),
             hover_fill: Some(hover),
             radius: 4.0,
             center: true,
@@ -281,6 +281,11 @@ pub fn tool_button(
     press_state(ui, id, on);
     ui.close();
     ui.signal(id)
+}
+
+/// A tool button's face at rest, where the theme gives it one.
+fn rest(theme: &crate::Theme) -> Option<[f32; 4]> {
+    (theme.tool[3] > 0.0).then_some(theme.tool)
 }
 
 /// Shows button `id` as a toggle, pressed or not, where `on` is given.
@@ -404,7 +409,7 @@ pub fn split_button(
         Spec {
             flags: Flags::FLOAT,
             size: [px(TOOL + RADIUS), px(TOOL)],
-            fill: fade(lit),
+            fill: fade(lit).or(rest(&ui.theme)),
             radius: RADIUS,
             ..Spec::default()
         },
@@ -476,7 +481,9 @@ pub fn menu_button(
         Spec {
             flags: Flags::CLICKABLE,
             size: [px(TOOL + ARROW), px(TOOL)],
-            fill: (ui.popup_open(menu) || on == Some(true)).then(|| theme.hover()),
+            fill: (ui.popup_open(menu) || on == Some(true))
+                .then(|| theme.hover())
+                .or(rest(&theme)),
             hover_fill: Some(theme.hover()),
             radius: 4.0,
             role: Some(Role::Button),

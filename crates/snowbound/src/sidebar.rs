@@ -584,7 +584,7 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
             flags: Flags::CLICKABLE,
             size: [fill(), px(ROW)],
             fill: lit,
-            hover_fill: Some(ui::mix(lit.unwrap_or(theme.strip), theme.hover(), 0.6)),
+            hover_fill: Some(ui::mix(lit.unwrap_or(theme.sidebar), theme.hover(), 0.6)),
             radius: 4.0,
             pad: [6.0 + INDENT * row.depth as f32, 0.0],
             // The field's text stands where the label did.
@@ -681,7 +681,7 @@ impl crate::State {
             Spec {
                 flags: Flags::CLIP,
                 size: [px(width), fill()],
-                fill: Some(theme.strip),
+                fill: Some(theme.sidebar),
                 ..Spec::default()
             },
         );

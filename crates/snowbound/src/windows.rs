@@ -234,6 +234,12 @@ unsafe extern "system" fn frame_procedure(
     match message {
         // Accent colours and transparency effects reach the window only as settings.
         wm::WM_SETTINGCHANGE | wm::WM_DWMCOLORIZATIONCOLORCHANGED => {
+            if message == wm::WM_SETTINGCHANGE && setting(lparam) == "ImmersiveColorSet" {
+                refresh_color_policy();
+                if ACRYLIC.load(Ordering::Relaxed) {
+                    accent(hwnd, Accent::Acrylic);
+                }
+            }
             if let Some(proxy) = QUIT.get() {
                 let _ = proxy.send_event(crate::UserEvent::Appearance);
             }
@@ -250,6 +256,33 @@ unsafe extern "system" fn frame_procedure(
         Caption::Drawn => drawn_frame(hwnd, message, wparam, lparam, &previous),
     };
     result.unwrap_or_else(|| previous(message, wparam, lparam))
+}
+
+/// The setting a `WM_SETTINGCHANGE` names, if any.
+fn setting(lparam: LPARAM) -> String {
+    if lparam == 0 {
+        return String::new();
+    }
+    let text = lparam as *const u16;
+    let length = (0..).take_while(|&i| unsafe { *text.add(i) } != 0).count();
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, length) })
+}
+
+/// Has uxtheme read the apps' colour mode again: it answers winit's `ShouldAppsUseDarkMode`
+/// from a cache that a change of mode otherwise leaves stale.
+fn refresh_color_policy() {
+    // RefreshImmersiveColorPolicyState is exported by ordinal alone, and 104 only from 1809.
+    if version() < (10, 0, 17763) {
+        return;
+    }
+    let refresh = unsafe {
+        let module = LoadLibraryW(wide("uxtheme.dll").as_ptr());
+        GetProcAddress(module, 104 as *const u8)
+    };
+    if let Some(refresh) = refresh {
+        let refresh: unsafe extern "system" fn() = unsafe { std::mem::transmute(refresh) };
+        unsafe { refresh() };
+    }
 }
 
 type Procedure<'a> = &'a dyn Fn(u32, WPARAM, LPARAM) -> LRESULT;
@@ -383,7 +416,7 @@ fn drawn_frame(
             None
         }
         wm::WM_EXITSIZEMOVE if ACRYLIC.load(Ordering::Relaxed) => {
-            accent(hwnd, Accent::Acrylic(ACRYLIC_TINT.load(Ordering::Relaxed)));
+            accent(hwnd, Accent::Acrylic);
             None
         }
         _ => None,
@@ -409,15 +442,13 @@ pub fn cuts_corners() -> bool {
     false
 }
 
-/// Whether Windows 10 shows acrylic under the window, which a drag swaps for plain blur,
-/// and the tint it shows it with.
+/// Whether Windows 10 shows acrylic under the window, which a drag swaps for plain blur.
 static ACRYLIC: AtomicBool = AtomicBool::new(false);
-static ACRYLIC_TINT: AtomicU32 = AtomicU32::new(0);
 
 enum Accent {
     Blur,
-    /// Acrylic tinted with an `0xAABBGGRR` colour.
-    Acrylic(u32),
+    /// Acrylic in the shell's own tints: Windows 10's light and dark flyouts.
+    Acrylic,
 }
 
 /// Windows 10's accent under the window, through the undocumented
@@ -448,10 +479,15 @@ fn accent(hwnd: HWND, accent: Accent) -> bool {
             tint: 0,
             animation: 0,
         },
-        Accent::Acrylic(tint) => Policy {
+        Accent::Acrylic => Policy {
             state: 4,
             flags: 2,
-            tint,
+            // 0xAABBGGRR, after the apps' colour mode.
+            tint: if registry_dword(PERSONALIZE, "AppsUseLightTheme") == Some(0) {
+                0xcc20_2020
+            } else {
+                0xccf3_f3f3
+            },
             animation: 0,
         },
     };
@@ -466,11 +502,10 @@ fn accent(hwnd: HWND, accent: Accent) -> bool {
 
 /// Whether Personalization's transparency effects are on, as acrylic and Mica need.
 fn transparency() -> bool {
-    registry_dword(
-        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-        "EnableTransparency",
-    ) != Some(0)
+    registry_dword(PERSONALIZE, "EnableTransparency") != Some(0)
 }
+
+const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
 
 /// Lays the system's material under the window, which shows through the app's transparent
 /// pixels: Aero glass on Windows 7 while the desktop composes, acrylic on Windows 10 (blur
@@ -504,11 +539,7 @@ pub fn install_backdrop(window: &Window) -> bool {
             }
         }
         Caption::Drawn if build >= 17134 => {
-            // The shell's own acrylic tints: Windows 10's light and dark flyouts.
-            let dark = appearance(window) == Theme::Dark;
-            let tint = if dark { 0xcc20_2020 } else { 0xccf3_f3f3 };
-            ACRYLIC_TINT.store(tint, Ordering::Relaxed);
-            let shown = accent(hwnd, Accent::Acrylic(tint));
+            let shown = accent(hwnd, Accent::Acrylic);
             ACRYLIC.store(shown, Ordering::Relaxed);
             shown
         }
@@ -541,6 +572,23 @@ pub fn titlebar(appearance: Theme) -> Option<[[f32; 4]; 2]> {
         Theme::Dark => [draw::srgb(0x20, 0x20, 0x20), draw::srgb(0x2b, 0x2b, 0x2b)],
         Theme::Light => [draw::srgb(0xff, 0xff, 0xff); 2],
     })
+}
+
+/// The theme over the window's material. Over Windows 7's glass, fields and tool buttons
+/// take white faces, as Internet Explorer's do there, so their text and icons stay legible,
+/// and the sidebar stays opaque.
+pub fn over_backdrop(theme: ui::Theme) -> ui::Theme {
+    let sidebar = theme.sidebar;
+    let theme = theme.over_backdrop();
+    if caption() != Caption::Glass || eleven() {
+        return theme;
+    }
+    ui::Theme {
+        sidebar,
+        base: [1.0, 1.0, 1.0, 0.8],
+        tool: [1.0, 1.0, 1.0, 0.35],
+        ..theme
+    }
 }
 
 /// None: the kit's own menus.

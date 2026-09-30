@@ -253,6 +253,11 @@ fn desktop() -> Desktop {
     })
 }
 
+/// The theme over the window's backdrop, as the kit draws it.
+pub fn over_backdrop(theme: ui::Theme) -> ui::Theme {
+    theme.over_backdrop()
+}
+
 /// Menus in `appearance` as the desktop draws its own: libadwaita's popover menus on GNOME
 /// and Breeze's on KDE, each moving as that desktop moves them.
 pub fn menu(appearance: Theme) -> Option<ui::Menu> {

@@ -1060,10 +1060,8 @@ mod tests {
         );
         assert_eq!(shown("", "Group/New Section 1.one"), under);
         assert_eq!(shown("notes/lab", "elsewhere/New Section 1.one"), None);
-        assert_eq!(
-            shown("notes/lab", "/tmp/Section.one"),
-            Some(PathBuf::from("/tmp/Section.one"))
-        );
+        let elsewhere = std::env::temp_dir().join("Section.one");
+        assert_eq!(library("notes/lab").local(&elsewhere), Some(elsewhere));
     }
 
     #[test]

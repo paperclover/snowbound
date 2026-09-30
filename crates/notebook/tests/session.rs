@@ -196,9 +196,10 @@ fn saves_wait_for_an_unreachable_file_and_publish_after_relaunch() {
     let (section, _) = open(&file, &cache);
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
-    use std::os::unix::fs::PermissionsExt;
     let permissions = std::fs::metadata(&file).unwrap().permissions();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let mut read_only = permissions.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&file, read_only).unwrap();
     let after = edited(&before, "Offline ");
     let id = typed(&section, space, &before, 0..0, "Offline ");
     wait(&section, |event| matches!(event, Event::Unreachable(_)));
@@ -721,9 +722,10 @@ fn a_conflicting_save_keeps_the_native_page_and_a_conflict_page_the_session_dele
     let space = section.pages().unwrap()[0].0;
     let before = section.page(space).unwrap();
     let text = first_text(&before);
-    use std::os::unix::fs::PermissionsExt;
     let permissions = std::fs::metadata(&file).unwrap().permissions();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let mut read_only = permissions.clone();
+    read_only.set_readonly(true);
+    std::fs::set_permissions(&file, read_only).unwrap();
     let mut local = before.clone();
     model_ops::replace_text(&mut local, text, 0..8, "Local");
     let id = typed(&section, space, &before, 0..8, "Local");

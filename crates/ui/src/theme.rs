@@ -8,9 +8,13 @@ pub struct Theme {
     pub base: [f32; 4],
     /// Side panels.
     pub panel: [f32; 4],
-    /// The window's title bar, toolbar, tab row and sidebar; transparent where the system's
-    /// backdrop shows through them.
+    /// The window's title bar, toolbar and tab row; transparent where the system's backdrop
+    /// shows through them.
     pub strip: [f32; 4],
+    /// The notebook sidebar: the strip's colour, unless kept opaque over a backdrop.
+    pub sidebar: [f32; 4],
+    /// Toolbar buttons at rest: clear, or a face where the backdrop would hide their icons.
+    pub tool: [f32; 4],
     pub accent: [f32; 4],
     /// The text caret, and selected text's fill with and without keyboard focus; the
     /// platform's own where it has them.
@@ -139,6 +143,8 @@ impl Theme {
             base: srgb(0x19, 0x1b, 0x1c),
             panel: srgb(0x1f, 0x22, 0x23),
             strip: srgb(0x27, 0x2a, 0x2b),
+            sidebar: srgb(0x27, 0x2a, 0x2b),
+            tool: [0.0; 4],
             accent: srgb(0x00, 0x79, 0xa6),
             caret,
             selection,
@@ -168,6 +174,8 @@ impl Theme {
             base: srgb(0xfc, 0xfc, 0xfd),
             panel: srgb(0xf4, 0xf5, 0xf7),
             strip: srgb(0xeb, 0xed, 0xf0),
+            sidebar: srgb(0xeb, 0xed, 0xf0),
+            tool: [0.0; 4],
             accent: srgb(0x00, 0x79, 0xa6),
             caret,
             selection,
@@ -196,6 +204,7 @@ impl Theme {
         let text = |alpha| [self.text[0], self.text[1], self.text[2], alpha];
         Self {
             strip: [0.0; 4],
+            sidebar: [0.0; 4],
             text_dim: text(0.5),
             chip: text(0.1),
             base: text(0.05),

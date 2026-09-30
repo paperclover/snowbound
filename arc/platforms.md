@@ -114,9 +114,12 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   them over the glass; 11 doesn't over the Direct3D surface, so the row
   draws them as 11 does, lit where the system reports the pointer. On 8
   and 10, whose frames are opaque, the window has no system frame and the
-  row draws and runs caption buttons as 10 does, over acrylic on 10. With
-  Windows 7's basic or classic theme the system draws the title bar and
-  the row lies beneath it, as on KDE.
+  row draws and runs caption buttons as 10 does, over acrylic on 10. Over
+  7's glass the sidebar stays opaque, and fields and tool buttons take white
+  faces, as Internet Explorer's do there. The theme and material follow the
+  system's colour mode as it changes. With Windows 7's basic or classic
+  theme the system draws the title bar and the row lies beneath it, as on
+  KDE.
 - A notebook on a share opens by its UNC path through Windows' own SMB
   client, which takes OneNote's opens and locks natively: `onestore` opens a
   section as OneNote does (a reader shares it with everyone, a writer denies

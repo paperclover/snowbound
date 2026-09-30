@@ -260,7 +260,6 @@ fn file_id(path: &std::path::Path) -> [u8; 16] {
 
 #[test]
 fn a_page_delete_lists_the_recycle_bin_it_finds_or_makes_and_leaves_an_unreadable_one() {
-    use std::os::unix::fs::PermissionsExt;
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("notebook");
     let bin = root.join("OneNote_RecycleBin");
@@ -318,19 +317,22 @@ fn a_page_delete_lists_the_recycle_bin_it_finds_or_makes_and_leaves_an_unreadabl
     if let Some(directory) = std::env::var_os("NOTEBOOK_RECYCLE_EXPORT") {
         copy_dir(&root, std::path::Path::new(&directory));
     }
-    // Permission bits do not bind the superuser.
-    if unsafe { libc::geteuid() } == 0 {
-        return;
-    }
-
     // A bin that cannot be read is neither replaced nor added to.
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let denied = notebook.refresh().and_then(|_| recycle(&mut notebook));
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(denied.is_err());
-    let names: Vec<_> = std::fs::read_dir(&bin)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(names.len(), 2, "{names:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Permission bits do not bind the superuser.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let denied = notebook.refresh().and_then(|_| recycle(&mut notebook));
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(denied.is_err());
+        let names: Vec<_> = std::fs::read_dir(&bin)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
 }
