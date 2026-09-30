@@ -348,7 +348,14 @@ fn download(path: &str, limit: u64) -> Result<Vec<u8>, String> {
     agent
         .get(&format!("{BASE}{path}"))
         .call()
-        .and_then(|mut response| response.body_mut().with_config().limit(limit).read_to_vec())
+        .and_then(|mut response| {
+            // ureq refuses a body that reaches its limit, so an exact size needs one byte more.
+            response
+                .body_mut()
+                .with_config()
+                .limit(limit + 1)
+                .read_to_vec()
+        })
         .map_err(|error| error.to_string())
 }
 
